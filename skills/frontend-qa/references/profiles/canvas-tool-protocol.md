@@ -38,4 +38,8 @@ Reviewed: 2026-08-27
 
 - LingXi Android WebView inspector: `clients/android/app/src/main/java/com/lingxi/code/localapps/LocalAppWebView.kt`
 - LingXi iOS WebView inspector: `clients/ios/Sources/LocalApps/LocalAppWebView.swift`
-- LingXi frontend QA workflow: `lingxi-code/tools/workflow/src/local_app_canvas_workflow.js`
+- LingXi frontend QA canvas gate (what actually encodes this protocol today):
+  `lingxi-code/plugins/lingxi-local-app/workflows/local-app-build.js:107-108`
+  (`render_check` requires `canvas_surfaces`/`frames_captured`, `motion_check`
+  requires `frames_compared`). `local_app_canvas_workflow.js` does not exist
+  in this repo — an earlier draft cited it.

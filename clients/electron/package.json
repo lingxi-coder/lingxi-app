@@ -13,6 +13,7 @@
     "preview": "electron-vite preview",
     "test": "node --import ../shared/node_modules/tsx/dist/loader.mjs --test test/*.test.ts test/*.test.mjs",
     "package:mac": "node scripts/package-mac.mjs",
+    "package:mac:flare": "bash scripts/package-macos-flare.sh",
     "package:desktop": "node scripts/package-desktop.mjs",
     "verify:desktop-package": "node scripts/verify-desktop-package.mjs",
     "verify:desktop-sidecar": "node scripts/packaged-sidecar-smoke.mjs",
@@ -24,8 +25,7 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web"
   },
   "dependencies": {
-    "@lingxi/bridge-client": "file:../shared",
-    "highlight.js": "^11.12.0"
+    "@lingxi/bridge-client": "file:../shared"
   },
   "devDependencies": {
     "@electron/asar": "^3.4.1",
@@ -35,6 +35,7 @@
     "@vitejs/plugin-react": "^5.2.0",
     "electron": "43.1.1",
     "electron-vite": "^5.0.0",
+    "highlight.js": "^11.12.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.7.3",

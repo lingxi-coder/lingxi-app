@@ -3,9 +3,13 @@ import type {
   AudioResultDto,
   ClientCommand,
   ComputerAccessResponseDto,
+  HookAdminCommandDto,
   ImageRefDto,
+  McpAdminCommandDto,
   PermissionResponseDto,
+  PluginAdminCommandDto,
   ReasoningSelectionDto,
+  SkillAdminCommandDto,
 } from '@lingxi/bridge-client';
 import { detectImageMediaType, isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_BYTES } from '../shared/imageInput.js';
 import { ALLOWED_CLIENT_COMMAND_TYPES, ALLOWED_REFRESH_LISTING_KINDS } from '../shared/clientCommands.js';
@@ -21,9 +25,11 @@ import {
 const MAX_PROMPT_LENGTH = 256 * 1024;
 const MAX_ID_LENGTH = 512;
 const MAX_JSON_PAYLOAD_LENGTH = 64 * 1024;
+const MAX_ADMIN_JSON_PAYLOAD_LENGTH = 768 * 1024;
 const MAX_LIST_ITEMS = 128;
 const MAX_RULE_LENGTH = 4096;
 const MAX_PATH_LENGTH = 4096;
+const MAX_AUDIO_TRANSCRIPT_LENGTH = 256 * 1024;
 const SETTINGS_DESTINATIONS = ['user', 'project', 'local'] as const;
 const PERMISSION_BEHAVIORS = ['allow', 'deny', 'ask'] as const;
 const MCP_SCOPES = ['user', 'local', 'project'] as const;
@@ -117,6 +123,48 @@ function jsonObjectString(value: unknown, name: string, max: number): string {
   return text;
 }
 
+function sha256Revision(value: unknown, name: string): string {
+  const revision = string(value, name, 64);
+  if (!/^[0-9a-f]{64}$/.test(revision)) throw new Error(`invalid ${name}`);
+  return revision;
+}
+
+function validateAdminCommand<T extends { action: string }>(
+  value: unknown,
+  name: string,
+  readActions: readonly string[],
+  writeActions: readonly string[],
+  targetRequiredActions: readonly string[] = [],
+  nonMutatingOperationActions: readonly string[] = [],
+): T {
+  const input = object(value);
+  exactKeys(input, ['action', 'operation_id', 'target', 'scope', 'revision', 'payload_json']);
+  const action = string(input['action'], `${name} action`, 128);
+  const isRead = readActions.includes(action);
+  const isNonMutatingOperation = nonMutatingOperationActions.includes(action);
+  if (!isRead && !isNonMutatingOperation && !writeActions.includes(action)) throw new Error(`invalid ${name} action`);
+  const command: Record<string, unknown> = { action };
+  if (input['target'] !== undefined) command['target'] = string(input['target'], `${name} target`, 4096);
+  if (input['scope'] !== undefined) command['scope'] = string(input['scope'], `${name} scope`, 64);
+  if (isRead) {
+    if (targetRequiredActions.includes(action) && command['target'] === undefined) {
+      throw new Error(`invalid ${name} target`);
+    }
+    if (input['operation_id'] !== undefined || input['revision'] !== undefined || input['payload_json'] !== undefined) {
+      throw new Error(`${name} read action contains write fields`);
+    }
+    return command as T;
+  }
+  command['operation_id'] = integer(input['operation_id'], `${name} operation id`, 1, Number.MAX_SAFE_INTEGER);
+  if (!isNonMutatingOperation) {
+    command['revision'] = sha256Revision(input['revision'], `${name} revision`);
+  } else if (input['revision'] !== undefined) {
+    command['revision'] = sha256Revision(input['revision'], `${name} revision`);
+  }
+  command['payload_json'] = jsonObjectString(input['payload_json'], `${name} payload`, MAX_ADMIN_JSON_PAYLOAD_LENGTH);
+  return command as T;
+}
+
 export function validatePrompt(value: unknown): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_PROMPT_LENGTH || value.trim().length === 0) {
     throw new Error('invalid prompt');
@@ -181,19 +229,12 @@ function audioSampleRate(value: unknown): number {
 }
 
 /**
- * One `AudioResultDto`, narrowed to the outcomes this renderer can honestly
- * produce.
+ * One `AudioResultDto`, bounded to what the desktop host may truthfully send.
  *
- * `transcript` is deliberately ABSENT. Desktop has no speech recognizer, and
- * the renderer cannot reach a provider transcription API either — `host.ts`
- * forwards a provider credential straight to the engine and keeps nothing,
- * so there is no key here to call one with. `renderer/audio/requests.ts`
- * therefore answers `AudioOpDto::Transcribe` with `failed`/`unavailable`,
- * and leaving `transcript` off this gate means a fabricated transcript
- * cannot leave the renderer even if some future code tried to send one. Wire
- * real transcription first, then widen this — the same bounded-surface
- * discipline that keeps `new_session`/`resume_session` off
- * `ALLOWED_CLIENT_COMMAND_TYPES`.
+ * `transcript` is now a real path: the host-native audio executor can return
+ * local speech recognition text, and that answer still needs the same local
+ * gate every other audio result goes through so an invalid payload becomes an
+ * immediate renderer failure instead of a parked engine request.
  */
 function validateAudioResult(value: unknown): AudioResultDto {
   const input = object(value);
@@ -224,6 +265,25 @@ function validateAudioResult(value: unknown): AudioResultDto {
         // `0` is legal, and required: it is half of the played-in-place pair.
         sample_rate_hz: audioSampleRate(input['sample_rate_hz']),
       };
+    case 'transcript': {
+      exactKeys(input, ['type', 'text', 'language', 'confidence']);
+      const rawConfidence = input['confidence'];
+      if (
+        rawConfidence !== undefined
+        && (typeof rawConfidence !== 'number' || !Number.isFinite(rawConfidence) || rawConfidence < 0 || rawConfidence > 1)
+      ) {
+        throw new Error('invalid audio transcript confidence');
+      }
+      const confidence = typeof rawConfidence === 'number' ? rawConfidence : undefined;
+      return {
+        type,
+        text: audioText(input['text'], MAX_AUDIO_TRANSCRIPT_LENGTH, 'audio transcript text'),
+        ...(input['language'] === undefined
+          ? {}
+          : { language: audioText(input['language'], 64, 'audio transcript language') }),
+        ...(confidence === undefined ? {} : { confidence }),
+      };
+    }
     case 'failed':
       exactKeys(input, ['type', 'kind', 'message']);
       return {
@@ -470,6 +530,29 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
         scope: enumValue(input['scope'], 'mcp scope', MCP_SCOPES),
         name: string(input['name'], 'mcp server name', 256),
       };
+    case 'skill_admin':
+      exactKeys(input, ['type', 'command']);
+      return { type, command: validateAdminCommand<SkillAdminCommandDto>(
+        input['command'], 'skill admin',
+        ['get_catalog', 'get_document'],
+        ['save_document', 'create_skill', 'move_skill', 'trash_skill', 'restore_skill', 'purge_trash_skill'],
+        ['get_document'],
+      ) };
+    case 'mcp_admin':
+      exactKeys(input, ['type', 'command']);
+      return { type, command: validateAdminCommand<McpAdminCommandDto>(
+        input['command'], 'mcp admin', ['get_snapshot'], ['save_server', 'remove_server', 'set_approval'],
+      ) };
+    case 'plugin_admin':
+      exactKeys(input, ['type', 'command']);
+      return { type, command: validateAdminCommand<PluginAdminCommandDto>(
+        input['command'], 'plugin admin', ['get_catalog'], ['apply_operation', 'save_config'], [], ['preview_operation'],
+      ) };
+    case 'hook_admin':
+      exactKeys(input, ['type', 'command']);
+      return { type, command: validateAdminCommand<HookAdminCommandDto>(
+        input['command'], 'hook admin', ['get_document'], ['save_document'], [], ['validate_document'],
+      ) };
     case 'audio_response':
       exactKeys(input, ['type', 'request_id', 'result']);
       return {

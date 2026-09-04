@@ -1720,6 +1720,294 @@ async fn forced_mode_forces_every_turn_including_the_first() {
     assert_eq!(api.forced_calls(), vec![true]);
 }
 
+// ---- P0-1 (2026-09-02): a schema subagent must still be able to call
+// tools — the wire `tool_choice` must NOT be pinned to `StructuredOutput` on
+// every round when other tools are advertised. See
+// `<scratchpad>/WP3-oracle.txt` for the claude-code 2.1.258 oracle evidence
+// this is verified against (the shared subagent turn loop hardcodes
+// `toolChoice: void 0` and enforces StructuredOutput purely via a repeated
+// in-conversation nudge, never via `tool_choice`). ------------------------
+
+/// `SubagentApiClient` that drives the runner exclusively through the
+/// `_opts` streaming seam (the one `run_subagent_loop` actually calls) and
+/// records, per round-trip, whether it was called through the FORCED variant
+/// (`Some(forced_tool)`) or the plain one (`None`) — a direct proxy for what
+/// `tool_choice` the wire request would have carried. Also records the
+/// message history each round was given, so a test can assert the nudge
+/// text rides on a specific round-trip.
+struct RecordingForceApiClient {
+    responses: Mutex<VecDeque<Result<llm_client::LlmResponse, llm_client::LlmError>>>,
+    forced_tools: Mutex<Vec<Option<String>>>,
+    messages_per_call: Mutex<Vec<Vec<ConversationMessage>>>,
+}
+
+impl RecordingForceApiClient {
+    fn new(responses: Vec<Result<llm_client::LlmResponse, llm_client::LlmError>>) -> Arc<Self> {
+        Arc::new(Self {
+            responses: Mutex::new(responses.into_iter().collect()),
+            forced_tools: Mutex::new(Vec::new()),
+            messages_per_call: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn forced_tools(&self) -> Vec<Option<String>> {
+        self.forced_tools.lock().unwrap().clone()
+    }
+
+    fn messages_per_call(&self) -> Vec<Vec<ConversationMessage>> {
+        self.messages_per_call.lock().unwrap().clone()
+    }
+
+    fn next_response(&self) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Ok(text_response("(exhausted)", Some("end_turn"))))
+    }
+
+    fn record_and_stream(
+        &self,
+        messages: Vec<ConversationMessage>,
+        forced_tool: Option<&str>,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+        llm_client::LlmError,
+    > {
+        use futures::StreamExt;
+        self.forced_tools
+            .lock()
+            .unwrap()
+            .push(forced_tool.map(str::to_string));
+        self.messages_per_call.lock().unwrap().push(messages);
+        let resp = self.next_response()?;
+        let events = crate::accumulator::response_to_stream_events(resp);
+        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
+    }
+}
+
+#[async_trait]
+impl crate::api::SubagentApiClient for RecordingForceApiClient {
+    async fn messages_create(
+        &self,
+        _model: &str,
+        _system: Option<&str>,
+        _messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        unreachable!(
+            "run_subagent_loop drives every round through the _opts streaming seam only"
+        )
+    }
+
+    async fn messages_create_stream_in_opts(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+        _system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+        _effort: Option<serde_json::Value>,
+        _opts: crate::api::SubagentApiCallOpts,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+        llm_client::LlmError,
+    > {
+        self.record_and_stream(messages, None)
+    }
+
+    async fn messages_create_stream_forced_in_opts(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+        _system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+        forced_tool: Option<&str>,
+        _effort: Option<serde_json::Value>,
+        _opts: crate::api::SubagentApiCallOpts,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+        llm_client::LlmError,
+    > {
+        self.record_and_stream(messages, forced_tool)
+    }
+}
+
+/// (a) + (b) + (d): a schema run with another tool ALSO advertised must
+/// never pin `tool_choice` — not on round 1 (other tools available), and
+/// NOT on the round immediately after a turn that ended without a valid
+/// StructuredOutput call either (verified oracle behavior: enforcement is
+/// the in-conversation nudge alone, never a wire-level restriction). The
+/// structured result is still captured and schema-validated once produced.
+#[tokio::test]
+async fn schema_with_other_tools_never_pins_tool_choice_even_after_a_nudge() {
+    let structured = serde_json::json!({ "answer": 42 });
+    let api = RecordingForceApiClient::new(vec![
+        // Round 1: the model uses an unrelated tool — only possible at all
+        // if round 1 was NOT forced to StructuredOutput.
+        Ok(tool_use_response("OtherTool", Some("tool_use"))),
+        // Round 2: the model ends its turn without calling StructuredOutput
+        // at all — triggers the in-conversation nudge.
+        Ok(text_response("still thinking", Some("end_turn"))),
+        // Round 3 (post-nudge): the model finally calls StructuredOutput.
+        Ok(llm_client::LlmResponse {
+            content: vec![llm_client::ContentBlock::ToolCall {
+                id: ToolUseId::new().to_string(),
+                name: "StructuredOutput".into(),
+                input: structured.clone(),
+            }],
+            ..tool_use_response("StructuredOutput", Some("tool_use"))
+        }),
+    ]);
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 6);
+    // A non-empty `tool_schemas` means the injected StructuredOutput tool is
+    // NOT the only tool in the registry.
+    ctx.tool_schemas = vec![serde_json::json!({
+        "name": "OtherTool",
+        "description": "an unrelated tool the schema run must still be able to call",
+        "input_schema": {"type": "object"}
+    })];
+    ctx.schema = Some(
+        r#"{"type":"object","required":["answer"],"properties":{"answer":{"type":"integer"}}}"#
+            .to_string(),
+    );
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+
+    // (d) unchanged capture + schema validation.
+    assert_eq!(one_completed(&evs), structured);
+
+    // Precondition, not the gate: the run really did reach the other tool's
+    // dispatch path. (This one line is polarity-neutral — the canned response
+    // names `OtherTool` whether or not the round was forced; the
+    // `forced_tools()` assertion below is what flips.)
+    assert_eq!(invoker.call_count(), 1, "OtherTool must have been dispatched");
+    // (a) no round is forced while another tool is advertised.
+    let forced = api.forced_tools();
+    assert_eq!(
+        forced,
+        vec![None, None, None],
+        "tool_choice must stay unpinned on every round while another tool is \
+         advertised, including the round right after a no-call nudge — got {forced:?}"
+    );
+
+    // (b, reinterpreted per verified oracle behavior): the nudge text rides
+    // as a plain conversational message on round 3's request, NOT a
+    // tool_choice restriction.
+    let round3 = &api.messages_per_call()[2];
+    let nudged = round3.iter().any(|m| {
+        matches!(m, ConversationMessage::User { content, .. }
+            if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. }
+                if text.contains("You did not call StructuredOutput"))))
+    });
+    assert!(
+        nudged,
+        "round 3 must carry the in-conversation nudge from round 2's no-call turn: {round3:?}"
+    );
+}
+
+/// (c): when the registry has NOTHING but the synthetic StructuredOutput
+/// tool, the first round is forced immediately (nothing else the model
+/// could usefully call, so pinning it removes a redundant no-call round-trip
+/// without changing observable model behavior).
+#[tokio::test]
+async fn schema_only_tool_in_registry_forces_from_round_one() {
+    let structured = serde_json::json!({ "answer": 7 });
+    let api = RecordingForceApiClient::new(vec![Ok(llm_client::LlmResponse {
+        content: vec![llm_client::ContentBlock::ToolCall {
+            id: ToolUseId::new().to_string(),
+            name: "StructuredOutput".into(),
+            input: structured.clone(),
+        }],
+        ..tool_use_response("StructuredOutput", Some("tool_use"))
+    })]);
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 4);
+    // No pre-existing tools: after injection the registry holds ONLY the
+    // synthetic StructuredOutput tool.
+    ctx.tool_schemas = vec![];
+    ctx.schema = Some(
+        r#"{"type":"object","required":["answer"],"properties":{"answer":{"type":"integer"}}}"#
+            .to_string(),
+    );
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+
+    assert_eq!(one_completed(&evs), structured, "(d) capture still works");
+    assert_eq!(
+        api.forced_tools(),
+        vec![Some("StructuredOutput".to_string())],
+        "the sole-tool registry must force StructuredOutput from round 1"
+    );
+}
+
+/// Companion to the relaxation above: once the model is free to keep calling
+/// other tools, a schema run CAN reach `max_turns` without ever producing a
+/// structured result — an exit that was unreachable while `tool_choice` was
+/// pinned every round. That exit must still honour the schema contract and
+/// fail, not resolve the caller's `agent()` with the off-schema
+/// `{"reason":"max_turns_exhausted"}` completion payload. Oracle 2.1.258
+/// @172635430 checks `structured === undefined` after the whole attempt ends,
+/// for any exit reason, and throws this exact error.
+#[tokio::test]
+async fn schema_run_exhausting_max_turns_fails_instead_of_completing_off_schema() {
+    // Every round the model calls the unrelated tool and never StructuredOutput;
+    // `max_turns` (3) is reached with `should_continue` still true each time.
+    let api = RecordingForceApiClient::new(vec![
+        Ok(tool_use_response("OtherTool", Some("tool_use"))),
+        Ok(tool_use_response("OtherTool", Some("tool_use"))),
+        Ok(tool_use_response("OtherTool", Some("tool_use"))),
+    ]);
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
+    ctx.tool_schemas = vec![serde_json::json!({
+        "name": "OtherTool",
+        "description": "an unrelated tool the schema run keeps calling",
+        "input_schema": {"type": "object"}
+    })];
+    ctx.schema = Some(
+        r#"{"type":"object","required":["answer"],"properties":{"answer":{"type":"integer"}}}"#
+            .to_string(),
+    );
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+
+    // The precondition this test exists for: the run really did burn all 3
+    // turns on the other tool rather than ending early.
+    assert_eq!(api.forced_tools().len(), 3, "3 round-trips expected");
+    assert_eq!(invoker.call_count(), 3, "OtherTool dispatched every turn");
+
+    let completed: Vec<&serde_json::Value> = evs
+        .iter()
+        .filter_map(|e| match e {
+            SubagentEvent::Completed { result, .. } => Some(result),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        completed.is_empty(),
+        "a schema run must not report success with an off-schema payload \u{2014} got {completed:?}"
+    );
+    let err = evs
+        .iter()
+        .find_map(|e| match e {
+            SubagentEvent::Failed { error, .. } => Some(error.clone()),
+            _ => None,
+        })
+        .expect("a Failed event naming the missing StructuredOutput");
+    assert_eq!(
+        err,
+        "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)"
+    );
+}
+
 #[test]
 fn structured_output_validation_and_cap_helpers() {
     // Valid input passes; type-mismatch fails with a leaf message.

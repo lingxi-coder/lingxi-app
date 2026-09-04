@@ -38,6 +38,9 @@
 
 use client_protocol::commands::UNIFFI_META_CLIENT_PROTOCOL_ENUM_CLIENTCOMMAND;
 use client_protocol::events::UNIFFI_META_CLIENT_PROTOCOL_ENUM_CLIENTEVENT;
+use client_protocol::local_apps::{
+    UNIFFI_META_CLIENT_PROTOCOL_ENUM_APPEVENTDTO, UNIFFI_META_CLIENT_PROTOCOL_ENUM_PLUGINCOMMANDDTO,
+};
 
 /// `uniffi_core::metadata::BUF_SIZE` — the hard, hardcoded ceiling every
 /// `MetadataBuffer` asserts against. Verified against `uniffi_core 0.28.3`
@@ -114,6 +117,28 @@ fn client_event_uniffi_metadata_stays_within_budget() {
         "ClientEvent",
         "client-protocol/src/events.rs",
         &UNIFFI_META_CLIENT_PROTOCOL_ENUM_CLIENTEVENT,
+    );
+}
+
+/// `AppEventDto` is the enum every create-flow event rides in — same shape of
+/// risk as `ClientEvent`, just unwatched until now.
+#[test]
+fn app_event_dto_uniffi_metadata_stays_within_budget() {
+    assert_within_budget(
+        "AppEventDto",
+        "client-protocol/src/local_apps.rs",
+        &UNIFFI_META_CLIENT_PROTOCOL_ENUM_APPEVENTDTO,
+    );
+}
+
+/// `PluginCommandDto` is the plugin-facing analogue of `ClientCommand` — same
+/// shape of risk, just unwatched until now.
+#[test]
+fn plugin_command_dto_uniffi_metadata_stays_within_budget() {
+    assert_within_budget(
+        "PluginCommandDto",
+        "client-protocol/src/local_apps.rs",
+        &UNIFFI_META_CLIENT_PROTOCOL_ENUM_PLUGINCOMMANDDTO,
     );
 }
 

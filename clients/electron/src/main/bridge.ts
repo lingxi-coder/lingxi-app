@@ -1,9 +1,9 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
@@ -29,6 +29,7 @@ import {
   validatePrompt,
   validateRequestId,
 } from './validation.js';
+import { resolveProviderIdForModel } from './credential-broker.js';
 
 export const CH_SEND_PROMPT = 'lingxi:sendPrompt';
 export const CH_APPROVE = 'lingxi:approve';
@@ -63,6 +64,8 @@ export interface BridgeLaunchConfig {
   sessionId?: string;
   apiKey?: string;
   providerCredentials?: Record<string, string>;
+  /** Broker-owned sensitive plugin options, passed only over child stdin. */
+  pluginSecrets?: Record<string, Record<string, string>>;
   trusted: boolean;
   model?: string;
   apiBaseUrl?: string;
@@ -98,7 +101,15 @@ export interface BridgeManagerOptions {
   /** Direct unit-test/legacy mode can keep the old runtime IPC registration. */
   registerIpc?: boolean;
   diagnostics?: DiagnosticBuffer;
+  /** Internal process-inspection seam used to recover detached Desktop runtimes after a main-process restart. */
+  readProcessCommand?: (pid: number) => string | undefined;
+  /** Internal process-table seam used to attach sessions still owned by another local Desktop/test host. */
+  listProcessCommands?: () => readonly ProcessCommand[];
   onModelChanged?: (model: string) => void;
+  /** Resolve a broker-owned credential only when this session first selects its provider. */
+  resolveProviderCredential?: (providerId: string) => Promise<string | undefined>;
+  /** Internal cache hook used by SessionRuntimeManager; never exposed to renderer IPC. */
+  onActivityChanged?: () => void;
   onFirstPromptSent?: () => boolean | void;
   /** SECURITY: consulted before a `set_permission_mode: bypassPermissions`
    * command is forwarded to the engine. Must show a blocking acceptance dialog
@@ -108,10 +119,18 @@ export interface BridgeManagerOptions {
 }
 
 type ProviderCredentialStatus = Extract<ClientEvent, { type: 'provider_credential_status' }>;
+export type ProviderConnectionTestResult = Extract<ClientEvent, { type: 'provider_connection_tested' }>;
 
 interface PendingCredentialOperation {
   providerIds: readonly string[];
   resolve: (status: ProviderCredentialStatus) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
+interface PendingProviderConnectionTest {
+  providerId: string;
+  resolve: (result: ProviderConnectionTestResult) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
 }
@@ -123,6 +142,9 @@ interface PendingAskUserQuestionRequest {
 interface PendingSessionResume {
   sessionId: string;
   generation: number;
+  sessionResumed: boolean;
+  model?: string;
+  hydrationStarted: boolean;
   resolve: () => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
@@ -181,6 +203,280 @@ function lockfiles(dir: string): string[] {
   } catch {
     return [];
   }
+}
+
+export interface ReusableBridge {
+  launchDir: string;
+  lockfilePath: string;
+  pid: number;
+  ownedProcess: boolean;
+}
+
+export interface ProcessCommand {
+  pid: number;
+  ppid?: number;
+  command: string;
+}
+
+function privateOwnedPath(path: string, kind: 'directory' | 'file'): boolean {
+  try {
+    const metadata = lstatSync(path);
+    if (kind === 'directory' ? !metadata.isDirectory() : !metadata.isFile()) return false;
+    if (process.platform !== 'win32' && (metadata.mode & 0o077) !== 0) return false;
+    if (process.getuid && metadata.uid !== process.getuid()) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function processCommandOwnsSession(command: string, sessionId: string): boolean {
+  if (!isSessionId(sessionId)) return false;
+  const escaped = sessionId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|\\s)--session-id(?:=|\\s+)${escaped}(?=\\s|$)`).test(command);
+}
+
+function readProcessCommand(pid: number): string | undefined {
+  if (process.platform === 'win32') return undefined;
+  try {
+    const command = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'command='], {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024,
+      timeout: 1_000,
+    }).trim();
+    return command || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function listProcessCommands(): ProcessCommand[] {
+  if (process.platform === 'win32') return [];
+  try {
+    return execFileSync('/bin/ps', ['-axww', '-o', 'pid=,ppid=,command='], {
+      encoding: 'utf8',
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 2_000,
+    }).split('\n').flatMap((line) => {
+      const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+      return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), command: match[3] }] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function lockfilePort(name: string): number | undefined {
+  if (!name.endsWith('.lock') || name.startsWith('.')) return undefined;
+  const raw = name.slice(0, -'.lock'.length);
+  const port = Number(raw);
+  return Number.isInteger(port) && port >= 1 && port <= 65_535 && String(port) === raw
+    ? port
+    : undefined;
+}
+
+function reusableBridgeInLaunchDirectory(
+  launchDir: string,
+  ref: SessionRef,
+  pid: number,
+  ownedProcess: boolean,
+): ReusableBridge | undefined {
+  if (!privateOwnedPath(launchDir, 'directory')) return undefined;
+  for (const name of lockfiles(launchDir)) {
+    if (lockfilePort(name) === undefined) continue;
+    const lockfilePath = join(launchDir, name);
+    if (!privateOwnedPath(lockfilePath, 'file')) continue;
+    try {
+      const body = JSON.parse(readFileSync(lockfilePath, 'utf8')) as { pid?: unknown };
+      validateBridgeLockfile(body, pid, ref.projectPath);
+      return { launchDir, lockfilePath, pid, ownedProcess };
+    } catch {
+      // A stale or partially-written candidate is not reusable; keep looking.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Locate a still-running bridge-server previously detached from this exact
+ * Desktop user-data root. The private lockfile authenticates the connection;
+ * the process command supplies the missing session-id binding in the legacy
+ * lockfile schema without weakening its Claude-compatible wire format.
+ */
+export function discoverReusableBridge(
+  bridgeRoot: string,
+  ref: SessionRef,
+  processCommand: (pid: number) => string | undefined = readProcessCommand,
+): ReusableBridge | undefined {
+  if (!privateOwnedPath(bridgeRoot, 'directory')) return undefined;
+  let entries: string[];
+  try {
+    entries = readdirSync(bridgeRoot).sort((left, right) => right.localeCompare(left));
+  } catch {
+    return undefined;
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith('launch-')) continue;
+    const launchDir = join(bridgeRoot, entry);
+    if (!privateOwnedPath(launchDir, 'directory')) continue;
+    for (const name of lockfiles(launchDir)) {
+      if (lockfilePort(name) === undefined) continue;
+      const lockfilePath = join(launchDir, name);
+      if (!privateOwnedPath(lockfilePath, 'file')) continue;
+      try {
+        const body = JSON.parse(readFileSync(lockfilePath, 'utf8')) as { pid?: unknown };
+        if (!Number.isSafeInteger(body.pid) || Number(body.pid) < 1) continue;
+        const pid = Number(body.pid);
+        const command = processCommand(pid);
+        if (!command || !processCommandOwnsSession(command, ref.sessionId)) continue;
+        const reusable = reusableBridgeInLaunchDirectory(launchDir, ref, pid, true);
+        if (reusable) return reusable;
+      } catch {
+        // A stale or partially-written candidate is not reusable; keep looking.
+      }
+    }
+  }
+  return undefined;
+}
+
+function argumentBetween(command: string, start: string, end: string): string | undefined {
+  const startIndex = command.indexOf(start);
+  if (startIndex < 0) return undefined;
+  const valueStart = startIndex + start.length;
+  const endIndex = command.indexOf(end, valueStart);
+  if (endIndex < 0) return undefined;
+  const value = command.slice(valueStart, endIndex).trim();
+  return value || undefined;
+}
+
+function processCommandArgument(command: string, name: string): string | undefined {
+  const marker = ` --${name} `;
+  const startIndex = command.indexOf(marker);
+  if (startIndex < 0) return undefined;
+  const valueStart = startIndex + marker.length;
+  const nextFlag = command.indexOf(' --', valueStart);
+  const value = command.slice(valueStart, nextFlag < 0 ? undefined : nextFlag).trim();
+  return value || undefined;
+}
+
+function processCommandHasFlag(command: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|\\s)--${escaped}(?=\\s|$)`).test(command);
+}
+
+function pathIsWithin(root: string, candidate: string): boolean {
+  const relativePath = relative(resolve(root), resolve(candidate));
+  return relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath));
+}
+
+export function discoverExternalReusableBridge(
+  ref: SessionRef,
+  processes: readonly ProcessCommand[] = listProcessCommands(),
+): ReusableBridge | undefined {
+  for (const processInfo of processes) {
+    if (!processCommandOwnsSession(processInfo.command, ref.sessionId)) continue;
+    const workspace = argumentBetween(processInfo.command, ' --cwd ', ' --bridge-dir ');
+    const launchDir = argumentBetween(processInfo.command, ' --bridge-dir ', ' --session-id ');
+    if (workspace !== ref.projectPath || !launchDir) continue;
+    const reusable = reusableBridgeInLaunchDirectory(
+      launchDir,
+      ref,
+      processInfo.pid,
+      processInfo.ppid === 1,
+    );
+    if (reusable) return reusable;
+  }
+  return undefined;
+}
+
+/**
+ * Find only pre-broker Desktop bridges that launchd inherited after their
+ * parent exited. Current packaged bridges always carry the stdin-only marker;
+ * constraining candidates to this private Desktop root avoids terminating CLI,
+ * TUI, test, or another app installation's background sessions.
+ */
+export function discoverLegacyOrphanBridges(
+  bridgeRoot: string,
+  processes: readonly ProcessCommand[] = listProcessCommands(),
+): ReusableBridge[] {
+  if (!privateOwnedPath(bridgeRoot, 'directory')) return [];
+  const candidates: ReusableBridge[] = [];
+  const seen = new Set<number>();
+  for (const processInfo of processes) {
+    if (processInfo.ppid !== 1 || seen.has(processInfo.pid)) continue;
+    if (processCommandHasFlag(processInfo.command, 'packaged-credential-stdin-only')) continue;
+    const workspace = processCommandArgument(processInfo.command, 'cwd');
+    const launchDir = processCommandArgument(processInfo.command, 'bridge-dir');
+    const sessionId = processCommandArgument(processInfo.command, 'session-id');
+    if (!workspace || !launchDir || !sessionId || !isSessionId(sessionId)) continue;
+    if (!pathIsWithin(bridgeRoot, launchDir)) continue;
+    if (!processCommandOwnsSession(processInfo.command, sessionId)) continue;
+    const reusable = reusableBridgeInLaunchDirectory(
+      launchDir,
+      { projectPath: workspace, sessionId },
+      processInfo.pid,
+      true,
+    );
+    if (!reusable) continue;
+    seen.add(processInfo.pid);
+    candidates.push(reusable);
+  }
+  return candidates;
+}
+
+interface StopLegacyOrphanBridgesOptions {
+  processes?: readonly ProcessCommand[];
+  signalProcess?: (pid: number, signal: NodeJS.Signals) => boolean;
+  processIsAlive?: (pid: number) => boolean;
+  wait?: (milliseconds: number) => Promise<void>;
+  stopTimeoutMs?: number;
+}
+
+function signalProcessGroup(pid: number, signal: NodeJS.Signals): boolean {
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch {
+    try {
+      process.kill(pid, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+export async function stopLegacyOrphanBridges(
+  bridgeRoot: string,
+  options: StopLegacyOrphanBridgesOptions = {},
+): Promise<number[]> {
+  const signalProcess = options.signalProcess ?? signalProcessGroup;
+  const isAlive = options.processIsAlive ?? processIsAlive;
+  const wait = options.wait ?? ((milliseconds: number) => new Promise<void>((resolveWait) => {
+    const timer = setTimeout(resolveWait, milliseconds);
+    timer.unref();
+  }));
+  const stopped: number[] = [];
+  for (const candidate of discoverLegacyOrphanBridges(bridgeRoot, options.processes)) {
+    if (!signalProcess(candidate.pid, 'SIGINT')) continue;
+    const deadline = Date.now() + (options.stopTimeoutMs ?? 1_000);
+    while (isAlive(candidate.pid) && Date.now() < deadline) await wait(50);
+    if (isAlive(candidate.pid)) {
+      signalProcess(candidate.pid, 'SIGKILL');
+      await wait(25);
+    }
+    if (!isAlive(candidate.pid)) stopped.push(candidate.pid);
+  }
+  return stopped;
 }
 
 function urlOrigin(raw: string): string | undefined {
@@ -326,15 +622,19 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onFirstPromptSent' | 'sessionId' | 'projectPath' | 'envelopeEvents' | 'registerIpc'> {
-  launchConfig: (ref: SessionRef) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents' | 'registerIpc'> {
+  launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;
   onFirstPromptSent?: (ref: SessionRef) => boolean | void;
   sessionIdAvailable?: (ref: SessionRef) => boolean | Promise<boolean>;
+  /** Maximum retained runtimes when enough idle sessions are evictable. */
+  maxCachedRuntimes?: number;
 }
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DEFAULT_MAX_CACHED_RUNTIMES = 6;
+const MAX_CONFIGURED_CACHED_RUNTIMES = 32;
 
 export function isSessionId(value: unknown): value is string {
   return typeof value === 'string' && SESSION_ID_PATTERN.test(value);
@@ -358,14 +658,19 @@ export class SessionRuntime {
   private restartChain: Promise<void> = Promise.resolve();
   private generation = 0;
   private launchDir: string | null = null;
+  private adoptedPid: number | null = null;
+  private adoptedProcessOwned = false;
   private activeWorkspace: string | undefined;
   private activeWorkspaceTrusted = false;
   private runtimeCredentialProviders = new Set<string>();
   private persistedCredentialProviders = new Set<string>();
   private activeCredentialProviders = new Set<string>();
+  private credentialPreviews = new Map<string, string>();
   private credentialStorageEncrypted = false;
   private nextCredentialOperationId = 1;
   private readonly pendingCredentialOperations = new Map<number, PendingCredentialOperation>();
+  private readonly pendingRuntimeCredentialLoads = new Map<string, Promise<void>>();
+  private readonly pendingProviderConnectionTests = new Map<number, PendingProviderConnectionTest>();
   private activeTurn = false;
   private activeTurnId: number | undefined;
   private cancellingTurn = false;
@@ -421,6 +726,10 @@ export class SessionRuntime {
 
   get providerCredentialStorageEncrypted(): boolean {
     return this.credentialStorageEncrypted;
+  }
+
+  get providerCredentialPreviews(): Readonly<Record<string, string>> {
+    return Object.fromEntries(this.credentialPreviews);
   }
 
   get runtimeVersions(): BridgeRuntimeVersions | undefined {
@@ -598,6 +907,10 @@ export class SessionRuntime {
     this.pendingAskUserQuestionIds.delete(requestId);
   }
 
+  private notifyActivityChanged(): void {
+    this.opts.onActivityChanged?.();
+  }
+
   /**
    * Forgets the interactions the engine itself drops when a turn ends.
    *
@@ -677,6 +990,44 @@ export class SessionRuntime {
   }
 
   private async startInternal(): Promise<void> {
+    let generation = ++this.generation;
+    const bridgeRoot = this.opts.bridgeRoot;
+    if (bridgeRoot && this.projectPath) {
+      const ref = { projectPath: this.projectPath, sessionId: this.sessionId };
+      const reusable = discoverReusableBridge(
+        bridgeRoot,
+        ref,
+        this.opts.readProcessCommand ?? readProcessCommand,
+      ) ?? discoverExternalReusableBridge(
+        ref,
+        (this.opts.listProcessCommands ?? listProcessCommands)(),
+      );
+      if (reusable) {
+        this.launchDir = reusable.launchDir;
+        this.adoptedPid = reusable.pid;
+        this.adoptedProcessOwned = reusable.ownedProcess;
+        this.activeWorkspace = this.projectPath;
+        const access = this.opts.accessState?.();
+        this.activeWorkspaceTrusted = Boolean(
+          access?.trusted
+          && (!access.workspace || access.workspace === this.projectPath),
+        );
+        try {
+          await this.connectBridgeClient(reusable.lockfilePath, generation);
+          this.diagnostics.add('info', 'host', diagnosticEvent('bridge_adopted', {
+            pid: reusable.pid,
+            sessionId: this.sessionId,
+          }));
+          return;
+        } catch (error) {
+          this.diagnostics.add('warn', 'host', `failed to adopt existing session runtime: ${sanitizeDiagnostic(error)}`);
+          await this.stopBridge();
+          if (!reusable.ownedProcess) throw error;
+          generation = ++this.generation;
+        }
+      }
+    }
+
     const launch = await this.opts.launchConfig();
     if (this.disposed) throw new Error('SessionRuntime is disposed');
     this.activeWorkspace = launch.workspace;
@@ -690,9 +1041,9 @@ export class SessionRuntime {
     ]);
     this.persistedCredentialProviders.clear();
     this.activeCredentialProviders = new Set(this.runtimeCredentialProviders);
+    this.credentialPreviews.clear();
     this.credentialStorageEncrypted = false;
     const bridgeDir = this.createLaunchDirectory();
-    const generation = ++this.generation;
 
     this.setState({ status: 'spawning' });
     let child: ChildProcess;
@@ -704,7 +1055,12 @@ export class SessionRuntime {
       throw error;
     }
     this.child = child;
-    this.captureLogs(child, [launch.apiKey, ...Object.values(launch.providerCredentials ?? {})].filter((value): value is string => Boolean(value)));
+    const pluginSecretValues = Object.values(launch.pluginSecrets ?? {}).flatMap((values) => Object.values(values));
+    this.captureLogs(child, [
+      launch.apiKey,
+      ...Object.values(launch.providerCredentials ?? {}),
+      ...pluginSecretValues,
+    ].filter((value): value is string => Boolean(value)));
 
     child.once('exit', (code, signal) => {
       this.diagnostics.add('info', 'host', childExitDiagnostic(code, signal, generation));
@@ -721,26 +1077,7 @@ export class SessionRuntime {
     try {
       const lockfilePath = await this.waitForLockfile(bridgeDir, launch, generation);
       if (this.disposed) throw new Error('SessionRuntime is disposed');
-      this.setState({ status: 'connecting' });
-      const client = new BridgeClient({ lockfilePath, clientName: 'lingxi-electron/0.1.0' });
-      this.client = client;
-      this.wireClient(client, generation);
-      const hello = await client.connect();
-      if (generation !== this.generation || this.disposed) return;
-      this.lastRuntimeVersions = {
-        serverName: hello.server_name,
-        serverProtocol: hello.protocol_version,
-        clientProtocol: hello.capabilities.client_protocol_version,
-      };
-      this.diagnostics.add(
-        'info',
-        'bridge',
-        bridgeVersionDiagnostic(hello.server_name, hello.protocol_version, hello.capabilities.client_protocol_version),
-      );
-      this.setState({ status: 'connected' });
-      // Reading credential metadata may consult the login Keychain, so it
-      // must never hold the desktop in a spawning/restarting state.
-      void this.refreshProviderCredentials();
+      await this.connectBridgeClient(lockfilePath, generation);
     } catch (error) {
       if (generation === this.generation) {
         this.fail(error);
@@ -748,6 +1085,29 @@ export class SessionRuntime {
       }
       throw error;
     }
+  }
+
+  private async connectBridgeClient(lockfilePath: string, generation: number): Promise<void> {
+    this.setState({ status: 'connecting' });
+    const client = new BridgeClient({ lockfilePath, clientName: 'lingxi-electron/0.1.0' });
+    this.client = client;
+    this.wireClient(client, generation);
+    const hello = await client.connect();
+    if (generation !== this.generation || this.disposed) return;
+    this.lastRuntimeVersions = {
+      serverName: hello.server_name,
+      serverProtocol: hello.protocol_version,
+      clientProtocol: hello.capabilities.client_protocol_version,
+    };
+    this.diagnostics.add(
+      'info',
+      'bridge',
+      bridgeVersionDiagnostic(hello.server_name, hello.protocol_version, hello.capabilities.client_protocol_version),
+    );
+    this.setState({ status: 'connected' });
+    // Status refreshes use attribute-only broker queries; they do not
+    // decrypt every saved credential or expose secret bytes to the renderer.
+    void this.refreshProviderCredentials();
   }
 
   private async refreshProviderCredentials(): Promise<void> {
@@ -779,7 +1139,8 @@ export class SessionRuntime {
       bridgeDir,
       model: launch.model,
       hasApiKey: Boolean(launch.apiKey),
-      hasCredentialStdin: Object.keys(launch.providerCredentials ?? {}).length > 0,
+      hasCredentialStdin: Object.keys(launch.providerCredentials ?? {}).length > 0
+        || Object.keys(launch.pluginSecrets ?? {}).length > 0,
       trusted: launch.trusted,
       packagedCredentialBoundary: Boolean(this.opts.isPackaged),
     });
@@ -792,20 +1153,28 @@ export class SessionRuntime {
       detached: process.platform !== 'win32',
     });
     const providerCredentials = launch.providerCredentials ?? {};
-    if (Object.keys(providerCredentials).length > 0) {
+    if (Object.keys(providerCredentials).length > 0 || Object.keys(launch.pluginSecrets ?? {}).length > 0) {
       child.stdin?.end(buildCredentialEnvelope(launch));
     } else if (launch.apiKey) child.stdin?.end(`${launch.apiKey}\n`);
     else child.stdin?.end();
     return child;
   }
 
-  listProviderCredentials(providerIds: readonly string[]): Promise<ProviderCredentialStatus> {
+  listProviderCredentials(
+    providerIds: readonly string[],
+    previewProviderIds: readonly string[] = [],
+  ): Promise<ProviderCredentialStatus> {
     const ids = providerIds.map((providerId) => this.validateProviderId(providerId));
+    const previews = previewProviderIds.map((providerId) => this.validateProviderId(providerId));
     if (ids.length > 32) throw new Error('too many provider credentials requested');
+    if (previews.some((providerId) => !ids.includes(providerId))) {
+      throw new Error('credential preview provider must be included in the status query');
+    }
     return this.requestCredentialOperation(ids, (operationId) => ({
       type: 'list_provider_credentials',
       operation_id: operationId,
       provider_ids: ids,
+      ...(previews.length > 0 ? { preview_provider_ids: previews } : {}),
     }));
   }
 
@@ -829,6 +1198,47 @@ export class SessionRuntime {
       operation_id: operationId,
       provider_id: id,
     }));
+  }
+
+  testProviderConnection(
+    providerId: string,
+    apiBase: string,
+    model: string,
+    credentialOverride?: string,
+  ): Promise<ProviderConnectionTestResult> {
+    const id = this.validateProviderId(providerId);
+    if (!apiBase || apiBase.length > 2_048 || apiBase.includes('\0')) throw new Error('invalid provider API base');
+    if (model.length > 512 || model.includes('\0')) throw new Error('invalid provider model');
+    if (credentialOverride !== undefined
+      && (!credentialOverride.trim() || credentialOverride.length > 16_384 || credentialOverride.includes('\0'))) {
+      throw new Error('invalid provider credential');
+    }
+    const client = this.client;
+    if (!client) throw new Error(`bridge client not connected (state=${this.state.status})`);
+    const operationId = this.nextCredentialOperationId;
+    this.nextCredentialOperationId = Number.isSafeInteger(operationId + 1) ? operationId + 1 : 1;
+    return new Promise<ProviderConnectionTestResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingProviderConnectionTests.delete(operationId);
+        reject(new Error('provider connection test timed out'));
+      }, 20_000);
+      timer.unref();
+      this.pendingProviderConnectionTests.set(operationId, { providerId: id, resolve, reject, timer });
+      try {
+        client.sendCommand({
+          type: 'test_provider_connection',
+          operation_id: operationId,
+          provider_id: id,
+          api_base: apiBase,
+          model,
+          ...(credentialOverride !== undefined ? { credential_override: credentialOverride } : {}),
+        });
+      } catch (error) {
+        clearTimeout(timer);
+        this.pendingProviderConnectionTests.delete(operationId);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
   }
 
   private requestCredentialOperation(
@@ -938,6 +1348,9 @@ export class SessionRuntime {
       if (event.type === 'provider_credential_status') {
         this.handleProviderCredentialStatus(event);
       }
+      if (event.type === 'provider_connection_tested') {
+        this.handleProviderConnectionTested(event);
+      }
       if (event.type === 'session_resumed') {
         if (event.session_id !== this.sessionId) {
           this.rejectPendingSessionResume(new Error('engine resumed a different session id'));
@@ -946,7 +1359,10 @@ export class SessionRuntime {
         }
         this.sessionHasHistory = true;
         this.sessionIdentityCommitted = true;
-        this.resolvePendingSessionResume();
+        if (this.pendingSessionResume) {
+          this.pendingSessionResume.sessionResumed = true;
+          this.completePendingSessionResumeIfReady();
+        }
       }
       if (event.type === 'error' && this.pendingSessionResume) {
         this.rejectPendingSessionResume(new Error(sanitizeDiagnostic(event.message)));
@@ -965,6 +1381,15 @@ export class SessionRuntime {
       if (event.type === 'model_changed') {
         try { this.opts.onModelChanged?.(event.model); }
         catch (error) { this.diagnostics.add('warn', 'host', error); }
+        const pending = this.pendingSessionResume;
+        if (pending) {
+          pending.model = event.model;
+          this.completePendingSessionResumeIfReady();
+        } else {
+          void this.ensureModelProviderCredential(event.model).catch((error: unknown) => {
+            this.diagnostics.add('warn', 'host', `failed to load model provider credential: ${sanitizeDiagnostic(error)}`);
+          });
+        }
       }
       if (event.type === 'ask_user_question') {
         if (this.cancellingTurn) return;
@@ -985,6 +1410,13 @@ export class SessionRuntime {
       if (event.type === 'ask_user_question_resolved') {
         this.clearPendingAskUserQuestion(event.request_id);
       }
+      if (
+        event.type === 'turn_started'
+        || event.type === 'turn_ended'
+        || event.type === 'session_ended'
+        || event.type === 'ask_user_question'
+        || event.type === 'ask_user_question_resolved'
+      ) this.notifyActivityChanged();
       this.broadcastClientEvent(event);
     });
     client.on('permission', (request: PermissionRequest) => {
@@ -995,6 +1427,7 @@ export class SessionRuntime {
           return;
         }
         this.pendingPermissionIds.add(request.request_id);
+        this.notifyActivityChanged();
         this.broadcast(CH_PERMISSION, request);
       }
     });
@@ -1009,6 +1442,7 @@ export class SessionRuntime {
           return;
         }
         this.pendingComputerAccessIds.add(request.request_id);
+        this.notifyActivityChanged();
         this.broadcast(CH_COMPUTER_ACCESS, request);
       }
     });
@@ -1028,6 +1462,7 @@ export class SessionRuntime {
     }
     const configured = new Set(event.configured_provider_ids);
     const unavailable = new Set(event.unavailable_provider_ids ?? []);
+    const previews = event.credential_previews ?? {};
     // The configured/unavailable id sets are authoritative regardless of whether
     // the originating promise is still pending — a LATE (post-timeout) event must
     // still fold into the cached state, or providerCredentialSnapshot() reports
@@ -1040,8 +1475,18 @@ export class SessionRuntime {
     const clearAbsent = !event.error;
     for (const providerId of scope) {
       if (unavailable.has(providerId)) continue;
-      if (configured.has(providerId)) this.persistedCredentialProviders.add(providerId);
-      else if (clearAbsent) this.persistedCredentialProviders.delete(providerId);
+      if (configured.has(providerId)) {
+        this.persistedCredentialProviders.add(providerId);
+        const preview = previews[providerId];
+        if (preview) this.credentialPreviews.set(providerId, preview);
+        // A status-only query intentionally omits previews so it can use an
+        // attribute-only Keychain lookup. Preserve any previously fetched
+        // suffix until an explicit preview query replaces it or deletion
+        // clears the provider below.
+      } else if (clearAbsent) {
+        this.persistedCredentialProviders.delete(providerId);
+        this.credentialPreviews.delete(providerId);
+      }
     }
     this.credentialStorageEncrypted = event.storage_encrypted;
     this.activeCredentialProviders = new Set([
@@ -1053,6 +1498,18 @@ export class SessionRuntime {
       if (event.error) pending.reject(new Error(sanitizeDiagnostic(event.error)));
       else pending.resolve(event);
     }
+  }
+
+  private handleProviderConnectionTested(event: ProviderConnectionTestResult): void {
+    const pending = this.pendingProviderConnectionTests.get(event.operation_id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingProviderConnectionTests.delete(event.operation_id);
+    if (pending.providerId !== event.provider_id) {
+      pending.reject(new Error('provider connection test returned a mismatched provider'));
+      return;
+    }
+    pending.resolve(event);
   }
 
   private assertSender(event: IpcMainInvokeEvent): void {
@@ -1080,6 +1537,7 @@ export class SessionRuntime {
       this.activeTurn = true;
       this.activeTurnId = undefined;
       this.cancellingTurn = false;
+      this.notifyActivityChanged();
     }
   }
 
@@ -1089,6 +1547,7 @@ export class SessionRuntime {
     if (this.activeTurn && (id === undefined || id === this.activeTurnId)) {
       this.cancellingTurn = true;
       this.clearTurnInteractions();
+      this.notifyActivityChanged();
     }
   }
 
@@ -1098,6 +1557,7 @@ export class SessionRuntime {
     if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
     this.requireClient().approvePermission(id, permissionResponse);
     this.pendingPermissionIds.delete(id);
+    this.notifyActivityChanged();
   }
 
   denyPermission(requestId: number): void {
@@ -1105,6 +1565,7 @@ export class SessionRuntime {
     if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
     this.requireClient().denyPermission(id);
     this.pendingPermissionIds.delete(id);
+    this.notifyActivityChanged();
   }
 
   approveComputerAccess(requestId: number, response: unknown): void {
@@ -1113,6 +1574,7 @@ export class SessionRuntime {
     if (!this.pendingComputerAccessIds.has(id)) throw new Error('computer access request is not pending');
     this.requireClient().approveComputerAccess(id, computerAccessResponse);
     this.pendingComputerAccessIds.delete(id);
+    this.notifyActivityChanged();
   }
 
   denyComputerAccess(requestId: number): void {
@@ -1120,6 +1582,7 @@ export class SessionRuntime {
     if (!this.pendingComputerAccessIds.has(id)) throw new Error('computer access request is not pending');
     this.requireClient().denyComputerAccess(id);
     this.pendingComputerAccessIds.delete(id);
+    this.notifyActivityChanged();
   }
 
   answerAskUserQuestion(requestId: number, answers: unknown): void {
@@ -1128,6 +1591,7 @@ export class SessionRuntime {
     if (!this.pendingAskUserQuestionIds.has(id)) throw new Error('AskUserQuestion request is not pending');
     this.requireClient().answerAskUserQuestion(id, validatedAnswers);
     this.clearPendingAskUserQuestion(id);
+    this.notifyActivityChanged();
   }
 
   cancelAskUserQuestion(requestId: number): void {
@@ -1135,6 +1599,7 @@ export class SessionRuntime {
     if (!this.pendingAskUserQuestionIds.has(id)) throw new Error('AskUserQuestion request is not pending');
     this.requireClient().cancelAskUserQuestion(id);
     this.clearPendingAskUserQuestion(id);
+    this.notifyActivityChanged();
   }
 
   private registerIpc(): void {
@@ -1241,7 +1706,62 @@ export class SessionRuntime {
       // would race a real reply the engine has already accepted.
       this.outstandingResponderRequests.delete(validated.request_id);
     }
+    if (validated.type === 'set_model') {
+      await this.ensureModelProviderCredential(validated.model);
+    }
     this.requireClient().sendCommand(validated);
+  }
+
+  private async ensureProviderCredentialCached(providerId: string): Promise<void> {
+    if (this.runtimeCredentialProviders.has(providerId) || !this.opts.resolveProviderCredential) return;
+    const existing = this.pendingRuntimeCredentialLoads.get(providerId);
+    if (existing) return existing;
+    const generation = this.generation;
+    const client = this.requireClient();
+    let loading!: Promise<void>;
+    loading = (async () => {
+      const credential = await this.opts.resolveProviderCredential!(providerId);
+      if (generation !== this.generation || client !== this.client) {
+        throw new Error('provider credential loading was interrupted');
+      }
+      if (credential) await this.cacheProviderCredential(providerId, credential);
+    })().finally(() => {
+      if (this.pendingRuntimeCredentialLoads.get(providerId) === loading) {
+        this.pendingRuntimeCredentialLoads.delete(providerId);
+      }
+    });
+    this.pendingRuntimeCredentialLoads.set(providerId, loading);
+    return loading;
+  }
+
+  private async ensureModelProviderCredential(model: string): Promise<void> {
+    const providerId = resolveProviderIdForModel(model);
+    if (providerId) await this.ensureProviderCredentialCached(providerId);
+  }
+
+  hasCachedProviderCredential(providerId: string): boolean {
+    return this.runtimeCredentialProviders.has(providerId);
+  }
+
+  async cacheProviderCredential(providerId: string, credential: string): Promise<void> {
+    await this.setProviderCredential(providerId, credential);
+    this.persistedCredentialProviders.delete(providerId);
+    this.runtimeCredentialProviders.add(providerId);
+    this.activeCredentialProviders = new Set([
+      ...this.runtimeCredentialProviders,
+      ...this.persistedCredentialProviders,
+    ]);
+  }
+
+  async clearCachedProviderCredential(providerId: string): Promise<void> {
+    if (!this.runtimeCredentialProviders.has(providerId)) return;
+    await this.deleteProviderCredential(providerId);
+    this.runtimeCredentialProviders.delete(providerId);
+    this.persistedCredentialProviders.delete(providerId);
+    this.activeCredentialProviders = new Set([
+      ...this.runtimeCredentialProviders,
+      ...this.persistedCredentialProviders,
+    ]);
   }
 
   /** Resume the one session owned by this runtime and wait for engine proof. */
@@ -1259,6 +1779,8 @@ export class SessionRuntime {
       this.pendingSessionResume = {
         sessionId: this.sessionId,
         generation,
+        sessionResumed: false,
+        hydrationStarted: false,
         resolve,
         reject,
         timer,
@@ -1273,6 +1795,18 @@ export class SessionRuntime {
         this.rejectPendingSessionResume(error instanceof Error ? error : new Error(String(error)));
       }
     });
+  }
+
+  private completePendingSessionResumeIfReady(): void {
+    const pending = this.pendingSessionResume;
+    if (!pending?.sessionResumed || !pending.model || pending.hydrationStarted) return;
+    pending.hydrationStarted = true;
+    void this.ensureModelProviderCredential(pending.model).then(
+      () => this.resolvePendingSessionResume(),
+      (error: unknown) => this.rejectPendingSessionResume(
+        error instanceof Error ? error : new Error(String(error)),
+      ),
+    );
   }
 
   async restoreOwnedSessionIfNeeded(): Promise<void> {
@@ -1346,6 +1880,7 @@ export class SessionRuntime {
     }
     this.diagnostics.add('info', 'host', connectionDiagnostic(next, this.generation));
     this.broadcast(CH_STATE_CHANGED, next);
+    this.notifyActivityChanged();
   }
 
   private fail(error: unknown): void {
@@ -1369,6 +1904,12 @@ export class SessionRuntime {
       pending.reject(new Error('bridge credential operation was interrupted'));
     }
     this.pendingCredentialOperations.clear();
+    this.pendingRuntimeCredentialLoads.clear();
+    for (const pending of this.pendingProviderConnectionTests.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('provider connection test was interrupted'));
+    }
+    this.pendingProviderConnectionTests.clear();
     this.activeWorkspace = undefined;
     this.activeWorkspaceTrusted = false;
     this.runtimeCredentialProviders.clear();
@@ -1408,7 +1949,38 @@ export class SessionRuntime {
       }, this.opts.stopTimeoutMs ?? 2_000);
       timer.unref();
     });
-    this.removeLaunchDirectory();
+    const adoptedPid = this.adoptedPid;
+    const adoptedProcessOwned = this.adoptedProcessOwned;
+    this.adoptedPid = null;
+    this.adoptedProcessOwned = false;
+    if (adoptedPid && adoptedProcessOwned) await this.stopAdoptedBridge(adoptedPid);
+    if (!adoptedPid || adoptedProcessOwned) this.removeLaunchDirectory();
+    else this.launchDir = null;
+  }
+
+  private processIsAlive(pid: number): boolean {
+    return processIsAlive(pid);
+  }
+
+  private async stopAdoptedBridge(pid: number): Promise<void> {
+    const signal = (value: NodeJS.Signals): boolean => {
+      try {
+        if (process.platform !== 'win32') process.kill(-pid, value);
+        else process.kill(pid, value);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (!signal('SIGINT')) return;
+    const deadline = Date.now() + (this.opts.stopTimeoutMs ?? 2_000);
+    while (this.processIsAlive(pid) && Date.now() < deadline) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 50);
+        timer.unref();
+      });
+    }
+    if (this.processIsAlive(pid)) signal('SIGKILL');
   }
 
   private signalChildTree(child: ChildProcess, signal: NodeJS.Signals): void {
@@ -1459,9 +2031,22 @@ export class SessionRuntimeManager {
   private readonly closingProjects = new Set<string>();
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly targetDestroyedHandlers = new Map<WebContents, () => void>();
+  private readonly lastUsed = new Map<string, number>();
+  private readonly sessionModelHints = new Map<string, string>();
+  private readonly pendingEvictions = new Set<Promise<void>>();
+  private readonly maxCachedRuntimes: number;
+  private activeSessionId: string | null = null;
+  private accessSequence = 0;
+  private cacheTrimScheduled = false;
   private registered = false;
 
-  constructor(private readonly opts: SessionRuntimeManagerOptions) {}
+  constructor(private readonly opts: SessionRuntimeManagerOptions) {
+    const requestedLimit = opts.maxCachedRuntimes ?? DEFAULT_MAX_CACHED_RUNTIMES;
+    if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > MAX_CONFIGURED_CACHED_RUNTIMES) {
+      throw new Error(`maxCachedRuntimes must be between 1 and ${MAX_CONFIGURED_CACHED_RUNTIMES}`);
+    }
+    this.maxCachedRuntimes = requestedLimit;
+  }
 
   get size(): number {
     return this.runtimes.size;
@@ -1477,6 +2062,53 @@ export class SessionRuntimeManager {
 
   get(sessionId: string): SessionRuntime | undefined {
     return this.runtimes.get(sessionId);
+  }
+
+  private touch(sessionId: string): void {
+    if (this.runtimes.has(sessionId)) this.lastUsed.set(sessionId, ++this.accessSequence);
+  }
+
+  private activate(runtime: SessionRuntime): void {
+    this.activeSessionId = runtime.sessionId;
+    this.touch(runtime.sessionId);
+    this.trimCache();
+  }
+
+  private runtimeIsPinned(runtime: SessionRuntime): boolean {
+    const status = runtime.connectionState.status;
+    return runtime.sessionId === this.activeSessionId
+      || runtime.turnActive
+      || runtime.pendingInteractions > 0
+      || status === 'spawning'
+      || status === 'restarting'
+      || status === 'connecting'
+      || this.openingSessions.has(runtime.sessionId);
+  }
+
+  private trimCache(): void {
+    while (this.runtimes.size > this.maxCachedRuntimes) {
+      const victim = [...this.runtimes.values()]
+        .filter((runtime) => !this.runtimeIsPinned(runtime))
+        .sort((left, right) => (this.lastUsed.get(left.sessionId) ?? 0) - (this.lastUsed.get(right.sessionId) ?? 0))[0];
+      if (!victim) return;
+      this.runtimes.delete(victim.sessionId);
+      this.lastUsed.delete(victim.sessionId);
+      this.sessionModelHints.delete(victim.sessionId);
+      const eviction = victim.dispose()
+        .catch((error) => this.opts.diagnostics?.add('warn', 'host', `session cache eviction failed: ${sanitizeDiagnostic(error)}`))
+        .finally(() => this.pendingEvictions.delete(eviction));
+      this.pendingEvictions.add(eviction);
+    }
+  }
+
+  private scheduleCacheTrim(sessionId?: string): void {
+    if (sessionId) this.touch(sessionId);
+    if (this.cacheTrimScheduled) return;
+    this.cacheTrimScheduled = true;
+    queueMicrotask(() => {
+      this.cacheTrimScheduled = false;
+      this.trimCache();
+    });
   }
 
   require(ref: SessionRef): SessionRuntime {
@@ -1506,19 +2138,22 @@ export class SessionRuntimeManager {
   }
 
   /** Create, validate, and optionally start one session-owned runtime. */
-  async ensure(ref: SessionRef, start = true): Promise<SessionRuntime> {
+  async ensure(ref: SessionRef, start = true, resumeModel?: string): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const existing = this.runtimes.get(ref.sessionId);
     if (existing) {
       if (existing.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
       if (start) await existing.start();
+      this.touch(existing.sessionId);
       return existing;
     }
 
+    if (resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
     const runtimeOptions = this.runtimeOptions(ref);
     const runtime = new SessionRuntime(runtimeOptions);
     this.runtimes.set(ref.sessionId, runtime);
+    this.touch(ref.sessionId);
     for (const [webContents, origins] of this.targets) {
       if (webContents.isDestroyed()) {
         this.detachWindow(webContents);
@@ -1531,12 +2166,14 @@ export class SessionRuntimeManager {
       return runtime;
     } catch (error) {
       this.runtimes.delete(ref.sessionId);
+      this.lastUsed.delete(ref.sessionId);
+      this.sessionModelHints.delete(ref.sessionId);
       await runtime.dispose().catch(() => undefined);
       throw error;
     }
   }
 
-  openSession(ref: SessionRef, empty = false): Promise<SessionRuntime> {
+  openSession(ref: SessionRef, empty = false, resumeModel?: string): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const existing = this.runtimes.get(ref.sessionId);
@@ -1548,7 +2185,11 @@ export class SessionRuntimeManager {
       if (pending.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
       return pending.promise;
     }
-    if (existing?.connectionState.status === 'connected') return Promise.resolve(existing);
+    if (!existing && resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
+    if (existing?.connectionState.status === 'connected') {
+      this.activate(existing);
+      return Promise.resolve(existing);
+    }
 
     const promise = this.openSessionInternal(ref, existing, empty);
     const trackedPromise = promise.finally(() => {
@@ -1568,27 +2209,31 @@ export class SessionRuntimeManager {
         runtime = await this.ensure(ref, true);
       }
       if (!empty) await runtime.resumeOwnedSession();
+      this.activate(runtime);
       return runtime;
     } catch (error) {
       if (!existing && runtime) {
         this.runtimes.delete(ref.sessionId);
+        this.lastUsed.delete(ref.sessionId);
+        this.sessionModelHints.delete(ref.sessionId);
         await runtime.dispose().catch(() => undefined);
       }
       throw error;
     }
   }
 
-  async newSession(projectPath: string, _model?: string): Promise<SessionRef> {
+  async newSession(projectPath: string, model?: string): Promise<SessionRef> {
     if (typeof projectPath !== 'string' || projectPath.length === 0) throw new Error('invalid project path');
     this.assertProjectNotClosing(projectPath);
     const pendingDraft = this.openingDraftSessions.get(projectPath);
     if (pendingDraft) return pendingDraft;
     const draft = this.draftSessions.get(projectPath);
     if (draft) {
-      await this.ensure(draft, true);
+      const runtime = await this.ensure(draft, true, model);
+      this.activate(runtime);
       return { ...draft };
     }
-    const promise = this.allocateDraftSession(projectPath);
+    const promise = this.allocateDraftSession(projectPath, model);
     const trackedPromise = promise.finally(() => {
       if (this.openingDraftSessions.get(projectPath) === trackedPromise) this.openingDraftSessions.delete(projectPath);
     });
@@ -1596,7 +2241,7 @@ export class SessionRuntimeManager {
     return trackedPromise;
   }
 
-  private async allocateDraftSession(projectPath: string): Promise<SessionRef> {
+  private async allocateDraftSession(projectPath: string, model?: string): Promise<SessionRef> {
     let ref: SessionRef | undefined;
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const candidate = { projectPath, sessionId: randomUUID() } satisfies SessionRef;
@@ -1608,7 +2253,8 @@ export class SessionRuntimeManager {
     if (!ref) throw new Error('could not allocate a new session id');
     this.draftSessions.set(projectPath, ref);
     try {
-      await this.ensure(ref, true);
+      const runtime = await this.ensure(ref, true, model);
+      this.activate(runtime);
     } catch (error) {
       this.clearDraftSession(ref);
       throw error;
@@ -1633,6 +2279,9 @@ export class SessionRuntimeManager {
     // instead of resolving silently — surfacing a failure for a settings or
     // credential write that actually succeeded.
     this.runtimes.delete(ref.sessionId);
+    this.lastUsed.delete(ref.sessionId);
+    this.sessionModelHints.delete(ref.sessionId);
+    if (this.activeSessionId === ref.sessionId) this.activeSessionId = null;
     this.clearDraftSession(ref);
     await runtime.dispose();
   }
@@ -1648,6 +2297,9 @@ export class SessionRuntimeManager {
     // arriving while disposal is in progress must fail instead of entering a
     // runtime whose child is already being torn down.
     for (const runtime of projectRuntimes) this.runtimes.delete(runtime.sessionId);
+    for (const runtime of projectRuntimes) this.lastUsed.delete(runtime.sessionId);
+    for (const runtime of projectRuntimes) this.sessionModelHints.delete(runtime.sessionId);
+    if (projectRuntimes.some((runtime) => runtime.sessionId === this.activeSessionId)) this.activeSessionId = null;
     try {
       await Promise.all(projectRuntimes.map((runtime) => runtime.dispose()));
     } finally {
@@ -1666,13 +2318,35 @@ export class SessionRuntimeManager {
     ));
   }
 
+  async refreshCachedProviderCredential(providerId: string, credential: string): Promise<void> {
+    const runtimes = [...this.runtimes.values()]
+      .filter((runtime) => (
+        runtime.connectionState.status === 'connected'
+        && runtime.hasCachedProviderCredential(providerId)
+      ));
+    await Promise.all(runtimes.map((runtime) => runtime.cacheProviderCredential(providerId, credential)));
+  }
+
+  async clearCachedProviderCredential(providerId: string): Promise<void> {
+    const runtimes = [...this.runtimes.values()]
+      .filter((runtime) => (
+        runtime.connectionState.status === 'connected'
+        && runtime.hasCachedProviderCredential(providerId)
+      ));
+    await Promise.all(runtimes.map((runtime) => runtime.clearCachedProviderCredential(providerId)));
+  }
+
   async dispose(): Promise<void> {
     const runtimes = [...this.runtimes.values()];
     this.runtimes.clear();
+    this.lastUsed.clear();
+    this.sessionModelHints.clear();
+    this.activeSessionId = null;
     this.openingSessions.clear();
     this.draftSessions.clear();
     this.openingDraftSessions.clear();
     await Promise.all(runtimes.map((runtime) => runtime.dispose().catch(() => undefined)));
+    await Promise.all([...this.pendingEvictions]);
     this.unregisterIpc();
     for (const webContents of [...this.targets.keys()]) this.detachWindow(webContents);
   }
@@ -1732,6 +2406,7 @@ export class SessionRuntimeManager {
       accessState,
       onModelChanged,
       onFirstPromptSent,
+      maxCachedRuntimes: _maxCachedRuntimes,
       ...base
     } = this.opts;
     return {
@@ -1740,9 +2415,13 @@ export class SessionRuntimeManager {
       projectPath: ref.projectPath,
       envelopeEvents: true,
       registerIpc: false,
-      launchConfig: () => launchConfig(ref),
+      launchConfig: () => launchConfig(ref, this.sessionModelHints.get(ref.sessionId)),
       ...(accessState ? { accessState: () => accessState(ref) } : {}),
-      ...(onModelChanged ? { onModelChanged: (model: string) => onModelChanged(ref, model) } : {}),
+      onModelChanged: (model: string) => {
+        this.sessionModelHints.set(ref.sessionId, model);
+        onModelChanged?.(ref, model);
+      },
+      onActivityChanged: () => this.scheduleCacheTrim(ref.sessionId),
       onFirstPromptSent: () => {
         if (!onFirstPromptSent) {
           this.clearDraftSession(ref);
@@ -1769,6 +2448,7 @@ export class SessionRuntimeManager {
     if (!isSessionId(value)) throw new Error('invalid session id');
     const runtime = this.runtimes.get(value);
     if (!runtime) throw new Error(`session runtime is not open: ${value}`);
+    this.touch(runtime.sessionId);
     return runtime;
   }
 

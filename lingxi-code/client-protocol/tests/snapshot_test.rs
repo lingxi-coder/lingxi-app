@@ -40,8 +40,9 @@ use std::path::{Path, PathBuf};
 
 use client_protocol::ask_user_question::{AskOptionDto, AskQuestionDto, AskUserQuestionRequestDto};
 use client_protocol::commands::{
-    AppCreateModeDto, AudioResultDto, ClientCommand, ImageRefDto, ListingKindDto, McpScopeDto,
-    PermissionBehaviorDto, PromptModeDto, ProviderCredentialSecretDto, SettingsDestinationDto,
+    AppCreateModeDto, AudioResultDto, ClientCommand, HookAdminCommandDto, ImageRefDto,
+    ListingKindDto, McpAdminCommandDto, McpScopeDto, PermissionBehaviorDto, PluginAdminCommandDto,
+    PromptModeDto, ProviderCredentialSecretDto, SettingsDestinationDto, SkillAdminCommandDto,
 };
 use client_protocol::computer_access::{
     AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -58,7 +59,8 @@ use client_protocol::events::{
     TurnRecoverySnapshotDto, TurnRecoveryStateDto,
 };
 use client_protocol::listings::{
-    AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
+    AgentDto, AuthStateDto, CheckStatusDto, ConfigurationDomainDto, ConfigurationEffectDto,
+    ConfigurationOperationStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
     SessionAgentSummaryDto, SessionModeDto, SessionRowDto, SkillDto, SlashCommandDto,
     StatusSnapshotDto, TaskRowDto, TaskStatusDto,
@@ -494,7 +496,66 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 configured_provider_ids: vec!["deepseek".to_string()],
                 unavailable_provider_ids: Vec::new(),
                 storage_encrypted: true,
+                credential_previews: HashMap::from([(
+                    "deepseek".to_string(),
+                    "••••cdef".to_string(),
+                )]),
                 error: None,
+            },
+        ),
+        (
+            "event/provider_connection_tested.json",
+            ClientEvent::ProviderConnectionTested {
+                operation_id: 20,
+                provider_id: "deepseek".to_string(),
+                connected: true,
+                reachable: true,
+                authenticated: true,
+                model_available: true,
+                http_status: Some(200),
+                latency_ms: 86,
+                message: "连接成功 · 86 ms".to_string(),
+                used_stored_credential: true,
+            },
+        ),
+        (
+            "event/configuration_operation.json",
+            ClientEvent::ConfigurationOperation {
+                domain: ConfigurationDomainDto::Plugin,
+                operation_id: 41,
+                status: ConfigurationOperationStatusDto::Succeeded,
+                effect: ConfigurationEffectDto::Applied,
+                message: Some("Saved plugin settings.".to_string()),
+                details_json: Some(r#"{"scope":"user"}"#.to_string()),
+            },
+        ),
+        (
+            "event/skill_catalog.json",
+            ClientEvent::SkillCatalog {
+                catalog_json: r#"{"skills":[{"id":"user:greet","scope":"user","writable":true}]}"#
+                    .to_string(),
+            },
+        ),
+        (
+            "event/skill_document.json",
+            ClientEvent::SkillDocument {
+                document_json: r#"{"id":"user:greet","content":"---\ndescription: greet\n---\n"}"#
+                    .to_string(),
+            },
+        ),
+        (
+            "event/mcp_configuration_snapshot.json",
+            ClientEvent::McpConfigurationSnapshot {
+                snapshot_json:
+                    r#"{"scopes":[{"scope":"user","raw_json":"{}"}],"runtime_servers":[]}"#
+                        .to_string(),
+            },
+        ),
+        (
+            "event/plugin_catalog.json",
+            ClientEvent::PluginCatalog {
+                catalog_json: r#"{"installed":[{"name":"lingxi-local-app","version":"2.0.0"}]}"#
+                    .to_string(),
             },
         ),
         (
@@ -547,6 +608,16 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     event: "PostToolUse".to_string(),
                     matcher: Some("Write|Edit".to_string()),
                     timeout_ms: 60_000,
+                    hook_type: Some("command".to_string()),
+                    source: Some("User settings (~/.lingxi/settings.json)".to_string()),
+                    content: Some("./format.sh".to_string()),
+                    status_message: Some("Formatting".to_string()),
+                    blocking: Some(true),
+                    is_async: Some(false),
+                    priority: Some(0),
+                    async_rewake: Some(false),
+                    async_timeout_ms: None,
+                    if_condition: Some("Write(*.ts)".to_string()),
                 }],
             },
         ),
@@ -1221,6 +1292,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::ListProviderCredentials {
                 operation_id: 17,
                 provider_ids: vec!["deepseek".to_string(), "openrouter".to_string()],
+                preview_provider_ids: Vec::new(),
             },
         ),
         (
@@ -1236,6 +1308,16 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::DeleteProviderCredential {
                 operation_id: 19,
                 provider_id: "deepseek".to_string(),
+            },
+        ),
+        (
+            "command/test_provider_connection.json",
+            ClientCommand::TestProviderConnection {
+                operation_id: 20,
+                provider_id: "deepseek".to_string(),
+                api_base: "https://api.deepseek.com".to_string(),
+                model: "deepseek-v4-flash".to_string(),
+                credential_override: None,
             },
         ),
         (
@@ -1644,6 +1726,68 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::RemoveMcpServer {
                 scope: McpScopeDto::User,
                 name: "linear".to_string(),
+            },
+        ),
+        (
+            "command/skill_admin.json",
+            ClientCommand::SkillAdmin {
+                command: SkillAdminCommandDto {
+                    action: "save_document".to_string(),
+                    operation_id: Some(31),
+                    target: None,
+                    scope: None,
+                    revision: Some("a".repeat(64)),
+                    payload_json: Some(
+                        r#"{"skill_id":"/home/dev/.lingxi/skills/greet","content":"---\ndescription: greet\n---\n"}"#
+                            .to_string(),
+                    ),
+                },
+            },
+        ),
+        (
+            "command/mcp_admin.json",
+            ClientCommand::McpAdmin {
+                command: McpAdminCommandDto {
+                    action: "save_server".to_string(),
+                    operation_id: Some(32),
+                    target: None,
+                    scope: None,
+                    revision: Some("b".repeat(64)),
+                    payload_json: Some(
+                        r#"{"scope":"project","name":"filesystem","config":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem"]}}"#
+                            .to_string(),
+                    ),
+                },
+            },
+        ),
+        (
+            "command/plugin_admin.json",
+            ClientCommand::PluginAdmin {
+                command: PluginAdminCommandDto {
+                    action: "preview_operation".to_string(),
+                    operation_id: Some(33),
+                    target: None,
+                    scope: None,
+                    revision: Some("c".repeat(64)),
+                    payload_json: Some(
+                        r#"{"action":"install","plugin_id":"lingxi-local-app"}"#.to_string(),
+                    ),
+                },
+            },
+        ),
+        (
+            "command/hook_admin.json",
+            ClientCommand::HookAdmin {
+                command: HookAdminCommandDto {
+                    action: "save_document".to_string(),
+                    operation_id: Some(34),
+                    target: None,
+                    scope: None,
+                    revision: Some("d".repeat(64)),
+                    payload_json: Some(
+                        r#"{"scope":"local","hooks":{"preToolUse":[]}}"#.to_string(),
+                    ),
+                },
             },
         ),
         (

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   APP_NAME,
+  binaryArchitectures,
   desktopArtifactPaths,
   formatError,
   packageRoot,
@@ -18,6 +19,7 @@ import {
   sha256File,
   walkTree,
 } from './package-support.mjs';
+import { BROKER_RESOURCE_DIRNAME } from './credential-broker.mjs';
 
 function requirePath(path, label) {
   if (!existsSync(path)) throw new Error(`${label} is missing: ${path}`);
@@ -48,6 +50,26 @@ export function verifyDesktopPackage(root, platform, arch) {
   requirePath(asar, 'application asar');
   requirePath(sidecar, 'bridge-server sidecar');
   requirePath(executable, 'Electron executable');
+  if (platform === 'darwin') {
+    const brokerPaths = [
+      join(resources, BROKER_RESOURCE_DIRNAME, 'broker-manifest.json'),
+      join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.launchd.plist'),
+      join(resources, BROKER_RESOURCE_DIRNAME, 'bin', 'lingxi-credential-client'),
+      join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.app'),
+    ];
+    for (const path of brokerPaths) requirePath(path, 'credential broker resource');
+    const expectedArchitecture = arch === 'x64' ? 'x86_64' : 'arm64';
+    for (const path of [
+      brokerPaths[2],
+      join(brokerPaths[3], 'Contents', 'MacOS', 'LingXiCredentialBroker'),
+    ]) {
+      if (!binaryArchitectures(path).includes(expectedArchitecture)) {
+        throw new Error(`credential broker resource has the wrong architecture: ${path}`);
+      }
+    }
+    execFileSync('/usr/bin/codesign', ['--verify', '--strict', brokerPaths[2]], { stdio: 'pipe' });
+    execFileSync('/usr/bin/codesign', ['--verify', '--strict', brokerPaths[3]], { stdio: 'pipe' });
+  }
   if (existsSync(join(resources, 'default_app.asar'))) throw new Error('Electron default_app.asar remains in the package');
   if (existsSync(join(resources, 'app'))) throw new Error('unpacked resources/app remains beside app.asar');
 

@@ -8,14 +8,26 @@
 //! side-effects), 21 `AllowByDefault` (read-only or agent-local) = 44 tools,
 //! plus one synthetic `<unknown>` fallback.
 //!
-//! MOBILE DIVERGENCE: 27 further `LocalApp*` rows for the first-party
-//! local-app host operations (`engine_mobile::local_apps_tools`). They have no
-//! oracle counterpart — claude-code has no host-owned local-app surface — and
-//! are split by REVERSIBILITY: 12 `AllowByDefault` (read-only, plus the
-//! network-disabled build, the restartable local preview runtime, the
-//! shell-scaffolding commit, and template-selection staging), 15
-//! `DenyByDefault` (user data, UI actuation, view capture, checkpoint restore,
-//! network, and template validation).
+//! LINGXI DIVERGENCE: 33 further rows with no oracle counterpart, reported by
+//! [`is_divergence_tool`]. 32 are the `LocalApp*` first-party local-app host
+//! operations (`engine_mobile::local_apps_tools`) — claude-code has no
+//! host-owned local-app surface. The 33rd is `Workflow`: claude-code gates it
+//! behind the `WORKFLOW_SCRIPTS` feature and it is absent from external builds
+//! (see `mode_policy`'s module doc), so the M5-05 table has no row for it and
+//! its default here is a LingXi decision, NOT oracle parity.
+//!
+//! The divergence rows are split by REVERSIBILITY: 14 `AllowByDefault`
+//! (read-only, plus the network-disabled build, the restartable local preview
+//! runtime, the shell-scaffolding commit, template-selection staging, and the
+//! `Workflow` hand-off), 19 `DenyByDefault` (user data, UI actuation, view
+//! capture, checkpoint restore, network, template validation, and the MCP
+//! proposal lifecycle).
+//!
+//! 🚨 `AllowByDefault` is not merely a prompt default: it also short-circuits
+//! the Plan-mode mutation backstop and the `DontAsk` ask→deny transform. Every
+//! divergence row is therefore EXCLUDED from the Plan-mode auto-allow unless it
+//! is plan-safe — see `policy_gate::read_only_default_auto_allows`, which keys
+//! that carve-out on [`is_divergence_tool`].
 //!
 //! Both splits are asserted in
 //! `tests::the_counts_in_this_module_doc_are_the_counts_in_the_table` — this
@@ -32,7 +44,7 @@ static TOOL_DEFAULTS: OnceLock<HashMap<&'static str, PromptDefault>> = OnceLock:
 
 fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     use PromptDefault::{AllowByDefault, DenyByDefault};
-    let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(71);
+    let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(77);
 
     // Allow-by-default tools ([Y/n]) — 21 entries. (It said 20 while there
     // were 21, from before `ListAgents` was added; the count is asserted in
@@ -90,6 +102,29 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("WebFetch", DenyByDefault);
     m.insert("WebSearch", DenyByDefault);
     m.insert("Write", DenyByDefault);
+
+    // ---- LINGXI DIVERGENCE: the workflow-script launcher -------------------
+    // NOT oracle parity: claude-code gates `Workflow` behind `WORKFLOW_SCRIPTS`
+    // and external builds never advertise it (`mode_policy` module doc), so the
+    // M5-05 table has no row to copy. Without a row `tool_default` fell through
+    // to the fail-closed `DenyByDefault`, which prompted [y/N] on the single
+    // hand-off of the whole create-app flow — unlike its siblings `Agent` and
+    // `Skill`.
+    //
+    // Two disjoint launch shapes, both already gated below this row
+    // (`WorkflowTool::check_permissions`, tools/workflow/src/lib.rs:1115):
+    //   - a `scriptPath` launch is re-asked as the canonical `Read` tool on the
+    //     resolved file, so a `Read(...)` rule and the symlink checks apply;
+    //   - an inline / named launch reads no caller-selected file and self-allows
+    //     with the reason "Workflow launch — spawned agents are individually
+    //     permissioned".
+    // They are the `else` and the `Some` arms of one `let`, so exactly one runs
+    // per call; neither leaves the launch unchecked.
+    //
+    // `Workflow` is NOT plan-safe (`mode_policy::PLAN_SAFE_TOOLS`), so
+    // [`is_divergence_tool`] keeps Plan mode prompting for it.
+    m.insert("Workflow", AllowByDefault);
+
     // ---- MOBILE DIVERGENCE: first-party local-app host operations ----------
     // No oracle counterpart — claude-code has no host-owned local-app surface.
     // These are BUILTIN tools (see `engine_mobile::local_apps_tools`), not a
@@ -102,6 +137,9 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     // is not bound to an app workspace.
     m.insert("LocalAppList", AllowByDefault);
     m.insert("LocalAppGet", AllowByDefault);
+    // Read-only: the tool table (`local_apps_tools::LOCAL_APP_TOOLS`) marks
+    // its `read_only` column `true`.
+    m.insert("LocalAppRuntimeProfiles", AllowByDefault);
     m.insert("LocalAppTemplateCatalog", AllowByDefault);
     m.insert("LocalAppResolveTemplateSelection", AllowByDefault);
     m.insert("LocalAppLogs", AllowByDefault);
@@ -141,6 +179,17 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("LocalAppCreate", DenyByDefault);
     m.insert("LocalAppValidateTemplateSelection", DenyByDefault);
     m.insert("LocalAppStageCreate", AllowByDefault);
+    // MCP proposal lifecycle — the ONLY path by which network-reaching MCP
+    // server configuration gets authored onto an app and promoted into its
+    // live catalog, so every step of it asks. `approve_mcp_proposal` asks even
+    // in its `create_without_mcp=true` branch, which authors no tools: that
+    // branch still seals and persists a signed candidate + journal for the
+    // app and drives the same approval surface, and the row is per-NAME, not
+    // per-input, so it cannot be split by that flag.
+    m.insert("LocalAppValidateMcpProposal", DenyByDefault);
+    m.insert("LocalAppApproveMcpProposal", DenyByDefault);
+    m.insert("LocalAppQaMcpCandidate", DenyByDefault);
+    m.insert("LocalAppPromoteMcpCandidate", DenyByDefault);
     // Effects the user cannot trivially undo, or that reach the network.
     // These two expose an app's CONTENT — user records and the live WebView
     // DOM. Binding scopes them inside an app workspace, but a GLOBAL
@@ -161,19 +210,42 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("LocalAppBackgroundCancel", DenyByDefault);
     m.insert("LocalAppBackgroundRetry", DenyByDefault);
 
-    // 44 oracle-parity tools + 27 mobile local-app builtins.
-    debug_assert_eq!(m.len(), 71, "tool defaults table must list all 71 tools");
+    // 44 oracle-parity tools + 33 LingXi divergence rows (32 local-app
+    // builtins + `Workflow`).
+    debug_assert_eq!(m.len(), 77, "tool defaults table must list all 77 tools");
     m
+}
+
+/// Does this row have NO claude-code counterpart?
+///
+/// True for the mobile `LocalApp*` family and for `Workflow` (gated behind
+/// `WORKFLOW_SCRIPTS` upstream, absent from external builds). The oracle-parity
+/// split in `tests::table_splits_into_the_parity_set_and_the_mobile_divergence`
+/// keys on this, and so does the Plan-mode carve-out in
+/// `policy_gate::read_only_default_auto_allows`: a divergence row that is not
+/// plan-safe must not be auto-allowed while the user believes they are only
+/// planning. Deliberately NOT extended to the oracle rows — several of them are
+/// `AllowByDefault` without being plan-safe, and changing that would be a parity
+/// change rather than a fix.
+#[must_use]
+pub fn is_divergence_tool(name: &str) -> bool {
+    name.starts_with("LocalApp") || name == "Workflow"
+}
+
+/// Look up the row for a tool name, distinguishing "no row" from "a row that
+/// happens to say Deny". `tool_default` collapses both to `DenyByDefault`,
+/// which makes a missing row indistinguishable from a deliberate deny at that
+/// call site — callers that need to catch a missing row (e.g. a cross-crate
+/// guard test) must use this instead.
+#[must_use]
+pub fn tool_default_row(name: &str) -> Option<PromptDefault> {
+    TOOL_DEFAULTS.get_or_init(init_defaults).get(name).copied()
 }
 
 /// Look up the default Y/N decision for a tool name. Unknown tools → Deny.
 #[must_use]
 pub fn tool_default(name: &str) -> PromptDefault {
-    TOOL_DEFAULTS
-        .get_or_init(init_defaults)
-        .get(name)
-        .copied()
-        .unwrap_or(PromptDefault::DenyByDefault)
+    tool_default_row(name).unwrap_or(PromptDefault::DenyByDefault)
 }
 
 #[cfg(test)]
@@ -258,6 +330,27 @@ mod tests {
         assert_eq!(tool_default("Agent"), PromptDefault::AllowByDefault);
     }
 
+    /// `Workflow` is the single hand-off of the create-app flow (and of any
+    /// scripted multi-agent launch). `WorkflowTool::check_permissions` gates it
+    /// below this row in EITHER of two mutually exclusive shapes — a
+    /// `scriptPath` launch is re-asked as the canonical `Read` tool on the
+    /// resolved file, an inline / named launch reads no caller-selected file and
+    /// self-allows because the agents it spawns are individually permissioned —
+    /// so a missing row here would double-prompt with no extra safety. A tool
+    /// absent from this table falls through `tool_default` to the fail-closed
+    /// `DenyByDefault`, unlike its siblings `Agent` and `Skill`.
+    ///
+    /// The Plan-mode consequence is covered by
+    /// `policy_gate::plan_mode_divergence_test`.
+    #[test]
+    fn workflow_is_allow_by_default() {
+        assert_eq!(tool_default("Workflow"), PromptDefault::AllowByDefault);
+        assert!(
+            is_divergence_tool("Workflow"),
+            "Workflow is a divergence row, not oracle parity"
+        );
+    }
+
     #[test]
     fn write_edit_notebook_are_deny() {
         assert_eq!(tool_default("Write"), PromptDefault::DenyByDefault);
@@ -304,11 +397,15 @@ mod tests {
         // Splitting the count is strictly stronger than asserting the total:
         // it catches BOTH a dropped oracle tool and a mobile tool added
         // without being recorded as a divergence, which a single total hides.
-        let oracle = m.keys().filter(|k| !k.starts_with("LocalApp")).count();
-        let mobile = m.keys().filter(|k| k.starts_with("LocalApp")).count();
+        let oracle = m.keys().filter(|k| !is_divergence_tool(k)).count();
+        let divergence = m.keys().filter(|k| is_divergence_tool(k)).count();
         assert_eq!(oracle, 44, "oracle-parity tool count changed");
-        assert_eq!(mobile, 27, "local-app builtin count changed");
-        assert_eq!(m.len(), oracle + mobile);
+        assert_eq!(divergence, 33, "divergence row count changed");
+        assert_eq!(m.len(), oracle + divergence);
+        // `Workflow` must be booked as a divergence, never as oracle parity:
+        // the M5-05 table has no row for it.
+        assert!(is_divergence_tool("Workflow"));
+        assert!(!is_divergence_tool("Agent"));
     }
 
     /// The module doc states four counts. Assert each one so the documentation
@@ -316,9 +413,9 @@ mod tests {
     #[test]
     fn the_counts_in_this_module_doc_are_the_counts_in_the_table() {
         let m = init_defaults();
-        let count = |mobile: bool, want: PromptDefault| {
+        let count = |divergence: bool, want: PromptDefault| {
             m.iter()
-                .filter(|(name, value)| name.starts_with("LocalApp") == mobile && **value == want)
+                .filter(|(name, value)| is_divergence_tool(name) == divergence && **value == want)
                 .count()
         };
         assert_eq!(
@@ -333,9 +430,13 @@ mod tests {
         );
         assert_eq!(
             count(true, PromptDefault::AllowByDefault),
-            12,
-            "mobile allow"
+            14,
+            "divergence allow"
         );
-        assert_eq!(count(true, PromptDefault::DenyByDefault), 15, "mobile deny");
+        assert_eq!(
+            count(true, PromptDefault::DenyByDefault),
+            19,
+            "divergence deny"
+        );
     }
 }

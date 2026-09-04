@@ -125,22 +125,19 @@ pub enum OrchestratorError {
     #[error("{}", REPEATED_529_ERROR_MESSAGE)]
     RepeatedOverloaded,
 
-    /// A terminal 429 whose error response carried the unified rate-limit
-    /// headers — the user-visible copy is the composed
-    /// `getRateLimitErrorMessage` text (claude-code `errors.ts:480-516` →
-    /// `rateLimitMessages.ts:333-344`), e.g.
-    /// `"You've hit your weekly limit · resets 3pm"`.
+    /// A terminal 429 with a composed user-facing explanation. For Anthropic,
+    /// this is the limits-specific `getRateLimitErrorMessage` text; for an
+    /// OpenRouter free model it preserves the provider's `error.message` and
+    /// adds retry/model-switch guidance.
     ///
     /// Task 6 (llm-client future-work batch 5): produced by the public turn
     /// drivers when the turn dies on `LlmError::RateLimited` AND the API
-    /// client recorded a composed limits copy from the 429's own headers
+    /// client recorded a composed explanation
     /// (`OrchestratorApiClient::last_rate_limit_error_message`). Without that
     /// context the generic `ApiCall(RateLimited)` surface is unchanged.
     #[error("{message}")]
     RateLimitRejected {
-        /// The pre-composed limits-specific copy (templates byte-locked in
-        /// `model::rate_limit::rate_limit_error_message`; the reset-time
-        /// substring is locale/timezone formatted at record time).
+        /// The pre-composed user-facing copy.
         message: String,
     },
 }

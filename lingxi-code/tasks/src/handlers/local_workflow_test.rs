@@ -1117,6 +1117,7 @@ async fn run_bridge(script: &str, spawner: Arc<EchoSpawner>) -> workflow::RunOut
     run_workflow_script(
         script,
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1192,6 +1193,7 @@ async fn run_with_progress_drain_completes_and_does_not_hang() {
     let run = run_workflow_script(
         script,
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         Arc::new(YieldSpawner),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1232,6 +1234,7 @@ async fn agent_cap_rejects_the_1001st_spawn() {
     let result = run_workflow_script(
         "for (let i = 0; i < 1001; i++) { await agent('x'); } return 'done';",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1264,6 +1267,7 @@ async fn agent_cap_admits_first_1000_parallel_calls() {
     let outcome = run_workflow_script(
         "const rs = await parallel(Array.from({ length: 1001 }, () => () => agent('x'))); return rs.length;",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner.clone(),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1285,13 +1289,19 @@ async fn agent_cap_admits_first_1000_parallel_calls() {
 }
 
 /// An explicit unknown `agentType` throws the byte-exact not-found error
-/// listing the available agents; a known one runs fine.
+/// listing the available agents; a known one runs fine. The workflow id here
+/// (`"local-app-build"`) deliberately has NO `:` -- a saved/inline, non-plugin
+/// workflow -- so this also pins that the plugin-namespace retry added for
+/// P0-2 (`plugin_workflow_resolves_bare_agent_type_under_its_namespace`
+/// below) does not change behavior for a non-plugin workflow: the error stays
+/// byte-exact, with no "(also tried ...)" clause.
 #[tokio::test]
 async fn unknown_agent_type_throws_not_found() {
     let spawner = Arc::new(EchoSpawner::default());
     let result = run_workflow_script(
         "await agent('p', { agentType: 'nope' }); return 'done';",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "local-app-build",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1308,11 +1318,314 @@ async fn unknown_agent_type_throws_not_found() {
     )
     .await;
     let err = result.expect_err("unknown agentType must throw");
+    let msg = format!("{err}");
     assert!(
-        format!("{err}").contains(
+        msg.contains(
             "agent({agentType}): agent type 'nope' not found. Available agents: general-purpose, Explore, code-reviewer"
         ),
-        "got: {err}"
+        "got: {msg}"
+    );
+    assert!(
+        !msg.contains("also tried"),
+        "non-plugin (no ':' in workflow id) error must not gain the plugin-namespace \
+         'also tried' clause: {msg}"
+    );
+}
+
+/// A minimal spawner whose agent listing is fully caller-controlled, so a test
+/// can pin the EXACT set of registered agent types (e.g. only the
+/// plugin-qualified name a real plugin loader would register).
+#[derive(Default)]
+struct NamespacedListingSpawner {
+    listing: Vec<String>,
+    seen_reqs: StdMutex<Vec<SubagentSpawnRequest>>,
+}
+
+#[async_trait]
+impl SubagentSpawner for NamespacedListingSpawner {
+    async fn agent_listing(&self) -> Vec<platform_api::subagent_spawn::SubagentListingEntry> {
+        self.listing
+            .iter()
+            .map(|t| platform_api::subagent_spawn::SubagentListingEntry {
+                agent_type: t.clone(),
+                when_to_use: String::new(),
+                tools_description: String::new(),
+            })
+            .collect()
+    }
+
+    async fn spawn(
+        &self,
+        request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.seen_reqs.lock().unwrap().push(request.clone());
+        Ok(SubagentResult::Completed {
+            agent_id: protocol::AgentId::new(),
+            content: Value::String(format!("echo:{}", request.prompt)),
+            usage: SubagentUsage::default(),
+            total_tool_use_count: 0,
+            total_duration_ms: 0,
+            total_tokens: 0,
+            assistant_message_count: 0,
+            response_char_count: 0,
+            last_request_id: None,
+            cumulative_usage: SubagentUsage::default(),
+            usage_complete: true,
+        })
+    }
+}
+
+/// P0-2 positive case: the plugin loader registers agents as
+/// `<plugin>:<agent>` (`plugin/src/manager.rs:1052-1055`), but a plugin's own
+/// workflow script authors a BARE `agentType` -- it must not need to know
+/// what namespace it was installed under. When the exact bare name is not in
+/// the listing and the running workflow's own id is plugin-qualified
+/// (`lingxi-local-app:local-app-build`), the dispatch must retry under that
+/// plugin's namespace and spawn with the QUALIFIED subagent_type.
+#[tokio::test]
+async fn plugin_workflow_resolves_bare_agent_type_under_its_namespace() {
+    let spawner = Arc::new(NamespacedListingSpawner {
+        listing: vec!["lingxi-local-app:builder".to_string()],
+        ..Default::default()
+    });
+    let outcome = run_workflow_script(
+        "const r = await agent('p', { agentType: 'builder' }); return r;",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        "lingxi-local-app:local-app-build",
+        spawner.clone(),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    )
+    .await
+    .expect("a bare agentType matching the workflow's own plugin namespace must resolve");
+    assert_eq!(outcome.result.as_deref(), Some("\"echo:p\""));
+    let reqs = spawner.seen_reqs.lock().unwrap();
+    assert_eq!(reqs.len(), 1, "exactly one agent() call must have spawned");
+    assert_eq!(
+        reqs[0].subagent_type, "lingxi-local-app:builder",
+        "the spawn request must carry the NAMESPACE-QUALIFIED subagent_type, \
+         not the script's bare 'builder'"
+    );
+}
+
+/// r1-workflow-runtime-15 / r3-tests-honesty-13: the bare-name check runs
+/// FIRST and the namespaced retry only fires when the bare name is absent
+/// (local_workflow.rs:2766) -- deliberately, on the same "closer scope wins"
+/// precedence `resolve_script_at` documents for workflow name resolution
+/// itself (`tools/workflow/src/lib.rs:320-331`, "project/user file always
+/// wins a name collision" over a plugin). A project/user agent named
+/// `builder` is therefore meant to shadow the plugin's own
+/// `lingxi-local-app:builder` when both are registered, exactly like a
+/// project workflow file shadows a plugin workflow of the same name. This
+/// pins that contract so a later flip to namespace-first is caught here
+/// instead of silently changing which agent definition a plugin workflow
+/// runs under.
+#[tokio::test]
+async fn bare_agent_type_shadows_the_plugin_namespaced_agent_when_both_are_registered() {
+    let spawner = Arc::new(NamespacedListingSpawner {
+        listing: vec![
+            "builder".to_string(),
+            "lingxi-local-app:builder".to_string(),
+        ],
+        ..Default::default()
+    });
+    let outcome = run_workflow_script(
+        "const r = await agent('p', { agentType: 'builder' }); return r;",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        "lingxi-local-app:local-app-build",
+        spawner.clone(),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    )
+    .await
+    .expect("a bare agentType present in the listing must resolve without the namespaced retry");
+    assert_eq!(outcome.result.as_deref(), Some("\"echo:p\""));
+    let reqs = spawner.seen_reqs.lock().unwrap();
+    assert_eq!(reqs.len(), 1, "exactly one agent() call must have spawned");
+    assert_eq!(
+        reqs[0].subagent_type, "builder",
+        "a project/user agent registered under the bare name must shadow the plugin's own \
+         namespaced agent of the same name, the same precedence workflow name resolution uses"
+    );
+}
+
+/// P0-2 negative case: even under a plugin-qualified workflow id, a name that
+/// matches NEITHER the bare spelling NOR `<plugin>:<name>` still throws --
+/// and the error must name BOTH spellings it tried, so a user debugging a
+/// typo sees the actual namespace resolution that happened.
+#[tokio::test]
+async fn unknown_agent_type_under_plugin_workflow_names_both_spellings() {
+    let spawner = Arc::new(NamespacedListingSpawner {
+        listing: vec!["lingxi-local-app:builder".to_string()],
+        ..Default::default()
+    });
+    let result = run_workflow_script(
+        "await agent('p', { agentType: 'nope' }); return 'done';",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        "lingxi-local-app:local-app-build",
+        spawner,
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    )
+    .await;
+    let err = result.expect_err("an agentType matching neither spelling must still throw");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("'nope'"),
+        "error must name the bare spelling that was tried first: {msg}"
+    );
+    assert!(
+        msg.contains("lingxi-local-app:nope"),
+        "error must ALSO name the namespace-qualified spelling that was tried: {msg}"
+    );
+}
+
+/// A `NestedConfig` carrying a live plugin workflow registry with exactly the
+/// given namespaced workflow names.
+fn nested_with_plugin_workflows(names: &[&str]) -> NestedConfig {
+    let registry = workflow::PluginWorkflowRegistry::new();
+    registry.register(
+        names
+            .iter()
+            .map(|name| workflow::PluginWorkflowEntry {
+                name: (*name).to_string(),
+                script_path: std::path::PathBuf::from(format!("/plugins/{name}.js")),
+            })
+            .collect(),
+    );
+    NestedConfig {
+        plugin_workflows: Some(Arc::new(registry)),
+        ..Default::default()
+    }
+}
+
+/// P0-2, RESUME path. The Host relaunches a paused/adopted local-app build by
+/// `script_path` with `name: None` (`apps/engine-mobile/src/host.rs`), so the
+/// run's `workflow_id` degrades to the script's BARE `meta.name`
+/// (`"local-app-build"`, no `:`) -- the desktop host does the same by
+/// preferring `meta.name` over `spec.name`. Splitting the id alone therefore
+/// yields no namespace, and the very same three plugin scripts would throw
+/// again on their first uncached `agent()` call after the journal goes live.
+/// The namespace must instead be recovered from the plugin workflow registry:
+/// exactly one plugin registers `lingxi-local-app:local-app-build`, so a bare
+/// `builder` resolves under `lingxi-local-app`.
+#[tokio::test]
+async fn resumed_plugin_workflow_resolves_bare_agent_type_via_registry() {
+    let spawner = Arc::new(NamespacedListingSpawner {
+        listing: vec!["lingxi-local-app:builder".to_string()],
+        ..Default::default()
+    });
+    let outcome = run_workflow_script(
+        "const r = await agent('p', { agentType: 'builder' }); return r;",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        // Bare, exactly as the resume/desktop paths derive it.
+        "local-app-build",
+        spawner.clone(),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        0,
+        nested_with_plugin_workflows(&["lingxi-local-app:local-app-build"]),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    )
+    .await
+    .expect("a resumed plugin workflow must still resolve its own bare agentType");
+    assert_eq!(outcome.result.as_deref(), Some("\"echo:p\""));
+    let reqs = spawner.seen_reqs.lock().unwrap();
+    assert_eq!(reqs.len(), 1, "exactly one agent() call must have spawned");
+    assert_eq!(
+        reqs[0].subagent_type, "lingxi-local-app:builder",
+        "the namespace must be recovered from the plugin workflow registry when \
+         the workflow id itself is bare"
+    );
+}
+
+/// The registry fallback must not GUESS an owner. When two plugins each
+/// register a workflow with the same bare name there is no unambiguous
+/// namespace, so a bare `agentType` stays unresolved and the error keeps the
+/// byte-exact non-plugin wording (no "(also tried ...)" clause).
+#[tokio::test]
+async fn ambiguous_bare_workflow_name_resolves_no_namespace() {
+    let spawner = Arc::new(NamespacedListingSpawner {
+        listing: vec!["lingxi-local-app:builder".to_string()],
+        ..Default::default()
+    });
+    let result = run_workflow_script(
+        "await agent('p', { agentType: 'builder' }); return 'done';",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        "local-app-build",
+        spawner.clone(),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        0,
+        nested_with_plugin_workflows(&[
+            "lingxi-local-app:local-app-build",
+            "other-plugin:local-app-build",
+        ]),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    )
+    .await;
+    let err = result.expect_err("an ambiguous bare workflow name must not resolve a namespace");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains(
+            "agent({agentType}): agent type 'builder' not found. Available agents: lingxi-local-app:builder"
+        ),
+        "got: {msg}"
+    );
+    assert!(
+        !msg.contains("also tried"),
+        "an ambiguous registry match must resolve NO namespace, so no second \
+         spelling may be reported as tried: {msg}"
+    );
+    assert_eq!(
+        spawner.seen_reqs.lock().unwrap().len(),
+        0,
+        "no agent may be spawned when the namespace is ambiguous"
     );
 }
 
@@ -1321,6 +1634,7 @@ async fn remote_isolation_is_rejected_in_local_workflow_build() {
     let result = run_workflow_script(
         "await agent('p', { isolation: 'remote' });",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         Arc::new(EchoSpawner::default()),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1367,6 +1681,7 @@ async fn budget_spent_is_turn_relative_via_baseline() {
     let outcome = run_workflow_script(
         "await agent('a'); log('spent=' + budget.spent()); return '';",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1401,6 +1716,7 @@ async fn budget_ceiling_throws_when_turn_spend_exceeds_total() {
     let result = run_workflow_script(
         "await agent('a'); return 'done';",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1435,6 +1751,7 @@ async fn shared_pool_makes_spent_read_main_loop_plus_subagents() {
     let outcome = run_workflow_script(
         "await agent('a'); await agent('b'); log('spent=' + budget.spent()); return '';",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1559,6 +1876,7 @@ async fn workflow_agent_progress_keeps_provider_qualified_model() {
     run_workflow_script_with_live_updates(
         r#"await agent('design', {model:'deepseek-v4-flash', modelProfile:'deepseek'});"#,
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         Arc::new(EchoSpawner::default()),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1610,6 +1928,7 @@ async fn workflow_emits_queued_progress_for_waiting_parallel_agents_before_slots
             run_workflow_script_with_live_updates(
                 &script,
                 DEFAULT_WORKFLOW_SUBAGENT,
+                "",
                 spawner,
                 Arc::new(MockInvoker),
                 Arc::new(MockBudget),
@@ -1713,6 +2032,7 @@ async fn workflow_rejected_agent_type_emits_no_queued_progress() {
     let err = run_workflow_script_with_live_updates(
         "await agent('x', { agentType: 'missing-agent' }); return 'done';",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1827,6 +2147,7 @@ async fn top_level_args_global_reaches_the_script() {
     let outcome = run_workflow_script(
         "log('a=' + args.a); return args;",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1872,6 +2193,7 @@ async fn workflow_runs_a_nested_scriptpath_inline_sharing_the_runtime() {
     let outcome = run_workflow_script(
         parent,
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner.clone(),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1930,6 +2252,7 @@ async fn workflow_runs_a_nested_name_from_user_workflows_dir() {
     let outcome = run_workflow_script(
         parent,
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner.clone(),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1997,6 +2320,7 @@ async fn workflow_runs_a_nested_name_from_plugin_workflow_registry() {
     let outcome = run_workflow_script(
         parent,
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner.clone(),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -2051,6 +2375,7 @@ async fn workflow_fusion_round_trips_a_compact_result() {
     let outcome = run_workflow_script_with_live_updates_and_fusion(
         "return await fusion('review this', { preset: 'fast', maxPanel: 4, partialOk: false });",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         Arc::new(EchoSpawner::default()),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -2134,6 +2459,7 @@ async fn workflow_fusion_resume_hits_the_journal_and_never_calls_the_executor() 
     let outcome = run_workflow_script_with_live_updates_and_fusion(
         "return await fusion('review this');",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         Arc::new(EchoSpawner::default()),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -2179,6 +2505,7 @@ async fn workflow_fusion_rejects_unknown_fields_before_executor_runs() {
     let err = run_workflow_script_with_live_updates_and_fusion(
         "await fusion('review this', { nope: true });",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         Arc::new(EchoSpawner::default()),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -2228,6 +2555,7 @@ async fn workflow_fusion_rejects_when_disabled_without_executor_calls() {
     let err = run_workflow_script_with_live_updates_and_fusion(
         "await fusion('review this');",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         Arc::new(EchoSpawner::default()),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -2270,6 +2598,7 @@ async fn workflow_fusion_surfaces_cross_provider_denials_without_silently_downgr
     let err = run_workflow_script_with_live_updates_and_fusion(
         "await fusion('review this', { crossProvider: true });",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         Arc::new(EchoSpawner::default()),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -2321,6 +2650,7 @@ async fn workflow_fusion_refuses_when_the_turn_token_budget_is_already_spent() {
     let err = run_workflow_script_with_live_updates_and_fusion(
         "await fusion('review this');",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         Arc::new(EchoSpawner::default()),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -2374,6 +2704,7 @@ async fn workflow_fusion_adds_its_output_tokens_to_the_shared_spent_pool() {
     let outcome = run_workflow_script_with_live_updates_and_fusion(
         "return await fusion('review this');",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         Arc::new(EchoSpawner::default()),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -2416,6 +2747,7 @@ async fn workflow_fusion_enforces_the_per_workflow_call_cap() {
     let err = run_workflow_script_with_live_updates_and_fusion(
         "await fusion('one'); await fusion('two');",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         Arc::new(EchoSpawner::default()),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -2477,6 +2809,7 @@ try { await fusion('two'); } catch (e) { e2 = e.message; }
 return { e1, e2 };
 "#,
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         Arc::new(EchoSpawner::default()),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4046,6 +4379,7 @@ async fn telemetry_no_phase_events_without_phase_calls() {
     run_workflow_script(
         "return 'ok';",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4085,6 +4419,7 @@ async fn telemetry_phase_completed_fires_per_phase_for_named_workflow() {
     run_workflow_script(
         "phase('Step 1'); await agent('phase-1'); phase('Step 2'); await agent('phase-2'); return 'done';",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4156,6 +4491,7 @@ async fn telemetry_phase_completed_includes_phase_only_workflows() {
     run_workflow_script(
         "phase('Empty 1'); log('no agents'); phase('Empty 2'); return 'done';",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         Arc::new(EchoSpawner::default()),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4213,6 +4549,7 @@ async fn telemetry_phase_completed_suppressed_for_inline_workflow() {
     run_workflow_script(
         "phase('Step 1'); phase('Step 2'); return 'done';",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4261,6 +4598,7 @@ async fn telemetry_phase_completed_suppressed_for_script_path_workflow() {
     run_workflow_script(
         "phase('Step A'); return 'done';",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4306,6 +4644,7 @@ async fn telemetry_phase_completed_suppressed_when_no_telemetry_ctx() {
     run_workflow_script(
         "phase('Step 1'); return 'done';",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4350,6 +4689,7 @@ async fn telemetry_budget_cap_fires() {
     let _ = run_workflow_script(
         "await agent('a'); return 'done';",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4397,6 +4737,7 @@ async fn telemetry_agent_cap_fires() {
     let _ = run_workflow_script(
         "for (let i = 0; i < 1001; i++) { await agent('x'); } return 'done';",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4530,6 +4871,7 @@ async fn workflow_agent_progress_start_and_done_emitted() {
     run_workflow_script(
         "const r = await agent('analyze the code', { label: 'my-label' }); log('r=' + r);",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4593,6 +4935,7 @@ async fn workflow_phase_and_log_progress_format() {
     run_workflow_script(
         "phase('Analysis'); log('hello world'); phase('Report');",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4643,6 +4986,7 @@ async fn workflow_agent_index_is_monotonic() {
     run_workflow_script(
         "await agent('first'); await agent('second'); await agent('third');",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4702,6 +5046,7 @@ async fn workflow_progress_keeps_earliest_agents_through_log_flood() {
          for (let i = 0; i < 1100; i++) { log('flood ' + i); } \
          phase('Late'); await agent('a2');",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4785,6 +5130,7 @@ async fn workflow_agent_carries_phase_context() {
     run_workflow_script(
         "phase('MyPhase'); await agent('task1');",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4865,6 +5211,7 @@ async fn workflow_agent_cached_event_on_journal_replay() {
     run_workflow_script(
         script,
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         Arc::new(EchoSpawner::default()),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4916,6 +5263,7 @@ async fn workflow_agent_error_event_on_failure() {
     run_workflow_script(
         "const r = await agent('task'); log('r=' + r);",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -4962,6 +5310,7 @@ async fn workflow_agent_throw_on_error_preserves_failure_reason() {
     let err = run_workflow_script(
         "await agent('task', { throwOnError: true });",
         DEFAULT_WORKFLOW_SUBAGENT,
+        "",
         Arc::new(EchoSpawner {
             fail: true,
             ..Default::default()

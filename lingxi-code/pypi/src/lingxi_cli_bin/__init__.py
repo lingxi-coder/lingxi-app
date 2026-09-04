@@ -33,6 +33,20 @@ def bundled_path_dir() -> "Path | None":
     return path if path.is_dir() else None
 
 
+def bundled_credential_broker_dir() -> "Path | None":
+    path = bundled_package_dir() / "credential-broker"
+    return path if path.is_dir() else None
+
+
+def bundled_credential_broker_client() -> "Path | None":
+    broker_dir = bundled_credential_broker_dir()
+    if broker_dir is None:
+        return None
+    exe = "lingxi-credential-client.exe" if os.name == "nt" else "lingxi-credential-client"
+    path = broker_dir / "bin" / exe
+    return path if path.is_file() else None
+
+
 def main() -> int:
     """Console entrypoint: exec the bundled lingxi binary with argv passthrough,
     forwarding termination signals and mirroring the child's exit code."""
@@ -71,6 +85,8 @@ __all__ = [
     "PACKAGE_NAME",
     "bundled_lingxi_path",
     "bundled_package_dir",
+    "bundled_credential_broker_client",
+    "bundled_credential_broker_dir",
     "bundled_path_dir",
     "main",
 ]

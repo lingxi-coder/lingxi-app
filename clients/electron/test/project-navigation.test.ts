@@ -166,7 +166,7 @@ test('sidebar exposes a bounded drag handle for resizing', () => {
   assert.match(source, /onPointerMove=\{resizeSidebar\}/);
 });
 
-test('project rows omit the disclosure arrow and the active session uses the accent background', () => {
+test('project rows omit the disclosure arrow and the active session matches Settings selection styling', () => {
   const markup = renderToStaticMarkup(React.createElement(
     Theme.Provider,
     { value: tokens(true) },
@@ -176,7 +176,7 @@ test('project rows omit the disclosure arrow and the active session uses the acc
   const source = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
 
   assert.doesNotMatch(source, /\{active \? <Icon name="chevron"[^\n]+rotate/);
-  assert.match(activeSessionTag, /background:oklch\(72% 0\.18 268 \/ 0\.14\)/);
+  assert.match(activeSessionTag, /background:oklch\(26% 0\.028 270\)/);
 });
 
 test('a running session does not lock global project and session navigation', () => {
@@ -261,6 +261,12 @@ test('composer keeps its idle input compact and aligns the primary action contro
     assert.match(tag, /height:40px/);
     assert.match(tag, /border-radius:50%/);
   }
+
+  const microphoneTag = openingTag(markup, 'aria-label="Start ordinary recording"');
+  const flowTag = openingTag(markup, 'aria-label="开启心流模式"');
+  assert.match(microphoneTag, /background:transparent/);
+  assert.match(flowTag, /background:transparent/, 'the flow icon must use the same transparent treatment as the microphone');
+  assert.doesNotMatch(flowTag, /box-shadow/, 'the flow icon must not restore the old circular halo');
 
   assert.doesNotMatch(markup, /aria-label="Goal active"/);
   assert.doesNotMatch(markup, /Enter to send/);

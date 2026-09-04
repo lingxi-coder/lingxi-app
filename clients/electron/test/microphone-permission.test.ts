@@ -13,6 +13,7 @@ import {
   type VoicePermissionStatus,
 } from '../src/renderer/audio/capabilities';
 import { voicePageModel } from '../src/renderer/components/settings/pages/Voice';
+import { defaultNativeAudioSnapshot } from '../src/shared/nativeAudio';
 import { defaultVoicePreferences } from '../src/shared/voicePreferences';
 import { HostController } from '../src/main/host';
 import { DiagnosticBuffer } from '../src/main/host-utils';
@@ -201,31 +202,16 @@ test('the voice page probe takes the microphone state from the OS-backed host br
   }
 });
 
-test('a denied OS grant reaches the 麦克风权限 row, the blocking issue, the banner and the System Settings button', async () => {
-  const snapshot = await probePlatform({
-    synth: { getVoices: () => [], addEventListener: () => undefined, removeEventListener: () => undefined },
-    queryMicrophonePermission: async () => 'denied',
+test('a denied OS grant reaches the native voice page model and blocking notice', () => {
+  const model = voicePageModel(defaultVoicePreferences(), {
+    ...defaultNativeAudioSnapshot(),
+    permissions: { microphone: 'denied', speech: 'not_determined' },
     localeTag: 'zh-CN',
-    providerConfigured: true,
-    providerTranscriptionCapable: false,
-    voiceListTimeoutMs: 5,
   });
-  const model = voicePageModel(defaultVoicePreferences(), snapshot);
 
   assert.equal(model.microphonePermission, 'denied');
   assert.equal(model.microphonePermissionLabel, '未授权');
-  // `Voice.tsx` renders the 「打开系统设置」 button — the only control that
-  // opens `SYSTEM_SETTINGS_PANES.microphone` — under exactly this flag.
-  assert.equal(model.microphoneActionable, true, 'the System Settings deep link is unreachable while this is false');
-  assert.ok(
-    model.notices.includes('尚未获得麦克风权限，录音功能无法使用。'),
-    'MicrophonePermissionRequired must reach the Status card',
-  );
-  assert.ok(model.recognitionUnavailableNotice.includes('尚未获得麦克风权限，录音功能无法使用。'));
-  assert.ok(
-    !model.recognitionUnavailableNotice.includes('录音与语音朗读功能不受影响'),
-    'the banner must not claim recording is unaffected while the OS denies the microphone',
-  );
+  assert.ok(model.notices.some((notice) => /尚未获得麦克风权限/.test(notice)));
 });
 
 test('the microphone System Settings pane is accepted by the main process, so the row\'s button is not a dead link', async () => {

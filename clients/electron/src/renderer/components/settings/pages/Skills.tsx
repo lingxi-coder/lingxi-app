@@ -1,98 +1,612 @@
-import { useEffect, useState } from 'react';
-import type { SkillDto } from '@lingxi/bridge-client';
+import { useEffect, useMemo, useState } from 'react';
+import type { SkillAdminCommandDto, SkillDto } from '@lingxi/bridge-client';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
-import { useT } from '../../../theme/ThemeContext';
 import { Toggle } from '../primitives';
+import { useT } from '../../../theme/ThemeContext';
 import type { EditableLayer, PageContentProps } from '../SettingsScreen';
 import { boolFromLayer } from '../layerFields';
-import { ghostButtonStyle } from './ghostButton';
+import { ghostButtonStyle, inputStyle } from './ghostButton';
+import {
+  asBoolean,
+  asString,
+  detailGridStyle,
+  DomainOperationBanner,
+  EmptyDetail,
+  Field,
+  managerDetailStyle,
+  managerShellStyle,
+  managerSidebarStyle,
+  nextConfigurationOperationId,
+  noteStyle,
+  parseEventEnvelope,
+  searchInputStyle,
+  secondaryMetaStyle,
+  sidebarButtonStyle,
+  sidebarListStyle,
+  sidebarSectionTitleStyle,
+  SourcePill,
+  textareaStyle,
+} from './configurationAdmin';
+
+const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+interface SkillCatalogItem {
+  id: string;
+  name: string;
+  source: string;
+  pluginOwner?: string;
+  rootDir: string;
+  directory: string;
+  writable: boolean;
+  readonlyReason?: string;
+  revision?: string;
+  description?: string;
+  whenToUse?: string;
+  parseError?: string;
+  trashId?: string;
+  trashedAt?: string;
+}
+
+interface SkillCatalogEnvelope {
+  entries?: SkillCatalogItem[];
+  trash?: SkillCatalogItem[];
+  sync_claude_ai_note?: string;
+}
+
+interface SkillDocumentEnvelope {
+  id: string;
+  name: string;
+  source: string;
+  pluginOwner?: string;
+  directory: string;
+  rootDir: string;
+  markdown: string;
+  writable: boolean;
+  revision: string;
+  readonlyReason?: string;
+  parseError?: string;
+  diagnosticsJson?: string;
+}
+
+type SkillSelection =
+  | { kind: 'skill'; id: string }
+  | { kind: 'trash'; id: string }
+  | { kind: 'create' };
 
 export interface SkillsPageModel {
   skills: SkillDto[];
-  /**
-   * Documents, at the type level, which row the layer switcher can actually
-   * move — `'syncClaudeAiSkills only'` is a literal, not a computed value,
-   * because there is nothing else on this page for a layer to affect.
-   */
   layerAffects: 'syncClaudeAiSkills only';
 }
 
-/**
- * The pinned decision this task's brief names directly: the skills LIST is
- * discovered from `skills/` directories (`ClientEvent::Skills`, Task 7),
- * not read per-layer — its shape structurally cannot depend on `layer`
- * because this function never reads `input.layer` to compute `.skills`.
- * Only `syncClaudeAiSkills` (a real settings key) is layered; `layerAffects`
- * says so for the page to render as a visible caveat rather than a silent
- * assumption a user could reasonably get wrong ("I switched layers, where
- * did my skill go?").
- */
-export function skillsPageModel(input: { layer: EditableLayer; skills?: SkillDto[] }): SkillsPageModel {
+export function skillsPageModel(input: { skills?: SkillDto[] }): SkillsPageModel {
   return { skills: input.skills ?? [], layerAffects: 'syncClaudeAiSkills only' };
 }
 
-/**
- * Skills is `layered` per `nav.ts`, but the layer switcher affects exactly
- * ONE row on this page (`syncClaudeAiSkills`) — the skills list itself is a
- * directory-discovery VIEW (`refresh_listings{skills}` →
- * `ClientEvent::Skills`, Task 7), unrelated to any settings file layer. The
- * "还没接过引擎" empty-listing case and "engine has zero skills" both render
- * as the same empty state; this page has no way to tell them apart without
- * a dedicated loading flag, and guessing would be worse than not guessing.
- */
+function sourceScope(source: string): 'user' | 'project' | null {
+  return source === 'user' || source === 'project' ? source : null;
+}
+
+function skillCatalogFromBridge(bridge: PageContentProps['bridge']): SkillCatalogEnvelope {
+  const fromEvent = parseEventEnvelope<SkillCatalogEnvelope>(bridge.skillCatalogEvent?.catalog_json, {});
+  if (Array.isArray(fromEvent.entries) || Array.isArray(fromEvent.trash)) return fromEvent;
+  return {
+    entries: (bridge.skillsEvent?.skills ?? []).map((skill) => ({
+      id: skill.source_dir,
+      name: skill.name,
+      source: skill.source_dir.includes('/.lingxi/skills/') ? 'project' : 'user',
+      rootDir: skill.source_dir.replace(/\/[^/]+$/, ''),
+      directory: skill.source_dir,
+      writable: false,
+      readonlyReason: '当前运行时只上报了已发现的 skills 列表，未提供可编辑文档。',
+    })),
+    trash: [],
+    sync_claude_ai_note: 'Stored only. Claude.ai cloud sync is not wired on desktop.',
+  };
+}
+
+function skillDocumentFromBridge(bridge: PageContentProps['bridge']): SkillDocumentEnvelope | null {
+  const parsed = parseEventEnvelope<Partial<SkillDocumentEnvelope> | null>(bridge.skillDocumentEvent?.document_json, null);
+  if (!parsed || typeof parsed.id !== 'string') return null;
+  return {
+    id: parsed.id,
+    name: asString(parsed.name),
+    source: asString(parsed.source),
+    pluginOwner: typeof parsed.pluginOwner === 'string' ? parsed.pluginOwner : undefined,
+    directory: asString(parsed.directory),
+    rootDir: asString(parsed.rootDir),
+    markdown: asString(parsed.markdown),
+    writable: asBoolean(parsed.writable),
+    revision: asString(parsed.revision),
+    readonlyReason: typeof parsed.readonlyReason === 'string' ? parsed.readonlyReason : undefined,
+    parseError: typeof parsed.parseError === 'string' ? parsed.parseError : undefined,
+    diagnosticsJson: typeof parsed.diagnosticsJson === 'string' ? parsed.diagnosticsJson : undefined,
+  };
+}
+
+function callSkillAdmin(bridge: PageContentProps['bridge'], command: SkillAdminCommandDto | Record<string, unknown>) {
+  const admin = (bridge as { skillAdmin?: (payload: unknown) => Promise<unknown> }).skillAdmin;
+  return typeof admin === 'function' ? admin(command) : Promise.resolve();
+}
+
+function defaultCreateScope(editingLayer: EditableLayer): 'user' | 'project' {
+  return editingLayer === 'project' ? 'project' : 'user';
+}
+
 export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageContentProps) {
   const t = useT();
-  const model = skillsPageModel({ layer: editingLayer, skills: bridge.skillsEvent?.skills });
+  const model = skillsPageModel({ skills: bridge.skillsEvent?.skills });
+  const catalog = useMemo(() => skillCatalogFromBridge(bridge), [bridge.skillCatalogEvent?.catalog_json, bridge.skillsEvent?.skills]);
+  const document = useMemo(() => skillDocumentFromBridge(bridge), [bridge.skillDocumentEvent?.document_json]);
+  const adminAvailable = typeof (bridge as { skillAdmin?: unknown }).skillAdmin === 'function';
+  const skillOperation = bridge.configurationOperations?.skill ?? null;
   const syncEnabled = boolFromLayer(snapshot, editingLayer, 'syncClaudeAiSkills');
 
-  const [syncSaving, setSyncSaving] = useState(false);
-  const [syncError, setSyncError] = useState<string | null>(null);
+  const [selection, setSelection] = useState<SkillSelection>({ kind: 'create' });
+  const [search, setSearch] = useState('');
+  const [draftContent, setDraftContent] = useState('');
+  const [draftCreateName, setDraftCreateName] = useState('');
+  const [draftCreateScope, setDraftCreateScope] = useState<'user' | 'project'>(defaultCreateScope(editingLayer));
+  const [draftCreateContent, setDraftCreateContent] = useState('---\ndescription: \n---\n');
+  const [moveScope, setMoveScope] = useState<'user' | 'project'>(defaultCreateScope(editingLayer));
+  const [moveName, setMoveName] = useState('');
+  const [restoreScope, setRestoreScope] = useState<'user' | 'project'>(defaultCreateScope(editingLayer));
+  const [restoreName, setRestoreName] = useState('');
+  const [syncDraft, setSyncDraft] = useState(syncEnabled);
+  const [pendingSelection, setPendingSelection] = useState<SkillSelection | null>(null);
+  const [savingSync, setSavingSync] = useState(false);
+  const [loadingDocument, setLoadingDocument] = useState(false);
   const [reloading, setReloading] = useState(false);
-  const [reloadError, setReloadError] = useState<string | null>(null);
+  const [pageError, setPageError] = useState<string | null>(null);
+  const [purgeConfirmId, setPurgeConfirmId] = useState<string | null>(null);
 
-  useEffect(() => { void bridge.refreshSkills(); }, [bridge.refreshSkills]);
+  useEffect(() => {
+    void (adminAvailable ? callSkillAdmin(bridge, { action: 'get_catalog' }) : bridge.refreshSkills());
+  }, [adminAvailable, bridge.refreshSkills, bridge.skillAdmin]);
 
-  const handleToggleSync = (next: boolean) => {
-    setSyncSaving(true);
-    setSyncError(null);
-    void bridge.updateEngineSettings(editingLayer, { syncClaudeAiSkills: next })
-      .catch((cause) => setSyncError(cause instanceof Error ? cause.message : '无法保存 syncClaudeAiSkills。'))
-      .finally(() => setSyncSaving(false));
+  useEffect(() => {
+    setSyncDraft(syncEnabled);
+    setDraftCreateScope(defaultCreateScope(editingLayer));
+    setRestoreScope(defaultCreateScope(editingLayer));
+    if (editingLayer !== 'project' && moveScope !== 'project') setMoveScope('user');
+  }, [editingLayer, moveScope, syncEnabled]);
+
+  const activeSkills = catalog.entries ?? [];
+  const trashedSkills = catalog.trash ?? [];
+  const visibleQuery = search.trim().toLowerCase();
+  const filteredSkills = visibleQuery
+    ? activeSkills.filter((entry) => `${entry.name} ${entry.directory} ${entry.source}`.toLowerCase().includes(visibleQuery))
+    : activeSkills;
+  const filteredTrash = visibleQuery
+    ? trashedSkills.filter((entry) => `${entry.name} ${entry.directory}`.toLowerCase().includes(visibleQuery))
+    : trashedSkills;
+
+  useEffect(() => {
+    if (selection.kind === 'create') return;
+    const existsInSkills = activeSkills.some((entry) => entry.id === selection.id);
+    const existsInTrash = trashedSkills.some((entry) => entry.id === selection.id);
+    if (!existsInSkills && !existsInTrash) {
+      if (activeSkills[0]) setSelection({ kind: 'skill', id: activeSkills[0].id });
+      else if (trashedSkills[0]) setSelection({ kind: 'trash', id: trashedSkills[0].id });
+      else setSelection({ kind: 'create' });
+    }
+  }, [activeSkills, selection, trashedSkills]);
+
+  useEffect(() => {
+    if (selection.kind !== 'create' || !document) return;
+    if (activeSkills.some((entry) => entry.id === document.id)) {
+      setSelection({ kind: 'skill', id: document.id });
+    }
+  }, [activeSkills, document, selection.kind]);
+
+  const selectedSkill = selection.kind === 'skill' ? activeSkills.find((entry) => entry.id === selection.id) ?? null : null;
+  const selectedTrash = selection.kind === 'trash' ? trashedSkills.find((entry) => entry.id === selection.id) ?? null : null;
+  const selectedDocument = selectedSkill && document?.id === selectedSkill.id ? document : null;
+
+  useEffect(() => {
+    if (!selectedSkill || !adminAvailable) return;
+    if (document?.id === selectedSkill.id) return;
+    setLoadingDocument(true);
+    setPageError(null);
+    void callSkillAdmin(bridge, { action: 'get_document', target: selectedSkill.id })
+      .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法读取 skill 文档。'))
+      .finally(() => setLoadingDocument(false));
+  }, [adminAvailable, bridge.skillAdmin, document?.id, selectedSkill]);
+
+  useEffect(() => {
+    if (!selectedDocument) return;
+    setDraftContent(selectedDocument.markdown);
+    setMoveScope(selectedDocument.source === 'project' ? 'user' : 'project');
+    setMoveName(selectedDocument.name);
+  }, [selectedDocument]);
+
+  useEffect(() => {
+    if (!selectedTrash) return;
+    setRestoreScope(defaultCreateScope(editingLayer));
+    setRestoreName(selectedTrash.name);
+    setPurgeConfirmId(null);
+  }, [editingLayer, selectedTrash]);
+
+  const skillDirty = selectedDocument
+    ? draftContent !== selectedDocument.markdown
+      || moveName !== selectedDocument.name
+      || moveScope !== (selectedDocument.source === 'project' ? 'user' : 'project')
+    : false;
+  const trashDirty = selectedTrash
+    ? restoreName !== selectedTrash.name || restoreScope !== defaultCreateScope(editingLayer)
+    : false;
+  const detailDirty = selection.kind === 'create'
+    ? draftCreateName.trim().length > 0 || draftCreateContent !== '---\ndescription: \n---\n'
+    : selection.kind === 'skill'
+      ? skillDirty
+      : selection.kind === 'trash'
+        ? trashDirty
+        : false;
+
+  const requestSelection = (next: SkillSelection) => {
+    if (detailDirty) {
+      setPendingSelection(next);
+      return;
+    }
+    setPendingSelection(null);
+    setSelection(next);
   };
+
+  const discardDrafts = () => {
+    if (selectedDocument) {
+      setDraftContent(selectedDocument.markdown);
+      const resetDocument = selectedDocument;
+      setMoveScope(resetDocument.source === 'project' ? 'user' : 'project');
+      setMoveName(resetDocument.name);
+    }
+    if (selectedTrash) {
+      const resetTrash = selectedTrash;
+      setRestoreName(resetTrash.name);
+      setRestoreScope(defaultCreateScope(editingLayer));
+    }
+    setDraftCreateName('');
+    setDraftCreateScope(defaultCreateScope(editingLayer));
+    setDraftCreateContent('---\ndescription: \n---\n');
+    setPendingSelection(null);
+  };
+
+  const syncHasChanges = syncDraft !== syncEnabled;
 
   const handleReload = () => {
     setReloading(true);
-    setReloadError(null);
+    setPageError(null);
     void bridge.runSlashCommand('/reload-skills')
-      .then(() => bridge.refreshSkills())
-      .catch((cause) => setReloadError(cause instanceof Error ? cause.message : '无法重新加载 skills。'))
+      .then(async () => {
+        await bridge.refreshSkills();
+        if (adminAvailable) await callSkillAdmin(bridge, { action: 'get_catalog' });
+      })
+      .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法重新加载 skills。'))
       .finally(() => setReloading(false));
   };
 
+  const handleSaveSkill = () => {
+    if (!selectedDocument) return;
+    const scope = sourceScope(selectedDocument.source);
+    if (!scope) return;
+    setPageError(null);
+    void callSkillAdmin(bridge, {
+      action: 'save_document',
+      operation_id: nextConfigurationOperationId(),
+      target: selectedDocument.id,
+      scope,
+      revision: selectedDocument.revision,
+      payload_json: JSON.stringify({ name: selectedDocument.name, markdown: draftContent }),
+    }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法保存 skill。'));
+  };
+
+  const handleCreateSkill = () => {
+    if (!draftCreateName.trim()) {
+      setPageError('需要一个 skill 名称。');
+      return;
+    }
+    setPageError(null);
+    void callSkillAdmin(bridge, {
+      action: 'create_skill',
+      operation_id: nextConfigurationOperationId(),
+      scope: draftCreateScope,
+      revision: EMPTY_SHA256,
+      payload_json: JSON.stringify({
+        name: draftCreateName.trim(),
+        markdown: draftCreateContent,
+      }),
+    }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法创建 skill。'));
+  };
+
+  const handleMoveSkill = () => {
+    if (!selectedDocument) return;
+    setPageError(null);
+    void callSkillAdmin(bridge, {
+      action: 'move_skill',
+      operation_id: nextConfigurationOperationId(),
+      target: selectedDocument.id,
+      scope: moveScope,
+      revision: selectedDocument.revision,
+      payload_json: JSON.stringify({ name: moveName.trim() || selectedDocument.name }),
+    }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法移动 skill。'));
+  };
+
+  const handleTrashSkill = () => {
+    if (!selectedDocument) return;
+    setPageError(null);
+    void callSkillAdmin(bridge, {
+      action: 'trash_skill',
+      operation_id: nextConfigurationOperationId(),
+      target: selectedDocument.id,
+      revision: selectedDocument.revision,
+      payload_json: '{}',
+    }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法移到回收区。'));
+  };
+
+  const handleRestoreSkill = () => {
+    if (!selectedTrash?.trashId) return;
+    setPageError(null);
+    void callSkillAdmin(bridge, {
+      action: 'restore_skill',
+      operation_id: nextConfigurationOperationId(),
+      target: selectedTrash.trashId,
+      scope: restoreScope,
+      revision: selectedTrash.revision ?? EMPTY_SHA256,
+      payload_json: JSON.stringify({ name: restoreName.trim() || selectedTrash.name }),
+    }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法恢复 skill。'));
+  };
+
+  const handlePurgeSkill = () => {
+    if (!selectedTrash?.trashId) return;
+    if (purgeConfirmId !== selectedTrash.trashId) {
+      setPurgeConfirmId(selectedTrash.trashId);
+      return;
+    }
+    setPageError(null);
+    void callSkillAdmin(bridge, {
+      action: 'purge_trash_skill',
+      operation_id: nextConfigurationOperationId(),
+      target: selectedTrash.trashId,
+      revision: selectedTrash.revision ?? EMPTY_SHA256,
+      payload_json: JSON.stringify({ confirmed: true }),
+    })
+      .then(() => setPurgeConfirmId(null))
+      .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法永久删除 skill。'));
+  };
+
+  const detail = selection.kind === 'create'
+    ? (
+      <div style={managerDetailStyle()}>
+        <div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>新建 Skill</div>
+            <SourcePill t={t} label={draftCreateScope === 'project' ? '项目' : '用户'} />
+          </div>
+          <div style={secondaryMetaStyle(t)}>会创建目录与 SKILL.md。其它附件文件仍需在文件系统里处理。</div>
+        </div>
+        <div style={detailGridStyle()}>
+          <Field t={t} label="作用域">
+            <select value={draftCreateScope} onChange={(event) => setDraftCreateScope(event.target.value as 'user' | 'project')} style={inputStyle(t)} aria-label="skill-create-scope">
+              <option value="user">用户</option>
+              <option value="project">项目</option>
+            </select>
+          </Field>
+          <Field t={t} label="名称">
+            <input value={draftCreateName} onChange={(event) => setDraftCreateName(event.target.value)} style={inputStyle(t)} aria-label="skill-create-name" placeholder="my-skill" />
+          </Field>
+        </div>
+        <Field t={t} label="SKILL.md">
+          <textarea value={draftCreateContent} onChange={(event) => setDraftCreateContent(event.target.value)} rows={14} style={textareaStyle(t, 14)} aria-label="skill-create-content" />
+        </Field>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button type="button" onClick={handleCreateSkill} style={ghostButtonStyle(t)}>创建</button>
+          <button type="button" onClick={discardDrafts} style={ghostButtonStyle(t, false, true)}>取消</button>
+        </div>
+      </div>
+    )
+    : selection.kind === 'trash' && selectedTrash
+      ? (
+        <div style={managerDetailStyle()}>
+          <div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>{selectedTrash.name}</div>
+              <SourcePill t={t} label="回收区" tone="warn" />
+            </div>
+            <div className="mono" style={secondaryMetaStyle(t)}>{selectedTrash.directory}</div>
+            {selectedTrash.trashedAt && <div style={secondaryMetaStyle(t)}>删除批次：{selectedTrash.trashedAt}</div>}
+          </div>
+          <div style={noteStyle(t, 'warn')}>
+            目录仍保留在 skill 回收区中。恢复会移动回用户或项目作用域；永久删除会直接清除该回收区条目。
+          </div>
+          {purgeConfirmId === selectedTrash.trashId && (
+            <div role="alert" style={noteStyle(t, 'danger')}>
+              此操作不可恢复。请再次点击“确认永久删除”。
+            </div>
+          )}
+          <div style={detailGridStyle()}>
+            <Field t={t} label="恢复到">
+              <select value={restoreScope} onChange={(event) => setRestoreScope(event.target.value as 'user' | 'project')} style={inputStyle(t)} aria-label="skill-restore-scope">
+                <option value="user">用户</option>
+                <option value="project">项目</option>
+              </select>
+            </Field>
+            <Field t={t} label="恢复名称">
+              <input value={restoreName} onChange={(event) => setRestoreName(event.target.value)} style={inputStyle(t)} aria-label="skill-restore-name" />
+            </Field>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button type="button" onClick={handleRestoreSkill} disabled={!selectedTrash.trashId} style={ghostButtonStyle(t, !selectedTrash.trashId)}>恢复</button>
+            <button type="button" onClick={handlePurgeSkill} disabled={!selectedTrash.trashId} style={ghostButtonStyle(t, !selectedTrash.trashId, true)}>
+              {purgeConfirmId === selectedTrash.trashId ? '确认永久删除' : '永久删除'}
+            </button>
+          </div>
+        </div>
+      )
+      : selectedSkill
+        ? (
+          <div style={managerDetailStyle()}>
+            <div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>{selectedSkill.name}</div>
+                <SourcePill t={t} label={selectedSkill.source} />
+                {selectedSkill.pluginOwner && <SourcePill t={t} label={selectedSkill.pluginOwner} />}
+                {!selectedSkill.writable && <SourcePill t={t} label="只读" tone="warn" />}
+                {selectedSkill.parseError && <SourcePill t={t} label="解析错误" tone="danger" />}
+              </div>
+              <div className="mono" style={secondaryMetaStyle(t)}>{selectedSkill.directory}</div>
+              <div className="mono" style={secondaryMetaStyle(t)}>{selectedSkill.rootDir}</div>
+              {selectedSkill.description && <div style={secondaryMetaStyle(t)}>{selectedSkill.description}</div>}
+              {selectedSkill.whenToUse && <div style={secondaryMetaStyle(t)}>When to use: {selectedSkill.whenToUse}</div>}
+            </div>
+            {loadingDocument && <div style={noteStyle(t)}>正在读取 SKILL.md…</div>}
+            {!selectedDocument && !loadingDocument && (
+              <EmptyDetail t={t} title="还没有拿到文档内容" body="如果当前引擎还没接入 skill_admin get_document，这里会退回为目录级清单。" />
+            )}
+            {selectedDocument && (
+              <>
+                {selectedDocument.parseError && <div role="alert" style={noteStyle(t, 'danger')}>{selectedDocument.parseError}</div>}
+                {selectedDocument.readonlyReason && <div style={noteStyle(t, 'warn')}>{selectedDocument.readonlyReason}</div>}
+                <Field t={t} label="SKILL.md">
+                  <textarea
+                    value={draftContent}
+                    onChange={(event) => setDraftContent(event.target.value)}
+                    rows={16}
+                    readOnly={!selectedDocument.writable}
+                    aria-label={`${selectedDocument.name} markdown`}
+                    style={textareaStyle(t, 16)}
+                  />
+                </Field>
+                <div style={detailGridStyle()}>
+                  <Field t={t} label="移动到">
+                    <select value={moveScope} onChange={(event) => setMoveScope(event.target.value as 'user' | 'project')} style={inputStyle(t)} aria-label="skill-move-scope" disabled={!selectedDocument.writable}>
+                      <option value="user">用户</option>
+                      <option value="project">项目</option>
+                    </select>
+                  </Field>
+                  <Field t={t} label="新名称">
+                    <input value={moveName} onChange={(event) => setMoveName(event.target.value)} style={inputStyle(t)} aria-label="skill-move-name" disabled={!selectedDocument.writable} />
+                  </Field>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  <button type="button" onClick={handleSaveSkill} disabled={!selectedDocument.writable || draftContent === selectedDocument.markdown} style={ghostButtonStyle(t, !selectedDocument.writable || draftContent === selectedDocument.markdown)}>
+                    保存
+                  </button>
+                  <button type="button" onClick={discardDrafts} disabled={!selectedDocument.writable || !detailDirty} style={ghostButtonStyle(t, !selectedDocument.writable || !detailDirty, true)}>
+                    取消
+                  </button>
+                  <button type="button" onClick={handleMoveSkill} disabled={!selectedDocument.writable} style={ghostButtonStyle(t, !selectedDocument.writable)}>
+                    移动
+                  </button>
+                  <button type="button" onClick={handleTrashSkill} disabled={!selectedDocument.writable} style={ghostButtonStyle(t, !selectedDocument.writable, true)}>
+                    移到回收区
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )
+        : <div style={managerDetailStyle()}><EmptyDetail t={t} title="没有可编辑的 skill" body="左侧目录为空时，可以直接创建新的 user 或 project skill。" /></div>;
+
   return (
     <>
-      <Card title="已发现的 Skills">
-        <div style={{ padding: '10px 18px 0', fontSize: 12, color: t.text3 }}>
-          这份列表来自磁盘目录扫描，与上方的层切换器无关——切换层不会改变它。只有下面的「同步 Claude.ai skills」一项真的按层写入。
+      <Card title="Skills">
+        <div style={managerShellStyle(t)}>
+          <div style={managerSidebarStyle(t)}>
+            <div style={{ display: 'grid', gap: 10 }}>
+              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索 skill 名称或路径" aria-label="搜索 skills" style={searchInputStyle(t)} />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button type="button" onClick={() => requestSelection({ kind: 'create' })} style={ghostButtonStyle(t)}>新建</button>
+                <button type="button" onClick={handleReload} disabled={reloading} style={ghostButtonStyle(t, reloading)}>{reloading ? '重载中…' : '重新加载'}</button>
+              </div>
+              <div style={noteStyle(t)}>
+                左侧目录优先来自新的 skill catalog。保存成功后会尝试热重载；如果当前有活动回合，右侧状态会明确标出需要重启。
+              </div>
+            </div>
+            <div style={sidebarListStyle()}>
+              <div style={sidebarSectionTitleStyle(t)}>Skills</div>
+              {filteredSkills.map((entry) => (
+                <button key={entry.id} type="button" onClick={() => requestSelection({ kind: 'skill', id: entry.id })} style={sidebarButtonStyle(t, selection.kind === 'skill' && selection.id === entry.id)}>
+                  <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>{entry.name}</span>
+                    <SourcePill t={t} label={entry.source} />
+                    {!entry.writable && <SourcePill t={t} label="只读" tone="warn" />}
+                  </span>
+                  <span className="mono" style={{ fontSize: 11.5, color: t.text4, overflow: 'hidden', textOverflow: 'ellipsis' }}>{entry.directory}</span>
+                </button>
+              ))}
+              {filteredSkills.length === 0 && <div style={secondaryMetaStyle(t)}>没有匹配的 skill。</div>}
+              <div style={sidebarSectionTitleStyle(t)}>Trash</div>
+              {filteredTrash.map((entry) => (
+                <button key={entry.id} type="button" onClick={() => requestSelection({ kind: 'trash', id: entry.id })} style={sidebarButtonStyle(t, selection.kind === 'trash' && selection.id === entry.id)}>
+                  <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>{entry.name}</span>
+                    <SourcePill t={t} label="已删除" tone="warn" />
+                  </span>
+                  <span className="mono" style={{ fontSize: 11.5, color: t.text4, overflow: 'hidden', textOverflow: 'ellipsis' }}>{entry.directory}</span>
+                </button>
+              ))}
+              {filteredTrash.length === 0 && <div style={secondaryMetaStyle(t)}>回收区为空。</div>}
+            </div>
+          </div>
+          <div style={managerDetailStyle()}>
+            <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel="Skills" />
+            {pendingSelection && (
+              <div style={noteStyle(t, 'warn')}>
+                当前 detail 有未保存修改。切换前先保存，或者丢弃当前草稿。
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      discardDrafts();
+                      setSelection(pendingSelection);
+                    }}
+                    style={ghostButtonStyle(t)}
+                  >
+                    丢弃并切换
+                  </button>
+                  <button type="button" onClick={() => setPendingSelection(null)} style={ghostButtonStyle(t, false, true)}>继续编辑</button>
+                </div>
+              </div>
+            )}
+            {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
+            {detail}
+          </div>
         </div>
-        {model.skills.length === 0 && (
-          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>没有发现 skill，或引擎尚未上报。</div>
-        )}
-        {model.skills.map((skill) => (
-          <Row key={skill.source_dir} align="center" title={skill.name} desc={<span className="mono" style={{ fontSize: 11.5 }}>{skill.source_dir}</span>}>{null}</Row>
-        ))}
-        <Row title="重新加载" desc="等价于运行 /reload-skills。" align="center">
-          <button type="button" disabled={reloading} onClick={handleReload} style={ghostButtonStyle(t, reloading)}>{reloading ? '重新加载中…' : '重新加载'}</button>
-        </Row>
-        {reloadError && <Row title="错误" align="center"><span role="alert" style={{ color: t.danger, fontSize: 12 }}>{reloadError}</span></Row>}
       </Card>
 
       <Card title="Claude.ai 同步">
         <FieldProvenanceNotice snapshot={snapshot} fieldKey="syncClaudeAiSkills" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
-        <Row title="syncClaudeAiSkills" desc="是否同步 Claude.ai 上的 skills。这是本页唯一按层写入的设置。" align="center">
-          <Toggle value={syncEnabled} onChange={syncSaving ? () => undefined : handleToggleSync} />
+        <Row title="syncClaudeAiSkills" desc={(catalog.sync_claude_ai_note ?? 'Stored only. Claude.ai cloud sync is not wired on desktop.').replace('Stored only.', '仅保存。').replace('Claude.ai cloud sync is not wired on desktop.', '当前还没有接入 Claude.ai 云端同步。')} align="center">
+          <Toggle value={syncDraft} onChange={savingSync ? () => undefined : setSyncDraft} />
         </Row>
-        {syncError && <Row title="错误" align="center"><span role="alert" style={{ color: t.danger, fontSize: 12 }}>{syncError}</span></Row>}
+        <Row title="保存" desc="这是本页唯一按层写入的普通设置项。" align="center">
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              type="button"
+              disabled={savingSync || !syncHasChanges}
+              onClick={() => {
+                setSavingSync(true);
+                setPageError(null);
+                void bridge.updateEngineSettings(editingLayer, { syncClaudeAiSkills: syncDraft })
+                  .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法保存 syncClaudeAiSkills。'))
+                  .finally(() => setSavingSync(false));
+              }}
+              style={ghostButtonStyle(t, savingSync || !syncHasChanges)}
+            >
+              保存
+            </button>
+            <button type="button" disabled={savingSync || !syncHasChanges} onClick={() => setSyncDraft(syncEnabled)} style={ghostButtonStyle(t, savingSync || !syncHasChanges, true)}>
+              取消
+            </button>
+          </div>
+        </Row>
+      </Card>
+
+      <Card title="兼容视图">
+        <div style={{ padding: '12px 18px', fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
+          旧 bridge 只会上报一个扁平 discovered skills 列表。当前页会优先读取新的 skill catalog / document API；如果它们还没接上，左侧目录会退回到只读清单。
+        </div>
+        {model.skills.slice(0, 3).map((skill) => (
+          <Row key={skill.source_dir} align="center" title={skill.name} desc={<span className="mono" style={{ fontSize: 11.5 }}>{skill.source_dir}</span>}>{null}</Row>
+        ))}
       </Card>
     </>
   );

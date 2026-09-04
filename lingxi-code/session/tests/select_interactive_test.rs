@@ -20,6 +20,8 @@ fn rows(n: usize) -> Vec<SessionMetadata> {
             path: PathBuf::from(format!("s{i}.jsonl")),
             pr_number: None,
             custom_or_ai_title: Some(format!("title-{i}")),
+            resume_model: None,
+            resume_model_profile: None,
         })
         .collect()
 }

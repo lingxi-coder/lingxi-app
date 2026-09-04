@@ -3,7 +3,7 @@
 //!
 //! claude-code builds several tool prompts as `fn(model){ if(Dh(model)) return
 //! SHORT; return LONG }` — the current-generation default models
-//! (`claude-opus-4-8` / `claude-fable-5` / `claude-mythos-5`) get the terse
+//! (`claude-opus-4-8` / `claude-fable-5-1` / `claude-mythos-5-1`) get the terse
 //! SHORT variant, classic models (sonnet/haiku/`claude-3-*`/`opus-4-0..4-7`)
 //! get the verbose LONG one. The file tools (Read/Write/Edit/Glob/Grep) and the
 //! task tool (TodoWrite) all consult the SAME predicate, so it lives here as a
@@ -39,7 +39,7 @@ fn is_early_access_model(model: &str) -> bool {
 /// function BKb(e){
 ///   if(imt(e)) return!1;                                  // `-eap` (early-access) → false
 ///   let t = Fo(e);                                        // normalize (strip region/profile)
-///   if(F2(t,"lean_prompt") || t==="claude-mythos-5") return!1;   // (A) CAPABILITY first
+///   if(F2(t,"lean_prompt") || t==="claude-mythos-5-1") return!1; // (A) CAPABILITY first
 ///   if(t.includes("claude-3-") || t.includes("haiku") || t.includes("sonnet")
 ///      || t==="claude-opus-4-0" || t==="claude-opus-4-1" || t==="claude-opus-4-5"
 ///      || t==="claude-opus-4-6" || t==="claude-opus-4-7") return!0;  // (B) NAME list second
@@ -101,7 +101,7 @@ fn uwu_standard_model(model: &str) -> bool {
     if platform_api::model_capabilities::has_capability(
         &t,
         platform_api::model_capabilities::ModelCapability::LeanPrompt,
-    ) || t == "claude-mythos-5"
+    ) || t == "claude-mythos-5-1"
     {
         return false;
     }
@@ -192,7 +192,7 @@ mod tests {
         platform_api::model_capabilities::has_capability(
             t,
             platform_api::model_capabilities::ModelCapability::LeanPrompt,
-        ) || t == "claude-mythos-5"
+        ) || t == "claude-mythos-5-1"
     }
 
     fn classic_name_arm(t: &str) -> bool {
@@ -231,8 +231,8 @@ mod tests {
             "claude-opus-4-7",
             "claude-opus-4-8",
             "claude-opus-5",
-            "claude-fable-5",
-            "claude-mythos-5",
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
             // Catalog entries the port's registry does not enumerate but the
             // oracle does; all `capabilities:[]` or `["context_management"]`.
             "claude-3-5-haiku",
@@ -259,12 +259,12 @@ mod tests {
     /// reorder is behaviour-preserving on every id the registry knows.
     #[test]
     fn each_arm_alone_classifies_the_registry_the_same_way() {
-        for id in ["claude-opus-4-8", "claude-opus-5", "claude-fable-5"] {
+        for id in ["claude-opus-4-8", "claude-opus-5", "claude-fable-5-1"] {
             assert!(capability_arm(id), "{id} must hit the capability arm");
             assert!(!classic_name_arm(id), "{id} must miss the name list");
         }
-        assert!(capability_arm("claude-mythos-5"));
-        assert!(!classic_name_arm("claude-mythos-5"));
+        assert!(capability_arm("claude-mythos-5-1"));
+        assert!(!classic_name_arm("claude-mythos-5-1"));
         for id in [
             "claude-sonnet-5",
             "claude-sonnet-4-6",
@@ -293,7 +293,7 @@ mod tests {
     /// the pre-lean Opus models still take the LONG one.
     #[test]
     fn lean_prompt_models_are_short_and_older_opus_is_long() {
-        for m in ["claude-opus-4-8", "claude-opus-5", "claude-fable-5"] {
+        for m in ["claude-opus-4-8", "claude-opus-5", "claude-fable-5-1"] {
             assert!(dh_simple_system_prompt(Some(m)), "{m} must be SHORT");
         }
         for m in ["claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7"] {
@@ -304,8 +304,8 @@ mod tests {
     #[test]
     fn new_models_are_short() {
         assert!(dh_simple_system_prompt(Some("claude-opus-4-8")));
-        assert!(dh_simple_system_prompt(Some("claude-fable-5")));
-        assert!(dh_simple_system_prompt(Some("claude-mythos-5")));
+        assert!(dh_simple_system_prompt(Some("claude-fable-5-1")));
+        assert!(dh_simple_system_prompt(Some("claude-mythos-5-1")));
     }
 
     #[test]

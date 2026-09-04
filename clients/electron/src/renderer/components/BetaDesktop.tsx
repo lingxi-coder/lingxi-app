@@ -8,6 +8,7 @@ import type {
 } from '@lingxi/bridge-client';
 
 import { type UseBridge } from '../bridge/useBridge';
+import type { NativeAudioApi } from '../bridge/lingxi';
 import { orderedTasks } from '../bridge/desktopState';
 import { classifyDesktopError } from '../bridge/errors';
 import { useT } from '../theme/ThemeContext';
@@ -27,7 +28,14 @@ import {
   slashMenuLabel,
   slashNavigationDirection,
 } from '../bridge/slashCommands';
-import { groupModelReferences, modelReference, resolveModelSelection } from '../bridge/modelCatalog';
+import {
+  filterModelGroups,
+  groupModelReferences,
+  modelBillingGroups,
+  modelDisplayLabel,
+  modelReference,
+  resolveModelSelection,
+} from '../bridge/modelCatalog';
 import { formatSessionMetadata } from '../bridge/sessionPresentation';
 import { ALL_DESKTOP_COMMANDS, DESKTOP_COMMANDS } from '../bridge/desktopCommands';
 import {
@@ -35,9 +43,19 @@ import {
   resolveDesktopCommand,
   type DesktopCommandContext,
 } from '../bridge/slashDispatch';
+import {
+  DEFAULT_VOICE_FLOW_STATE,
+  VoiceFlowController,
+  type VoiceFlowState,
+} from '../audio/flow/controller';
+import { sanitizeSpeakableText } from '../audio/flow/segmenter';
+import { shouldAutoplayTrackedReply } from '../audio/autoplay';
 import { Icon } from './Icon';
+import { VoiceFlowPanel } from './voice/VoiceFlowPanel';
 import { providerById } from '../../shared/providers';
 import { MAX_IMAGE_ATTACHMENTS } from '../../shared/imageInput';
+import { defaultVoicePreferences, LANGUAGE_AUTO } from '../../shared/voicePreferences';
+import type { NativeAudioOwner, NativeAudioResponse } from '../../shared/nativeAudio';
 import { PERMISSION_MODE_OPTIONS } from '../model/permissionModes';
 import type { RunItem } from '../model/runItem';
 
@@ -241,9 +259,9 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin }
         style={{
           width: '100%', minHeight: 43, display: 'grid', gap: 1,
           padding: '6px 34px 6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
-          background: active ? t.accentBg : opening ? t.surface : 'transparent', color: highlighted ? t.text : t.text2,
+          background: active ? t.surfaceActive : opening ? t.surface : 'transparent', color: highlighted ? t.text : t.text2,
           cursor: opening ? 'wait' : 'pointer',
-          fontSize: 12.5, fontWeight: active ? 600 : 400,
+          fontSize: 13, fontWeight: active ? 600 : 500,
         }}
       >
         <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -446,11 +464,11 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                     title={`${title}\n${pinned.projectPath}`}
                     style={{
                       width: '100%', minHeight: 43, display: 'grid', gap: 1, padding: '6px 34px 6px 10px',
-                      border: 0, borderRadius: 8, background: active ? t.accentBg : opening ? t.surface : 'transparent',
+                      border: 0, borderRadius: 8, background: active ? t.surfaceActive : opening ? t.surface : 'transparent',
                       color: t.text2, textAlign: 'left', cursor: opening ? 'wait' : 'pointer',
                     }}
                   >
-                    <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12.5, fontWeight: 500 }}>
+                    <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13, fontWeight: active ? 600 : 500 }}>
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</span>
                       {opening
                         ? <span className="beta-spinner" role="status" aria-label="Opening session" title="Opening session" style={{ marginLeft: 7, color: t.accent }} />
@@ -479,7 +497,7 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
 
         <section aria-labelledby="projects-heading">
           <div style={{ minHeight: 31, padding: '2px 4px 4px 8px', display: 'flex', alignItems: 'center' }}>
-            <h2 id="projects-heading" style={{ flex: 1, color: t.text4, fontSize: 12.5, fontWeight: 600, letterSpacing: '.01em' }}>Projects</h2>
+            <h2 id="projects-heading" style={{ flex: 1, color: t.text4, fontSize: 11, fontWeight: 600, letterSpacing: '.04em' }}>Projects</h2>
             <button
               type="button"
               className="sidebar-header-action"
@@ -527,12 +545,12 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                     style={{
                       width: '100%', minHeight: 37, display: 'flex', alignItems: 'center', gap: 9,
                       padding: '7px 62px 7px 8px', border: 0, borderRadius: 8,
-                      background: active ? t.surface : 'transparent', color: active ? t.text : t.text2,
+                      background: active ? t.surfaceActive : 'transparent', color: active ? t.text : t.text2,
                       cursor: 'pointer', textAlign: 'left',
                     }}
                   >
                     <Icon name="folder" size={16} color={active ? t.text2 : t.text3} stroke={1.7} />
-                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13.5, fontWeight: active ? 600 : 500 }}>{basename(projectPath)}</span>
+                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13, fontWeight: active ? 600 : 500 }}>{basename(projectPath)}</span>
                   </button>
                   <button
                     type="button"
@@ -721,36 +739,15 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
   );
 }
 
-type SpeechRecognitionResultLike = {
-  isFinal: boolean;
-  [index: number]: { transcript: string };
-};
+function nativeAudioApi(): NativeAudioApi | undefined {
+  return typeof window === 'undefined' ? undefined : window.lingxi?.audio;
+}
 
-type SpeechRecognitionEventLike = Event & {
-  resultIndex: number;
-  results: { length: number; [index: number]: SpeechRecognitionResultLike };
-};
-
-type SpeechRecognitionLike = {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  start(): void;
-  stop(): void;
-  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
-  onerror: ((event: Event & { error?: string }) => void) | null;
-  onend: (() => void) | null;
-};
-
-type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
-
-function speechRecognitionConstructor(): SpeechRecognitionConstructor | null {
-  if (typeof window === 'undefined') return null;
-  const browserWindow = window as Window & {
-    SpeechRecognition?: SpeechRecognitionConstructor;
-    webkitSpeechRecognition?: SpeechRecognitionConstructor;
-  };
-  return browserWindow.SpeechRecognition ?? browserWindow.webkitSpeechRecognition ?? null;
+function resolvedVoiceLanguage(configured: string): string {
+  if (configured === LANGUAGE_AUTO) {
+    return typeof navigator !== 'undefined' && navigator.language ? navigator.language : 'en-US';
+  }
+  return configured;
 }
 
 function modelLabel(model?: string | null): string {
@@ -904,6 +901,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const [text, setText] = useState('');
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSubmenu, setModelSubmenu] = useState<ModelPickerSubmenu>(null);
+  const [modelQuery, setModelQuery] = useState('');
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
   const [filePicker, setFilePicker] = useState<FilePickerState | null>(null);
@@ -917,6 +915,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const [imageDragActive, setImageDragActive] = useState(false);
   const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'unsupported' | 'denied'>('idle');
   const [flowMode, setFlowMode] = useState(false);
+  const [flowState, setFlowState] = useState<VoiceFlowState>(DEFAULT_VOICE_FLOW_STATE);
   const [slashResultIndex, setSlashResultIndex] = useState(0);
   const input = useRef<HTMLDivElement>(null);
   const fileControl = useRef<HTMLDivElement>(null);
@@ -926,9 +925,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const permissionButton = useRef<HTMLButtonElement>(null);
   const modelControl = useRef<HTMLDivElement>(null);
   const modelTrigger = useRef<HTMLButtonElement>(null);
+  const modelSearchInput = useRef<HTMLInputElement>(null);
   const slashControl = useRef<HTMLDivElement>(null);
-  const recognition = useRef<SpeechRecognitionLike | null>(null);
-  const voiceBase = useRef('');
+  const dictationInsertionRange = useRef<Range | null>(null);
+  const flowControllerRef = useRef<VoiceFlowController | null>(null);
   const fileSearchRequest = useRef(0);
   const savedEditorSelection = useRef<Range | null>(null);
   const activeMentionRange = useRef<Range | null>(null);
@@ -940,6 +940,18 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const draftSessionId = useRef<string | null>(null);
   imageAttachmentsRef.current = imageAttachments;
   const activeSessionId = bridge.activeSession?.sessionId ?? null;
+  const audio = nativeAudioApi();
+  const voicePrefs = bridge.bootstrap?.settings.voice ?? defaultVoicePreferences();
+  const voicePrefsRef = useRef(voicePrefs);
+  voicePrefsRef.current = voicePrefs;
+  const dictationOwner = useRef<NativeAudioOwner | null>(null);
+  const autoplayOwner = useRef<NativeAudioOwner | null>(null);
+  const autoplaySubscription = useRef<(() => void) | null>(null);
+  const activeAudioSessionId = useRef(activeSessionId);
+  activeAudioSessionId.current = activeSessionId;
+  const flowModeRef = useRef(flowMode);
+  flowModeRef.current = flowMode;
+  const standardListeningRef = useRef(false);
 
   const slashCommands = useMemo(
     () => filterSlashCommands(bridge.desktop.slashCommands, slashQuery ?? ''),
@@ -948,6 +960,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const modelGroups = useMemo(
     () => groupModelReferences(bridge.desktop.models),
     [bridge.desktop.models],
+  );
+  const filteredModelGroups = useMemo(
+    () => filterModelGroups(modelGroups, modelQuery, bridge.desktop.modelDetails),
+    [bridge.desktop.modelDetails, modelGroups, modelQuery],
   );
   const modelDetailsByReference = useMemo(
     () => new Map(bridge.desktop.modelDetails.map((detail) => [detail.reference, detail])),
@@ -1028,6 +1044,14 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   }, [modelOpen]);
 
   useEffect(() => {
+    if (modelOpen && modelSubmenu === 'model') {
+      modelSearchInput.current?.focus();
+      return;
+    }
+    setModelQuery('');
+  }, [modelOpen, modelSubmenu]);
+
+  useEffect(() => {
     setSlashResultIndex((index) => reconcileSlashSelectionIndex(
       index,
       slashQuery,
@@ -1103,11 +1127,6 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   useEffect(() => {
     if (fileMenuOpen && filePicker?.source === 'button') fileSearchInput.current?.focus();
   }, [fileMenuOpen, filePicker?.source]);
-
-  useEffect(() => () => {
-    recognition.current?.stop();
-    recognition.current = null;
-  }, []);
 
   useEffect(() => () => {
     const previewUrls = new Set(imageAttachmentsRef.current.map((attachment) => attachment.previewUrl));
@@ -1283,77 +1302,243 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     setSlashQuery(null);
   };
 
-  const replaceVoiceText = (nextText: string) => {
+  const insertVoiceTextAtSelection = (transcript: string, selection = dictationInsertionRange.current) => {
     const editor = input.current;
-    if (!editor) return;
-    const mentions = [...editor.querySelectorAll<HTMLElement>(FILE_MENTION_SELECTOR)];
-    editor.replaceChildren();
-    for (const mention of mentions) editor.append(mention, document.createTextNode(ZERO_WIDTH_SPACE));
-    if (nextText) editor.append(document.createTextNode(nextText));
-    const range = editorSelection(editor);
-    range.selectNodeContents(editor);
-    range.collapse(false);
-    savedEditorSelection.current = range;
-    setText(nextText);
+    if (!editor || transcript.length === 0) return;
+    const insertion = selection?.cloneRange() ?? savedEditorSelection.current?.cloneRange() ?? editorSelection(editor);
+    insertion.deleteContents();
+    const node = document.createTextNode(transcript);
+    insertion.insertNode(node);
+    const caret = document.createRange();
+    caret.setStart(node, node.length);
+    caret.collapse(true);
+    applyEditorSelection(caret);
+    savedEditorSelection.current = caret.cloneRange();
+    dictationInsertionRange.current = caret.cloneRange();
+    syncPromptState();
+    updateActiveCompletions();
   };
 
-  const stopVoice = () => {
-    recognition.current?.stop();
-    recognition.current = null;
+  const audioOwner = useCallback((kind: NativeAudioOwner['kind']): NativeAudioOwner => ({
+    kind,
+    id: `${activeSessionId ?? 'desktop'}:${kind}`,
+  }), [activeSessionId]);
+
+  const reportNativeAudioFailure = useCallback((response: NativeAudioResponse): boolean => {
+    if (response.type !== 'error') return false;
+    if (response.error.code === 'permission') setVoiceState('denied');
+    else if (response.error.code === 'unavailable') setVoiceState('unsupported');
+    else setVoiceState('idle');
+    return true;
+  }, []);
+
+  const cancelStandardListening = useCallback(async () => {
+    const owner = dictationOwner.current;
+    standardListeningRef.current = false;
+    dictationOwner.current = null;
+    dictationInsertionRange.current = null;
     setVoiceState('idle');
-  };
+    if (!audio || !owner) return;
+    try {
+      await audio.request({ type: 'cancel', owner });
+    } catch {}
+  }, [audio]);
 
-  const toggleVoice = () => {
-    if (voiceState === 'listening') {
-      stopVoice();
-      return;
-    }
-    const SpeechRecognition = speechRecognitionConstructor();
-    if (!SpeechRecognition) {
+  const cancelAutoplay = useCallback(async () => {
+    autoplaySubscription.current?.();
+    autoplaySubscription.current = null;
+    const owner = autoplayOwner.current;
+    autoplayOwner.current = null;
+    if (!audio || !owner) return;
+    try {
+      await audio.request({ type: 'stop_speaking', owner });
+    } catch {}
+  }, [audio]);
+
+  const startStandardListening = async () => {
+    if (!audio) {
       setVoiceState('unsupported');
       return;
     }
-    const next = new SpeechRecognition();
-    voiceBase.current = text.trimEnd();
-    next.continuous = true;
-    next.interimResults = true;
-    next.lang = typeof navigator !== 'undefined' && navigator.language ? navigator.language : 'en-US';
-    next.onresult = (event) => {
-      const transcript = Array.from(event.results, (result) => result[0]?.transcript ?? '').join('');
-      const prefix = voiceBase.current;
-      replaceVoiceText(`${prefix}${prefix && transcript ? ' ' : ''}${transcript}`);
-    };
-    next.onerror = (event) => {
-      setVoiceState(event.error === 'not-allowed' || event.error === 'service-not-allowed' ? 'denied' : 'idle');
-      recognition.current = null;
-    };
-    next.onend = () => {
-      recognition.current = null;
-      setVoiceState((current) => current === 'listening' ? 'idle' : current);
-    };
-    recognition.current = next;
-    setVoiceState('listening');
-    try {
-      next.start();
-    } catch {
-      recognition.current = null;
-      setVoiceState('idle');
+    const editor = input.current;
+    dictationInsertionRange.current = editor ? editorSelection(editor).cloneRange() : savedEditorSelection.current?.cloneRange() ?? null;
+    const owner = audioOwner('dictation');
+    dictationOwner.current = owner;
+    const permissions = await audio.request({ type: 'request_authorization', permissions: ['microphone', 'speech'] });
+    if (reportNativeAudioFailure(permissions)) {
+      dictationOwner.current = null;
+      dictationInsertionRange.current = null;
+      return;
     }
+    const response = await audio.request({
+      type: 'start_listening',
+      owner,
+      recognitionMode: voicePrefs.recognitionMode,
+      language: resolvedVoiceLanguage(voicePrefs.language),
+    });
+    if (reportNativeAudioFailure(response)) {
+      dictationOwner.current = null;
+      dictationInsertionRange.current = null;
+      return;
+    }
+    standardListeningRef.current = true;
+    setVoiceState('listening');
+  };
+
+  const finishStandardListening = async () => {
+    if (!audio || !dictationOwner.current) return;
+    const owner = dictationOwner.current;
+    standardListeningRef.current = false;
+    dictationOwner.current = null;
+    const response = await audio.request({ type: 'finish_listening', owner });
+    if (reportNativeAudioFailure(response)) {
+      dictationInsertionRange.current = null;
+      return;
+    }
+    setVoiceState('idle');
+    if (response.type === 'listening_finished') {
+      const transcript = response.transcript?.text.trim() ?? '';
+      if (transcript) insertVoiceTextAtSelection(transcript);
+    }
+    dictationInsertionRange.current = null;
+  };
+
+  const stopFlowMode = useCallback(async () => {
+    setFlowMode(false);
+    await flowControllerRef.current?.stop();
+  }, []);
+
+  const retryFlowMode = useCallback(() => {
+    if (!flowModeRef.current) setFlowMode(true);
+    void flowControllerRef.current?.retry();
+  }, []);
+
+  useEffect(() => {
+    if (!audio) {
+      flowControllerRef.current = null;
+      setVoiceState('unsupported');
+      setFlowState({
+        ...DEFAULT_VOICE_FLOW_STATE,
+        phase: 'configurationRequired',
+        detail: 'Native audio is unavailable in this environment.',
+      });
+      return;
+    }
+    const controller = new VoiceFlowController({
+      audio: {
+        request: (command) => audio.request(command),
+        onEvent: (listener) => audio.onEvent(listener),
+      },
+      bridge: {
+        sendTrackedPrompt: bridge.sendTrackedPrompt,
+        subscribeTrackedSpeech: bridge.subscribeTrackedSpeech,
+        cancel: bridge.cancel,
+      },
+      getPreferences: () => voicePrefsRef.current,
+      createOwner: audioOwner,
+      timers: {
+        setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
+        clearTimeout: (handle) => window.clearTimeout(handle as number),
+      },
+      onStateChange: (state) => setFlowState(state),
+    });
+    flowControllerRef.current = controller;
+    setFlowState(controller.getState());
+    return () => {
+      if (flowControllerRef.current === controller) flowControllerRef.current = null;
+      controller.dispose();
+    };
+  }, [audio, audioOwner, bridge.cancel, bridge.sendTrackedPrompt, bridge.subscribeTrackedSpeech]);
+
+  useEffect(() => {
+    const controller = flowControllerRef.current;
+    if (!controller) return;
+    if (flowMode) {
+      void controller.start();
+      return;
+    }
+    void controller.stop();
+  }, [flowMode]);
+
+  useEffect(() => {
+    if (!audio) {
+      setVoiceState('unsupported');
+      return;
+    }
+    return audio.onEvent((event) => {
+      if (event.type === 'speech_state'
+          && autoplayOwner.current?.id === event.owner.id
+          && (event.state === 'finished' || event.state === 'interrupted')) {
+        autoplayOwner.current = null;
+      }
+      if (event.type === 'error' && autoplayOwner.current?.id === event.owner?.id) {
+        autoplayOwner.current = null;
+      }
+      if (event.type === 'error' && event.owner && dictationOwner.current && event.owner.id === dictationOwner.current.id) {
+        standardListeningRef.current = false;
+        dictationOwner.current = null;
+        dictationInsertionRange.current = null;
+        setVoiceState(event.error.code === 'permission' ? 'denied' : 'idle');
+      }
+    });
+  }, [audio]);
+
+  const previousAudioSessionId = useRef(activeSessionId);
+  useEffect(() => {
+    if (previousAudioSessionId.current === activeSessionId) return;
+    previousAudioSessionId.current = activeSessionId;
+    if (standardListeningRef.current) void cancelStandardListening();
+    void cancelAutoplay();
+    if (flowModeRef.current) setFlowMode(false);
+  }, [activeSessionId, cancelAutoplay, cancelStandardListening]);
+
+  useEffect(() => {
+    const handleHidden = () => {
+      if (!document.hidden) return;
+      if (standardListeningRef.current) void cancelStandardListening();
+      void cancelAutoplay();
+      if (flowModeRef.current) setFlowMode(false);
+    };
+    document.addEventListener('visibilitychange', handleHidden);
+    return () => document.removeEventListener('visibilitychange', handleHidden);
+  }, [cancelAutoplay, cancelStandardListening]);
+
+  useEffect(() => () => {
+    if (standardListeningRef.current) void cancelStandardListening();
+    void cancelAutoplay();
+    flowControllerRef.current?.dispose();
+  }, [cancelAutoplay, cancelStandardListening]);
+
+  const stopVoice = () => {
+    if (flowModeRef.current) {
+      void stopFlowMode();
+      return;
+    }
+    if (standardListeningRef.current) {
+      void finishStandardListening();
+      return;
+    }
+    setVoiceState('idle');
   };
 
   const toggleStandardVoice = () => {
-    if (flowMode) setFlowMode(false);
-    toggleVoice();
+    if (flowModeRef.current) {
+      void stopFlowMode();
+      return;
+    }
+    if (standardListeningRef.current) {
+      void finishStandardListening();
+      return;
+    }
+    void startStandardListening();
   };
 
   const toggleFlowMode = () => {
-    if (flowMode) {
-      stopVoice();
-      setFlowMode(false);
+    if (flowModeRef.current) {
+      void stopFlowMode();
       return;
     }
     setFlowMode(true);
-    if (voiceState !== 'listening') toggleVoice();
   };
 
   const addImageFiles = async (files: File[]) => {
@@ -1422,7 +1607,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const submit = async () => {
     const snapshot = input.current ? richPromptSnapshot(input.current) : { text, files: selectedFiles };
     const value = promptWithFileMentions(snapshot.text, snapshot.files);
-    if (!ready) return;
+    if (!ready || flowModeRef.current) return;
     if (!value) {
       if (imageAttachments.length) setImageNotice('请先输入问题，再发送图片。');
       return;
@@ -1456,12 +1641,56 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     const images: ImageRefDto[] = imageAttachments.map(({ media_type, base64 }) => ({ media_type, base64 }));
     const submittingSessionId = draftSessionId.current;
     try {
-      await bridge.sendPrompt(
+      const supportsTrackedSend = typeof bridge.sendTrackedPrompt === 'function';
+      const tracked = supportsTrackedSend
+        ? bridge.sendTrackedPrompt(
+            value,
+            images,
+            imageAttachments.map((attachment) => attachment.name),
+            snapshot.files,
+          )
+        : null;
+      if (supportsTrackedSend && !tracked) return;
+      const queued = tracked?.queued ?? bridge.sendPrompt(
         value,
         images,
         imageAttachments.map((attachment) => attachment.name),
         snapshot.files,
       );
+      if (voicePrefs.autoPlayReplies && audio && tracked) {
+        await cancelAutoplay();
+        const autoplayTokenOwner = { kind: 'autoplay', id: tracked.token.clientTurnId } satisfies NativeAudioOwner;
+        autoplayOwner.current = autoplayTokenOwner;
+        const offTrackedSpeech = bridge.subscribeTrackedSpeech(tracked.token, (event) => {
+          if (event.type !== 'completion') return;
+          offTrackedSpeech();
+          if (autoplaySubscription.current === offTrackedSpeech) autoplaySubscription.current = null;
+          if (!shouldAutoplayTrackedReply(activeAudioSessionId.current, tracked.token.sessionId, document.hidden)) {
+            autoplayOwner.current = null;
+            return;
+          }
+          const spoken = sanitizeSpeakableText(event.text);
+          if (!spoken) {
+            autoplayOwner.current = null;
+            return;
+          }
+          void audio.request({
+            type: 'speak',
+            owner: autoplayTokenOwner,
+            text: spoken,
+            voiceId: voicePrefs.voiceSelection,
+            rate: voicePrefs.rate,
+          }).then((response) => {
+            if (response.type === 'error' && autoplayOwner.current?.id === autoplayTokenOwner.id) {
+              autoplayOwner.current = null;
+            }
+          }).catch(() => {
+            if (autoplayOwner.current?.id === autoplayTokenOwner.id) autoplayOwner.current = null;
+          });
+        });
+        autoplaySubscription.current = offTrackedSpeech;
+      }
+      await queued;
       clearComposer(submittingSessionId);
     } catch {
       setImageNotice('发送失败，图片附件已保留，可以重试。');
@@ -1667,50 +1896,13 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   return (
     <div className="desktop-composer-dock" style={{ flexShrink: 0, padding: '10px 18px 18px', background: t.stageBg }}>
       {flowMode && (
-        <div
-          role="status"
-          aria-label="Flow mode is listening"
-          style={{
-            position: 'relative',
-            maxWidth: 980,
-            height: 156,
-            margin: '0 auto 10px',
-            overflow: 'hidden',
-            borderRadius: 22,
-            border: `1px solid ${t.accentBorder}`,
-            background: `radial-gradient(circle at 50% 48%, ${t.accentBg} 0%, ${t.surface} 72%)`,
-            boxShadow: '0 14px 36px rgba(0,0,0,.10)',
-          }}
-        >
-          <div style={{ position: 'absolute', left: 16, top: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ width: 7, height: 7, borderRadius: 99, background: t.accent, boxShadow: `0 0 12px ${t.accent}` }} />
-            <span style={{ color: t.text, fontSize: 12.5, fontWeight: 650 }}>心流模式</span>
-          </div>
-          <button
-            type="button"
-            aria-label="关闭心流模式"
-            title="关闭心流模式"
-            onClick={toggleFlowMode}
-            style={{ ...composerIconStyle(t), position: 'absolute', right: 12, top: 9, width: 32, height: 32, background: t.surfaceHover }}
-          >
-            <Icon name="x" size={13} color={t.text3} stroke={1.9} />
-          </button>
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 180 64"
-            style={{ position: 'absolute', left: '50%', top: '48%', width: 210, height: 74, transform: 'translate(-50%, -50%)', color: t.accent }}
-          >
-            {[12, 23, 34, 48, 34, 23, 12].map((height, index) => (
-              <rect key={index} x={27 + index * 20} y={(64 - height) / 2} width="7" height={height} rx="3.5" fill="currentColor" opacity={0.5 + index * 0.06}>
-                <animate attributeName="height" values={`${height};${Math.max(12, 58 - Math.abs(3 - index) * 8)};${height}`} dur={`${1.05 + index * 0.09}s`} repeatCount="indefinite" />
-                <animate attributeName="y" values={`${(64 - height) / 2};${(64 - Math.max(12, 58 - Math.abs(3 - index) * 8)) / 2};${(64 - height) / 2}`} dur={`${1.05 + index * 0.09}s`} repeatCount="indefinite" />
-              </rect>
-            ))}
-          </svg>
-          <div style={{ position: 'absolute', left: 0, right: 0, bottom: 13, textAlign: 'center', color: t.text3, fontSize: 11.5 }}>
-            {voiceState === 'listening' ? '正在聆听 · 可继续使用下方输入框' : '轻点波形按钮继续聆听'}
-          </div>
-        </div>
+        <VoiceFlowPanel
+          state={flowState}
+          onOrb={() => { void flowControllerRef.current?.orb(); }}
+          onRetry={retryFlowMode}
+          onOpenSettings={() => onOpenSettingsPage('voice')}
+          onClose={() => { void stopFlowMode(); }}
+        />
       )}
       <div
         className="beta-composer"
@@ -2017,29 +2209,41 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                   );
                 })}
 
-                <div aria-hidden="true" style={{ height: 1, margin: '7px 9px', background: t.border }} />
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={!ready || bridge.running}
-                  onClick={() => {
-                    invoke(() => bridge.setReasoningSelection({ type: 'automatic' }));
-                    invoke(() => bridge.setFastMode(false));
-                    setModelSubmenu(null);
-                  }}
-                  style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', minHeight: 42, padding: '7px 9px', border: 0, borderRadius: 8, background: 'transparent', color: !ready || bridge.running ? t.text4 : t.text3, textAlign: 'left', cursor: !ready || bridge.running ? 'not-allowed' : 'pointer', font: 'inherit', fontSize: 13, opacity: !ready || bridge.running ? .6 : 1 }}
-                  onMouseEnter={(event) => { if (ready && !bridge.running) event.currentTarget.style.background = t.surfaceHover; }}
-                  onMouseLeave={(event) => { event.currentTarget.style.background = 'transparent'; }}
-                >
-                  <span style={{ flex: 1 }}>Reset to default</span>
-                  <span aria-hidden="true" style={{ color: t.text3, fontSize: 22, fontWeight: 300, lineHeight: 1 }}>↻</span>
-                </button>
-
                 {modelSubmenu === 'model' && (
-                  <div style={{ ...modelPickerSubmenuStyle(t), width: 390, maxWidth: 'min(390px, calc(100vw - 44px))', maxHeight: 'min(500px, calc(100vh - 140px))', overflow: 'hidden', display: 'flex', flexDirection: 'column' }} role="menu" aria-label="Available models">
-                    <div style={{ flexShrink: 0, padding: '5px 10px 8px', color: t.text3, fontSize: 12, fontWeight: 600 }}>Model</div>
+                  <div className="model-picker-model-submenu" style={{ ...modelPickerSubmenuStyle(t), width: 390, maxWidth: 'min(390px, calc(100vw - 44px))', maxHeight: 'min(500px, calc(100vh - 140px))', overflow: 'hidden', display: 'flex', flexDirection: 'column' }} role="menu" aria-label="Available models">
+                    <div style={{ flexShrink: 0, padding: '5px 10px 7px', color: t.text3, fontSize: 12, fontWeight: 600 }}>Model</div>
+                    <div style={{ position: 'relative', flexShrink: 0, margin: '0 3px 7px' }}>
+                      <span aria-hidden="true" style={{ position: 'absolute', left: 10, top: '50%', display: 'grid', placeItems: 'center', transform: 'translateY(-50%)', pointerEvents: 'none' }}>
+                        <Icon name="search" size={14} color={t.text4} stroke={1.8} />
+                      </span>
+                      <input
+                        ref={modelSearchInput}
+                        type="text"
+                        value={modelQuery}
+                        aria-label="Search models"
+                        placeholder="Search models"
+                        autoComplete="off"
+                        spellCheck={false}
+                        onChange={(event) => setModelQuery(event.currentTarget.value)}
+                        onKeyDown={(event) => {
+                          if (event.key !== 'Escape') return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          if (modelQuery) setModelQuery('');
+                          else setModelSubmenu(null);
+                        }}
+                        style={{ width: '100%', height: 34, padding: '0 32px 0 31px', border: `0.5px solid ${t.borderStrong}`, borderRadius: 8, outline: 'none', background: t.surfaceActive, color: t.text, font: 'inherit', fontSize: 12.5 }}
+                        onFocus={(event) => { event.currentTarget.style.borderColor = t.accent; }}
+                        onBlur={(event) => { event.currentTarget.style.borderColor = t.borderStrong; }}
+                      />
+                      {modelQuery && (
+                        <button type="button" aria-label="Clear model search" onClick={() => { setModelQuery(''); modelSearchInput.current?.focus(); }} style={{ position: 'absolute', right: 5, top: '50%', display: 'grid', width: 24, height: 24, padding: 0, placeItems: 'center', transform: 'translateY(-50%)', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}>
+                          <Icon name="x" size={12} color={t.text3} stroke={1.9} />
+                        </button>
+                      )}
+                    </div>
                     <div style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '0 3px 3px', scrollbarGutter: 'stable' }}>
-                      {modelGroups.map((group, groupIndex) => {
+                      {filteredModelGroups.map((group, groupIndex) => {
                         const statusProviderId = group.providerId === 'builtin' ? 'anthropic' : group.providerId;
                         const metadata = statusProviderId
                           ? providerCredentials?.find((entry) => entry.providerId === statusProviderId)
@@ -2057,32 +2261,40 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                               <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{group.providerLabel}</span>
                               {connectionLabel && <span title={`${group.providerLabel}: ${connectionLabel}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0, color: connected ? t.ok : connectionLabel === 'Checking…' ? t.text4 : t.warn, fontSize: 9.5, fontWeight: 600, letterSpacing: 0, textTransform: 'none' }}><span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: 99, background: 'currentColor' }} />{connectionLabel}</span>}
                             </div>
-                            {group.models.map((entry) => {
-                              const active = entry.reference === bridge.desktop.currentModel;
-                              const entryDetail = modelDetailsByReference.get(entry.reference);
-                              const entrySupportsFastMode = modelReference(entry.reference).providerId === 'anthropic'
-                                && modelSupportsFastMode(entryDetail);
-                              const selection = resolveModelSelection(entry.reference, providerCredentials);
-                              const unavailable = selection.kind === 'loading';
-                              const requiresConnection = selection.kind === 'connect';
-                              return (
-                                <button key={entry.reference} type="button" role="menuitemradio" aria-checked={active} disabled={unavailable} aria-disabled={unavailable} title={unavailable ? 'Checking provider connection…' : requiresConnection ? `Connect ${providerById(selection.providerId)?.label ?? selection.providerId} in Settings to use this model` : undefined} onClick={() => {
-                                  if (selection.kind === 'loading') return;
-                                  setModelOpen(false);
-                                  setModelSubmenu(null);
-                                  if (selection.kind === 'connect') onOpenProviderSettings(selection.providerId, entry.reference, () => modelTrigger.current?.focus());
-                                  else invoke(() => bridge.setModel(entry.reference));
-                                }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 40, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: unavailable ? t.text4 : requiresConnection ? t.text2 : t.text, textAlign: 'left', cursor: unavailable ? 'wait' : 'pointer', font: 'inherit', fontSize: 12.5, opacity: unavailable ? .68 : 1 }} onMouseEnter={(event) => { if (!active && !unavailable) event.currentTarget.style.background = t.surfaceHover; }} onMouseLeave={(event) => { if (!active && !unavailable) event.currentTarget.style.background = 'transparent'; }}>
-                                  {unavailable ? <span className="beta-spinner" aria-hidden="true" style={{ width: 11, height: 11, borderWidth: 1.5, color: t.text4 }} /> : requiresConnection ? <Icon name="lock" size={14} color={t.warn} /> : entrySupportsFastMode && <Icon name="bolt" size={14} color={active ? t.accent : t.text3} />}
-                                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: active ? 650 : 500 }}>{entry.label}</span>
-                                  {requiresConnection && <span style={{ flexShrink: 0, color: t.warn, fontSize: 10, fontWeight: 600 }}>Connect in Settings</span>}
-                                  {active && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
-                                </button>
-                              );
-                            })}
+                            {modelBillingGroups(group, bridge.desktop.modelDetails).map((billingGroup, billingIndex) => (
+                              <div key={billingGroup.label ?? 'all'} style={billingIndex === 0 ? undefined : { marginTop: 4, paddingTop: 4, borderTop: `0.5px solid ${t.border}` }}>
+                                {billingGroup.label && <div style={{ padding: '5px 10px 3px', color: t.text4, fontSize: 9.5, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase' }}>{billingGroup.label}</div>}
+                                {billingGroup.models.map((entry) => {
+                                  const active = entry.reference === bridge.desktop.currentModel;
+                                  const entryDetail = modelDetailsByReference.get(entry.reference);
+                                  const entrySupportsFastMode = modelReference(entry.reference).providerId === 'anthropic'
+                                    && modelSupportsFastMode(entryDetail);
+                                  const selection = resolveModelSelection(entry.reference, providerCredentials);
+                                  const unavailable = selection.kind === 'loading';
+                                  const requiresConnection = selection.kind === 'connect';
+                                  return (
+                                    <button key={entry.reference} type="button" role="menuitemradio" aria-checked={active} disabled={unavailable} aria-disabled={unavailable} title={unavailable ? 'Checking provider connection…' : requiresConnection ? `Connect ${providerById(selection.providerId)?.label ?? selection.providerId} in Settings to use this model` : entry.requestModel} onClick={() => {
+                                      if (selection.kind === 'loading') return;
+                                      setModelOpen(false);
+                                      setModelSubmenu(null);
+                                      if (selection.kind === 'connect') onOpenProviderSettings(selection.providerId, entry.reference, () => modelTrigger.current?.focus());
+                                      else invoke(() => bridge.setModel(entry.reference));
+                                    }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 40, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: unavailable ? t.text4 : requiresConnection ? t.text2 : t.text, textAlign: 'left', cursor: unavailable ? 'wait' : 'pointer', font: 'inherit', fontSize: 12.5, opacity: unavailable ? .68 : 1 }} onMouseEnter={(event) => { if (!active && !unavailable) event.currentTarget.style.background = t.surfaceHover; }} onMouseLeave={(event) => { if (!active && !unavailable) event.currentTarget.style.background = 'transparent'; }}>
+                                      {unavailable ? <span className="beta-spinner" aria-hidden="true" style={{ width: 11, height: 11, borderWidth: 1.5, color: t.text4 }} /> : requiresConnection ? <Icon name="lock" size={14} color={t.warn} /> : entrySupportsFastMode && <Icon name="bolt" size={14} color={active ? t.accent : t.text3} />}
+                                      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: active ? 650 : 500 }}>{modelDisplayLabel(entry, bridge.desktop.modelDetails)}</span>
+                                      {requiresConnection && <span style={{ flexShrink: 0, color: t.warn, fontSize: 10, fontWeight: 600 }}>Connect in Settings</span>}
+                                      {active && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            ))}
                           </section>
                         );
                       })}
+                      {filteredModelGroups.length === 0 && (
+                        <div role="status" style={{ padding: '28px 16px 30px', color: t.text4, fontSize: 12, textAlign: 'center' }}>No models match “{modelQuery.trim()}”</div>
+                      )}
                     </div>
                   </div>
                 )}
@@ -2119,7 +2331,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               </div>
             )}
           </div>
-          <button type="button" disabled={!ready} aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
+          <button type="button" disabled={!ready || flowMode} aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready && !flowMode), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
           <button
             type="button"
             disabled={!ready}
@@ -2127,9 +2339,9 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             aria-pressed={flowMode}
             title={flowMode ? '关闭心流模式' : '开启心流模式'}
             onClick={toggleFlowMode}
-            style={{ ...composerPrimaryActionStyle(t, ready), background: flowMode ? t.accent : t.text, color: t.windowBg, boxShadow: flowMode ? `0 0 0 3px ${t.accentBg}` : 'none' }}
+            style={{ ...composerPrimaryActionStyle(t, ready), color: flowMode ? t.accent : t.text }}
           >
-            <Icon name="waveform" size={18} color={flowMode ? '#fff' : t.windowBg} stroke={2.15} />
+            <Icon name="waveform" size={18} color="currentColor" stroke={2.15} />
           </button>
           {bridge.running && (
             <button
@@ -2143,12 +2355,12 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           )}
           <button
             type="button"
-            disabled={!ready || !hasPrompt}
+            disabled={!ready || !hasPrompt || flowMode}
             onClick={() => { void submit(); }}
             aria-label={bridge.running ? 'Send pending message' : 'Send prompt'}
             title={bridge.running ? 'Send as pending message' : 'Send prompt'}
-            style={composerSendStyle(t, Boolean(ready && hasPrompt))}
-          ><Icon name="arrowU" size={18} color={ready && hasPrompt ? '#fff' : t.text4} /></button>
+            style={composerSendStyle(t, Boolean(ready && hasPrompt && !flowMode))}
+          ><Icon name="arrowU" size={18} color={ready && hasPrompt && !flowMode ? '#fff' : t.text4} /></button>
         </div>
         {(voiceState === 'unsupported' || voiceState === 'denied') && <div style={{ position: 'relative' }}>
           {voiceState === 'unsupported' && <span role="status" style={{ position: 'absolute', right: 52, bottom: 9, padding: '5px 8px', borderRadius: 7, background: t.surfaceHover, color: t.text3, fontSize: 10.5 }}>Voice input is unavailable here</span>}

@@ -18,7 +18,8 @@
 use crate::ask_user_question::AskUserQuestionRequestDto;
 use crate::controls::ConversationControlsDto;
 use crate::listings::{
-    AgentDto, AuthStateDto, CoordinatorWorkerDto, DoctorReportDto, HookDto, McpServerDto,
+    AgentDto, AuthStateDto, ConfigurationDomainDto, ConfigurationEffectDto,
+    ConfigurationOperationStatusDto, CoordinatorWorkerDto, DoctorReportDto, HookDto, McpServerDto,
     MemoryEntryDto, ModelDetailsDto, SessionAgentSummaryDto, SessionModeDto, SessionRowDto,
     SkillDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
@@ -29,6 +30,7 @@ use crate::local_apps::{
 use crate::message::MessageDto;
 use crate::permission::PermissionResolutionDto;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Outbound events the engine streams to a client.
 ///
@@ -206,6 +208,11 @@ pub enum ClientEvent {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         unavailable_provider_ids: Vec<String>,
         storage_encrypted: bool,
+        /// Display-safe credential previews keyed by provider id. Values are
+        /// fixed masks plus at most the final four characters; plaintext
+        /// credentials never cross the client protocol.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        credential_previews: HashMap<String, String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -513,6 +520,47 @@ pub enum ClientEvent {
         source_session_id: String,
         session_id: String,
         mode: SessionModeDto,
+    },
+
+    ProviderConnectionTested {
+        operation_id: u64,
+        provider_id: String,
+        connected: bool,
+        reachable: bool,
+        authenticated: bool,
+        model_available: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        http_status: Option<u16>,
+        latency_ms: u64,
+        message: String,
+        used_stored_credential: bool,
+    },
+
+    ConfigurationOperation {
+        domain: ConfigurationDomainDto,
+        operation_id: u64,
+        status: ConfigurationOperationStatusDto,
+        effect: ConfigurationEffectDto,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details_json: Option<String>,
+    },
+
+    SkillCatalog {
+        catalog_json: String,
+    },
+
+    SkillDocument {
+        document_json: String,
+    },
+
+    McpConfigurationSnapshot {
+        snapshot_json: String,
+    },
+
+    PluginCatalog {
+        catalog_json: String,
     },
 }
 

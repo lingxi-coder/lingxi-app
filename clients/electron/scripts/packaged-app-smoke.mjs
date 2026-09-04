@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { APP_NAME, BUNDLE_ID, artifactPaths, formatError, packageRoot, repoRoot } from './package-support.mjs';
+import { APP_NAME, artifactPaths, formatError, packageRoot, repoRoot } from './package-support.mjs';
 
 export const APP_USER_DATA_SUBPATH = join('Library', 'Application Support', APP_NAME);
 
@@ -197,9 +197,35 @@ export function sanitizePackagedAppEnvironment(source, overrides = {}) {
   return env;
 }
 
-export function isKeylessProviderCredentialSnapshot(providerCredentials) {
+const SAFE_CREDENTIAL_METADATA_KEYS = new Set([
+  'configured',
+  'credentialPreview',
+  'encryptionAvailable',
+  'providerId',
+]);
+
+const SAFE_BOOTSTRAP_PROMPT_PLACEHOLDERS = new Set([
+  'Connect a provider in Settings to start coding…',
+  'Waiting for the local engine…',
+]);
+
+export function isSafeProviderCredentialSnapshot(providerCredentials) {
   return Array.isArray(providerCredentials)
-    && providerCredentials.every((entry) => entry?.configured === false);
+    && providerCredentials.length > 0
+    && providerCredentials.every((entry) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+      if (Object.keys(entry).some((key) => !SAFE_CREDENTIAL_METADATA_KEYS.has(key))) return false;
+      if (typeof entry.providerId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(entry.providerId)) return false;
+      if (typeof entry.configured !== 'boolean' || entry.encryptionAvailable !== true) return false;
+      if (entry.credentialPreview === undefined) return true;
+      return typeof entry.credentialPreview === 'string'
+        && entry.credentialPreview.startsWith('••••')
+        && Array.from(entry.credentialPreview.slice(4)).length <= 4;
+    });
+}
+
+export function isExpectedBootstrapPromptPlaceholder(placeholder) {
+  return SAFE_BOOTSTRAP_PROMPT_PLACEHOLDERS.has(placeholder);
 }
 
 function writeJson(path, value) {
@@ -289,13 +315,26 @@ class CdpConnection {
     });
   }
 
-  async send(method, params = {}) {
+  async send(method, params = {}, timeoutMs = 10_000) {
     await this.ready;
     if (this.#closed) throw new Error(`CDP connection already closed for ${method}`);
     const id = this.#nextId++;
     const message = JSON.stringify({ id, method, params });
     return await new Promise((resolvePromise, rejectPromise) => {
-      this.#pending.set(id, { resolve: resolvePromise, reject: rejectPromise });
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        rejectPromise(new Error(`CDP ${method} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.#pending.set(id, {
+        resolve: (value) => {
+          clearTimeout(timer);
+          resolvePromise(value);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          rejectPromise(error);
+        },
+      });
       this.ws.send(message);
     });
   }
@@ -310,10 +349,10 @@ class CdpConnection {
     };
   }
 
-  async close() {
+  async close(timeoutMs = 2_000) {
     if (this.#closed) return;
     this.ws.close();
-    await this.#closePromise;
+    await Promise.race([this.#closePromise, delay(timeoutMs)]);
   }
 }
 
@@ -457,13 +496,24 @@ function spawnPackagedApp(appPath, env, cdpPort, userDataDir) {
   return { child, executable, output: { get stdout() { return stdout; }, get stderr() { return stderr; } } };
 }
 
-async function closePackagedApp(browser, child) {
+function packagedAppBundleId(appPath) {
+  return execFileSync('/usr/libexec/PlistBuddy', [
+    '-c',
+    'Print :CFBundleIdentifier',
+    join(appPath, 'Contents', 'Info.plist'),
+  ], { encoding: 'utf8' }).trim();
+}
+
+async function closePackagedApp(browser, child, bundleId) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   try {
-    execFileSync('/usr/bin/osascript', ['-e', `tell application id "${BUNDLE_ID}" to quit`], { stdio: 'pipe' });
+    execFileSync('/usr/bin/osascript', ['-e', `tell application id "${bundleId}" to quit`], { stdio: 'pipe' });
   } catch {
     try {
-      await browser.send('Browser.close');
+      await Promise.race([
+        browser.send('Browser.close'),
+        delay(2_000).then(() => { throw new Error('Browser.close timed out'); }),
+      ]);
     } catch {
       // Best effort fallback when Apple Events are unavailable.
     }
@@ -483,8 +533,17 @@ async function assertRendererContract(page, leakPatterns) {
       protocol: window.location.protocol,
       hasNodeRequire: typeof window.require !== 'undefined',
       hasNodeProcess: typeof window.process !== 'undefined',
+      screenLabel: document.querySelector('.desktop-shell')?.getAttribute('data-screen-label'),
+      hasPrompt: Boolean(document.querySelector('[aria-label="Prompt"]')),
+      promptPlaceholder: document.querySelector('[aria-label="Prompt"]')?.getAttribute('data-placeholder'),
       bodyText: document.body.innerText,
-    }))()`).then((value) => value?.hasLingxi && /Set up LingXi Code Beta/.test(value.bodyText) ? value : undefined),
+    }))()`).then((value) => (
+      value?.hasLingxi
+      && value.screenLabel === 'LingXi Code Desktop Beta'
+      && value.hasPrompt
+        ? value
+        : undefined
+    )),
     { timeoutMs: 15_000, label: 'renderer bootstrap' },
   );
   assert.equal(details.hasLingxi, true, 'window.lingxi must be exposed');
@@ -493,13 +552,17 @@ async function assertRendererContract(page, leakPatterns) {
   assert.equal(details.protocol, 'file:', 'packaged app must load the bundled file renderer');
   assert.equal(details.hasNodeRequire, false, 'nodeIntegration must remain disabled');
   assert.equal(details.hasNodeProcess, false, 'process must not be exposed to the renderer');
-  assert.match(details.bodyText, /Set up LingXi Code Beta/);
-  assert.match(details.bodyText, /Choose a workspace/);
-  assert.match(details.bodyText, /Trust executable workspace settings/);
-  assert.match(details.bodyText, /Connect a provider/);
-  assert.match(details.bodyText, /OpenAI/);
-  assert.match(details.bodyText, /DeepSeek/);
-  assert.match(details.bodyText, /Start the local engine/);
+  assert.equal(details.screenLabel, 'LingXi Code Desktop Beta');
+  assert.equal(details.hasPrompt, true, 'desktop prompt composer must render');
+  assert.match(details.bodyText, /LingXi/);
+  assert.match(details.bodyText, /CODE/);
+  assert.match(details.bodyText, /Projects/);
+  assert.match(details.bodyText, /workspace/);
+  assert.equal(
+    isExpectedBootstrapPromptPlaceholder(details.promptPlaceholder),
+    true,
+    `unexpected pre-ready prompt placeholder: ${details.promptPlaceholder}`,
+  );
   assert.doesNotMatch(details.bodyText, /MLPlatform|Dispatching Task 1|Placeholder for the desktop mock/);
   const leaks = collectLeakMatches(details.bodyText, leakPatterns);
   assert.equal(leaks.length, 0, `renderer leaked forbidden content: ${leaks.map((pattern) => pattern.source).join(', ')}`);
@@ -522,7 +585,7 @@ async function setupSmokeCollectors(page) {
   await evaluate(page, `(() => {
     window.__lingxiSmoke?.unsubs?.forEach((unsubscribe) => unsubscribe());
     const state = { events: [], states: [], permissions: [], unsubs: [] };
-    state.unsubs.push(window.lingxi.onEvent((event) => { state.events.push(event); }));
+    state.unsubs.push(window.lingxi.onEvent((envelope) => { state.events.push(envelope.event); }));
     state.unsubs.push(window.lingxi.onConnectionStateChanged((connection) => { state.states.push(connection); }));
     state.unsubs.push(window.lingxi.onPermission((permission) => { state.permissions.push(permission); }));
     window.__lingxiSmoke = state;
@@ -530,7 +593,7 @@ async function setupSmokeCollectors(page) {
   })()`);
 }
 
-async function assertKeylessBundledSidecar(page, appPath, tempRoot) {
+async function assertBundledSidecar(page, appPath, tempRoot) {
   const bootstrap = await waitFor(
     async () => {
       const value = await evaluate(page, `window.lingxi.bootstrap()`);
@@ -539,9 +602,9 @@ async function assertKeylessBundledSidecar(page, appPath, tempRoot) {
     { timeoutMs: 20_000, label: 'keyless bundled bridge connection' },
   );
   assert.equal(
-    isKeylessProviderCredentialSnapshot(bootstrap.providerCredentials),
+    isSafeProviderCredentialSnapshot(bootstrap.providerCredentials),
     true,
-    'packaged smoke profile must remain keyless',
+    'packaged credential snapshot must stay encrypted and metadata-only',
   );
   assert.equal(bootstrap.workspace.trusted, true, 'workspace should be pretrusted for automated smoke verification');
 
@@ -550,40 +613,53 @@ async function assertKeylessBundledSidecar(page, appPath, tempRoot) {
   assert.equal(fileSearch.truncated, false, 'small workspace file search should not be truncated');
 
   await setupSmokeCollectors(page);
-  await evaluate(page, `window.lingxi.command({ type: 'list_models' })`);
-  await evaluate(page, `window.lingxi.command({ type: 'list_sessions', limit: 5 })`);
-  await evaluate(page, `window.lingxi.command({ type: 'new_session' })`);
-  await evaluate(page, `window.lingxi.command({ type: 'set_permission_mode', mode: 'acceptEdits' })`);
+  const sessionBootstrap = await evaluate(page, `(async () => {
+    const current = await window.lingxi.bootstrap();
+    return await window.lingxi.newSession(current.workspace.path);
+  })()`);
+  const sessionId = sessionBootstrap?.activeSession?.sessionId;
+  assert.equal(typeof sessionId, 'string', 'packaged smoke must create an active session before dispatching commands');
+  const encodedSessionId = JSON.stringify(sessionId);
+  await evaluate(page, `window.lingxi.command(${encodedSessionId}, { type: 'list_models' })`);
+  await evaluate(page, `window.lingxi.command(${encodedSessionId}, { type: 'list_sessions', limit: 5 })`);
+  await evaluate(page, `window.lingxi.command(${encodedSessionId}, { type: 'set_permission_mode', mode: 'acceptEdits' })`);
   // bypassPermissions now requires explicit, persisted acceptance (security #34).
   // This profile pre-accepts it (createPackagedSettings sets
   // bypassPermissionsModeAccepted), so the raw command passes the gate without a
   // blocking dialog — the "already accepted, don't re-prompt" path. A fresh
   // profile with no acceptance would have this command rejected.
-  await evaluate(page, `window.lingxi.command({ type: 'set_permission_mode', mode: 'bypassPermissions' })`);
+  await evaluate(page, `window.lingxi.command(${encodedSessionId}, { type: 'set_permission_mode', mode: 'bypassPermissions' })`);
 
-  const smokeState = await waitFor(
-    async () => {
-      const value = await evaluate(page, `window.__lingxiSmoke && ({
-        events: window.__lingxiSmoke.events,
-        states: window.__lingxiSmoke.states,
-        permissions: window.__lingxiSmoke.permissions,
-      })`);
-      const types = new Set((value?.events ?? []).map((event) => event.type));
-      const modes = (value?.events ?? [])
-        .filter((event) => event.type === 'permission_mode_changed')
-        .map((event) => event.mode);
-      if (
-        types.has('model_list')
-        && types.has('session_list')
-        && types.has('session_started')
-        && modes.includes('acceptEdits')
-        && modes.includes('bypassPermissions')
-      ) return value;
-      return undefined;
-    },
-    { timeoutMs: 20_000, label: 'bundled sidecar keyless event flow' },
-  );
-  assert.equal(smokeState.permissions.length, 0, 'packaged keyless smoke must not trigger permission prompts during listing/session setup');
+  const readSmokeState = () => evaluate(page, `window.__lingxiSmoke && ({
+    events: window.__lingxiSmoke.events,
+    states: window.__lingxiSmoke.states,
+    permissions: window.__lingxiSmoke.permissions,
+  })`);
+  let smokeState;
+  try {
+    smokeState = await waitFor(
+      async () => {
+        const value = await readSmokeState();
+        const types = new Set((value?.events ?? []).map((event) => event.type));
+        const modes = (value?.events ?? [])
+          .filter((event) => event.type === 'permission_mode_changed')
+          .map((event) => event.mode);
+        if (
+          types.has('model_list')
+          && types.has('session_list')
+          && modes.includes('acceptEdits')
+          && modes.includes('bypassPermissions')
+        ) return value;
+        return undefined;
+      },
+      { timeoutMs: 20_000, label: 'bundled sidecar event flow' },
+    );
+  } catch (error) {
+    const observed = await readSmokeState();
+    const types = (observed?.events ?? []).map((event) => event.type);
+    throw new Error(`${formatError(error)}; observed event types: ${JSON.stringify(types)}`);
+  }
+  assert.equal(smokeState.permissions.length, 0, 'packaged smoke must not trigger permission prompts during listing/session setup');
   assert.deepEqual(
     smokeState.events
       .filter((event) => event.type === 'permission_mode_changed')
@@ -645,6 +721,7 @@ export async function runPackagedAppSmoke(root = packageRoot) {
   const runtimePaths = runtimePathsForHome(tempHome);
   writeJson(runtimePaths.settingsPath, createPackagedSettings({ workspace }));
   const copiedAppPath = copyPackagedApp(appPath, join(tempRoot, 'app-copy'));
+  const copiedAppBundleId = packagedAppBundleId(copiedAppPath);
   const cdpPort = await reserveLoopbackPort();
   const env = sanitizePackagedAppEnvironment(process.env, {
     HOME: tempHome,
@@ -685,13 +762,13 @@ export async function runPackagedAppSmoke(root = packageRoot) {
 
     await assertRendererContract(page, leakPatterns);
     await assertSecurityBehavior(page);
-    await assertKeylessBundledSidecar(page, copiedAppPath, tempRoot);
+    await assertBundledSidecar(page, copiedAppPath, tempRoot);
 
     assert.equal(consoleErrors.length, 0, `renderer console errors detected: ${JSON.stringify(consoleErrors)}`);
     assert.equal(runtimeExceptions.length, 0, `renderer exceptions detected: ${JSON.stringify(runtimeExceptions)}`);
     assert.equal(logErrors.length, 0, `renderer log errors detected: ${JSON.stringify(logErrors)}`);
 
-    await closePackagedApp(browser, child);
+    await closePackagedApp(browser, child, copiedAppBundleId);
     child = null;
     await browser.close();
     await page.close();
@@ -705,7 +782,7 @@ export async function runPackagedAppSmoke(root = packageRoot) {
       cdpPort,
       runtimePaths,
       notes: [
-        'Automated: bundled file:// renderer, preload contract, bounded @file workspace search, keyless bundled sidecar session/listing flow, live permission-mode switching, renderer security checks, and exact temp cleanup.',
+        'Automated: bundled file:// renderer, preload contract, bounded @file workspace search, encrypted credential metadata, bundled sidecar session/listing flow, live permission-mode switching, renderer security checks, and exact temp cleanup.',
         'Manual-only: Gatekeeper transfer prompts, ad-hoc signature approval on a different Mac, full Developer ID notarization/stapling, and native workspace-trust dialog text on physical user interaction.',
       ],
     };

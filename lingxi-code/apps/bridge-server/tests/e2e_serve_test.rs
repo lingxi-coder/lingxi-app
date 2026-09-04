@@ -41,7 +41,6 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cwd = tmp.path().to_path_buf();
     let cfg = DesktopConfig {
-        credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
         api_key_helper: None,
@@ -64,6 +63,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         // credential-required Error. Without this the credential assertions
         // below pass only on a machine that has never logged in.
         isolated_credential_storage: true,
+        credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
         recent_models: Vec::new(),
         fallback_model: None,
         custom_betas: Vec::new(),
@@ -75,6 +75,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         deny_unresolved_ask: false,
         is_tty: false,
         injected_permission_gate: None,
+        injected_plugin_secrets: Default::default(),
         ask_user_question_tx: None,
         computer_access_tx: None,
         session_agent_observer: None,

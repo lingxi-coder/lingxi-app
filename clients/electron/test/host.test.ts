@@ -6,6 +6,9 @@ import { join } from 'node:path';
 
 import {
   CH_BRIDGE_RESTART,
+  CH_PROVIDER_CREDENTIAL_CLEAR,
+  CH_PROVIDER_CREDENTIAL_SET,
+  CH_PROVIDER_CREDENTIALS_GET,
   CH_SESSION_CLEAR,
   CH_SETTINGS_UPDATE,
   CH_WORKSPACE_FILE_PREVIEW,
@@ -476,24 +479,43 @@ test('session open accepts a matching UUID outside the bounded project list', as
   const sessionId = '55555555-6666-4777-8888-999999999999';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
-  let opened: { projectPath: string; sessionId: string } | undefined;
+  let opened: {
+    ref: { projectPath: string; sessionId: string };
+    empty?: boolean;
+    resumeModel?: string;
+  } | undefined;
   const host = new HostController(
     settings,
     {
       get: () => undefined,
-      openSession: async (ref: { projectPath: string; sessionId: string }) => { opened = ref; },
+      openSession: async (
+        ref: { projectPath: string; sessionId: string },
+        empty?: boolean,
+        resumeModel?: string,
+      ) => { opened = { ref, empty, resumeModel }; },
     } as any,
     new DiagnosticBuffer(),
     {
       list: async () => ({ sessions: [] }),
       find: async (_projectPath: string, requestedId: string) => requestedId === sessionId
-        ? { uuid: sessionId, title: 'Old session', modified_rfc3339: '', message_count: 1, path: 'old.jsonl' }
+        ? {
+          uuid: sessionId,
+          title: 'Old session',
+          modified_rfc3339: '',
+          message_count: 1,
+          path: 'old.jsonl',
+          resume_model: 'openrouter/cohere/north-mini-code:free',
+        }
         : undefined,
     } as any,
   );
   try {
     await host.openSessionAndActivate({ projectPath: project, sessionId });
-    assert.deepEqual(opened, { projectPath: project, sessionId });
+    assert.deepEqual(opened, {
+      ref: { projectPath: project, sessionId },
+      empty: false,
+      resumeModel: 'openrouter/cohere/north-mini-code:free',
+    });
     assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, sessionId });
   } finally {
     rmSync(userData, { recursive: true, force: true });
@@ -591,14 +613,14 @@ test('opening an already-connected runtime does not require a persisted catalog 
     assert.equal(opened, true);
     assert.equal(catalogLookups, 0);
     assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, sessionId });
-    assert.equal((host as any).bootstrap().workspace.trusted, true);
+    assert.equal((await (host as any).bootstrap()).workspace.trusted, true);
   } finally {
     rmSync(userData, { recursive: true, force: true });
     rmSync(projectDirectory, { recursive: true, force: true });
   }
 });
 
-test('bootstrap surfaces an explicit recovery state when the persisted workspace is missing', () => {
+test('bootstrap surfaces an explicit recovery state when the persisted workspace is missing', async () => {
   const diagnostics = new DiagnosticBuffer();
   const workspace = '/missing/workspace';
   const missing = Object.assign(new Error('workspace path is not a directory'), { code: 'ENOENT' });
@@ -620,9 +642,9 @@ test('bootstrap surfaces an explicit recovery state when the persisted workspace
   };
   const host = new HostController(settings as any, bridge as any, diagnostics);
 
-  const bootstrap = (host as any).bootstrap();
+  const bootstrap = await (host as any).bootstrap();
   const report = JSON.parse((host as any).diagnosticReport());
-  const nextBootstrap = (host as any).bootstrap();
+  const nextBootstrap = await (host as any).bootstrap();
 
   assert.equal(nextBootstrap.revision, bootstrap.revision + 1);
 
@@ -642,7 +664,7 @@ test('bootstrap surfaces an explicit recovery state when the persisted workspace
   assert.match(diagnostics.snapshot()[0]?.message ?? '', /workspace path is not a directory/);
 });
 
-test('bootstrap treats a credential already supplied to the running engine as configured', () => {
+test('bootstrap treats a credential already supplied to the running engine as configured', async () => {
   const diagnostics = new DiagnosticBuffer();
   const settings = {
     getWorkspace: () => '/workspace',
@@ -662,7 +684,7 @@ test('bootstrap treats a credential already supplied to the running engine as co
   };
   const host = new HostController(settings as any, bridge as any, diagnostics);
 
-  const bootstrap = (host as any).bootstrap();
+  const bootstrap = await (host as any).bootstrap();
   const deepseek = bootstrap.providerCredentials.find((entry: { providerId: string }) => entry.providerId === 'deepseek');
 
   assert.deepEqual(deepseek, {
@@ -673,7 +695,7 @@ test('bootstrap treats a credential already supplied to the running engine as co
   });
 });
 
-test('bootstrap does not treat launch credentials as configured when the engine failed to start', () => {
+test('bootstrap does not treat launch credentials as configured when the engine failed to start', async () => {
   const diagnostics = new DiagnosticBuffer();
   const settings = {
     getWorkspace: () => '/workspace',
@@ -693,7 +715,7 @@ test('bootstrap does not treat launch credentials as configured when the engine 
   };
   const host = new HostController(settings as any, bridge as any, diagnostics);
 
-  const bootstrap = (host as any).bootstrap();
+  const bootstrap = await (host as any).bootstrap();
   const deepseek = bootstrap.providerCredentials.find((entry: { providerId: string }) => entry.providerId === 'deepseek');
 
   assert.deepEqual(deepseek, {
@@ -703,7 +725,7 @@ test('bootstrap does not treat launch credentials as configured when the engine 
   });
 });
 
-test('bootstrap reports CLI/TUI credentials discovered by the shared engine store as persisted', () => {
+test('bootstrap reports CLI/TUI credentials discovered by the shared engine store as persisted', async () => {
   const diagnostics = new DiagnosticBuffer();
   const settings = {
     getWorkspace: () => '/workspace',
@@ -721,32 +743,23 @@ test('bootstrap reports CLI/TUI credentials discovered by the shared engine stor
     activeCredentialProviderIds: ['deepseek'],
     persistedCredentialProviderIds: ['deepseek'],
     providerCredentialStorageEncrypted: true,
+    providerCredentialPreviews: { deepseek: '••••abcd' },
     turnActive: false,
   };
   const host = new HostController(settings as any, bridge as any, diagnostics);
 
-  const bootstrap = (host as any).bootstrap();
+  const bootstrap = await (host as any).bootstrap();
   const deepseek = bootstrap.providerCredentials.find((entry: { providerId: string }) => entry.providerId === 'deepseek');
 
   assert.deepEqual(deepseek, {
     providerId: 'deepseek',
     configured: true,
     encryptionAvailable: true,
+    credentialPreview: '••••abcd',
   });
 });
 
-test('default model mirror failure is recoverable after credential persistence', () => {
-  const diagnostics = new DiagnosticBuffer();
-  const settings = {
-    update: () => { throw new Error('settings mirror failed'); },
-  };
-  const host = new HostController(settings as any, {} as any, diagnostics);
-
-  (host as any).updateProviderDefaultModel('deepseek/deepseek-v4-flash');
-  assert.match(diagnostics.snapshot()[0]?.message ?? '', /default model update failed/);
-});
-
-test('bootstrap replays pending AskUserQuestion requests after a renderer reload', () => {
+test('bootstrap replays pending AskUserQuestion requests after a renderer reload', async () => {
   const diagnostics = new DiagnosticBuffer();
   const settings = {
     getWorkspace: () => '/workspace',
@@ -771,7 +784,7 @@ test('bootstrap replays pending AskUserQuestion requests after a renderer reload
   };
   const host = new HostController(settings as any, bridge as any, diagnostics);
 
-  const bootstrap = (host as any).bootstrap();
+  const bootstrap = await (host as any).bootstrap();
 
   assert.deepEqual(bootstrap.pendingAskUserQuestions, bridge.pendingAskUserQuestions);
 });
@@ -806,7 +819,7 @@ test('project session catalogs are patched independently and preserved in bootst
   await (host as any).loadProjectSessions(projectA);
   await (host as any).loadProjectSessions(projectB);
 
-  const bootstrap = (host as any).bootstrap();
+  const bootstrap = await (host as any).bootstrap();
   assert.deepEqual(calls, [projectA, projectB]);
   assert.equal(bootstrap.projectCatalogs[projectA].sessions[0].title, projectA);
   assert.equal(bootstrap.projectCatalogs[projectB].sessions[0].title, projectB);
@@ -845,10 +858,131 @@ test('host catalog generations keep only the newest deferred response', async ()
   first.resolve({ sessions: [row('old')] });
   await firstLoad;
 
-  assert.equal((host as any).bootstrap().projectCatalogs[projectPath].sessions[0].title, 'new');
+  assert.equal((await (host as any).bootstrap()).projectCatalogs[projectPath].sessions[0].title, 'new');
 });
 
-test('the settings-update IPC handler accepts a voice patch, normalizes it through the real store, and never restarts the bridge for it', async () => {
+test('provider credential IPC uses the broker path, hot-syncs cached sessions, and never returns the full secret', async () => {
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  const ipc = {
+    handle: (channel: string, handler: (...args: unknown[]) => unknown) => { handlers.set(channel, handler); },
+    removeHandler: (channel: string) => { handlers.delete(channel); },
+  };
+  const settings = {
+    getWorkspace: () => '/workspace',
+    getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
+    getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [] }),
+  };
+  const operations: string[] = [];
+  const bridge = {
+    registerIpc: () => undefined,
+    registerWindow: () => undefined,
+    turnActive: false,
+    hasActiveWork: () => false,
+    refreshCachedProviderCredential: async (providerId: string, credential: string) => {
+      assert.equal(credential, 'sk-replacement-secret');
+      operations.push(`runtime:set:${providerId}`);
+    },
+    clearCachedProviderCredential: async (providerId: string) => {
+      operations.push(`runtime:delete:${providerId}`);
+    },
+  };
+  const host = new HostController(
+    settings as any,
+    bridge as any,
+    new DiagnosticBuffer(),
+    undefined,
+    ipc as any,
+    undefined,
+    {
+      health: async () => ({ protocolVersion: 1, buildVersion: 'test' }),
+      listStatus: async () => [{ providerId: 'anthropic', configured: true }],
+      preview: async () => ({ providerId: 'anthropic', configured: true, maskedValue: '••••cret' }),
+      resolve: async () => 'sk-test-secret',
+      set: async (providerId: string) => {
+        operations.push(`broker:set:${providerId}`);
+        return { providerId, configured: true, maskedValue: '••••cret' };
+      },
+      delete: async (providerId: string) => { operations.push(`broker:delete:${providerId}`); },
+    },
+  );
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { mainFrame: frame, isDestroyed: () => false, once: () => undefined, removeListener: () => undefined };
+  host.registerWindow(sender as any, frame.url);
+  host.registerIpc();
+
+  const credentials = handlers.get(CH_PROVIDER_CREDENTIALS_GET);
+  assert.ok(credentials);
+  const result = await credentials!({ sender, senderFrame: frame }, 'anthropic') as Array<Record<string, unknown>>;
+  const anthropic = result.find((entry) => entry['providerId'] === 'anthropic');
+
+  assert.deepEqual(anthropic, {
+    providerId: 'anthropic',
+    configured: true,
+    encryptionAvailable: true,
+    credentialPreview: '••••cret',
+  });
+  assert.equal(JSON.stringify(result).includes('sk-test-secret'), false);
+
+  const setCredential = handlers.get(CH_PROVIDER_CREDENTIAL_SET);
+  const clearCredential = handlers.get(CH_PROVIDER_CREDENTIAL_CLEAR);
+  assert.ok(setCredential);
+  assert.ok(clearCredential);
+  const stored = await setCredential!({ sender, senderFrame: frame }, 'anthropic', 'sk-replacement-secret') as Record<string, unknown>;
+  assert.equal(JSON.stringify(stored).includes('sk-replacement-secret'), false);
+  assert.deepEqual(operations, ['broker:set:anthropic', 'runtime:set:anthropic']);
+
+  await clearCredential!({ sender, senderFrame: frame }, 'anthropic');
+  assert.deepEqual(operations, [
+    'broker:set:anthropic',
+    'runtime:set:anthropic',
+    'runtime:delete:anthropic',
+    'broker:delete:anthropic',
+  ]);
+});
+
+test('broker-backed bootstrap ignores legacy runtime credential status', async () => {
+  const settings = {
+    getWorkspace: () => '/workspace',
+    getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
+    getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [] }),
+    credentialMetadata: () => ({ configured: false, encryptionAvailable: false }),
+    providerCredentialMetadataFor: () => [],
+  };
+  const bridge = {
+    connectionState: { status: 'connected' as const },
+    persistedCredentialProviderIds: ['deepseek'],
+    providerCredentialStorageEncrypted: true,
+    providerCredentialPreviews: { deepseek: '••••legacy' },
+    turnActive: false,
+  };
+  const broker = {
+    health: async () => ({ protocolVersion: 1, buildVersion: 'test' }),
+    listStatus: async () => [],
+    preview: async (providerId: string) => ({ providerId, configured: false }),
+    resolve: async () => undefined,
+    set: async (providerId: string) => ({ providerId, configured: true, maskedValue: '••••test' }),
+    delete: async () => undefined,
+  };
+  const host = new HostController(
+    settings as any,
+    bridge as any,
+    new DiagnosticBuffer(),
+    undefined,
+    undefined,
+    undefined,
+    broker,
+  );
+
+  const bootstrap = await (host as any).bootstrap();
+  const deepseek = bootstrap.providerCredentials.find((entry: { providerId: string }) => entry.providerId === 'deepseek');
+  assert.deepEqual(deepseek, {
+    providerId: 'deepseek',
+    configured: false,
+    encryptionAvailable: true,
+  });
+});
+
+test('settings model and voice patches persist without restarting a live session', async () => {
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-settings-update-voice-'));
   const settings = new SettingsStore(userData);
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
@@ -883,6 +1017,12 @@ test('the settings-update IPC handler accepts a voice patch, normalizes it throu
   const event = { sender, senderFrame: frame };
 
   try {
+    const modelResult = await Promise.resolve(update!(event, {
+      model: 'openrouter/minimax/minimax-m3:free',
+    })) as { model?: string | null };
+    assert.equal(modelResult.model, 'openrouter/minimax/minimax-m3:free');
+    assert.equal(restartCalls, 0, 'persisting a selected model must not restart its session engine');
+
     const result = await Promise.resolve(update!(event, {
       voice: { schemaVersion: 2, recognitionMode: 'localOnly', language: '  ZH-cn  ', voiceSelection: 'Alex', rate: 99, autoPlayReplies: true },
     })) as { voice?: Record<string, unknown> };
@@ -897,10 +1037,8 @@ test('the settings-update IPC handler accepts a voice patch, normalizes it throu
       language: 'ZH-cn',
       voiceSelection: 'system:Alex',
       rate: 2.0,
+      autoPlayReplies: true,
     });
-    // The removed auto-play flag cannot re-enter the settings file through a
-    // renderer patch either: `parseVoicePreferences` keeps known keys only.
-    assert.ok(!('autoPlayReplies' in (result.voice ?? {})));
     assert.deepEqual(settings.getPublic().voice, result.voice, 'the IPC response must reflect what was actually persisted, not an optimistic echo');
     assert.equal(restartCalls, 0, 'a voice-only patch must never restart the bridge');
 

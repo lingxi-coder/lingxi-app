@@ -39,6 +39,13 @@ import {
   unlinkIfPresent,
   writeJson,
 } from './package-support.mjs';
+import {
+  BRIDGE_SERVER_IDENTIFIER,
+  BROKER_CLIENT_IDENTIFIER,
+  BROKER_RESOURCE_DIRNAME,
+  buildCredentialBrokerResources,
+  signBinary,
+} from './credential-broker.mjs';
 
 function log(message) {
   process.stdout.write(`[package:desktop] ${message}\n`);
@@ -129,6 +136,11 @@ function createArchive(paths) {
 }
 
 async function assembleDarwin(paths, metadata, electronDist, sidecar) {
+  if (process.env['LINGXI_CREDENTIAL_BROKER_TEST_MOCK'] !== '1') {
+    throw new Error(
+      'generic macOS packaging is test-only; use npm run package:mac with an Apple signing identity and provisioning profile',
+    );
+  }
   const electronApp = join(electronDist, 'Electron.app');
   const sourceExecutable = join(electronApp, 'Contents', 'MacOS', 'Electron');
   assertBinaryArchitecture(sourceExecutable, paths, 'Electron runtime');
@@ -142,17 +154,32 @@ async function assembleDarwin(paths, metadata, electronDist, sidecar) {
   const packagedSidecar = join(binDir, 'bridge-server');
   copyFileSync(sidecar, packagedSidecar);
   chmodSync(packagedSidecar, 0o755);
+  const brokerResourceRoot = join(resources, BROKER_RESOURCE_DIRNAME);
+  buildCredentialBrokerResources(brokerResourceRoot, {
+    version: metadata.version,
+    targetTriple: paths.arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin',
+    target: paths.arch,
+  });
   copyFileSync(join(packageRoot, 'assets', 'icons', 'icon.icns'), join(resources, 'icon.icns'));
   copyFileSync(join(packageRoot, 'INTERNAL_BETA.md'), join(resources, 'INTERNAL_BETA.md'));
   const executable = renameElectronExecutable(paths.payloadRoot);
   rewriteInfoPlist(join(contents, 'Info.plist'), metadata.version);
   assertBinaryArchitecture(executable, paths, `${APP_NAME} executable`);
   assertBinaryArchitecture(packagedSidecar, paths, 'packaged bridge-server sidecar');
-  if (commandAvailable('/usr/bin/codesign')) {
-    execFileSync('/usr/bin/codesign', [
-      '--force', '--deep', '--sign', '-', '--timestamp=none', paths.payloadRoot,
-    ], { stdio: 'inherit' });
-  }
+  if (!commandAvailable('/usr/bin/codesign')) throw new Error('codesign is required for macOS package tests');
+  signBinary(packagedSidecar, '-', BRIDGE_SERVER_IDENTIFIER);
+  signBinary(
+    join(brokerResourceRoot, 'bin', 'lingxi-credential-client'),
+    '-',
+    BROKER_CLIENT_IDENTIFIER,
+  );
+  execFileSync('/usr/bin/codesign', [
+    '--force', '--sign', '-', '--timestamp=none',
+    join(brokerResourceRoot, 'LingXiCredentialBroker.app'),
+  ], { stdio: 'inherit' });
+  execFileSync('/usr/bin/codesign', [
+    '--force', '--sign', '-', '--timestamp=none', paths.payloadRoot,
+  ], { stdio: 'inherit' });
 }
 
 async function assemblePortable(paths, metadata, electronDist, sidecar) {

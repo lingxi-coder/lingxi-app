@@ -65,6 +65,7 @@ import {
   isSendableAudioSampleRate,
   isSendableAudioText,
   MAX_AUDIO_BASE64_LENGTH,
+  MAX_AUDIO_FAILURE_MESSAGE_LENGTH,
   MAX_AUDIO_MIME_TYPE_LENGTH,
   sanitizeAudioMessage,
 } from '../../shared/audioResponse.js';
@@ -108,6 +109,12 @@ export interface AudioRequestDeps {
   /** `synthesis.ts`'s `synthesize`, with its `SynthesisDeps` already bound. */
   synthesize(text: string, voiceId: string, rate: number): Promise<SynthesisResult>;
   playback(): VoicePlaybackPreference;
+  /**
+   * Native desktop audio executor. When present, this is the authoritative
+   * path for every engine `audio_request`; the browser recorder/synthesizer
+   * fallback remains only for older hosts and focused tests.
+   */
+  executeEngineRequest?(op: AudioOpDto): Promise<unknown>;
 }
 
 /** The one command shape this module sends. */
@@ -129,6 +136,8 @@ export type AudioResponseSender = (sessionId: string, command: AudioResponseComm
  * here — and a throw out of it would cost the parked engine call its answer.
  */
 export type AudioFailureReporter = (cause: unknown) => void;
+
+export const MAX_AUDIO_TRANSCRIPT_LENGTH = 256 * 1024;
 
 /** Invokes a reporter without ever letting it become this function's problem. */
 function report(onError: AudioFailureReporter | undefined, cause: unknown): void {
@@ -168,6 +177,87 @@ function failed(kind: AudioErrorKindDto, message: string): AudioResultDto {
     kind,
     message: sanitizeAudioMessage(message, 'the desktop client reported an unnamed audio failure'),
   };
+}
+
+function invalidNativeAudioResult(message: string): AudioResultDto {
+  return failed('other', `the native audio helper returned an invalid response: ${message}`);
+}
+
+function normalizeNativeAudioResult(value: unknown): AudioResultDto {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return invalidNativeAudioResult('expected an object result');
+  }
+  const input = value as Record<string, unknown>;
+  const type = input['type'];
+  if (typeof type !== 'string') return invalidNativeAudioResult('missing result type');
+  switch (type) {
+    case 'ok':
+      return { type };
+    case 'recording_state':
+      if (typeof input['recording'] !== 'boolean') {
+        return invalidNativeAudioResult('recording_state.recording must be a boolean');
+      }
+      return { type, recording: input['recording'] };
+    case 'recording':
+      if (!isSendableAudioBase64(input['audio_base64'])) {
+        return invalidNativeAudioResult('recording.audio_base64 must be valid base64');
+      }
+      if (!isSendableAudioText(input['mime_type'], MAX_AUDIO_MIME_TYPE_LENGTH)) {
+        return invalidNativeAudioResult('recording.mime_type must be a bounded non-empty string');
+      }
+      return { type, audio_base64: input['audio_base64'], mime_type: input['mime_type'] };
+    case 'transcript': {
+      if (!isSendableAudioText(input['text'], MAX_AUDIO_TRANSCRIPT_LENGTH)) {
+        return invalidNativeAudioResult('transcript.text must be a bounded non-empty string');
+      }
+      const rawLanguage = input['language'];
+      if (rawLanguage !== undefined && !isSendableAudioText(rawLanguage, 64)) {
+        return invalidNativeAudioResult('transcript.language must be a bounded non-empty string');
+      }
+      const language = typeof rawLanguage === 'string' ? rawLanguage : undefined;
+      const rawConfidence = input['confidence'];
+      if (
+        rawConfidence !== undefined
+        && (typeof rawConfidence !== 'number' || !Number.isFinite(rawConfidence) || rawConfidence < 0 || rawConfidence > 1)
+      ) {
+        return invalidNativeAudioResult('transcript.confidence must be a finite number between 0 and 1');
+      }
+      const confidence = typeof rawConfidence === 'number' ? rawConfidence : undefined;
+      return {
+        type,
+        text: input['text'],
+        ...(language === undefined ? {} : { language }),
+        ...(confidence === undefined ? {} : { confidence }),
+      };
+    }
+    case 'audio':
+      if (!isSendableAudioBase64(input['pcm_base64'])) {
+        return invalidNativeAudioResult('audio.pcm_base64 must be valid base64');
+      }
+      if (!isSendableAudioSampleRate(input['sample_rate_hz'])) {
+        return invalidNativeAudioResult('audio.sample_rate_hz must be a valid sample rate');
+      }
+      return { type, pcm_base64: input['pcm_base64'], sample_rate_hz: input['sample_rate_hz'] };
+    case 'failed':
+      if (
+        input['kind'] !== 'permission_denied'
+        && input['kind'] !== 'no_speech'
+        && input['kind'] !== 'not_recording'
+        && input['kind'] !== 'unavailable'
+        && input['kind'] !== 'busy'
+        && input['kind'] !== 'retriable'
+        && input['kind'] !== 'synthesis_failed'
+        && input['kind'] !== 'other'
+      ) {
+        return invalidNativeAudioResult('failed.kind must be a declared audio error kind');
+      }
+      if (!isSendableAudioText(input['message'], MAX_AUDIO_FAILURE_MESSAGE_LENGTH)) {
+        return invalidNativeAudioResult('failed.message must be a bounded non-empty string');
+      }
+      return { type, kind: input['kind'], message: input['message'] };
+    default:
+      return invalidNativeAudioResult(`unsupported result type "${type}"`);
+  }
 }
 
 /**
@@ -212,6 +302,13 @@ function failureFrom(cause: unknown, fallback: AudioErrorKindDto): AudioResultDt
  * `AudioResultDto`.
  */
 export async function serviceAudioOp(op: AudioOpDto, deps: AudioRequestDeps): Promise<AudioResultDto> {
+  if (deps.executeEngineRequest) {
+    try {
+      return normalizeNativeAudioResult(await deps.executeEngineRequest(op));
+    } catch (cause) {
+      return failureFrom(cause, 'other');
+    }
+  }
   switch (op.type) {
     case 'is_recording':
       try {

@@ -555,12 +555,43 @@ mod provider_boot_default_tests {
         assert!(is_curated_model("openai-chatgpt", "gpt-5.6-sol"));
         assert!(!is_curated_model("openai-chatgpt", "gpt-5.3-codex"));
         assert!(is_curated_model("anthropic", "claude-opus-5"));
+        assert!(is_curated_model("anthropic", "claude-fable-5-1"));
+        assert!(!is_curated_model("anthropic", "claude-fable-5"));
         assert!(!is_curated_model("anthropic", "claude-opus-4-8"));
         assert!(is_curated_model("glm-coding", "glm-5.3"));
         assert!(is_curated_model("zai", "glm-5.3"));
         assert!(is_curated_model("zai", "glm-5.3-flash"));
         assert!(is_curated_model("kimi", "kimi-k3"));
         assert!(is_curated_model("kimi-code", "k3"));
+    }
+
+    #[test]
+    fn openrouter_curates_latest_aliases_and_top_free_models() {
+        for latest in [
+            "~anthropic/claude-fable-latest",
+            "~openai/gpt-latest",
+            "~google/gemini-pro-latest",
+            "~deepseek/deepseek-v4-flash-latest",
+            "openai/gpt-chat-latest",
+        ] {
+            assert!(is_curated_model("openrouter", latest), "missing {latest}");
+        }
+        for free in [
+            "openrouter/free",
+            "cohere/north-mini-code:free",
+            "z-ai/glm-5.2:free",
+            "thinkingmachines/inkling:free",
+            "thinkingmachines/inkling-small:free",
+            "minimax/minimax-m3:free",
+            "minimax/minimax-m2.7:free",
+            "poolside/laguna-s-2.1:free",
+            "inclusionai/ling-3.0-flash-fin:free",
+            "nvidia/nemotron-3.5-lightning:free",
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+        ] {
+            assert!(is_curated_model("openrouter", free), "missing {free}");
+        }
+        assert!(!is_curated_model("openrouter", "liquid/lfm-2.5-2.6b:free"));
     }
 
     #[test]

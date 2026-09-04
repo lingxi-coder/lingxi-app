@@ -16,8 +16,8 @@
       "notFor": [
         "custom game loop"
       ],
-      "contractSha256": "86d26632e3edca20ab56e74a0154c08f1240ec29118460a11c1eebac93d0452a",
-      "inventorySha256": "53d8e020629871af9834875656c0ef44cb537577df6d32f883a9a69911783f93",
+      "contractSha256": "46c46a541e932106fa47a0e7cbfacc0548668ec3ce2a98289d32ef37044da610",
+      "inventorySha256": "13ad59f15f1767688c507318611424b3157346ef53c3d22e1f053207e4b7dee7",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
         "Start with a read-only search or lookup tool over the app's existing collections.",
@@ -40,8 +40,8 @@
       "notFor": [
         "ordinary forms"
       ],
-      "contractSha256": "2d182ef8872ce22d7c1b9e362abdf23cddac7cbb12ad69d498589c6a54acf585",
-      "inventorySha256": "e13599a39d17d2be478353936307b4495e7b021b49b955871584f3a79fbf3438",
+      "contractSha256": "931a6e28e26922052bb5cc262e984654a8b8fdb0f559b641e5f5d9d35cdc1d4f",
+      "inventorySha256": "9f6aae99d72b6e29384aa60980f6b8c08bf3c3b9c61a8421d4a6e74c3d488122",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
         "Expose read-only scene or frame state before adding write paths.",
@@ -64,8 +64,8 @@
       "notFor": [
         "ordinary forms"
       ],
-      "contractSha256": "c40c3bcabc26a07969a30e7c68083d79cee18e2c39065f2c3063d5a7db34e623",
-      "inventorySha256": "854a371c5f69907c8292b80229c443ba487f552700421d5ff8093b2f3b8160aa",
+      "contractSha256": "d63030e0fb54a4342b46043c77c960be191cbcd57246b4f7a8655ef14b60a375",
+      "inventorySha256": "8a10ee6d98ff66cfe61f62936e07ccd437787554e2a9525171659caee6addc55",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
         "Expose semantic scene queries such as selected object, camera, or asset inspection.",
@@ -90,8 +90,8 @@
         "ordinary forms",
         "static data pages"
       ],
-      "contractSha256": "bdf7c54c88cd0ba7d9168be3748524b45ddde22dbd826bd0663c753cc4aaa227",
-      "inventorySha256": "481ced0795f9e934b12df10127eedc169e3a487d9fb63cfd234cf0a11287cc42",
+      "contractSha256": "ea76a88e82fca8327cad5911db35268e324da0d7021d36f76e89ebdf03dde024",
+      "inventorySha256": "3b809779e2f661b2ed62c89cc97c1cabedb4209d8bb35146e8913f06e40f940b",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
         "Start with read-only gameplay state or inventory lookups.",

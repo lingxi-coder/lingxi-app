@@ -1076,3 +1076,36 @@ final class LingxiCodeUITests: XCTestCase {
     }
 
 }
+
+/// Exercises the real engine startup path rather than the mock fixture used by
+/// the rest of this file. On a clean install, engine construction may spend tens
+/// of seconds installing the bundled Linux rootfs; onboarding must remain usable
+/// while that work continues in the background.
+final class StartupResponsivenessUITests: XCTestCase {
+    func testOnboardingRemainsInteractiveDuringEngineBootstrap() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)"]
+
+        let launchStarted = Date()
+        app.launch()
+        XCTAssertLessThan(
+            Date().timeIntervalSince(launchStarted),
+            8,
+            "real engine bootstrap must not delay presentation of the setup UI"
+        )
+
+        let primaryAction = app.buttons["onboarding.primaryAction"]
+        XCTAssertTrue(primaryAction.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(primaryAction.isHittable, app.debugDescription)
+
+        let tapStarted = Date()
+        primaryAction.tap()
+        XCTAssertLessThan(
+            Date().timeIntervalSince(tapStarted),
+            2,
+            "rootfs installation must not block setup interactions"
+        )
+        XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 2), app.debugDescription)
+    }
+}

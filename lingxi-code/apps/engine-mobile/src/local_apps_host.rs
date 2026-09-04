@@ -187,6 +187,13 @@ struct CreateProposalContext {
     design_spec: Option<Value>,
     design_spec_sha256: Option<String>,
     contexts: BTreeMap<String, local_apps::AppMcpFlowContext>,
+    /// The display name and brief the user confirmed through `LocalAppStageCreate`
+    /// (WP5). This is the ONLY name/brief source the native create confirmation
+    /// sheet and the scaffold commit are allowed to render or persist — never
+    /// the empty shell `AppRecord.name`/`.brief`, which stays the `untitled`
+    /// placeholder until `commit_scaffold` runs.
+    name: String,
+    brief: String,
 }
 
 #[derive(Clone, Debug)]
@@ -194,6 +201,10 @@ struct CreateScaffoldSeed {
     selection: crate::local_app_template_catalog::ValidatedTemplateSelection,
     template_root: PathBuf,
     contexts: BTreeMap<String, local_apps::AppMcpFlowContext>,
+    /// Staged through `LocalAppStageCreate`; authoritative over whatever name/brief
+    /// the model echoes back into `LocalAppScaffold`. See `CreateProposalContext`.
+    name: String,
+    brief: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -670,6 +681,44 @@ impl Drop for ScaffoldReservation {
     }
 }
 
+/// One claimed [`local_apps::McpConfirmationReceipt`] slot, held from the
+/// moment `claim_candidate` succeeds until the scaffold transaction leaves by
+/// ANY path — an ordinary `Err`, a panic, or the future being dropped (a Stop,
+/// a 529 non-streaming fallback, connection teardown). Before this guard
+/// existed, only the explicit `Err` arm called `release_claim`, so every OTHER
+/// exit left `McpReceiptBook::issue`'s in-use predicate tripped for the app
+/// until the process restarted — the same class of leak `ScaffoldReservation`
+/// exists to prevent, one level down.
+///
+/// `McpConfirmationReceipt::release_claim` is already a no-op once the
+/// receipt is `consumed`, so this guard drops harmlessly after a successful
+/// `commit_claimed_candidate`: it needs no separate hand-off method the way
+/// [`PortLease::commit`] does. That rests entirely on `release_claim` being a
+/// no-op once `consumed` — if that ever stops being true, this guard needs an
+/// explicit "defused" flag set at the commit point.
+struct ReceiptClaim {
+    book: Arc<std::sync::Mutex<local_apps::McpReceiptBook>>,
+    receipt_id: String,
+}
+
+impl ReceiptClaim {
+    /// Wrap an ALREADY-CLAIMED receipt id. Does not itself call
+    /// `claim_candidate` — the caller does that first, under the same lock,
+    /// so a failed claim never produces a guard with nothing to release.
+    fn held(book: Arc<std::sync::Mutex<local_apps::McpReceiptBook>>, receipt_id: String) -> Self {
+        Self { book, receipt_id }
+    }
+}
+
+impl Drop for ReceiptClaim {
+    fn drop(&mut self) {
+        self.book
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .release_claim(&self.receipt_id);
+    }
+}
+
 // The `device.*` operations of the bridge — capture / pick / record / locate
 // / notify. A CHILD module (not a sibling) so it reaches the broker's private
 // fields and `authorize_declared_capability` without widening their
@@ -1001,7 +1050,7 @@ pub(crate) async fn reconcile_app_init_session_title(
 /// response). Handing off to it is what puts the agent in the right cwd with the
 /// right `LINGXI.md` auto-loaded.
 pub(crate) fn create_next_step_guidance() -> String {
-    "The app now exists as an EMPTY shell, and this conversation is not rooted in it. Stop here: do not write source, do not call LocalAppBuild, and do not start a build workflow from this conversation — its working directory is not the app's workspace, so anything written here lands outside the app. The app has its own workspace and its own session (init_session_id in this result); continue there, where the guided workspace contract explains the interview and scaffold steps. Do not recreate the app, do not run a package-manager scaffold command, and do not install dependencies yet: runtime-profile confirmation and LocalAppScaffold happen first.".into()
+    "The app now exists as an EMPTY shell, and this conversation is not rooted in it. Stop here: do not write source, do not call LocalAppBuild, and do not start a build workflow from this conversation — its working directory is not the app's workspace, so anything written here lands outside the app. The app has its own workspace and its own session (init_session_id in this result); continue there, where the guided workspace contract explains the interview and hands off to the `lingxi-local-app:create-local-app` skill (that exact, plugin-qualified name is how it is registered; the bare name does not resolve). Do not recreate the app, do not run a package-manager scaffold command, and do not install dependencies yet: the interview, a native create confirmation, and only then LocalAppScaffold happen first — never call LocalAppScaffold directly from this step.".into()
 }
 
 struct LocalAppsRuntimeConfiguration {
@@ -1098,7 +1147,10 @@ pub(crate) struct LocalAppsHostBroker {
     pending_mcp_proposal_approvals: Mutex<HashMap<String, PendingNativeApproval>>,
     pending_ui: Mutex<HashMap<String, oneshot::Sender<UiResolution>>>,
     pending_dependency_change_receipts: Mutex<HashMap<String, PendingDependencyChangeReceipt>>,
-    pending_mcp_receipts: Mutex<local_apps::McpReceiptBook>,
+    /// `std::sync::Mutex`, not `tokio::sync::Mutex`, for the same reason as
+    /// `scaffold_reservations` (:1172): [`ReceiptClaim::drop`] releases a
+    /// leaked claim, and `Drop` cannot `.await`.
+    pending_mcp_receipts: Arc<std::sync::Mutex<local_apps::McpReceiptBook>>,
     session_permissions: Mutex<SessionPermissions>,
     runtimes: Arc<Mutex<HashMap<String, RuntimeEntry>>>,
     /// See [`PortLeases`].  Broker-scoped because a profile's apps are what
@@ -1234,7 +1286,9 @@ impl LocalAppsHostBroker {
             pending_mcp_proposal_approvals: Mutex::new(HashMap::new()),
             pending_ui: Mutex::new(HashMap::new()),
             pending_dependency_change_receipts: Mutex::new(HashMap::new()),
-            pending_mcp_receipts: Mutex::new(local_apps::McpReceiptBook::default()),
+            pending_mcp_receipts: Arc::new(std::sync::Mutex::new(
+                local_apps::McpReceiptBook::default(),
+            )),
             session_permissions: Mutex::new(SessionPermissions::default()),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             port_leases: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -2267,6 +2321,24 @@ impl LocalAppsHostBroker {
             .map_err(|error| format!("create_staging_evidence_missing: {error}"))?;
         let staging_evidence: Value = serde_json::from_str(&evidence_body)
             .map_err(|error| format!("create_staging_evidence_invalid: {error}"))?;
+        // WP5: `stage_create` is the only production writer of this evidence
+        // file and always persists the confirmed name/brief onto it (see
+        // above); a missing field here means staging is corrupt, not that the
+        // caller may fall back to the shell record's `untitled` placeholder.
+        let name = staging_evidence
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                "create_staging_evidence_invalid: staged evidence is missing name".to_string()
+            })?
+            .to_string();
+        let brief = staging_evidence
+            .get("brief")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                "create_staging_evidence_invalid: staged evidence is missing brief".to_string()
+            })?
+            .to_string();
         let design_path = staging_root.join("design-spec.json");
         let (design_spec, design_spec_sha256) = match std::fs::read(&design_path) {
             Ok(bytes) => {
@@ -2295,6 +2367,8 @@ impl LocalAppsHostBroker {
                         design_spec,
                         design_spec_sha256,
                         contexts,
+                        name,
+                        brief,
                     });
                 }
                 Err(error) => {
@@ -2329,6 +2403,8 @@ impl LocalAppsHostBroker {
             selection: create_context.selection,
             template_root,
             contexts: create_context.contexts,
+            name: create_context.name,
+            brief: create_context.brief,
         })
     }
 
@@ -2379,7 +2455,13 @@ impl LocalAppsHostBroker {
     ) -> Result<bool, String> {
         let proposed = mcp_tool_surfaces_from_candidate(candidate)?;
         if !record.scaffolded {
-            let selection = self.create_selection_for_run(&record.id, workflow_run_id)?;
+            // WP5: render the name/brief the user confirmed through
+            // `LocalAppStageCreate`, never `record.name`/`record.brief` — the
+            // shell record is still the empty `untitled` placeholder at this
+            // point in the flow (it is only overwritten once `commit_scaffold`
+            // lands, long after this confirmation is answered).
+            let create_context = self.load_create_proposal_context(&record.id, workflow_run_id)?;
+            let selection = create_context.selection;
             let template = crate::local_app_template_catalog::catalog_view()?
                 .templates
                 .into_iter()
@@ -2392,8 +2474,8 @@ impl LocalAppsHostBroker {
                 request: LocalAppCreateConfirmationRequestDto {
                     request_id: request_id.clone(),
                     app_id: record.id.clone(),
-                    name: record.name.clone(),
-                    brief: record.brief.clone(),
+                    name: create_context.name,
+                    brief: create_context.brief,
                     selected_template: LocalAppTemplateSummaryDto {
                         template_id: selection.template_id,
                         surface: lower_surface(selection.surface),
@@ -2826,7 +2908,7 @@ impl LocalAppsHostBroker {
             || dependency_record.toolchain_key.as_deref() != Some(snapshot.toolchain_key.as_str())
         {
             return Err(format!(
-                "dependencies_dirty: app {} dependency record no longer matches the verified snapshot; run LocalAppUpdateDependencies to refresh it",
+                "dependencies_dirty: app {} dependency record no longer matches the verified snapshot; this cannot be repaired by re-editing package.json/lockfile — report the drift to the user/workflow as a finding instead of retrying",
                 layout.app_id()
             ));
         }
@@ -3535,8 +3617,15 @@ impl LocalAppsHostBroker {
                 .runtime_profile
                 .is_some()
             {
+                // `LocalAppConfirmDependencyChange`/`LocalAppUpdateDependencies` are Host
+                // operations, not model-callable tools: they are not in `LOCAL_APP_TOOLS`
+                // and the MCP transport refuses their static spelling outright (see
+                // `local_apps_mcp.rs`'s `the_mcp_surface_no_longer_serves_the_static_host_
+                // operations`). Naming them here as something the caller can "use" sends
+                // an agent to retry a call that fails closed forever; tell it to report the
+                // drift instead.
                 return Err(
-                    "dependencies_dirty: workspace package.json or pnpm-lock.yaml differs from the host-owned dependency snapshot; use LocalAppConfirmDependencyChange and LocalAppUpdateDependencies"
+                    "dependencies_dirty: workspace package.json or pnpm-lock.yaml differs from the host-owned dependency snapshot; this cannot be repaired by re-editing package.json/lockfile — report the drift to the user/workflow as a finding instead of retrying"
                         .into(),
                 );
             } else {
@@ -4479,6 +4568,9 @@ impl LocalAppsHostBroker {
         }
     }
 
+    /// Scaffold-landing caller (`land_scaffold`'s commit path): the record's
+    /// dependency state is NOT yet `Installing` here, so this wrapper owns
+    /// the whole transition itself.
     async fn install_scaffold_dependencies(
         &self,
         service: &Arc<AppService>,
@@ -4489,6 +4581,23 @@ impl LocalAppsHostBroker {
             .start_dependency_install(app_id)
             .await
             .map_err(|error| error.to_string())?;
+        self.run_started_dependency_install(service, app_id, layout)
+            .await
+    }
+
+    /// Run one dependency-install attempt assuming the record is ALREADY
+    /// `Installing` -- e.g. `ensure_dependency_install` transitions it there
+    /// itself before spawning `run_dependency_install`. Re-calling
+    /// `start_dependency_install` here would always fail (the state is
+    /// already `Installing`), leaving the record permanently stuck: this is
+    /// the body both callers of the state transition above actually need to
+    /// run, split out so each caller owns its own precondition.
+    async fn run_started_dependency_install(
+        &self,
+        service: &Arc<AppService>,
+        app_id: &str,
+        layout: &AppLayout,
+    ) -> Result<(), String> {
         match self.dependency_install_once(layout, app_id).await {
             Ok(completion) => service
                 .complete_dependency_install_with_metadata(
@@ -4571,10 +4680,29 @@ impl LocalAppsHostBroker {
                 return;
             }
         };
+        // `ensure_dependency_install` already transitioned this record to
+        // `Installing` before spawning us -- run the install body directly
+        // rather than through `install_scaffold_dependencies`, which would
+        // try to make that SAME transition again and always fail because the
+        // state is already `Installing`, leaving the record stuck forever.
         if let Err(error) = self
-            .install_scaffold_dependencies(&service, &app_id, &layout)
+            .run_started_dependency_install(&service, &app_id, &layout)
             .await
         {
+            // Every other early return out of this worker already lands the
+            // record in `Failed` (:4618, :4633). This arm must too: the record
+            // is `Installing` when we get here, and the one Err this arm can
+            // still receive with the install itself having succeeded is the
+            // `complete_dependency_install_with_metadata` persist failure,
+            // whose Ok-arm has made no state transition at all. Without this,
+            // that window leaves the record terminal `Installing` -- nothing
+            // on any boot path sweeps it, so every later `LocalAppBuild`
+            // polls the full `DEPENDENCY_INSTALL_TIMEOUT` and fails.
+            // Re-failing an already-`Failed` record is an idempotent rewrite
+            // (`fail_dependency_install` has no state guard).
+            let _ = service
+                .fail_dependency_install(&app_id, error.clone())
+                .await;
             tracing::warn!(app_id = %app_id, error = %error, "dependency install failed");
         }
     }
@@ -6375,9 +6503,17 @@ impl LocalAppsHostBroker {
         }
         let candidate = self.load_mcp_candidate(&app_id, &workflow_run_id)?;
         let create_seed = self.load_create_scaffold_seed(&app_id, &workflow_run_id)?;
+        // WP5: the candidate staged through `LocalAppStageCreate` — the exact
+        // values the user already saw and approved in the native create
+        // confirmation sheet — is authoritative here. The model may still echo
+        // `name`/`brief` back into this call (the schema still requires them so
+        // a caller cannot silently omit confirmation), but only the staged
+        // values are ever committed; a mismatched echo is not an error.
+        let name = create_seed.name.clone();
+        let brief = create_seed.brief.clone();
         self.pending_mcp_receipts
             .lock()
-            .await
+            .unwrap_or_else(|error| error.into_inner())
             .claim_candidate(
                 &receipt_id,
                 &app_id,
@@ -6387,6 +6523,12 @@ impl LocalAppsHostBroker {
                 now_ms(),
             )
             .map_err(|issue| issue.message)?;
+        // Held across every path out of this function — success, an ordinary
+        // `Err`, a panic, or the future being dropped mid-transaction — so the
+        // claim can never outlive this call the way it used to when only the
+        // `Err` arm below released it. See [`ReceiptClaim`].
+        let _receipt_claim =
+            ReceiptClaim::held(Arc::clone(&self.pending_mcp_receipts), receipt_id.clone());
         let receipt_binding = create_seed.selection.runtime_profile.clone();
         let scaffolded = async {
             let surface = receipt_binding.family.surface();
@@ -6493,9 +6635,19 @@ impl LocalAppsHostBroker {
         .await;
         let committed = match scaffolded {
             Ok(committed) => {
-                self.pending_mcp_receipts
+                // The scaffold above already committed to disk and to the app
+                // record: files are written, `record.scaffolded` is true, a
+                // retry would now hit "already scaffolded". A failure in this
+                // purely-bookkeeping receipt commit must not be reported as a
+                // failed create on top of that — it would tell the model (and
+                // the user) the app was never made when it was, and a retry
+                // could not recover since the app already exists. Warn and
+                // continue, matching the same idiom already used for the
+                // journal-stamp failure a few lines below.
+                if let Err(issue) = self
+                    .pending_mcp_receipts
                     .lock()
-                    .await
+                    .unwrap_or_else(|error| error.into_inner())
                     .commit_claimed_candidate(
                         &receipt_id,
                         &app_id,
@@ -6503,32 +6655,21 @@ impl LocalAppsHostBroker {
                         &journal.approval_contract_sha256,
                         &candidate.validated.proposal_sha256,
                     )
-                    .map_err(|issue| issue.message)?;
-                let layout = self.layout(&app_id)?;
-                match local_apps::load_candidate_journal(&layout)
-                    .map_err(|error| error.to_string())
-                    .and_then(|mut journal| {
-                        if journal.workflow_run_id != workflow_run_id {
-                            return Err(
-                                "journal_invalid: create receipt workflow run changed before scaffold commit"
-                                    .to_string(),
-                            );
-                        }
-                        journal.consumed_receipt_sha256 =
-                            Some(format!("{:x}", Sha256::digest(receipt_id.as_bytes())));
-                        journal = journal.seal().map_err(|issue| issue.message)?;
-                        local_apps::save_candidate_journal(&layout, &journal)
-                            .map_err(|error| error.to_string())
-                    }) {
-                    Ok(()) => {}
-                    Err(error) => tracing::warn!(
+                {
+                    tracing::warn!(
                         app_id = %app_id,
                         workflow_run_id = %workflow_run_id,
-                        %error,
-                        "create scaffold committed and receipt consumed, but the candidate journal did not record the consumed receipt"
-                    ),
+                        error = %issue.message,
+                        "create scaffold committed but receipt commit bookkeeping failed"
+                    );
                 }
-                if candidate.validated.tools.is_empty() {
+                let layout = self.layout(&app_id)?;
+                let create_only = candidate.validated.tools.is_empty();
+                if create_only {
+                    // The candidate journal is about to be deleted outright;
+                    // stamping `consumed_receipt_sha256` into it first would
+                    // only be a write immediately followed by its own
+                    // deletion.
                     if let Err(error) =
                         self.delete_mcp_candidate_state(&layout, &app_id, &workflow_run_id)
                     {
@@ -6539,16 +6680,37 @@ impl LocalAppsHostBroker {
                             "plain create committed but create-only candidate cleanup failed"
                         );
                     }
+                } else {
+                    match local_apps::load_candidate_journal(&layout)
+                        .map_err(|error| error.to_string())
+                        .and_then(|mut journal| {
+                            if journal.workflow_run_id != workflow_run_id {
+                                return Err(
+                                    "journal_invalid: create receipt workflow run changed before scaffold commit"
+                                        .to_string(),
+                                );
+                            }
+                            journal.consumed_receipt_sha256 =
+                                Some(format!("{:x}", Sha256::digest(receipt_id.as_bytes())));
+                            journal = journal.seal().map_err(|issue| issue.message)?;
+                            local_apps::save_candidate_journal(&layout, &journal)
+                                .map_err(|error| error.to_string())
+                        }) {
+                        Ok(()) => {}
+                        Err(error) => tracing::warn!(
+                            app_id = %app_id,
+                            workflow_run_id = %workflow_run_id,
+                            %error,
+                            "create scaffold committed and receipt consumed, but the candidate journal did not record the consumed receipt"
+                        ),
+                    }
                 }
                 committed
             }
-            Err(error) => {
-                self.pending_mcp_receipts
-                    .lock()
-                    .await
-                    .release_claim(&receipt_id);
-                return Err(error);
-            }
+            // No explicit `release_claim` here: `_receipt_claim`'s `Drop`
+            // covers this arm AND every other exit (panic, dropped future)
+            // that used to leak the claim.
+            Err(error) => return Err(error),
         };
 
         // STEP 5 — the pinned init session's title, AFTER the commit and
@@ -7244,8 +7406,8 @@ fn formal_workspace_contract(
             "{profile_identity}\
              - This app's surface is `dom`. The host authorizes exactly one build workflow for this surface and refuses any other; you never name or choose a workflow yourself, and a request that named a different one would be refused. The surface and runtime profile are fixed at creation; do not infer them from source.\n\
              - This workspace already contains the repository-verified Vite + Ionic foundation. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
-             - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
-             - Default editable entry points are `app/screens/home-screen.jsx`, `app/screens/detail-screen.jsx`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
+             - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `LINGXI.md`, the whole `.lingxi/` directory, `node_modules/`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
+             - Default editable entry points are `app/screens/home-screen.jsx`, `app/screens/detail-screen.jsx`, and `app/globals.css`. You may edit files under `app/`, `src/`, `components/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
              - The UI kit is Ionic. Import components from `@ionic/react`; never from `@ionic/core/components`, which cannot be bundled here. There is no Tailwind: use Ionic's CSS variables and its utility classes (`ion-padding`, `ion-margin`, `ion-text-center`, `ion-justify-content-*`, `ion-hide-*`), and put anything else in `app/globals.css`.\n\
              - Routing is `IonRouterOutlet` with react-router 6 `Routes`/`Route`. Every routed screen must render `IonPage` as its ROOT element, or the outlet has nothing to animate and the platform back gesture does not attach. Navigate with `routerLink`, not an onClick handler.\n\
              - The platform look is chosen for you: the checked-in provider calls `setupIonicReact` with the host's OS, so components already render iOS or Material chrome. Do not branch on the user agent and do not hard-code one platform's metrics.\n\
@@ -7262,6 +7424,21 @@ fn formal_workspace_contract(
                 local_apps::AppRuntimeProfile::Babylon3d => "lib/babylon-runtime.js",
                 local_apps::AppRuntimeProfile::ReactDom => unreachable!(),
             };
+            // The Phaser and Babylon templates ship `lib/frame-loop.js` NEXT
+            // TO their engine adapter, and both their
+            // `.lingxi/source-policy.json` and
+            // `local_apps_build::HOST_MANAGED_FILES` list it as host-managed.
+            // Naming only `{helper}` for those two profiles would leave the
+            // contract silently narrower than the set actually enforced: the
+            // lease accepts an edit to `lib/frame-loop.js`, the next build's
+            // `restore_host_managed_files` reverts it, and the only trace is
+            // a `tracing::warn!` while the model loops against a file the
+            // contract never told it was managed.
+            let managed_extra = match binding.family {
+                local_apps::AppRuntimeProfile::Phaser2d
+                | local_apps::AppRuntimeProfile::Babylon3d => "`lib/frame-loop.js`, ",
+                _ => "",
+            };
             let engine_rule = match binding.family {
                 local_apps::AppRuntimeProfile::Canvas2d =>
                     "- This is a Canvas 2D profile: use the checked-in `lib/frame-loop.js` helper and the Canvas 2D APIs; do not add a game engine or physics library.",
@@ -7277,8 +7454,8 @@ fn formal_workspace_contract(
                 "{profile_identity}\
                  - This app's surface is `canvas`. The host authorizes exactly one build workflow for this surface and refuses any other; you never name or choose a workflow yourself, and a request that named a different one would be refused. It is one drawn surface plus overlays; do not infer a screen hierarchy or the surface from source.\n\
                  - This workspace already contains the repository-verified Vite + Ionic foundation, scaffolded for a single DRAWN SURFACE. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
-                 - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, `{helper}`, and `styles/foundation.css`. Do not edit them; `{helper}` is the profile's checked-in runtime adapter.\n\
-                 - Default editable entry points are `app/screens/game-screen.jsx`, `src/stores/game-store.js`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`, but never edit the managed adapter `{helper}`.\n\
+                 - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `LINGXI.md`, the whole `.lingxi/` directory, `node_modules/`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, {managed_extra}`{helper}`, and `styles/foundation.css`. Do not edit them; `{helper}` is the profile's checked-in runtime adapter.\n\
+                 - Default editable entry points are `app/screens/game-screen.jsx`, `src/stores/game-store.js`, and `app/globals.css`. You may edit files under `app/`, `src/`, `components/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`, but never edit the managed adapter `{helper}`.\n\
                  - There is NO router: menus, pause and game-over are Ionic components layered on top of the canvas, not separate pages.\n\
                  {engine_rule}\n\
                  - Keep per-frame simulation state in a ref, NOT in React or the store. The store is for the phase machine, score and settings; pushing positions through React re-renders turns the app into a slideshow.\n\
@@ -7303,14 +7480,15 @@ fn formal_workspace_contract(
          Brief: {brief}\n\n\
          ## Workspace contract\n\
          - This workspace is already bound to local app `{id}`. Treat `{id}` as authoritative; do not call `LocalAppList` or `LocalAppGet` to rediscover or confirm it, and do not call `LocalAppCreate` again.\n\
-         - Edit ONLY app-owned files under `app/`, `src/`, `lib/`, `styles/`, `public/`.\n\
+         - Edit ONLY app-owned files under `app/`, `src/`, `components/`, `lib/`, `styles/`, `public/`.\n\
+         - The host draws NO chrome around a running app: the app must provide every visible title, navigation and back affordance. The host floats ONE control over the bottom-leading corner, so keep the leading 80 CSS px by the bottom 80 CSS px clear from the safe area and keep time-critical controls off its temporary expansion strip.\n\
          {setup_path}\
          - The page reaches host data/network/device ONLY through `window.lingxi.v2` \
          (see `lib/lingxi-bridge.js`).\n\
          - Declare data collections / network domains / capabilities through \
          `LocalAppManifest` BEFORE the page relies on them; runtime \
          authorization still prompts the user. Every collection is `{{id,name,fields}}`; every field is `{{id,label,kind,required?,enumOptions?}}`; IDs use lower snake_case. Never declare host-owned `recordId`, `revision`, `createdAtMs`, or `updatedAtMs` as fields. Repair and retry any rejected manifest before building.\n\
-         - If a material requirement is unresolved, call `AskUserQuestion` so the native client presents its sheet. Never leave unresolved questions in ordinary assistant text; when the brief and device context are sufficient, infer and continue.\n\n\
+         - If a material requirement is unresolved, the app's conversation agent calls `AskUserQuestion` so the native client presents its sheet; a build-workflow subagent has no such tool and must infer from the confirmed spec and device context and continue. Never leave unresolved questions in ordinary assistant text.\n\n\
          ## Build & preview\n\
          {build_preview}\
          - `LocalAppRuntime {{\"app_id\":\"{id}\",\"action\":\"start\"}}` \
@@ -7366,8 +7544,11 @@ fn formal_workspace_contract(
 /// - "任何源文件都会被删除", because the first scaffold WIPES the editable
 ///   surface (§C.0.1). An agent that writes code here does not merely waste the
 ///   turn, it loses work it believes it has done;
-/// - "只有 `LocalAppScaffold` 对你有意义", because every other local-app tool
-///   is gated off for an unformed app and will refuse;
+/// - "不要自己直接调 `LocalAppScaffold`", because scaffold fails closed without
+///   the receipt the unified create flow issues (`scaffold_shell_app_value`
+///   refuses with "receipt_id is required; create scaffold only accepts a
+///   Host-issued unified create confirmation receipt"), and every OTHER
+///   local-app tool is gated off for an unformed app and will refuse too;
 /// - the surface vocabulary, because the surface is IMMUTABLE once scaffolded,
 ///   so it is the one decision the user has to make before anything is written;
 /// - "这一轮**不要用 `AskUserQuestion`**" on step 1, because `AskUserQuestion`
@@ -7380,6 +7561,28 @@ fn formal_workspace_contract(
 ///   wrong for the one turn that has none — which is why step 1 states the
 ///   exception in the same breath as the tool, rather than leaving a reader to
 ///   reconcile the two.
+/// - step 4 names the create SKILL below, not the build workflow it launches
+///   internally. There is no host-initiated launch site for the build
+///   workflow (the host only auto-starts MCP authoring and resume), so an
+///   agent that reaches this file can only get to `LocalAppScaffold` through
+///   the skill's own name — the only place that name lives, and the reason
+///   the literal below is a deliberate, allowlisted exception to the "no
+///   component names in Host prose" rule `component_literal_scan.rs`
+///   enforces elsewhere in this file's own history (P-1.4). Naming the
+///   WORKFLOW instead would reintroduce exactly the coupling that rule
+///   removed; naming the skill does not, because skill selection here was
+///   always model-driven (the model is only ever in this file's workspace
+///   because it already ran the skill once, to create the shell) while
+///   WORKFLOW selection stays fully Host-resolved and still appears nowhere
+///   in this file. `lingxi_md_contract_prose_names_no_workflow` still pins
+///   the FORMED contract and the tool-result guidance prose to naming no
+///   build workflow
+///   (the host authorizes exactly one and refuses any other there); this
+///   step never names the workflow id either, only the skill that owns the
+///   interview. Do not have this step call `LocalAppStageCreate` or
+///   `LocalAppApproveMcpProposal` directly: those are the workflow's own
+///   sub-agent calls, not something the top-level interview agent invokes
+///   itself.
 fn guided_workspace_contract(record: &local_apps::AppRecord) -> String {
     format!(
         "# Local App（新建，尚未定形态）\n\n\
@@ -7400,9 +7603,11 @@ fn guided_workspace_contract(record: &local_apps::AppRecord) -> String {
          3. 用 `AskUserQuestion` 把提议的**名称**与**形态**交给用户确认或修改：\n\
          \u{20}  - `dom` —— 多屏界面（表单、列表、页面导航）\n\
          \u{20}  - `canvas` —— 单一绘制面（游戏、3D、可视化）\n\
-         4. 如需运行时细分，先读 `LocalAppRuntimeProfiles`，再用运行时确认工具为 `{id}` 取得短时 receipt。\n\
-         5. 用户确认后调 `LocalAppScaffold`（`app_id` 用 `{id}`，并带上 runtime profile receipt）。\n\
-         6. 重读本文件，按新合约继续。\n\n\
+         4. 名称与形态确认后，用 `Skill` 工具启动 `lingxi-local-app:create-local-app`（技能只以这个\
+         带插件前缀的名字注册，裸名解析不到）继续：它会读 `LocalAppRuntimeProfiles` \
+         定运行时子档位，走统一创建流程暂存候选、弹出一次原生确认，确认后才落地 `LocalAppScaffold`。\
+         不要自己直接调 `LocalAppScaffold`——它需要那条流程发出的 receipt，没有任何捷径能绕过。\n\
+         5. 重读本文件，按新合约继续。\n\n\
          形态一旦落地不可更改，所以必须让用户确认，不要自作主张。\n",
         id = record.id,
     )
@@ -8071,6 +8276,27 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         let workflow_run_id = required_string(&input, "workflow_run_id")?;
         let handle = required_string(&input, "validated_selection_handle")?;
         let quality_level = required_string(&input, "quality_level")?;
+        // WP5: the user-confirmed display name and brief are staged HERE, once,
+        // so they can be the single value the native create confirmation sheet
+        // renders and `LocalAppScaffold` commits — never the empty shell
+        // `AppRecord.name`/`.brief` (which stays the `untitled` placeholder the
+        // whole way through create; see `service.rs`'s `PLACEHOLDER_APP_NAME`).
+        let name = confirmed_field(&input, "name")?.to_string();
+        if name.len() > local_apps::service::MAX_NAME_BYTES {
+            return Err(format!(
+                "invalid_argument: name is {} bytes (limit {})",
+                name.len(),
+                local_apps::service::MAX_NAME_BYTES
+            ));
+        }
+        let brief = confirmed_field(&input, "brief")?.to_string();
+        if brief.len() > local_apps::service::MAX_BRIEF_BYTES {
+            return Err(format!(
+                "invalid_argument: brief is {} bytes (limit {})",
+                brief.len(),
+                local_apps::service::MAX_BRIEF_BYTES
+            ));
+        }
         let design_spec = input.get("design_spec").cloned();
         let record = self
             .service()?
@@ -8079,6 +8305,38 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .map_err(|error| error.to_string())?;
         if record.scaffolded {
             return Err("create_staging_rejected: app is already scaffolded".into());
+        }
+        // THIS RUN's `stage_create` may already have been approved — the
+        // native create sheet shown, the user's answer journaled — and that
+        // approval is bound to the exact staging bytes the sheet rendered.
+        // Re-staging past that point would let a second call silently
+        // rewrite `design-spec.json`/`evidence.json` underneath an approval
+        // the user already gave for the OLD content, so the approved receipt
+        // would end up committing bytes nobody confirmed.
+        //
+        // Scoped to the SAME `workflow_run_id`, exactly as `create_without
+        // _mcp`'s already-approved reuse arm spells the same check. The
+        // candidate journal is per-APP (one `load_candidate_journal(&layout)`
+        // file), and staging is per-RUN
+        // (`.lingxi-build-state/template-candidates/<app>/<run>/staging/…`,
+        // which is also where `load_create_proposal_context` reads
+        // `evidence.json` back out), so a DIFFERENT run cannot reach the
+        // approved run's bytes and must stay allowed. Refusing it outright
+        // would brick the app: the journal survives a failed
+        // `LocalAppScaffold` (that arm returns the error without deleting
+        // it), so an app whose scaffold was refused for an invalid name or
+        // brief could never be staged again in any run — including the new
+        // run this very error tells the caller to start.
+        if let Ok(layout) = self.layout(app_id) {
+            if let Ok(existing_journal) = local_apps::load_candidate_journal(&layout) {
+                if existing_journal.workflow_run_id == workflow_run_id
+                    && existing_journal.stage >= local_apps::McpAuthoringStage::Approved
+                {
+                    return Err(
+                        "create_staging_rejected: this create candidate is already approved; start a new workflow run".into(),
+                    );
+                }
+            }
         }
         let selection = crate::local_app_template_catalog::resolve_typed(
             &self.root,
@@ -8113,24 +8371,19 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .find(|(path, _)| *path == crate::local_app_runtime_profiles::LOCKFILE_FILE_REL)
             .map(|(_, bytes)| bytes.as_slice())
             .ok_or_else(|| "create_staging_invalid: base lock input missing".to_string())?;
+        // Not a verification: `dependency_input_sha256` is a pure function of
+        // `requested`/`effective`/`lock`, taken from the same in-memory
+        // `artifacts.files` with no I/O in between, so computing it twice and
+        // comparing can never disagree — the branch below used to do exactly
+        // that and was unreachable dead weight. The digest is still recorded
+        // into `evidence.json` for provenance; nothing re-verifies it against
+        // the materialized staging bytes at landing time (a separate gap).
         let dependency_input_sha256 = crate::local_app_template_catalog::dependency_input_sha256(
             requested,
             effective,
             lock,
             crate::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY,
         );
-        let verified_dependency_input_sha256 =
-            crate::local_app_template_catalog::dependency_input_sha256(
-                requested,
-                effective,
-                lock,
-                crate::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY,
-            );
-        if dependency_input_sha256 != verified_dependency_input_sha256 {
-            return Err(
-                "create_staging_invalid: dependency_input_sha256 verification mismatch".into(),
-            );
-        }
         let staging = self
             .root
             .join(".lingxi-build-state/template-candidates")
@@ -8140,6 +8393,29 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .join(handle);
         std::fs::create_dir_all(&staging)
             .map_err(|error| format!("create isolated staging: {error}"))?;
+        // `load_create_proposal_context` (and therefore both
+        // `approve_mcp_proposal`'s create-without-MCP branch and
+        // `validate_mcp_proposal`'s pre-scaffold branch) require a staged
+        // MCP flow context file to exist before the native create
+        // confirmation can be raised. A brand-new app has no prior active
+        // MCP contexts to carry forward, so the correct seed here is the
+        // empty set — the same baseline `validate_app_mcp_proposal` would
+        // otherwise be handed for a first-time create. Writing it here,
+        // once, keeps this file's only production writer honest for every
+        // create run instead of leaving it to a `#[cfg(test)]` helper.
+        let staged_context_dir = staging.join(".lingxi");
+        std::fs::create_dir_all(&staged_context_dir)
+            .map_err(|error| format!("create staged MCP flow context directory: {error}"))?;
+        let staged_context_path = staged_context_dir.join("mcp-flow-contexts.json");
+        let staged_context_temp_path = staged_context_dir.join("mcp-flow-contexts.json.tmp");
+        std::fs::write(
+            &staged_context_temp_path,
+            serde_json::to_vec_pretty(&BTreeMap::<String, local_apps::AppMcpFlowContext>::new())
+                .map_err(|error| format!("serialize staged MCP flow contexts: {error}"))?,
+        )
+        .map_err(|error| format!("write staged MCP flow contexts: {error}"))?;
+        std::fs::rename(&staged_context_temp_path, &staged_context_path)
+            .map_err(|error| format!("commit staged MCP flow contexts: {error}"))?;
         let design_spec_sha256 = if let Some(design_spec) = design_spec.as_ref() {
             let design_bytes = serde_json::to_vec_pretty(design_spec)
                 .map_err(|error| format!("serialize design spec: {error}"))?;
@@ -8210,12 +8486,12 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             "appId": app_id,
             "workflowRunId": workflow_run_id,
             "validatedSelectionHandle": handle,
+            "name": name,
+            "brief": brief,
             "templateId": selection.template_id,
             "dependencyInputSha256": dependency_input_sha256,
             "designSpecSha256": design_spec_sha256,
             "stagedFiles": staged_files,
-            "published": false,
-            "manifestCommitted": false,
         });
         let evidence_path = staging.join("evidence.json");
         let bytes = serde_json::to_vec_pretty(&evidence)
@@ -8360,6 +8636,65 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 );
             }
             let layout = self.layout(&app_id)?;
+            // Already-approved reuse arm. Without it, a repeated
+            // `create_without_mcp` call for a `workflow_run_id` whose
+            // candidate journal is already sealed at `Approved` rewrites that
+            // journal back to `Prepared`, re-raises the native
+            // create-confirmation sheet a second time, and then — if the
+            // FIRST receipt is still claimed by an in-flight scaffold —
+            // throws the user's fresh answer away when `issue()` returns
+            // `receipt_in_use`.
+            //
+            // The user has already answered the sheet for exactly this
+            // contract digest, so reuse asks nothing again and never touches
+            // the sealed journal. It does NOT mirror the MCP-revise branch's
+            // `receipt_id: null` / `approved_reusable` answer: that shape is
+            // only safe there because its consumer (the MCP-authoring
+            // workflow script) declares `receipt_id` nullable and is told to
+            // consume the existing receipt. THIS branch's only consumer, the
+            // unified build workflow script, requires a non-empty
+            // `receipt_id` whenever `approved` is true — both in the
+            // `createApprovalSchema` the agent must satisfy and in the
+            // imperative check before `LocalAppScaffold` — so a null here
+            // would swap one dead end for another. Mint a usable receipt
+            // against the sealed journal instead.
+            //
+            // `issue()` still refuses while a live, unexpired claim is
+            // outstanding. Post-WP-B that is a scaffold genuinely in flight,
+            // and starting a second one is exactly what must not happen, so
+            // this surfaces a named error WITHOUT raising a sheet — no user
+            // answer can be discarded because none was solicited.
+            if let Ok(existing_journal) = local_apps::load_candidate_journal(&layout) {
+                if existing_journal.workflow_run_id == workflow_run_id
+                    && existing_journal.stage >= local_apps::McpAuthoringStage::Approved
+                {
+                    let receipt = local_apps::McpConfirmationReceipt::new(
+                        &app_id,
+                        &workflow_run_id,
+                        existing_journal.approval_contract_sha256.clone(),
+                        existing_journal.proposal_sha256.clone(),
+                        now_ms(),
+                    );
+                    let receipt_id = receipt.receipt_id.clone();
+                    self.pending_mcp_receipts
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .issue(receipt)
+                        .map_err(|issue| {
+                            format!(
+                                "create_approval_in_flight: the sealed create approval for this \
+                                 app is already claimed by an in-flight scaffold; retry after it \
+                                 finishes ({})",
+                                issue.message
+                            )
+                        })?;
+                    return Ok(json!({
+                        "approved": true,
+                        "receipt_id": receipt_id,
+                        "status": "create_approved_no_mcp",
+                    }));
+                }
+            }
             let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
             let create_context = self.load_create_proposal_context(&app_id, &workflow_run_id)?;
             let proposal = local_apps::AppMcpProposal {
@@ -8451,7 +8786,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             let receipt_id = receipt.receipt_id.clone();
             self.pending_mcp_receipts
                 .lock()
-                .await
+                .unwrap_or_else(|error| error.into_inner())
                 .issue(receipt)
                 .map_err(|issue| issue.message)?;
             journal = journal
@@ -8535,7 +8870,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             let receipt_id = receipt.receipt_id.clone();
             self.pending_mcp_receipts
                 .lock()
-                .await
+                .unwrap_or_else(|error| error.into_inner())
                 .issue(receipt)
                 .map_err(|issue| issue.message)?;
             journal = journal
@@ -8836,7 +9171,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         if let Some(receipt_id) = receipt_id.as_deref() {
             self.pending_mcp_receipts
                 .lock()
-                .await
+                .unwrap_or_else(|error| error.into_inner())
                 .consume_candidate(
                     receipt_id,
                     &app_id,
@@ -9009,7 +9344,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             "app_id": app_id,
             "target": target.template_id(),
             "dependencies": dependencies,
-            "hint": "start or restart the runtime with manage_runtime to serve the new build",
+            "hint": "start or restart the runtime with LocalAppRuntime to serve the new build",
         }))
     }
 
@@ -13178,12 +13513,23 @@ mod tests {
         }
     }
 
+    const TEST_DEFAULT_APP_NAME: &str = "Test App";
+    const TEST_DEFAULT_APP_BRIEF: &str = "test app brief";
+
     async fn approved_create_receipt(
         broker: &Arc<LocalAppsHostBroker>,
         app_id: &str,
         surface: &str,
     ) -> (String, String) {
-        approved_create_receipt_with_design(broker, app_id, surface, None).await
+        approved_create_receipt_with_design(
+            broker,
+            app_id,
+            surface,
+            None,
+            TEST_DEFAULT_APP_NAME,
+            TEST_DEFAULT_APP_BRIEF,
+        )
+        .await
     }
 
     async fn approved_create_receipt_with_design(
@@ -13191,6 +13537,8 @@ mod tests {
         app_id: &str,
         surface: &str,
         design_spec: Option<Value>,
+        name: &str,
+        brief: &str,
     ) -> (String, String) {
         let workflow_run_id = format!("wf_create_{}", uuid::Uuid::new_v4().simple());
         let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
@@ -13221,6 +13569,8 @@ mod tests {
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
                 "quality_level": if surface == "canvas" { "balanced" } else { "fast" },
+                "name": name,
+                "brief": brief,
                 "design_spec": design_spec,
             }))
             .await
@@ -13284,7 +13634,39 @@ mod tests {
         brief: &str,
         surface: &str,
     ) -> Value {
-        let (workflow_run_id, receipt_id) = approved_create_receipt(broker, app_id, surface).await;
+        // Stage the SAME name/brief that will be echoed into the scaffold call
+        // below, so these fixtures exercise the ordinary case where the model's
+        // echo matches what it staged — the mismatch case (staged wins) has its
+        // own dedicated test. `LocalAppStageCreate` enforces the same
+        // non-empty/max-length bounds `LocalAppScaffold` does, so a handful of
+        // this helper's callers deliberately pass a value ONLY meant to trip
+        // scaffold's own front-door validation (an empty/whitespace name or
+        // brief, an over-long name) — staging that value would fail before the
+        // scaffold call under test ever runs. Stage a safe placeholder in that
+        // case; the (possibly invalid) `name`/`brief` args still reach the
+        // returned scaffold input unchanged, so the validation under test
+        // still sees exactly what the caller asked for.
+        let stage_name = if !name.trim().is_empty() && name.len() <= local_apps::service::MAX_NAME_BYTES
+        {
+            name
+        } else {
+            TEST_DEFAULT_APP_NAME
+        };
+        let stage_brief =
+            if !brief.trim().is_empty() && brief.len() <= local_apps::service::MAX_BRIEF_BYTES {
+                brief
+            } else {
+                TEST_DEFAULT_APP_BRIEF
+            };
+        let (workflow_run_id, receipt_id) = approved_create_receipt_with_design(
+            broker,
+            app_id,
+            surface,
+            None,
+            stage_name,
+            stage_brief,
+        )
+        .await;
         json!({
             "app_id": app_id,
             "name": name,
@@ -13661,6 +14043,8 @@ mod tests {
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
                 "quality_level": "fast",
+                "name": "Plain create",
+                "brief": "MCP remains optional",
             }))
             .await
             .expect("stage create");
@@ -13732,6 +14116,750 @@ mod tests {
             !load_mcp_settings(&broker.layout(&shell.id).expect("layout"))
                 .expect("MCP settings")
                 .enabled
+        );
+    }
+
+    /// `stage_create` must refuse to re-stage once THIS RUN's create
+    /// candidate journal is already sealed at `Approved` — the native create
+    /// sheet already rendered these staged bytes and the user already
+    /// answered for them. Without a guard, a second `stage_create` for the
+    /// same run silently overwrites `design-spec.json`/`evidence.json` under
+    /// an approval bound to the OLD content, so the approved receipt would
+    /// end up committing bytes nobody actually confirmed
+    /// (`r1-backlog-scaffold-build-14`).
+    ///
+    /// The refusal is scoped to the approved RUN, and the second half of this
+    /// test pins that scope: staging is per-run
+    /// (`.lingxi-build-state/template-candidates/<app>/<run>/staging/…`), so
+    /// a DIFFERENT run cannot reach the approved run's bytes and must stay
+    /// allowed — otherwise the remedy the error message itself prescribes
+    /// ("start a new workflow run") would be refused too, and an app whose
+    /// `LocalAppScaffold` was rejected after approval could never be staged
+    /// again in any run.
+    #[tokio::test]
+    async fn stage_create_after_approval_is_refused_and_cannot_rewrite_the_approved_bytes() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let (first_workflow_run_id, _receipt_id) =
+            approved_create_receipt(&broker, &shell.id, "dom").await;
+        let sealed_journal_before =
+            local_apps::load_candidate_journal(&broker.layout(&shell.id).expect("layout"))
+                .expect("sealed journal");
+        assert_eq!(
+            sealed_journal_before.stage,
+            local_apps::McpAuthoringStage::Approved
+        );
+
+        // The exact bytes the native sheet rendered, in the approved run.
+        let approved_handle = broker
+            .create_selection_handle_for_run(&shell.id, &first_workflow_run_id)
+            .expect("the approved run's selection handle");
+        let approved_evidence_path = broker
+            .create_staging_root(&shell.id, &first_workflow_run_id, &approved_handle)
+            .join("evidence.json");
+        let evidence_before =
+            fs::read_to_string(&approved_evidence_path).expect("approved staging evidence");
+        assert!(
+            evidence_before.contains(TEST_DEFAULT_APP_NAME),
+            "the approved evidence must carry the confirmed name: {evidence_before}"
+        );
+
+        // Re-staging INSIDE the approved run — the hazard — must be refused.
+        let error = broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": first_workflow_run_id,
+                "validated_selection_handle": approved_handle,
+                "quality_level": "fast",
+                "name": "a different name the user never saw",
+                "brief": "a different brief the user never saw",
+            }))
+            .await
+            .expect_err("re-staging an already-approved create candidate must be refused");
+        assert!(
+            error.contains("create_staging_rejected") && error.contains("already approved"),
+            "expected the re-stage refusal to name both the code and the reason, got: {error}"
+        );
+
+        // And it must refuse BEFORE writing anything: the approved bytes the
+        // user answered for are byte-identical afterwards.
+        let evidence_after = fs::read_to_string(&approved_evidence_path)
+            .expect("approved staging evidence still present");
+        assert_eq!(
+            evidence_before, evidence_after,
+            "the refusal must not have rewritten the approved staging evidence"
+        );
+        assert!(
+            !evidence_after.contains("a different name the user never saw"),
+            "the unconfirmed name must never reach the approved staging evidence: {evidence_after}"
+        );
+
+        // The refusal is a pure read-side check: the sealed journal approved
+        // for `first_workflow_run_id` is untouched.
+        let sealed_journal_after =
+            local_apps::load_candidate_journal(&broker.layout(&shell.id).expect("layout"))
+                .expect("sealed journal still present");
+        assert_eq!(sealed_journal_after.workflow_run_id, first_workflow_run_id);
+        assert_eq!(
+            sealed_journal_after.stage,
+            local_apps::McpAuthoringStage::Approved
+        );
+
+        // A genuinely NEW workflow run — the remedy the error names — is
+        // still allowed, because it writes its own staging tree and cannot
+        // touch the approved run's bytes.
+        let second_workflow_run_id = format!("wf_restage_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &second_workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id,
+                "workflow_run_id": second_workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": template_id_for_scaffold_surface("dom"),
+                "reason": "a fresh run after the first approval",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection for the second run");
+        let second_handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle")
+            .to_string();
+        broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": second_workflow_run_id,
+                "validated_selection_handle": second_handle,
+                "quality_level": "fast",
+                "name": "a name for the fresh run",
+                "brief": "a brief for the fresh run",
+            }))
+            .await
+            .expect("a NEW workflow run must still be allowed to stage");
+        // The approved run's bytes are still exactly what the sheet showed.
+        assert_eq!(
+            evidence_before,
+            fs::read_to_string(&approved_evidence_path).expect("approved staging evidence"),
+            "a second run must write its own staging tree, never the approved run's"
+        );
+    }
+
+    /// WP-C gate (`r4-engine-core-01`): a SECOND `create_without_mcp` call for
+    /// a `workflow_run_id` whose candidate journal is already sealed at
+    /// `Approved` must reuse that approval — no second native
+    /// `CreateConfirmationRequested` sheet, the sealed journal stays
+    /// `Approved` rather than being rewritten back to `Prepared`, and the
+    /// answer must be one the create workflow can actually spend: a non-empty
+    /// `receipt_id` that `LocalAppScaffold` can claim. Before the reuse arm
+    /// existed, the second call rebuilt a fresh `Prepared` journal and
+    /// re-raised the native sheet unconditionally. A reuse arm that answers
+    /// with `receipt_id: null` fixes only the sheet — `local-app-build.js`
+    /// rejects that payload in `createApprovalSchema` and again before
+    /// `LocalAppScaffold`, so the retry still dies, which is why the receipt
+    /// is asserted here too.
+    ///
+    /// The tail covers the one case where reuse legitimately cannot hand out a
+    /// receipt: a scaffold already holds a live claim. That must fail fast
+    /// with a named `create_approval_in_flight:` error and still raise no
+    /// sheet, so no user answer can be solicited and then discarded.
+    #[tokio::test]
+    async fn approve_mcp_proposal_reuses_an_already_approved_create_journal_without_a_second_native_sheet(
+    ) {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_root, _service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &_service).await;
+        let workflow_run_id = format!("wf_reuse_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id.clone(),
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "reuse arm coverage",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle");
+        broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": "Reuse arm",
+                "brief": "second approval call must reuse the sealed journal",
+            }))
+            .await
+            .expect("stage create");
+        write_initial_staging_flow_contexts(&broker, &shell.id, &workflow_run_id, handle);
+
+        let first_approval = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            let workflow_run_id = workflow_run_id.clone();
+            async move {
+                broker
+                    .approve_mcp_proposal(json!({
+                        "app_id": app_id,
+                        "workflow_run_id": workflow_run_id,
+                        "create_without_mcp": true,
+                    }))
+                    .await
+            }
+        });
+        let first_request_id = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(request_id) = broker
+                    .pending_create_confirmations
+                    .lock()
+                    .await
+                    .keys()
+                    .next()
+                    .cloned()
+                {
+                    break request_id;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("first create confirmation request");
+        assert!(
+            broker
+                .resolve_create_confirmation(&first_request_id, true)
+                .await
+        );
+        let first_approved = first_approval
+            .await
+            .expect("first approval task")
+            .expect("approve plain create");
+        assert_eq!(first_approved["status"], "create_approved_no_mcp");
+        let first_receipt_id = first_approved["receipt_id"]
+            .as_str()
+            .expect("first create receipt")
+            .to_string();
+
+        let sealed_journal =
+            local_apps::load_candidate_journal(&broker.layout(&shell.id).expect("layout"))
+                .expect("sealed journal after first approval");
+        assert_eq!(sealed_journal.stage, local_apps::McpAuthoringStage::Approved);
+
+        // A SECOND identical call must reuse the sealed approval promptly —
+        // it must NOT raise a second native confirmation sheet and hang
+        // waiting for an answer nothing in this test will ever give it.
+        let second_approval = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            let workflow_run_id = workflow_run_id.clone();
+            async move {
+                broker
+                    .approve_mcp_proposal(json!({
+                        "app_id": app_id,
+                        "workflow_run_id": workflow_run_id,
+                        "create_without_mcp": true,
+                    }))
+                    .await
+            }
+        });
+        tokio::pin!(second_approval);
+        let second_approved = tokio::select! {
+            result = &mut second_approval => result
+                .expect("second approval task did not panic")
+                .expect("reuse arm must return the existing approval, not an error"),
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {
+                let pending = broker.pending_create_confirmations.lock().await.len();
+                panic!(
+                    "the create approval branch has no already-approved reuse arm: a second \
+                     create_without_mcp call for an already-Approved journal is still pending \
+                     after 300ms (pending_create_confirmations={pending}), meaning it re-raised \
+                     the native create-confirmation sheet instead of reusing the sealed approval"
+                );
+            }
+        };
+        assert_eq!(second_approved["status"], "create_approved_no_mcp");
+        assert_eq!(second_approved["approved"], true);
+        assert!(
+            broker.pending_create_confirmations.lock().await.is_empty(),
+            "the reuse arm must leave no native create-confirmation sheet outstanding"
+        );
+
+        // The reuse answer must be USABLE, not merely prompt. `local-app-build.js`
+        // rejects `approved: true` without a non-empty `receipt_id` twice over —
+        // `createApprovalSchema` (the shape the mcp-designer agent must satisfy)
+        // and the imperative check before `LocalAppScaffold` — so a `null`
+        // receipt here would replace the duplicate-sheet dead end with an
+        // unnamed workflow failure and leave `create_declined` as the agent's
+        // only schema-valid answer for a creation the user actually approved.
+        let second_receipt_id = second_approved["receipt_id"].as_str().unwrap_or_else(|| {
+            panic!(
+                "the reuse arm returned receipt_id={:?}, which is not a string: \
+                 local-app-build.js requires a non-empty receipt_id whenever approved is true \
+                 (createApprovalSchema + the LocalAppScaffold precondition), so this retry can \
+                 never complete",
+                second_approved["receipt_id"]
+            )
+        });
+        assert!(
+            !second_receipt_id.is_empty(),
+            "the reuse arm returned an empty receipt_id; LocalAppScaffold cannot consume it"
+        );
+        let second_receipt_id = second_receipt_id.to_string();
+
+        // The sealed journal must be untouched — still Approved, not
+        // downgraded back to Prepared by a rebuilt candidate.
+        let journal_after =
+            local_apps::load_candidate_journal(&broker.layout(&shell.id).expect("layout"))
+                .expect("journal must still exist after the reuse call");
+        assert_eq!(
+            journal_after.stage,
+            local_apps::McpAuthoringStage::Approved,
+            "the reuse arm must not rewrite the sealed Approved journal back to Prepared"
+        );
+        assert_eq!(
+            journal_after.proposal_sha256, sealed_journal.proposal_sha256,
+            "the reuse arm must not mint a new candidate proposal over the sealed one"
+        );
+
+        // The reused receipt must actually be spendable by the scaffold step.
+        broker
+            .pending_mcp_receipts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .claim_candidate(
+                &second_receipt_id,
+                &shell.id,
+                &workflow_run_id,
+                &journal_after.approval_contract_sha256,
+                &journal_after.proposal_sha256,
+                now_ms(),
+            )
+            .expect("the receipt handed back by the reuse arm must be claimable by LocalAppScaffold");
+
+        // With that claim now live (an in-flight scaffold), a THIRD call must
+        // still refuse to raise a native sheet: it fails fast with a named
+        // in-flight error instead of asking the user again only to throw the
+        // answer away on `receipt_in_use`.
+        let third_approval = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            let workflow_run_id = workflow_run_id.clone();
+            async move {
+                broker
+                    .approve_mcp_proposal(json!({
+                        "app_id": app_id,
+                        "workflow_run_id": workflow_run_id,
+                        "create_without_mcp": true,
+                    }))
+                    .await
+            }
+        });
+        tokio::pin!(third_approval);
+        let third_error = tokio::select! {
+            result = &mut third_approval => result
+                .expect("third approval task did not panic")
+                .expect_err("a third call while the receipt is claimed must not hand out a second live receipt"),
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {
+                let pending = broker.pending_create_confirmations.lock().await.len();
+                panic!(
+                    "a create_without_mcp call for an already-Approved journal whose receipt is \
+                     claimed by an in-flight scaffold is still pending after 300ms \
+                     (pending_create_confirmations={pending}): it re-raised the native \
+                     create-confirmation sheet instead of failing fast"
+                );
+            }
+        };
+        assert!(
+            third_error.starts_with("create_approval_in_flight:"),
+            "the in-flight refusal must be named, got {third_error:?}"
+        );
+        assert!(
+            broker.pending_create_confirmations.lock().await.is_empty(),
+            "the in-flight refusal must not leave a native create-confirmation sheet outstanding"
+        );
+        assert_ne!(
+            second_receipt_id, first_receipt_id,
+            "the reuse arm must mint its own receipt: handing back the first one would collide \
+             with a scaffold that already claimed it"
+        );
+    }
+
+    /// WP-C gate (`r3-failure-paths-03`): a declined native create
+    /// confirmation must be TERMINAL in `local-app-build.js`. Before the
+    /// decline shape existed, `createApprovalSchema` demanded an approved
+    /// receipt, so the mcp-designer agent had no way to report the decline;
+    /// the script fell through to the unnamed
+    /// "create approval did not yield a unified scaffold receipt" throw, and
+    /// the agent's only remaining move was to call
+    /// `LocalAppApproveMcpProposal` again — re-raising the very sheet the user
+    /// had just dismissed.
+    ///
+    /// This runs the REAL plugin script through the REAL QuickJS workflow
+    /// runtime with a hermetic mcp-designer that declines, and asserts the run
+    /// ends in a declined terminal result having asked exactly ONCE. It does
+    /// not prove the schema admits the decline shape — the workflow runtime
+    /// only `JSON.parse`s a schema agent's answer (`workflow/src/lib.rs`);
+    /// validation is host-side in `agent::runner`.
+    #[test]
+    fn declined_create_confirmation_is_terminal_in_the_build_workflow() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let args = json!({
+            "operation": "create",
+            "app_id": "aaaa1111",
+            "spec": "A small form app",
+            "quality_level": "balanced",
+            "host_context": {
+                "source": "verified_host",
+                "operation": "create",
+                "app_id": "aaaa1111",
+                "workflow_run_id": "wf_decline1",
+                "selector_capability": "sel_00000000000000000000000000000000",
+                "invocation_capability": "mcpv_00000000000000000000000000000000",
+                "template_catalog": {
+                    "catalog_digest": "digest",
+                    "available_template_ids": ["react-dom-r2"],
+                },
+                "staging": {"isolated": true, "final_publish": false},
+            },
+        });
+        let approval_calls = Arc::new(AtomicUsize::new(0));
+        let post_decline_calls = Arc::new(AtomicUsize::new(0));
+        let approval_counter = approval_calls.clone();
+        let post_decline_counter = post_decline_calls.clone();
+        let outcome = workflow::run_with_progress(
+            source,
+            move |prompts, options| {
+                prompts
+                    .iter()
+                    .zip(options.iter())
+                    .map(|(_prompt, options)| {
+                        if options.contains("template-selector") {
+                            return json!({
+                                "catalog_digest": "digest",
+                                "template_id": "react-dom-r2",
+                                "reason": "ordinary form",
+                                "rejected": [],
+                                "validated_selection_handle":
+                                    "vsel_0123456789abcdef0123456789abcdef",
+                            })
+                            .to_string();
+                        }
+                        // Checked BEFORE "designer": the approval stage's
+                        // agentType IS `mcp-designer`.
+                        if options.contains("native-create-approval") {
+                            approval_counter.fetch_add(1, Ordering::SeqCst);
+                            return json!({
+                                "approved": false,
+                                "status": "create_declined",
+                            })
+                            .to_string();
+                        }
+                        if options.contains("designer") {
+                            return json!({
+                                "runtime_family": "react_dom",
+                                "acceptance_checks": [],
+                                "summary": "design",
+                            })
+                            .to_string();
+                        }
+                        if options.contains("builder-stage") {
+                            return json!({
+                                "ok": true,
+                                "dependency_input_sha256": "a".repeat(64),
+                                "summary": "staged",
+                            })
+                            .to_string();
+                        }
+                        // Any stage after the decline means the run kept going.
+                        post_decline_counter.fetch_add(1, Ordering::SeqCst);
+                        json!({"ok": false, "summary": "unreachable after a decline"}).to_string()
+                    })
+                    .collect()
+            },
+            |_progress| {},
+            None,
+            true,
+            Some(args.to_string()),
+            None,
+        );
+        let after_decline = post_decline_calls.load(Ordering::SeqCst);
+        assert_eq!(
+            after_decline, 0,
+            "a declined create confirmation must be terminal, but the workflow ran \
+             {after_decline} further agent stage(s) after the decline"
+        );
+        let asked = approval_calls.load(Ordering::SeqCst);
+        assert_eq!(
+            asked, 1,
+            "a declined create confirmation must not be re-asked, but the workflow called the \
+             native-create-approval agent {asked} time(s)"
+        );
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => panic!(
+                "a declined create confirmation has no terminal contract in local-app-build.js: \
+                 the workflow threw instead of returning a declined result ({error})"
+            ),
+        };
+        let result = outcome
+            .result
+            .expect("the declined create run must produce a workflow result");
+        assert!(
+            result.contains("\"status\":\"create_declined\""),
+            "the declined create run must report status create_declined, got {result}"
+        );
+        assert!(
+            result.contains("\"ok\":false"),
+            "the declined create run must report ok=false, got {result}"
+        );
+    }
+
+    /// WP-C gate (`r3-failure-paths-03`, contradictory-shape half): widening
+    /// the create-approval contract must not let an APPROVED creation be
+    /// reported to the user as a decline. `createApprovalSchema` now makes the
+    /// contradictory shape unrepresentable (`anyOf` of the two whole shapes),
+    /// and `local-app-build.js` also checks `approved === false` before taking
+    /// the declined exit — keying the exit on `status` alone would turn
+    /// `{approved: true, status: 'create_declined'}` into
+    /// "The user declined the create confirmation."
+    #[test]
+    fn contradictory_create_approval_is_never_reported_as_a_user_decline() {
+        let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let args = json!({
+            "operation": "create",
+            "app_id": "aaaa1111",
+            "spec": "A small form app",
+            "quality_level": "balanced",
+            "host_context": {
+                "source": "verified_host",
+                "operation": "create",
+                "app_id": "aaaa1111",
+                "workflow_run_id": "wf_contradiction1",
+                "selector_capability": "sel_00000000000000000000000000000000",
+                "invocation_capability": "mcpv_00000000000000000000000000000000",
+                "template_catalog": {
+                    "catalog_digest": "digest",
+                    "available_template_ids": ["react-dom-r2"],
+                },
+                "staging": {"isolated": true, "final_publish": false},
+            },
+        });
+        let outcome = workflow::run_with_progress(
+            source,
+            move |prompts, options| {
+                prompts
+                    .iter()
+                    .zip(options.iter())
+                    .map(|(_prompt, options)| {
+                        if options.contains("template-selector") {
+                            return json!({
+                                "catalog_digest": "digest",
+                                "template_id": "react-dom-r2",
+                                "reason": "ordinary form",
+                                "rejected": [],
+                                "validated_selection_handle":
+                                    "vsel_0123456789abcdef0123456789abcdef",
+                            })
+                            .to_string();
+                        }
+                        if options.contains("native-create-approval") {
+                            return json!({
+                                "approved": true,
+                                "receipt_id": "mcp-create-receipt",
+                                "status": "create_declined",
+                            })
+                            .to_string();
+                        }
+                        if options.contains("designer") {
+                            return json!({
+                                "runtime_family": "react_dom",
+                                "acceptance_checks": [],
+                                "summary": "design",
+                            })
+                            .to_string();
+                        }
+                        if options.contains("builder-stage") {
+                            return json!({
+                                "ok": true,
+                                "dependency_input_sha256": "a".repeat(64),
+                                "summary": "staged",
+                            })
+                            .to_string();
+                        }
+                        json!({"ok": false, "summary": "unreachable"}).to_string()
+                    })
+                    .collect()
+            },
+            |_progress| {},
+            None,
+            true,
+            Some(args.to_string()),
+            None,
+        );
+        // Refusing the contradictory answer outright is fine; silently
+        // relabelling an approval as a user decline is not.
+        if let Ok(outcome) = outcome {
+            let result = outcome.result.unwrap_or_default();
+            assert!(
+                !result.contains("create_declined"),
+                "an approval that also claims `create_declined` must never be reported to the \
+                 user as a decline, got {result}"
+            );
+        }
+    }
+
+    /// WP4 gate: `stage_create` alone — never the `#[cfg(test)]`
+    /// `write_initial_staging_flow_contexts` helper — must leave enough on
+    /// disk for `approve_mcp_proposal(create_without_mcp=true)` to reach the
+    /// native create confirmation. Before the fix, `load_create_proposal_context`
+    /// fails closed with `mcp_flow_contexts_missing` before the confirmation
+    /// is ever raised.
+    #[tokio::test]
+    async fn create_without_mcp_reaches_confirmation_from_staged_context_alone() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let workflow_run_id = format!("wf_stage_only_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id.clone(),
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "stage-only create without MCP",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle");
+        broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": "Staged context only",
+                "brief": "create without MCP lands an empty active context set",
+            }))
+            .await
+            .expect("stage create");
+        // Deliberately no `write_initial_staging_flow_contexts` call here:
+        // this test exercises exactly what production `stage_create` leaves
+        // on disk, nothing more.
+
+        let approval = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            let workflow_run_id = workflow_run_id.clone();
+            async move {
+                broker
+                    .approve_mcp_proposal(json!({
+                        "app_id": app_id,
+                        "workflow_run_id": workflow_run_id,
+                        "create_without_mcp": true,
+                    }))
+                    .await
+            }
+        });
+        tokio::pin!(approval);
+        let request_id = tokio::select! {
+            id = timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(request_id) = broker
+                        .pending_create_confirmations
+                        .lock()
+                        .await
+                        .keys()
+                        .next()
+                        .cloned()
+                    {
+                        break request_id;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }) => id.expect(
+                "approve_mcp_proposal(create_without_mcp) must raise a native \
+                 CreateConfirmationRequested within 2s using only what production \
+                 stage_create wrote, but none was pending",
+            ),
+            result = &mut approval => {
+                panic!(
+                    "approve_mcp_proposal(create_without_mcp) must raise a native \
+                     CreateConfirmationRequested using only what production stage_create \
+                     wrote, but it returned before any confirmation was requested: {:?}",
+                    result.expect("approval task did not panic")
+                );
+            }
+        };
+        assert!(broker.resolve_create_confirmation(&request_id, true).await);
+        let approved = approval
+            .await
+            .expect("approval task")
+            .expect("approve plain create from staged context alone");
+        assert_eq!(approved["status"], "create_approved_no_mcp");
+        let receipt_id = approved["receipt_id"]
+            .as_str()
+            .expect("create receipt")
+            .to_string();
+        assert!(
+            !receipt_id.is_empty(),
+            "expected a non-empty receipt_id, got: {approved}"
+        );
+
+        // The empty staged context set must also survive landing: the seed
+        // carries `contexts` into `land_scaffold`, which calls
+        // `persist_active_mcp_flow_contexts`. Assert the landed file exists
+        // and round-trips to an empty map rather than trusting inspection.
+        broker
+            .scaffold_shell_app_value(json!({
+                "app_id": shell.id,
+                "name": "Staged context only",
+                "brief": "create without MCP lands an empty active context set",
+                "workflow_run_id": workflow_run_id,
+                "receipt_id": receipt_id,
+            }))
+            .await
+            .expect("scaffold from staged context alone");
+        assert!(service.record(&shell.id).await.expect("record").scaffolded);
+        let landed_contexts: BTreeMap<String, local_apps::AppMcpFlowContext> =
+            serde_json::from_slice(
+                &fs::read(workspace_of(&root, &shell.id).join(".lingxi/mcp-flow-contexts.json"))
+                    .expect("landed active MCP flow contexts"),
+            )
+            .expect("parse landed active MCP flow contexts");
+        assert!(
+            landed_contexts.is_empty(),
+            "landing an empty staged context set must persist an empty active \
+             context map, got: {landed_contexts:?}"
         );
     }
 
@@ -13807,6 +14935,8 @@ mod tests {
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
                 "quality_level": "balanced",
+                "name": "Recipe list",
+                "brief": "two-screen recipe list",
                 "design_spec": design_spec,
             }))
             .await
@@ -13873,12 +15003,19 @@ mod tests {
         let handle = selection["validated_selection_handle"]
             .as_str()
             .expect("selection handle");
+        // WP5 gate (a): a distinctive staged name/brief, never echoed anywhere
+        // else in this test, so the assertion below can only pass if the
+        // native confirmation sheet actually rendered what was staged here.
+        const STAGED_NAME: &str = "记账本";
+        const STAGED_BRIEF: &str = "记录日常收支的小工具";
         let stage = broker
             .stage_create(json!({
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
                 "quality_level": "balanced",
+                "name": STAGED_NAME,
+                "brief": STAGED_BRIEF,
                 "design_spec": {
                     "runtime_family": "react_dom",
                     "acceptance_checks": ["render shell"],
@@ -13941,6 +15078,11 @@ mod tests {
         assert_eq!(request.app_id, shell.id);
         assert_eq!(request.selected_template.template_id, "react-dom-r2");
         assert_eq!(request.initial_tools.len(), 1);
+        // WP5 gate (a): the sheet must carry the staged name/brief, never the
+        // empty shell record's `untitled` placeholder.
+        assert_eq!(request.name, STAGED_NAME, "got: {request:?}");
+        assert_eq!(request.brief, STAGED_BRIEF, "got: {request:?}");
+        assert_ne!(request.name, local_apps::service::PLACEHOLDER_APP_NAME);
         assert!(
             !sink.events().await.iter().any(|event| matches!(
                 event,
@@ -13961,11 +15103,15 @@ mod tests {
             .expect("approved");
         let receipt_id = approval["receipt_id"].as_str().expect("receipt id");
 
+        // WP5 gate (b): echo back a DIFFERENT name/brief than what was staged.
+        // The candidate staged through `LocalAppStageCreate` must still win —
+        // proving `LocalAppScaffold` commits the staged values, not whatever
+        // the model happens to send at scaffold time.
         broker
             .scaffold_shell_app_value(json!({
                 "app_id": shell.id,
-                "name": "Create E2E",
-                "brief": "single confirmation",
+                "name": "Model Echoed A Different Name",
+                "brief": "model echoed a different brief",
                 "workflow_run_id": workflow_run_id,
                 "receipt_id": receipt_id,
             }))
@@ -13973,6 +15119,8 @@ mod tests {
             .expect("scaffold from unified create receipt");
         let record = service.record(&shell.id).await.expect("record");
         assert!(record.scaffolded);
+        assert_eq!(record.name, STAGED_NAME, "scaffold must commit the staged name, not the model's echoed value");
+        assert_eq!(record.brief, STAGED_BRIEF, "scaffold must commit the staged brief, not the model's echoed value");
         let manifest = load_manifest(&layout).expect("scaffolded manifest");
         assert_eq!(
             manifest
@@ -14442,7 +15590,291 @@ mod tests {
             .await
             .expect_err("runtime-profile apps must not auto-repair dependency drift");
         assert!(error.contains("dependencies_dirty"), "{error}");
-        assert!(error.contains("LocalAppConfirmDependencyChange"), "{error}");
+        // WP8: the drift error must not send the agent to retry
+        // `LocalAppConfirmDependencyChange`/`LocalAppUpdateDependencies` — neither is a
+        // model-callable tool (absent from `LOCAL_APP_TOOLS`, refused by name on the MCP
+        // transport) — it must tell the agent to report the drift instead.
+        assert!(
+            !error.contains("LocalAppConfirmDependencyChange")
+                && !error.contains("LocalAppUpdateDependencies"),
+            "{error}"
+        );
+        assert!(error.contains("report the drift"), "{error}");
+    }
+
+    /// r4-failure-paths-01: `ensure_dependency_install` transitions the
+    /// dependency record to `Installing` itself (its own
+    /// `start_dependency_install` call) and then spawns `run_dependency_install`
+    /// to do the actual work. That worker used to call the SAME transition
+    /// again through `install_scaffold_dependencies`, which always fails once
+    /// the state is already `Installing` -- so the install body never ran and
+    /// the record was stuck `Installing` forever, with `LocalAppBuild` polling
+    /// the full ten-minute timeout on every later attempt.
+    ///
+    /// Requeue an already-scaffolded (dependencies `Ready`) app to exercise a
+    /// route where `ensure_dependency_install` itself performs the
+    /// `Installing` transition and spawns the worker (a `Queued` or `Failed`
+    /// record reaches that same transition without any requeue), then assert
+    /// the install the worker was spawned to run actually completes to
+    /// `Ready` -- not merely that no error is returned.
+    #[tokio::test]
+    async fn ensure_dependency_install_runs_the_install_its_worker_owns() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "双重安装", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+
+        let after_scaffold = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("dependency record after scaffold");
+        assert_eq!(after_scaffold.state, AppDependencyState::Ready);
+
+        // The same requeue `ensure_dependency_install` performs itself when it
+        // detects a stale snapshot (local_apps_host.rs:3611-3616). This is the
+        // route this test simulates; a `Queued` or `Failed` record reaches the
+        // very same `start_dependency_install` at :3617 with no requeue at all.
+        service
+            .queue_dependency_install(&shell.id)
+            .await
+            .expect("requeue dependency install");
+
+        let started = broker
+            .ensure_dependency_install(&shell.id, false)
+            .await
+            .expect("ensure_dependency_install must accept a queued record");
+        assert_eq!(
+            started.state,
+            AppDependencyState::Installing,
+            "ensure_dependency_install must own the Queued -> Installing transition itself"
+        );
+
+        let mut observed = started.clone();
+        for _ in 0..200 {
+            observed = service
+                .dependency_record(&shell.id)
+                .await
+                .expect("poll dependency record");
+            if observed.state != AppDependencyState::Installing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The terminal state is the whole criterion, and it is load-bearing:
+        // `Ready` is only ever written by
+        // `complete_dependency_install_with_metadata`, which on this path is
+        // only reachable from `run_started_dependency_install`'s Ok arm --
+        // i.e. only after `dependency_install_once` actually ran and
+        // succeeded.
+        //
+        // Deliberately NOT asserted here, because neither discriminates the
+        // bug from the fix on this path:
+        //  - `install_attempts`: bumped by `start_dependency_install`, which
+        //    `ensure_dependency_install` calls itself at :3617 before the
+        //    worker is ever spawned, so it rises identically in the broken
+        //    build.
+        //  - a pnpm invocation count on the mock runtime: this requeue reuses
+        //    the scaffold's dependency snapshot, so `dependency_install_once`
+        //    takes the `snapshot_ready` fast path (:4455) and issues no
+        //    isolated command at all -- measured: zero requests even when the
+        //    install genuinely runs.
+        assert_eq!(
+            observed.state,
+            AppDependencyState::Ready,
+            "the worker spawned by ensure_dependency_install never completed the install it \
+             started -- record left at {:?} (last_error={:?}) after a 2s poll window instead of \
+             Ready; this is the double-start where the worker re-invokes \
+             start_dependency_install and always fails because the state is already Installing, \
+             so dependency_install_once is never reached and the app can never be built",
+            observed.state,
+            observed.last_error,
+        );
+    }
+
+    /// A `ReceiptClaim` guard dropped WITHOUT `commit_claimed_candidate` ever
+    /// running — the shape of a Stop, a panic, or the 529 non-streaming
+    /// fallback dropping `scaffold_shell_app_value`'s future mid-transaction
+    /// — must release the claim, leaving the app's receipt slot re-issuable.
+    ///
+    /// REGRESSION: before this guard existed, only the explicit `Err` arm at
+    /// the end of `scaffold_shell_app_value` called `release_claim`; any OTHER
+    /// exit (a dropped future among them) left the claim held forever, and
+    /// `McpReceiptBook::issue`'s in-use check answered `receipt_in_use` for
+    /// the life of the process — the app could never be created.
+    #[test]
+    fn a_dropped_receipt_claim_guard_leaves_the_slot_re_issuable() {
+        let digest = "0".repeat(64);
+        let claimed = local_apps::McpConfirmationReceipt::new(
+            "app",
+            "run-1",
+            digest.clone(),
+            digest.clone(),
+            0,
+        );
+        let receipt_id = claimed.receipt_id.clone();
+        let book = Arc::new(std::sync::Mutex::new(local_apps::McpReceiptBook::default()));
+        book.lock().unwrap().issue(claimed).unwrap();
+        book.lock()
+            .unwrap()
+            .claim_candidate(&receipt_id, "app", "run-1", &digest, &digest, 0)
+            .unwrap();
+
+        {
+            // Simulates the scaffold transaction's future being dropped mid-
+            // flight: the guard leaves scope WITHOUT `commit_claimed_candidate`
+            // (the only other place that used to clear `claimed`) ever running.
+            let _guard = ReceiptClaim::held(Arc::clone(&book), receipt_id.clone());
+        }
+
+        let reissued = local_apps::McpConfirmationReceipt::new(
+            "app",
+            "run-2",
+            digest.clone(),
+            digest,
+            0,
+        );
+        book.lock().unwrap().issue(reissued).expect(
+            "the dropped ReceiptClaim guard must have released the claim so a fresh \
+             receipt can be issued for this app -- otherwise the app can never be \
+             (re)created until the process restarts",
+        );
+    }
+
+    /// The guard is only worth having if the PRODUCTION transaction actually
+    /// holds one. The test above pins `ReceiptClaim`'s `Drop`; this one pins
+    /// the `let _receipt_claim = ReceiptClaim::held(..)` binding at the top of
+    /// `scaffold_shell_app_value` — delete that one line and this test goes
+    /// red while the one above stays green.
+    ///
+    /// The drop is placed strictly between `claim_candidate` and
+    /// `commit_claimed_candidate` WITHOUT a timing race: the test takes
+    /// `lock_app_build` out from under the transaction first, and
+    /// `land_scaffold` blocks on that lock, so the future can never reach the
+    /// commit while the contender is alive. What is dropped is the real
+    /// `scaffold_shell_app_value` future — the shape of a Stop, a panic
+    /// unwinding the caller, or the 529 non-streaming fallback abandoning it.
+    ///
+    /// It is also independent of the TTL escape hatch in
+    /// `McpReceiptBook::issue`: the re-issue below is minted at the same
+    /// `now_ms()` as the leaked slot, so the slot has NOT expired and the TTL
+    /// clause cannot be what lets the new receipt through.
+    #[tokio::test]
+    async fn dropping_the_scaffold_future_releases_the_claim_it_took() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let input = confirmed_scaffold_input(&broker, &shell.id, "打飞机", "b", "canvas").await;
+
+        // Hold the per-app build lock so the transaction parks inside
+        // `land_scaffold` instead of racing us to its commit point.
+        let contender = tokio::task::spawn_blocking({
+            let root = root.path().to_path_buf();
+            let app_id = shell.id.clone();
+            move || local_apps::storage::lock_app_build(&root, &app_id)
+        })
+        .await
+        .expect("join the contender")
+        .expect("the contender must take the build lock first");
+
+        {
+            let mut scaffolding = Box::pin(broker.scaffold_shell_app_value(input));
+            assert!(
+                timeout(Duration::from_millis(400), &mut scaffolding)
+                    .await
+                    .is_err(),
+                "the transaction must still be IN FLIGHT — past `claim_candidate` \
+                 and parked on the build lock, short of `commit_claimed_candidate` \
+                 — for its drop to be the thing under test"
+            );
+            // ...and here it is dropped, never polled again: nothing further
+            // in its body ever runs, `Err` arm included.
+        }
+
+        let digest = "0".repeat(64);
+        let reissued = local_apps::McpConfirmationReceipt::new(
+            shell.id.clone(),
+            "run-after-the-drop",
+            digest.clone(),
+            digest,
+            now_ms(),
+        );
+        broker
+            .pending_mcp_receipts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .issue(reissued)
+            .expect(
+                "dropping `scaffold_shell_app_value`'s own future must release the receipt \
+                 claim it took -- otherwise `McpReceiptBook::issue` answers `receipt_in_use` \
+                 for this app for the life of the process and it can never be created",
+            );
+
+        drop(contender);
+    }
+
+    /// WP8 (corrector): the behavioural test above pins ONE of the three host
+    /// copies that used to send an agent to the two dead tool names. The copy
+    /// that mattered most was a different one — `local_apps_build.rs`'s
+    /// `validate_dependency_snapshot_files`, reachable from the MODEL-callable
+    /// `LocalAppBuild` (`build_app` -> `build_workspace` ->
+    /// `build_workspace_locked`) — and a gate that covers only the copy that
+    /// was fixed makes the FAMILY look handled when it is not.
+    ///
+    /// So scan the production text of both files for an imperative that names
+    /// either operation. Neither is in `LOCAL_APP_TOOLS`; the MCP transport
+    /// refuses their static spelling outright (see `local_apps_mcp.rs`'s
+    /// `the_mcp_surface_no_longer_serves_the_static_host_operations`), so any
+    /// "use/run/call/retry/invoke <name>" in model-facing copy is an
+    /// instruction to retry a call that fails closed forever.
+    ///
+    /// The needles are ASSEMBLED at runtime rather than written out, because
+    /// this test's own source is inside one of the two files it scans — a
+    /// literal needle here would match itself and the gate could never go red.
+    /// Mentioning the names in prose (as the comments above and this one do) is
+    /// deliberately still allowed: the defect is the imperative, not the name.
+    #[test]
+    fn no_host_error_copy_tells_the_model_to_call_a_dead_dependency_operation() {
+        let dead = [
+            format!("LocalApp{}", "ConfirmDependencyChange"),
+            format!("LocalApp{}", "UpdateDependencies"),
+        ];
+        let verbs = ["use ", "run ", "call ", "retry ", "invoke "];
+        let sources = [
+            ("local_apps_host.rs", include_str!("local_apps_host.rs")),
+            ("local_apps_build.rs", include_str!("local_apps_build.rs")),
+        ];
+        let mut hits: Vec<String> = Vec::new();
+        for (name, src) in sources {
+            for (index, line) in src.lines().enumerate() {
+                let lowered = line.to_lowercase();
+                for op in &dead {
+                    let lowered_op = op.to_lowercase();
+                    for verb in verbs {
+                        let needle = format!("{verb}{lowered_op}");
+                        if lowered.contains(&needle) {
+                            hits.push(format!(
+                                "{name}:{}: `{}` — {}",
+                                index + 1,
+                                line.trim(),
+                                needle
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "host copy must not tell a caller to invoke a dependency operation that is \
+             absent from LOCAL_APP_TOOLS and refused by name on the MCP transport; it must \
+             tell the agent to report the drift instead. Offending line(s):\n{}",
+            hits.join("\n")
+        );
     }
 
     #[tokio::test]
@@ -15737,6 +17169,155 @@ mod tests {
                      Host-side resolve/enforce exists to remove — found `{workflow}` in {prose}"
                 );
             }
+        }
+    }
+
+    /// The formal contract's "Host-managed files are …" sentence must name
+    /// every `lib/` file the profile's OWN `.lingxi/source-policy.json`
+    /// reserves. That policy is the same set
+    /// `permission::workspace_lease::host_owned_relative` and
+    /// `local_apps_build::restore_host_managed_files` enforce, so a file the
+    /// prose leaves out is a file the agent is never told it may not edit:
+    /// the lease accepts the `Edit`, the next build silently reverts it, and
+    /// the only trace is a `tracing::warn!` while the model loops against a
+    /// file it cannot change.
+    ///
+    /// The needle set is DERIVED from the shipped profile contracts, never
+    /// typed here, and every profile must contribute at least one needle —
+    /// otherwise this assertion would be vacuous. Demonstrated red by
+    /// dropping `lib/frame-loop.js` from the canvas-family sentence: the
+    /// Phaser and Babylon profiles ship it beside their engine adapter and
+    /// reserve BOTH in their policy, while the prose named only the adapter.
+    #[tokio::test]
+    async fn the_formal_contract_names_every_host_managed_helper_its_profile_reserves() {
+        let (_root, service, broker) = create_broker(false, None).await;
+        let record = shell_app_fixture(&broker, &service).await;
+        let mut checked = Vec::new();
+        for family in [
+            local_apps::AppRuntimeProfile::ReactDom,
+            local_apps::AppRuntimeProfile::Canvas2d,
+            local_apps::AppRuntimeProfile::Three3d,
+            local_apps::AppRuntimeProfile::Phaser2d,
+            local_apps::AppRuntimeProfile::Babylon3d,
+        ] {
+            // `babylon_3d` is deliberately gated out of this host build
+            // (`UNAVAILABLE_PROFILES`), so it has no current binding to
+            // render. Skipping it is why `checked` is asserted below.
+            let Ok(binding) = crate::local_app_runtime_profiles::current_binding_for_family(family)
+            else {
+                continue;
+            };
+            let profile_contract =
+                crate::local_app_runtime_profiles::contract_for_binding(&binding)
+                    .expect("the current binding resolves to its contract");
+            let policy_bytes = profile_contract
+                .managed_files
+                .iter()
+                .find(|(path, _)| *path == ".lingxi/source-policy.json")
+                .map(|(_, bytes)| *bytes)
+                .expect("every profile ships a source policy");
+            let policy: Value =
+                serde_json::from_slice(policy_bytes).expect("source policy json parses");
+            let reserved_helpers = policy
+                .get("host_managed_paths")
+                .and_then(Value::as_array)
+                .expect("source policy host_managed_paths")
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|path| path.starts_with("lib/"))
+                .collect::<Vec<_>>();
+            assert!(
+                !reserved_helpers.is_empty(),
+                "{family}: an empty needle set would make this test vacuous"
+            );
+            let contract = formal_workspace_contract(&record, &binding);
+            for helper in reserved_helpers {
+                assert!(
+                    contract.contains(&format!("`{helper}`")),
+                    "{family}: the formal workspace contract must name host-managed \
+                     `{helper}`, or the agent is never told it may not edit it: {contract}"
+                );
+            }
+            checked.push(family);
+        }
+        assert!(
+            checked.contains(&local_apps::AppRuntimeProfile::Phaser2d) && checked.len() >= 4,
+            "this gate is only meaningful while the scaffoldable profiles — Phaser above all, \
+             which ships `lib/frame-loop.js` BESIDE its engine adapter — are actually \
+             rendered here, got {checked:?}"
+        );
+    }
+
+    /// WP8: every backticked `LocalApp*` token in a workspace contract must
+    /// name a REAL builtin tool, or the model is told to call something that
+    /// fails with an unrelated "tool not found" error it has no way to
+    /// diagnose. This is a forward-looking regression gate.
+    ///
+    /// It does not, by itself, catch the actual pre-fix defect: the guided
+    /// contract's steps 4-5 sent the model to "用运行时确认工具" (a "runtime
+    /// confirmation tool") that was never spelled as a tool name at all —
+    /// plain Chinese prose, no backticks, protocol 10.0.0 having removed the
+    /// path it once named — and then to call `LocalAppScaffold` (itself a
+    /// real, existing tool) directly with a runtime-profile receipt the real
+    /// path never produces. A scanner that only understands backticked
+    /// `LocalApp*` spans walks right past prose like that, so this test pins
+    /// the absence of that specific phrase directly alongside the general
+    /// scan, rather than pretending the scan alone would have caught it.
+    #[tokio::test]
+    async fn workspace_contracts_name_no_local_app_tool_outside_local_app_tools() {
+        fn assert_only_real_tool_names(contract: &str, label: &str) {
+            let mut offset = 0;
+            while let Some(found) = contract[offset..].find('`') {
+                let start = offset + found + 1;
+                let Some(found_end) = contract[start..].find('`') else {
+                    break;
+                };
+                let end = start + found_end;
+                let span = &contract[start..end];
+                let name: String = span.chars().take_while(char::is_ascii_alphanumeric).collect();
+                if let Some(rest) = name.strip_prefix("LocalApp") {
+                    if !rest.is_empty() {
+                        assert!(
+                            crate::local_apps_tools::LOCAL_APP_TOOLS
+                                .iter()
+                                .any(|&(tool_name, _, _)| tool_name == name),
+                            "{label} names backticked tool `{name}`, which is not in \
+                             LOCAL_APP_TOOLS and cannot be called: {contract}"
+                        );
+                    }
+                }
+                offset = end + 1;
+            }
+        }
+
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let guided = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
+            .expect("read the guided contract");
+        assert!(
+            !guided.contains("运行时确认工具"),
+            "the guided contract must not send the model to a \"runtime confirmation \
+             tool\" that does not exist — protocol 10.0.0 removed that path; the real \
+             path is the create-local-app skill's unified create flow, which stages a \
+             candidate, raises one native confirmation, and only then calls \
+             LocalAppScaffold: {guided}"
+        );
+        assert_only_real_tool_names(&guided, "the guided contract");
+
+        for surface in ["dom", "canvas"] {
+            let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+            let (root, service, broker) = create_broker(false, Some(runtime)).await;
+            let shell = shell_app_fixture(&broker, &service).await;
+            let input =
+                confirmed_scaffold_input(&broker, &shell.id, "契约扫描", "扫描正文的工具名", surface)
+                    .await;
+            broker
+                .scaffold_shell_app_value(input)
+                .await
+                .expect("scaffold");
+            let formal = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
+                .expect("read the formal contract");
+            assert_only_real_tool_names(&formal, &format!("the formal {surface} contract"));
         }
     }
 
@@ -18591,6 +20172,7 @@ mod tests {
                 self.root.path().to_path_buf(),
                 self.fs.clone(),
                 self.service.clone(),
+                self.broker.clone(),
             )
             .await;
         }
@@ -18777,6 +20359,77 @@ mod tests {
         shell.run_boot_backfill_sweep().await;
 
         assert_eq!(shell.title(), "我的宝贝项目");
+    }
+
+    /// `workspace/LINGXI.md` is the ONE channel that reaches the model for an
+    /// unscaffolded shell (`r3-e2e-trace-01`). Nothing in the create
+    /// transaction ever revisits it after the initial write, so if it is ever
+    /// lost — a partial restore, a wiped workspace mount — the boot sweep must
+    /// be the thing that notices and rewrites it; otherwise the interview
+    /// never restarts and the agent sees an ordinary empty directory.
+    #[tokio::test]
+    async fn boot_sweep_repairs_a_missing_guided_workspace_contract() {
+        let shell = pinned_shell().await;
+        let lingxi_md = workspace_of(&shell.root, &shell.app_id).join("LINGXI.md");
+        // `pinned_shell()` builds its record straight off `AppService`,
+        // bypassing the broker's create-time initializer hook (the one that
+        // normally writes the guided contract) — so this fixture's workspace
+        // starts with no `LINGXI.md` at all, which is exactly the "lost"
+        // state this test needs. Removing it too makes that starting point
+        // explicit regardless of what the fixture happens to do.
+        let _ = fs::remove_file(&lingxi_md);
+        assert!(!lingxi_md.exists(), "the guided contract must be absent before the sweep runs");
+
+        shell.run_boot_backfill_sweep().await;
+
+        let repaired = fs::read_to_string(&lingxi_md)
+            .expect("the boot sweep must rewrite a missing guided workspace contract");
+        assert!(
+            repaired.contains("尚未定形态"),
+            "the repaired file must be the real guided contract, not a stub: {repaired}"
+        );
+    }
+
+    /// Same repair, but for a TRUNCATED file rather than an absent one — an
+    /// interrupted write can leave bytes on disk that are not the contract.
+    #[tokio::test]
+    async fn boot_sweep_repairs_a_truncated_guided_workspace_contract() {
+        let shell = pinned_shell().await;
+        let lingxi_md = workspace_of(&shell.root, &shell.app_id).join("LINGXI.md");
+        fs::write(&lingxi_md, "").expect("truncate the guided contract to simulate a partial write");
+
+        shell.run_boot_backfill_sweep().await;
+
+        let repaired = fs::read_to_string(&lingxi_md)
+            .expect("guided contract still present after repair");
+        assert!(
+            repaired.contains("尚未定形态"),
+            "a truncated guided contract must be rewritten, not left empty: {repaired}"
+        );
+    }
+
+    /// The repair must be scoped to UNSCAFFOLDED shells: once an app is
+    /// formed, `workspace/LINGXI.md` carries the FORMAL contract, and step 0
+    /// rewriting it back to the guided text on every boot would erase the
+    /// surface-specific rules the formal contract exists to state.
+    #[tokio::test]
+    async fn boot_sweep_never_rewrites_a_formed_apps_formal_contract() {
+        let shell = pinned_shell().await;
+        shell.scaffold("打飞机").await.expect("scaffold");
+        let lingxi_md = workspace_of(&shell.root, &shell.app_id).join("LINGXI.md");
+        let formal_before = fs::read_to_string(&lingxi_md).expect("formal contract");
+        assert!(
+            !formal_before.contains("尚未定形态"),
+            "a formed app's contract must already be the FORMAL one: {formal_before}"
+        );
+
+        shell.run_boot_backfill_sweep().await;
+
+        let formal_after = fs::read_to_string(&lingxi_md).expect("formal contract after sweep");
+        assert_eq!(
+            formal_before, formal_after,
+            "step 0 must never overwrite a formed app's formal contract with the guided one"
+        );
     }
 
     /// Clause 1 of the predicate, pinned directly: an app still in its

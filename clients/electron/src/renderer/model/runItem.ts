@@ -92,6 +92,29 @@ export interface CommandRunItem {
   readonly isError: boolean;
 }
 
+/** User-visible lifecycle for a manual `/compact` operation. */
+export interface CompactionRunItem {
+  readonly type: 'compaction';
+  readonly id: string;
+  readonly status: 'running' | 'complete' | 'error';
+  readonly messagesBefore?: number;
+  readonly messagesAfter?: number;
+  readonly bytesSaved?: number;
+  readonly detail?: string;
+}
+
+/**
+ * CLI-compatible time estimate for context compaction.
+ *
+ * The summarizer exposes no token-level progress, so the TUI uses
+ * `min(95, round((1 - e^(-t/90)) * 100))`. Keeping the 95% ceiling prevents a
+ * time estimate from claiming completion before the terminal engine event.
+ */
+export function compactProgressPercent(elapsedMs: number): number {
+  const elapsedSeconds = Math.max(0, elapsedMs) / 1_000;
+  return Math.min(95, Math.round((1 - Math.exp(-elapsedSeconds / 90)) * 100));
+}
+
 export type CommandPresentationKind =
   | 'help'
   | 'metrics'
@@ -135,7 +158,8 @@ export type RunItem =
   | MetaRunItem
   | AudioRunItem
   | ThinkingRunItem
-  | CommandRunItem;
+  | CommandRunItem
+  | CompactionRunItem;
 
 /** Compact transcript content may show at most this many code points before folding. */
 export const NARRATION_COLLAPSE_MAX_CHARS = 640;

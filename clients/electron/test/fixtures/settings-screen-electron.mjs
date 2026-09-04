@@ -1,4 +1,6 @@
 import { app, BrowserWindow } from 'electron';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const url = process.argv.find((argument) => argument.startsWith('http://') || argument.startsWith('https://'));
 if (!url) throw new Error('fixture URL is required');
@@ -46,23 +48,11 @@ async function runProjectTabsScenario(webContents) {
   return { withoutProject, withProject };
 }
 
-async function runPendingBannerScenario(webContents) {
-  const noSnapshot = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
+async function runNoEngineBannerScenario(webContents) {
   await webContents.executeJavaScript(
     'window.__settingsScreenTest.setSnapshot({ model: "opus", theme: "dark" }, { model: "sonnet", theme: "dark" })',
   );
-  const pending = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  await webContents.executeJavaScript('window.__settingsScreenTest.setRunning(true)');
-  const midTurn = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  await webContents.executeJavaScript('window.__settingsScreenTest.setRunning(false)');
-  await webContents.executeJavaScript('window.__settingsScreenTest.clickRestart()');
-  await waitFor(webContents, 'window.__settingsScreenTest.state().restartCalls === 1');
-  const afterRestart = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  await webContents.executeJavaScript(
-    'window.__settingsScreenTest.setSnapshot({ model: "opus" }, { model: "opus" })',
-  );
-  const resolved = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  return { noSnapshot, pending, midTurn, afterRestart, resolved };
+  return webContents.executeJavaScript('window.__settingsScreenTest.state()');
 }
 
 async function runMalformedSnapshotScenario(webContents) {
@@ -82,7 +72,7 @@ async function runSessionLoadingGuardScenario(webContents) {
   // Close and reopen while the session is loading: a naive `[activeSessionId]`
   // dependency would fire once here, find `command()` silently no-opping
   // (the host guard for a loading session), and never retry once loading
-  // finishes — leaving the snapshot, and the pending banner, permanently null.
+  // finishes — leaving the snapshot permanently null.
   await webContents.executeJavaScript('window.__settingsScreenTest.closeSettings()');
   await webContents.executeJavaScript('window.__settingsScreenTest.setSessionLoading(true)');
   await webContents.executeJavaScript('window.__settingsScreenTest.openSettings()');
@@ -95,24 +85,6 @@ async function runSessionLoadingGuardScenario(webContents) {
   await waitFor(webContents, `window.__settingsScreenTest.state().refreshCalls > ${whileLoading.refreshCalls}`);
   const afterReady = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
   return { initial, whileLoading, afterReady };
-}
-
-async function runRestartErrorScenario(webContents) {
-  await webContents.executeJavaScript(
-    'window.__settingsScreenTest.setSnapshot({ model: "opus" }, { model: "sonnet" })',
-  );
-  await webContents.executeJavaScript('window.__settingsScreenTest.setRestartShouldFail("cancel the active turn before changing engine settings")');
-  await webContents.executeJavaScript('window.__settingsScreenTest.clickRestart()');
-  await waitFor(webContents, 'window.__settingsScreenTest.state().hasRestartError');
-  const afterFailure = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-
-  // A later successful restart must clear the earlier error rather than
-  // leaving a stale failure banner next to a click that just worked.
-  await webContents.executeJavaScript('window.__settingsScreenTest.setRestartShouldFail(null)');
-  await webContents.executeJavaScript('window.__settingsScreenTest.clickRestart()');
-  await waitFor(webContents, '!window.__settingsScreenTest.state().hasRestartError');
-  const afterSuccess = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  return { afterFailure, afterSuccess };
 }
 
 async function runPageContentScenario(webContents) {
@@ -196,31 +168,8 @@ async function runLayerReseedScenario(webContents) {
   await webContents.executeJavaScript('window.__settingsScreenTest.clickLayerTab("project")');
   const configAfterSwitch = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="a@b 配置"]\')');
 
-  // Task 18 fix round 2, Critical: the THIRD instance of the same defect
-  // class — `PluginToggleRow`'s `useRef` remembers the last truthy
-  // `enabledPlugins[id]` it saw and (before this round's fix) was never
-  // reset on a layer switch. Priming the ref on a TRUTHY (config-object)
-  // value in `user`, then switching to `project` where the same id is
-  // `false`, then toggling it ON in `project` must write a fresh `true` —
-  // NOT `user`'s remembered config object — into `project`. Unlike the
-  // `ConcatDedup` case above this doesn't duplicate irrecoverably
-  // (`enabledPlugins` is `DeepMerge`), so the only way to see the bug is to
-  // inspect the VALUE actually written, via the `updateEngineSettings` mock.
-  await webContents.executeJavaScript('window.__settingsScreenTest.clickLayerTab("user")');
-  await webContents.executeJavaScript(
-    'window.__settingsScreenTest.setLayeredSnapshot({ user: { enabledPlugins: { "a@b": { config: "A" } } }, project: { enabledPlugins: { "a@b": false } } })',
-  );
-  await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("plugins")');
-  await webContents.executeJavaScript('window.__settingsScreenTest.clickLayerTab("project")');
-  await webContents.executeJavaScript(
-    'document.querySelector(\'[data-testid="plugin-toggle-a@b"] button\').click()',
-  );
-  const afterToggleOnInProject = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  const enabledPluginsToggle = afterToggleOnInProject.lastEngineSettingsPatch;
-
   return {
     toolsInitial, toolsDirty, toolsAfterSwitch, configInitial, configDirty, configAfterSwitch,
-    enabledPluginsToggle,
   };
 }
 
@@ -329,6 +278,61 @@ async function runFocusTrapScenario(webContents) {
   return { onMount, afterForwardTab, afterBackwardTab, afterClose };
 }
 
+async function runVisualAdminScenario(window, webContents) {
+  await webContents.executeJavaScript('window.__settingsScreenTest.setHasProject(true)');
+  await webContents.executeJavaScript(`window.__settingsScreenTest.setLayeredSnapshot({
+    user: {
+      enabledPlugins: { "secure@acme": true },
+      pluginConfigs: { "secure@acme": { options: { REGION: "us-west" }, mcpServers: {} } },
+      extraKnownMarketplaces: { acme: { source: "acme/plugins" } },
+      hooks: {
+        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "./scripts/check.sh", timeout: 30, statusMessage: "Checking command" }] }],
+        Stop: [{ hooks: [{ type: "prompt", prompt: "Review the final response", model: "haiku" }] }]
+      }
+    },
+    project: {},
+    local: {}
+  })`);
+  await delay(100);
+  const pages = ['skills', 'mcp', 'plugins', 'hooks'];
+  const layout = {};
+  const screenshots = {};
+  const screenshotDir = process.env.LINGXI_SETTINGS_SCREENSHOT_DIR;
+  if (screenshotDir) mkdirSync(screenshotDir, { recursive: true });
+  const theme = process.env.LINGXI_SETTINGS_SCREEN_THEME === 'dark' ? 'dark' : 'light';
+  for (const page of pages) {
+    await webContents.executeJavaScript(`window.__settingsScreenTest.selectPage(${JSON.stringify(page)})`);
+    await delay(100);
+    if (page === 'hooks') {
+      for (const label of ['PreToolUse', 'Group 1', 'Handler 1']) {
+        await webContents.executeJavaScript(`(() => {
+          const button = [...document.querySelectorAll('button')].find((candidate) => candidate.textContent?.includes(${JSON.stringify(label)}));
+          button?.click();
+        })()`);
+        await delay(50);
+      }
+    }
+    layout[page] = await webContents.executeJavaScript(`(() => {
+      const dialog = document.querySelector('[role="dialog"]');
+      const state = window.__settingsScreenTest.state();
+      return {
+        ...state,
+        horizontalOverflow: dialog ? dialog.scrollWidth > dialog.clientWidth + 1 : true,
+        structuredHookEditor: Boolean(document.querySelector('[aria-label="hook type"]')),
+        advancedHookJson: Boolean(document.querySelector('[aria-label="hooks-json"]')),
+        structuredMcpEditor: Boolean(document.querySelector('[aria-label="mcp-transport"]')),
+        manifestPluginEditor: Boolean(document.querySelector('[aria-label="REGION option"]')),
+      };
+    })()`);
+    if (screenshotDir) {
+      const path = join(screenshotDir, `${theme}-${page}.png`);
+      writeFileSync(path, (await window.capturePage()).toPNG());
+      screenshots[page] = path;
+    }
+  }
+  return { pages, layout, screenshots };
+}
+
 async function main() {
   await app.whenReady();
   const window = new BrowserWindow({ show: false, width: 1000, height: 720, webPreferences: { sandbox: true } });
@@ -338,11 +342,11 @@ async function main() {
     webContents.focus();
     await waitFor(webContents, 'Boolean(window.__settingsScreenTest && document.querySelector(\'[role="dialog"]\'))');
     const scenario = process.env.LINGXI_SETTINGS_SCREEN_SCENARIO ?? 'layer-switcher';
-    const result = scenario === 'project-tabs' ? await runProjectTabsScenario(webContents)
-      : scenario === 'pending-banner' ? await runPendingBannerScenario(webContents)
+    const result = scenario === 'visual-admin' ? await runVisualAdminScenario(window, webContents)
+      : scenario === 'project-tabs' ? await runProjectTabsScenario(webContents)
+      : scenario === 'no-engine-banner' ? await runNoEngineBannerScenario(webContents)
       : scenario === 'malformed-snapshot' ? await runMalformedSnapshotScenario(webContents)
       : scenario === 'session-loading-guard' ? await runSessionLoadingGuardScenario(webContents)
-      : scenario === 'restart-error' ? await runRestartErrorScenario(webContents)
       : scenario === 'focus-trap' ? await runFocusTrapScenario(webContents)
       : scenario === 'page-content' ? await runPageContentScenario(webContents)
       : scenario === 'layer-reseed' ? await runLayerReseedScenario(webContents)

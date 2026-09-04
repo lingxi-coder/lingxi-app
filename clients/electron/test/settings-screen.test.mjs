@@ -34,7 +34,8 @@ async function runScenario(scenario) {
     await vite.listen();
     const address = vite.httpServer?.address();
     assert.ok(address && typeof address === 'object' && address.port, 'Vite fixture server did not bind a port');
-    const fixtureUrl = `http://127.0.0.1:${address.port}/settings-screen-fixture.html`;
+    const fixtureTheme = process.env.LINGXI_SETTINGS_SCREEN_THEME === 'dark' ? 'dark' : 'light';
+    const fixtureUrl = `http://127.0.0.1:${address.port}/settings-screen-fixture.html?theme=${fixtureTheme}`;
     child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl], {
       cwd: electronRoot,
       env: {
@@ -93,6 +94,19 @@ test('the layer switcher appears only on layered pages', async () => {
   assert.equal(rawJson.hasLayerSwitcher, true, 'raw-json is outside 编码 but IS layered');
 });
 
+test('the four configuration managers render without horizontal dialog overflow', async () => {
+  const result = await runScenario('visual-admin');
+  assert.deepEqual(result.pages, ['skills', 'mcp', 'plugins', 'hooks']);
+  for (const [page, state] of Object.entries(result.layout)) {
+    assert.equal(state.placeholderKind, null, `${page} must render its real settings page`);
+    assert.equal(state.horizontalOverflow, false, `${page} must fit the settings dialog horizontally`);
+  }
+  assert.equal(result.layout.hooks.structuredHookEditor, true, 'hooks must expose event/group/handler controls');
+  assert.equal(result.layout.hooks.advancedHookJson, true, 'hooks must retain the advanced JSON editor');
+  assert.equal(result.layout.mcp.structuredMcpEditor, true, 'MCP must expose transport-aware structured controls');
+  assert.equal(result.layout.plugins.manifestPluginEditor, true, 'plugins must render manifest-driven configuration fields');
+});
+
 test('project and local tabs are disabled with no project open, with the reason shown as visible text', async () => {
   const { withoutProject, withProject } = await runScenario('project-tabs');
   assert.equal(withoutProject.userDisabled, false, 'the user layer needs no project and must stay editable');
@@ -111,23 +125,9 @@ test('project and local tabs are disabled with no project open, with the reason 
   assert.equal(withProject.layerSwitcherReasonText, null, 'once a project is open there is nothing to explain');
 });
 
-test('the pending-settings banner comes from pendingKeys alone, and its restart action respects a turn in flight', async () => {
-  const { noSnapshot, pending, midTurn, afterRestart, resolved } = await runScenario('pending-banner');
-  assert.equal(noSnapshot.hasBanner, false, 'with no snapshot yet there is nothing to diff, so no banner');
-  assert.equal(pending.hasBanner, true, 'effective and active disagree on `model`, so the banner must appear');
-  assert.match(pending.bannerText ?? '', /1 项/, 'exactly one key (`model`) differs, not `theme`');
-  assert.equal(pending.restartButtonDisabled, false);
-  assert.equal(midTurn.restartButtonDisabled, true, 'a turn in flight must disable restart, not fail silently on click');
-  assert.match(midTurn.restartDisabledReasonText ?? '', /对话|回合/, 'the reason must be visible text, not a title= tooltip');
-  assert.equal(afterRestart.restartCalls, 1, 'restart goes through bridge.restartBridge, the existing path');
-  assert.equal(resolved.hasBanner, false, 'once active catches up to effective, the banner must go away');
-});
-
-test('a rejected restart surfaces its error visibly instead of being swallowed, and a later success clears it', async () => {
-  const { afterFailure, afterSuccess } = await runScenario('restart-error');
-  assert.equal(afterFailure.hasRestartError, true, 'the shell covers <ErrorBanner>, so a caught restart failure must render its own visible error');
-  assert.match(afterFailure.restartErrorText ?? '', /cancel the active turn/, 'the ACTUAL host-provided reason must reach the user, not a generic message');
-  assert.equal(afterSuccess.hasRestartError, false, 'a later successful restart must clear the earlier failure banner');
+test('the settings shell never renders an engine restart banner', async () => {
+  const state = await runScenario('no-engine-banner');
+  assert.equal(state.hasBanner, false, 'runtime active/effective differences do not belong in settings chrome');
 });
 
 test('opening settings while the session is loading sends nothing, and the snapshot fetch retries once the session is ready — with no extra action', async () => {
@@ -199,7 +199,6 @@ test('switching layers re-seeds a dirty draft field instead of leaving stale tex
   const {
     toolsInitial, toolsDirty, toolsAfterSwitch,
     configInitial, configDirty, configAfterSwitch,
-    enabledPluginsToggle,
   } = await runScenario('layer-reseed');
 
   assert.equal(toolsInitial, 'Bash', 'the user layer set enabledTools to ["Bash"]');
@@ -214,18 +213,6 @@ test('switching layers re-seeds a dirty draft field instead of leaving stale tex
   assert.equal(
     configAfterSwitch, JSON.stringify({ from: 'project' }, null, 2),
     'switching from user to project must re-seed the SAME plugin id\'s textarea with project\'s own config, not the dirty text or the stale user-layer value',
-  );
-
-  // Task 18 fix round 2, Critical: the THIRD instance of the same defect —
-  // `PluginToggleRow`'s `useRef` primed on `user`'s truthy config object,
-  // then (without the fix) surviving the switch to `project` where the
-  // same id is `false`. Toggling it ON in `project` must write a fresh
-  // `true`, not `user`'s remembered `{config:"A"}`.
-  assert.ok(enabledPluginsToggle, 'toggling the plugin on in the project layer must dispatch a write');
-  assert.equal(enabledPluginsToggle.destination, 'project', 'the write must target the layer actually being edited');
-  assert.deepEqual(
-    enabledPluginsToggle.patch, { enabledPlugins: { 'a@b': true } },
-    'toggling on in the project layer must write a fresh `true`, not the user layer\'s remembered config object',
   );
 });
 

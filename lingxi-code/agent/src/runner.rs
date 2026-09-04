@@ -1124,9 +1124,10 @@ async fn run_subagent_loop(
     //
     // Structured output (claude-code workflow `agent({schema})`): when a schema
     // was requested, inject a synthetic `StructuredOutput` tool whose
-    // `input_schema` IS the schema and force the model to call it (`tool_choice`
-    // via `messages_create_stream_forced`); its tool input is captured below as
-    // the run's result.
+    // `input_schema` IS the schema; its tool input is captured below as the
+    // run's result. `force_structured_tool` drives validation/capture/retry-cap
+    // (unchanged) — see `force_tool_choice_for_api` below for what actually
+    // gets sent on the wire as `tool_choice`.
     let mut tool_schemas = ctx.tool_schemas.clone();
     let force_structured_tool: Option<&'static str> = if let Some(schema_str) = &ctx.schema {
         let input_schema: serde_json::Value = serde_json::from_str(schema_str)
@@ -1147,6 +1148,41 @@ async fn run_subagent_loop(
     } else {
         None
     };
+    // P0-1 (2026-09-02): forcing `tool_choice` to StructuredOutput on EVERY
+    // round-trip made a schema subagent unable to call any other advertised
+    // tool for its whole run — verified against the claude-code 2.1.258
+    // oracle binary (`~/.local/share/claude/versions/2.1.258`), whose shared
+    // subagent turn loop hardcodes `toolChoice: void 0` on its single
+    // `callModel` call site (offset ~164713374) regardless of
+    // `requiresStructuredOutput`, and instead enforces StructuredOutput
+    // purely by injecting an in-conversation nudge message once per turn the
+    // model ends without a valid captured output (offset ~164629006, sentinel
+    // `"[structured-output-enforce]"` at 161464131) — never by restricting
+    // the tool_choice wire param. LingXi mirrors that: only pin `tool_choice`
+    // when StructuredOutput is the ONLY tool being advertised (there is
+    // nothing else the model could usefully call, so forcing changes
+    // nothing observable and just removes one avoidable no-tool-called
+    // round-trip); whenever other tools are present the model chooses
+    // freely every round, and the existing SubagentStop nudge path below
+    // (`:1949` as of this change) is the sole enforcement mechanism, exactly
+    // as the oracle does. See `<scratchpad>/WP3-oracle.txt` for the full
+    // extracted evidence.
+    //
+    // 🚨 CORRECTING THE RECORD: commit `1c9cbd695`'s message says `tool_choice`
+    // is "forced after the nudge". That is WRONG and was never what shipped.
+    // `force_tool_choice_for_api` is computed ONCE, HERE, before the turn loop
+    // is entered, from the advertised-tool count alone; the nudge path below
+    // deliberately does NOT re-arm it, and there is no other assignment to this
+    // binding anywhere in the loop (it is a `let`, not a `let mut`). A run that
+    // advertises tools besides StructuredOutput sends `tool_choice = None` on
+    // every round-trip, before AND after the nudge. Believe this comment and
+    // the shipped test, not the commit message.
+    let force_tool_choice_for_api: Option<&'static str> =
+        if force_structured_tool.is_some() && tool_schemas.len() == 1 {
+            force_structured_tool
+        } else {
+            None
+        };
     // Captured when the model calls the synthetic `StructuredOutput` tool with an
     // input that VALIDATES against the schema — that input becomes the run's
     // result, and the loop terminates.
@@ -1441,7 +1477,20 @@ async fn run_subagent_loop(
                         query_source_label: ctx.query_source_label.clone(),
                     };
                     let open_stream = async {
-                        if force_this_turn {
+                        // Combine both fixes: `force_tool_choice_for_api.is_some()`
+                        // (main, P0-1) is the oracle-verified wire-level gate —
+                        // pinning `tool_choice` is only ever safe when
+                        // StructuredOutput is the ONLY advertised tool, since
+                        // pinning it otherwise silently removes the model's
+                        // ability to call any other tool for the rest of the
+                        // turn. `force_this_turn` (WP2a `StructuredOutputMode`)
+                        // is the run's own turn-scoped policy for WHEN forcing
+                        // is even desired (every turn under `Forced`, or only
+                        // the last/idle-exhausted turn under `WhenDone`). Both
+                        // must hold: a turn this policy wants forced still only
+                        // gets pinned on the wire when there is nothing else the
+                        // model could usefully call anyway.
+                        if force_this_turn && force_tool_choice_for_api.is_some() {
                             api_client
                                 .messages_create_stream_forced_in_opts(
                                     &current_model,
@@ -2156,6 +2205,37 @@ async fn run_subagent_loop(
         }
 
         if !terminated_cleanly {
+            // A schema run has no "whatever work was produced" to hand back: the
+            // caller asked for an object matching its schema, and
+            // `{"reason":"max_turns_exhausted"}` is not one. claude-code checks for
+            // a captured structured result AFTER the whole subagent attempt has
+            // ended — for ANY exit reason, not just the nudge path — and throws the
+            // same terminal error when there is none. Oracle 2.1.258
+            // (`~/.local/share/claude/versions/2.1.258`) @172635430, in the workflow
+            // `agent()` wrapper `mn`, after its `for await` over the turn loop:
+            //   `let U = we && E.structured !== void 0 ? tVn(E.structured, …) : void 0;`
+            //   … `if(we){ if(U===void 0) throw Error("agent({schema}): subagent`
+            //   `completed without calling StructuredOutput (after in-conversation`
+            //   `nudge)"); … }`
+            // (`we` = schema-presence flag, `U` = the captured output). Until this
+            // change's `tool_choice` relaxation the model was forced to call
+            // StructuredOutput on every round, so a schema run terminated within one
+            // valid call or `structured_retry_cap` invalid ones and could not reach
+            // `max_turns` at all; now that it chooses freely, it can — so this exit
+            // has to carry the schema contract too.
+            if force_structured_tool.is_some() && structured_result.is_none() {
+                emit_failed(
+                    &out_tx,
+                    transcript.as_ref(),
+                    &history,
+                    &mut transcript_written,
+                    agent_id,
+                    "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)".to_string(),
+                    cumulative_usage.clone(),
+                )
+                .await;
+                return;
+            }
             // The inner loop fell through: `max_turns` exhausted without a terminal
             // stop. claude-code surfaces this as a completion carrying a max-turns
             // reason rather than a hard failure, so the parent can still consume

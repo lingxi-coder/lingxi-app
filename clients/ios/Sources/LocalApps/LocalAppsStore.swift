@@ -58,7 +58,8 @@ final class LocalAppsStore {
     ///
     /// The init session is not known at `AppCreated` time — the service emits
     /// that event as part of the create transaction and the engine pins the
-    /// app's own session AFTERWARDS (`local_apps_mcp.rs`, best-effort,
+    /// app's own session AFTERWARDS (`host.rs`, `handle_create_app`, the
+    /// `mint_app_init_session`/`set_init_session` pair, best-effort,
     /// announced by `AppRecordChanged`). Arming on `AppCreated` and filling the
     /// pin in later is what keeps the hand-off from being silently dropped.
     struct CreatedAppLanding: Equatable {
@@ -335,8 +336,7 @@ final class LocalAppsStore {
         func resolvePendingCreateConfirmation(_ approved: Bool) async {
             guard let prompt = pendingCreateConfirmation else { return }
             pendingCreateConfirmation = nil
-            defer { presentNextCreateConfirmation() }
-            _ = await send(
+            let sent = await send(
                 .pluginCommand(
                     command: .resolveCreateConfirmation(
                         requestId: prompt.requestID,
@@ -344,6 +344,16 @@ final class LocalAppsStore {
                     )
                 )
             )
+            if sent {
+                presentNextCreateConfirmation()
+            } else {
+                // The result was discarded here before: a failed send left
+                // the engine holding the approval token with no answer, and
+                // the sheet already gone with nothing to re-answer it.
+                // Restore the SAME prompt (not the queue's next one) so the
+                // user can retry, mirroring `setBuiltinPluginEnabled` above.
+                pendingCreateConfirmation = prompt
+            }
         }
 
         func resolvePendingMcpProposalApproval(_ approved: Bool) async {
@@ -587,6 +597,26 @@ final class LocalAppsStore {
         return createdAppID
     }
 
+    /// Drop the library's create-landing fallback claim.
+    ///
+    /// The library cover is the ONLY consumer of `createdAppID`
+    /// (`pendingCreateArmsLibraryFallback` exists solely to tell an
+    /// `AppCreated` this arrived FOR the library, not the drawer). Between
+    /// the '+' tap and `AppCreated`, dismissing that cover leaves nobody to
+    /// consume it: `createdAppID` — if `AppCreated` still arrives afterwards
+    /// — would sit armed for the process lifetime and hijack a much later,
+    /// unrelated visit to the library into that old app's details page.
+    ///
+    /// This does NOT touch the create's PRIMARY landing
+    /// (`createdAppLanding`/`landingAwaitingPin`), which `RootView` consumes
+    /// independently of whether this cover is on screen — dropping only the
+    /// fallback claim cannot lose the hand-off, only the library's own,
+    /// redundant path to it.
+    func clearLibraryFallbackArm() {
+        createdAppID = nil
+        pendingCreateArmsLibraryFallback = false
+    }
+
     func completeWidgetSetup() {
         pendingWidgetSetup = nil
     }
@@ -617,11 +647,9 @@ final class LocalAppsStore {
         /// The environment variable that asks for [`seedForUITesting`].
         ///
         /// Opt-in per launch, like every other `LINGXI_UI_TEST_*` switch, and
-        /// deliberately NOT folded into `LINGXI_UI_TESTING=1`: the apps tab's
-        /// empty state is itself pinned by
-        /// `testEverySidebarRoutePresentsAndLeavesTheSidebar`, which asserts
-        /// `drawer.apps.view-all` is absent. Seeding unconditionally would
-        /// turn that assertion red.
+        /// deliberately NOT folded into `LINGXI_UI_TESTING=1`: other UI tests
+        /// exercise the apps drawer/library's genuinely EMPTY state, and
+        /// seeding unconditionally would leave nothing to assert against.
         static let uiTestSeedEnvironmentKey = "LINGXI_UI_TEST_LOCAL_APPS"
 
         /// The id of the app [`seedForUITesting`] plants. The drawer renders it
@@ -638,8 +666,8 @@ final class LocalAppsStore {
         /// both engine-event handlers — so with no engine behind the mock,
         /// `.listApps` resolves into nothing and the catalog is permanently
         /// empty. Everything gated on it is then unreachable: `Drawer`'s
-        /// `appsSection` (hence `drawer.apps.view-all`, the only surviving
-        /// drawer route to `LocalAppsRootView`) and the library's own list.
+        /// apps rows (hence `drawer.apps.library`, the drawer's route to
+        /// `LocalAppsRootView`) and the library's own list.
         ///
         /// Assigns `apps` directly rather than replaying an `.appsChanged`
         /// event: this is a fixture, not an engine, and that arm also fires
@@ -695,22 +723,40 @@ final class LocalAppsStore {
         #endif
     }
 
-    func refreshAfterEngineRebind() async {
-        // The create claim does NOT survive a rebind. `AppCreated` is a
-        // one-shot event on the source that was just torn down, so a create
-        // still in flight across a project/scope switch can never resolve its
-        // claim — and nothing else clears `pendingCreateRequestID`. Left armed
-        // it is a permanent latch: every later create returns
-        // `local_apps_error_create_in_progress` for the process lifetime.
-        //
-        // The app itself was probably still created, which is exactly why the
-        // user is TOLD rather than left to assume it failed — and why the
-        // client must not go on to claim some later `AppCreated`. Nothing that
-        // arrives after this point carries a request id this store is still
-        // waiting on, so nothing can be claimed.
-        if let pending = pendingCreateRequestID {
-            clearPendingCreate(requestID: pending)
-            errorMessage = String(localized: "local_apps_creation_result_unknown")
+    /// - Parameter isInitialBootstrap: `true` only for the app's very first
+    ///   bootstrap (no prior engine session existed to rebind FROM). A create
+    ///   started during that same bootstrap's async gap — the UI is already
+    ///   interactive while the engine connects — must not be mistaken for one
+    ///   that predates a rebind and disowned. Every other caller passes
+    ///   `false`: an ACTUAL rebind, where any create still armed is provably
+    ///   stale.
+    func refreshAfterEngineRebind(isInitialBootstrap: Bool = false) async {
+        if !isInitialBootstrap {
+            // The create claim does NOT survive a rebind. `AppCreated` is a
+            // one-shot event on the source that was just torn down, so a
+            // create still in flight across a project/scope switch can never
+            // resolve its claim — and nothing else clears
+            // `pendingCreateRequestID`. Left armed it is a permanent latch:
+            // every later create returns `local_apps_error_create_in_progress`
+            // for the process lifetime.
+            //
+            // The app itself was probably still created, which is exactly why
+            // the user is TOLD rather than left to assume it failed — and why
+            // the client must not go on to claim some later `AppCreated`.
+            // Nothing that arrives after this point carries a request id this
+            // store is still waiting on, so nothing can be claimed.
+            if let pending = pendingCreateRequestID {
+                clearPendingCreate(requestID: pending)
+                errorMessage = String(localized: "local_apps_creation_result_unknown")
+            }
+            // The pin half of the hand-off is a SEPARATE latch, armed by
+            // `AppCreated` and cleared only by a matching `AppRecordChanged`
+            // (see the case for `.appCreated` below). Left armed across a
+            // rebind, a record update for the same app id — arriving
+            // arbitrarily later, for any unrelated reason — would still
+            // publish a landing and pull the user into a session they never
+            // asked to enter. Mirrors `LocalAppsViewModel.kt:308` on Android.
+            landingAwaitingPin = nil
         }
         await refresh()
         let appIDs = apps.map(\.id)
@@ -846,6 +892,19 @@ final class LocalAppsStore {
     private func reportUnknownCreateResult(requestID: String) {
         guard pendingCreateRequestID == requestID else { return }
         clearPendingCreate(requestID: requestID)
+        errorMessage = String(localized: "local_apps_creation_result_unknown")
+    }
+
+    /// The created-app hand-off exhausted its retry budget: the record exists
+    /// and the one-shot landing signal is already spent, so nothing else will
+    /// carry the user into the new app's conversation.
+    ///
+    /// Reuses `reportUnknownCreateResult`'s copy deliberately. From the user's
+    /// side the two are the same situation — the app was created and is in the
+    /// library, but this client could not take them to it — and inventing a
+    /// second string would need a new key in `clients/translations/*.json`
+    /// (the generated catalogs' real source) for a case that reads identically.
+    func reportCreatedAppLandingExhausted() {
         errorMessage = String(localized: "local_apps_creation_result_unknown")
     }
 
@@ -1308,6 +1367,17 @@ final class LocalAppsStore {
                 scheduleWidgetSnapshotPublish()
 
             case let .appProfileProposal(proposal):
+                // A second proposal supersedes whatever was pending — but
+                // that one still holds an approval token the engine is
+                // waiting on. Decline it explicitly before overwriting,
+                // mirroring the same-app supersession in
+                // `enqueueCreateConfirmation`/`enqueueMcpProposalApproval`
+                // above: an overwrite with no queue and no decline just
+                // strands the engine holding a token nothing will ever
+                // answer.
+                if pendingProfileProposal != nil {
+                    resolveProfileProposal(false)
+                }
                 pendingProfileProposal = LocalAppProfileProposal(
                     appID: proposal.appId,
                     approvalToken: proposal.approvalToken,

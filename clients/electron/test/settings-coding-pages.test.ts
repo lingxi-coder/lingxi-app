@@ -15,6 +15,7 @@ import {
 } from '../src/renderer/components/settings/pages/ToolsAgent';
 import { skillsPageModel } from '../src/renderer/components/settings/pages/Skills';
 import { pluginDependencyCaveat } from '../src/renderer/components/settings/pages/Plugins';
+import { adminRecordCommand } from '../src/renderer/components/settings/pages/configurationAdmin';
 import { parseJsonObjectInput } from '../src/renderer/components/settings/jsonInput';
 import { hooksPageModel } from '../src/renderer/components/settings/pages/Hooks';
 import { SETTINGS_NAV } from '../src/renderer/components/settings/nav';
@@ -142,9 +143,9 @@ test('skillsPageModel carries through whatever skills list it is given, regardle
 // Hooks: read-only, with a raw-JSON escape hatch.
 // ---------------------------------------------------------------------------
 
-test('hooks are read-only and point at the raw JSON page', () => {
+test('hooks expose the raw JSON escape hatch while the page itself is editable', () => {
   const page = hooksPageModel({ hooks: { PreToolUse: [] } } as never);
-  assert.equal(page.editable, false);
+  assert.equal(page.editable, true);
   assert.equal(page.escapeHatch, 'raw-json');
 });
 
@@ -233,32 +234,37 @@ test('mcp is the one 编码-group page that is NOT layered — it owns its own s
 });
 
 // ---------------------------------------------------------------------------
-// Plugins: the disclosure, not the resolver. Spec A5.10 asked this page to
-// reuse `cli/src/commands/plugin_settings.rs`, which `bridge-server` cannot
-// depend on, so the page writes `enabledPlugins` through the generic patch
-// and must SAY so instead of implying the toggles are dependency-guarded.
+// Plugins: Desktop delegates dependency-aware lifecycle mutations to the same
+// service used by the CLI and explains the guard in the page.
 // ---------------------------------------------------------------------------
 
-test('the plugins page discloses that dependency relationships are NOT enforced here', () => {
+test('the plugins page discloses the dependency-aware enable and disable rules', () => {
   const caveat = pluginDependencyCaveat();
-  assert.match(caveat, /依赖/, 'must name what is not handled: plugin dependencies');
-  assert.match(
-    caveat, /不会连带启用/,
-    'enabling must be stated NOT to transitively enable dependencies (plugin_settings.rs collect_dependencies does)',
-  );
-  assert.match(
-    caveat, /不会被拦下|不会拦/,
-    'disabling must be stated NOT to be refused when other enabled plugins depend on it',
-  );
-  assert.match(
-    caveat, /plugin enable/,
-    'must point at the CLI command that does enforce it, not just at "the CLI"',
-  );
-  assert.match(caveat, /plugin disable/);
+  assert.match(caveat, /递归启用.*依赖/);
+  assert.match(caveat, /停用.*会被拒绝/);
 });
 
-test('the plugins caveat never claims the toggles are safe or checked', () => {
+test('the plugins lifecycle explains its preflight confirmation boundary', () => {
   const caveat = pluginDependencyCaveat();
-  assert.doesNotMatch(caveat, /会自动(解析|处理|启用)/, 'must not overclaim that this page resolves dependencies');
-  assert.doesNotMatch(caveat, /安全/, 'must not reassure; the point is that a guard is missing here');
+  assert.match(caveat, /预检/);
+  assert.match(caveat, /确认执行/);
+});
+
+test('configuration admin commands contain only protocol fields that were supplied', () => {
+  assert.deepEqual(adminRecordCommand('get_catalog'), { action: 'get_catalog' });
+  assert.deepEqual(
+    adminRecordCommand('save_config', {
+      operation_id: 7,
+      scope: 'user',
+      revision: 'a'.repeat(64),
+      payload_json: '{}',
+    }),
+    {
+      action: 'save_config',
+      operation_id: 7,
+      scope: 'user',
+      revision: 'a'.repeat(64),
+      payload_json: '{}',
+    },
+  );
 });

@@ -65,47 +65,48 @@ fn has_1m_context(model: &str) -> bool {
 /// `true` if the canonical model family supports the 1M-context beta, unless
 /// 1M context is disabled. Mirrors `modelSupports1M` (2.1.198 binary `hG`
 /// @208698905: excludes claude-3-*/opus-4-0/4-1/4-5/haiku-4-5 via `QRn`, then
-/// `KL(canonical)?.context?.supports_1m_beta`). The 2.1.198 registry carries
-/// `supports_1m_beta:!0` on sonnet-4-0/4-5/4-6, sonnet-5, opus-4-6, opus-4-7,
-/// opus-4-8, fable-5 and mythos-5.
+/// `KL(canonical)?.context?.supports_1m_beta`). Older Sonnet 4 and Opus 4.6+
+/// families retain their beta support; current 5-series models are native 1M.
 fn model_supports_1m(model: &str) -> bool {
     if is_1m_context_disabled() {
         return false;
     }
     let canonical = canonical_name(model);
     canonical.contains("claude-sonnet-4")
-        || canonical.contains("claude-sonnet-5")
-        || canonical.contains("opus-4-6")
-        || canonical.contains("opus-4-7")
-        || canonical.contains("opus-4-8")
-        || canonical.contains("claude-opus-5")
-        || canonical.contains("claude-fable-5")
-        || canonical.contains("claude-mythos-5")
+        || matches!(
+            canonical.as_str(),
+            "claude-sonnet-5"
+                | "claude-opus-4-6"
+                | "claude-opus-4-7"
+                | "claude-opus-4-8"
+                | "claude-opus-5"
+                | "claude-fable-5-1"
+                | "claude-mythos-5-1"
+                | "claude-mythos-preview"
+        )
 }
 
 /// `true` if the model's registry entry marks it natively 1M (2.1.198 binary
 /// `Hx` @208698511: `KL(canonical)?.context?.native_1m` on the first-party
-/// path — no beta header and no `[1m]` suffix required). The 2.1.198 registry
-/// gives `context:{window:1e6,native_1m:!0}` to `claude-sonnet-5` (plus
-/// `native_1m_3p:{bedrock,vertex,foundry}`), `claude-opus-4-7`,
-/// `claude-opus-4-8`, `claude-fable-5` and `claude-mythos-5`; `Hx` also
-/// special-cases `claude-mythos-preview` (the missing-registry-entry bail is
-/// `!n?.native_1m && t !== "claude-mythos-preview"`). opus-4-6 and the
-/// sonnet-4-x family have NO `native_1m` and stay beta/suffix-gated. Honors
-/// the same `CLAUDE_CODE_DISABLE_1M_CONTEXT` kill switch (`Aye()` guard
+/// path — no beta header and no `[1m]` suffix required). Fable is intentionally
+/// recognized only as `claude-fable-5-1`; the removed 5.0 id is not an alias.
+/// Honors the same `CLAUDE_CODE_DISABLE_1M_CONTEXT` kill switch (`Aye()` guard
 /// inside `Hx`).
 fn model_native_1m(model: &str) -> bool {
     if is_1m_context_disabled() {
         return false;
     }
     let canonical = canonical_name(model);
-    canonical.contains("claude-sonnet-5")
-        || canonical.contains("opus-4-7")
-        || canonical.contains("opus-4-8")
-        || canonical.contains("claude-opus-5")
-        || canonical.contains("claude-fable-5")
-        || canonical.contains("claude-mythos-5")
-        || canonical == "claude-mythos-preview"
+    matches!(
+        canonical.as_str(),
+        "claude-sonnet-5"
+            | "claude-opus-4-7"
+            | "claude-opus-4-8"
+            | "claude-opus-5"
+            | "claude-fable-5-1"
+            | "claude-mythos-5-1"
+            | "claude-mythos-preview"
+    )
 }
 
 /// Resolve a full model id to a shorter canonical family name.
@@ -115,10 +116,19 @@ fn model_native_1m(model: &str) -> bool {
 /// no-op for the substring checks we perform, so it is folded in here.
 fn canonical_name(model: &str) -> String {
     let name = model.to_lowercase();
+    if name.contains("claude-fable-5-1") {
+        return "claude-fable-5-1".to_string();
+    }
+    if name.contains("claude-mythos-5-1") {
+        return "claude-mythos-5-1".to_string();
+    }
+    if name.contains("claude-opus-5") {
+        return "claude-opus-5".to_string();
+    }
     // Order matters: check more specific versions first (4-8/4-7/4-6 before 4-5 before 4).
     // opus-4-8/4-7 must precede the bare `claude-opus-4` catch so they resolve to
     // their own canonical (binary `getCanonicalName` preserves them) and get the
-    // 64k/128k max-output tier (binary `YCe`), not the bare-family 32k/32k.
+    // 128k max-output tier (binary `YCe`), not the bare-family 32k/32k.
     if name.contains("claude-opus-4-8") {
         return "claude-opus-4-8".to_string();
     }
@@ -229,9 +239,8 @@ pub fn context_window_for_model(model: &str, betas: &[String]) -> u64 {
     }
 
     // Native 1M (2.1.198 binary `XHi`: `if(Hx(e))return 1e6` — after the
-    // suffix/beta checks, before the default). sonnet-5, opus-4-7, opus-4-8,
-    // fable-5 and mythos-5 are natively 1M (registry `native_1m:!0`), NOT
-    // beta-gated.
+    // suffix/beta checks, before the default). Current 1M Claude families are
+    // native 1M (registry `native_1m:!0`), not beta-gated.
     if model_native_1m(model) {
         return 1_000_000;
     }
@@ -264,22 +273,14 @@ fn model_max_output_tokens(model: &str) -> (u64, u64) {
     }
 
     let m = canonical_name(model);
-    // Binary `YCe` (v2.1.183 getModelMaxOutputTokens): fable-5/mythos-5/opus-4-8/
-    // opus-4-7/opus-4-6 → 64k/128k; sonnet-4-6 → 32k/128k; opus-4-5/sonnet-4-0/4-5/
-    // haiku-4-5 → 32k/64k; opus-4-1/4-0 → 32k/32k; else → 32k/128k.
-    // 2.1.198 `pIe` adds `r==="claude-sonnet-5" → t=64000,n=128000` (between the
-    // fable-5/mythos-5 arm and opus-4-8) — sonnet-5 gets the 64k/128k tier.
-    let (default_tokens, upper_limit) = if m.contains("opus-4-8")
-        || m.contains("opus-4-7")
-        || m.contains("fable-5")
-        || m.contains("mythos-5")
-    {
-        (64_000, 128_000)
-    } else if m.contains("sonnet-5") {
-        // "claude-sonnet-4-5" does NOT contain "sonnet-5" — canonical arms are
-        // mutually exclusive (locked by tests below).
-        (64_000, 128_000)
-    } else if m.contains("opus-4-6") {
+    // The current 5-series lineup advertises a 128k output limit. Older 4.x
+    // models retain their existing defaults and upper limits.
+    let (default_tokens, upper_limit) = if matches!(
+        m.as_str(),
+        "claude-opus-5" | "claude-sonnet-5" | "claude-fable-5-1" | "claude-mythos-5-1"
+    ) {
+        (128_000, 128_000)
+    } else if m.contains("opus-4-8") || m.contains("opus-4-7") || m.contains("opus-4-6") {
         (64_000, 128_000)
     } else if m.contains("sonnet-4-6") {
         (32_000, 128_000)
@@ -303,6 +304,59 @@ fn model_max_output_tokens(model: &str) -> (u64, u64) {
     (default_tokens, upper_limit)
 }
 
+/// Returns the effective hard output ceiling for `model`.
+///
+/// Unlike [`default_output_tokens_for_model`], this value is only a validation
+/// ceiling. It should not be copied into every request as the implicit output
+/// budget.
+#[must_use]
+pub fn output_token_limit_for_model(model: &str) -> u64 {
+    model_max_output_tokens(model).1
+}
+
+/// Returns a provider-advertised hard output ceiling when model metadata is
+/// known. Unknown custom models return `None` instead of inheriting a guessed
+/// fallback ceiling.
+#[must_use]
+pub fn known_output_token_limit_for_model(model: &str) -> Option<u64> {
+    if is_claude_family(model) {
+        Some(output_token_limit_for_model(model))
+    } else {
+        super::model_limits::lookup(model).map(|limits| limits.max_output_tokens)
+    }
+}
+
+/// Returns the ordinary per-request output budget for `model`.
+///
+/// Catalog `limit.output` values are hard provider ceilings, not sensible
+/// defaults for every turn.  Most coding-agent turns need far less output, and
+/// using a ceiling that nearly equals the context window leaves no reliable
+/// room for provider-side prompt/tool formatting.  Keep Claude's model-specific
+/// defaults, but cap the implicit default for catalog-backed non-Claude models
+/// at the same 32k budget used by the generic fallback.  An explicit
+/// `LINGXI_MAX_OUTPUT_TOKENS` value may still opt in up to the model ceiling.
+#[must_use]
+pub fn default_output_tokens_for_model(model: &str) -> u64 {
+    let (model_default, upper_limit) = model_max_output_tokens(model);
+    let default_tokens = if is_claude_family(model) {
+        model_default
+    } else {
+        upper_limit.min(MAX_OUTPUT_TOKENS_DEFAULT)
+    };
+    configured_output_tokens(default_tokens, upper_limit)
+}
+
+fn configured_output_tokens(default_tokens: u64, upper_limit: u64) -> u64 {
+    if let Ok(raw) = std::env::var("LINGXI_MAX_OUTPUT_TOKENS") {
+        let value = platform_api::env::parse_int_env(&raw);
+        if !value.is_nan() && value > 0.0 {
+            return value.min(upper_limit as f64) as u64;
+        }
+    }
+
+    default_tokens
+}
+
 /// Returns the effective max output tokens for `model`.
 ///
 /// Mirrors `getMaxOutputTokensForModel` (`api/claude.ts:3399-3419`). The
@@ -313,19 +367,7 @@ fn model_max_output_tokens(model: &str) -> (u64, u64) {
 #[must_use]
 pub fn max_output_tokens_for_model(model: &str) -> u64 {
     let (default_tokens, upper_limit) = model_max_output_tokens(model);
-
-    // validateBoundedIntEnvVar('LINGXI_MAX_OUTPUT_TOKENS', …, default, upper)
-    // (`IPe`): the raw value is parsed by the shared `hp` helper; a `NaN`/
-    // non-positive value falls back to the default, anything above the upper
-    // limit is capped down to it.
-    if let Ok(raw) = std::env::var("LINGXI_MAX_OUTPUT_TOKENS") {
-        let o = platform_api::env::parse_int_env(&raw);
-        if !o.is_nan() && o > 0.0 {
-            return o.min(upper_limit as f64) as u64;
-        }
-    }
-
-    default_tokens
+    configured_output_tokens(default_tokens, upper_limit)
 }
 
 /// Returns the maximum thinking-budget tokens for `model`.
@@ -347,10 +389,9 @@ mod tests {
 
     #[test]
     fn default_window_for_unknown_and_known_models() {
-        // No betas, no [1m] suffix → 200k default for every model.
+        // No betas, no [1m] suffix → 200k default for non-native-1M models.
         for model in [
-            "claude-opus-4-6-20260101",
-            "claude-sonnet-4-6-20251001",
+            "claude-sonnet-4-5-20250929",
             "claude-3-5-haiku-20241022",
             "some-unknown-model",
         ] {
@@ -374,90 +415,93 @@ mod tests {
     #[test]
     fn beta_header_unlocks_1m_only_for_capable_models() {
         let betas = vec![CONTEXT_1M_BETA_HEADER.to_string()];
-        // sonnet-4 family is 1M-capable.
-        assert_eq!(
-            context_window_for_model("claude-sonnet-4-6-20251001", &betas),
-            1_000_000
-        );
-        // opus-4-6 is 1M-capable.
-        assert_eq!(
-            context_window_for_model("claude-opus-4-6-20260101", &betas),
-            1_000_000
-        );
         // A non-capable model with the beta still gets the default.
         assert_eq!(
             context_window_for_model("claude-3-5-haiku-20241022", &betas),
             200_000
         );
+        // Older capable families remain beta-gated.
+        assert_eq!(
+            context_window_for_model("claude-sonnet-4-6-20251001", &[]),
+            200_000
+        );
+        assert_eq!(
+            context_window_for_model("claude-sonnet-4-6-20251001", &betas),
+            1_000_000
+        );
+        assert_eq!(
+            context_window_for_model("claude-opus-4-6-20260101", &betas),
+            1_000_000
+        );
     }
 
     #[test]
-    fn sonnet_5_is_natively_1m_and_64k_output() {
-        // 2.1.198 registry: claude-sonnet-5 context {window:1e6, native_1m:!0}
-        // — 1M WITHOUT any beta or [1m] suffix (binary XHi → Hx).
+    fn sonnet_5_is_natively_1m_and_128k_output() {
+        // Current docs / registry: claude-sonnet-5 is native 1M WITHOUT any
+        // beta or [1m] suffix (binary XHi → Hx).
         assert_eq!(context_window_for_model("claude-sonnet-5", &[]), 1_000_000);
         // Dated / provider-shaped ids canonicalize to claude-sonnet-5 too.
         assert_eq!(
             context_window_for_model("us.anthropic.claude-sonnet-5", &[]),
             1_000_000
         );
-        // The explicit [1m] suffix still resolves (sonnet-5[1m] is a valid
-        // suffixed id in the 2.1.198 binary alongside sonnet-4-6[1m]).
+        // The explicit [1m] suffix still resolves.
         assert_eq!(
             context_window_for_model("claude-sonnet-5[1m]", &[]),
             1_000_000
         );
-        // The 1M beta also unlocks it (registry supports_1m_beta:!0) — same 1M.
+        // The 1M beta also keeps it at 1M.
         let betas = vec![CONTEXT_1M_BETA_HEADER.to_string()];
         assert_eq!(
             context_window_for_model("claude-sonnet-5", &betas),
             1_000_000
         );
-        // 2.1.198 pIe: claude-sonnet-5 → default 64k (upper 128k).
-        assert_eq!(max_output_tokens_for_model("claude-sonnet-5"), 64_000);
+        // Current docs: Sonnet 5 defaults to its 128k output limit.
+        assert_eq!(max_output_tokens_for_model("claude-sonnet-5"), 128_000);
         assert_eq!(max_thinking_tokens_for_model("claude-sonnet-5"), 127_999);
     }
 
     #[test]
-    fn opus_4_7_opus_4_8_fable_5_are_natively_1m() {
-        // 2.1.198 registry (binary catalog blob @207769000..207775500):
-        // claude-opus-4-7, claude-opus-4-8, claude-fable-5 (and
-        // claude-mythos-5) all carry context:{window:1e6,native_1m:!0} —
-        // 1M with NO beta header and NO [1m] suffix, exactly like sonnet-5
-        // (binary `XHi` → `Hx`).
+    fn current_1m_claude_models_are_native() {
+        // Current docs: the current 1M Claude families are native 1M with NO
+        // beta header and NO [1m] suffix, exactly like sonnet-5.
         for model in [
             "claude-opus-4-7",
             "claude-opus-4-8",
-            "claude-fable-5",
-            "claude-mythos-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+            "claude-mythos-preview",
             // Dated / provider-shaped ids canonicalize to the same entries.
             "claude-opus-4-8-20260115",
             "us.anthropic.claude-opus-4-7",
-            "us.anthropic.claude-fable-5",
+            "us.anthropic.claude-opus-5",
+            "us.anthropic.claude-fable-5-1",
         ] {
             assert_eq!(context_window_for_model(model, &[]), 1_000_000, "{model}");
         }
-        // The 1M beta ALSO unlocks them (registry supports_1m_beta:!0) — same 1M.
+        // The 1M beta ALSO keeps them at 1M — same result.
         let betas = vec![CONTEXT_1M_BETA_HEADER.to_string()];
+        assert_eq!(
+            context_window_for_model("claude-opus-4-6", &betas),
+            1_000_000
+        );
         assert_eq!(
             context_window_for_model("claude-opus-4-8", &betas),
             1_000_000
         );
         assert_eq!(
-            context_window_for_model("claude-fable-5", &betas),
+            context_window_for_model("claude-fable-5-1", &betas),
             1_000_000
         );
-        // pIe max-output stays the 64k/128k tier (locked in
-        // max_output_tokens_canonical_table); the thinking ceiling rides 128k-1.
+        // Fable 5.0 is deliberately not retained as a compatibility alias.
+        assert_eq!(context_window_for_model("claude-fable-5", &[]), 200_000);
+        assert_eq!(max_output_tokens_for_model("claude-fable-5"), 32_000);
+        // pIe max-output is now 128k on the current 1M families; the thinking
+        // ceiling rides 128k-1.
         assert_eq!(max_thinking_tokens_for_model("claude-opus-4-7"), 127_999);
-        assert_eq!(max_thinking_tokens_for_model("claude-fable-5"), 127_999);
-        // NEIGHBOR LOCK: opus-4-6 has NO native_1m in the 2.1.198 registry —
-        // it stays beta/suffix-gated (200k bare, 1M only with the beta).
-        assert_eq!(context_window_for_model("claude-opus-4-6", &[]), 200_000);
-        assert_eq!(
-            context_window_for_model("claude-opus-4-6", &betas),
-            1_000_000
-        );
+        assert_eq!(max_thinking_tokens_for_model("claude-fable-5-1"), 127_999);
         // `Hx` special case: claude-mythos-preview is native-1M despite having
         // no registry entry (`t!=="claude-mythos-preview"` bail).
         assert_eq!(
@@ -475,8 +519,7 @@ mod tests {
         assert_eq!(canonical_name("claude-sonnet-4-5"), "claude-sonnet-4-5");
         assert_eq!(canonical_name("claude-sonnet-4-6"), "claude-sonnet-4-6");
         assert_eq!(canonical_name("claude-3-5-sonnet"), "claude-3-5-sonnet");
-        // Neighbors keep their own windows / outputs (sonnet-4-5 stays 200k/32k,
-        // sonnet-4-6 stays 200k/32k without the beta).
+        // Neighbors keep their own windows / outputs.
         assert_eq!(
             context_window_for_model("claude-sonnet-4-5-20250929", &[]),
             200_000
@@ -510,14 +553,17 @@ mod tests {
         );
         assert_eq!(max_output_tokens_for_model("claude-haiku-4-5-x"), 32_000);
         assert_eq!(max_output_tokens_for_model("claude-opus-4-1-x"), 32_000);
-        // Binary YCe: opus-4-8/4-7/fable-5/mythos-5 → 64k (NOT the bare-opus-4 32k).
+        // Current 1M Claude families → 128k (NOT the bare-opus-4 32k).
+        assert_eq!(max_output_tokens_for_model("claude-opus-5"), 128_000);
         assert_eq!(
             max_output_tokens_for_model("claude-opus-4-8-20260115"),
             64_000
         );
         assert_eq!(max_output_tokens_for_model("claude-opus-4-7-x"), 64_000);
-        assert_eq!(max_output_tokens_for_model("claude-fable-5"), 64_000);
-        assert_eq!(max_output_tokens_for_model("claude-mythos-5"), 64_000);
+        assert_eq!(max_output_tokens_for_model("claude-opus-4-6-x"), 64_000);
+        assert_eq!(max_output_tokens_for_model("claude-fable-5-1"), 128_000);
+        assert_eq!(max_output_tokens_for_model("claude-mythos-5-1"), 128_000);
+        assert_eq!(max_output_tokens_for_model("claude-mythos-preview"), 32_000);
         assert_eq!(
             max_output_tokens_for_model("claude-opus-4-20250514"),
             32_000
@@ -560,7 +606,9 @@ mod tests {
             },
         );
         assert_eq!(context_window_for_model(id, &[]), 1_050_000);
+        assert_eq!(output_token_limit_for_model(id), 128_000);
         assert_eq!(max_output_tokens_for_model(id), 128_000);
+        assert_eq!(default_output_tokens_for_model(id), 32_000);
         // Thinking ceiling follows the real output, not the Claude 128k-1.
         assert_eq!(max_thinking_tokens_for_model(id), 127_999);
 
@@ -582,6 +630,30 @@ mod tests {
         assert_eq!(
             max_output_tokens_for_model("claude-opus-4-8-20260115"),
             64_000
+        );
+    }
+
+    #[test]
+    fn openrouter_glm_free_does_not_use_hard_output_limit_as_default() {
+        use crate::model::model_limits::{register, ModelLimits};
+
+        let id = "z-ai/glm-5.2:free-test";
+        register(
+            id,
+            ModelLimits {
+                context_window: 256_000,
+                max_output_tokens: 230_400,
+            },
+        );
+
+        assert_eq!(context_window_for_model(id, &[]), 256_000);
+        assert_eq!(output_token_limit_for_model(id), 230_400);
+        assert_eq!(max_output_tokens_for_model(id), 230_400);
+        assert_eq!(default_output_tokens_for_model(id), 32_000);
+        assert_eq!(max_thinking_tokens_for_model(id), 230_399);
+        assert_eq!(
+            known_output_token_limit_for_model("unknown-custom-model"),
+            None
         );
     }
 

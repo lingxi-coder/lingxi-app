@@ -1493,6 +1493,10 @@ function validateCommand(name: string, v: unknown): void {
     case 'list_provider_credentials':
       assert.ok(isNumber(o['operation_id']) && Array.isArray(o['provider_ids']));
       for (const providerId of o['provider_ids'] as unknown[]) assert.ok(isString(providerId));
+      if (o['preview_provider_ids'] !== undefined) {
+        assert.ok(Array.isArray(o['preview_provider_ids']));
+        for (const providerId of o['preview_provider_ids'] as unknown[]) assert.ok(isString(providerId));
+      }
       break;
     case 'set_provider_credential':
       assert.ok(
@@ -1503,6 +1507,15 @@ function validateCommand(name: string, v: unknown): void {
       break;
     case 'delete_provider_credential':
       assert.ok(isNumber(o['operation_id']) && isString(o['provider_id']));
+      break;
+    case 'test_provider_connection':
+      assert.ok(
+        isNumber(o['operation_id']) &&
+          isString(o['provider_id']) &&
+          isString(o['api_base']) &&
+          isString(o['model']),
+      );
+      if ('credential_override' in o) assert.ok(isString(o['credential_override']));
       break;
     case 'set_model':
       assert.ok(isString(o['model']));
@@ -1942,7 +1955,28 @@ function validateEvent(name: string, v: unknown): void {
           isBool(o['storage_encrypted']),
       );
       for (const providerId of o['configured_provider_ids'] as unknown[]) assert.ok(isString(providerId));
+      if ('credential_previews' in o) {
+        const previews = rec(o['credential_previews']);
+        for (const [providerId, preview] of Object.entries(previews)) {
+          assert.ok(isString(providerId) && isString(preview));
+          assert.match(preview as string, /^••••.{0,4}$/u);
+        }
+      }
       if ('error' in o) assert.ok(isString(o['error']));
+      break;
+    case 'provider_connection_tested':
+      assert.ok(
+        isNumber(o['operation_id']) &&
+          isString(o['provider_id']) &&
+          isBool(o['connected']) &&
+          isBool(o['reachable']) &&
+          isBool(o['authenticated']) &&
+          isBool(o['model_available']) &&
+          isNumber(o['latency_ms']) &&
+          isString(o['message']) &&
+          isBool(o['used_stored_credential']),
+      );
+      if ('http_status' in o) assert.ok(isNumber(o['http_status']));
       break;
     case 'mcp_servers':
       assert.ok(Array.isArray(o['servers']));

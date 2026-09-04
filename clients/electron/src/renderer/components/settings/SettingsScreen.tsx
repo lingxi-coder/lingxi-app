@@ -22,7 +22,7 @@ import { Skills } from './pages/Skills';
 import { ToolsAgent } from './pages/ToolsAgent';
 import { Voice } from './pages/Voice';
 import { provenanceLabel, type Provenance } from './rows';
-import { pendingKeys, type SettingsSnapshot } from './useEngineSettings';
+import type { SettingsSnapshot } from './useEngineSettings';
 
 /**
  * The three settings-file layers a person can actually pick from up here.
@@ -37,7 +37,6 @@ const EDITABLE_LAYERS: EditableLayer[] = ['user', 'project', 'local'];
 const GROUP_ORDER: NavPage['group'][] = ['个人', '模型与服务', '编码', '高级'];
 
 const LAYER_DISABLED_REASON_ID = 'settings-layer-switcher-disabled-reason';
-const RESTART_DISABLED_REASON_ID = 'settings-restart-disabled-reason';
 
 /**
  * Props were built field-for-field isomorphic to the old settings modal's
@@ -73,25 +72,6 @@ export function layerDisabled(layer: EditableLayer, hasProject: boolean): boolea
   return layer !== 'user' && !hasProject;
 }
 
-/**
- * Why the "restart engine" action in the pending-settings banner should be
- * disabled, or `null` if it should not be. This mirrors only the ONE
- * precondition this component can actually see (`bridge.running`, a turn in
- * flight) plus the absence of a session — it deliberately does NOT try to
- * reproduce every precondition the host enforces (`assertRestartAllowed`,
- * `src/main/host.ts:538-546`: a non-active session, `pendingInteractions >
- * 0`, `hasActiveWork(projectPath)`), since this component has no visibility
- * into most of those. A restart the host rejects for a reason not covered
- * here still surfaces — see `handleRestart`'s catch, rendered as
- * `settings-restart-error` — so an enabled button can never fail silently
- * even though this function's disabling is necessarily incomplete.
- */
-export function restartDisabledReason(running: boolean, hasSession: boolean): string | null {
-  if (running) return '对话正在进行时无法重启引擎，请等待当前回合结束。';
-  if (!hasSession) return '打开一个会话后才能重启引擎。';
-  return null;
-}
-
 /** The nav grouped by `NavPage.group`, in a fixed display order, filtered to whatever `query` matches (via `nav.ts`'s own `searchNav`). A group with no visible pages is omitted entirely rather than rendered with an empty body. */
 export function groupedNav(query: string): Array<{ group: NavPage['group']; pages: NavPage[] }> {
   const matches = query.trim() ? new Set(searchNav(query).map((page) => page.id)) : null;
@@ -116,13 +96,6 @@ export function groupedNav(query: string): Array<{ group: NavPage['group']; page
  * error result, never a thrown exception — a broken settings file must not
  * take the whole settings screen down with it.
  *
- * A missing `active_json` (an older producer may omit it — it's optional on
- * the wire) defaults `active` to `effective`, NOT to `{}`. An empty object
- * would make `pendingKeys` treat every effective key as newly pending — a
- * maximally loud false "restart to apply" banner manufactured from "we don't
- * know" rather than from an actual difference. Defaulting to `effective`
- * instead means "we don't know of anything pending", which is the honest
- * reading of an absent field.
  */
 export function parseSettingsSnapshot(
   raw: SettingsSnapshotEvent | null | undefined,
@@ -132,7 +105,6 @@ export function parseSettingsSnapshot(
     const effective = JSON.parse(raw.effective_json) as Record<string, unknown>;
     const provenance = JSON.parse(raw.provenance_json) as Record<string, string>;
     const files = raw.files_json ? (JSON.parse(raw.files_json) as SettingsSnapshot['files']) : [];
-    const active = raw.active_json ? (JSON.parse(raw.active_json) as Record<string, unknown>) : effective;
     const locked = raw.locked ?? [];
     // A producer that predates `layers_json` (additive, §0.10) leaves every
     // layer looking empty rather than throwing — the same "we don't know"
@@ -145,7 +117,7 @@ export function parseSettingsSnapshot(
     // existed instead of suppressing every provenance badge it can draw.
     const mergedKeys = raw.merged_keys ?? [];
     return {
-      snapshot: { effective, provenance, files, active, locked, layers, mergedKeys },
+      snapshot: { effective, provenance, files, locked, layers, mergedKeys },
       error: null,
     };
   } catch (cause) {
@@ -154,10 +126,6 @@ export function parseSettingsSnapshot(
       error: cause instanceof Error ? cause.message : 'The settings snapshot could not be parsed.',
     };
   }
-}
-
-function messageFrom(cause: unknown): string {
-  return cause instanceof Error && cause.message ? cause.message : 'The engine could not be restarted.';
 }
 
 /**
@@ -251,6 +219,9 @@ export interface PageContentProps {
   onJumpToLayer(layer: EditableLayer): void;
 }
 
+/** Clears the macOS hidden-inset titlebar controls before the first settings control. */
+export const SETTINGS_SIDEBAR_TOP_INSET = 44;
+
 function PagePlaceholder({ page, kind }: { page: NavPage; kind: 'not-implemented' | 'not-wired' }) {
   const t = useT();
   const heading = kind === 'not-implemented' ? `${page.label}：尚未实现` : `${page.label}：内容即将到来`;
@@ -337,52 +308,6 @@ function LayerSwitcher({ value, onChange, hasProject }: {
   );
 }
 
-function PendingSettingsBanner({ pending, disabledReason, onRestart }: {
-  pending: string[];
-  disabledReason: string | null;
-  onRestart(): void;
-}) {
-  const t = useT();
-  if (pending.length === 0) return null;
-  return (
-    <div
-      data-testid="settings-pending-banner"
-      role="status"
-      style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
-        padding: '10px 18px', background: t.accentBg, borderBottom: `0.5px solid ${t.border}`,
-        fontSize: 12.5, color: t.text2, flexShrink: 0,
-      }}
-    >
-      <span>重启引擎以应用（{pending.length} 项）</span>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        {/* Same reasoning as the layer switcher's reason text above: visible
-            text a screen reader can reach via `aria-describedby`, not a
-            tooltip a disabled button will never dispatch. */}
-        {disabledReason && (
-          <span id={RESTART_DISABLED_REASON_ID} data-testid="restart-disabled-reason" style={{ fontSize: 11, color: t.text3 }}>
-            {disabledReason}
-          </span>
-        )}
-        <button
-          type="button"
-          disabled={disabledReason !== null}
-          aria-describedby={disabledReason ? RESTART_DISABLED_REASON_ID : undefined}
-          onClick={onRestart}
-          style={{
-            padding: '5px 12px', borderRadius: 7, border: `0.5px solid ${t.accentBorder}`,
-            background: disabledReason !== null ? t.surfaceActive : t.accent,
-            color: disabledReason !== null ? t.text4 : '#fff',
-            fontSize: 12, fontWeight: 600, cursor: disabledReason !== null ? 'not-allowed' : 'pointer',
-          }}
-        >
-          重启引擎
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function NavIcon({ name }: { name: string }) {
   const t = useT();
   return <Icon name={name} size={15} color="currentColor" stroke={1.7} style={{ color: t.text3 }} />;
@@ -395,7 +320,6 @@ export function SettingsScreen({
   const [page, setPage] = useState<string>(() => resolveInitialPage(initialPageId, initialProviderId));
   const [query, setQuery] = useState('');
   const [editingLayer, setEditingLayer] = useState<EditableLayer>('user');
-  const [restartError, setRestartError] = useState<string | null>(null);
 
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -418,22 +342,17 @@ export function SettingsScreen({
     if (layerDisabled(editingLayer, hasProject)) setEditingLayer('user');
   }, [editingLayer, hasProject]);
 
-  // The shell owns the settings-snapshot lifecycle so every page and the
-  // pending banner read the one parse of it, rather than each page task
-  // re-fetching and re-parsing the same wire event independently.
+  // The shell owns the settings-snapshot lifecycle so every page reads the
+  // one parse of it rather than re-fetching and re-parsing the same wire event.
   //
   // Gated on `bridge.connected` and NOT `bridge.sessionLoading`: `command()`
   // (the thing `refreshSettingsSnapshot` wraps) silently no-ops while a
   // session is loading, and `activeSession` is already populated with the
   // PENDING session during that window — so a naive `[activeSessionId]`
   // dependency fires once, sends nothing, and never fires again once loading
-  // finishes (neither dependency changes), leaving the snapshot — and so the
-  // pending banner — permanently null. Depending on `bridge.connected` too
-  // makes this effect re-run exactly when loading finishes and the session
-  // is actually ready to answer, which is also what makes a post-restart
-  // refresh happen automatically: a real restart cycles `connected` through
-  // `false` before `true` again, re-firing this effect with no separate
-  // "refresh after restart" call needed (see `handleRestart` below).
+  // finishes (neither dependency changes), leaving the snapshot permanently
+  // null. Depending on `bridge.connected` makes this effect re-run exactly
+  // when loading finishes and the session is actually ready to answer.
   useEffect(() => {
     if (!activeSessionId || !bridge.connected || bridge.sessionLoading) return;
     void bridge.refreshSettingsSnapshot().catch(() => undefined);
@@ -484,18 +403,6 @@ export function SettingsScreen({
     () => parseSettingsSnapshot(bridge.settingsSnapshotEvent),
     [bridge.settingsSnapshotEvent],
   );
-  const pending = snapshot ? pendingKeys(snapshot) : [];
-  const restartReason = restartDisabledReason(bridge.running, Boolean(activeSessionId));
-
-  const handleRestart = () => {
-    setRestartError(null);
-    // No explicit "refresh the snapshot after this" chain: a successful
-    // restart cycles `bridge.connected` through `false`→`true`, which the
-    // effect above already treats as a reason to re-fetch. Chaining it here
-    // too would just re-race the same no-op-while-loading guard that effect
-    // exists to fix.
-    void bridge.restartBridge().catch((cause) => setRestartError(messageFrom(cause)));
-  };
 
   let body: ReactNode;
   // Whether the body actually has something a layer switcher could target.
@@ -563,14 +470,6 @@ export function SettingsScreen({
         background: t.windowBg, color: t.text,
       }}
     >
-      <PendingSettingsBanner pending={pending} disabledReason={restartReason} onRestart={handleRestart} />
-      {restartError && (
-        <div data-testid="settings-restart-error" role="alert" style={{
-          padding: '10px 18px', background: t.danger, color: '#fff', fontSize: 12.5, flexShrink: 0,
-        }}>
-          重启失败：{restartError}
-        </div>
-      )}
       {snapshotError && (
         <div data-testid="settings-snapshot-error" role="alert" style={{
           padding: '10px 18px', background: t.danger, color: '#fff', fontSize: 12.5, flexShrink: 0,
@@ -583,7 +482,7 @@ export function SettingsScreen({
           width: 240, flexShrink: 0, display: 'flex', flexDirection: 'column',
           borderRight: `0.5px solid ${t.border}`, background: t.sidebarBg, overflowY: 'auto',
         }}>
-          <div style={{ padding: '14px 14px 8px' }}>
+          <div style={{ padding: `${SETTINGS_SIDEBAR_TOP_INSET}px 14px 8px` }}>
             <div style={{
               display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8,
               background: t.surface, border: `0.5px solid ${t.border}`,

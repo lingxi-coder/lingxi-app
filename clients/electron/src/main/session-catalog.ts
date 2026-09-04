@@ -23,6 +23,8 @@ export interface ProjectSessionCatalogResult {
 export interface ProjectSessionCatalogRow extends SessionRowDto {
   /** Private bridge-server catalog marker; never crosses into renderer state. */
   empty_session: boolean;
+  /** Private launch hint reconstructed from the session transcript. */
+  resume_model?: string;
 }
 
 function boundedOutput(value: string): string {
@@ -34,6 +36,7 @@ function sessionRow(value: unknown): ProjectSessionCatalogRow | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
   const messageCount = row['message_count'];
+  const resumeModel = row['resume_model'];
   if (
     !isSessionId(row['uuid'])
     || typeof row['title'] !== 'string'
@@ -42,6 +45,12 @@ function sessionRow(value: unknown): ProjectSessionCatalogRow | null {
     || !Number.isSafeInteger(messageCount)
     || typeof row['path'] !== 'string'
     || typeof row['empty_session'] !== 'boolean'
+    || (resumeModel !== undefined && (
+      typeof resumeModel !== 'string'
+      || resumeModel.length === 0
+      || resumeModel.length > 256
+      || resumeModel.includes('\0')
+    ))
   ) return null;
   return {
     uuid: row['uuid'],
@@ -51,6 +60,7 @@ function sessionRow(value: unknown): ProjectSessionCatalogRow | null {
     mode: row['mode'] === 'chat' ? 'chat' : 'code',
     path: row['path'],
     empty_session: row['empty_session'],
+    ...(typeof resumeModel === 'string' ? { resume_model: resumeModel } : {}),
   };
 }
 

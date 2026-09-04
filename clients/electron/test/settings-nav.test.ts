@@ -41,11 +41,26 @@ test('client-owned pages do not need the engine', () => {
   }
 });
 
+test('provider credentials stays visible while the engine is disconnected', () => {
+  assert.equal(
+    SETTINGS_NAV.find((page) => page.id === 'provider-credentials')?.needsEngine,
+    false,
+    'the page owns engine recovery and must not be replaced by the generic engine-required placeholder',
+  );
+});
+
 test('search finds a page by a settings key it owns', () => {
   const hits = searchNav('outputStyle');
   assert.ok(
     hits.some((p) => p.id === 'tools-agent'),
     'searching a settings key must reach the page that owns it',
+  );
+});
+
+test('base URL search belongs to custom providers, not built-in credentials', () => {
+  assert.deepEqual(
+    searchNav('baseUrl').map((page) => page.id),
+    ['custom-providers'],
   );
 });
 

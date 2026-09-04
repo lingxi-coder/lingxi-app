@@ -93,16 +93,25 @@ body {
   isolation: isolate;
   overscroll-behavior: contain;
 }
-.desktop-stage::before {
-  content: '';
-  position: absolute;
-  z-index: 0;
-  inset: 0;
-  pointer-events: none;
-  background:
-    radial-gradient(circle at 56% 18%, oklch(66% .16 270 / .055), transparent 31%),
-    radial-gradient(circle at 42% 43%, oklch(70% .11 320 / .028), transparent 26%);
-  mask-image: linear-gradient(to bottom, #000 0%, #000 70%, transparent 100%);
+
+.settings-provider-row,
+.settings-provider-back {
+  transition-property: background-color, opacity;
+  transition-duration: 140ms;
+  transition-timing-function: ease-out;
+}
+
+.settings-provider-row:not(:disabled):hover,
+.settings-provider-row:not(:disabled):focus-visible,
+.settings-provider-back:not(:disabled):hover,
+.settings-provider-back:not(:disabled):focus-visible {
+  background: var(--settings-provider-row-hover) !important;
+  outline: none;
+}
+
+.settings-provider-row:disabled,
+.settings-provider-back:disabled {
+  opacity: 0.58;
 }
 .desktop-stage-feed {
   position: relative;
@@ -201,6 +210,68 @@ body {
   line-height: 1.6;
 }
 .command-result-card[data-command-kind='error'] .command-result-pre { color: var(--command-danger); }
+.compact-status {
+  width: min(880px, 100%);
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 9px;
+  padding: 3px 2px;
+  color: var(--compact-color);
+}
+.compact-status-icon {
+  width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+}
+.compact-status-content {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding-top: 1px;
+}
+.compact-status-title {
+  width: fit-content;
+  font-size: 13.5px;
+  font-weight: 510;
+  line-height: 20px;
+  letter-spacing: -.006em;
+}
+.compact-status-detail {
+  color: var(--compact-muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+  text-wrap: pretty;
+}
+.compact-status-elapsed {
+  padding-top: 3px;
+  color: var(--compact-muted);
+  font-size: 10.5px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+.compact-progress-track {
+  position: relative;
+  width: min(280px, 46vw);
+  height: 2px;
+  margin-top: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--compact-track);
+}
+.compact-progress-indicator {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  min-width: 2px;
+  border-radius: inherit;
+  background: var(--compact-progress);
+  transition-property: width;
+  transition-duration: 500ms;
+  transition-timing-function: cubic-bezier(.2, 0, 0, 1);
+}
 .command-help-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -393,6 +464,308 @@ body {
   transform: translateY(-1px);
 }
 
+/* Shared Desktop dialog ------------------------------------------------- */
+.desktop-dialog-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: color-mix(in oklab, var(--dialog-overlay) 82%, transparent);
+  -webkit-backdrop-filter: blur(10px) saturate(.9);
+  backdrop-filter: blur(10px) saturate(.9);
+  animation: desktop-dialog-backdrop-enter 160ms ease-out both;
+}
+.desktop-dialog-panel {
+  max-height: min(720px, 100%);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 24px;
+  background: color-mix(in oklab, var(--dialog-window) 97%, transparent);
+  color: var(--dialog-text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  -webkit-backdrop-filter: blur(32px) saturate(1.04);
+  backdrop-filter: blur(32px) saturate(1.04);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--dialog-border-strong) 64%, transparent),
+    0 28px 84px -28px rgba(0, 0, 0, .58),
+    0 10px 28px -18px rgba(0, 0, 0, .36);
+  animation: desktop-dialog-panel-enter 190ms cubic-bezier(.2, 0, 0, 1) both;
+}
+.desktop-dialog-panel--compact { width: min(480px, 100%); }
+.desktop-dialog-panel--regular { width: min(600px, 100%); }
+.desktop-dialog-panel--wide { width: min(720px, 100%); }
+.desktop-dialog-header {
+  padding: 28px 32px 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+}
+.desktop-dialog-icon {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: var(--dialog-text);
+}
+.desktop-dialog-heading-copy {
+  min-width: 0;
+  display: grid;
+  flex: 1;
+  gap: 6px;
+}
+.desktop-dialog-eyebrow {
+  color: var(--dialog-accent);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+.desktop-dialog-header h2 {
+  color: var(--dialog-text);
+  font-size: 22px;
+  font-weight: 680;
+  line-height: 1.2;
+  letter-spacing: -.025em;
+  text-wrap: balance;
+}
+.desktop-dialog-summary {
+  max-width: 64ch;
+  color: var(--dialog-text-2);
+  font-size: 14px;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+.desktop-dialog-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 32px 20px;
+}
+
+/* Permission request content ------------------------------------------- */
+.permission-prompt-request-card {
+  min-height: 0;
+  margin-top: 20px;
+  overflow: hidden;
+  border-radius: 16px;
+  background: color-mix(in oklab, var(--dialog-surface) 88%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--dialog-border) 68%, transparent),
+    0 1px 2px -1px color-mix(in oklab, #000 9%, transparent),
+    0 3px 8px -5px color-mix(in oklab, #000 13%, transparent);
+}
+.permission-prompt-request-heading {
+  min-height: 66px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.permission-prompt-request-icon {
+  width: 34px;
+  height: 34px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--dialog-accent) 12%, var(--dialog-surface));
+  color: var(--dialog-accent);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--dialog-accent) 12%, transparent);
+}
+.permission-prompt-request-copy {
+  min-width: 0;
+  display: grid;
+  flex: 1;
+  gap: 2px;
+}
+.permission-prompt-request-copy strong {
+  overflow: hidden;
+  color: var(--dialog-text);
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.permission-prompt-request-copy small {
+  overflow: hidden;
+  color: var(--dialog-text-3);
+  font-size: 11.5px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.permission-prompt-worker {
+  width: fit-content;
+  min-height: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.permission-prompt-worker > span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.permission-prompt-detail {
+  max-height: min(250px, 34vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 14px 16px 16px 62px;
+  border-top: 1px solid color-mix(in oklab, var(--dialog-border) 62%, transparent);
+  background: color-mix(in oklab, var(--dialog-window) 30%, transparent);
+  color: var(--dialog-text-2);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12.5px;
+  font-variant-ligatures: none;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.permission-prompt-risk {
+  margin-top: 17px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--dialog-text-3);
+  font-size: 12px;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+.permission-prompt-risk > svg {
+  margin-top: 1px;
+  flex: 0 0 auto;
+}
+.desktop-dialog-footer {
+  padding: 0 32px 28px;
+}
+.desktop-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+}
+.desktop-dialog-action {
+  position: relative;
+  min-width: 88px;
+  min-height: 36px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 620;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition-property: scale, background-color, color, box-shadow, filter;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(.2, 0, 0, 1);
+}
+.desktop-dialog-action::before {
+  content: "";
+  position: absolute;
+  inset: -4px 0;
+}
+.desktop-dialog-action--cancel {
+  color: var(--dialog-text);
+  background: color-mix(in oklab, var(--dialog-surface-hover) 58%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--dialog-border) 64%, transparent);
+}
+.desktop-dialog-action--cancel:hover {
+  background: color-mix(in oklab, var(--dialog-surface-hover) 82%, transparent);
+  box-shadow: 0 0 0 1px var(--dialog-border-strong);
+}
+.desktop-dialog-action--secondary {
+  min-width: 96px;
+  color: var(--dialog-text-2);
+  background: transparent;
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--dialog-border) 64%, transparent);
+}
+.desktop-dialog-action--secondary:hover {
+  color: var(--dialog-text);
+  background: color-mix(in oklab, var(--dialog-surface-hover) 74%, transparent);
+  box-shadow: 0 0 0 1px var(--dialog-border-strong);
+}
+.permission-prompt-panel .desktop-dialog-action--secondary {
+  min-width: 160px;
+}
+.desktop-dialog-action--primary {
+  min-width: 108px;
+  color: #fff;
+  background: var(--dialog-accent);
+  box-shadow: 0 0 0 1px var(--dialog-accent-border);
+}
+.desktop-dialog-action--primary:hover {
+  filter: brightness(1.04);
+}
+.desktop-dialog-panel[data-tone='danger'] .desktop-dialog-icon,
+.desktop-dialog-panel[data-tone='danger'] .permission-prompt-request-icon {
+  color: var(--dialog-danger);
+}
+.desktop-dialog-panel[data-tone='danger'] .permission-prompt-request-icon {
+  background: color-mix(in oklab, var(--dialog-danger) 10%, var(--dialog-surface));
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--dialog-danger) 12%, transparent);
+}
+.desktop-dialog-panel[data-tone='danger'] .desktop-dialog-action--primary {
+  background: color-mix(in oklab, var(--dialog-danger) 90%, #ff4a4a);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--dialog-danger) 86%, #ff4a4a);
+}
+.desktop-dialog-action:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--dialog-window),
+    0 0 0 4px var(--dialog-accent);
+}
+.desktop-dialog-action:active {
+  scale: .96;
+}
+.ask-dialog-eyebrow-copy {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+@media (max-width: 620px) {
+  .desktop-dialog-overlay { padding: 16px; }
+  .desktop-dialog-panel { border-radius: 20px; }
+  .desktop-dialog-header { padding: 24px 22px 10px; }
+  .desktop-dialog-body { padding: 10px 22px 18px; }
+  .desktop-dialog-footer { padding: 0 22px 22px; }
+  .permission-prompt-detail { padding-left: 16px; }
+  .permission-prompt-worker { display: none; }
+}
+
+@media (max-width: 460px) {
+  .desktop-dialog-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .desktop-dialog-action {
+    min-height: 40px;
+  }
+  .desktop-dialog-action--primary {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-dialog-overlay,
+  .desktop-dialog-panel { animation: none; }
+  .desktop-dialog-action { transition-duration: 0ms; }
+}
+
+@keyframes desktop-dialog-backdrop-enter { from { opacity: 0; } to { opacity: 1; } }
+@keyframes desktop-dialog-panel-enter {
+  from { opacity: 0; transform: translateY(6px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
 @keyframes empty-state-enter {
   from { opacity: 0; transform: translateY(10px); filter: blur(4px); }
   to { opacity: 1; transform: translateY(0); filter: blur(0); }
@@ -785,6 +1158,13 @@ textarea, input { font-family: inherit; }
     background-image: none;
     color: var(--sweep-base) !important;
   }
+  .compact-progress-indicator {
+    transition-duration: 0ms;
+  }
+}
+
+@media (max-width: 920px) {
+  .model-picker-model-submenu { right: calc(100% - 4px) !important; }
 }
 
 @media (max-width: 760px) {

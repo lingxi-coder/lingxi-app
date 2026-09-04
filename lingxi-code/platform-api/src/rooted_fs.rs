@@ -1565,6 +1565,48 @@ mod imp {
         })
     }
 
+    #[cfg(any(test, target_os = "ios"))]
+    pub(super) fn open_direct_root_checked(
+        root: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<OwnedFd, FsError> {
+        // An iOS app may open its own container directly, but its sandbox
+        // rejects opening protected ancestors such as `/private/var/mobile`.
+        // Reject every symlink in the supplied path before and after the open,
+        // then prove the opened handle still names the resolved directory.
+        let canonical_before = std::fs::canonicalize(root).map_err(|error| map_io(root, error))?;
+        if canonical_before != root {
+            return Err(FsError::OutsideWorkspace(root.display().to_string()));
+        }
+        let directory = fs::open(
+            root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| map_unix_io(root, error))?;
+        let canonical_after = std::fs::canonicalize(root).map_err(|error| map_io(root, error))?;
+        if canonical_after != root {
+            return Err(FsError::OutsideWorkspace(root.display().to_string()));
+        }
+        let opened = fs::fstat(&directory).map_err(|error| map_unix_io(root, error))?;
+        let resolved = fs::stat(root).map_err(|error| map_unix_io(root, error))?;
+        if opened.st_dev != resolved.st_dev || opened.st_ino != resolved.st_ino {
+            return Err(FsError::OutsideWorkspace(format!(
+                "root directory identity changed: {}",
+                root.display()
+            )));
+        }
+        if let Some(expected) = expected {
+            if identity_from_fd(&directory, root)? != *expected {
+                return Err(FsError::OutsideWorkspace(format!(
+                    "root directory identity changed: {}",
+                    root.display()
+                )));
+            }
+        }
+        Ok(directory)
+    }
+
     fn open_root_checked(root: &Path, expected: Option<&RootIdentity>) -> Result<OwnedFd, FsError> {
         // Never canonicalize the root before opening it. Canonicalization
         // follows a swapped task-output directory (or one of its parents),
@@ -1576,7 +1618,7 @@ mod imp {
         // `/private/*`. Resolve only those kernel-provided aliases before the
         // no-follow walk; arbitrary user/task symlinks still fail closed at
         // the component where they occur.
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "ios", target_os = "macos"))]
         let root_alias_free = {
             let mut components = root.components();
             match (components.next(), components.next()) {
@@ -1601,8 +1643,17 @@ mod imp {
                 _ => root.to_path_buf(),
             }
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "ios", target_os = "macos")))]
         let root_alias_free = root.to_path_buf();
+
+        // iOS grants access to the app container itself without granting
+        // directory traversal over its system-owned ancestors. Directly pin
+        // an absolute, alias-free root after the checks above instead of
+        // starting the walk at `/`, which the sandbox rejects with EACCES.
+        #[cfg(target_os = "ios")]
+        if root_alias_free.is_absolute() {
+            return open_direct_root_checked(&root_alias_free, expected);
+        }
 
         let mut directory = if root_alias_free.is_absolute() {
             fs::open(
@@ -2480,6 +2531,26 @@ mod tests {
         let result = create_new_file(&task_dir, Path::new("task.output"));
         assert!(result.is_err(), "a symlinked ancestor must be refused");
         assert!(!victim.path().join("tasks/task.output").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_root_open_accepts_a_real_root_and_rejects_a_symlinked_ancestor() {
+        let real = tempfile::tempdir().unwrap();
+        let canonical_real = std::fs::canonicalize(real.path()).unwrap();
+        drop(imp::open_direct_root_checked(&canonical_real, None).unwrap());
+
+        let parent = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        std::fs::create_dir(victim.path().join("nested")).unwrap();
+        let linked_parent = parent.path().join("linked");
+        std::os::unix::fs::symlink(victim.path(), &linked_parent).unwrap();
+        let linked_root = linked_parent.join("nested");
+
+        assert!(matches!(
+            imp::open_direct_root_checked(&linked_root, None),
+            Err(FsError::OutsideWorkspace(_))
+        ));
     }
 
     #[test]

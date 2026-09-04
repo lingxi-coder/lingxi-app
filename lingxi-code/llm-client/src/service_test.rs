@@ -253,6 +253,24 @@ mod tests {
         provider_id: ProviderId,
         base_url: &str,
     ) -> ApiService {
+        make_adapter_for_protocol_with_transport(
+            protocol,
+            provider_id,
+            base_url,
+            "p",
+            "model",
+            FakeTransport::always(ProviderResponse::json(200, ok_response_json())),
+        )
+    }
+
+    fn make_adapter_for_protocol_with_transport(
+        protocol: ProtocolFamily,
+        provider_id: ProviderId,
+        base_url: &str,
+        profile_name: &str,
+        model: &str,
+        transport: Arc<dyn Transport>,
+    ) -> ApiService {
         let azure = if matches!(protocol, ProtocolFamily::AzureOpenAi) {
             Some(crate::AzureConfig {
                 api_version: "2024-02-01".to_string(),
@@ -264,15 +282,15 @@ mod tests {
             DefaultLlmClient::from_config(ClientConfig {
                 providers: vec![ProviderProfile {
                     provider_id,
-                    profile_name: "p".to_string(),
+                    profile_name: profile_name.to_string(),
                     base_url: base_url.to_string(),
                     protocol,
                     auth: AuthStrategy::None,
                     credential: CredentialConfig::None,
                     models: vec![ModelProfile {
-                        display_model: "model".to_string(),
-                        request_model: "model".to_string(),
-                        billing_model: "model".to_string(),
+                        display_model: model.to_string(),
+                        request_model: model.to_string(),
+                        billing_model: model.to_string(),
                         aliases: Vec::new(),
                         description: None,
                         metadata: Default::default(),
@@ -297,7 +315,7 @@ mod tests {
         );
         ApiService::new(
             client,
-            FakeTransport::always(ProviderResponse::json(200, ok_response_json())),
+            transport,
             SubscriberState::default(),
             UserAgentEnv {
                 user_type: Some("external".to_string()),
@@ -598,18 +616,17 @@ mod tests {
         );
     }
 
-    /// `None` must mean "whatever this model can emit", not a codec default.
+    /// `None` must mean the model-aware request default, not a codec default.
     ///
     /// This is what makes `messages_create_side_query`'s `Option<u32>` worth
-    /// having. A caller with no real reason to spend less than the model allows
-    /// used to be forced to invent a ceiling, and an invented ceiling is sized
-    /// against the ANSWER while the provider bills THINKING to the same number:
-    /// the local-app questionnaire stage picked 4096, and on `deepseek-v4-pro`
-    /// a 3123-token reasoning pass hit `finish_reason: length` at 4098, cutting
-    /// the tool call mid-JSON. If `None` ever stops resolving to the model's own
-    /// limit, every such caller silently inherits a cliff again.
+    /// having. A caller with no real reason to pick a number used to be forced
+    /// to invent a ceiling, and an invented ceiling is sized against the ANSWER
+    /// while the provider bills THINKING to the same number. The local-app
+    /// questionnaire stage picked 4096, and on `deepseek-v4-pro` a 3123-token
+    /// reasoning pass hit `finish_reason: length` at 4098, cutting the tool call
+    /// mid-JSON.
     #[test]
-    fn a_side_query_without_a_ceiling_takes_the_models_own_max_output() {
+    fn a_side_query_without_a_ceiling_uses_the_model_request_default() {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let model = "claude-sonnet-4-20250514";
@@ -628,17 +645,16 @@ mod tests {
                 .max_tokens
         };
 
-        let model_ceiling = u32::try_from(
-            crate::model::context_window::max_output_tokens_for_model(model),
-        )
-        .expect("the model ceiling fits u32");
+        let model_default =
+            u32::try_from(crate::model::context_window::default_output_tokens_for_model(model))
+                .expect("the model default fits u32");
         assert_eq!(
             build(None),
-            Some(model_ceiling),
-            "an absent ceiling must resolve to the model's own max output"
+            Some(model_default),
+            "an absent ceiling must resolve to the model-aware request default"
         );
         assert!(
-            model_ceiling > 4096,
+            model_default > 4096,
             "this model must have headroom above the figure the local-app stages \
              used to invent, or the test cannot tell the two apart"
         );
@@ -994,14 +1010,16 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport); // default ThinkingConfig::Adaptive
 
-        // (model, expected model-max-output-tokens) — binary YCe (v2.1.183):
-        // opus-4-8 / fable-5 → 64k default; sonnet-4-6 → 32k default.
-        // 2.1.198 pIe: sonnet-5 → 64k default (adaptive via registry capability).
+        // (model, expected model-max-output-tokens). Existing 4.x defaults stay
+        // unchanged; the current 5-series lineup exposes 128k output.
         for (model, expected_max) in [
-            ("claude-opus-4-8", 64_000u32),
+            ("claude-opus-4-6", 64_000u32),
+            ("claude-opus-4-8", 64_000),
+            ("claude-opus-5", 128_000),
             ("claude-sonnet-4-6", 32_000),
-            ("claude-sonnet-5", 64_000),
-            ("claude-fable-5", 64_000),
+            ("claude-sonnet-5", 128_000),
+            ("claude-fable-5-1", 128_000),
+            ("claude-mythos-5-1", 128_000),
         ] {
             let req = adapter
                 .build_request(model, None, None, vec![], vec![], false, None)
@@ -1178,7 +1196,7 @@ mod tests {
             req.temperature.is_none(),
             "opus-4-8 thinking-disabled → no temperature (not in rhn set)"
         );
-        // max_tokens still the model value (binary YCe: opus-4-8 → 64k).
+        // max_tokens still uses the model limit even when thinking is disabled.
         assert_eq!(req.max_tokens, Some(64_000));
         clear_thinking_env();
     }
@@ -1203,6 +1221,67 @@ mod tests {
             .expect("build_request");
         assert_eq!(req.max_tokens, Some(7_777));
         clear_thinking_env();
+    }
+
+    #[test]
+    fn build_request_uses_safe_glm_default_and_enforces_hard_output_limit() {
+        use crate::model::model_limits::{register, ModelLimits};
+
+        let model = "z-ai/glm-5.2:free-build-request-test";
+        register(
+            model,
+            ModelLimits {
+                context_window: 256_000,
+                max_output_tokens: 230_400,
+            },
+        );
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+
+        let ordinary = adapter
+            .build_request(
+                model,
+                Some("openrouter"),
+                None,
+                vec![text_user_msg("hello")],
+                vec![],
+                false,
+                None,
+            )
+            .expect("ordinary GLM request");
+        assert_eq!(ordinary.max_tokens, Some(32_000));
+
+        let oversized_override = adapter
+            .build_request(
+                model,
+                Some("openrouter"),
+                None,
+                vec![text_user_msg("hello")],
+                vec![],
+                false,
+                Some(u32::MAX),
+            )
+            .expect("explicit GLM request");
+        assert_eq!(oversized_override.max_tokens, Some(230_400));
+    }
+
+    #[test]
+    fn build_request_preserves_explicit_limit_for_unknown_custom_model() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let request = adapter
+            .build_request(
+                "unknown-custom-long-output-model",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                false,
+                Some(150_000),
+            )
+            .expect("custom model request");
+
+        assert_eq!(request.max_tokens, Some(150_000));
     }
 
     #[test]
@@ -3004,7 +3083,7 @@ mod tests {
             );
             h
         };
-        adapter.record_rate_limit_from_429(&headers, None);
+        adapter.record_rate_limit_from_429(&headers, None, "claude-sonnet-4-20250514");
         // Sanity: the slot is genuinely staged before we clear it.
         assert!(
             adapter.pending_429.lock().unwrap().is_some(),
@@ -3505,7 +3584,7 @@ mod tests {
             "precondition: seed a non-empty raw snapshot first"
         );
 
-        adapter.record_rate_limit_from_429(&BTreeMap::new(), None);
+        adapter.record_rate_limit_from_429(&BTreeMap::new(), None, "claude-sonnet-4-20250514");
         adapter.promote_pending_429();
 
         assert_eq!(
@@ -3968,13 +4047,42 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn repeated_identical_non_stream_overflow_stops_after_one_adjustment() {
+        let message = "This endpoint's maximum context length is 200000 tokens. However, you requested about 212000 tokens (150000 of text input, 30000 of tool input, 32000 in the output). Please reduce the length of either one.";
+        let overflow = serde_json::json!({
+            "type": "error",
+            "error": {"type": "invalid_request_error", "message": message}
+        });
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(400, overflow.clone())),
+            FakeResponse::Ok(ProviderResponse::json(400, overflow)),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let adapter = make_adapter(transport.clone())
+            .with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+
+        let result = adapter
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
+            .await;
+
+        assert!(matches!(result, Err(LlmError::InvalidRequest { .. })));
+        assert_eq!(transport.seen_count(), 2);
+    }
+
     // ── 3c-T1: streaming 429 + retry-after header drives correct delay ────────
 
-    /// Empty frame-stream for scripted streaming errors.
-    struct EmptyFrames;
-    impl crate::FrameStream for EmptyFrames {
+    struct RawBodyFrames(Option<Vec<u8>>);
+    impl crate::FrameStream for RawBodyFrames {
         fn next_frame(&mut self) -> BoxFuture<'_, Result<Option<crate::RawStreamFrame>, LlmError>> {
-            Box::pin(async { Ok(None) })
+            let frame = self.0.take().map(crate::RawStreamFrame::new);
+            Box::pin(async move { Ok(frame) })
         }
     }
 
@@ -3982,8 +4090,9 @@ mod tests {
     /// streaming (`open_stream`) responses.
     struct FakeStreamTransport {
         /// Sequence of `open_stream` results.
-        stream_resps: Mutex<Vec<FakeStreamResp>>,
-        stream_call_count: Mutex<usize>,
+        responses: Mutex<Vec<FakeStreamResp>>,
+        call_count: Mutex<usize>,
+        requests: Mutex<Vec<ProviderRequest>>,
     }
 
     #[allow(dead_code)]
@@ -3992,6 +4101,7 @@ mod tests {
         Status {
             status: u16,
             headers: BTreeMap<String, String>,
+            body_json: Option<serde_json::Value>,
         },
         /// Terminal transport error (e.g. connection failure).
         Err(LlmError),
@@ -4000,13 +4110,21 @@ mod tests {
     impl FakeStreamTransport {
         fn sequence(stream_resps: Vec<FakeStreamResp>) -> Arc<Self> {
             Arc::new(Self {
-                stream_resps: Mutex::new(stream_resps),
-                stream_call_count: Mutex::new(0),
+                responses: Mutex::new(stream_resps),
+                call_count: Mutex::new(0),
+                requests: Mutex::new(Vec::new()),
             })
         }
 
         fn stream_call_count(&self) -> usize {
-            *self.stream_call_count.lock().unwrap()
+            *self.call_count.lock().unwrap()
+        }
+
+        fn request_max_tokens(&self, index: usize) -> Option<u64> {
+            self.requests.lock().unwrap()[index]
+                .body_json
+                .get("max_tokens")
+                .and_then(serde_json::Value::as_u64)
         }
     }
 
@@ -4024,20 +4142,30 @@ mod tests {
 
         fn open_stream<'a>(
             &'a self,
-            _request: &'a ProviderRequest,
+            request: &'a ProviderRequest,
         ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
-            let mut count = self.stream_call_count.lock().unwrap();
-            let idx = (*count).min(self.stream_resps.lock().unwrap().len().saturating_sub(1));
+            self.requests.lock().unwrap().push(request.clone());
+            let mut count = self.call_count.lock().unwrap();
+            let idx = (*count).min(self.responses.lock().unwrap().len().saturating_sub(1));
             *count += 1;
             drop(count);
             let resp = {
-                let resps = self.stream_resps.lock().unwrap();
+                let resps = self.responses.lock().unwrap();
                 match &resps[idx] {
-                    FakeStreamResp::Status { status, headers } => Ok(StreamingResponse {
-                        status: *status,
-                        headers: headers.clone(),
-                        frames: Box::new(EmptyFrames),
-                    }),
+                    FakeStreamResp::Status {
+                        status,
+                        headers,
+                        body_json,
+                    } => {
+                        let body = body_json
+                            .as_ref()
+                            .map(|value| serde_json::to_vec(value).expect("scripted JSON body"));
+                        Ok(StreamingResponse {
+                            status: *status,
+                            headers: headers.clone(),
+                            frames: Box::new(RawBodyFrames(body)),
+                        })
+                    }
                     FakeStreamResp::Err(e) => Err(e.clone()),
                 }
             };
@@ -4138,10 +4266,12 @@ mod tests {
             FakeStreamResp::Status {
                 status: 429,
                 headers: headers_429,
+                body_json: None,
             },
             FakeStreamResp::Status {
                 status: 200,
                 headers: BTreeMap::new(),
+                body_json: None,
             },
         ]);
 
@@ -4183,6 +4313,180 @@ mod tests {
             2,
             "must retry exactly once (429 → 200)"
         );
+    }
+
+    #[tokio::test]
+    async fn streaming_openrouter_free_429_surfaces_provider_detail_without_retrying() {
+        let model = "z-ai/glm-5.2:free";
+        let stream_transport = FakeStreamTransport::sequence(vec![FakeStreamResp::Status {
+            status: 429,
+            headers: BTreeMap::new(),
+            body_json: Some(serde_json::json!({
+                "error": {
+                    "code": "rate_limit_exceeded",
+                    "message": "Free model daily request limit exceeded"
+                }
+            })),
+        }]);
+        let adapter = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::OpenAiChat,
+            ProviderId::OpenAICompatible {
+                name: "openrouter".to_string(),
+            },
+            "https://openrouter.ai/api/v1",
+            "openrouter",
+            model,
+            Arc::clone(&stream_transport) as Arc<dyn Transport>,
+        );
+
+        let result = adapter
+            .stream(
+                model,
+                Some("openrouter"),
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(LlmError::RateLimited { .. })),
+            "OpenRouter's 429 must keep the typed rate-limit error"
+        );
+        assert_eq!(
+            stream_transport.stream_call_count(),
+            1,
+            "a free-tier 429 must still fail fast"
+        );
+        assert_eq!(
+            adapter.last_rate_limit_error_message().as_deref(),
+            Some(
+                "OpenRouter free-model rate limit reached: Free model daily request limit exceeded. Try another free model or retry later."
+            ),
+            "the terminal surface must retain OpenRouter's useful error detail"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_openrouter_overflow_retries_with_server_derived_output_limit() {
+        use crate::model::model_limits::{register, ModelLimits};
+
+        let model = "z-ai/glm-5.2:free-stream-test";
+        register(
+            model,
+            ModelLimits {
+                context_window: 256_000,
+                max_output_tokens: 230_400,
+            },
+        );
+        let overflow = serde_json::json!({
+            "error": {
+                "message": "This endpoint's maximum context length is 256000 tokens. However, you requested about 272000 tokens (200000 of text input, 40000 of tool input, 32000 in the output). Please reduce the length of either one.",
+                "code": 400,
+                "metadata": {"provider_name": null}
+            }
+        });
+        let stream_transport = FakeStreamTransport::sequence(vec![
+            FakeStreamResp::Status {
+                status: 400,
+                headers: BTreeMap::new(),
+                body_json: Some(overflow),
+            },
+            FakeStreamResp::Status {
+                status: 200,
+                headers: BTreeMap::new(),
+                body_json: None,
+            },
+        ]);
+        let adapter = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::OpenAiChat,
+            ProviderId::OpenAICompatible {
+                name: "openrouter".to_string(),
+            },
+            "https://openrouter.ai/api/v1",
+            "openrouter",
+            model,
+            Arc::clone(&stream_transport) as Arc<dyn Transport>,
+        );
+
+        let result = adapter
+            .stream(
+                model,
+                Some("openrouter"),
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+            )
+            .await;
+
+        assert!(result.is_ok(), "second stream connection should open");
+        assert_eq!(stream_transport.stream_call_count(), 2);
+        assert_eq!(stream_transport.request_max_tokens(0), Some(32_000));
+        assert_eq!(stream_transport.request_max_tokens(1), Some(15_000));
+    }
+
+    #[tokio::test]
+    async fn repeated_identical_stream_overflow_stops_after_one_adjustment() {
+        use crate::model::model_limits::{register, ModelLimits};
+
+        let model = "z-ai/glm-5.2:free-repeated-stream-test";
+        register(
+            model,
+            ModelLimits {
+                context_window: 256_000,
+                max_output_tokens: 230_400,
+            },
+        );
+        let message = "This endpoint's maximum context length is 256000 tokens. However, you requested about 272000 tokens (200000 of text input, 40000 of tool input, 32000 in the output). Please reduce the length of either one.";
+        let overflow = serde_json::json!({
+            "error": {"message": message, "code": 400, "metadata": {"provider_name": null}}
+        });
+        let stream_transport = FakeStreamTransport::sequence(vec![
+            FakeStreamResp::Status {
+                status: 400,
+                headers: BTreeMap::new(),
+                body_json: Some(overflow.clone()),
+            },
+            FakeStreamResp::Status {
+                status: 400,
+                headers: BTreeMap::new(),
+                body_json: Some(overflow),
+            },
+            FakeStreamResp::Status {
+                status: 200,
+                headers: BTreeMap::new(),
+                body_json: None,
+            },
+        ]);
+        let adapter = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::OpenAiChat,
+            ProviderId::OpenAICompatible {
+                name: "openrouter".to_string(),
+            },
+            "https://openrouter.ai/api/v1",
+            "openrouter",
+            model,
+            Arc::clone(&stream_transport) as Arc<dyn Transport>,
+        );
+
+        let result = adapter
+            .stream(
+                model,
+                Some("openrouter"),
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+            )
+            .await;
+
+        assert!(matches!(result, Err(LlmError::InvalidRequest { .. })));
+        assert_eq!(stream_transport.stream_call_count(), 2);
     }
 
     // ── M12: streaming idle watchdog (cc 2.1.196 default-on) ─────────────────
@@ -5570,16 +5874,27 @@ mod tests {
         // small input) is left UNCHANGED.
         assert_eq!(bound_output_to_context(64_000, 200_000, 5_000), 64_000);
 
-        // Never capped below the 4096 floor, even when input nearly fills context.
-        assert_eq!(bound_output_to_context(64_000, 200_000, 199_000), 4_096);
+        // Near-full input must still produce a valid request rather than forcing
+        // an output floor that makes input + output exceed the hard context cap.
+        assert_eq!(bound_output_to_context(64_000, 200_000, 199_000), 1);
+
+        // Input that already fills the window cannot produce a valid output.
+        assert_eq!(bound_output_to_context(64_000, 200_000, 200_001), 0);
+
+        // A percentage-only margin must not consume all 40k of otherwise valid
+        // output space on a 1M-class model.
+        assert_eq!(
+            bound_output_to_context(32_000, 1_050_000, 1_010_000),
+            20_000
+        );
     }
 
     #[test]
     fn custom_context_beta_controls_request_output_bound() {
-        // 720k ASCII bytes ≈ 180k input tokens. In the default 200k window the
-        // model's 32k output allowance must be context-capped; with the 1M beta
-        // the complete model allowance fits unchanged.
-        let messages = vec![text_user_msg(&"x".repeat(720_000))];
+        // 520k ASCII bytes are below the default 200k input window under the
+        // conservative request estimator, but leave too little headroom for a
+        // full 32k output. With the 1M beta the full output allowance fits.
+        let messages = vec![text_user_msg(&"x".repeat(520_000))];
         let without = make_adapter(FakeTransport::always(ProviderResponse::json(
             200,
             ok_response_json(),

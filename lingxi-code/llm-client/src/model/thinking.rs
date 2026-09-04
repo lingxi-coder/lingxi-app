@@ -9,7 +9,7 @@
 //! These predicates compare the model's **canonical** name (date suffix stripped)
 //! for either a `claude-3-` prefix (thinking support) or exact membership in the
 //! adaptive-thinking set. The canonical names this module must distinguish —
-//! `claude-opus-4-8`, `claude-opus-4-7`, `claude-fable-5`, `claude-mythos-5`,
+//! `claude-opus-4-8`, `claude-opus-4-7`, `claude-fable-5-1`, `claude-mythos-5-1`,
 //! `claude-sonnet-4-6` — are finer-grained than `compaction`'s
 //! `firstPartyNameToCanonical` (which collapses `claude-opus-4-8` → `claude-opus-4`).
 //! We therefore carry a dedicated [`canonical`] helper here that preserves the
@@ -30,8 +30,8 @@ pub fn canonical(model: &str) -> String {
     let name = model.to_lowercase();
     // Most specific first. These are the family-versions the predicates key on.
     const KNOWN: &[&str] = &[
-        "claude-fable-5",
-        "claude-mythos-5",
+        "claude-fable-5-1",
+        "claude-mythos-5-1",
         "claude-mythos-preview",
         "claude-opus-4-8",
         "claude-opus-4-7",
@@ -87,7 +87,7 @@ pub fn model_supports_thinking(model: &str) -> bool {
 /// `modelSupportsAdaptiveThinking` — EXACT v2.1.183 binary list (canonical
 /// equality, NOT substring `.includes`).
 ///
-/// `true` for `{claude-fable-5, claude-mythos-5, claude-opus-4-8, claude-opus-4-7,
+/// `true` for `{claude-fable-5-1, claude-mythos-5-1, claude-opus-4-8, claude-opus-4-7,
 /// claude-opus-4-6, claude-sonnet-4-6}`; `false` for the explicit non-adaptive
 /// set `{claude-3-*, claude-opus-4-0, claude-opus-4-1, claude-opus-4-5,
 /// claude-sonnet-4-0, claude-sonnet-4-5, claude-haiku-4-5}`; any other
@@ -99,8 +99,8 @@ pub fn model_supports_adaptive_thinking(model: &str) -> bool {
     // capability check `lB(n,"adaptive_thinking")` (its capabilities include
     // "adaptive_thinking"); folded into the static TRUE set here.
     const ADAPTIVE: &[&str] = &[
-        "claude-fable-5",
-        "claude-mythos-5",
+        "claude-fable-5-1",
+        "claude-mythos-5-1",
         "claude-opus-4-8",
         "claude-opus-4-7",
         "claude-opus-4-6",
@@ -136,7 +136,7 @@ pub fn model_supports_adaptive_thinking(model: &str) -> bool {
 /// `rhn` — the v2.1.185 temperature-gate model set (binary `function rhn`
 /// @195164989). When thinking is disabled, claude-code sends `temperature:1`
 /// ONLY for these models; for every OTHER model — including the default
-/// `claude-opus-4-8`, `claude-opus-4-7`, `claude-fable-5`, `claude-mythos-5`,
+/// `claude-opus-4-8`, `claude-opus-4-7`, `claude-fable-5-1`, `claude-mythos-5-1`,
 /// and any unknown id — it omits the `temperature` field entirely.
 ///
 /// Binary: substring match on `claude-3-` plus canonical equality on the
@@ -393,7 +393,7 @@ mod tests {
         assert_eq!(canonical("claude-opus-4-8-20260115"), "claude-opus-4-8");
         assert_eq!(canonical("claude-sonnet-4-6-20251114"), "claude-sonnet-4-6");
         assert_eq!(canonical("claude-haiku-4-5-20251001"), "claude-haiku-4-5");
-        assert_eq!(canonical("claude-fable-5"), "claude-fable-5");
+        assert_eq!(canonical("claude-fable-5-1"), "claude-fable-5-1");
         assert_eq!(canonical("claude-3-5-haiku-20241022"), "claude-3-5-haiku");
         // bare opus-4 family (no dotted minor) → the undated family name
         assert_eq!(canonical("claude-opus-4-20250514"), "claude-opus-4");
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn supports_thinking_excludes_claude_3() {
         for m in [
-            "claude-fable-5",
+            "claude-fable-5-1",
             "claude-opus-4-8-20260115",
             "claude-sonnet-4-6-20251114",
             "claude-haiku-4-5-20251001",
@@ -442,8 +442,8 @@ mod tests {
     #[test]
     fn adaptive_thinking_exact_binary_list() {
         for m in [
-            "claude-fable-5",
-            "claude-mythos-5",
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
             "claude-sonnet-5",
             "claude-opus-4-8-20260115",
             "claude-opus-4-7-20251201",
@@ -487,8 +487,8 @@ mod tests {
         for model in [
             "claude-opus-4-8-20260115",
             "claude-opus-4-7-20251201",
-            "claude-fable-5",
-            "claude-mythos-5",
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
             "claude-sonnet-5",
         ] {
             assert_eq!(

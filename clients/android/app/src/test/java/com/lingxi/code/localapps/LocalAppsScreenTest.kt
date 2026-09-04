@@ -14,6 +14,52 @@ class LocalAppsScreenTest {
     // session catalog's display order.
 
     /**
+     * The approval dialog's dismissal polarity (outside tap / back press must
+     * NOT reject a create/MCP/profile approval) is asserted by no runtime
+     * test: `androidx.compose.ui.test` is instrumented-only in this module
+     * (see `DrawerCreateEntryTest`'s header for why), and every dismissal test
+     * elsewhere in this package drives the ViewModel directly, never the
+     * dialog. Source-level, in the same style as
+     * `RootLocalAppPresenterSourceTest`.
+     */
+    @Test
+    fun `the approval sheet dialog cannot be dismissed by an outside tap or back press`() {
+        val source = File("src/main/java/com/lingxi/code/localapps/LocalAppsScreen.kt").readText()
+
+        val start = source.indexOf("fun LocalAppApprovalSheetDialog(")
+        assertTrue("read the wrong file: LocalAppApprovalSheetDialog not found", start >= 0)
+        val end = source.indexOf("\nprivate fun LocalAppApprovalFact(", start)
+        assertTrue("read the wrong file: the function after the dialog was not found", end > start)
+        val dialog = source.substring(start, end)
+
+        assertTrue(
+            "vacuity guard: the sliced region must still be the AlertDialog call",
+            "AlertDialog(" in dialog,
+        )
+        assertTrue(
+            "an outside tap or back press must not be able to reject the sheet: " +
+                "onDismissRequest must be a no-op, matching iOS's " +
+                "`.interactiveDismissDisabled()` on the same prompt",
+            "onDismissRequest = {}" in dialog,
+        )
+        assertTrue(
+            "AlertDialog must be given DialogProperties disabling both interactive " +
+                "dismissal paths, not just a no-op onDismissRequest (which alone still " +
+                "lets a back press pop the dialog without calling it)",
+            Regex(
+                "DialogProperties\\(\\s*dismissOnBackPress\\s*=\\s*false\\s*,\\s*" +
+                    "dismissOnClickOutside\\s*=\\s*false\\s*\\)",
+            ).containsMatchIn(dialog),
+        )
+        assertTrue(
+            "rejection must still be reachable through the explicit dismiss button, " +
+                "keyed to the sheet's own requestId so a stale tap cannot resolve a " +
+                "sheet that has since been superseded",
+            "TextButton(onClick = { onAction(LocalAppsAction.ResolveApprovalSheet(sheet.requestId, false)) })" in dialog,
+        )
+    }
+
+    /**
      * A DRAFT card must show neither the stored name nor the stored brief.
      *
      * The fixture below is exactly what the engine writes for a shell: the

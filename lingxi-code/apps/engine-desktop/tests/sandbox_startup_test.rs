@@ -76,7 +76,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         // Sandboxed boot: inherit no machine credentials, so the
         // assertions do not depend on the developer's env/keychain.
         isolated_credential_storage: true,
-        credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
+        credential_storage_policy: platform_api::CredentialStoragePolicy::PlainTextFixture,
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
         api_key_helper: None,
@@ -101,6 +101,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         deny_unresolved_ask: false,
         is_tty: false,
         injected_permission_gate: None,
+        injected_plugin_secrets: Default::default(),
         ask_user_question_tx: None,
         computer_access_tx: None,
         session_agent_observer: None,

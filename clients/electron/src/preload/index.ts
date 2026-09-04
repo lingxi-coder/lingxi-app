@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type {
   AskUserQuestionRequestDto,
+  AudioOpDto,
+  AudioResultDto,
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
@@ -11,9 +13,20 @@ import type {
 } from '@lingxi/bridge-client';
 import { createRuntimeEventReplayBuffer, type SequencedRuntimeEventEnvelope } from './event-replay.js';
 import type { AllowedClientCommand } from '../shared/clientCommands.js';
+import {
+  CH_NATIVE_AUDIO_ENGINE_REQUEST,
+  CH_NATIVE_AUDIO_EVENT,
+  CH_NATIVE_AUDIO_REQUEST,
+} from '../shared/nativeAudio.js';
+import type {
+  NativeAudioCommand,
+  NativeAudioCommandResult,
+  NativeAudioEvent,
+  NativeAudioResponse,
+} from '../shared/nativeAudio.js';
 import type { PublicSettings, SessionPinInput, SessionRef } from '../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../shared/microphoneAccess.js';
-import type { WorkspaceFilePreview } from '../main/host.js';
+import type { PluginSecretMetadata, WorkspaceFilePreview } from '../main/host.js';
 
 export type { AllowedClientCommand } from '../shared/clientCommands.js';
 export type {
@@ -51,6 +64,10 @@ const CH_WORKSPACE_FILES_SEARCH = 'lingxi:workspace-files:search';
 const CH_PROVIDER_CREDENTIALS_GET = 'lingxi:provider-credentials:get';
 const CH_PROVIDER_CREDENTIAL_SET = 'lingxi:provider-credential:set';
 const CH_PROVIDER_CREDENTIAL_CLEAR = 'lingxi:provider-credential:clear';
+const CH_PROVIDER_CONNECTION_TEST = 'lingxi:provider-connection:test';
+const CH_PLUGIN_SECRET_GET = 'lingxi:plugin-secret:get';
+const CH_PLUGIN_SECRET_SET = 'lingxi:plugin-secret:set';
+const CH_PLUGIN_SECRET_CLEAR = 'lingxi:plugin-secret:clear';
 const CH_BRIDGE_RESTART = 'lingxi:bridge:restart';
 const CH_DIAGNOSTICS_GET = 'lingxi:diagnostics:get';
 const CH_DIAGNOSTICS_COPY = 'lingxi:diagnostics:copy';
@@ -99,9 +116,10 @@ export interface WorkspaceMetadata {
     message: string;
   };
 }
-export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; runtimeOnly?: true }
+export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; credentialPreview?: string; runtimeOnly?: true }
 export interface ProviderCredentialMetadata extends CredentialMetadata { providerId: string }
 export interface ProviderCredentialUpdate { credential: ProviderCredentialMetadata; settings: PublicSettings }
+export type ProviderConnectionTestResult = Extract<ClientEvent, { type: 'provider_connection_tested' }>;
 export interface DiagnosticEntry {
   timestamp: string;
   level: 'info' | 'warn' | 'error';
@@ -122,9 +140,14 @@ export interface BootstrapState {
 export interface WorkspaceFileSearchResult { files: string[]; truncated: boolean }
 
 export type Unsubscribe = () => void;
+export interface NativeAudioApi {
+  request(command: NativeAudioCommand): Promise<NativeAudioCommandResult>;
+  onEvent(cb: (event: NativeAudioEvent) => void): Unsubscribe;
+  executeEngineRequest(sessionId: string, op: AudioOpDto): Promise<AudioResultDto>;
+}
 
 /** The macOS System Settings deep links this app opens: the computer-access TCC panel's two panes, plus the voice settings page's `microphone` row. */
-export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone';
+export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
 export interface LingxiApi {
   platform: NodeJS.Platform;
@@ -138,9 +161,13 @@ export interface LingxiApi {
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<PublicSettings>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   previewWorkspaceFile(sessionId: string, path: string): Promise<WorkspaceFilePreview>;
-  providerCredentials(): Promise<ProviderCredentialMetadata[]>;
+  providerCredentials(providerId?: string): Promise<ProviderCredentialMetadata[]>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
+  testProviderConnection(providerId: string, credentialOverride?: string): Promise<ProviderConnectionTestResult>;
+  pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
+  setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;
+  clearPluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   restartBridge(sessionId: string): Promise<void>;
   diagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;
@@ -174,6 +201,7 @@ export interface LingxiApi {
   onPermission(cb: (request: RuntimeEventEnvelope<PermissionRequest>) => void): Unsubscribe;
   onComputerAccess(cb: (request: RuntimeEventEnvelope<ComputerAccessRequestDto>) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: RuntimeEventEnvelope<ConnectionState>) => void): Unsubscribe;
+  audio: NativeAudioApi;
 }
 
 function subscribe<T>(channel: string, callback: (payload: T) => void): Unsubscribe {
@@ -209,9 +237,13 @@ const api: LingxiApi = {
   setSessionPinned: (session, pinned) => ipcRenderer.invoke(CH_SESSION_PIN_SET, session, pinned) as Promise<PublicSettings>,
   searchWorkspaceFiles: (query) => ipcRenderer.invoke(CH_WORKSPACE_FILES_SEARCH, query) as Promise<WorkspaceFileSearchResult>,
   previewWorkspaceFile: (sessionId, path) => ipcRenderer.invoke(CH_WORKSPACE_FILE_PREVIEW, sessionId, path) as Promise<WorkspaceFilePreview>,
-  providerCredentials: () => ipcRenderer.invoke(CH_PROVIDER_CREDENTIALS_GET) as Promise<ProviderCredentialMetadata[]>,
+  providerCredentials: (providerId) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIALS_GET, providerId) as Promise<ProviderCredentialMetadata[]>,
   setProviderCredential: (providerId, credential) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIAL_SET, providerId, credential) as Promise<ProviderCredentialUpdate>,
   clearProviderCredential: (providerId) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIAL_CLEAR, providerId) as Promise<ProviderCredentialMetadata>,
+  testProviderConnection: (providerId, credentialOverride) => ipcRenderer.invoke(CH_PROVIDER_CONNECTION_TEST, providerId, credentialOverride) as Promise<ProviderConnectionTestResult>,
+  pluginSecret: (pluginId, key) => ipcRenderer.invoke(CH_PLUGIN_SECRET_GET, pluginId, key) as Promise<PluginSecretMetadata>,
+  setPluginSecret: (pluginId, key, secret) => ipcRenderer.invoke(CH_PLUGIN_SECRET_SET, pluginId, key, secret) as Promise<PluginSecretMetadata>,
+  clearPluginSecret: (pluginId, key) => ipcRenderer.invoke(CH_PLUGIN_SECRET_CLEAR, pluginId, key) as Promise<PluginSecretMetadata>,
   restartBridge: (sessionId) => ipcRenderer.invoke(CH_BRIDGE_RESTART, sessionId) as Promise<void>,
   diagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_GET) as Promise<DiagnosticEntry[]>,
   copyDiagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_COPY) as Promise<void>,
@@ -237,6 +269,13 @@ const api: LingxiApi = {
   onPermission: (callback) => subscribe(CH_PERMISSION, callback),
   onComputerAccess: (callback) => subscribe(CH_COMPUTER_ACCESS, callback),
   onConnectionStateChanged: (callback) => subscribe(CH_STATE_CHANGED, callback),
+  audio: {
+    request: (command) => ipcRenderer.invoke(CH_NATIVE_AUDIO_REQUEST, command) as Promise<NativeAudioCommandResult>,
+    onEvent: (callback) => subscribe(CH_NATIVE_AUDIO_EVENT, callback),
+    executeEngineRequest: (sessionId, op) => (
+      ipcRenderer.invoke(CH_NATIVE_AUDIO_ENGINE_REQUEST, sessionId, op) as Promise<AudioResultDto>
+    ),
+  },
 };
 
 contextBridge.exposeInMainWorld('lingxi', api);

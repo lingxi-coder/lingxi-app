@@ -17,6 +17,17 @@ def _install_fake_binary(tmp_path, monkeypatch, script):
     return exe
 
 
+def _install_fake_broker(tmp_path, monkeypatch):
+    pkg = tmp_path / "lingxi_cli_bin"
+    broker = pkg / "credential-broker"
+    (broker / "bin").mkdir(parents=True, exist_ok=True)
+    client = broker / ("bin/lingxi-credential-client.exe" if os.name == "nt" else "bin/lingxi-credential-client")
+    client.write_text("")
+    (pkg / "lingxi-package.json").write_text("{}")
+    monkeypatch.setattr(lingxi_cli_bin, "__file__", str(pkg / "__init__.py"))
+    return broker
+
+
 def test_bundled_path_found(tmp_path, monkeypatch):
     _install_fake_binary(tmp_path, monkeypatch, "#!/bin/sh\nexit 0\n")
     assert lingxi_cli_bin.bundled_lingxi_path().is_file()
@@ -36,3 +47,14 @@ def test_missing_binary_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(lingxi_cli_bin, "__file__", str(pkg / "__init__.py"))
     with pytest.raises(FileNotFoundError):
         lingxi_cli_bin.bundled_lingxi_path()
+
+
+def test_bundled_credential_broker_dir_found(tmp_path, monkeypatch):
+    broker = _install_fake_broker(tmp_path, monkeypatch)
+    assert lingxi_cli_bin.bundled_credential_broker_dir() == broker
+
+
+def test_bundled_credential_broker_client_found(tmp_path, monkeypatch):
+    broker = _install_fake_broker(tmp_path, monkeypatch)
+    expected = broker / ("bin/lingxi-credential-client.exe" if os.name == "nt" else "bin/lingxi-credential-client")
+    assert lingxi_cli_bin.bundled_credential_broker_client() == expected

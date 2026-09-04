@@ -35,6 +35,15 @@ pub trait SecureStorage: Send + Sync {
         account: &str,
     ) -> Result<Option<SecureStorageData>, SecureStorageError>;
 
+    /// Check whether an entry exists without requiring callers to load its
+    /// secret payload. Native backends should override this when their OS API
+    /// can answer an attribute-only query without decrypting the value.
+    async fn contains(&self, service: &str, account: &str) -> Result<bool, SecureStorageError> {
+        self.retrieve(service, account)
+            .await
+            .map(|entry| entry.is_some())
+    }
+
     /// Remove the entry for `(service, account)`. Removing a non-existent entry
     /// is not an error.
     async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError>;

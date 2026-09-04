@@ -50,6 +50,16 @@ SKILL_ROOTS = ["lingxi-code/plugins/lingxi-local-app/skills"]
 # 来自**目录名**。两者都由 `plugin/src/discovery.rs` 的 `glob_md()` 递归发现。
 AGENT_ROOTS = ["lingxi-code/plugins/lingxi-local-app/agents"]
 
+# Prose that asserts a tool does not exist. Matched per SENTENCE against the
+# agent's own granted tool names, so "no `LocalAppActOnUi` — that is operator's
+# job" (a scope statement about a tool the agent was NOT granted) does not trip
+# it; only "<granted tool> ... has no backing Host tool" does.
+DENIES_EXISTENCE = re.compile(
+    r"(has no backing|no backing Host tool|do(?:es)? not exist|there is no Host tool|"
+    r"is not reachable from any tool|anywhere in the repo|zero hits|0 hits)",
+    re.I,
+)
+
 # ⛔ 这三个字段出现在 plugin agent 的 frontmatter 里就是错的,而且**两种错法不同**:
 # `hooks` / `permissionMode` 让 `validate_plugin_agent_frontmatter` 失败,
 # 于是 `PluginManagerError::Validation` **让整个 plugin 装载失败**
@@ -100,38 +110,76 @@ def main():
     agents = []
     for root in AGENT_ROOTS:
         base = repo / root
-        if base.is_dir():
-            agents.extend(sorted(base.glob("*.md")))
+        if not base.is_dir():
+            print("check-skill-frontmatter: agent root missing at %s — refusing to report a clean "
+                  "result from a root that does not exist" % base, file=sys.stderr)
+            return 1
+        # rglob, not glob: matches discovery.rs's glob_md, which recurses —
+        # a nested reorg the plugin loader still finds must not go unseen here.
+        agents.extend(sorted((p, base) for p in base.rglob("*.md")))
+
+    if not agents:
+        print("check-skill-frontmatter: enumerated ZERO agents under %s — refusing to report clean "
+              "from an empty enumeration" % ", ".join(AGENT_ROOTS), file=sys.stderr)
+        return 1
 
     problems = []
     rows = []
-    for path in agents:
+    for path, agent_base in agents:
         stem = path.stem
+        # `stem` is the IDENTITY (discovery.rs keys agents by file name, not by
+        # relative path); `rel` is only for the message, so a nested agent the
+        # rglob above now finds is reported at a path that actually exists.
+        rel = path.relative_to(agent_base)
         text = path.read_text(encoding="utf-8", errors="replace")
         m = FRONTMATTER.match(text)
         if not m:
-            problems.append("agents/%s.md: no YAML frontmatter block" % stem)
+            problems.append("agents/%s: no YAML frontmatter block" % rel)
             continue
         block = m.group(1)
         name = scalar(block, "name")
         if not name:
-            problems.append("agents/%s.md: frontmatter has no non-empty `name`" % stem)
+            problems.append("agents/%s: frontmatter has no non-empty `name`" % rel)
         elif name != stem:
             problems.append(
-                "agents/%s.md: frontmatter name is %r but the file is %r.md — agent identity comes "
-                "from the FILE NAME" % (stem, name, stem)
+                "agents/%s: frontmatter name is %r but the file is %r.md — agent identity comes "
+                "from the FILE NAME" % (rel, name, stem)
             )
         if not scalar(block, "description"):
-            problems.append("agents/%s.md: frontmatter has no non-empty `description`" % stem)
+            problems.append("agents/%s: frontmatter has no non-empty `description`" % rel)
         for field in FORBIDDEN_AGENT_FIELDS:
             if re.search(r"^%s\s*:" % re.escape(field), block, re.M):
                 how = ("makes validate_plugin_agent_frontmatter fail, which fails the WHOLE plugin load"
                        if field in ("hooks", "permissionMode")
                        else "is parsed then silently cleared with only a tracing warning")
                 problems.append(
-                    "agents/%s.md declares `%s`, which a plugin agent must never set — it %s"
-                    % (stem, field, how)
+                    "agents/%s declares `%s`, which a plugin agent must never set — it %s"
+                    % (rel, field, how)
                 )
+
+        # An agent that GRANTS a tool must not also tell itself the tool does
+        # not exist. The 2026-09-02 create-flow fix corrected exactly this
+        # sentence in `tester.md` and left the identical sentence standing in
+        # `designer.md`, `operator.md` and `verifier.md` — three of the four
+        # agents the build workflow orders to resolve a selection handle were
+        # still reading "there is no such tool anywhere in the repo" in their
+        # own system prompt. Nothing caught it: the frontmatter was right, the
+        # tool was registered, and the contradiction lived only in prose.
+        body = text[m.end():]
+        for tool in re.findall(r"^\s*-\s*([A-Za-z][A-Za-z0-9_]*)\s*$", block, re.M):
+            if tool not in body:
+                continue
+            for sentence in re.split(r"(?<=[.。])\s+", body):
+                if tool not in sentence:
+                    continue
+                if DENIES_EXISTENCE.search(sentence):
+                    problems.append(
+                        "agents/%s grants `%s` in its frontmatter but its prose says the tool "
+                        "does not exist: %r — an agent told its own granted tool is missing will "
+                        "skip the step that needs it"
+                        % (rel, tool, " ".join(sentence.split())[:160])
+                    )
+                    break
 
     for path in skills:
         directory = path.parent.name

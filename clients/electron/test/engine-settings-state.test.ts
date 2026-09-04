@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rowState, pendingKeys } from '../src/renderer/components/settings/useEngineSettings';
+import { rowState } from '../src/renderer/components/settings/useEngineSettings';
 import type { SettingsFile, SettingsSnapshot } from '../src/renderer/components/settings/useEngineSettings';
 
 const files: SettingsFile[] = [
@@ -14,7 +14,7 @@ const files: SettingsFile[] = [
 // fails to compile instead of silently missing every `.find`.
 function snap(over: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
   return {
-    files: [...files], effective: {}, active: {}, provenance: {}, locked: [], layers: {},
+    files: [...files], effective: {}, provenance: {}, locked: [], layers: {},
     mergedKeys: [], ...over,
   };
 }
@@ -124,20 +124,4 @@ test('layer-broken when the editing layer failed to parse', () => {
             files[1], files[2]],
   });
   assert.deepEqual(rowState(s, 'outputStyle', 'user'), { kind: 'layer-broken', error: 'bad json' });
-});
-
-test('pending names only the keys the running session actually differs on', () => {
-  const differing = snap({ effective: { outputStyle: 'terse' }, active: { outputStyle: 'loud' } });
-  assert.deepEqual(
-    pendingKeys(differing), ['outputStyle'],
-    'a key on disk that differs from what the session loaded is pending',
-  );
-});
-
-test('pending is empty when disk and session agree (the A/B for the test above)', () => {
-  const same = snap({ effective: { outputStyle: 'terse' }, active: { outputStyle: 'terse' } });
-  assert.deepEqual(
-    pendingKeys(same), [],
-    'if this also reported pending, the test above would prove nothing',
-  );
 });

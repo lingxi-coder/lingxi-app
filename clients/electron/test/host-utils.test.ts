@@ -235,12 +235,14 @@ test('credential envelope uses the bridge-server snake_case contract', () => {
   const payload = buildCredentialEnvelope({
     apiKey: 'anthropic-secret',
     providerCredentials: { deepseek: 'provider-secret' },
+    pluginSecrets: { 'weather@official': { API_KEY: 'plugin-secret' } },
   });
   assert.deepEqual(JSON.parse(payload), {
     api_key: 'anthropic-secret',
     provider_keys: { deepseek: 'provider-secret' },
+    plugin_secrets: { 'weather@official': { API_KEY: 'plugin-secret' } },
   });
-  assert.doesNotMatch(payload, /apiKey|providerKeys/);
+  assert.doesNotMatch(payload, /apiKey|providerKeys|pluginSecrets/);
 });
 
 test('diagnostics redact secrets, strip control characters, truncate, and remain bounded', () => {
@@ -380,6 +382,7 @@ test('parseSettings normalizes a persisted voice value, repairing garbage rather
     language: 'auto',
     voiceSelection: 'system:Alex',
     rate: 2,
+    autoPlayReplies: false,
   };
   assert.deepEqual(parsed.voice, expected);
 });
@@ -407,6 +410,7 @@ test('SettingsStore.update writes and reloads voice preferences, normalized', ()
     language: 'ZH-cn',
     voiceSelection: 'system:default',
     rate: 0.5,
+    autoPlayReplies: false,
   };
   assert.deepEqual(result.voice, expected);
   assert.deepEqual(new SettingsStore(userData).getPublic().voice, expected, 'voice preferences must survive a reload');
@@ -420,5 +424,6 @@ test('SettingsStore.update writes and reloads voice preferences, normalized', ()
     language: 'auto',
     voiceSelection: 'system:default',
     rate: 1.75,
+    autoPlayReplies: false,
   }, 'the earlier localOnly/ZH-cn values must be replaced wholesale, not merged into');
 });

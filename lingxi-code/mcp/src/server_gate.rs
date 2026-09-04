@@ -40,6 +40,7 @@
 use crate::connection::{ConfigScope, McpServerConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 /// `bX = "computer-use"` — the single builtin MCP server subject to the
@@ -96,15 +97,39 @@ impl McpPolicyContext {
         let key = migrations::global_config::project_path_for_config(cwd);
         let project_cfg = migrations::global_config::get_project_config(global_config_path, &key)
             .unwrap_or_default();
-        let (enabled_servers, disabled_servers) = read_gate_lists(&project_cfg);
+        // Desktop settings migrated project trust decisions into the Local
+        // settings layer. Keep the legacy global-project record as a fallback
+        // and union list values so an older approval does not disappear during
+        // an incremental migration.
+        let local_path = cwd.join(branding::DOT_DIR).join("settings.local.json");
+        let local_cfg = std::fs::read_to_string(local_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        let (legacy_enabled, legacy_disabled) = read_gate_lists(&project_cfg);
+        let (local_enabled, local_disabled) = read_gate_lists(&local_cfg);
         Self {
-            enabled_servers,
-            disabled_servers,
-            approved_project_servers: eqn_string_array(project_cfg.get("enabledMcpjsonServers")),
-            rejected_project_servers: read_rejected_mcpjson_servers(&project_cfg),
-            enable_all_project_servers: project_cfg
+            enabled_servers: dedupe_strings(legacy_enabled.into_iter().chain(local_enabled)),
+            disabled_servers: dedupe_strings(legacy_disabled.into_iter().chain(local_disabled)),
+            approved_project_servers: dedupe_strings(
+                eqn_string_array(project_cfg.get("enabledMcpjsonServers"))
+                    .into_iter()
+                    .chain(eqn_string_array(local_cfg.get("enabledMcpjsonServers"))),
+            ),
+            rejected_project_servers: dedupe_strings(
+                read_rejected_mcpjson_servers(&project_cfg)
+                    .into_iter()
+                    .chain(read_rejected_mcpjson_servers(&local_cfg)),
+            ),
+            enable_all_project_servers: local_cfg
                 .get("enableAllProjectMcpServers")
                 .and_then(Value::as_bool)
+                .or_else(|| {
+                    project_cfg
+                        .get("enableAllProjectMcpServers")
+                        .and_then(Value::as_bool)
+                })
                 .unwrap_or(false),
         }
     }
@@ -147,6 +172,14 @@ impl McpPolicyContext {
         }
         McpServerDecision::Allow
     }
+}
+
+fn dedupe_strings(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    values
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// `rTo(e)`: whether `name` is the builtin `computer-use` server (the only
@@ -527,6 +560,48 @@ mod tests {
         assert!(!servers[1].disabled);
         // An un-listed project server is pending approval and cannot connect.
         assert!(servers[2].disabled);
+    }
+
+    #[test]
+    fn policy_loads_migrated_local_approval_and_keeps_legacy_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("proj");
+        std::fs::create_dir_all(cwd.join(branding::DOT_DIR)).unwrap();
+        let key = migrations::global_config::project_path_for_config(&cwd);
+        let global = dir.path().join(".lingxi.json");
+        std::fs::write(
+            &global,
+            serde_json::to_vec(&serde_json::json!({
+                "projects": { key: {
+                    "enabledMcpjsonServers": ["legacy-approved"],
+                    "disabledMcpjsonServers": ["legacy-rejected"],
+                    "enableAllProjectMcpServers": true
+                }}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(branding::DOT_DIR).join("settings.local.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "enabledMcpjsonServers": ["desktop-approved"],
+                "disabledMcpjsonServers": ["desktop-rejected"],
+                "enableAllProjectMcpServers": false
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let policy = McpPolicyContext::load(&global, &cwd);
+        assert_eq!(
+            policy.approved_project_servers,
+            vec!["desktop-approved", "legacy-approved"]
+        );
+        assert_eq!(
+            policy.rejected_project_servers,
+            vec!["desktop-rejected", "legacy-rejected"]
+        );
+        assert!(!policy.enable_all_project_servers);
     }
 
     #[test]

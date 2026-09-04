@@ -9,8 +9,6 @@ import { test } from 'node:test';
 import react from '@vitejs/plugin-react';
 import { createServer } from 'vite';
 
-import { DESKTOP_TRANSCRIPTION_UNAVAILABLE_MESSAGE } from '../src/renderer/audio/requests.ts';
-
 const electronRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
@@ -95,9 +93,9 @@ test('a real mounted renderer answers a real audio_request with a real audio_res
       result: { type: 'recording_state', recording: false },
     });
 
-    // And the answer is honest, in a real renderer with a real
-    // `window.speechSynthesis` and a real `navigator.mediaDevices` available:
-    // desktop still reports that it cannot transcribe.
+    // This fixture intentionally omits the native-audio preload surface. The
+    // renderer must still answer exactly once with an explicit unavailable
+    // failure instead of falling back to browser speech APIs.
     assert.equal(result.transcribe.length, 1, 'a transcribe request must be answered exactly once');
     assert.deepEqual(result.transcribe[0].command, {
       type: 'audio_response',
@@ -105,7 +103,7 @@ test('a real mounted renderer answers a real audio_request with a real audio_res
       result: {
         type: 'failed',
         kind: 'unavailable',
-        message: DESKTOP_TRANSCRIPTION_UNAVAILABLE_MESSAGE,
+        message: 'native audio is unavailable on this host',
       },
     });
 

@@ -86,6 +86,7 @@ class ChatViewModelReducerTest {
     private class RecordingSource : ConversationSource {
         val submitted = mutableListOf<String>()
         val pending = mutableListOf<String>()
+        val commands = mutableListOf<ClientCommand>()
         val cancelledTurnIds = mutableListOf<Long?>()
         var submittedTurnId: Long? = null
         var cancelCount = 0
@@ -96,6 +97,7 @@ class ChatViewModelReducerTest {
             return never.asSharedFlow() // a turn that streams forever until cancelled
         }
         override suspend fun submitClientCommand(command: ClientCommand) {
+            commands += command
             if (command is ClientCommand.SendPrompt) pending += command.text
         }
         override fun submit(
@@ -274,6 +276,50 @@ class ChatViewModelReducerTest {
     }
 
     private fun newVm() = ChatViewModel(StubSource())
+
+    @Test
+    fun compactSlashUsesDedicatedCommandAndCliProgressThenSettles() = runTest(dispatcher) {
+        val source = RecordingSource()
+        val vm = ChatViewModel(source)
+
+        vm.send("/compact")
+        runCurrent()
+
+        assertTrue(source.commands.single() is ClientCommand.ForceCompact)
+        assertEquals("/compact", vm.state.value.messages.single().text)
+        assertEquals(CompactionProgressStatus.Running, vm.state.value.compaction?.status)
+        assertTrue(vm.state.value.requiresBackgroundExecution)
+        assertEquals(0, compactProgressPercent(0))
+        assertEquals(4, compactProgressPercent(4_000))
+        assertEquals(63, compactProgressPercent(90_000))
+        assertEquals(95, compactProgressPercent(10_000_000))
+        vm.send("must not overlap compaction")
+        assertEquals(1, vm.state.value.messages.size)
+
+        vm.reduceClientEvent(ClientEvent.CompactionCompleted(20u, 7u, 4096u))
+        val completed = vm.state.value.compaction
+        assertEquals(CompactionProgressStatus.Completed, completed?.status)
+        assertEquals(20, completed?.messagesBefore)
+        assertEquals(7, completed?.messagesAfter)
+        assertEquals(4096L, completed?.bytesSaved)
+        assertFalse(vm.state.value.requiresBackgroundExecution)
+    }
+
+    @Test
+    fun compactCommandFailureSettlesTheVisibleProgress() = runTest(dispatcher) {
+        val source = RecordingSource()
+        val vm = ChatViewModel(source)
+        vm.send("/compact")
+        runCurrent()
+
+        vm.reduceClientEvent(ClientEvent.Error(
+            kind = com.lingxi.code.bindings.ErrorKindDto.INTERNAL,
+            message = "force_compact failed: handle action failed: rate limited",
+        ))
+
+        assertEquals(CompactionProgressStatus.Failed, vm.state.value.compaction?.status)
+        assertEquals("rate limited", vm.state.value.compaction?.detail)
+    }
 
     @Test
     fun activeTurnHoldsBackgroundExecutionUntilTerminalEvent() = runTest(dispatcher) {

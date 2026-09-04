@@ -158,6 +158,23 @@ test('real Electron restores an independent unsent composer draft for each sessi
     });
 
     assert.deepEqual(result, {
+      audioInteraction: {
+        dictationStartRequests: ['request_authorization', 'start_listening'],
+        dictatedText: 'dictated text',
+        flowStartRequests: ['request_authorization', 'start_listening'],
+      },
+      modelSettings: {
+        resetToDefaultVisible: false,
+      },
+      initialPicker: {
+        sections: ['Paid', 'Free'],
+        models: ['OpenRouter Auto', 'Anthropic: Claude Opus Latest', 'OpenRouter Free', 'InclusionAI: Ling 3.0 Flash Fin (free)'],
+      },
+      filteredPicker: {
+        focused: 'Search models',
+        models: ['InclusionAI: Ling 3.0 Flash Fin (free)'],
+        clearVisible: true,
+      },
       restoredA: 'draft for A',
       restoredB: 'draft for B',
       survivingDraft: 'draft that must survive',

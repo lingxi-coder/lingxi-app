@@ -695,6 +695,10 @@ async fn provider_credentials_round_trip_through_shared_engine_store() {
             configured_provider_ids: vec!["deepseek".into()],
             unavailable_provider_ids: Vec::new(),
             storage_encrypted: false,
+            credential_previews: std::collections::HashMap::from([(
+                "deepseek".into(),
+                "••••cret".into(),
+            )]),
             error: None,
         })
     );
@@ -721,6 +725,7 @@ async fn provider_credentials_round_trip_through_shared_engine_store() {
             configured_provider_ids: Vec::new(),
             unavailable_provider_ids: Vec::new(),
             storage_encrypted: false,
+            credential_previews: std::collections::HashMap::new(),
             error: None,
         })
     );
@@ -759,6 +764,70 @@ async fn provider_credentials_round_trip_through_shared_engine_store() {
 }
 
 #[tokio::test]
+async fn externally_owned_provider_credentials_stay_process_local() {
+    let (router, credentials, _temp) = router_with_credentials().await;
+    let router = router.with_ephemeral_provider_credentials(true);
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::SetProviderCredential {
+                operation_id: 41,
+                provider_id: "openrouter".into(),
+                credential: ProviderCredentialSecretDto::new("or-session-secret".into()),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert_eq!(
+        credentials
+            .get_provider_key("openrouter")
+            .await
+            .expect("read process cache")
+            .expect("cached key")
+            .expose_secret(),
+        "or-session-secret"
+    );
+    credentials
+        .delete_provider_key_ephemeral("openrouter")
+        .await;
+    assert!(
+        credentials
+            .get_provider_key("openrouter")
+            .await
+            .expect("inspect persistent fallback")
+            .is_none(),
+        "the packaged Desktop route must not persist the broker-owned secret"
+    );
+
+    router
+        .route(
+            ClientCommand::SetProviderCredential {
+                operation_id: 42,
+                provider_id: "openrouter".into(),
+                credential: ProviderCredentialSecretDto::new("replacement-secret".into()),
+            },
+            sink.clone(),
+        )
+        .await;
+    router
+        .route(
+            ClientCommand::DeleteProviderCredential {
+                operation_id: 43,
+                provider_id: "openrouter".into(),
+            },
+            sink,
+        )
+        .await;
+    assert!(credentials
+        .get_provider_key("openrouter")
+        .await
+        .expect("read after process-cache delete")
+        .is_none());
+}
+
+#[tokio::test]
 async fn provider_credential_listing_reports_partial_success_without_erasing_unknown_state() {
     let credentials = Arc::new(secret::CredentialManager::new(
         Arc::new(SelectiveFailureStorage::default()),
@@ -781,6 +850,7 @@ async fn provider_credential_listing_reports_partial_success_without_erasing_unk
             ClientCommand::ListProviderCredentials {
                 operation_id: 9,
                 provider_ids: vec!["deepseek".into(), "openrouter".into()],
+                preview_provider_ids: vec!["deepseek".into()],
             },
             sink.clone(),
         )
@@ -791,6 +861,7 @@ async fn provider_credential_listing_reports_partial_success_without_erasing_unk
         configured_provider_ids,
         unavailable_provider_ids,
         storage_encrypted,
+        credential_previews,
         error,
         ..
     } = &events[0]
@@ -800,6 +871,10 @@ async fn provider_credential_listing_reports_partial_success_without_erasing_unk
     assert_eq!(configured_provider_ids, &["deepseek"]);
     assert_eq!(unavailable_provider_ids, &["openrouter"]);
     assert!(*storage_encrypted);
+    assert_eq!(
+        credential_previews.get("deepseek").map(String::as_str),
+        Some("••••seek")
+    );
     assert!(error
         .as_deref()
         .is_some_and(|message| message.contains("openrouter")));
@@ -2439,7 +2514,7 @@ async fn the_settings_listing_emits_a_snapshot_instead_of_nothing() {
             lingxi_home: home,
             project_dir: project.clone(),
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed,
     });
     let sink = CapturingSink::arc();
@@ -2579,7 +2654,7 @@ async fn update_settings_with_a_null_value_deletes_the_key_on_disk() {
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -2630,7 +2705,7 @@ async fn update_settings_rejects_a_non_object_patch_with_protocol_error() {
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -2679,7 +2754,7 @@ async fn update_settings_rejects_invalid_json_with_protocol_error() {
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -2763,7 +2838,7 @@ async fn update_permission_rules_writes_the_named_layer_and_preserves_other_keys
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -2815,7 +2890,7 @@ async fn update_permission_rules_reports_when_nothing_was_requested() {
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -2869,7 +2944,7 @@ async fn update_permission_rules_reports_only_the_error_when_nothing_changed_bef
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -2921,7 +2996,7 @@ async fn set_default_permission_mode_writes_the_named_layer_and_preserves_other_
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -2972,7 +3047,7 @@ async fn set_default_permission_mode_reports_the_bypass_permissions_refusal() {
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();
@@ -3036,7 +3111,7 @@ async fn update_workspace_directories_writes_the_named_layer_and_preserves_other
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::collections::BTreeMap::new(),
+        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         managed: std::collections::BTreeMap::new(),
     });
     let sink = CapturingSink::arc();

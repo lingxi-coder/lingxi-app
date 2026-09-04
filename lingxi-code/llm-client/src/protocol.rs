@@ -881,6 +881,13 @@ fn write_json_string_from_utf16(out: &mut Vec<u8>, utf16_code_units: &[u16]) {
     out.push(b'"');
 }
 
+/// Returns the exact JSON byte length of a UTF-16 string, including quotes.
+pub(crate) fn json_string_len_from_utf16(utf16_code_units: &[u16]) -> u64 {
+    let mut encoded = Vec::new();
+    write_json_string_from_utf16(&mut encoded, utf16_code_units);
+    u64::try_from(encoded.len()).unwrap_or(u64::MAX)
+}
+
 fn write_json_char(out: &mut Vec<u8>, ch: char) {
     match ch {
         '"' => out.extend_from_slice(br#"\""#),

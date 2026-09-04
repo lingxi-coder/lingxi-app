@@ -28,6 +28,22 @@ export function isMicrophonePermissionStatus(value: unknown): value is Microphon
   return typeof value === 'string' && MICROPHONE_PERMISSION_STATUSES.includes(value);
 }
 
+/** Minimal preload surface used to read the OS-backed microphone grant. */
+export interface MicrophoneAccessHost {
+  microphoneAccess(): Promise<unknown>;
+}
+
+/** Returns an honest permission reader with no browser Permissions API fallback. */
+export function hostMicrophonePermissionReader(
+  host: MicrophoneAccessHost | undefined,
+): () => Promise<MicrophonePermissionStatus> {
+  return async () => {
+    if (typeof host?.microphoneAccess !== 'function') return 'unavailable';
+    const answer = await host.microphoneAccess();
+    return isMicrophonePermissionStatus(answer) ? answer : 'unavailable';
+  };
+}
+
 /**
  * Maps Electron's `systemPreferences.getMediaAccessStatus('microphone')` to
  * the status the UI can speak about.

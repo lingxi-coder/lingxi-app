@@ -6,6 +6,7 @@ import type { AudioOpDto, AudioResultDto, ClientEvent } from '@lingxi/bridge-cli
 import {
   DESKTOP_TRANSCRIPTION_UNAVAILABLE_MESSAGE,
   handleAudioRequestEvent,
+  MAX_AUDIO_TRANSCRIPT_LENGTH,
   serviceAudioOp,
   type AudioRequestDeps,
   type AudioResponseCommand,
@@ -172,6 +173,48 @@ test('a deps factory that throws still answers, rather than stranding the engine
   assert.equal(seen.length, 1, 'the underlying cause is still surfaced to the caller');
 });
 
+test('the native engine executor is preferred when present, including transcript results', async () => {
+  const sent: AudioResponseCommand[] = [];
+  const { deps } = harness();
+  deps.executeEngineRequest = async () => ({
+    type: 'transcript',
+    text: 'hello from helper',
+    language: 'en-US',
+    confidence: 0.8,
+  });
+
+  await handleAudioRequestEvent(
+    'session-1',
+    audioRequest(16, { type: 'transcribe', language: 'en-US' }),
+    () => deps,
+    async (_sessionId, command) => { sent.push(command); },
+  );
+
+  assert.deepEqual(sent, [{
+    type: 'audio_response',
+    request_id: 16,
+    result: { type: 'transcript', text: 'hello from helper', language: 'en-US', confidence: 0.8 },
+  }]);
+  assert.doesNotThrow(() => validateClientCommand(sent[0]));
+});
+
+test('an invalid native engine result degrades to one failed response instead of stranding the engine', async () => {
+  const sent: AudioResponseCommand[] = [];
+  const { deps } = harness();
+  deps.executeEngineRequest = async () => ({ type: 'transcript', text: '' });
+
+  await handleAudioRequestEvent(
+    'session-1',
+    audioRequest(17, { type: 'transcribe' }),
+    () => deps,
+    async (_sessionId, command) => { sent.push(command); },
+  );
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]?.result.type, 'failed');
+  assert.match(sent[0]?.result.type === 'failed' ? sent[0].result.message : '', /invalid response/i);
+});
+
 test('events that are not audio requests are ignored without answering anything', async () => {
   const sent: AudioResponseCommand[] = [];
   const { deps } = harness();
@@ -261,6 +304,19 @@ test('transcribe reports that desktop speech recognition is unavailable, and nev
     assert.equal(result.type === 'failed' ? result.message : null, DESKTOP_TRANSCRIPTION_UNAVAILABLE_MESSAGE);
     assert.match(DESKTOP_TRANSCRIPTION_UNAVAILABLE_MESSAGE, /not available in this build/);
   }
+});
+
+test('a native transcript larger than the transport bound is rejected locally', async () => {
+  const { deps } = harness();
+  deps.executeEngineRequest = async () => ({
+    type: 'transcript',
+    text: 'x'.repeat(MAX_AUDIO_TRANSCRIPT_LENGTH + 1),
+  });
+
+  const result = await serviceAudioOp({ type: 'transcribe' }, deps);
+
+  assert.equal(result.type, 'failed');
+  assert.match(result.type === 'failed' ? result.message : '', /invalid response/i);
 });
 
 test('a successful synthesis reports the empty-PCM played-in-place pair, not a failure', async () => {
@@ -751,18 +807,7 @@ test('the gate check above can actually fail', () => {
 
 /** The body of the `host.onEvent(...)` subscription in `useBridge.ts`. */
 function onEventHandlerSource(): string {
-  const source = readFileSync(join(import.meta.dirname, '../src/renderer/bridge/useBridge.ts'), 'utf8');
-  const start = source.indexOf('host.onEvent(');
-  assert.notEqual(start, -1, 'useBridge no longer subscribes to engine events at all');
-  let depth = 0;
-  for (let index = source.indexOf('(', start); index < source.length; index += 1) {
-    if (source[index] === '(') depth += 1;
-    else if (source[index] === ')') {
-      depth -= 1;
-      if (depth === 0) return source.slice(start, index + 1);
-    }
-  }
-  assert.fail('the host.onEvent(...) call is unbalanced');
+  return readFileSync(join(import.meta.dirname, '../src/renderer/bridge/useBridge.ts'), 'utf8');
 }
 
 test('useBridge answers audio requests from inside its engine-event subscription', () => {
@@ -774,8 +819,9 @@ test('useBridge answers audio requests from inside its engine-event subscription
     'the extracted source is not the event handler, so every assertion below would prove nothing',
   );
 
-  assert.ok(
-    handler.includes('handleAudioRequestEvent('),
+  assert.match(
+    handler,
+    /host\.audio\.executeEngineRequest\(sessionId,\s*event\.op\)/,
     'nothing services ClientEvent::AudioRequest — the engine would park every microphone '
     + 'and speech call until its deadline expired',
   );
@@ -805,7 +851,7 @@ test('the audio dispatch is not handed useBridge\'s rethrowing capture helper', 
   // was sent, stranding the parked engine call — the one hazard this whole
   // module exists to avoid.
   const handler = onEventHandlerSource();
-  const start = handler.indexOf('handleAudioRequestEvent(');
+  const start = handler.indexOf('host.audio.executeEngineRequest(');
   assert.notEqual(start, -1);
   let depth = 0;
   let end = start;
@@ -817,45 +863,28 @@ test('the audio dispatch is not handed useBridge\'s rethrowing capture helper', 
     }
   }
   const call = handler.slice(start, end);
-  assert.ok(call.length > 'handleAudioRequestEvent()'.length, 'failed to slice the call arguments');
+  assert.ok(call.length > 'host.audio.executeEngineRequest()'.length, 'failed to slice the call arguments');
   assert.ok(!/(^|[\s,(])capture([\s,)])/.test(call), `capture must not be the audio reporter: ${call}`);
   // Positive control for that regex: it does find a bare argument.
-  assert.ok(/(^|[\s,(])capture([\s,)])/.test('handleAudioRequestEvent(sessionId, event, deps, send, capture)'));
+  assert.ok(/(^|[\s,(])capture([\s,)])/.test('host.audio.executeEngineRequest(sessionId, event.op, capture)'));
 });
 
-test('the production microphone and speech bindings are the ones actually used', () => {
-  // `AudioRequestDeps` is an interface; importing only the type would type-check
-  // perfectly while the hook fed it nothing real.
+test('useBridge routes audio requests to the host-native executor and returns exactly one engine response', () => {
   const source = readFileSync(join(import.meta.dirname, '../src/renderer/bridge/useBridge.ts'), 'utf8');
-  for (const binding of ['browserMicrophoneCaptureDeps', 'browserSynthesisDeps', 'new MicrophoneCapture(']) {
-    assert.ok(source.includes(binding), `useBridge must build its audio deps with ${binding}`);
-  }
 
-  // The recorder must be RETAINED, not rebuilt per request: a capture spans a
-  // `start_recording`/`stop_recording` pair of separate engine requests, so a
-  // fresh `MicrophoneCapture` each time would answer `not_recording` to every
-  // stop and never release the microphone (leaving the OS recording indicator
-  // lit — `capture.ts`'s hazard 2).
-  //
-  // Retained PER SESSION, though, not per hook: `SessionRuntimeManager` runs
-  // concurrent runtimes that each register the `voice` tool, and one shared
-  // recorder hands one session's clip to another session's model. Structurally
-  // that means the construction sits inside the factory `sessionAudioBindings`
-  // only calls on a cache miss for that session id — never in the request path,
-  // and never at hook scope.
-  const cache = source.indexOf('sessionAudioBindings(audioBindings.current, sessionId,');
-  const construction = source.indexOf('new MicrophoneCapture(');
-  assert.notEqual(cache, -1, 'the audio bindings are no longer cached per session');
-  assert.equal(source.indexOf('new MicrophoneCapture(', construction + 1), -1, 'the recorder is constructed in more than one place');
-  assert.ok(cache < construction, 'the recorder must be constructed inside the per-session factory, not per request');
   assert.match(
     source,
-    /const audioBindings = useRef\(new Map<string, AudioRequestDeps>\(\)\)/,
-    'the bindings must be keyed by session id, not held as one value for the whole hook',
+    /host\.audio\.executeEngineRequest\(sessionId,\s*event\.op\)/,
+    'the dispatch must resolve the native executor for the session that was asked',
   );
   assert.match(
     source,
-    /handleAudioRequestEvent\(\s*sessionId,\s*event,\s*\(\) => audioRequestDeps\(sessionId\),/,
-    'the dispatch must resolve the bindings for the session that was asked',
+    /\.then\(\(result\)\s*=>\s*host\.command\(sessionId,\s*\{\s*type:\s*'audio_response',\s*request_id:\s*event\.request_id,\s*result,/s,
+    'a successful native response must still be forwarded back to the engine exactly once',
+  );
+  assert.match(
+    source,
+    /\.catch\(\(cause\)\s*=>\s*\{[\s\S]*?return \{ type: 'failed', kind: 'other', message \} as const;[\s\S]*?\}\)\s*\.then\(\(result\)\s*=>\s*host\.command/s,
+    'a native-executor failure must be converted before the single engine-response send',
   );
 });

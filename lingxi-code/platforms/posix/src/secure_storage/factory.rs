@@ -1,9 +1,10 @@
 //! Platform-default [`SecureStorage`] factory.
 //!
-//! On macOS, tries [`super::macos::MacOsKeychainStorage`] first. On any init
-//! or runtime availability error (e.g. `security` CLI absent, a locked login
-//! keychain, or a sandboxed runtime that blocks subprocess spawn), logs a
-//! warning and falls back to [`super::plaintext::PlainTextSecureStorage`].
+//! On macOS, requires the bundled credential broker app and does not fall back
+//! automatically. Unsigned/mispackaged persistent clients fail closed rather
+//! than writing secrets to plaintext or fallback memory. The explicitly
+//! isolated packaged bridge policy remains process-local by design and has no
+//! persistent broker authority.
 //!
 //! On Linux, tries [`super::linux::LinuxSecretStorage`] (the `libsecret`
 //! `secret-tool` CLI) first, falling back to plaintext on init or runtime
@@ -127,6 +128,38 @@ impl RuntimeFallbackStorage {
         }
     }
 
+    async fn contains_with_fallback(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<bool, SecureStorageError> {
+        match self.fallback.contains(service, account).await {
+            Ok(true) => {
+                self.fallback_active.store(true, Ordering::Release);
+                Ok(true)
+            }
+            Ok(false) => match self.primary.contains(service, account).await {
+                Ok(present) => {
+                    self.fallback_active.store(false, Ordering::Release);
+                    Ok(present)
+                }
+                Err(error) if runtime_fallback_allowed(&error) => {
+                    self.activate_fallback(&error);
+                    Ok(false)
+                }
+                Err(error) => Err(error),
+            },
+            Err(fallback_error) => match self.primary.contains(service, account).await {
+                Ok(present) => Ok(present),
+                Err(primary_error) if runtime_fallback_allowed(&primary_error) => {
+                    self.activate_fallback(&primary_error);
+                    Err(fallback_error)
+                }
+                Err(primary_error) => Err(primary_error),
+            },
+        }
+    }
+
     fn activate_fallback(&self, error: &SecureStorageError) {
         self.fallback_active.store(true, Ordering::Release);
         if !self.warned.swap(true, Ordering::AcqRel) {
@@ -235,11 +268,35 @@ impl SecureStorage for RuntimeFallbackStorage {
         match fallback_result {
             Ok(Some(data)) => {
                 self.fallback_active.store(true, Ordering::Release);
-                return if is_fallback_tombstone(&data) {
-                    Ok(None)
-                } else {
-                    Ok(Some(data))
-                };
+                if is_fallback_tombstone(&data) {
+                    return Ok(None);
+                }
+
+                // A fallback file records a past native-store failure, not a
+                // permanent policy choice. Retry Keychain on a later healthy
+                // launch and remove the plaintext shadow only after the native
+                // write succeeds. The valid fallback value remains readable
+                // even if either recovery step fails.
+                match self.primary.store(service, account, data.clone()).await {
+                    Ok(()) => match self.fallback.delete(service, account).await {
+                        Ok(()) => self.fallback_active.store(false, Ordering::Release),
+                        Err(cleanup_error) => self.mark_fallback_active(
+                            &cleanup_error,
+                            "Warning: native credential storage recovered, but the owner-only \
+                             fallback could not be removed; retaining the current value in both \
+                             stores.",
+                        ),
+                    },
+                    Err(error) if runtime_fallback_allowed(&error) => {
+                        self.activate_fallback(&error);
+                    }
+                    Err(error) => self.mark_fallback_active(
+                        &error,
+                        "Warning: native credential migration failed; retaining the owner-only \
+                         fallback value.",
+                    ),
+                }
+                return Ok(Some(data));
             }
             Ok(None) => {}
             Err(fallback_error) => {
@@ -261,6 +318,10 @@ impl SecureStorage for RuntimeFallbackStorage {
             }
             Err(error) => Err(error),
         }
+    }
+
+    async fn contains(&self, service: &str, account: &str) -> Result<bool, SecureStorageError> {
+        self.contains_with_fallback(service, account).await
     }
 
     async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
@@ -384,16 +445,9 @@ pub async fn plaintext_secure_storage(
 ///
 /// `user` is the native keychain account name. `config_dir` is the `LingXi`
 /// configuration directory and `plaintext_path` is its existing OAuth JSON
-/// path. The owner-only provider-key fallback is deliberately stored in a
-/// sibling directory ending in `.d`, so it never overwrites the OAuth JSON.
-///
-/// Native storage remains preferred. Availability failures that happen while
-/// reading or writing (not just while constructing the native backend) switch
-/// this handle to the same file-backed fallback every host can reopen.
-///
-/// Fallback initialization is lazy: a healthy native store never requires the
-/// sidecar directory to be writable. Any later sidecar access failure is
-/// returned by the corresponding storage operation.
+/// path. On macOS the bundled credential broker is mandatory; only the
+/// explicit [`CredentialStoragePolicy::PlainTextFixture`] test path may bypass
+/// it. Linux keeps the existing lazy fallback behavior.
 pub async fn secure_storage_for_policy(
     user: String,
     config_dir: PathBuf,
@@ -403,6 +457,24 @@ pub async fn secure_storage_for_policy(
     if policy == CredentialStoragePolicy::PlainTextFixture {
         return plaintext_secure_storage(plaintext_path).await;
     }
+    #[cfg(target_os = "macos")]
+    {
+        if policy == CredentialStoragePolicy::NativeOrMemory {
+            // Packaged bridge-server uses this explicit isolation policy. Its
+            // active provider credential arrives once over stdin and remains
+            // process-local; the sidecar never receives broker authority.
+            return Ok(Arc::new(InMemorySecureStorage::new()));
+        }
+        let default_dir = default_lingxi_dir();
+        return super::macos::MacOsKeychainStorage::new(
+            user.clone(),
+            config_dir.clone(),
+            default_dir,
+            String::new(),
+        )
+        .map(|keychain| Arc::new(keychain) as Arc<dyn SecureStorage>);
+    }
+    #[cfg(not(target_os = "macos"))]
     let fallback: Arc<dyn SecureStorage> = match policy {
         CredentialStoragePolicy::NativePreferred => Arc::new(DeferredPlainTextStorage::new(
             fallback_directory(&plaintext_path),
@@ -410,31 +482,6 @@ pub async fn secure_storage_for_policy(
         CredentialStoragePolicy::NativeOrMemory => Arc::new(InMemorySecureStorage::new()),
         CredentialStoragePolicy::PlainTextFixture => unreachable!("handled above"),
     };
-    #[cfg(target_os = "macos")]
-    {
-        let default_dir = default_lingxi_dir();
-        match super::macos::MacOsKeychainStorage::new(
-            user.clone(),
-            config_dir.clone(),
-            default_dir,
-            String::new(),
-        ) {
-            Ok(keychain) => {
-                return Ok(Arc::new(RuntimeFallbackStorage::new(
-                    Arc::new(keychain),
-                    fallback,
-                )));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "lingxi::secure_storage",
-                    error = %e,
-                    policy = ?policy,
-                    "Warning: native credential storage unavailable during init."
-                );
-            }
-        }
-    }
     #[cfg(target_os = "linux")]
     {
         // Realizes claude-code's `// TODO: add libsecret support for Linux`:
@@ -477,7 +524,10 @@ pub async fn secure_storage_for_policy(
         let _ = &user;
         let _ = &config_dir;
     }
-    Ok(fallback)
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(fallback)
+    }
 }
 
 /// Build the shared POSIX credential store with the production
@@ -679,12 +729,30 @@ mod tests {
     async fn factory_returns_storage_handle() {
         let dir = tempdir().expect("tempdir");
         let plain = dir.path().join("creds-base");
-        let storage = secure_storage_for_platform("test".into(), dir.path().to_path_buf(), plain)
-            .await
-            .expect("factory");
-        // is_encrypted is true on macOS keychain, false on plaintext — we
-        // only check that the trait method dispatches.
+        let result = secure_storage_for_policy(
+            "test".into(),
+            dir.path().to_path_buf(),
+            plain,
+            CredentialStoragePolicy::PlainTextFixture,
+        )
+        .await;
+        let storage = result.expect("factory");
         let _ = storage.is_encrypted();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn packaged_bridge_policy_is_explicitly_process_local() {
+        let dir = tempdir().expect("tempdir");
+        let storage = secure_storage_for_policy(
+            "test".into(),
+            dir.path().to_path_buf(),
+            dir.path().join("creds-base"),
+            CredentialStoragePolicy::NativeOrMemory,
+        )
+        .await
+        .expect("isolated bridge storage");
+        assert_eq!(storage.backend(), SecureStorageBackend::MemorySession);
     }
 
     #[test]
@@ -781,6 +849,44 @@ mod tests {
             actual.expose_secret_bytes(),
             replacement.expose_secret_bytes()
         );
+    }
+
+    #[tokio::test]
+    async fn healthy_native_store_migrates_a_cold_fallback_value() {
+        let primary = Arc::new(MemoryStorage::new(true));
+        let fallback = Arc::new(MemoryStorage::new(false));
+        let expected = test_payload(b"old-fallback-key");
+        fallback
+            .store("lingxi", "provider-key-deepseek", expected.clone())
+            .await
+            .expect("seed fallback");
+
+        let storage = RuntimeFallbackStorage::new(primary.clone(), fallback.clone());
+        let actual = storage
+            .retrieve("lingxi", "provider-key-deepseek")
+            .await
+            .expect("retrieve and migrate")
+            .expect("stored key");
+
+        assert_eq!(actual.expose_secret_bytes(), expected.expose_secret_bytes());
+        assert_eq!(
+            primary
+                .retrieve("lingxi", "provider-key-deepseek")
+                .await
+                .expect("native retrieve")
+                .expect("migrated native key")
+                .expose_secret_bytes(),
+            expected.expose_secret_bytes()
+        );
+        assert!(
+            fallback
+                .retrieve("lingxi", "provider-key-deepseek")
+                .await
+                .expect("fallback retrieve")
+                .is_none(),
+            "successful migration must remove the plaintext shadow"
+        );
+        assert!(storage.is_encrypted());
     }
 
     #[tokio::test]

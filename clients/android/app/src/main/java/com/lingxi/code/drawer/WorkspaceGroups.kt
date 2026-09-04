@@ -110,8 +110,17 @@ internal fun buildWorkspaceGroups(
                             mode = session.mode,
                             modifiedAtEpochSeconds = session.modifiedAtEpochSeconds,
                             relativeTime = session.relativeTime,
+                            isInit = session.isInit,
                         )
-                    }.filter { it.mode == mode },
+                    }.filter { it.mode == mode }
+                        // The pinned create-interview session sorts first,
+                        // regardless of recency — it is the conversation that
+                        // defines the app, and a user re-opening a half-finished
+                        // interview should not have to hunt for it below newer
+                        // sessions. `sortedByDescending` is stable, so relative
+                        // order within each group (init / not-init) is
+                        // unchanged.
+                        .sortedByDescending { it.isInit },
                 ),
             )
         }

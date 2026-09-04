@@ -150,7 +150,15 @@ struct MCPListPage: View {
                     iconColor: Color(srgb: 0, 0.78, 0.55),
                     label: host.localAppsStore.builtinPluginDescriptor.displayName,
                     subView: AnyView(VStack(alignment: .leading, spacing: 6) {
-                        Text("v\(host.localAppsStore.builtinPluginDescriptor.version) · \(digestSummary(host.localAppsStore.builtinPluginDescriptor.archiveDigest))")
+                        // Joined, not interpolated around a literal separator:
+                        // `archiveDigest` is empty until the engine's
+                        // `pluginInventoryChanged` lands (the static descriptor
+                        // carries no hand-typed hash), and the old form rendered
+                        // a dangling "v1.0.0 · " until then.
+                        Text([
+                            "v\(host.localAppsStore.builtinPluginDescriptor.version)",
+                            digestSummary(host.localAppsStore.builtinPluginDescriptor.archiveDigest),
+                        ].filter { !$0.isEmpty }.joined(separator: " · "))
                             .font(.system(size: 11.5, design: .monospaced))
                             .foregroundStyle(t.text4)
                         if let status = host.localAppsStore.builtinPluginStatus {

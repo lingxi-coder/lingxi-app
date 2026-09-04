@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -12,11 +12,29 @@ import {
   assertArm64Architecture,
   copyProductionDependencies,
   normalizeTimestamp,
+  repoRoot,
   rewriteInfoPlist,
   runtimePackageJson,
   scanTreeForForbiddenContent,
   validateZipEntries,
 } from '../scripts/package-support.mjs';
+import {
+  BROKER_ALLOWED_CALLERS,
+  brokerIdentifiers,
+  brokerManifest,
+  findMachOFiles,
+  renderLaunchAgentTemplate,
+  resolveSwiftTarget,
+  validateProvisioningProfileMetadata,
+  validateSignedEntitlements,
+} from '../scripts/credential-broker.mjs';
+import {
+  AUDIO_HELPER_USAGE_DESCRIPTIONS,
+  audioHelperIdentifiers,
+  ensureAudioHelperResourceLayout,
+  writeAudioHelperInfoPlist,
+} from '../scripts/audio-helper.mjs';
+import { assertSandboxedPreloadBundle } from '../scripts/verify-package.mjs';
 
 /**
  * A minimal but structurally real Info.plist — the same shape Electron's own
@@ -105,6 +123,14 @@ test('runtime manifests discard development-only install metadata', () => {
   });
 });
 
+test('sandboxed preload accepts Electron only and rejects package requires', () => {
+  assert.doesNotThrow(() => assertSandboxedPreloadBundle(`const { ipcRenderer } = require("electron");`));
+  assert.throws(
+    () => assertSandboxedPreloadBundle(`require("electron"); require("@lingxi/bridge-client/protocol");`),
+    /unsupported external require\(s\): @lingxi\/bridge-client\/protocol/,
+  );
+});
+
 test('architecture validation accepts arm64 and rejects x86-only binaries', () => {
   assert.doesNotThrow(() => assertArm64Architecture(['arm64'], 'fixture'));
   assert.doesNotThrow(() => assertArm64Architecture(['x86_64', 'arm64'], 'fixture'));
@@ -112,6 +138,198 @@ test('architecture validation accepts arm64 and rejects x86-only binaries', () =
     () => assertArm64Architecture(['x86_64'], 'fixture'),
     /arm64 is required/,
   );
+});
+
+test('credential broker packaging resolves Swift targets for both macOS CLI triples', () => {
+  assert.equal(resolveSwiftTarget('aarch64-apple-darwin'), 'arm64-apple-macos13.0');
+  assert.equal(resolveSwiftTarget('x86_64-apple-darwin'), 'x86_64-apple-macos13.0');
+  assert.equal(resolveSwiftTarget('x86_64-unknown-linux-musl'), null);
+});
+
+test('credential broker requests cryptographic signing information before reading TeamIdentifier', () => {
+  const source = readFileSync(join(
+    repoRoot,
+    'lingxi-code',
+    'platforms',
+    'macos-credential-broker',
+    'BrokerCommon.swift',
+  ), 'utf8');
+  assert.match(
+    source,
+    /SecCodeCopySigningInformation\([\s\S]{0,160}SecCSFlags\(rawValue: kSecCSSigningInformation\)/,
+  );
+  assert.doesNotMatch(source, /SecCodeCopySigningInformation\(staticCode, SecCSFlags\(\), &info\)/);
+  assert.match(source, /current code signature does not contain a TeamIdentifier/);
+});
+
+test('credential broker replaces a same-version installed bundle when its signed code changes', () => {
+  const commonSource = readFileSync(join(
+    repoRoot,
+    'lingxi-code',
+    'platforms',
+    'macos-credential-broker',
+    'BrokerCommon.swift',
+  ), 'utf8');
+  const clientSource = readFileSync(join(
+    repoRoot,
+    'lingxi-code',
+    'platforms',
+    'macos-credential-broker',
+    'CredentialClientMain.swift',
+  ), 'utf8');
+
+  assert.match(commonSource, /func codeDirectoryHash\([\s\S]*kSecCodeInfoUnique/);
+  assert.match(
+    clientSource,
+    /case \.orderedSame:[\s\S]*codeDirectoryHash\(at: installedBundle\)[\s\S]*codeDirectoryHash\(at: packaged\.appBundle\)/,
+  );
+});
+
+test('nested signing discovery includes Mach-O binaries and excludes ordinary resources', () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-macho-test-'));
+  try {
+    const binary = join(root, 'helper');
+    const resource = join(root, 'resource.txt');
+    copyFileSync('/bin/echo', binary);
+    writeFileSync(resource, 'not executable code');
+    assert.deepEqual(findMachOFiles(root), [binary]);
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test('credential broker manifest stays metadata-only and caller allowlist stays narrow', () => {
+  assert.deepEqual(brokerManifest('1.2.3'), {
+    version: '1.2.3',
+    protocol_version: 1,
+    channel: 'production',
+  });
+  assert.deepEqual(BROKER_ALLOWED_CALLERS, [
+    'com.lingxi.code',
+    'com.lingxi.code.cli',
+  ]);
+  assert.deepEqual(brokerIdentifiers('development'), {
+    brokerBundleId: 'com.lingxi.code.credential-broker.development',
+    clientIdentifier: 'com.lingxi.code.credential-client.development',
+    bridgeServerIdentifier: 'com.lingxi.code.bridge-server.development',
+    desktopBundleId: 'com.lingxi.code.development',
+    machService: 'com.lingxi.code.credential-broker.development',
+    allowedCallers: [
+      'com.lingxi.code.development',
+      'com.lingxi.code.cli.development',
+    ],
+  });
+});
+
+test('credential broker admits only the plugin-secret service in its matching channel', () => {
+  const source = readFileSync(join(
+    repoRoot,
+    'lingxi-code/platforms/macos-credential-broker/CredentialBrokerMain.swift',
+  ), 'utf8');
+  assert.match(source, /"com\.lingxi\.plugin-secrets\.v1"/);
+  assert.match(source, /"com\.lingxi\.plugin-secrets\.v1\.development"/);
+  assert.match(source, /service == pluginSecretService/);
+  assert.doesNotMatch(source, /service\.hasPrefix\([^\n]*plugin/i);
+});
+
+test('audio helper identifiers follow the desktop packaging channel split', () => {
+  assert.deepEqual(audioHelperIdentifiers('production'), {
+    bundleId: 'com.lingxi.code.audio-helper',
+    desktopBundleId: 'com.lingxi.code',
+  });
+  assert.deepEqual(audioHelperIdentifiers('development'), {
+    bundleId: 'com.lingxi.code.audio-helper.development',
+    desktopBundleId: 'com.lingxi.code.development',
+  });
+  assert.throws(() => audioHelperIdentifiers('staging'), /unsupported audio helper channel/);
+});
+
+test('audio helper resource layout and plist declare the expected macOS voice permissions', () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-audio-helper-test-'));
+  try {
+    const contents = join(root, 'LingXiAudioHelper.app', 'Contents');
+    const macOS = join(contents, 'MacOS');
+    mkdirSync(macOS, { recursive: true });
+    writeFileSync(join(macOS, 'LingXiAudioHelper'), 'placeholder');
+    writeAudioHelperInfoPlist(contents, {
+      bundleId: 'com.lingxi.code.audio-helper.development',
+      version: '9.9.9',
+    });
+
+    ensureAudioHelperResourceLayout(root);
+
+    const plist = JSON.parse(execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', join(contents, 'Info.plist')], {
+      encoding: 'utf8',
+    }));
+    assert.equal(plist.CFBundleIdentifier, 'com.lingxi.code.audio-helper.development');
+    assert.equal(plist.LSUIElement, true);
+    assert.equal(plist.NSMicrophoneUsageDescription, AUDIO_HELPER_USAGE_DESCRIPTIONS.microphone);
+    assert.equal(plist.NSSpeechRecognitionUsageDescription, AUDIO_HELPER_USAGE_DESCRIPTIONS.speechRecognition);
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test('audio helper release builds remap local source and debug paths', () => {
+  const source = readFileSync(join(import.meta.dirname, '../scripts/audio-helper.mjs'), 'utf8');
+  assert.match(source, /-file-prefix-map/);
+  assert.match(source, /-debug-prefix-map/);
+  assert.match(source, /\$\{repoRoot\}=\/workspace/);
+  assert.match(source, /run\('\/usr\/bin\/strip', \['-S', '-x', helperBinary\]\)/);
+});
+
+test('Apple Speech is constrained to its on-device recognizer before audio is appended', () => {
+  const source = readFileSync(join(import.meta.dirname, '../native/audio-helper/AudioHelperMain.swift'), 'utf8');
+  assert.match(source, /recognizer\.supportsOnDeviceRecognition/);
+  assert.match(source, /request\.requiresOnDeviceRecognition = true/);
+  assert.doesNotMatch(source, /request\.requiresOnDeviceRecognition = false/);
+});
+
+test('credential broker launch agent template keeps an install-time executable placeholder', () => {
+  const plist = renderLaunchAgentTemplate();
+  assert.match(plist, /com\.lingxi\.code\.credential-broker/);
+  assert.match(plist, /@BROKER_EXECUTABLE_PATH@/);
+  assert.doesNotMatch(plist, /Application Support/);
+});
+
+test('signed entitlement validation requires the exact team and application identifier', () => {
+  const entitlements = {
+    'com.apple.application-identifier': 'ABCDEFGHIJ.com.lingxi.code.credential-broker',
+    'com.apple.developer.team-identifier': 'ABCDEFGHIJ',
+  };
+  assert.doesNotThrow(() => validateSignedEntitlements(
+    entitlements,
+    'ABCDEFGHIJ',
+    'com.lingxi.code.credential-broker',
+  ));
+  assert.throws(() => validateSignedEntitlements(
+    entitlements,
+    'ZZZZZZZZZZ',
+    'com.lingxi.code.credential-broker',
+  ), /signed entitlements/);
+});
+
+test('provisioning profile validation rejects an iOS profile before macOS signing starts', () => {
+  const profile = {
+    TeamIdentifier: ['ABCDEFGHIJ'],
+    Platform: ['OSX'],
+    ExpirationDate: '2030-01-01T00:00:00Z',
+    Entitlements: {
+      'com.apple.application-identifier': 'ABCDEFGHIJ.com.lingxi.code.development',
+    },
+  };
+  assert.doesNotThrow(() => validateProvisioningProfileMetadata(
+    profile,
+    'ABCDEFGHIJ',
+    'com.lingxi.code.development',
+    Date.parse('2029-01-01T00:00:00Z'),
+  ));
+  assert.throws(() => validateProvisioningProfileMetadata(
+    { ...profile, Platform: ['iOS'] },
+    'ABCDEFGHIJ',
+    'com.lingxi.code.development',
+    Date.parse('2029-01-01T00:00:00Z'),
+  ), /macOS/);
 });
 
 test('ZIP validation rejects traversal and entries outside the app', () => {
@@ -147,6 +365,22 @@ test('package scanning rejects developer paths and an obvious secret canary', ()
       () => scanTreeForForbiddenContent(root),
       /absolute macOS user path found/,
     );
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test('package scanning permits the public source prefix embedded by the official sherpa archive', () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-package-sherpa-path-'));
+  try {
+    writeFileSync(
+      join(root, 'upstream.txt'),
+      [
+        '/Users/runner/work/sherpa-onnx/sherpa-onnx/sherpa-onnx/csrc/offline-recognizer.cc',
+        '/Users/runner/work/onnxruntime-libs/onnxruntime-libs/onnxruntime/core/framework/session_state.cc',
+      ].join('\n'),
+    );
+    assert.doesNotThrow(() => scanTreeForForbiddenContent(root));
   } finally {
     rmSync(root, { force: true, recursive: true });
   }

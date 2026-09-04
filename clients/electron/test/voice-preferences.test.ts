@@ -51,6 +51,7 @@ test('a fresh install defaults to automatic, matching mobile', () => {
   assert.equal(fresh.language, LANGUAGE_AUTO);
   assert.equal(fresh.voiceSelection, 'system:default');
   assert.equal(fresh.rate, 1);
+  assert.equal(fresh.autoPlayReplies, false);
 });
 
 test('schemaVersion is always 2, regardless of what was supplied', () => {
@@ -90,27 +91,12 @@ test('voiceSelection is normalized the same way through the full parser', () => 
   assert.equal(parseVoicePreferences({ voiceSelection: 123 }).voiceSelection, 'system:default');
 });
 
-// ---------------------------------------------------------------------------
-// Final review, Defects 5 and 10: `autoPlayReplies` was persisted here and
-// read by nothing. The desktop's only speech-output path is servicing the
-// engine's `AudioOpDto::Synthesize`; no reply is ever spoken, and there is no
-// manual play control for the row's 「无需手动点击播放」 to spare anyone from.
-// The setting is gone rather than left saving a value that changes nothing:
-// the next person to reach for an obviously-named preference would assume it
-// works, exactly the way `resolveCapabilities`'s unread `fallbackReason` field
-// was a landmine for the next person writing a fallback message.
-// ---------------------------------------------------------------------------
-
-test('no auto-play-replies preference is persisted, because nothing plays replies', () => {
-  assert.ok(!('autoPlayReplies' in defaultVoicePreferences()), 'a fresh install must not carry a setting nothing reads');
-  assert.ok(!('autoPlayReplies' in parseVoicePreferences({})));
-  // A value left behind in an existing settings file is DROPPED on the next
-  // write, not carried forward: `parseVoicePreferences` builds a complete
-  // value from known keys only, so no migration is needed and none is faked.
-  assert.ok(
-    !('autoPlayReplies' in parseVoicePreferences({ autoPlayReplies: true })),
-    'a persisted auto-play flag must not survive into the parsed value',
-  );
+test('auto-play-replies persists and defaults false', () => {
+  assert.equal(defaultVoicePreferences().autoPlayReplies, false);
+  assert.equal(parseVoicePreferences({}).autoPlayReplies, false);
+  assert.equal(parseVoicePreferences({ autoPlayReplies: true }).autoPlayReplies, true);
+  assert.equal(parseVoicePreferences({ autoPlayReplies: false }).autoPlayReplies, false);
+  assert.equal(parseVoicePreferences({ autoPlayReplies: 'yes' }).autoPlayReplies, false);
 });
 
 test('parseVoicePreferences never throws on hostile input', () => {

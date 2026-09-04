@@ -8,6 +8,7 @@ import {
 } from '../model/runItem';
 import { collapseFor, collapseInitial, collapseOpen, collapseSet } from './collapseStore';
 import { CommandOutput } from './CommandOutput';
+import { CompactionStatus } from './CompactionStatus';
 import { Icon } from './Icon';
 import { Disclosure } from './Disclosure';
 import { MarkdownContent } from './MarkdownContent';
@@ -280,6 +281,13 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
                     onSetOpen={setOpen}
                   />
                 </div>
+              </div>
+            );
+          }
+          if (item.type === 'compaction') {
+            return (
+              <div className="transcript-run-item" data-run-type="compaction" key={item.id}>
+                <CompactionStatus item={item} />
               </div>
             );
           }

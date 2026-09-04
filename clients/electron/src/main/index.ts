@@ -3,7 +3,14 @@ import { join } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { SessionRuntimeManager, type SessionRef } from './bridge.js';
+import { SessionRuntimeManager, stopLegacyOrphanBridges, type SessionRef } from './bridge.js';
+import {
+  createMacCredentialBrokerClient,
+  resolveProviderCredential,
+  resolveSessionLaunchCredentials,
+  resolveSessionLaunchPluginSecrets,
+} from './credential-broker.js';
+import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { HostController } from './host.js';
 import { DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
 import { SettingsStore } from './settings.js';
@@ -18,6 +25,7 @@ const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const securedSessions = new WeakSet<Session>();
 let bridge: SessionRuntimeManager | null = null;
 let host: HostController | null = null;
+let nativeAudio: NativeAudioManager | null = null;
 let quitting = false;
 
 function developmentRendererUrl(): string | undefined {
@@ -48,9 +56,9 @@ function isLocalRendererUrl(raw: string): boolean {
 function secureSession(session: Session): void {
   if (securedSessions.has(session)) return;
   securedSessions.add(session);
-  // The composer can use the browser's speech recognition API, but no other
-  // permission is needed by the desktop app. Keep the allowlist scoped to the
-  // local renderer so a future navigation cannot inherit microphone access.
+  // Keep legacy renderer media access scoped to the local app origin. The
+  // production voice path is the signed native Audio Helper; this remains for
+  // compatibility tests and cannot authorize an arbitrary navigation.
   session.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => (
     permission === 'media' && isLocalRendererUrl(requestingOrigin)
   ));
@@ -72,26 +80,6 @@ function isHttpsUrl(raw: string): boolean {
     const url = new URL(raw);
     return url.protocol === 'https:' && !url.username && !url.password;
   } catch { return false; }
-}
-
-const providerEnvironmentVariables: Readonly<Record<string, string>> = {
-  anthropic: 'ANTHROPIC_API_KEY',
-  openai: 'OPENAI_API_KEY',
-  deepseek: 'DEEPSEEK_API_KEY',
-  kimi: 'MOONSHOT_API_KEY',
-  'kimi-code': 'KIMI_API_KEY',
-  gemini: 'GEMINI_API_KEY',
-  openrouter: 'OPENROUTER_API_KEY',
-  zai: 'ZAI_API_KEY',
-  'glm-coding': 'GLM_API_KEY',
-  'github-copilot': 'GITHUB_TOKEN',
-};
-
-/** Developer opt-in fallback for a locked/missing Keychain item. */
-function readEnvironmentCredential(providerId: string): string | undefined {
-  const variable = providerEnvironmentVariables[providerId];
-  const value = variable ? process.env[variable] : undefined;
-  return typeof value === 'string' && value.length > 0 && value.length <= 16_384 ? value : undefined;
 }
 
 function createWindow(): BrowserWindow {
@@ -119,6 +107,12 @@ function createWindow(): BrowserWindow {
 
   secureSession(mainWindow.webContents.session);
   host?.registerWindow(mainWindow.webContents, target.url);
+  const releaseAudio = (): void => {
+    void nativeAudio?.suspend('window hidden').catch(() => undefined);
+  };
+  mainWindow.on('hide', releaseAudio);
+  mainWindow.on('minimize', releaseAudio);
+  mainWindow.on('closed', releaseAudio);
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -142,12 +136,33 @@ function createWindow(): BrowserWindow {
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
-if (hasSingleInstanceLock) void app.whenReady().then(() => {
+if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const userData = app.getPath('userData');
   const diagnostics = new DiagnosticBuffer(join(userData, 'logs', 'desktop.jsonl'));
   diagnostics.add('info', 'host', `desktop start: app=${app.getVersion()} electron=${process.versions.electron} platform=${process.platform} arch=${process.arch}`);
-  diagnostics.add('info', 'host', 'credential store: shared engine secure storage');
+  const bridgeRoot = join(userData, 'bridge-runtime');
+  if (process.platform === 'darwin' && app.isPackaged) {
+    const stoppedLegacyPids = await stopLegacyOrphanBridges(bridgeRoot);
+    if (stoppedLegacyPids.length > 0) {
+      diagnostics.add('warn', 'host', `stopped legacy orphan bridge processes: ${stoppedLegacyPids.join(', ')}`);
+    }
+  }
+  const credentialBroker = createMacCredentialBrokerClient({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+  });
+  diagnostics.add('info', 'host', credentialBroker
+    ? 'credential store: macOS credential broker'
+    : 'credential store: shared engine secure storage');
   const settings = new SettingsStore(userData);
+  nativeAudio = process.platform === 'darwin'
+    ? new NativeAudioManager({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        userDataPath: userData,
+        diagnostics,
+      })
+    : null;
   const sessionCatalog = new ProjectSessionCatalog({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
@@ -156,7 +171,12 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
   bridge = new SessionRuntimeManager({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
-    bridgeRoot: join(app.getPath('userData'), 'bridge-runtime'),
+    bridgeRoot,
+    // Runtime assembly includes live MCP discovery before publishing the
+    // bridge lockfile. A healthy project can exceed the generic 15s default
+    // on a cold network; keep the test-injected short timeout untouched while
+    // giving the real Desktop launch enough room to finish.
+    lockfileTimeoutMs: 30_000,
     providerIds: PROVIDER_IDS,
     diagnostics,
     accessState: (ref: SessionRef) => {
@@ -170,6 +190,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
       }
     },
     onModelChanged: (_ref, model) => { settings.update({ model }); },
+    resolveProviderCredential: (providerId) => resolveProviderCredential(providerId, { credentialBroker }),
     onFirstPromptSent: (ref) => { settings.setActiveSession(ref); },
     sessionIdAvailable: async (ref) => {
       const catalog = await sessionCatalog.list(ref.projectPath);
@@ -202,25 +223,21 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
       settings.setBypassPermissionsAccepted(true);
       return true;
     },
-    launchConfig: async (ref: SessionRef) => {
+    launchConfig: async (ref: SessionRef, resumeModel?: string) => {
       const workspace = ref.projectPath;
       const configured = settings.getPublic();
-      const credentials: Record<string, string> = {};
-      for (const providerId of PROVIDER_IDS) {
-        const environmentCredential = readEnvironmentCredential(providerId);
-        if (environmentCredential !== undefined) {
-          credentials[providerId] = environmentCredential;
-        }
-      }
+      const model = resumeModel ?? configured.model;
+      const credentials = await resolveSessionLaunchCredentials(model, {
+        credentialBroker,
+      });
+      const pluginSecrets = await resolveSessionLaunchPluginSecrets(credentialBroker);
       return {
         workspace,
         sessionId: ref.sessionId,
         trusted: settings.hasProject(workspace),
-        apiKey: credentials['anthropic'],
-        providerCredentials: Object.fromEntries(
-          Object.entries(credentials).filter(([providerId]) => providerId !== 'anthropic'),
-        ),
-        model: configured.model,
+        ...credentials,
+        pluginSecrets,
+        model,
         apiBaseUrl: configured.apiBaseUrl,
       };
     },
@@ -230,6 +247,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
     bridge,
     diagnostics,
     sessionCatalog,
+    undefined,
+    undefined,
+    credentialBroker,
+    nativeAudio ?? undefined,
   );
   host.registerIpc();
   createWindow();
@@ -267,7 +288,12 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
   quitting = true;
   host?.dispose();
   host = null;
+  const currentAudio = nativeAudio;
+  nativeAudio = null;
   const currentBridge = bridge;
   bridge = null;
-  void (currentBridge?.dispose() ?? Promise.resolve()).finally(() => app.quit());
+  void Promise.all([
+    currentAudio?.dispose() ?? Promise.resolve(),
+    currentBridge?.dispose() ?? Promise.resolve(),
+  ]).finally(() => app.quit());
   });

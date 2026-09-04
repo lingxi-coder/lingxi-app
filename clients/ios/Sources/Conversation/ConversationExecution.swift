@@ -937,6 +937,20 @@ struct ConversationCompactionSnapshot: Identifiable, Equatable {
     var bytesSaved: UInt64
 }
 
+enum ConversationCompactionStatus: Equatable {
+    case running(startedAt: Date)
+    case completed(messagesBefore: UInt32?, messagesAfter: UInt32?, bytesSaved: UInt64?)
+    case failed(detail: String)
+}
+
+enum ConversationCompactionProgress {
+    /// Matches the CLI's exponential time estimate; the summarizer exposes no real percent.
+    static func percent(elapsed: TimeInterval) -> Int {
+        let value = (1 - exp(-max(0, elapsed) / 90)) * 100
+        return min(95, max(0, Int(value.rounded())))
+    }
+}
+
 struct ConversationCoordinatorWorker: Identifiable, Equatable {
     let id: String
     var name: String

@@ -7,15 +7,21 @@ description: Choose the simplest available Local App template from the Host sema
 
 Read `LocalAppTemplateCatalog` before choosing. It returns the Host's current
 catalog digest and only available semantic entries: `templateId`, `surface`,
-`summary`, `recommendedFor`, and `notFor`. Family, revision, paths and hashes
-are deliberately withheld and must never be inferred. Babylon stays out of
-the production catalog while its real-device availability gate is pending.
+`summary`, `recommendedFor`, `notFor`, `mcpDefaultEnabled`, and
+`mcpSuggestions`. Family, revision, paths and hashes are deliberately
+withheld and must never be inferred. The last two fields are informational
+context for a LATER per-App MCP-authoring step; a create run never acts on
+them — do not enable MCP, reference `mcpSuggestions`, or let either field
+leak into your `reason` text. Babylon stays out of the production catalog
+while its real-device availability gate is pending.
 
 Choose the simplest available entry matching the confirmed requirements.
-Prefer `react-dom-r1` for ordinary forms, lists, data and navigation; choose
-canvas or an engine only when the brief requires drawing, 3D, scenes, sprites,
-tilemaps, collision or a game lifecycle. Record at least one rejected
-candidate for the display-only confirmation UI.
+Prefer the catalog's `dom` template entry for ordinary forms, lists, data and
+navigation; choose canvas or an engine only when the brief requires drawing,
+3D, scenes, sprites, tilemaps, collision or a game lifecycle. Read the
+`templateId` the catalog actually returns rather than assuming a fixed
+revision suffix — it changes as the catalog is revised. Record at least one
+rejected candidate for the display-only confirmation UI.
 
 Submit the proposal to `LocalAppValidateTemplateSelection` with the exact
 `catalog_digest`, `template_id`, `reason`, `rejected`, Host-supplied `app_id`

@@ -248,6 +248,7 @@ final class ProviderRepositoryTests: XCTestCase {
             configuredProviderIds: ["openai-user"],
             unavailableProviderIds: [],
             storageEncrypted: true,
+            credentialPreviews: [:],
             error: nil
         ))
         await apply.value
@@ -297,6 +298,7 @@ final class ProviderRepositoryTests: XCTestCase {
             configuredProviderIds: [deepSeek],
             unavailableProviderIds: [],
             storageEncrypted: true,
+            credentialPreviews: [:],
             error: nil
         ))
 
@@ -590,6 +592,7 @@ final class ProviderRepositoryTests: XCTestCase {
             configuredProviderIds: [openAI],
             unavailableProviderIds: [],
             storageEncrypted: true,
+            credentialPreviews: [:],
             error: nil
         ))
         await apply.value
@@ -605,6 +608,7 @@ final class ProviderRepositoryTests: XCTestCase {
             configuredProviderIds: [],
             unavailableProviderIds: [openAI],
             storageEncrypted: true,
+            credentialPreviews: [:],
             error: "provider credential storage is unavailable"
         ))
 
@@ -643,6 +647,7 @@ final class ProviderRepositoryTests: XCTestCase {
             configuredProviderIds: [openAI],
             unavailableProviderIds: [],
             storageEncrypted: true,
+            credentialPreviews: [:],
             error: nil
         ))
 
@@ -673,6 +678,7 @@ final class ProviderRepositoryTests: XCTestCase {
             configuredProviderIds: [openAI],
             unavailableProviderIds: [],
             storageEncrypted: true,
+            credentialPreviews: [:],
             error: nil
         ))
         var state = try XCTUnwrap(repository.state(for: openAI))
@@ -685,6 +691,7 @@ final class ProviderRepositoryTests: XCTestCase {
             configuredProviderIds: [openAI],
             unavailableProviderIds: [],
             storageEncrypted: true,
+            credentialPreviews: [:],
             error: nil
         ))
         state = try XCTUnwrap(repository.state(for: openAI))
@@ -712,6 +719,7 @@ final class ProviderRepositoryTests: XCTestCase {
             configuredProviderIds: [],
             unavailableProviderIds: [openAI],
             storageEncrypted: true,
+            credentialPreviews: [:],
             error: "failed to store provider credential: locked"
         ))
         await failedApply.value
@@ -731,6 +739,7 @@ final class ProviderRepositoryTests: XCTestCase {
             configuredProviderIds: [openAI],
             unavailableProviderIds: [],
             storageEncrypted: true,
+            credentialPreviews: [:],
             error: nil
         ))
         await successfulApply.value
@@ -751,6 +760,7 @@ final class ProviderRepositoryTests: XCTestCase {
             configuredProviderIds: [],
             unavailableProviderIds: [],
             storageEncrypted: true,
+            credentialPreviews: [:],
             error: nil
         ))
         await deleteApply.value
@@ -779,6 +789,7 @@ final class ProviderRepositoryTests: XCTestCase {
             configuredProviderIds: [],
             unavailableProviderIds: [],
             storageEncrypted: true,
+            credentialPreviews: [:],
             error: nil
         ))
         await setTask.value
@@ -800,6 +811,7 @@ final class ProviderRepositoryTests: XCTestCase {
             configuredProviderIds: [openAI],
             unavailableProviderIds: [],
             storageEncrypted: true,
+            credentialPreviews: [:],
             error: nil
         ))
         let removed = await removeTask.value
@@ -834,6 +846,7 @@ final class ProviderRepositoryTests: XCTestCase {
             configuredProviderIds: [openAI],
             unavailableProviderIds: [],
             storageEncrypted: true,
+            credentialPreviews: [:],
             error: nil
         ))
         await initialApply.value
@@ -850,6 +863,7 @@ final class ProviderRepositoryTests: XCTestCase {
             configuredProviderIds: [],
             unavailableProviderIds: [],
             storageEncrypted: true,
+            credentialPreviews: [:],
             error: nil
         ))
         await clearApply.value
@@ -1042,7 +1056,7 @@ final class ProviderRepositoryTests: XCTestCase {
         let preset = try XCTUnwrap(Presets.llm.first(where: { $0.id == "anthropic" }))
         let curated: Set<String> = [
             "claude-opus-5",
-            "claude-fable-5",
+            "claude-fable-5-1",
             "claude-sonnet-5",
             "claude-haiku-4-5",
         ]

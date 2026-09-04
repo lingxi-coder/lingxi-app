@@ -163,6 +163,27 @@ enum WatcherControl {
     /// variant NEVER fires them — it is the pure watch-set rebind, guarded
     /// against an unchanged cwd (`if(_===S)return`) in the supervisor.
     CwdChanged { new_cwd: PathBuf },
+    /// Replace the configuration-derived matcher set after a Desktop settings
+    /// save. Unlike dynamic watch-path additions this is an authoritative
+    /// source swap, so paths from the previous hook document are dropped.
+    ReplaceMatchers { matchers: Vec<String>, cwd: PathBuf },
+}
+
+/// Cloneable configuration control for a live FileChanged watcher. The
+/// runtime keeps ownership of the supervisor task; bridge-server receives only
+/// this sender, so hot reload cannot accidentally detach the watcher.
+#[derive(Clone, Debug)]
+pub struct FileChangedWatcherController {
+    control: mpsc::UnboundedSender<WatcherControl>,
+}
+
+impl FileChangedWatcherController {
+    /// Replace every settings-derived matcher and restart the watched paths.
+    pub fn replace_matchers(&self, matchers: Vec<String>, cwd: PathBuf) {
+        let _ = self
+            .control
+            .send(WatcherControl::ReplaceMatchers { matchers, cwd });
+    }
 }
 
 /// Handle owning the spawned watcher supervisor. Dropping it aborts the
@@ -226,6 +247,14 @@ impl FileChangedWatcherHandle {
         self.control
             .clone()
             .map(|control| Arc::new(ControlRebinder { control }) as Arc<dyn hooks::WatcherRebinder>)
+    }
+
+    /// A cloneable hot-reload controller, when the supervisor is running.
+    #[must_use]
+    pub fn controller(&self) -> Option<FileChangedWatcherController> {
+        self.control
+            .clone()
+            .map(|control| FileChangedWatcherController { control })
     }
 }
 
@@ -337,9 +366,10 @@ impl FileChangedWatcher {
     /// appears later is simply not observed until it is (re)added — matching
     /// claude-code's init-time path resolution. Best-effort: a directory that
     /// fails to watch is logged and skipped, never fatal. When the resolved
-    /// watch-path set is empty (no usable matcher), NO supervisor is spawned —
-    /// the no-watch case is byte-identical to claude-code's
-    /// `if (paths.length === 0) return` (`fileChangedWatcher.ts:43`).
+    /// When the resolved watch-path set is empty, the supervisor remains idle
+    /// with no per-directory tasks. Keeping its control channel alive lets a
+    /// later Desktop hook save add the first FileChanged matcher without a
+    /// process restart while retaining the same no-files-watched behavior.
     pub async fn spawn(self, fs: Arc<dyn FileSystem>) -> FileChangedWatcherHandle {
         let Self {
             matchers,
@@ -348,9 +378,6 @@ impl FileChangedWatcher {
             cwd,
             firer,
         } = self;
-        if watch_paths.is_empty() {
-            return FileChangedWatcherHandle::empty();
-        }
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let supervisor = Supervisor {
             fs,
@@ -429,6 +456,15 @@ impl Supervisor {
                         .into_iter()
                         .collect();
                     self.cwd = new_cwd;
+                    self.restart().await;
+                }
+                WatcherControl::ReplaceMatchers { matchers, cwd } => {
+                    let matcher_refs: Vec<&str> = matchers.iter().map(String::as_str).collect();
+                    self.watch_paths = resolve_watch_paths(&matcher_refs, &cwd)
+                        .into_iter()
+                        .collect();
+                    self.matchers = matchers;
+                    self.cwd = cwd;
                     self.restart().await;
                 }
             }
@@ -807,6 +843,42 @@ mod tests {
         );
 
         drop(handle);
+    }
+
+    #[tokio::test]
+    async fn replace_matchers_can_activate_an_initially_idle_watcher() {
+        let root = tempfile::tempdir().unwrap();
+        let watched_dir = root.path().join("configured-later");
+        std::fs::create_dir_all(&watched_dir).unwrap();
+        let fs = Arc::new(RecordingFs::default());
+        let watched = fs.watched.clone();
+        let firer: Arc<dyn FileChangedFirer> = Arc::new(RecordingFirer::default());
+        let handle = FileChangedWatcher::new(&[], root.path(), firer)
+            .spawn(fs as Arc<dyn FileSystem>)
+            .await;
+        assert!(watched.lock().unwrap().is_empty());
+
+        handle
+            .controller()
+            .expect("idle watcher keeps a live controller")
+            .replace_matchers(
+                vec![watched_dir.join(".env").to_string_lossy().into_owned()],
+                root.path().to_path_buf(),
+            );
+
+        for _ in 0..400 {
+            if watched
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| Path::new(path) == watched_dir)
+            {
+                drop(handle);
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("replacement matcher did not start its directory watcher");
     }
 
     /// Spawn a watcher over a relative matcher resolved against `cwd`, waiting

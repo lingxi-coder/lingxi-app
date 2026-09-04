@@ -1,7 +1,7 @@
 //! Secure storage backends for desktop hosts.
 //!
 //! [`PlainTextSecureStorage`] (fallback), [`MacOsKeychainStorage`] (macOS, via
-//! the `security` CLI) and `LinuxSecretStorage` (Linux, via the `libsecret`
+//! the signed LingXi credential broker) and `LinuxSecretStorage` (Linux, via the `libsecret`
 //! `secret-tool` CLI) implement [`platform_api::SecureStorage`]. The
 //! [`secure_storage_for_platform`] helper picks the best backend per OS,
 //! with a documented plaintext-fallback warning when the preferred backend

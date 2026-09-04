@@ -6,9 +6,8 @@ import {
   layerDisabled,
   parseSettingsSnapshot,
   resolveInitialPage,
-  restartDisabledReason,
+  SETTINGS_SIDEBAR_TOP_INSET,
 } from '../src/renderer/components/settings/SettingsScreen';
-import { pendingKeys } from '../src/renderer/components/settings/useEngineSettings';
 import type { SettingsSnapshotEvent } from '../src/renderer/bridge/useBridge';
 
 test('resolveInitialPage opens the provider-credentials deep link when a provider id is given', () => {
@@ -28,19 +27,6 @@ test('layerDisabled: user is always editable, project and local need an open pro
   assert.equal(layerDisabled('local', true), false);
 });
 
-test('restartDisabledReason names a turn in flight over a missing session', () => {
-  assert.match(restartDisabledReason(true, true) ?? '', /对话正在进行/);
-  assert.match(restartDisabledReason(true, false) ?? '', /对话正在进行/);
-});
-
-test('restartDisabledReason names a missing session when no turn is in flight', () => {
-  assert.match(restartDisabledReason(false, false) ?? '', /会话/);
-});
-
-test('restartDisabledReason is null when there is nothing stopping a restart', () => {
-  assert.equal(restartDisabledReason(false, true), null);
-});
-
 test('groupedNav lists every group in a fixed order with no query', () => {
   const sections = groupedNav('');
   assert.deepEqual(sections.map((s) => s.group), ['个人', '模型与服务', '编码', '高级']);
@@ -58,6 +44,10 @@ test('groupedNav with a query matching nothing returns no sections', () => {
   assert.deepEqual(groupedNav('this matches absolutely nothing'), []);
 });
 
+test('settings search clears the macOS hidden-inset titlebar controls', () => {
+  assert.ok(SETTINGS_SIDEBAR_TOP_INSET >= 40);
+});
+
 function rawSnapshot(overrides: Partial<SettingsSnapshotEvent> = {}): SettingsSnapshotEvent {
   return {
     type: 'settings_snapshot',
@@ -72,14 +62,13 @@ test('parseSettingsSnapshot is null-safe: no event means no snapshot and no erro
   assert.deepEqual(parseSettingsSnapshot(undefined), { snapshot: null, error: null });
 });
 
-test('parseSettingsSnapshot defaults a missing active_json to effective, not to {}', () => {
+test('parseSettingsSnapshot contains settings data without runtime activation state', () => {
   const { snapshot, error } = parseSettingsSnapshot(rawSnapshot());
   assert.equal(error, null);
   assert.deepEqual(snapshot, {
     effective: { model: 'opus' },
     provenance: { model: 'user' },
     files: [],
-    active: { model: 'opus' },
     locked: [],
     layers: {},
     mergedKeys: [],
@@ -111,14 +100,12 @@ test('parseSettingsSnapshot decodes layers_json into a per-layer map when presen
   });
 });
 
-test('an absent active_json must not manufacture a pending banner out of "we do not know"', () => {
-  // If `active` defaulted to `{}` instead of `effective`, every effective key
-  // would look newly pending — a maximally loud FALSE banner built from an
-  // absent optional field, not from an actual difference on disk.
+test('parseSettingsSnapshot ignores engine active_json state', () => {
   const { snapshot } = parseSettingsSnapshot(rawSnapshot({
     effective_json: JSON.stringify({ model: 'opus', theme: 'dark' }),
+    active_json: JSON.stringify({ model: 'sonnet', theme: 'light' }),
   }));
-  assert.deepEqual(pendingKeys(snapshot!), [], 'no active_json means no known difference, so no pending keys');
+  assert.equal('active' in snapshot!, false);
 });
 
 test('parseSettingsSnapshot decodes the optional fields when present', () => {
@@ -134,7 +121,6 @@ test('parseSettingsSnapshot decodes the optional fields when present', () => {
     effective: { model: 'opus' },
     provenance: { model: 'user' },
     files: [{ layer: 'user', path: '/x', exists: true, parsed: true }],
-    active: { model: 'sonnet' },
     locked: ['model'],
     layers: { user: { model: 'opus' } },
     mergedKeys: ['hooks'],

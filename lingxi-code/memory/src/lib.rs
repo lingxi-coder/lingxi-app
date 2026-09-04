@@ -149,8 +149,8 @@ fn canonical_model_family(model: &str) -> String {
     let lower = model.trim().to_ascii_lowercase();
     // `if(e.includes(X))return X` — the plain-substring arms, in binary order.
     for family in [
-        "claude-fable-5",
-        "claude-mythos-5",
+        "claude-fable-5-1",
+        "claude-mythos-5-1",
         "claude-opus-5",
         "claude-opus-4-8",
         "claude-opus-4-7",

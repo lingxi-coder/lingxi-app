@@ -7,6 +7,7 @@ import type { AskUserQuestionRequestDto, SessionRowDto } from '@lingxi/bridge-cl
 import type {
   BridgeRuntimeVersions,
   ConnectionState,
+  ProviderConnectionTestResult,
   RuntimeEventEnvelope,
   SessionRef,
   SessionRuntimeManager,
@@ -15,6 +16,11 @@ import type {
 import { isSessionId } from './bridge.js';
 import { WorkspaceFileSearch } from './file-search.js';
 import { ProjectSessionCatalog, type ProjectSessionCatalogRow } from './session-catalog.js';
+import {
+  resolveProviderTestCredential,
+  type CredentialBrokerStatus,
+  type ProviderCredentialBroker,
+} from './credential-broker.js';
 import {
   canonicalWorkspace,
   DiagnosticBuffer,
@@ -25,18 +31,33 @@ import {
 } from './host-utils.js';
 import { validateClipboardText } from './validation.js';
 import { readMicrophoneAccess, type MediaAccessReader } from './microphoneAccess.js';
+import type { NativeAudioManager } from './audio/nativeAudioManager.js';
+import { CH_NATIVE_AUDIO_ENGINE_REQUEST, CH_NATIVE_AUDIO_EVENT, CH_NATIVE_AUDIO_REQUEST } from '../shared/nativeAudio.js';
 import { PROVIDER_IDS, providerById } from '../shared/providers.js';
 import type { SettingsStore } from './settings.js';
 
 export interface CredentialMetadata {
   configured: boolean;
   encryptionAvailable: boolean;
+  /** Display-safe fixed mask plus at most the final four credential characters. */
+  credentialPreview?: string;
   /** The running engine received a credential from an external runtime source. */
   runtimeOnly?: true;
+  /** Display-safe reason why the signed credential broker is unavailable. */
+  storageError?: string;
 }
 
 export interface ProviderCredentialMetadata extends CredentialMetadata {
   providerId: string;
+}
+
+export interface PluginSecretMetadata {
+  pluginId: string;
+  key: string;
+  configured: boolean;
+  maskedValue?: string;
+  storageError?: string;
+  restartRequired?: boolean;
 }
 
 export const CH_BOOTSTRAP = 'lingxi:bootstrap';
@@ -50,6 +71,10 @@ export const CH_WORKSPACE_FILES_SEARCH = 'lingxi:workspace-files:search';
 export const CH_PROVIDER_CREDENTIALS_GET = 'lingxi:provider-credentials:get';
 export const CH_PROVIDER_CREDENTIAL_SET = 'lingxi:provider-credential:set';
 export const CH_PROVIDER_CREDENTIAL_CLEAR = 'lingxi:provider-credential:clear';
+export const CH_PROVIDER_CONNECTION_TEST = 'lingxi:provider-connection:test';
+export const CH_PLUGIN_SECRET_GET = 'lingxi:plugin-secret:get';
+export const CH_PLUGIN_SECRET_SET = 'lingxi:plugin-secret:set';
+export const CH_PLUGIN_SECRET_CLEAR = 'lingxi:plugin-secret:clear';
 export const CH_BRIDGE_RESTART = 'lingxi:bridge:restart';
 export const CH_DIAGNOSTICS_GET = 'lingxi:diagnostics:get';
 export const CH_DIAGNOSTICS_COPY = 'lingxi:diagnostics:copy';
@@ -72,6 +97,16 @@ export interface WorkspaceFilePreview {
 }
 
 const MAX_WORKSPACE_FILE_PREVIEW_BYTES = 512 * 1024;
+
+function credentialBrokerDisplayError(diagnostic: string): string {
+  if (/ENOENT|not found|code signature|TeamIdentifier|authorize broker caller/i.test(diagnostic)) {
+    return '凭据代理未正确签名或未随应用安装。macOS 开发构建需要 Apple Development 签名和有效的 provisioning profile。';
+  }
+  if (/protocol mismatch|protocol version|incompatible/i.test(diagnostic)) {
+    return '凭据代理版本与当前应用不兼容，请升级 LingXi Desktop、CLI 和 TUI。';
+  }
+  return `macOS 安全凭据存储不可用：${diagnostic}`;
+}
 
 function pathEscapes(root: string, candidate: string): boolean {
   const value = relative(root, candidate);
@@ -187,6 +222,7 @@ const SYSTEM_SETTINGS_PANES = {
   accessibility: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
   screen_recording: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
   microphone: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
+  speech_recognition: 'x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition',
 } as const;
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export type SystemSettingsPane = keyof typeof SYSTEM_SETTINGS_PANES;
@@ -267,6 +303,10 @@ export class HostController {
   private readonly sessionCatalog: ProjectSessionCatalog;
   private readonly catalogs = new Map<string, ProjectSessionCatalogState>();
   private readonly catalogRequestGenerations = new Map<string, number>();
+  private readonly brokerConfiguredProviders = new Set<string>();
+  private readonly brokerCredentialPreviews = new Map<string, string>();
+  private brokerStorageError: string | undefined;
+  private offNativeAudio?: () => void;
 
   constructor(
     private readonly settings: SettingsStore,
@@ -281,6 +321,8 @@ export class HostController {
      * class ever holding a second, drift-prone copy of that wiring.
      */
     private readonly mediaAccess?: MediaAccessReader,
+    private readonly credentialBroker?: ProviderCredentialBroker,
+    private readonly nativeAudio?: NativeAudioManager,
   ) {
     this.sessionCatalog = sessionCatalog ?? new ProjectSessionCatalog();
   }
@@ -299,20 +341,33 @@ export class HostController {
     if (this.registered) return;
     this.registered = true;
     this.bridge.registerIpc();
-    this.ipc.handle(CH_BOOTSTRAP, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.bootstrap(); });
+    if (this.nativeAudio && !this.offNativeAudio) {
+      this.offNativeAudio = this.nativeAudio.onEvent((audioEvent) => {
+        for (const webContents of this.targets.keys()) {
+          if (webContents.isDestroyed()) continue;
+          webContents.send(CH_NATIVE_AUDIO_EVENT, audioEvent);
+        }
+      });
+    }
+    this.ipc.handle(CH_BOOTSTRAP, async (event: IpcMainInvokeEvent) => {
+      this.assertSender(event);
+      return this.bootstrap();
+    });
     this.ipc.handle(CH_SETTINGS_GET, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.settings.getPublic(); });
     this.ipc.handle(CH_SETTINGS_UPDATE, async (event: IpcMainInvokeEvent, patch: unknown) => {
       this.assertSender(event);
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('invalid settings patch');
       const keys = Object.keys(patch);
       if (keys.some((key) => key !== 'theme' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice')) throw new Error('unsupported setting');
-      const restartsBridge = 'model' in patch || 'apiBaseUrl' in patch;
+      const restartsBridge = 'apiBaseUrl' in patch;
       if (restartsBridge) this.assertNoActiveTurn();
-      // `voice` never restarts the bridge: recognition/synthesis read
+      // `model` is applied to a live session through `set_model`, then mirrored
+      // here by `onModelChanged`; persisting the default must not restart any
+      // session. `voice` also never restarts the bridge: recognition/synthesis read
       // `bootstrap.settings.voice` fresh on every audio request
       // (`renderer/audio/requests.ts`'s `playback()`), so a write here takes
-      // effect on the NEXT request with no engine restart needed — unlike
-      // `model`/`apiBaseUrl`, which change what the running engine talks to.
+      // effect on the NEXT request. Only the legacy Anthropic API base changes
+      // the construction of an already-running provider client.
       const result = this.settings.update(patch as { theme?: 'dark' | 'light' | 'system'; model?: string | null; apiBaseUrl?: string | null; voice?: unknown });
       if (restartsBridge) await this.restartIfConfigured();
       return result;
@@ -415,8 +470,19 @@ export class HostController {
       if (canonicalWorkspace(active.projectPath) !== project) throw new Error('session project mismatch');
       return readWorkspaceFilePreview(project, path);
     });
-    this.ipc.handle(CH_PROVIDER_CREDENTIALS_GET, (event: IpcMainInvokeEvent) => {
+    this.ipc.handle(CH_PROVIDER_CREDENTIALS_GET, async (event: IpcMainInvokeEvent, providerId?: unknown) => {
       this.assertSender(event);
+      if (this.credentialBroker) {
+        await this.refreshCredentialBrokerStatus(
+          providerId !== undefined ? this.requireProvider(providerId).id : undefined,
+        );
+      } else if (providerId !== undefined) {
+        const provider = this.requireProvider(providerId);
+        const runtime = this.currentRuntime();
+        if (runtime?.connectionState.status === 'connected') {
+          await runtime.listProviderCredentials([provider.id], [provider.id]);
+        }
+      }
       return this.providerCredentialSnapshot();
     });
     this.ipc.handle(CH_PROVIDER_CREDENTIAL_SET, async (event: IpcMainInvokeEvent, providerId: unknown, credential: unknown) => {
@@ -424,30 +490,118 @@ export class HostController {
       const provider = this.requireProvider(providerId);
       if (typeof credential !== 'string') throw new Error('invalid credential');
       this.assertNoActiveTurn();
-      this.requireWorkspace();
-      const runtime = this.requireCurrentRuntime();
-      const stored = await runtime.setProviderCredential(provider.id, credential);
-      if (!stored.configured_provider_ids.includes(provider.id)) {
-        throw new Error(`provider credential was not persisted (${provider.id})`);
-      }
-      const credentialMetadata: ProviderCredentialMetadata = {
-        providerId: provider.id,
-        configured: true,
-        encryptionAvailable: stored.storage_encrypted,
-      };
-      if (provider.defaultModel) this.updateProviderDefaultModel(provider.defaultModel);
-      // Persistence is the boundary of this IPC operation. Restart is owned by
-      // the renderer so it can clear the secret before handling recovery.
+      const credentialMetadata = this.credentialBroker
+        ? await this.setCredentialThroughBroker(provider.id, credential)
+        : await this.setCredentialThroughRuntime(provider.id, credential);
       return { credential: credentialMetadata, settings: this.settings.getPublic() };
     });
     this.ipc.handle(CH_PROVIDER_CREDENTIAL_CLEAR, async (event: IpcMainInvokeEvent, providerId: unknown) => {
       this.assertSender(event);
       const provider = this.requireProvider(providerId);
       this.assertNoActiveTurn();
-      this.requireWorkspace();
-      await this.requireCurrentRuntime().deleteProviderCredential(provider.id);
-      await this.restartIfConfigured();
+      if (this.credentialBroker) await this.clearCredentialThroughBroker(provider.id);
+      else {
+        this.requireWorkspace();
+        await this.requireCurrentRuntime().deleteProviderCredential(provider.id);
+      }
       return this.providerCredentialMetadata(provider.id);
+    });
+    this.ipc.handle(CH_PROVIDER_CONNECTION_TEST, async (
+      event: IpcMainInvokeEvent,
+      providerId: unknown,
+      credentialOverride?: unknown,
+    ): Promise<ProviderConnectionTestResult> => {
+      this.assertSender(event);
+      const provider = this.requireProvider(providerId);
+      if (credentialOverride !== undefined && typeof credentialOverride !== 'string') {
+        throw new Error('invalid credential');
+      }
+      this.assertNoActiveTurn();
+      this.requireWorkspace();
+      const configuredBase = provider.id === 'anthropic'
+        ? this.settings.getPublic().apiBaseUrl
+        : undefined;
+      const reference = provider.defaultModel ?? '';
+      const slash = reference.indexOf('/');
+      const model = slash >= 0 ? reference.slice(slash + 1) : reference;
+      const testCredential = await resolveProviderTestCredential(
+        provider.id,
+        credentialOverride,
+        this.credentialBroker,
+      );
+      return this.requireCurrentRuntime().testProviderConnection(
+        provider.id,
+        configuredBase ?? provider.defaultApiBase,
+        model,
+        testCredential,
+      );
+    });
+    this.ipc.handle(CH_PLUGIN_SECRET_GET, async (
+      event: IpcMainInvokeEvent,
+      pluginId: unknown,
+      key: unknown,
+    ) => {
+      this.assertSender(event);
+      if (typeof pluginId !== 'string' || typeof key !== 'string') throw new Error('invalid plugin secret reference');
+      if (!this.credentialBroker) {
+        return { pluginId, key, configured: false, storageError: '安全凭据代理不可用。' } satisfies PluginSecretMetadata;
+      }
+      const preview = await this.credentialBroker.previewPluginSecret(pluginId, key);
+      return {
+        pluginId: preview.pluginId,
+        key: preview.key,
+        configured: preview.configured,
+        ...(preview.maskedValue ? { maskedValue: preview.maskedValue } : {}),
+      } satisfies PluginSecretMetadata;
+    });
+    this.ipc.handle(CH_PLUGIN_SECRET_SET, async (
+      event: IpcMainInvokeEvent,
+      pluginId: unknown,
+      key: unknown,
+      secret: unknown,
+    ) => {
+      this.assertSender(event);
+      if (typeof pluginId !== 'string' || typeof key !== 'string' || typeof secret !== 'string') {
+        throw new Error('invalid plugin secret');
+      }
+      if (!this.credentialBroker) throw new Error('secure plugin credential broker is unavailable');
+      const preview = await this.credentialBroker.setPluginSecret(pluginId, key, secret);
+      let restartRequired = this.hasActiveWork();
+      if (!restartRequired) {
+        try {
+          await this.restartIfConfigured();
+        } catch (error) {
+          restartRequired = true;
+          this.diagnostics.add('warn', 'host', error);
+        }
+      }
+      return {
+        pluginId: preview.pluginId,
+        key: preview.key,
+        configured: preview.configured,
+        ...(preview.maskedValue ? { maskedValue: preview.maskedValue } : {}),
+        ...(restartRequired ? { restartRequired: true } : {}),
+      } satisfies PluginSecretMetadata;
+    });
+    this.ipc.handle(CH_PLUGIN_SECRET_CLEAR, async (
+      event: IpcMainInvokeEvent,
+      pluginId: unknown,
+      key: unknown,
+    ) => {
+      this.assertSender(event);
+      if (typeof pluginId !== 'string' || typeof key !== 'string') throw new Error('invalid plugin secret reference');
+      if (!this.credentialBroker) throw new Error('secure plugin credential broker is unavailable');
+      await this.credentialBroker.deletePluginSecret(pluginId, key);
+      let restartRequired = this.hasActiveWork();
+      if (!restartRequired) {
+        try {
+          await this.restartIfConfigured();
+        } catch (error) {
+          restartRequired = true;
+          this.diagnostics.add('warn', 'host', error);
+        }
+      }
+      return { pluginId, key, configured: false, ...(restartRequired ? { restartRequired: true } : {}) } satisfies PluginSecretMetadata;
     });
     this.ipc.handle(CH_BRIDGE_RESTART, async (event: IpcMainInvokeEvent, sessionId: unknown) => {
       this.assertSender(event);
@@ -501,6 +655,20 @@ export class HostController {
       this.assertSender(event);
       return readMicrophoneAccess(this.mediaAccess);
     });
+    this.ipc.handle(CH_NATIVE_AUDIO_REQUEST, async (event: IpcMainInvokeEvent, command: unknown) => {
+      this.assertSender(event);
+      if (!this.nativeAudio) throw new Error('native audio is unavailable on this host');
+      return this.nativeAudio.request(command);
+    });
+    this.ipc.handle(CH_NATIVE_AUDIO_ENGINE_REQUEST, async (
+      event: IpcMainInvokeEvent,
+      sessionId: unknown,
+      op: unknown,
+    ) => {
+      this.assertSender(event);
+      if (!this.nativeAudio) throw new Error('native audio is unavailable on this host');
+      return this.nativeAudio.executeEngineRequest(sessionId, op);
+    });
   }
 
   private assertSender(event: IpcMainInvokeEvent): void {
@@ -523,7 +691,18 @@ export class HostController {
     }
   }
 
-  private bootstrap(): BootstrapState {
+  private async bootstrap(): Promise<BootstrapState> {
+    if (this.credentialBroker) {
+      try {
+        await this.refreshCredentialBrokerStatus();
+      } catch (error) {
+        const diagnostic = sanitizeDiagnostic(error);
+        this.brokerStorageError = credentialBrokerDisplayError(diagnostic);
+        this.brokerConfiguredProviders.clear();
+        this.brokerCredentialPreviews.clear();
+        this.diagnostics.add('warn', 'host', `credential broker status refresh failed: ${diagnostic}`);
+      }
+    }
     const revision = ++this.bootstrapRevision;
     const activeSession = this.settings.getPublic().activeSession;
     const activeRuntime = this.currentRuntime();
@@ -549,6 +728,9 @@ export class HostController {
         ...(state.error ? { error: state.error } : {}),
       }])),
       providerCredentials: this.providerCredentialSnapshot(),
+      ...(this.credentialBroker
+        ? { credentialBrokerAvailable: this.brokerStorageError === undefined }
+        : {}),
       ...(pendingAskUserQuestions.length > 0 ? { pendingAskUserQuestions: [...pendingAskUserQuestions] } : {}),
       connection: activeRuntime?.connectionState ?? legacy.connectionState ?? { status: 'idle' },
       versions: {
@@ -626,20 +808,31 @@ export class HostController {
       activeCredentialProviderIds?: readonly string[];
       persistedCredentialProviderIds?: readonly string[];
       providerCredentialStorageEncrypted?: boolean;
+      providerCredentialPreviews?: Readonly<Record<string, string>>;
     };
     const activeProviders = new Set(
       (runtime?.connectionState ?? legacy.connectionState)?.status === 'connected'
         ? runtime?.activeCredentialProviderIds ?? legacy.activeCredentialProviderIds ?? []
         : [],
     );
-    const persistedProviders = new Set(runtime?.persistedCredentialProviderIds ?? legacy.persistedCredentialProviderIds ?? []);
-    const engineStorageEncrypted = runtime?.providerCredentialStorageEncrypted ?? legacy.providerCredentialStorageEncrypted ?? false;
+    const persistedProviders = this.credentialBroker
+      ? new Set(this.brokerConfiguredProviders)
+      : new Set(runtime?.persistedCredentialProviderIds ?? legacy.persistedCredentialProviderIds ?? []);
+    const engineStorageEncrypted = this.credentialBroker
+      ? this.brokerStorageError === undefined
+      : runtime?.providerCredentialStorageEncrypted ?? legacy.providerCredentialStorageEncrypted ?? false;
+    const credentialPreviews = this.credentialBroker
+      ? Object.fromEntries(this.brokerCredentialPreviews)
+      : runtime?.providerCredentialPreviews ?? legacy.providerCredentialPreviews ?? {};
     return PROVIDER_IDS.map((providerId) => {
       if (persistedProviders.has(providerId)) {
         return {
           providerId,
           configured: true,
           encryptionAvailable: engineStorageEncrypted,
+          ...(credentialPreviews[providerId]
+            ? { credentialPreview: credentialPreviews[providerId] }
+            : {}),
         };
       }
       if (activeProviders.has(providerId)) {
@@ -647,16 +840,89 @@ export class HostController {
           providerId,
           configured: true,
           encryptionAvailable: false,
+          ...(credentialPreviews[providerId]
+            ? { credentialPreview: credentialPreviews[providerId] }
+            : {}),
           runtimeOnly: true,
         };
       }
-      return { providerId, configured: false, encryptionAvailable: engineStorageEncrypted };
+      return {
+        providerId,
+        configured: false,
+        encryptionAvailable: engineStorageEncrypted,
+        ...(this.brokerStorageError ? { storageError: this.brokerStorageError } : {}),
+      };
     });
   }
 
   private providerCredentialMetadata(providerId: string): ProviderCredentialMetadata {
     return this.providerCredentialSnapshot().find((metadata) => metadata.providerId === providerId)
       ?? { providerId, configured: false, encryptionAvailable: false };
+  }
+
+  private async refreshCredentialBrokerStatus(previewProviderId?: string): Promise<void> {
+    if (!this.credentialBroker) return;
+    const nextConfigured = new Set(
+      (await this.credentialBroker.listStatus(PROVIDER_IDS))
+        .filter((entry: CredentialBrokerStatus) => entry.configured)
+        .map((entry: CredentialBrokerStatus) => entry.providerId),
+    );
+    this.brokerStorageError = undefined;
+    this.brokerConfiguredProviders.clear();
+    for (const providerId of nextConfigured) this.brokerConfiguredProviders.add(providerId);
+    for (const providerId of PROVIDER_IDS) {
+      if (!nextConfigured.has(providerId)) this.brokerCredentialPreviews.delete(providerId);
+    }
+    if (!previewProviderId) return;
+    const preview = await this.credentialBroker.preview(previewProviderId);
+    if (!preview.configured) {
+      this.brokerConfiguredProviders.delete(previewProviderId);
+      this.brokerCredentialPreviews.delete(previewProviderId);
+      return;
+    }
+    this.brokerConfiguredProviders.add(previewProviderId);
+    if (preview.maskedValue) this.brokerCredentialPreviews.set(previewProviderId, preview.maskedValue);
+    else this.brokerCredentialPreviews.delete(previewProviderId);
+  }
+
+  private async setCredentialThroughRuntime(providerId: string, credential: string): Promise<ProviderCredentialMetadata> {
+    this.requireWorkspace();
+    const stored = await this.requireCurrentRuntime().setProviderCredential(providerId, credential);
+    if (!stored.configured_provider_ids.includes(providerId)) {
+      throw new Error(`provider credential was not persisted (${providerId})`);
+    }
+    return {
+      providerId,
+      configured: true,
+      encryptionAvailable: stored.storage_encrypted,
+      ...(stored.credential_previews?.[providerId]
+        ? { credentialPreview: stored.credential_previews[providerId] }
+        : {}),
+    };
+  }
+
+  private async setCredentialThroughBroker(providerId: string, credential: string): Promise<ProviderCredentialMetadata> {
+    const stored = await this.credentialBroker!.set(providerId, credential);
+    if (!stored.configured) throw new Error(`provider credential was not persisted (${providerId})`);
+    await this.bridge.refreshCachedProviderCredential(providerId, credential);
+    this.brokerStorageError = undefined;
+    this.brokerConfiguredProviders.add(providerId);
+    if (stored.maskedValue) this.brokerCredentialPreviews.set(providerId, stored.maskedValue);
+    else this.brokerCredentialPreviews.delete(providerId);
+    return {
+      providerId,
+      configured: true,
+      encryptionAvailable: true,
+      ...(stored.maskedValue ? { credentialPreview: stored.maskedValue } : {}),
+    };
+  }
+
+  private async clearCredentialThroughBroker(providerId: string): Promise<void> {
+    await this.bridge.clearCachedProviderCredential(providerId);
+    await this.credentialBroker!.delete(providerId);
+    this.brokerConfiguredProviders.delete(providerId);
+    this.brokerCredentialPreviews.delete(providerId);
+    this.brokerStorageError = undefined;
   }
 
   private requireProvider(providerId: unknown) {
@@ -729,17 +995,6 @@ export class HostController {
     await this.bridge.restart(ref);
   }
 
-  private updateProviderDefaultModel(model: string): void {
-    try {
-      this.settings.update({ model });
-    } catch (error) {
-      // The credential write is already authoritative. A settings mirror
-      // failure is recoverable and must not turn a successful credential write
-      // into a renderer-visible persistence failure.
-      this.diagnostics.add('error', 'host', `provider credential persisted but default model update failed: ${sanitizeDiagnostic(error)}`);
-    }
-  }
-
   private requireCurrentRuntime() {
     const ref = this.settings.getPublic().activeSession;
     if (!ref) throw new Error('open a session first');
@@ -751,7 +1006,13 @@ export class HostController {
     this.catalogRequestGenerations.set(projectPath, generation);
     try {
       const result = await this.sessionCatalog.list(projectPath);
-      const state = { sessions: result.sessions.map(({ empty_session: _emptySession, ...session }) => session) };
+      const state = {
+        sessions: result.sessions.map(({
+          empty_session: _emptySession,
+          resume_model: _resumeModel,
+          ...session
+        }) => session),
+      };
       if (this.catalogRequestGenerations.get(projectPath) === generation) this.catalogs.set(projectPath, state);
       return state;
     } catch (error) {
@@ -791,7 +1052,11 @@ export class HostController {
     if (this.isProjectClosing(project)) throw new Error('project is closing');
     const canonical = { projectPath: project, sessionId: ref.sessionId } satisfies SessionRef;
     const session = await this.assertSessionBelongsToProject(canonical);
-    await this.bridge.openSession(canonical, session?.empty_session === true);
+    await this.bridge.openSession(
+      canonical,
+      session?.empty_session === true,
+      session?.resume_model,
+    );
     // Persist navigation only after the engine has emitted a matching
     // session_resumed event. A failed/corrupt resume leaves the visible session
     // and selected Project unchanged.
@@ -832,13 +1097,17 @@ export class HostController {
     }
     const catalog = await this.sessionCatalog.list(project);
     this.catalogs.set(project, {
-      sessions: catalog.sessions.map(({ empty_session: _emptySession, ...session }) => session),
+      sessions: catalog.sessions.map(({
+        empty_session: _emptySession,
+        resume_model: _resumeModel,
+        ...session
+      }) => session),
     });
     const first = catalog.sessions[0];
     const ref = first
       ? { projectPath: project, sessionId: first.uuid }
       : await this.bridge.newSession(project);
-    if (first) await this.bridge.openSession(ref, first.empty_session === true);
+    if (first) await this.bridge.openSession(ref, first.empty_session === true, first.resume_model);
     this.settings.activateProject(project);
     if (first) this.settings.setActiveSession(ref);
     else this.settings.setActiveSessionDraft(ref);
@@ -872,9 +1141,14 @@ export class HostController {
       CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR,
       CH_WORKSPACE_FILES_SEARCH,
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
-      CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET,
+      CH_PROVIDER_CONNECTION_TEST,
+      CH_PLUGIN_SECRET_GET, CH_PLUGIN_SECRET_SET, CH_PLUGIN_SECRET_CLEAR,
+      CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET, CH_MICROPHONE_ACCESS_GET,
       CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_OPEN_SYSTEM_SETTINGS,
+      CH_NATIVE_AUDIO_REQUEST, CH_NATIVE_AUDIO_ENGINE_REQUEST,
     ]) this.ipc.removeHandler(channel);
+    this.offNativeAudio?.();
+    this.offNativeAudio = undefined;
     this.registered = false;
     this.targets.clear();
   }

@@ -46,8 +46,10 @@ import { Stage } from '../src/renderer/components/Stage';
 import { ToolCall, toolIconName } from '../src/renderer/components/ToolCall';
 import {
   ASSISTANT_NARRATION_COLLAPSE_MAX_CHARS,
+  compactProgressPercent,
   NARRATION_COLLAPSE_MAX_CHARS,
   type CommandRunItem,
+  type CompactionRunItem,
   type NarrationRunItem,
   type ToolRunItem,
 } from '../src/renderer/model/runItem';
@@ -85,6 +87,49 @@ const DIFF: StructuredDiffDto = {
   truncated_rows: 0,
   rows: [{ kind: 'add', line_no: 12, hunk: 0, segments: [{ text: 'let a = 2;', class: 'plain' }] }],
 };
+
+function renderCompaction(item: CompactionRunItem): string {
+  return render(React.createElement(Stage, { liveItems: [item], sessionKey: 'session-a' }));
+}
+
+test('compaction status exposes CLI-compatible estimated progress and terminal summaries', () => {
+  const running = renderCompaction({ type: 'compaction', id: 'compact-1', status: 'running' });
+  assert.match(running, /role="status"/);
+  assert.match(running, /Compacting context/);
+  assert.match(running, /class="compact-progress-track"/);
+  assert.match(running, /aria-label="Compaction in progress"/);
+  assert.match(running, /aria-valuenow="0"/);
+  assert.match(running, />0% · 0s<\/span>/);
+  assert.match(running, /--sweep-base:/);
+  assert.match(running, /--sweep-highlight:/);
+
+  const complete = renderCompaction({
+    type: 'compaction',
+    id: 'compact-1',
+    status: 'complete',
+    messagesBefore: 18,
+    messagesAfter: 4,
+    bytesSaved: 32_768,
+  });
+  assert.match(complete, /Context compacted/);
+  assert.match(complete, /18 → 4 messages/);
+  assert.match(complete, /32 KB saved/);
+  assert.doesNotMatch(complete, /compact-progress-track/);
+
+  const failed = renderCompaction({
+    type: 'compaction', id: 'compact-1', status: 'error', detail: 'provider rate limited',
+  });
+  assert.match(failed, /role="alert"/);
+  assert.match(failed, /Compaction failed/);
+  assert.match(failed, /provider rate limited/);
+});
+
+test('compaction progress matches the CLI exponential estimate and never claims completion', () => {
+  assert.equal(compactProgressPercent(0), 0);
+  assert.equal(compactProgressPercent(4_000), 4);
+  assert.equal(compactProgressPercent(90_000), 63);
+  assert.equal(compactProgressPercent(10_000_000), 95);
+});
 
 // ── Message collapse defaults and accessible markup ──────────────────────────
 
@@ -512,6 +557,34 @@ test('the permission dialog renders the FULL command it asks you to approve', ()
   assert.match(redacted, /\[REDACTED\]/);
 });
 
+test('the permission dialog keeps the compact macOS hierarchy without changing its actions', () => {
+  const request: PermissionRequest = {
+    request_id: 9,
+    kind: {
+      type: 'tool_use_confirm',
+      tool_name: 'WebFetch',
+      tool_input_json: JSON.stringify({ url: 'https://example.com', prompt: 'Summarize the page' }),
+      default_allow: false,
+    },
+  };
+  const html = render(
+    React.createElement(PermissionPrompt, { request, onApprove: () => {}, onDeny: () => {} }),
+  );
+
+  assert.match(html, /aria-labelledby="lingxi-permission-title"/);
+  assert.match(html, /<h2[^>]*id="lingxi-permission-title"[^>]*>Allow WebFetch\?<\/h2>/);
+  assert.match(html, /class="desktop-dialog-header"/);
+  assert.match(html, /class="desktop-dialog-body"/);
+  assert.match(html, /class="permission-prompt-request-card"/);
+  assert.match(html, /id="lingxi-permission-risk"/);
+  assert.doesNotMatch(html, />Permission request</);
+  assert.doesNotMatch(html, />Requested input</);
+  assert.match(
+    html,
+    /<button[^>]*>Deny<\/button>[\s\S]*<button[^>]*>Allow matching actions<\/button>[\s\S]*<button[^>]*>Allow once<\/button>/,
+  );
+});
+
 test('session prompts are non-modal and do not install a global Tab trap', () => {
   const permission: PermissionRequest = {
     request_id: 21,
@@ -543,6 +616,9 @@ test('session prompts are non-modal and do not install a global Tab trap', () =>
   ];
   for (const html of rendered) {
     assert.match(html, /role="dialog"/);
+    assert.match(html, /class="desktop-dialog-overlay"/);
+    assert.match(html, /class="desktop-dialog-panel desktop-dialog-panel--/);
+    assert.match(html, /class="desktop-dialog-actions"/);
     assert.doesNotMatch(html, /aria-modal=/);
   }
 
@@ -550,7 +626,24 @@ test('session prompts are non-modal and do not install a global Tab trap', () =>
     const source = readFileSync(new URL(`../src/renderer/components/${filename}`, import.meta.url), 'utf8');
     assert.doesNotMatch(source, /document\.addEventListener\(['"]keydown['"]/);
     assert.doesNotMatch(source, /event\.key !== ['"]Tab['"]/);
-    assert.match(source, /onKeyDown=/);
+    assert.match(source, /<DesktopDialog/);
+    assert.match(source, /onEscape=/);
+  }
+  const dialogSource = readFileSync(new URL('../src/renderer/components/DesktopDialog.tsx', import.meta.url), 'utf8');
+  assert.match(dialogSource, /onKeyDown=/);
+});
+
+test('session interaction prompts share the global Desktop dialog shell', () => {
+  const shell = readFileSync(new URL('../src/renderer/components/DesktopDialog.tsx', import.meta.url), 'utf8');
+  assert.match(shell, /desktop-dialog-overlay/);
+  assert.match(shell, /desktop-dialog-panel/);
+  assert.match(shell, /desktop-dialog-footer/);
+  assert.match(shell, /desktop-dialog-action--/);
+
+  for (const filename of ['PermissionPrompt.tsx', 'ComputerAccessPrompt.tsx', 'AskUserQuestionPrompt.tsx']) {
+    const source = readFileSync(new URL(`../src/renderer/components/${filename}`, import.meta.url), 'utf8');
+    assert.match(source, /DesktopDialogActions/);
+    assert.match(source, /DesktopDialogButton/);
   }
 });
 

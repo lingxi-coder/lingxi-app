@@ -7,6 +7,8 @@ tools:
   - LocalAppEvents
   - LocalAppResolveTemplateSelection
   - LocalAppPromoteMcpCandidate
+skills:
+  - frontend-qa
 ---
 
 # Verify a Local App
@@ -61,8 +63,14 @@ report you're relaying) actually has is not a finding.
   you read what `operator`/`tester` already gathered; re-driving the App
   to gather more is their job, not yours.
 - "Validated selection read," listed for this role in the design's
-  tool-boundary table, has no backing Host tool — cite `LocalAppGet`'s
-  record instead of a selection handle that doesn't exist.
+  tool-boundary table, is `LocalAppResolveTemplateSelection` (granted above):
+  it resolves a Host-issued `validated_selection_handle` for the run's create
+  candidate. Cite what it returns, never a handle you constructed; outside a
+  create run cite `LocalAppGet`'s record instead.
 - Never consume a confirmation receipt or promote an App to active/
   published state — findings are input to a decision someone else makes,
-  not an action you take.
+  not an action you take. The sole exception is the
+  `lingxi-local-app:local-app-mcp-authoring` workflow's `mcp-promote` step,
+  where you relay `LocalAppPromoteMcpCandidate` for a Host-gated, already-QA'd
+  candidate and return the Host result unchanged — the Host decides whether
+  and how to promote, you do not.

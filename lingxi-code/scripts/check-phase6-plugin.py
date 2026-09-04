@@ -21,8 +21,8 @@ def fail(message: str) -> None:
 
 def main() -> None:
     types = (CORE / "types.rs").read_text(encoding="utf-8")
-    if not re.search(r"APPS_SCHEMA_VERSION:\s*u32\s*=\s*3", types):
-        fail("APPS_SCHEMA_VERSION must be 3")
+    if not re.search(r"APPS_SCHEMA_VERSION:\s*u32\s*=\s*4", types):
+        fail("APPS_SCHEMA_VERSION must be 4")
     ids = (CORE / "ids.rs").read_text(encoding="utf-8")
     if "APP_ID_MAX_LEN: usize = 54" not in ids or "{0,53}" not in ids:
         fail("app id grammar must be the v3 54-character form")
@@ -41,7 +41,7 @@ def main() -> None:
         fail("MCP authoring workflow must preserve zero-tool handoff and agent orchestration")
     if "const EXTERNAL_KEYS = ['app_id', 'user_goal'];" not in workflow:
         fail("MCP authoring workflow external contract drifted")
-    print("PHASE6-PLUGIN OK: schema v3, manifest pair guards, typed MCP authoring and workflow handoff")
+    print("PHASE6-PLUGIN OK: schema v4, manifest pair guards, typed MCP authoring and workflow handoff")
 
 
 if __name__ == "__main__":

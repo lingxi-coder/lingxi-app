@@ -118,6 +118,8 @@ export interface ConversationState {
    * the result event to pick up. Cleared the moment a result consumes it.
    */
   readonly pendingSlashName: string | null;
+  /** Stable id of the optimistic `/compact` status row awaiting a terminal event. */
+  readonly activeCompactionId: string | null;
 }
 
 /** A fresh, empty conversation (no items, not running). */
@@ -134,6 +136,7 @@ export function emptyConversation(): ConversationState {
     sessionKey: '',
     nextId: 1,
     pendingSlashName: null,
+    activeCompactionId: null,
   };
 }
 
@@ -227,6 +230,33 @@ export function beginLocalSlashCommand(state: ConversationState, raw: string): C
   const next = appendUserPrompt(state, trimmed);
   const name = trimmed.split(/\s/, 1)[0] ?? '';
   return { ...next, pendingSlashName: name };
+}
+
+/**
+ * Make manual compaction visible before the bridge can report completion.
+ *
+ * Composer submission has already echoed `/compact` through
+ * {@link beginLocalSlashCommand}; command-palette and diagnostics entry points
+ * have not. The pending slash name distinguishes those paths so every entry
+ * point gets exactly one command echo and one status row.
+ */
+export function beginCompaction(state: ConversationState): ConversationState {
+  if (state.activeCompactionId !== null) {
+    const active = state.items.find((item) => item.id === state.activeCompactionId);
+    if (active?.type === 'compaction' && active.status === 'running') return state;
+  }
+
+  const pendingIsCompact = state.pendingSlashName?.trim().toLocaleLowerCase() === '/compact';
+  const base = pendingIsCompact ? state : appendUserPrompt(state, '/compact');
+  const id = itemId(base.nextId);
+  return {
+    ...base,
+    items: [...base.items, { type: 'compaction', id, status: 'running' }],
+    pendingSlashName: '/compact',
+    activeCompactionId: id,
+    lastError: null,
+    nextId: base.nextId + 1,
+  };
 }
 
 /**
@@ -452,6 +482,36 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
         },
       };
 
+    case 'compaction_completed': {
+      const items = state.items.slice();
+      const index = state.activeCompactionId === null
+        ? -1
+        : items.findIndex((item) => item.id === state.activeCompactionId && item.type === 'compaction');
+      const completed = {
+        type: 'compaction' as const,
+        status: 'complete' as const,
+        messagesBefore: event.messages_before,
+        messagesAfter: event.messages_after,
+        bytesSaved: event.bytes_saved,
+      };
+      let nextId = state.nextId;
+      if (index >= 0) {
+        items[index] = { ...items[index], ...completed } as RunItem;
+      } else {
+        items.push({ ...completed, id: itemId(nextId) });
+        nextId += 1;
+      }
+      return {
+        ...state,
+        items,
+        activeCompactionId: null,
+        pendingSlashName: state.pendingSlashName?.trim().toLocaleLowerCase() === '/compact'
+          ? null
+          : state.pendingSlashName,
+        nextId,
+      };
+    }
+
     case 'system_notice':
       if (event.is_error) return pushError(state, event.message);
       return pushNotice(state, event.message);
@@ -484,6 +544,32 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
     }
 
     case 'error': {
+      if (/^force_compact failed:\s*/i.test(event.message) && state.activeCompactionId !== null) {
+        const index = state.items.findIndex((item) => (
+          item.id === state.activeCompactionId && item.type === 'compaction'
+        ));
+        if (index >= 0) {
+          const items = state.items.slice();
+          const previous = items[index];
+          items[index] = {
+            ...previous,
+            type: 'compaction',
+            status: 'error',
+            detail: event.message
+              .replace(/^force_compact failed:\s*/i, '')
+              .replace(/^handle action failed:\s*/i, '')
+              .trim() || 'Unknown error',
+          };
+          return {
+            ...state,
+            items,
+            activeCompactionId: null,
+            pendingSlashName: state.pendingSlashName?.trim().toLocaleLowerCase() === '/compact'
+              ? null
+              : state.pendingSlashName,
+          };
+        }
+      }
       // Error is shared by turn failures and unrelated commands/listings. A
       // hard turn failure is followed by an explicit turn_ended from the
       // bridge server, so only that lifecycle event may release the

@@ -17,6 +17,8 @@ fn meta(uuid_byte: u8, secs: u64, created_secs: u64, name: &str) -> SessionMetad
         path: PathBuf::from(name),
         pr_number: None,
         custom_or_ai_title: Some(format!("title-{uuid_byte}")),
+        resume_model: None,
+        resume_model_profile: None,
     }
 }
 

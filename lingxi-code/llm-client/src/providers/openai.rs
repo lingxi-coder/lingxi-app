@@ -1184,6 +1184,28 @@ mod tests {
         &request.body_json
     }
 
+    #[test]
+    fn openrouter_numeric_400_preserves_overflow_message_for_retry() {
+        let message = "This endpoint's maximum context length is 256000 tokens. However, you requested about 260085 tokens (10691 of text input, 24791 of tool input, 224603 in the output).";
+        let response = ProviderResponse::json(
+            400,
+            serde_json::json!({
+                "error": {
+                    "message": message,
+                    "code": 400,
+                    "metadata": {"provider_name": null}
+                }
+            }),
+        );
+
+        match decode_error_response(&response) {
+            LlmError::InvalidRequest { message: decoded } => {
+                assert!(decoded.contains(message));
+            }
+            other => panic!("expected retry-visible InvalidRequest, got {other:?}"),
+        }
+    }
+
     fn request_with_named_tool_choice(model: &str) -> LlmRequest {
         let mut request = LlmRequest::new(model);
         request.tool_choice = Some(ToolChoice::Tool {

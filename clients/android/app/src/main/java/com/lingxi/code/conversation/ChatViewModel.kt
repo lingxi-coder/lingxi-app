@@ -88,6 +88,8 @@ data class ChatState(
      * this dim line — they surface in [error] as a persistent banner.
      */
     val statusLine: String? = null,
+    /** Latest manual `/compact` lifecycle; terminal state remains until the next action. */
+    val compaction: CompactionProgressUi? = null,
     /** Live/completed shell calls for the current session, keyed by task id. */
     val shellTools: List<ShellToolCardState> = emptyList(),
     /** Latest android_use invocation, used to reopen setup guidance after dismissal. */
@@ -157,6 +159,7 @@ data class ChatState(
     val requiresBackgroundExecution: Boolean
         get() = streaming ||
             liveTurnWaitingForUser ||
+            compaction?.status == CompactionProgressStatus.Running ||
             activeBackgroundTaskIds.isNotEmpty() ||
             shellTools.any { it.status == ShellToolStatus.Running } ||
             agentRun?.activeWorkers?.let { it > 0 } == true ||
@@ -564,7 +567,35 @@ class ChatViewModel(
                 s.copy(pendingQuestions = s.pendingQuestions.filterNot { it.requestId == event.requestId })
             }
             is ClientEvent.SessionEnded -> _state.update {
-                it.copy(pendingQuestions = emptyList())
+                it.copy(pendingQuestions = emptyList(), compaction = null)
+            }
+            is ClientEvent.CompactionCompleted -> _state.update { state ->
+                val previous = state.compaction
+                state.copy(
+                    compaction = CompactionProgressUi(
+                        status = CompactionProgressStatus.Completed,
+                        startedAtMillis = previous?.startedAtMillis ?: compactionClockMillis(),
+                        messagesBefore = event.messagesBefore.toInt(),
+                        messagesAfter = event.messagesAfter.toInt(),
+                        bytesSaved = event.bytesSaved.toLong(),
+                    ),
+                )
+            }
+            is ClientEvent.Error -> _state.update { state ->
+                val previous = state.compaction
+                if (
+                    previous?.status != CompactionProgressStatus.Running ||
+                    !event.message.startsWith("force_compact failed:", ignoreCase = true)
+                ) {
+                    state
+                } else {
+                    state.copy(
+                        compaction = previous.copy(
+                            status = CompactionProgressStatus.Failed,
+                            detail = compactFailureDetail(event.message),
+                        ),
+                    )
+                }
             }
                 is ClientEvent.TaskRow -> _state.update {
                     val task = event.task.toBackgroundTaskUi()
@@ -1819,6 +1850,7 @@ class ChatViewModel(
                 sessionTransitioning = true,
                 sessionReady = false,
                 statusLine = status,
+                compaction = null,
                 shellTools = emptyList(),
                 agentRun = null,
                 agentRunsByMessageId = emptyMap(),
@@ -1932,6 +1964,40 @@ class ChatViewModel(
         if (refuseWhileDurableTurnParked()) return
         if (!_state.value.sessionReady || _state.value.sessionTransitioning) return
         if (explicitCancellation?.isActive == true) return
+        if (_state.value.compaction?.status == CompactionProgressStatus.Running) return
+
+        if (isManualCompactCommand(trimmed)) {
+            if (images.isNotEmpty() || _state.value.streaming) return
+            val startedAt = compactionClockMillis()
+            if (_sourceScope.value !is ConversationScope.LocalApp) savedState?.set(KEY_DRAFT, "")
+            _state.update {
+                it.copy(
+                    isNew = false,
+                    statusLine = null,
+                    error = null,
+                    messages = it.messages + Message(role = Role.User, text = trimmed),
+                    compaction = CompactionProgressUi(
+                        status = CompactionProgressStatus.Running,
+                        startedAtMillis = startedAt,
+                    ),
+                )
+            }
+            viewModelScope.launch {
+                runCatching { source.submitClientCommand(ClientCommand.ForceCompact) }
+                    .onFailure { failure ->
+                        _state.update { state ->
+                            val active = state.compaction
+                            if (active?.status != CompactionProgressStatus.Running) state else state.copy(
+                                compaction = active.copy(
+                                    status = CompactionProgressStatus.Failed,
+                                    detail = failure.message ?: failure::class.simpleName.orEmpty(),
+                                ),
+                            )
+                        }
+                    }
+            }
+            return
+        }
 
         if (_state.value.streaming) {
             if (_sourceScope.value !is ConversationScope.LocalApp) {
@@ -1994,6 +2060,7 @@ class ChatViewModel(
             it.copy(
                 isNew = false,
                 statusLine = null,
+                compaction = null,
                 error = null, // a fresh turn clears the prior turn's error banner
                 streaming = true, // gate the composer immediately, before the first event
                 liveTurnWaitingForUser = false,

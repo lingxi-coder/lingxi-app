@@ -315,12 +315,12 @@ export function renameElectronExecutable(appPath) {
   return newPath;
 }
 
-export function rewriteInfoPlist(plistPath, version) {
+export function rewriteInfoPlist(plistPath, version, bundleId = BUNDLE_ID) {
   const replacements = {
     CFBundleDisplayName: APP_NAME,
     CFBundleExecutable: APP_NAME,
     CFBundleIconFile: 'icon.icns',
-    CFBundleIdentifier: BUNDLE_ID,
+    CFBundleIdentifier: bundleId,
     CFBundleName: APP_NAME,
     CFBundleShortVersionString: version,
     CFBundleVersion: version,
@@ -431,7 +431,10 @@ export function forbiddenContentRules(root = packageRoot) {
   return [
     ...new Set(paths.map((value) => resolve(value))),
   ].map((value) => ({ label: `absolute developer path ${value}`, pattern: new RegExp(escaped(value), 'g') })).concat([
-    { label: 'absolute macOS user path', pattern: /\/Users\/[A-Za-z0-9._-]+\//g },
+    // The official prebuilt sherpa-onnx static archive embeds its public
+    // GitHub Actions checkout prefix in C++ assertion strings. It identifies
+    // upstream source, not a local developer or secret-bearing path.
+    { label: 'absolute macOS user path', pattern: /\/Users\/(?!runner\/work\/(?:sherpa-onnx\/sherpa-onnx|onnxruntime-libs\/onnxruntime-libs)\/)[A-Za-z0-9._-]+\//g },
     { label: 'package secret canary', pattern: new RegExp(escaped(canary), 'g') },
     { label: 'API secret', pattern: /(?:sk-ant-api\d{2}|sk-proj|sk-svcacct)-[A-Za-z0-9_-]{16,}/g },
     { label: 'API secret assignment', pattern: /(?:ANTHROPIC|OPENAI|LINGXI)_API_KEY\s*[=:]\s*["']?[A-Za-z0-9_-]{12,}/g },

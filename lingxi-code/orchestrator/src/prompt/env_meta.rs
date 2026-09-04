@@ -37,11 +37,11 @@ pub fn marketing_name_for_model(model_id: &str) -> Option<&'static str> {
     let canonical = platform_api::model_capabilities::normalize_model_id(model_id);
     let has_1m = original.contains("[1m]");
 
-    if canonical == "claude-fable-5" {
-        return Some("Fable 5");
+    if canonical == "claude-fable-5-1" {
+        return Some("Fable 5.1");
     }
-    if canonical == "claude-mythos-5" {
-        return Some("Mythos 5");
+    if canonical == "claude-mythos-5-1" {
+        return Some("Mythos 5.1");
     }
     if canonical == "claude-opus-5" {
         return Some(if has_1m {
@@ -133,8 +133,8 @@ pub fn knowledge_cutoff_for_model(model_id: &str) -> Option<&'static str> {
     let canonical = platform_api::model_capabilities::normalize_model_id(model_id);
     if canonical == "claude-opus-5" {
         Some("May 2026")
-    } else if canonical == "claude-fable-5" || canonical == "claude-mythos-5" {
-        Some("January 2026")
+    } else if canonical == "claude-fable-5-1" || canonical == "claude-mythos-5-1" {
+        Some("June 2026")
     } else if canonical == "claude-sonnet-5" {
         Some("January 2026")
     } else if canonical == "claude-opus-4-8" || canonical == "claude-opus-4-7" {
@@ -325,10 +325,13 @@ mod tests {
 
     #[test]
     fn marketing_names_match_ts_map() {
-        assert_eq!(marketing_name_for_model("claude-fable-5"), Some("Fable 5"));
         assert_eq!(
-            marketing_name_for_model("claude-mythos-5"),
-            Some("Mythos 5")
+            marketing_name_for_model("claude-fable-5-1"),
+            Some("Fable 5.1")
+        );
+        assert_eq!(
+            marketing_name_for_model("claude-mythos-5-1"),
+            Some("Mythos 5.1")
         );
         assert_eq!(
             marketing_name_for_model("claude-opus-4-8"),
@@ -394,12 +397,12 @@ mod tests {
     #[test]
     fn knowledge_cutoffs_match_ts_map() {
         assert_eq!(
-            knowledge_cutoff_for_model("claude-fable-5"),
-            Some("January 2026")
+            knowledge_cutoff_for_model("claude-fable-5-1"),
+            Some("June 2026")
         );
         assert_eq!(
-            knowledge_cutoff_for_model("claude-mythos-5"),
-            Some("January 2026")
+            knowledge_cutoff_for_model("claude-mythos-5-1"),
+            Some("June 2026")
         );
         assert_eq!(
             knowledge_cutoff_for_model("claude-opus-4-8"),

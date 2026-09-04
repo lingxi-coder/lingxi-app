@@ -2869,6 +2869,88 @@ impl McpRegistry {
         self.connect_locked(config, None).await
     }
 
+    /// Build a replacement connection completely before publishing it, then
+    /// swap the named registry slot in one state/client write. A failed
+    /// candidate leaves the previous connected generation callable.
+    ///
+    /// Hosts use this for live settings reconciliation. It intentionally does
+    /// not discover an absent configuration or change source precedence; the
+    /// caller supplies the already parsed, policy-gated winning config.
+    pub async fn replace_config_atomically(
+        &self,
+        config: McpServerConfig,
+    ) -> Result<Option<McpConnectionId>, McpError> {
+        self.freeze_configuration();
+        let key = config.name.clone();
+        let lifecycle = self.lifecycle_lock(&key);
+        let _guard = lifecycle.lock().await;
+        Self::validate_connectable_config(&config)?;
+
+        let (current_config, retired_connection_id, retired_is_live) = {
+            let connections = self.connections.read().await;
+            match connections.get(&key) {
+                Some(McpConnectionState::Connected {
+                    config,
+                    connection_id,
+                    ..
+                })
+                | Some(McpConnectionState::HealthChecking {
+                    config,
+                    connection_id,
+                }) => (Some(config.clone()), Some(*connection_id), true),
+                Some(McpConnectionState::Cached {
+                    config,
+                    connection_id,
+                    ..
+                }) => (Some(config.clone()), Some(*connection_id), false),
+                Some(state) => (Some(state.config().clone()), None, false),
+                None => (None, None, false),
+            }
+        };
+        if current_config
+            .as_ref()
+            .is_some_and(|current| Self::same_config_snapshot(current, &config))
+        {
+            return Ok(retired_connection_id);
+        }
+
+        if config.disabled {
+            if let Some(connection_id) = retired_connection_id.filter(|_| retired_is_live) {
+                self.transport.disconnect(connection_id).await?;
+            }
+            self.connections.write().await.insert(
+                key.clone(),
+                McpConnectionState::Disconnected {
+                    config: config.clone(),
+                    last_error: None,
+                },
+            );
+            self.clients.write().await.shift_remove(&key);
+            self.clear_prompt_predecessors_for_key(&key).await;
+            if let Some(connection_id) = retired_connection_id {
+                self.emit_retire_event_if_shared(&config, &key, connection_id)
+                    .await;
+            }
+            return Ok(None);
+        }
+
+        let negotiation_mode = crate::protocol_negotiation::resolve_for_spec_with_transport(
+            &config.spec,
+            config.metadata.transport.as_deref(),
+            mcp_connection_timeout().as_millis() as u64,
+        );
+        let discovery = self
+            .discover_live_connection(&config, negotiation_mode)
+            .await?;
+        let connection_id = self
+            .install_live_discovery(key, config, discovery, retired_connection_id, None, None)
+            .await?;
+        if let Some(retired) = retired_connection_id.filter(|_| retired_is_live) {
+            self.disconnect_or_schedule_cleanup(retired).await;
+        }
+        Ok(Some(connection_id))
+    }
+
     /// Connect a server only while a host-owned reconciliation generation is
     /// current. The guard is checked after the server lifecycle lock is
     /// acquired and again immediately before cache/live state publication.
@@ -10300,6 +10382,35 @@ mod tests {
                 config,
                 ..
             }) if *current == connection_id && !config.disabled
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_atomic_config_replacement_preserves_connected_generation() {
+        let mock = Arc::new(BridgeMock::new(&["read"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        );
+        let original = cfg("mock");
+        let connection_id = registry.connect(original.clone()).await.unwrap();
+        mock.connect_failures_remaining.store(1, Ordering::SeqCst);
+        let mut replacement = original.clone();
+        replacement.timeout_ms = Some(42_000);
+
+        assert!(registry
+            .replace_config_atomically(replacement)
+            .await
+            .is_err());
+        assert!(registry.get_client("mock").await.is_some());
+        let connections = registry.connections.read().await;
+        assert!(matches!(
+            connections.get("mock"),
+            Some(McpConnectionState::Connected {
+                connection_id: current,
+                config,
+                ..
+            }) if *current == connection_id && McpRegistry::same_config_snapshot(config, &original)
         ));
     }
 

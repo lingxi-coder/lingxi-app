@@ -231,6 +231,11 @@ pub struct CredentialEnvelope {
     /// Provider id to API key/bearer token mappings.
     #[serde(default)]
     pub provider_keys: BTreeMap<String, String>,
+    /// Sensitive plugin configuration, keyed by plugin identity then manifest
+    /// field name. Values are injected into the runtime's process-local
+    /// credential cache before plugin discovery.
+    #[serde(default)]
+    pub plugin_secrets: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// Read and validate the one-line JSON envelope used by the packaged desktop.
@@ -271,6 +276,36 @@ pub fn read_credential_envelope<R: BufRead>(reader: &mut R) -> Result<Credential
         }
         if key.is_empty() || key.len() > MAX_STDIN_API_KEY_BYTES || key.contains('\0') {
             return Err("invalid provider credential in credential envelope".to_string());
+        }
+    }
+    let plugin_secret_count: usize = envelope.plugin_secrets.values().map(BTreeMap::len).sum();
+    if plugin_secret_count > 256 {
+        return Err("credential envelope contains too many plugin secrets".to_string());
+    }
+    for (plugin, values) in &envelope.plugin_secrets {
+        if plugin.is_empty()
+            || plugin.len() > 128
+            || !plugin
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '@'))
+        {
+            return Err("invalid plugin id in credential envelope".to_string());
+        }
+        for (field, secret) in values {
+            if field.is_empty()
+                || field.len() > 128
+                || !field.chars().enumerate().all(|(index, ch)| {
+                    ch.is_ascii_alphabetic()
+                        || ch == '_'
+                        || (index > 0 && (ch.is_ascii_digit() || matches!(ch, '.' | '-')))
+                })
+            {
+                return Err("invalid plugin secret key in credential envelope".to_string());
+            }
+            if secret.is_empty() || secret.len() > MAX_STDIN_API_KEY_BYTES || secret.contains('\0')
+            {
+                return Err("invalid plugin secret in credential envelope".to_string());
+            }
         }
     }
     Ok(envelope)
@@ -377,16 +412,16 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // assigned by `main` immediately before assembly. Never inherit them
         // from environment or argv.
         api_key: String::new(),
-        // Production: consult the real keychain. The comment above governs the
-        // PARENT-supplied secret; the shared login keychain is still a
-        // legitimate source here (see `needs_credential_driver`, which treats a
-        // stored provider key as "connected").
+        // The packaged bridge gets an explicit process-local store. Desktop,
+        // CLI, and TUI own persistent broker access; this sidecar receives only
+        // its current session credential over stdin.
         isolated_credential_storage: false,
         credential_storage_policy: if args.packaged_credential_stdin_only {
             CredentialStoragePolicy::NativeOrMemory
         } else {
             CredentialStoragePolicy::NativePreferred
         },
+        injected_plugin_secrets: BTreeMap::new(),
         api_key_helper,
         // (M13) The bridge host does not resolve managed login-method forcing
         // (the Electron parent owns credential policy) and passes no
@@ -774,6 +809,15 @@ async fn list_sessions_json_from(cwd: &Path, lingxi_home: &Path) -> Result<Strin
                 "empty_session".to_string(),
                 serde_json::Value::Bool(empty_session),
             );
+            if let Some(model) = row.resume_model.as_deref() {
+                object.insert(
+                    "resume_model".to_string(),
+                    serde_json::Value::String(platform_api::qualified_model_ref(
+                        model,
+                        row.resume_model_profile.as_deref(),
+                    )),
+                );
+            }
         }
         sessions.push(value);
     }
@@ -807,6 +851,10 @@ pub async fn assemble_with_provider_keys(
     mut cfg: DesktopConfig,
     provider_keys: BTreeMap<String, String>,
 ) -> Result<BoundServer, String> {
+    let provider_credentials_ephemeral = matches!(
+        cfg.credential_storage_policy,
+        platform_api::CredentialStoragePolicy::NativeOrMemory
+    );
     let live_session = initialize_live_session(&mut cfg)?;
     let connection = BridgeConnection::new();
 
@@ -857,7 +905,7 @@ pub async fn assemble_with_provider_keys(
         let active = active_settings_baseline(&paths, &managed);
         SettingsContext {
             paths,
-            active,
+            active: Arc::new(std::sync::RwLock::new(active)),
             managed,
         }
     };
@@ -953,11 +1001,9 @@ pub async fn assemble_with_provider_keys(
             .await;
     }
 
-    // A packaged Electron parent normally supplies no secret at launch. That
-    // does not mean the user is disconnected: CLI/TUI may already have stored
-    // the selected provider key in the shared login keychain. Runtime build
-    // computes this map from `CredentialManager`, so consult it before binding
-    // the fail-fast driver.
+    // The parent-source fact is authoritative for packaged Electron sessions.
+    // Unpackaged CLI/TUI-oriented hosts may still derive availability from
+    // their own persistent storage before binding the fail-fast driver.
     let credential_required =
         needs_credential_driver(parent_credential_supplied, &runtime.provider_availability);
 
@@ -1046,9 +1092,16 @@ pub async fn assemble_with_provider_keys(
             Some(runtime.shared_command_registry.clone()),
         )
         .with_credentials(runtime.credentials.clone())
+        .with_ephemeral_provider_credentials(provider_credentials_ephemeral)
+        .with_http(runtime.http.clone())
         .with_session_store(session_store)
         .with_settings_context(settings_context)
-        .with_mcp_paths(mcp_paths),
+        .with_mcp_paths(mcp_paths)
+        .with_mcp_registry(runtime.mcp_registry.clone())
+        .with_plugin_runtime(runtime.plugin_runtime.clone())
+        .with_hook_registry(runtime.hook_registry.clone())
+        .with_repo_root_reloader(runtime.repo_root_reloader.clone())
+        .with_file_changed_watcher(runtime.file_changed_watcher.controller()),
     );
 
     let connection = connection
@@ -1253,6 +1306,81 @@ mod tests {
         assert_eq!(empty["empty_session"], true);
     }
 
+    #[tokio::test]
+    async fn list_mode_exposes_the_private_resume_model_hint() {
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let home = tempfile::tempdir().expect("config tempdir");
+        let session_id = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+        let transcript =
+            session::jsonl::session_path(home.path(), &cwd.path().to_string_lossy(), session_id);
+        std::fs::create_dir_all(transcript.parent().expect("catalog dir"))
+            .expect("create catalog dir");
+        let user_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let assistant_id = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+        let sidechain_id = "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa";
+        let user = serde_json::json!({
+            "type": "user",
+            "uuid": user_id,
+            "parentUuid": null,
+            "sessionId": session_id,
+            "timestamp": "2026-09-03T00:00:00.000Z",
+            "cwd": cwd.path().to_string_lossy(),
+            "version": "0.12.0",
+            "isSidechain": false,
+            "message": {"role": "user", "content": "hello"},
+        });
+        let assistant = serde_json::json!({
+            "type": "assistant",
+            "uuid": assistant_id,
+            "parentUuid": user_id,
+            "sessionId": session_id,
+            "timestamp": "2026-09-03T00:00:01.000Z",
+            "cwd": cwd.path().to_string_lossy(),
+            "version": "0.12.0",
+            "isSidechain": false,
+            "modelProfile": "openrouter",
+            "message": {
+                "role": "assistant",
+                "model": "cohere/north-mini-code:free",
+                "content": [{"type": "text", "text": "hello"}]
+            },
+        });
+        let newer_sidechain = serde_json::json!({
+            "type": "assistant",
+            "uuid": sidechain_id,
+            "parentUuid": user_id,
+            "sessionId": session_id,
+            "timestamp": "2026-09-03T00:00:02.000Z",
+            "cwd": cwd.path().to_string_lossy(),
+            "version": "0.12.0",
+            "isSidechain": true,
+            "modelProfile": "deepseek",
+            "message": {
+                "role": "assistant",
+                "model": "deepseek-v4-flash",
+                "content": [{"type": "text", "text": "off branch"}]
+            },
+        });
+        std::fs::write(
+            &transcript,
+            format!("{user}\n{assistant}\n{newer_sidechain}\n"),
+        )
+        .expect("write transcript");
+
+        let json = list_sessions_json_from(cwd.path(), home.path())
+            .await
+            .expect("catalog succeeds");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid envelope");
+        let row = value["sessions"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["uuid"] == session_id))
+            .expect("session row");
+        assert_eq!(
+            row["resume_model"],
+            "openrouter/cohere/north-mini-code:free"
+        );
+    }
+
     #[test]
     fn live_registration_allows_resume_of_existing_transcript_and_cleans_up() {
         // `LiveSessionDir` and the UDS inbox are process globals in tests just
@@ -1371,7 +1499,7 @@ mod tests {
     #[test]
     fn credential_envelope_accepts_provider_keys_without_echoing_secrets() {
         let mut input = std::io::Cursor::new(
-            br#"{"api_key":null,"provider_keys":{"openai":"sk-secret","deepseek":"ds-secret"}}"#
+            br#"{"api_key":null,"provider_keys":{"openai":"sk-secret","deepseek":"ds-secret"},"plugin_secrets":{"weather@official":{"API_KEY":"plugin-secret"}}}"#
                 .to_vec(),
         );
         let envelope = read_credential_envelope(&mut input).expect("envelope parses");
@@ -1380,6 +1508,14 @@ mod tests {
             Some("sk-secret")
         );
         assert_eq!(envelope.provider_keys.len(), 2);
+        assert_eq!(
+            envelope
+                .plugin_secrets
+                .get("weather@official")
+                .and_then(|values| values.get("API_KEY"))
+                .map(String::as_str),
+            Some("plugin-secret")
+        );
 
         let secret = "x".repeat(MAX_STDIN_CREDENTIAL_BYTES + 1);
         let mut oversized = std::io::Cursor::new(
@@ -1464,6 +1600,11 @@ mod tests {
         assert!(cfg.api_key_helper.is_none());
         assert!(cfg.provider_profiles.is_none());
         assert!(has_no_credential_source(&cfg));
+        assert_eq!(
+            cfg.credential_storage_policy,
+            CredentialStoragePolicy::NativeOrMemory,
+            "packaged bridge credentials must remain process-local"
+        );
     }
 
     #[test]
@@ -1506,8 +1647,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
         let cfg = DesktopConfig {
+            // This unit test must not require the signed macOS Credential
+            // Broker or inherit a developer login keychain.
+            isolated_credential_storage: true,
             credential_storage_policy: CredentialStoragePolicy::NativePreferred,
-            isolated_credential_storage: false,
             api_base: DEFAULT_API_BASE.to_string(),
             api_key: String::new(),
             api_key_helper: None,
@@ -1532,6 +1675,7 @@ mod tests {
             deny_unresolved_ask: false,
             is_tty: false,
             injected_permission_gate: None,
+            injected_plugin_secrets: BTreeMap::new(),
             ask_user_question_tx: None,
             computer_access_tx: None,
             session_agent_observer: None,

@@ -92,9 +92,18 @@ def validate_node_modules(
     lightningcss = load_json(root / "lightningcss" / "package.json")
     if lightningcss.get("version") != EXPECTED_LIGHTNINGCSS_VERSION:
         fail(f"runtime node_modules did not resolve lightningcss@{EXPECTED_LIGHTNINGCSS_VERSION}")
-    rollup = load_json(root / "rollup" / "package.json")
-    if rollup.get("version") != "4.44.0":
-        fail("runtime node_modules did not resolve rollup@4.44.0")
+    # No `rollup` package check here, on purpose. The Rolldown move took the
+    # rollup JS package out of the graph entirely — all five seed lockfiles
+    # carry zero `rollup@` entries and two `rolldown@` ones — so asking for
+    # `rollup/package.json` could only ever raise `load_json`'s "invalid JSON
+    # … No such file or directory", failing every stage with a message that
+    # names the wrong problem.
+    #
+    # 4.44.0 is still pinned, on the artifacts that actually ship: the
+    # `@rollup/rollup-linux-*-musl` native bindings are checked by exact
+    # version, and their single real `.node` binary by name, in the
+    # `allowed_rollup_bindings` loop below. Those bindings ARE in the
+    # lockfiles; the package that used to pull them in is not.
     allowed_rolldown_bindings = expected_native_packages_for(platform, "rolldown")
     allowed_rolldown_dirs = {name.removeprefix("@rolldown/") for name in allowed_rolldown_bindings}
     rolldown_roots = (

@@ -1396,6 +1396,22 @@ visionDelegationEnabled: true)
             XCTAssertGreaterThan(sessionListCommandCount, 0)
         }
 
+        func testEngineHandleConstructionDoesNotRunOnMainThread() async throws {
+            let constructed = expectation(description: "engine handle constructed off-main")
+            let handle = TestMobileEngineHandle { _ in }
+            let source = makeSource(handleBuilder: { _, _, _ in
+                XCTAssertFalse(
+                    Thread.isMainThread,
+                    "synchronous engine construction must not block the setup UI"
+                )
+                constructed.fulfill()
+                return handle
+            })
+
+            try await source.prepare()
+            await fulfillment(of: [constructed], timeout: 1)
+        }
+
         func testBootstrapRequestsTheCompleteSessionCatalog() async throws {
             let gate = EngineSubmitGate()
             let handle = TestMobileEngineHandle { command in

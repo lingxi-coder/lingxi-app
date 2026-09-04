@@ -72,7 +72,7 @@
 use crate::definition::{HookCondition, HookDefinition, HookExecutor, HookSource};
 use crate::events::HookEventType;
 use protocol::HookId;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -209,33 +209,33 @@ impl HookPolicyGate {
 }
 
 /// Top-level settings shape consumed by [`parse_hooks_from_settings_json`].
-#[derive(Debug, Deserialize)]
-struct SettingsTop {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SettingsTop {
     #[serde(default)]
-    hooks: HashMap<String, Vec<MatcherGroup>>,
+    pub(crate) hooks: HashMap<String, Vec<MatcherGroup>>,
 }
 
-#[derive(Debug, Deserialize)]
-struct MatcherGroup {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatcherGroup {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matcher: Option<String>,
     #[serde(default)]
-    matcher: Option<String>,
-    #[serde(default)]
-    hooks: Vec<HookEntry>,
+    pub hooks: Vec<HookEntry>,
 }
 
-#[derive(Debug, Deserialize)]
-struct HookEntry {
-    #[serde(default, rename = "type")]
-    kind: Option<String>,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HookEntry {
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     /// `command` hook executable (`schemas/hooks.ts:33-34`).
-    #[serde(default)]
-    command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
     /// `command` hook exec-form `args` (`schemas/hooks.ts`): when present,
     /// `command` is resolved as an executable and spawned directly with these
     /// arguments — no shell. Carried onto [`HookExecutor::Command`]'s `args`
     /// (the executor already supports it; the loader previously dropped it).
-    #[serde(default)]
-    args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
     /// `command` hook `shell` selector (oracle 2.1.238 @ 282293705,
     /// `shell:Mr(w$u).optional()` with `w$u=["bash","powershell"]`):
     /// "Shell interpreter. 'bash' uses your $SHELL (bash/zsh/sh); 'powershell'
@@ -244,91 +244,118 @@ struct HookEntry {
     /// Kept as a raw `String` so an out-of-enum value can be rejected the way
     /// zod's `Mr(w$u)` rejects it — the whole entry is dropped — rather than
     /// silently defaulting. Carried onto [`HookExecutor::Command`]'s `shell`.
-    #[serde(default)]
-    shell: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
     /// `http` hook endpoint URL (`schemas/hooks.ts:99`). Always sent via POST.
-    #[serde(default)]
-    url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     /// `http` hook request headers (`schemas/hooks.ts:106-111`). Values may
     /// reference env vars via `$VAR`/`${VAR}`, interpolated by the executor
     /// gated on [`Self::allowed_env_vars`] (claude-code `cHm`).
-    #[serde(default)]
-    headers: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HashMap<String, String>>,
     /// `http` hook `allowedEnvVars` (`schemas/hooks.ts`): env-var names header
     /// values may interpolate. Names absent here resolve to `""`. Required for
     /// any interpolation to occur.
-    #[serde(default, rename = "allowedEnvVars")]
-    allowed_env_vars: Option<Vec<String>>,
+    #[serde(
+        default,
+        rename = "allowedEnvVars",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allowed_env_vars: Option<Vec<String>>,
     /// `mcp_tool` hook target server (oracle `McpToolHookSchema.server`,
     /// 2.1.238 @ 282295711: "Name of an already-configured MCP server to
     /// invoke"). Required by the `mcp_tool` arm.
-    #[serde(default)]
-    server: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
     /// `mcp_tool` hook target tool on [`Self::server`] (oracle
     /// `McpToolHookSchema.tool`: "Name of the tool on that server to call").
     /// Required by the `mcp_tool` arm.
-    #[serde(default)]
-    tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
     /// `mcp_tool` arguments (oracle `McpToolHookSchema.input`,
     /// `lo(H(),Fn()).optional()`): "Arguments passed to the MCP tool. String
     /// values support `${path}` interpolation from the hook input JSON (e.g.
     /// `"${tool_input.file_path}"`)." Carried onto
     /// the `input` map of [`HookExecutor::McpTool`]; the interpolation happens at
     /// invocation time (see that variant's residual note).
-    #[serde(default)]
-    input: Option<HashMap<String, serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<HashMap<String, serde_json::Value>>,
     /// `agent` / `prompt` hook prompt text (`schemas/hooks.ts:138-142` /
     /// `67-73`). For an `agent` hook it is the verifier prompt; for a `prompt`
     /// hook it is the inline-LLM evaluation prompt (with `$ARGUMENTS`).
-    #[serde(default)]
-    prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
     /// `prompt` / `agent` hook model override (`schemas/hooks.ts:81-86`).
     /// Consumed only by the `prompt` arm; the `agent` arm has no model field on
     /// its [`HookExecutor::Agent`] variant, so it is dropped there.
-    #[serde(default)]
-    model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// `prompt` hook `continueOnBlock` (`schemas/hooks.ts`): when the hook blocks
     /// (`ok:false`), sets the `decision:"block"` `continue` value. Default false
     /// (turn ends). Carried onto [`HookExecutor::Prompt`]'s `continue_on_block`;
     /// the prompt executor sets `prevent_continuation = !continue_on_block`.
-    #[serde(default, rename = "continueOnBlock")]
-    continue_on_block: Option<bool>,
+    #[serde(
+        default,
+        rename = "continueOnBlock",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub continue_on_block: Option<bool>,
     /// `timeout` in seconds, shared by all hook types
     /// (`schemas/hooks.ts:42-46` / `75-79` / `101-105` / `144-148`).
-    #[serde(default)]
-    timeout: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+    /// Optional execution priority. Higher values run before lower values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
     /// claude-code `once` (`schemas/hooks.ts:51-54`): run once then remove.
     /// Parsed and carried onto [`HookDefinition::once`]; the executor performs
     /// the self-removal after successful completion.
-    #[serde(default)]
-    once: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub once: Option<bool>,
     /// claude-code `async` (`schemas/hooks.ts`: `async:boolean().optional()
     /// .describe("If true, hook runs in background without blocking")`). Maps to
     /// [`HookDefinition::blocking`] = `!async` — `blocking == false` routes the
     /// hook to the background async registry.
-    #[serde(default, rename = "async")]
-    r#async: Option<bool>,
+    #[serde(default, rename = "async", skip_serializing_if = "Option::is_none")]
+    pub r#async: Option<bool>,
     /// Reawaken the agent after an asynchronous completion.
-    #[serde(default, rename = "asyncRewake")]
-    async_rewake: Option<bool>,
+    #[serde(
+        default,
+        rename = "asyncRewake",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub async_rewake: Option<bool>,
     /// Async timeout in milliseconds. Missing/zero resolves to 15 seconds.
-    #[serde(default, rename = "asyncTimeout")]
-    async_timeout: Option<u64>,
+    #[serde(
+        default,
+        rename = "asyncTimeout",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub async_timeout: Option<u64>,
     /// Optional meta-context used for an asynchronous rewake.
-    #[serde(default, rename = "rewakeMessage")]
-    rewake_message: Option<String>,
+    #[serde(
+        default,
+        rename = "rewakeMessage",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub rewake_message: Option<String>,
     /// claude-code `statusMessage` (`schemas/hooks.ts:47-50`): custom spinner
     /// text. Parsed and carried onto [`HookDefinition::status_message`] for the
     /// executor's live progress observer.
-    #[serde(default, rename = "statusMessage")]
-    status_message: Option<String>,
+    #[serde(
+        default,
+        rename = "statusMessage",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub status_message: Option<String>,
     /// claude-code per-hook `if` (`schemas/hooks.ts:35` `IfConditionSchema`):
     /// a permission-rule-syntax pattern (e.g. `"Bash(git push:*)"`) that gates
     /// the hook on the tool name + tool input matching. Parsed and carried onto
     /// [`HookCondition::if_pattern`], evaluated by
     /// [`crate::matcher::matches_if_condition`] in `match_event`.
-    #[serde(default, rename = "if")]
-    if_pattern: Option<String>,
+    #[serde(default, rename = "if", skip_serializing_if = "Option::is_none")]
+    pub if_pattern: Option<String>,
 }
 
 /// Default agent type for an `agent` hook.
@@ -415,7 +442,7 @@ fn parse_into(raw: &str, source: HookSource) -> Result<Vec<HookDefinition>, serd
                     // path here. Defaults to blocking when the field is absent.
                     blocking: !entry.r#async.unwrap_or(false),
                     timeout: entry.timeout.map(Duration::from_secs),
-                    priority: 0,
+                    priority: entry.priority.unwrap_or(0),
                     once: entry.once.unwrap_or(false),
                     status_message: entry.status_message.clone(),
                     async_rewake: entry.async_rewake.unwrap_or(false),
@@ -440,7 +467,10 @@ fn parse_into(raw: &str, source: HookSource) -> Result<Vec<HookDefinition>, serd
 /// `matcher` (per-group) populates the B3 tool-name fields; `if_pattern`
 /// (per-hook) populates the `if`-condition field. A hook may carry both — both
 /// gate firing in `match_event`, mirroring claude-code's two sequential filters.
-fn build_condition(matcher: Option<&str>, if_pattern: Option<&str>) -> Option<HookCondition> {
+pub(crate) fn build_condition(
+    matcher: Option<&str>,
+    if_pattern: Option<&str>,
+) -> Option<HookCondition> {
     if matcher.is_none() && if_pattern.is_none() {
         return None;
     }
@@ -459,7 +489,7 @@ fn build_condition(matcher: Option<&str>, if_pattern: Option<&str>) -> Option<Ho
 /// timeout is NOT consumed here — it is carried
 /// onto [`HookDefinition::timeout`] by the caller for every type uniformly, so
 /// the executor's per-hook-timeout logic applies identically across arms.
-fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
+pub(crate) fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
     match entry.kind.as_deref() {
         Some("command") => {
             let command = entry.command.clone()?;
@@ -577,7 +607,7 @@ fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
 /// [`crate::events`], so all 33 are recognized here. Unrecognized names
 /// (including event names with no variant yet, and arbitrary typos) return
 /// `None` and are silently skipped by the caller.
-fn parse_event_type(name: &str) -> Option<HookEventType> {
+pub(crate) fn parse_event_type(name: &str) -> Option<HookEventType> {
     match name {
         "PreToolUse" => Some(HookEventType::PreToolUse),
         "PostToolUse" => Some(HookEventType::PostToolUse),
@@ -616,6 +646,44 @@ fn parse_event_type(name: &str) -> Option<HookEventType> {
         "MessageDisplay" => Some(HookEventType::MessageDisplay),
         "DirectoryAdded" => Some(HookEventType::DirectoryAdded),
         _ => None,
+    }
+}
+
+pub(crate) fn event_type_name(event_type: &HookEventType) -> &'static str {
+    match event_type {
+        HookEventType::PreToolUse => "PreToolUse",
+        HookEventType::PostToolUse => "PostToolUse",
+        HookEventType::PostToolUseFailure => "PostToolUseFailure",
+        HookEventType::Notification => "Notification",
+        HookEventType::UserPromptSubmit => "UserPromptSubmit",
+        HookEventType::SessionStart => "SessionStart",
+        HookEventType::SessionEnd => "SessionEnd",
+        HookEventType::Stop => "Stop",
+        HookEventType::StopFailure => "StopFailure",
+        HookEventType::SubagentStart => "SubagentStart",
+        HookEventType::SubagentStop => "SubagentStop",
+        HookEventType::PreCompact => "PreCompact",
+        HookEventType::PostCompact => "PostCompact",
+        HookEventType::PreModelSwitch => "PreModelSwitch",
+        HookEventType::PostModelSwitch => "PostModelSwitch",
+        HookEventType::PermissionRequest => "PermissionRequest",
+        HookEventType::PermissionDenied => "PermissionDenied",
+        HookEventType::Setup => "Setup",
+        HookEventType::TeammateIdle => "TeammateIdle",
+        HookEventType::TaskCreated => "TaskCreated",
+        HookEventType::TaskCompleted => "TaskCompleted",
+        HookEventType::Elicitation => "Elicitation",
+        HookEventType::ElicitationResult => "ElicitationResult",
+        HookEventType::ConfigChange => "ConfigChange",
+        HookEventType::WorktreeCreate => "WorktreeCreate",
+        HookEventType::WorktreeRemove => "WorktreeRemove",
+        HookEventType::InstructionsLoaded => "InstructionsLoaded",
+        HookEventType::CwdChanged => "CwdChanged",
+        HookEventType::FileChanged => "FileChanged",
+        HookEventType::PostToolBatch => "PostToolBatch",
+        HookEventType::UserPromptExpansion => "UserPromptExpansion",
+        HookEventType::MessageDisplay => "MessageDisplay",
+        HookEventType::DirectoryAdded => "DirectoryAdded",
     }
 }
 

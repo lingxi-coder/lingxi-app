@@ -25,11 +25,10 @@ export interface SettingsFile {
   parse_error?: string;
 }
 
-/** 已解析好的引擎设置快照。解析 wire 上的 JSON 字符串是桥接层的工作，不在这里做。 */
+/** 已解析好的分层设置快照。解析 wire 上的 JSON 字符串是桥接层的工作，不在这里做。 */
 export interface SettingsSnapshot {
   files: SettingsFile[];
   effective: Record<string, unknown>;
-  active: Record<string, unknown>;
   provenance: Record<string, string>;
   locked: string[];
   /**
@@ -108,19 +107,6 @@ export function rowState(
   return winnerRank > editingRank
     ? { kind: 'overridden', by: winner as Provenance }
     : { kind: 'inherited', from: winner as Provenance };
-}
-
-/**
- * 盘上生效值（`effective`）与运行中会话实际加载值（`active`）的差集。
- *
- * 这是「需要重启才能生效」提示的唯一诚实依据 —— 不是前端记账「用户刚点过
- * 保存」，那种记账在引擎重启后、或用户在终端里直接改了文件之后会撒谎。
- */
-export function pendingKeys(snapshot: SettingsSnapshot): string[] {
-  const keys = new Set([...Object.keys(snapshot.effective), ...Object.keys(snapshot.active)]);
-  return [...keys].filter(
-    (k) => JSON.stringify(snapshot.effective[k]) !== JSON.stringify(snapshot.active[k]),
-  ).sort();
 }
 
 /**

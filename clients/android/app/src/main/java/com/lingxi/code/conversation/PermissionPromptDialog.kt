@@ -1,46 +1,46 @@
 package com.lingxi.code.conversation
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Security
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
 import com.lingxi.code.R
 import com.lingxi.code.bindings.AutoModePromptDto
 import com.lingxi.code.bindings.PermissionResponseDto
 import com.lingxi.code.components.UiTags
-import com.lingxi.code.theme.LingXiTheme
 
 /**
  * The Android permission-prompt modal — the allow/deny surface for an
  * engine-parked tool request (SHIP-BLOCKER #3). Mirrors the Electron
- * `PermissionPrompt`: a scrim-backed card with the request title + a tool-input
+ * `PermissionPrompt`: a Material 3 alert with the request title + a tool-input
  * preview and actions — 拒绝 / 始终允许 / 自动模式 / 允许一次 — wired to
  * [onApprove] ([PermissionResponseDto.ALLOW_ONCE] /
  * [PermissionResponseDto.ALLOW_ALWAYS] / [PermissionResponseDto.ALLOW_AUTO])
@@ -60,147 +60,112 @@ fun PermissionPromptDialog(
     modifier: Modifier = Modifier,
 ) {
     if (state == null) return
-    val t = LingXiTheme.palette
+    val colors = MaterialTheme.colorScheme
 
-    Box(
-        modifier = modifier
-            .testTag(UiTags.PERMISSION_PROMPT)
-            .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.32f)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            modifier = Modifier
-                .widthIn(max = 420.dp)
-                .padding(horizontal = 24.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(t.windowBg)
-                .border(0.5.dp, t.border, RoundedCornerShape(14.dp)),
-        ) {
-            Column(modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 14.dp)) {
+    AlertDialog(
+        modifier = modifier.testTag(UiTags.PERMISSION_PROMPT),
+        onDismissRequest = {},
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+        ),
+        icon = {
+            Icon(
+                imageVector = Icons.Rounded.Security,
+                contentDescription = null,
+                tint = colors.primary,
+            )
+        },
+        title = {
+            Text(
+                text = state.title,
+                style = MaterialTheme.typography.headlineSmall,
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 state.worker?.let { w ->
                     val dot = runCatching { Color(android.graphics.Color.parseColor(w.color)) }
-                        .getOrDefault(t.text3)
+                        .getOrDefault(colors.onSurfaceVariant)
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.padding(bottom = 8.dp),
                     ) {
-                        Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(dot))
+                        Surface(
+                            modifier = Modifier.size(7.dp),
+                            shape = CircleShape,
+                            color = dot,
+                            content = {},
+                        )
                         Text(
                             text = if (w.team != null) "${w.name} · ${w.team}" else w.name,
                             color = dot,
-                            fontSize = 11.sp,
+                            style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.SemiBold,
                         )
                     }
                 }
-                Text(
-                    text = state.title,
-                    color = t.text,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
                 if (state.detail.isNotEmpty()) {
-                    Spacer(Modifier.size(8.dp))
-                    Text(
-                        text = state.detail,
-                        color = t.text2,
-                        fontSize = 12.sp,
-                        lineHeight = (12f * 1.5f).sp,
-                        fontFamily = FontFamily.Monospace,
-                        overflow = TextOverflow.Ellipsis,
+                    Surface(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 180.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(t.surface)
-                            .border(0.5.dp, t.border, RoundedCornerShape(8.dp))
-                            .verticalScroll(rememberScrollState())
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                    )
+                            .heightIn(max = 240.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        color = colors.surfaceContainerHighest,
+                    ) {
+                        SelectionContainer {
+                            Text(
+                                text = state.detail,
+                                color = colors.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier
+                                    .verticalScroll(rememberScrollState())
+                                    .padding(16.dp),
+                            )
+                        }
+                    }
                 }
             }
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(t.surface)
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-            ) {
-                PromptButton(
-                    label = stringResource(R.string.permission_deny),
-                    fg = t.danger,
-                    bg = Color.Transparent,
-                    borderColor = t.border,
-                    tag = UiTags.PERMISSION_DENY,
-                    onClick = { onDeny(state.requestId) },
-                    modifier = Modifier.weight(1f),
-                )
+        },
+        confirmButton = {
+            FlowRow(horizontalArrangement = Arrangement.End) {
                 if (!state.suppressAlwaysAllowRule && state.autoModePrompt == null) {
-                    PromptButton(
-                        label = stringResource(R.string.permission_allow_always),
-                        fg = t.text2,
-                        bg = Color.Transparent,
-                        borderColor = t.border,
-                        tag = UiTags.PERMISSION_ALLOW_ALWAYS,
+                    TextButton(
                         onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_ALWAYS) },
-                        modifier = Modifier.weight(1f),
-                    )
+                        modifier = Modifier.testTag(UiTags.PERMISSION_ALLOW_ALWAYS),
+                        colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant),
+                    ) {
+                        Text(stringResource(R.string.permission_allow_always))
+                    }
                 }
                 if (!state.suppressAlwaysAllowRule && state.autoModePrompt != null) {
-                    PromptButton(
-                        label = autoModeApprovalLabel(state.autoModePrompt),
-                        fg = Color.White,
-                        bg = t.accent,
-                        borderColor = t.borderStrong,
-                        tag = UiTags.PERMISSION_ALLOW_AUTO,
+                    TextButton(
                         onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_AUTO) },
-                        modifier = Modifier.weight(1f),
-                    )
+                        modifier = Modifier.testTag(UiTags.PERMISSION_ALLOW_AUTO),
+                        colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant),
+                    ) {
+                        Text(autoModeApprovalLabel(state.autoModePrompt))
+                    }
                 }
-                PromptButton(
-                    label = stringResource(R.string.permission_allow_once),
-                    fg = Color.White,
-                    bg = t.accent,
-                    borderColor = t.borderStrong,
-                    tag = UiTags.PERMISSION_ALLOW_ONCE,
+                TextButton(
                     onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_ONCE) },
-                    modifier = Modifier.weight(1f),
-                )
+                    modifier = Modifier.testTag(UiTags.PERMISSION_ALLOW_ONCE),
+                ) {
+                    Text(stringResource(R.string.permission_allow_once))
+                }
             }
-        }
-    }
-}
-
-@Composable
-private fun PromptButton(
-    label: String,
-    fg: Color,
-    bg: Color,
-    borderColor: Color,
-    tag: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier = modifier
-            .testTag(tag)
-            .clip(RoundedCornerShape(8.dp))
-            .background(bg)
-            .border(0.5.dp, borderColor, RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = fg,
-            fontSize = 12.5f.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-        )
-    }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = { onDeny(state.requestId) },
+                modifier = Modifier.testTag(UiTags.PERMISSION_DENY),
+                colors = ButtonDefaults.textButtonColors(contentColor = colors.error),
+            ) {
+                Text(stringResource(R.string.permission_deny))
+            }
+        },
+    )
 }
 
 private fun autoModeApprovalLabel(prompt: AutoModePromptDto): String =

@@ -48,10 +48,10 @@ use std::fmt::Write;
 
 /// Canonical model-id constants interpolated into the "most recent Claude
 /// models" static line. 2.1.220 (`hhc`): the line renders `latest_per_family`
-/// (`{fable: claude-fable-5, opus: claude-opus-5, sonnet: claude-sonnet-5,
+/// (`{fable: claude-fable-5-1, opus: claude-opus-5, sonnet: claude-sonnet-5,
 /// haiku: claude-haiku-4-5}`) as `${display_name}: '${id}'` pairs, with
 /// haiku-4-5 special-cased to its dated id.
-const MODEL_ID_FABLE: &str = "claude-fable-5";
+const MODEL_ID_FABLE: &str = "claude-fable-5-1";
 const MODEL_ID_OPUS: &str = "claude-opus-5";
 const MODEL_ID_SONNET: &str = "claude-sonnet-5";
 const MODEL_ID_HAIKU: &str = "claude-haiku-4-5-20251001";
@@ -143,9 +143,8 @@ pub fn format(ctx: &SystemPromptContext) -> String {
     // CLAUDE-ONLY (LingXi multi-provider divergence): claude-code only ever runs
     // Claude, so it always emits this Claude-model catalog + the Claude-Opus
     // fast-mode note. LingXi can run a non-Claude model (deepseek/gemini/…) via
-    // `/model`; feeding THAT model "the most recent Claude models are … Fable 5:
-    // 'claude-fable-5' …" both misinforms it and pollutes its self-identity (it
-    // echoes claude-fable-5 when asked "what model are you"). Gate both
+    // `/model`; feeding THAT model the first-party Claude catalog both
+    // misinforms it and pollutes its self-identity. Gate both
     // Claude-specific lines on the active model being a recognized Claude
     // profile. Raw substring matching here previously polluted custom
     // non-Claude model ids that merely contained `claude`.
@@ -155,7 +154,7 @@ pub fn format(ctx: &SystemPromptContext) -> String {
         write!(
             &mut s,
             "\n - The most recent Claude models are the Claude 5 family and Haiku 4.5. \
-Model IDs \u{2014} Fable 5: '{MODEL_ID_FABLE}', Opus 5: '{MODEL_ID_OPUS}', \
+Model IDs \u{2014} Fable 5.1: '{MODEL_ID_FABLE}', Opus 5: '{MODEL_ID_OPUS}', \
 Sonnet 5: '{MODEL_ID_SONNET}', Haiku 4.5: '{MODEL_ID_HAIKU}'. \
 When building AI applications, default to the latest and most capable Claude models."
         )
@@ -223,7 +222,7 @@ mod tests {
         assert!(out.contains("\n - You are powered by the model claude-opus-4-7."));
         assert!(!out.contains("Assistant knowledge cutoff"));
         // Static lines present, em-dash byte-exact.
-        assert!(out.contains("Model IDs \u{2014} Fable 5: 'claude-fable-5'"));
+        assert!(out.contains("Model IDs \u{2014} Fable 5.1: 'claude-fable-5-1'"));
         assert!(out.contains("Opus 5: 'claude-opus-5'"));
         assert!(out.ends_with("available on Opus 5/4.8."));
     }
@@ -250,7 +249,7 @@ The exact model ID is claude-opus-4-8[1m]."
     #[test]
     fn non_claude_model_omits_the_claude_catalog_and_fast_mode_lines() {
         // Multi-provider divergence: a non-Claude model (deepseek) must NOT be
-        // told "the most recent Claude models are … Fable 5: 'claude-fable-5'"
+        // told the first-party Claude model catalog
         // (it misinforms + pollutes self-identity). The id-only model line and
         // the LingXi CLI-availability line still render.
         let mut c = ctx();
@@ -266,8 +265,8 @@ The exact model ID is claude-opus-4-8[1m]."
             "Claude catalog line must be omitted for a non-Claude model: {out}"
         );
         assert!(
-            !out.contains("claude-fable-5"),
-            "no claude-fable-5 in a deepseek prompt: {out}"
+            !out.contains("claude-fable-5-1"),
+            "no claude-fable-5-1 in a deepseek prompt: {out}"
         );
         assert!(
             !out.contains("Fast mode for LingXi uses Claude Opus"),

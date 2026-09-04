@@ -233,12 +233,15 @@ pub fn nano_usd_to_dollars_format(nano: u64) -> String {
 pub fn first_party_name_to_canonical(name: &str) -> String {
     let name = name.to_lowercase();
     // Claude 4+ — order matters: check more specific versions first.
-    // fable-5 / mythos-5 must be explicit (they don't share a claude-opus prefix).
-    if name.contains("claude-fable-5") {
-        return "claude-fable-5".into();
+    // fable-5.1 / mythos-5.1 must be explicit (they don't share a claude-opus prefix).
+    if name.contains("claude-fable-5-1") {
+        return "claude-fable-5-1".into();
     }
-    if name.contains("claude-mythos-5") {
-        return "claude-mythos-5".into();
+    if name.contains("claude-mythos-5-1") {
+        return "claude-mythos-5-1".into();
+    }
+    if name.contains("claude-opus-5") {
+        return "claude-opus-5".into();
     }
     // opus-4-8 / opus-4-7 must precede bare claude-opus-4 to resolve correctly.
     if name.contains("claude-opus-4-8") {
@@ -390,11 +393,10 @@ impl PricingCatalog {
     #[must_use]
     pub fn builtin_reference() -> Self {
         let mut c = Self::empty();
-        // $3/$15 tier — Sonnet variants (COST_TIER_3_15, modelCost.ts:36-42).
-        // Sonnet 5 — standard $3/$15 sonnet rate class (2.1.198 registry; the
-        // $2/$10 intro pricing is billing-side only — the binary carries NO
-        // client-side promotional cost logic).
-        c.insert_anthropic("claude-sonnet-5", 3_000, 15_000, 3_750, 300);
+        // Sonnet 5 — current official $2/$10 rate, including $0.20 cache reads
+        // and $2.50 five-minute cache writes.
+        c.insert_anthropic("claude-sonnet-5", 2_000, 10_000, 2_500, 200);
+        // $3/$15 tier — prior Sonnet variants (COST_TIER_3_15).
         c.insert_anthropic("claude-sonnet-4-6", 3_000, 15_000, 3_750, 300);
         c.insert_anthropic("claude-sonnet-4-5", 3_000, 15_000, 3_750, 300);
         // claude-sonnet-4 ($3/$15) — modelCost.ts:113-114.
@@ -412,11 +414,12 @@ impl PricingCatalog {
         // $5/$25 — Opus 4.8 standard (Voe tier; binary `fHr` → `Voe` in `ukt`).
         // Fast-mode ($10/$50) handled by `opus_4_8_fast_pricing` in the calculator.
         c.insert_anthropic("claude-opus-4-8", 5_000, 25_000, 6_250, 500);
-        // $10/$50 — Fable 5 (Ypn tier; binary `iCe` → `Ypn` in `ukt`, offset 195364719).
-        // No separate fast-mode tier: binary `$2u` has no fast branch for fable-5/mythos-5.
-        c.insert_anthropic("claude-fable-5", 10_000, 50_000, 12_500, 1_000);
-        // $10/$50 — Mythos 5 (Ypn tier; binary `yFs` → `Ypn` in `ukt`).
-        c.insert_anthropic("claude-mythos-5", 10_000, 50_000, 12_500, 1_000);
+        // Opus 5 keeps the current $5/$25 Opus rate.
+        c.insert_anthropic("claude-opus-5", 5_000, 25_000, 6_250, 500);
+        // $10/$50 — Fable 5.1 and invite-only Mythos 5.1. Cache reads are
+        // $0.25/MTok; both keep the $12.50/MTok five-minute cache-write rate.
+        c.insert_anthropic("claude-fable-5-1", 10_000, 50_000, 12_500, 250);
+        c.insert_anthropic("claude-mythos-5-1", 10_000, 50_000, 12_500, 250);
         // $15/$75 — Opus 4 / 4.1 (COST_TIER_15_75, modelCost.ts:45-51).
         c.insert_anthropic("claude-opus-4-1", 15_000, 75_000, 18_750, 1_500);
         // claude-opus-4 ($15/$75) — modelCost.ts:119.
@@ -1343,9 +1346,9 @@ mod tests {
     }
 
     #[test]
-    fn builtin_has_fable_5_is_10_50() {
+    fn builtin_has_fable_5_1_is_10_50() {
         let c = PricingCatalog::builtin_reference();
-        for model_id in ["claude-fable-5", "claude-fable-5-20260601"] {
+        for model_id in ["claude-fable-5-1", "claude-fable-5-1-20260901"] {
             let mr = ModelRef {
                 provider: ProviderId::Anthropic,
                 model: model_id.into(),
@@ -1353,7 +1356,7 @@ mod tests {
             let (p, res) = c.resolve(&mr).unwrap();
             assert!(
                 matches!(res, PricingResolution::ExactModel { .. }),
-                "fable-5 must resolve exactly, got {:?}",
+                "fable-5.1 must resolve exactly, got {:?}",
                 res
             );
             // Ypn tier: $10/$50.
@@ -1368,7 +1371,7 @@ mod tests {
             );
             assert_eq!(
                 p.token_rates[&TokenClass::CacheRead].nano_usd_per_token,
-                1_000
+                250
             );
             // 1h cache-write: Ypn → $20/Mtok.
             assert_eq!(
@@ -1379,11 +1382,11 @@ mod tests {
     }
 
     #[test]
-    fn builtin_has_mythos_5_is_10_50() {
+    fn builtin_has_mythos_5_1_is_10_50() {
         let c = PricingCatalog::builtin_reference();
         let mr = ModelRef {
             provider: ProviderId::Anthropic,
-            model: "claude-mythos-5".into(),
+            model: "claude-mythos-5-1".into(),
         };
         let (p, res) = c.resolve(&mr).unwrap();
         assert!(matches!(res, PricingResolution::ExactModel { .. }));
@@ -1399,7 +1402,7 @@ mod tests {
         );
         assert_eq!(
             p.token_rates[&TokenClass::CacheRead].nano_usd_per_token,
-            1_000
+            250
         );
         assert_eq!(
             p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token,
@@ -1465,6 +1468,10 @@ mod tests {
     #[test]
     fn canonicalize_new_models() {
         assert_eq!(
+            first_party_name_to_canonical("claude-opus-5-20260812"),
+            "claude-opus-5"
+        );
+        assert_eq!(
             first_party_name_to_canonical("claude-opus-4-7-20260101"),
             "claude-opus-4-7"
         );
@@ -1473,12 +1480,12 @@ mod tests {
             "claude-opus-4-8"
         );
         assert_eq!(
-            first_party_name_to_canonical("claude-fable-5-20261001"),
-            "claude-fable-5"
+            first_party_name_to_canonical("claude-fable-5-1-20260901"),
+            "claude-fable-5-1"
         );
         assert_eq!(
-            first_party_name_to_canonical("claude-mythos-5"),
-            "claude-mythos-5"
+            first_party_name_to_canonical("claude-mythos-5-1"),
+            "claude-mythos-5-1"
         );
         // Must not collide with claude-opus-4 (bare).
         assert_eq!(
@@ -1523,9 +1530,9 @@ mod tests {
     }
 
     #[test]
-    fn builtin_has_sonnet_5_standard_3_15() {
-        // Standard sonnet rate class (2.1.198): $3/$15, cache-write $3.75,
-        // cache-read $0.30, 1h cache-write $6. NO client-side promo pricing.
+    fn builtin_has_sonnet_5_standard_2_10() {
+        // Current Sonnet 5 rates: $2/$10, cache-write $2.50,
+        // cache-read $0.20, and 1h cache-write $4.
         let c = PricingCatalog::builtin_reference();
         for model_id in ["claude-sonnet-5", "claude-sonnet-5-20260203"] {
             let mr = ModelRef {
@@ -1537,23 +1544,56 @@ mod tests {
                 matches!(res, PricingResolution::ExactModel { .. }),
                 "sonnet-5 must resolve exactly, got {res:?}"
             );
-            assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 3_000);
+            assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 2_000);
             assert_eq!(
                 p.token_rates[&TokenClass::Output].nano_usd_per_token,
-                15_000
+                10_000
             );
             assert_eq!(
                 p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token,
-                3_750
+                2_500
             );
             assert_eq!(
                 p.token_rates[&TokenClass::CacheRead].nano_usd_per_token,
-                300
+                200
             );
-            // 1h cache-write: yme sonnet tier → $6/Mtok.
+            // 1h cache-write is 2x base input pricing.
             assert_eq!(
                 p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token,
-                6_000
+                4_000
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_has_opus_5_standard_5_25() {
+        let c = PricingCatalog::builtin_reference();
+        for model_id in ["claude-opus-5", "claude-opus-5-20260812"] {
+            let mr = ModelRef {
+                provider: ProviderId::Anthropic,
+                model: model_id.into(),
+            };
+            let (p, res) = c.resolve(&mr).unwrap();
+            assert!(
+                matches!(res, PricingResolution::ExactModel { .. }),
+                "opus-5 must resolve exactly, got {res:?}"
+            );
+            assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 5_000);
+            assert_eq!(
+                p.token_rates[&TokenClass::Output].nano_usd_per_token,
+                25_000
+            );
+            assert_eq!(
+                p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token,
+                6_250
+            );
+            assert_eq!(
+                p.token_rates[&TokenClass::CacheRead].nano_usd_per_token,
+                500
+            );
+            assert_eq!(
+                p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token,
+                10_000
             );
         }
     }

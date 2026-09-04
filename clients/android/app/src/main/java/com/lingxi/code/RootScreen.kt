@@ -145,6 +145,7 @@ import android.graphics.BitmapFactory
 import android.widget.Toast
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -166,6 +167,19 @@ import kotlinx.coroutines.withTimeoutOrNull
 private const val LANDING_SWITCH_ATTEMPTS = 40
 private const val LANDING_SWITCH_RETRY_MS = 250L
 private const val SESSION_READY_TIMEOUT_MS = 20_000L
+
+/**
+ * How long a created-app landing waits for a STREAMING TURN to finish before it
+ * even attempts the scope switch.
+ *
+ * Separate from [LANDING_SWITCH_ATTEMPTS] x [LANDING_SWITCH_RETRY_MS] because
+ * the two refusals `switchWorkspaceSource` raises have different timescales: a
+ * competing switch clears in milliseconds, while a turn routinely runs for
+ * minutes. Spending the 10 s switch budget on a streaming turn is what silently
+ * dropped the hand-off. Still bounded — an unbounded wait would suspend inside
+ * `collect` and strand every later landing.
+ */
+private const val LANDING_STREAM_WAIT_MS = 180_000L
 
 /**
  * A conversation notification is usually tapped on a COLD start, so the first
@@ -1198,6 +1212,17 @@ fun RootScreen(
     LaunchedEffect(localAppsViewModel, chatViewModel, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             localAppsViewModel.createdAppLandings.collect { landing ->
+              // The whole body is wrapped so a cancellation MID-BODY re-arms
+              // the landing instead of losing it. `receiveAsFlow()` hands the
+              // element to this body before it runs, and `repeatOnLifecycle
+              // (RESUMED)` cancels this coroutine the instant the lifecycle
+              // drops below RESUMED — entirely normal if the user backgrounds
+              // the app while this body is suspended in the retry loop's
+              // `delay` or either `withTimeoutOrNull` wait below, which can
+              // together span several seconds. Without this, that ordinary
+              // backgrounding permanently drops the just-created app's landing
+              // with no retry and no error.
+              try {
                 setConversationMode(SessionMode.Code)
                 showingApps = false
                 // The result is load-bearing, not decoration: `switchWorkspaceSource`
@@ -1208,6 +1233,22 @@ fun RootScreen(
                 // it: the app's agent rooted in the wrong directory, which is the
                 // exact failure the comment above says was observed on device.
                 // Retry, the way iOS's `openCreatedAppSession` does.
+                //
+                // But the two refusals need two different waits. A competing
+                // switch clears in milliseconds; a STREAMING TURN does not, and
+                // routinely outlives the whole 40 x 250 ms budget below. Paying
+                // for it out of that budget is what dropped the hand-off into
+                // the (previously empty) `else` at the bottom: the user was left
+                // with an orphan draft app and only the unrelated
+                // 「请先停止当前任务，再切换项目。」 chat banner, which says nothing
+                // about the app that was just created. iOS parks the landing
+                // until the turn ends; wait for it here on a turn-sized budget
+                // before spending the switch budget at all.
+                if (chatViewModel.state.value.streaming) {
+                    withTimeoutOrNull(LANDING_STREAM_WAIT_MS) {
+                        chatViewModel.state.first { !it.streaming }
+                    }
+                }
                 var switched = false
                 var attempt = 0
                 while (!switched && attempt < LANDING_SWITCH_ATTEMPTS) {
@@ -1226,18 +1267,67 @@ fun RootScreen(
                     // WITHOUT setting `sessionReady`, so an unbounded wait would
                     // suspend forever inside `collect` and strand every later
                     // landing too.
-                    withTimeoutOrNull(SESSION_READY_TIMEOUT_MS) {
+                    val ready = withTimeoutOrNull(SESSION_READY_TIMEOUT_MS) {
                         chatViewModel.state.first {
                             it.sessionReady && !it.sessionTransitioning && it.session.id.isNotBlank()
                         }
-                    }?.let {
-                        // Placeholder-free copy: a shell has no brief to
-                        // interpolate, and the old text told the agent the
-                        // shape and the name were "already fixed", which is
-                        // exactly what the conversation now exists to decide.
-                        chatViewModel.send(context.getString(R.string.local_apps_kickoff))
                     }
+                    if (ready != null) {
+                        // Readiness says WHEN, never WHICH. The predicate above
+                        // is satisfied by whatever conversation becomes ready —
+                        // including the user's previous one if the transition was
+                        // abandoned or a competing switch won — so re-check the
+                        // scope, and that the transcript is still empty, before
+                        // firing. Without this the first message of the interview
+                        // can land in the wrong conversation, rooting the agent
+                        // outside the app workspace. iOS checks scope, target
+                        // session id and emptiness at its own send site.
+                        val landed = chatViewModel.sourceScope.value ==
+                            ConversationScope.LocalApp(landing.appId)
+                        if (landed && chatViewModel.state.value.messages.isEmpty()) {
+                            // Placeholder-free copy: a shell has no brief to
+                            // interpolate, and the old text told the agent the
+                            // shape and the name were "already fixed", which is
+                            // exactly what the conversation now exists to decide.
+                            chatViewModel.send(context.getString(R.string.local_apps_kickoff))
+                        }
+                    } else {
+                        // The scope switch itself succeeded, but the session
+                        // never reported ready within budget: without this, the
+                        // kickoff is silently dropped and nothing tells the user
+                        // anything happened.
+                        //
+                        // Reusing the switch-exhausted branch's banner here is a
+                        // KNOWN imprecision, deliberately accepted, not an
+                        // oversight. By this point the app exists and the user is
+                        // already sitting inside its conversation (the cover was
+                        // closed at the top of this body), so 「创建结果未知，
+                        // 请在应用库确认。」 both overstates the damage and stays
+                        // silent about the one thing that actually went wrong:
+                        // the interview kickoff was never sent, so the user has
+                        // to type the first message themselves.
+                        //
+                        // Saying that needs its OWN string key, and every
+                        // local_apps_ string is generated — one entry per locale
+                        // under clients/translations plus a generate.py run,
+                        // never a hand-edit of the generated Android or iOS
+                        // catalogs. An approximate banner is still strictly
+                        // better than the silent drop this branch replaces;
+                        // sharpen the copy the next time the catalogs are
+                        // touched for other reasons.
+                        localAppsViewModel.reportCreatedAppLandingExhausted()
+                    }
+                } else {
+                    // The switch budget is spent and the landing came off a
+                    // one-shot channel, so nothing else will carry the user in.
+                    // Say so against the app, rather than leaving only the
+                    // switch's own banner, which never names it.
+                    localAppsViewModel.reportCreatedAppLandingExhausted()
                 }
+              } catch (c: CancellationException) {
+                localAppsViewModel.rearmCreatedAppLanding(landing)
+                throw c
+              }
             }
         }
     }
@@ -1260,12 +1350,17 @@ fun RootScreen(
     LaunchedEffect(localAppsViewModel, chatViewModel, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             localAppsViewModel.draftSessionLandings.collect { landing ->
+              // See the created-app landing above for why this is wrapped:
+              // same one-shot channel, same `repeatOnLifecycle(RESUMED)`
+              // cancellation hazard.
+              try {
                 setConversationMode(SessionMode.Code)
-                showingApps = false
                 val target = landing.sessionId?.let { SessionRef(it, "") }
                 if (chatViewModel.sourceScope.value == ConversationScope.LocalApp(landing.appId)) {
                     // Already inside this app: an in-place session switch, so
-                    // the engine source is not needlessly rebound.
+                    // the engine source is not needlessly rebound. This branch
+                    // cannot be refused, so closing the cover up front is safe.
+                    showingApps = false
                     if (target == null) {
                         chatViewModel.startNewSession()
                     } else {
@@ -1273,14 +1368,31 @@ fun RootScreen(
                         chatViewModel.openSession(target, empty = true)
                     }
                 } else {
-                    switchEngineScope(
-                        engineScope = ConversationScope.LocalApp(landing.appId),
-                        project = null,
-                        target = target,
-                        newSession = target == null,
-                        resumeEmpty = true,
-                    )
+                    // Unlike the in-place branch, this CAN be refused (a
+                    // streaming turn, or a pending transition) — closing the
+                    // cover before knowing that strands the user outside the
+                    // library with only the switch's own generic banner and no
+                    // way back to the draft they just tapped. Close it only on
+                    // success. `replacePendingTransition = true` matches every
+                    // drawer call site: a transient pending-transition refusal
+                    // should not out-rank a fresh tap.
+                    if (
+                        switchEngineScope(
+                            engineScope = ConversationScope.LocalApp(landing.appId),
+                            project = null,
+                            target = target,
+                            newSession = target == null,
+                            resumeEmpty = true,
+                            replacePendingTransition = true,
+                        )
+                    ) {
+                        showingApps = false
+                    }
                 }
+              } catch (c: CancellationException) {
+                localAppsViewModel.rearmDraftSessionLanding(landing)
+                throw c
+              }
             }
         }
     }
@@ -1825,6 +1937,7 @@ fun RootScreen(
                                         relativeTime = row.relativeTime,
                                         mode = row.mode,
                                         modifiedAtEpochSeconds = row.modifiedAtEpochSeconds,
+                                        isInit = row.isInit,
                                     )
                                 },
                             )
@@ -2069,7 +2182,6 @@ fun RootScreen(
                             closeDrawer()
                             onOpenCronSettings(null)
                         },
-                        appsCount = localAppsState.apps.size,
                         // Create, then land in the new app's own conversation.
                         //
                         // `closeDrawer()` here rather than on the landing: the
@@ -2085,7 +2197,6 @@ fun RootScreen(
                         // false`, and why `LocalAppsErrorDialog` (at the bottom
                         // of this file) has to exist at all.
                         onCreateApp = {
-                            setConversationMode(SessionMode.Code)
                             closeDrawer()
                             localAppsViewModel.createAppFromDrawer()
                         },
@@ -2093,6 +2204,15 @@ fun RootScreen(
                             setConversationMode(SessionMode.Code)
                             showingApps = true
                             closeDrawer()
+                            // A library-origin create ("+" on a library card)
+                            // parks the cover on the new shell's Details page
+                            // (see `createShellApp` / `openApp`), and nothing
+                            // else resets it. Without this, browsing here after
+                            // such a create reopens onto that armed Details
+                            // destination — an unscaffolded shell with nothing
+                            // to show — instead of the library the user tapped
+                            // into. `Refresh` alone does not touch destination.
+                            localAppsViewModel.openLibrary()
                             localAppsViewModel.onAction(LocalAppsAction.Refresh)
                         },
                     )

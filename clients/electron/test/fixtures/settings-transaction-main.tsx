@@ -11,16 +11,12 @@ import { tokens } from '../../src/renderer/theme/tokens';
 // same already-tested transaction logic (`isCurrentCredentialTransaction`,
 // `persistProviderCredentialAndApplyModel`), lifted verbatim, now reached
 // through `SettingsScreen`. `initialProviderId="anthropic"` lands the shell
-// straight on that page (`resolveInitialPage`), so this fixture still drives
-// the exact same close-during-persistence and stale-session-recovery
-// scenarios end to end, just through the new shell instead of the old modal.
+// straight on that page (`resolveInitialPage`), so this fixture drives the
+// close-during-persistence behavior through the real settings shell.
 
 let persistencePending = false;
 let resolvePersistence: ((value: unknown) => void) | undefined;
 let restartCalls = 0;
-let restartTargets: string[] = [];
-let restartAttempts: string[] = [];
-let restartErrors = 0;
 let closeCalls = 0;
 let activeSessionId = 'session-a';
 let activeWork = false;
@@ -34,7 +30,7 @@ const bridge = {
     activeSession: { projectPath: '/test/project', sessionId: activeSessionId },
     runtimes: [],
     projectCatalogs: {},
-    providerCredentials: [{ providerId: 'anthropic', configured: false, encryptionAvailable: true }],
+    providerCredentials: [{ providerId: 'anthropic', configured: true, encryptionAvailable: true, credentialPreview: '••••test' }],
     connection: { status: 'connected' as const },
     diagnostics: [],
   },
@@ -50,20 +46,11 @@ const bridge = {
     persistencePending = true;
     return new Promise<unknown>((resolve) => { resolvePersistence = resolve; });
   },
-  restartBridge: async (sessionId?: string) => {
-    const requestedSessionId = sessionId ?? activeSessionId;
-    restartAttempts.push(requestedSessionId);
-    // Model the host's stale-session/active-work guard for the transaction
-    // fixture. A late completion must not restart another active session.
-    if (requestedSessionId !== activeSessionId || activeWork) {
-      restartErrors += 1;
-      throw new Error('the requested session is no longer active or has active work');
-    }
-    restartCalls += 1;
-    restartTargets.push(requestedSessionId);
-  },
+  restartBridge: async () => { restartCalls += 1; },
   setModel: async () => undefined,
   clearProviderCredential: async () => ({ providerId: 'anthropic', configured: false, encryptionAvailable: true }),
+  testProviderConnection: async () => { throw new Error('test credential rejected'); },
+  refreshProviderCredential: async () => undefined,
   setApiBaseUrl: async () => undefined,
   copyDiagnostics: async () => undefined,
   exportDiagnostics: async () => null,
@@ -79,8 +66,8 @@ function Fixture() {
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
         setter?.call(input, 'sk-pending-save');
         input?.dispatchEvent(new Event('input', { bubbles: true }));
-        const connect = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === '连接');
-        connect?.click();
+        const save = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === '保存');
+        save?.click();
       },
       resolvePersistence: () => {
         resolvePersistence?.({ credential: { providerId: 'anthropic', configured: true, encryptionAvailable: true }, settings: bridge.bootstrap.settings });
@@ -91,15 +78,16 @@ function Fixture() {
         activeSessionId = 'session-b';
         activeWork = true;
       },
-      setSessionState: (sessionId: string, work: boolean) => {
-        activeSessionId = sessionId;
-        activeWork = work;
+      startConnectionTest: () => {
+        const test = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === '测试连接');
+        test?.click();
       },
-      clickRetry: () => {
-        const retry = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === '重试引擎连接');
-        retry?.click();
+      clearStoredCredential: () => {
+        const remove = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === '删除 API Key');
+        remove?.click();
       },
-      state: () => ({ persistencePending, restartCalls, restartTargets: [...restartTargets], restartAttempts: [...restartAttempts], restartErrors, closeCalls, activeSessionId, activeWork }),
+      connectionTestErrorVisible: () => document.body.innerText.includes('test credential rejected'),
+      state: () => ({ persistencePending, restartCalls, closeCalls, activeSessionId, activeWork }),
     };
     return () => { delete window.__settingsTransactionTest; };
   }, []);
@@ -125,9 +113,10 @@ declare global {
       startSave(): void;
       resolvePersistence(): void;
       switchSessionAndStartWork(): void;
-      setSessionState(sessionId: string, work: boolean): void;
-      clickRetry(): void;
-      state(): { persistencePending: boolean; restartCalls: number; restartTargets: string[]; restartAttempts: string[]; restartErrors: number; closeCalls: number; activeSessionId: string; activeWork: boolean };
+      startConnectionTest(): void;
+      clearStoredCredential(): void;
+      connectionTestErrorVisible(): boolean;
+      state(): { persistencePending: boolean; restartCalls: number; closeCalls: number; activeSessionId: string; activeWork: boolean };
     };
   }
 }

@@ -1,5 +1,7 @@
 import type {
   AskUserQuestionRequestDto,
+  AudioOpDto,
+  AudioResultDto,
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
@@ -9,6 +11,11 @@ import type {
   SessionRowDto,
 } from '@lingxi/bridge-client';
 import type { AllowedClientCommand } from '../../shared/clientCommands.js';
+import type {
+  NativeAudioCommand,
+  NativeAudioResponse,
+  NativeAudioEvent,
+} from '../../shared/nativeAudio.js';
 import type { PinnedSessionRecord, PublicSettings, SessionRef } from '../../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../../shared/microphoneAccess.js';
 
@@ -63,9 +70,11 @@ export interface WorkspaceMetadata {
     message: string;
   };
 }
-export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; runtimeOnly?: true }
+export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; credentialPreview?: string; runtimeOnly?: true; storageError?: string }
 export interface ProviderCredentialMetadata extends CredentialMetadata { providerId: string }
+export interface PluginSecretMetadata { pluginId: string; key: string; configured: boolean; maskedValue?: string; storageError?: string; restartRequired?: boolean }
 export interface ProviderCredentialUpdate { credential: ProviderCredentialMetadata; settings: PublicSettings }
+export type ProviderConnectionTestResult = Extract<ClientEvent, { type: 'provider_connection_tested' }>;
 export interface DiagnosticEntry {
   timestamp: string;
   level: 'info' | 'warn' | 'error';
@@ -80,6 +89,8 @@ export interface BootstrapState {
   runtimes: SessionRuntimeSummary[];
   projectCatalogs: Record<string, ProjectSessionCatalogState>;
   providerCredentials?: ProviderCredentialMetadata[];
+  /** Whether credentials can be queried without a connected engine. */
+  credentialBrokerAvailable?: boolean;
   pendingAskUserQuestions?: AskUserQuestionRequestDto[];
   connection: ConnectionState;
   diagnostics: DiagnosticEntry[];
@@ -88,9 +99,14 @@ export interface BootstrapState {
 }
 export interface WorkspaceFileSearchResult { files: string[]; truncated: boolean }
 export type Unsubscribe = () => void;
+export interface NativeAudioApi {
+  request(command: NativeAudioCommand): Promise<NativeAudioResponse>;
+  onEvent(cb: (event: NativeAudioEvent) => void): Unsubscribe;
+  executeEngineRequest(sessionId: string, op: AudioOpDto): Promise<AudioResultDto>;
+}
 
 /** The macOS System Settings deep links this app opens: the computer-access TCC panel's two panes, plus the voice settings page's `microphone` row. */
-export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone';
+export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
 export interface LingxiApi {
   platform: NodeJS.Platform;
@@ -104,9 +120,13 @@ export interface LingxiApi {
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<PublicSettings>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   previewWorkspaceFile(sessionId: string, path: string): Promise<WorkspaceFilePreview>;
-  providerCredentials(): Promise<ProviderCredentialMetadata[]>;
+  providerCredentials(providerId?: string): Promise<ProviderCredentialMetadata[]>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
+  testProviderConnection(providerId: string, credentialOverride?: string): Promise<ProviderConnectionTestResult>;
+  pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
+  setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;
+  clearPluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   restartBridge(sessionId: string): Promise<void>;
   diagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;
@@ -133,6 +153,7 @@ export interface LingxiApi {
   onPermission(cb: (request: RuntimeEventEnvelope<PermissionRequest>) => void): Unsubscribe;
   onComputerAccess(cb: (request: RuntimeEventEnvelope<ComputerAccessRequestDto>) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: RuntimeEventEnvelope<ConnectionState>) => void): Unsubscribe;
+  audio: NativeAudioApi;
 }
 
 declare global {

@@ -90,6 +90,12 @@ object UiTags {
     /** The persistent drawer shortcut that opens the full-screen Android shell. */
     const val DRAWER_TERMINAL = "tag.drawerTerminal"
 
+    /** The drawer's in-app "create a local app" row. */
+    const val DRAWER_CREATE_APP = "tag.drawerCreateApp"
+
+    /** The drawer's "browse the app library" row. */
+    const val DRAWER_OPEN_APPS_LIBRARY = "tag.drawerOpenAppsLibrary"
+
     /** The dismissible offline banner shown in the chat scaffold when offline. */
     const val OFFLINE_BANNER = "tag.offlineBanner"
 

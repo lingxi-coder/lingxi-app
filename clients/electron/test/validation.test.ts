@@ -174,6 +174,62 @@ test('the settings, permission, workspace, and MCP commands pass the runtime all
   );
 });
 
+test('configuration admin writes require correlated operations, object payloads, and SHA-256 revisions', () => {
+  const revision = 'a'.repeat(64);
+  const command = {
+    type: 'skill_admin',
+    command: {
+      action: 'save_document',
+      operation_id: 42,
+      target: '/workspace/.lingxi/skills/demo',
+      scope: 'project',
+      revision,
+      payload_json: '{"name":"demo","markdown":"---\\ndescription: demo\\n---\\n"}',
+    },
+  } as const;
+  assert.deepEqual(validateClientCommand(command), command);
+  assert.throws(
+    () => validateClientCommand({ ...command, command: { ...command.command, revision: 'stale' } }),
+    /invalid skill admin revision/,
+  );
+  assert.throws(
+    () => validateClientCommand({ ...command, command: { ...command.command, payload_json: '[]' } }),
+    /invalid skill admin payload/,
+  );
+  assert.throws(
+    () => validateClientCommand({ type: 'skill_admin', command: { action: 'get_catalog', operation_id: 1 } }),
+    /read action contains write fields/,
+  );
+});
+
+test('configuration preflight operations are correlated but do not pretend to be writes', () => {
+  assert.deepEqual(
+    validateClientCommand({
+      type: 'hook_admin',
+      command: {
+        action: 'validate_document',
+        operation_id: 7,
+        payload_json: '{"scope":"project","hooks":{}}',
+      },
+    }),
+    {
+      type: 'hook_admin',
+      command: {
+        action: 'validate_document',
+        operation_id: 7,
+        payload_json: '{"scope":"project","hooks":{}}',
+      },
+    },
+  );
+  assert.throws(
+    () => validateClientCommand({
+      type: 'hook_admin',
+      command: { action: 'save_document', operation_id: 7, payload_json: '{}' },
+    }),
+    /invalid hook admin revision/,
+  );
+});
+
 test('a host-owned command that genuinely exists in the protocol is still rejected from the generic desktop command port', () => {
   assert.throws(() => validateClientCommand({ type: 'clear_session' }), /command is not allowed/);
 });
@@ -398,17 +454,18 @@ test('every AudioErrorKindDto the wire declares survives the gate', () => {
   );
 });
 
-test('a transcript cannot be sent from this renderer at all', () => {
-  // Desktop has no speech recognizer and cannot reach a provider
-  // transcription API (the renderer holds no credential — `host.ts` forwards
-  // it straight to the engine and keeps nothing). `Transcribe` is answered
-  // `failed`/`unavailable`, never with text. Keeping `transcript` OFF this
-  // gate means a fabricated transcript cannot leave the renderer even if
-  // some future code tried to send one — the same bounded-surface discipline
-  // that removed `new_session`/`resume_session` from the allowlist.
-  assert.throws(
-    () => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'transcript', text: 'invented words' } }),
-    /invalid audio result/,
+test('a bounded transcript from the native audio helper survives the gate', () => {
+  assert.deepEqual(
+    validateClientCommand({
+      type: 'audio_response',
+      request_id: 1,
+      result: { type: 'transcript', text: 'real local transcript', language: 'en-US', confidence: 0.75 },
+    }),
+    {
+      type: 'audio_response',
+      request_id: 1,
+      result: { type: 'transcript', text: 'real local transcript', language: 'en-US', confidence: 0.75 },
+    },
   );
 });
 
@@ -421,6 +478,8 @@ test('malformed audio responses are rejected rather than forwarded', () => {
   assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'recording_state', recording: 'yes' } }), /invalid audio recording state/);
   assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'recording', audio_base64: 'not base64!', mime_type: 'audio/webm' } }), /invalid audio base64/);
   assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'recording', audio_base64: 'AAEC', mime_type: '' } }), /invalid audio mime type/);
+  assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'transcript', text: '' } }), /invalid audio transcript text/);
+  assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'transcript', text: 'ok', confidence: 2 } }), /invalid audio transcript confidence/);
   assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'audio', pcm_base64: '', sample_rate_hz: -1 } }), /invalid audio sample rate/);
   assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'failed', kind: 'other', message: '' } }), /invalid audio error message/);
   assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: 'ok' }), /invalid payload/);

@@ -5442,20 +5442,19 @@ mod tests {
                 "{m}"
             );
         }
-        // sonnet-5 / fable-5: full ladder + adaptive + auto, no fast.
-        for m in ["claude-sonnet-5", "claude-fable-5"] {
+        // sonnet-5 / fable-5.1 / mythos-5.1: full ladder + adaptive + auto, no
+        // fast. Mythos 5.1 shares Fable 5.1's underlying model (see
+        // `platform-api/src/model_capabilities.rs`'s combined
+        // "claude-fable-5-1" | "claude-mythos-5-1" arm), so — unlike the old
+        // pre-rename "claude-mythos-5", which carried no registry
+        // capabilities at all — it now has the identical capability row.
+        for m in ["claude-sonnet-5", "claude-fable-5-1", "claude-mythos-5-1"] {
             assert_eq!(
                 model_capabilities(m),
                 (true, all.clone(), true, false, true),
                 "{m}"
             );
         }
-        // Mythos 5 is present in the 2.1.220 table with no registry
-        // capabilities; auto mode is derived separately for modern Claude.
-        assert_eq!(
-            model_capabilities("claude-mythos-5"),
-            (false, vec![], false, false, true)
-        );
         // sonnet-4-6 / opus-4-6: no xhigh (binary `Zne` excludes them by name).
         for m in ["claude-sonnet-4-6", "claude-opus-4-6-20260101"] {
             assert_eq!(
@@ -6462,6 +6461,8 @@ mod tests {
             path: PathBuf::from("x.jsonl"),
             pr_number: None,
             custom_or_ai_title: Some("shared".to_string()),
+            resume_model: None,
+            resume_model_profile: None,
         };
         let matches = vec![row(2, 1_700_000_001), row(1, 1_700_000_000)];
         assert_eq!(
@@ -6491,6 +6492,8 @@ mod tests {
             path: PathBuf::from(format!("{id}.jsonl")),
             pr_number: None,
             custom_or_ai_title: Some(searchable.to_string()),
+            resume_model: None,
+            resume_model_profile: None,
         }
     }
 

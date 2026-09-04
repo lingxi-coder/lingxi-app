@@ -966,19 +966,19 @@ pub(crate) struct MobileWorkflowLauncher {
 }
 
 /// Return whether a launch resolves to the Host-verified Local App plugin
-/// build workflow. Fresh launches must come from the verified plugin
-/// registry. Resumes must prove the same workflow through host-owned
-/// provenance plus an exact script-hash match. A custom workflow that merely
-/// happens to reuse the same `meta.name` is not treated as a Local App build.
+/// build workflow. A fresh OR by-name-resumed launch must come from the
+/// verified plugin registry (`verified_plugin_workflow`, which re-resolves
+/// `spec.name` against the registry's own bytes regardless of resume state --
+/// the same host-owned check either way). A `scriptPath` resume instead
+/// proves the same workflow through host-owned checkpoint provenance plus an
+/// exact script-hash match (`trusted_local_app_resume`). A custom workflow
+/// that merely happens to reuse the same `meta.name` is not treated as a
+/// Local App build.
 fn is_mobile_local_app_builtin(
     spec: &tool_workflow::WorkflowLaunchSpec,
     trusted_local_app_resume: bool,
     verified_plugin_workflow: bool,
 ) -> bool {
-    let is_resume = spec
-        .resume_from_run_id
-        .as_deref()
-        .is_some_and(|run_id| !run_id.is_empty());
     let no_script_path = spec
         .script_path
         .as_deref()
@@ -993,9 +993,14 @@ fn is_mobile_local_app_builtin(
     // registry. Its fully-qualified name is the identity, while the script
     // itself retains the short `meta.name` required by the workflow parser.
     // Only the named, non-overridden form is accepted here; an inline script
-    // cannot borrow Local App build authority by copying that name.
-    let named_plugin_builtin = !is_resume
-        && no_script_path
+    // cannot borrow Local App build authority by copying that name. Resuming
+    // BY NAME (no `scriptPath`) is accepted on the same footing as a fresh
+    // launch: `verified_plugin_workflow` re-reads the registry's current
+    // bytes and compares them against the script this launch actually
+    // resolved, which is exactly as strong a proof on a resume as on a fresh
+    // launch -- unlike a `scriptPath` resume, it is never taken on `spec`'s
+    // say-so alone.
+    let named_plugin_builtin = no_script_path
         && no_inline_override
         && spec.name.as_deref() == Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID);
     (named_plugin_builtin && verified_plugin_workflow) || trusted_local_app_resume
@@ -1035,6 +1040,43 @@ fn is_verified_plugin_workflow(
         .is_some_and(|resolved| resolved == script)
 }
 
+/// External (model-supplied) argument keys the Host launch boundary accepts
+/// for the plugin build workflow.
+///
+/// AUD-WF-03 / r2-tests-honesty-007: this is the SINGLE source of truth the
+/// `matches!`-turned-`contains` arm in
+/// [`validate_namespaced_local_app_external_args`] consumes AND the drift gate
+/// in this file's tests consumes. It used to be an inline `matches!` pattern
+/// with the same list re-typed inside the test, which meant a key ADDED at the
+/// boundary drifted invisibly: the test's own copy never grew, so nothing ever
+/// asked the script to declare it. Do not re-type these lists anywhere.
+///
+/// WP5: `name`/`brief` are the display name and one-line brief the user
+/// already confirmed conversationally before this launch. They carry no
+/// authority (the Host still owns profile, catalog and workspace identity) and
+/// they are the ONLY way the confirmed wording can reach `LocalAppStageCreate`,
+/// which is what the native create confirmation sheet renders and what
+/// `LocalAppScaffold` commits. Without them the create flow falls back to the
+/// `untitled` placeholder.
+pub(crate) const BUILD_EXTERNAL_ARG_KEYS: &[&str] = &[
+    "operation",
+    "app_id",
+    "spec",
+    "revision_prompt",
+    "quality_level",
+    "name",
+    "brief",
+];
+
+/// External argument keys accepted for the plugin use-test workflow.
+/// Same single-source-of-truth contract as [`BUILD_EXTERNAL_ARG_KEYS`].
+pub(crate) const USE_TEST_EXTERNAL_ARG_KEYS: &[&str] =
+    &["app_id", "scope", "scenarios", "quality_level"];
+
+/// External argument keys accepted for the plugin MCP-authoring workflow.
+/// Same single-source-of-truth contract as [`BUILD_EXTERNAL_ARG_KEYS`].
+pub(crate) const MCP_AUTHORING_EXTERNAL_ARG_KEYS: &[&str] = &["app_id", "user_goal"];
+
 /// Reject caller fields outside the narrow public workflow contract before
 /// the Host adds its private context.  Authority-bearing keys are accepted
 /// nowhere on the public launch surface: they are rejected here and only
@@ -1052,18 +1094,14 @@ fn validate_namespaced_local_app_external_args(
     };
     for key in object.keys() {
         let allowed = match name {
-            name if name == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID => matches!(
-                key.as_str(),
-                "operation" | "app_id" | "spec" | "revision_prompt" | "quality_level"
-            ),
+            name if name == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID => {
+                BUILD_EXTERNAL_ARG_KEYS.contains(&key.as_str())
+            }
             name if name == crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID => {
-                matches!(
-                    key.as_str(),
-                    "app_id" | "scope" | "scenarios" | "quality_level"
-                )
+                USE_TEST_EXTERNAL_ARG_KEYS.contains(&key.as_str())
             }
             name if name == crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID => {
-                matches!(key.as_str(), "app_id" | "user_goal")
+                MCP_AUTHORING_EXTERNAL_ARG_KEYS.contains(&key.as_str())
             }
             _ => true,
         };
@@ -1255,7 +1293,14 @@ fn apply_materialized_local_app_collections_with_identity(
     let operation = object
         .get("operation")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or("update")
+        .filter(|value| matches!(*value, "create" | "update" | "verify"))
+        .ok_or_else(|| {
+            tool_workflow::WorkflowLaunchError(
+                "local-app build workflow requires args.operation to be one of create, update, \
+                 verify"
+                    .to_string(),
+            )
+        })?
         .to_string();
     let is_plugin_workflow = launched_workflow_id
         == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID
@@ -1296,32 +1341,56 @@ fn apply_materialized_local_app_collections_with_identity(
                 )
             })?
             .to_string();
+        // AUD-WF-02, known-unfixed: injecting `workflow_run_id` on a trusted
+        // scriptPath resume (r1-backlog-workflow-runtime-04) lets a CREATE
+        // resume reach this call, but it does not yet make that resume
+        // succeed. `mint_run_id` reuses the run id on a resume, so this is the
+        // same capability path the interrupted run already holds, and
+        // `issue_selector_capability` fails closed with
+        // `selector_capability_exists` whenever the live (never-consumed)
+        // token is still on disk -- i.e. exactly the interrupted run one would
+        // want to resume. It only rotates the `.used` marker. Making a create
+        // resume actually resumable needs that function to rotate a LIVE
+        // capability on a Host-verified resume too; that lives in
+        // `local_app_template_catalog.rs`, outside this work package. Only the
+        // update/verify resume is proven end to end today.
         let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
             app_data_root,
             &app_id,
             &workflow_run_id,
         )
         .map_err(tool_workflow::WorkflowLaunchError)?;
-        let invocation_capability = format!("mcpv_{}", uuid::Uuid::new_v4().simple());
-        object.insert(
-            "selector_capability".into(),
-            serde_json::Value::String(selector_capability.clone()),
-        );
+        // r3-never-wired-11: `selector_capability` is also copied into
+        // `host_context` below, which is the ONLY copy the build workflow
+        // script reads (`context.selector_capability`, line ~123) -- it never
+        // reads the top-level `input.selector_capability` this used to write.
+        // r2-never-wired-05 / r2-never-wired-06: `invocation_capability`,
+        // `scaffolded` and `staging` have zero readers in that script
+        // (grepped; the only reader of `context.invocation_capability` in the
+        // plugin is the MCP-authoring workflow script, against its own
+        // freshly-minted copy from `enrich_persisted_plugin_workflow_context`).
+        // The gate this create branch is actually authorized by is
+        // `create_without_mcp` inside `approve_mcp_proposal`, not a token
+        // here -- dropping these does not change what a create run may do.
+        //
+        // AUD-WF-05: this reasoning is scoped to the CREATE branch, which is
+        // all r2-never-wired-05/06 anchor. The update/verify `host_context`
+        // literal further down still carries `invocation_capability` and
+        // `staging`; the same grep says the script does not read them there
+        // either, but removing them is outside what those findings cover and
+        // is tracked separately rather than done here.
         object.insert(
             "host_context".into(),
             serde_json::json!({
                 "source": "verified_host",
                 "operation": "create",
                 "app_id": app_id,
-                "scaffolded": false,
                 "workflow_run_id": workflow_run_id,
                 "selector_capability": selector_capability,
-                "invocation_capability": invocation_capability,
                 "template_catalog": {
                     "catalog_digest": catalog.catalog_digest,
                     "available_template_ids": catalog.templates.iter().map(|entry| entry.template_id.clone()).collect::<Vec<_>>(),
                 },
-                "staging": {"isolated": true, "final_publish": false}
             }),
         );
         let scope =
@@ -1687,12 +1756,23 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
         // bound to the same id the task receives. Host context is injected
         // before the args are serialized into TaskRegistry.
         let run_id = tool_workflow::mint_run_id(spec.resume_from_run_id.as_deref());
-        sanitize_namespaced_local_app_args(&mut spec);
+        sanitize_namespaced_local_app_args(&mut spec, expected_workflow_id);
         // The Host's own answer to "is this a Local App build, and of which
         // app": minted from the resolved app/binding, never from `spec.args`
         // or the workflow name. `None` for every other launch, which leaves
         // the task row authority-free (no workspace lease, no delete block).
-        if spec.name.as_deref() == Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID) {
+        // A fresh launch proves this through `spec.name`; a `scriptPath`
+        // resume -- the exact shape the tool's own resume hint produces,
+        // `{scriptPath, resumeFromRunId}` with no `name` -- proves it instead
+        // through `expected_workflow_id`, the host-owned checkpoint
+        // provenance resolved above. Either must inject the same key.
+        let is_build_workflow_launch = spec
+            .name
+            .as_deref()
+            .is_some_and(|name| name == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID)
+            || expected_workflow_id
+                == Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID);
+        if is_build_workflow_launch {
             if let Some(object) = spec.args.as_mut().and_then(Value::as_object_mut) {
                 object.insert("workflow_run_id".into(), Value::String(run_id.clone()));
             }
@@ -1707,7 +1787,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
         )?;
         // The create path receives the run id as a Host-injected field only;
         // it is not part of the external Workflow tool contract.
-        if spec.name.as_deref() == Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID) {
+        if is_build_workflow_launch {
             if let Some(context) = spec
                 .args
                 .as_mut()
@@ -2133,11 +2213,24 @@ fn enrich_persisted_plugin_workflow_context(
 /// from this launch boundary; allowing a caller-provided `runtime_profile`,
 /// template handle, collection list or context to survive would turn the
 /// Plugin script into its own authority source.
-fn sanitize_namespaced_local_app_args(spec: &mut tool_workflow::WorkflowLaunchSpec) {
-    let Some(name) = spec.name.as_deref() else {
-        return;
-    };
-    if !crate::local_app_plugin_binding::is_plugin_workflow_id(name) {
+///
+/// `spec.name` proves this on a fresh launch, but a `scriptPath` resume --
+/// the shape the Workflow tool's own resume hint produces -- carries no
+/// `name` at all. `expected_workflow_id` is the launcher's host-owned
+/// checkpoint-provenance answer for that case (only ever
+/// `PLUGIN_BUILD_WORKFLOW_ID` today; see `local_app_resume_resolution_for_record`),
+/// so a caller cannot forge it by omitting `name` and supplying a
+/// `scriptPath` instead.
+fn sanitize_namespaced_local_app_args(
+    spec: &mut tool_workflow::WorkflowLaunchSpec,
+    expected_workflow_id: Option<&str>,
+) {
+    let is_local_app_workflow = spec
+        .name
+        .as_deref()
+        .is_some_and(crate::local_app_plugin_binding::is_plugin_workflow_id)
+        || expected_workflow_id == Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID);
+    if !is_local_app_workflow {
         return;
     }
     let Some(object) = spec.args.as_mut().and_then(Value::as_object_mut) else {
@@ -2175,7 +2268,7 @@ mod plugin_args_tests {
             })),
             ..Default::default()
         };
-        sanitize_namespaced_local_app_args(&mut spec);
+        sanitize_namespaced_local_app_args(&mut spec, None);
         let object = spec.args.expect("args");
         assert_eq!(
             object.get("operation").and_then(Value::as_str),
@@ -2215,6 +2308,27 @@ mod plugin_args_tests {
         assert!(!is_mobile_local_app_builtin(&spec, false, false,));
     }
 
+    /// r4-workflow-runtime-02: a resume BY NAME (`resumeFromRunId` set,
+    /// `name` set, no `scriptPath`) re-resolves the script from the plugin
+    /// registry the same way a fresh by-name launch does -- so a byte match
+    /// (`verified_plugin_workflow = true`) is exactly as strong a proof of
+    /// provenance on a resume as on a fresh launch. `is_resume` alone must
+    /// not defeat that host-owned bytes match.
+    #[test]
+    fn resume_by_name_with_verified_plugin_bytes_is_still_a_local_app_builtin() {
+        let spec = tool_workflow::WorkflowLaunchSpec {
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
+            resume_from_run_id: Some("wf_resumebyname1".into()),
+            ..Default::default()
+        };
+        assert!(
+            is_mobile_local_app_builtin(&spec, false, true),
+            "a resume by name whose re-resolved script matched the verified plugin registry \
+             bytes (verified_plugin_workflow=true) must still be treated as the Local App \
+             build builtin"
+        );
+    }
+
     #[test]
     fn namespaced_plugin_rejects_renderer_and_workspace_overrides_at_launch() {
         let spec = tool_workflow::WorkflowLaunchSpec {
@@ -2246,6 +2360,170 @@ mod plugin_args_tests {
         let error = validate_namespaced_local_app_external_args(&spec)
             .expect_err("Host-owned fields must be rejected at the public launch boundary");
         assert!(error.to_string().contains("validated_selection_handle"));
+    }
+
+    /// WP5 drift gate: `local-app-build.js` maintains its own `ALLOWED_EXTERNAL`
+    /// list, and the Host rejects any launch key outside the arm above. The two
+    /// lists are written in different languages in different files, so a key
+    /// added to the script alone silently becomes unreachable: `input.<key>` is
+    /// simply `undefined` for every real launch and nothing fails loudly. That
+    /// is exactly how the user-confirmed `name`/`brief` were inert. Assert the
+    /// script's declared contract against the real validator, key by key.
+    #[test]
+    fn build_workflow_script_external_contract_is_accepted_by_the_host() {
+        let script =
+            include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let declaration = script
+            .lines()
+            .find(|line| line.starts_with("const ALLOWED_EXTERNAL ="))
+            .expect("local-app-build.js must declare ALLOWED_EXTERNAL");
+        let keys: Vec<String> = declaration
+            .split_once('[')
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .expect("ALLOWED_EXTERNAL must be an array literal")
+            .0
+            .split(',')
+            .map(|entry| entry.trim().trim_matches('\'').to_string())
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        assert!(
+            keys.contains(&"operation".to_string()) && keys.contains(&"app_id".to_string()),
+            "ALLOWED_EXTERNAL parse produced a list that does not even contain the \
+             known-good keys, so this gate would pass vacuously: {keys:?}"
+        );
+        for key in &keys {
+            let spec = tool_workflow::WorkflowLaunchSpec {
+                name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
+                args: Some(serde_json::json!({ key: "value" })),
+                ..Default::default()
+            };
+            validate_namespaced_local_app_external_args(&spec).unwrap_or_else(|error| {
+                panic!(
+                    "local-app-build.js declares external field {key:?} but the Host launch \
+                     boundary rejects it, so it can never reach the script: {error}"
+                )
+            });
+        }
+        // r2-fix-audit-09: the loop above only proves script -> Host
+        // (every key the script declares external is accepted by the Host).
+        // It says nothing about the other direction: a key the Host's launch
+        // boundary accepts but this script's own `ALLOWED_EXTERNAL` omits.
+        // That is not merely inert -- the script's OWN `unknown` check
+        // (local-app-build.js:26-27) throws on exactly that key, so a model
+        // that sets a Host-accepted field the script forgot to list gets a
+        // launch failure instead of a silently-ignored value.
+        //
+        // AUD-WF-03: this direction is driven off `BUILD_EXTERNAL_ARG_KEYS`,
+        // the very slice the launch boundary's arm consumes -- NOT a re-typed
+        // copy. A key added to the boundary therefore appears here with no
+        // test edit, which is the whole point: the previous version compared
+        // the script against a third hand-copied list, so a Host-side
+        // ADDITION stayed invisible to both directions.
+        assert!(
+            !BUILD_EXTERNAL_ARG_KEYS.is_empty(),
+            "sanity: the Host's accepted-key slice is EMPTY, so the Host -> script \
+             direction below would pass vacuously"
+        );
+        for key in BUILD_EXTERNAL_ARG_KEYS {
+            assert!(
+                keys.iter().any(|declared| declared == key),
+                "the Host launch boundary accepts external field {key:?} for \
+                 lingxi-local-app:local-app-build, but local-app-build.js's \
+                 ALLOWED_EXTERNAL omits it -- so a launch carrying it throws \
+                 \"unknown external field(s)\": {keys:?}"
+            );
+        }
+    }
+
+    /// r2-tests-honesty-007 / r3-workflow-runtime-02's other two plugin
+    /// workflows: `build_workflow_script_external_contract_is_accepted_by_the_host`
+    /// above only covers `local-app-build.js`. `validate_namespaced_local_app_external_args`
+    /// declares a separate accepted-key set for each of the three plugin
+    /// workflow ids; each script maintains its own declared list in a
+    /// different language, so each pair can drift independently of the
+    /// other two. Checked bidirectionally, same as the build case above, and
+    /// the Host side of each pair is the exact `*_EXTERNAL_ARG_KEYS` slice the
+    /// launch boundary itself consumes (AUD-WF-03) rather than a copy.
+    #[test]
+    fn use_test_and_mcp_authoring_script_external_contracts_match_the_host() {
+        fn parse_js_string_array(script: &str, declaration_prefix: &str) -> Vec<String> {
+            let declaration = script
+                .lines()
+                .find(|line| line.starts_with(declaration_prefix))
+                .unwrap_or_else(|| panic!("script must declare a line starting {declaration_prefix:?}"));
+            declaration
+                .split_once('[')
+                .and_then(|(_, rest)| rest.split_once(']'))
+                .expect("declaration must be an array literal")
+                .0
+                .split(',')
+                .map(|entry| entry.trim().trim_matches('\'').to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect()
+        }
+        let cases: [(&str, &str, &str, &[&str]); 2] = [
+            (
+                crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID,
+                include_str!("../../../plugins/lingxi-local-app/workflows/local-app-use-test.js"),
+                "const allowed =",
+                USE_TEST_EXTERNAL_ARG_KEYS,
+            ),
+            (
+                crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID,
+                include_str!(
+                    "../../../plugins/lingxi-local-app/workflows/local-app-mcp-authoring.js"
+                ),
+                "const EXTERNAL_KEYS =",
+                MCP_AUTHORING_EXTERNAL_ARG_KEYS,
+            ),
+        ];
+        for (workflow_id, script, declaration_prefix, host_accepted) in cases {
+            let declared = parse_js_string_array(script, declaration_prefix);
+            assert!(
+                !declared.is_empty(),
+                "sanity: parsing {declaration_prefix:?} out of {workflow_id}'s script produced \
+                 an EMPTY list, so every check below would pass vacuously"
+            );
+            // script -> Host: every key the script declares external must be
+            // accepted at the launch boundary (except the workflow's own
+            // Host-injected internal keys, which legitimately are NOT
+            // external and must stay out of this forward check).
+            for key in &declared {
+                if key == "host_context"
+                    || key == "workflow_run_id"
+                    || key == "runtime_profile"
+                    || key == "expected_writable_collections"
+                {
+                    continue;
+                }
+                let spec = tool_workflow::WorkflowLaunchSpec {
+                    name: Some(workflow_id.into()),
+                    args: Some(serde_json::json!({ key: "value" })),
+                    ..Default::default()
+                };
+                validate_namespaced_local_app_external_args(&spec).unwrap_or_else(|error| {
+                    panic!(
+                        "{workflow_id}'s script declares external field {key:?} but the Host \
+                         launch boundary rejects it, so it can never reach the script: {error}"
+                    )
+                });
+            }
+            // Host -> script: every key the Host's launch boundary accepts
+            // for this workflow must be in the script's own declared list,
+            // or the script's unknown-field check throws on it.
+            assert!(
+                !host_accepted.is_empty(),
+                "sanity: {workflow_id}'s Host-accepted key slice is EMPTY, so the \
+                 Host -> script direction would pass vacuously"
+            );
+            for key in host_accepted {
+                assert!(
+                    declared.iter().any(|d| d == key),
+                    "the Host launch boundary accepts external field {key:?} for {workflow_id}, \
+                     but its script's declared external-key list omits it: {declared:?}"
+                );
+            }
+        }
     }
 }
 
@@ -2477,6 +2755,7 @@ mod run_id_tests {
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             args: Some(serde_json::json!({
+                "operation": "update",
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
             })),
@@ -2536,6 +2815,7 @@ mod run_id_tests {
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             args: Some(serde_json::json!({
+                "operation": "update",
                 "app_id": "demo1234",
                 "runtime_profile": {
                     "family": "three_3d",
@@ -2628,6 +2908,7 @@ mod run_id_tests {
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             args: Some(serde_json::json!({
+                "operation": "update",
                 "app_id": "demo1234",
                 "expected_writable_collections": ["attacker_secrets"],
             })),
@@ -2699,6 +2980,7 @@ mod run_id_tests {
         stamp_record_mirror(&layout, true);
 
         let caller_args = serde_json::json!({
+            "operation": "update",
             "app_id": "demo1234",
             "spec": "a caller-authored spec",
             "revision_prompt": "a caller-authored revision prompt",
@@ -2747,20 +3029,32 @@ mod run_id_tests {
         let unexpected: Vec<&String> = injected.difference(&expected).collect();
         assert!(
             unexpected.is_empty(),
-            "the Host injected workflow arg key(s) {unexpected:?} that §19.3 has no \
+            "`apply_materialized_local_app_collections` -- this SEAM only, not the launcher \
+             that calls it -- injected workflow arg key(s) {unexpected:?} that §19.3 has no \
              caller-override test for. Every Host-injected key needs a companion test \
              proving a hostile caller value loses (see \
              `caller_supplied_runtime_profile_is_overridden_by_the_host` above) and an \
              `object.insert` — NOT `entry().or_insert_with`, which honours the caller. \
-             Add that test, then list the key in `expected` here. \
-             Host-injected keys seen: {injected:?}"
+             Add that test, then list the key in `expected` here. (A key injected by `launch` \
+             ITSELF rather than by this seam -- e.g. `workflow_run_id` -- is out of reach of \
+             this gate; see \
+             `launch_injects_workflow_run_id_and_exactly_the_expected_launcher_keys` below, \
+             which covers the launcher's local-app BUILD path ONLY. `launch`'s other \
+             injection site, `enrich_persisted_plugin_workflow_context` \
+             (workflow_support.rs:2023), writes these same key names for the use-test and \
+             mcp-authoring workflows and still has NO key-set gate at all.) Seam-injected \
+             keys seen: {injected:?}"
         );
         let missing: Vec<&String> = expected.difference(&injected).collect();
         assert!(
             missing.is_empty(),
-            "the Host stopped injecting the §19.3 key(s) {missing:?}; the workflow script \
-             would then run on whatever the caller supplied. \
-             Host-injected keys seen: {injected:?}"
+            "this seam stopped injecting the §19.3 key(s) {missing:?}; the workflow script \
+             would then run on whatever the caller supplied. This gate covers only \
+             `apply_materialized_local_app_collections`, not `launch` -- see \
+             `launch_injects_workflow_run_id_and_exactly_the_expected_launcher_keys` below for \
+             the launcher's local-app BUILD path; the launcher's other injection site, \
+             `enrich_persisted_plugin_workflow_context` (workflow_support.rs:2023), has no \
+             key-set gate at all. Seam-injected keys seen: {injected:?}"
         );
 
         // Listing a key in `expected` must not be a way to silence this gate.
@@ -2857,6 +3151,7 @@ mod run_id_tests {
             script_path: Some("persisted-workflow.js".into()),
             resume_from_run_id: Some("wf_resume1".into()),
             args: Some(serde_json::json!({
+                "operation": "update",
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
             })),
@@ -2910,6 +3205,7 @@ mod run_id_tests {
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             args: Some(serde_json::json!({
+                "operation": "update",
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
             })),
@@ -2938,6 +3234,7 @@ mod run_id_tests {
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
             args: Some(serde_json::json!({
+                "operation": "update",
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
             })),
@@ -2998,7 +3295,7 @@ mod run_id_tests {
 
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-            args: Some(serde_json::json!({"app_id": "demo1234"})),
+            args: Some(serde_json::json!({"operation": "update", "app_id": "demo1234"})),
             ..Default::default()
         };
         let error = super::apply_materialized_local_app_collections(
@@ -3048,7 +3345,7 @@ mod run_id_tests {
 
         let mut spec = tool_workflow::WorkflowLaunchSpec {
             name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-            args: Some(serde_json::json!({"app_id": "demo1234"})),
+            args: Some(serde_json::json!({"operation": "update", "app_id": "demo1234"})),
             ..Default::default()
         };
         let error = super::apply_materialized_local_app_collections(
@@ -3082,7 +3379,7 @@ mod run_id_tests {
 
             let mut spec = tool_workflow::WorkflowLaunchSpec {
                 name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-                args: Some(serde_json::json!({"app_id": "demo1234"})),
+                args: Some(serde_json::json!({"operation": "update", "app_id": "demo1234"})),
                 ..Default::default()
             };
             super::apply_materialized_local_app_collections(
@@ -3165,6 +3462,41 @@ mod run_id_tests {
         );
     }
 
+    /// r4-workflow-runtime-08: a launch with no `args.operation` used to be
+    /// silently treated as `update` for the Host's OWN create/update fork
+    /// (workflow_support.rs's `.unwrap_or("update")`), before the launch
+    /// ever reaches the script's own `!['create','update','verify'].includes(...)`
+    /// check. Against an unscaffolded shell that meant a confusing
+    /// "requires a persisted runtime profile" error instead of the operation
+    /// contract error the script would have given. The Host must now name
+    /// the same contract itself instead of guessing.
+    #[test]
+    fn missing_operation_is_rejected_by_the_host_instead_of_defaulting_to_update() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = local_apps::AppLayout::new(root.path(), "demo1234").expect("layout");
+        // An unscaffolded shell: exactly the case where the old silent
+        // default produced the WRONG (profile) error instead of the
+        // operation contract error.
+        stamp_record_mirror(&layout, false);
+        let mut spec = tool_workflow::WorkflowLaunchSpec {
+            name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
+            args: Some(serde_json::json!({ "app_id": "demo1234" })),
+            ..Default::default()
+        };
+        let error = super::apply_materialized_local_app_collections(
+            root.path(),
+            &mut spec,
+            plugin_build_script(),
+        )
+        .expect_err("a launch with no operation must not silently proceed as `update`");
+        assert!(
+            error.to_string().contains("operation"),
+            "missing `operation` must be reported as an operation-contract error, not the \
+             unrelated \"requires app {{app_id}} to have a persisted runtime profile\" error a \
+             silent `update` default produces against an unscaffolded shell: {error}"
+        );
+    }
+
     #[test]
     fn trusted_plugin_local_app_resume_uses_checkpoint_provenance() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -3222,6 +3554,7 @@ mod run_id_tests {
             resume_from_run_id: Some(run_id.into()),
             session_uuid: Some(session.into()),
             args: Some(serde_json::json!({
+                "operation": "update",
                 "app_id": "demo1234",
                 "expected_writable_collections": [],
             })),
@@ -3922,7 +4255,7 @@ mod run_id_tests {
                         name: Some(
                             crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
                         ),
-                        args: Some(serde_json::json!({ "app_id": app_id })),
+                        args: Some(serde_json::json!({ "operation": "update", "app_id": app_id })),
                         session_uuid: Some("session-scope".into()),
                         ..Default::default()
                     })
@@ -3948,7 +4281,7 @@ mod run_id_tests {
             // so the same run also takes that app's exclusive workspace lease.
             let mut genuine = tool_workflow::WorkflowLaunchSpec {
                 name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-                args: Some(serde_json::json!({ "app_id": app_id })),
+                args: Some(serde_json::json!({ "operation": "update", "app_id": app_id })),
                 ..Default::default()
             };
             let minted = super::apply_materialized_local_app_collections_with_identity(
@@ -3967,6 +4300,323 @@ mod run_id_tests {
                 "a build scope is what takes the app's exclusive workspace lease"
             );
         }
+    }
+
+    /// r2-tests-honesty-006's launcher-level companion to
+    /// `host_injected_arg_keys_are_exactly_the_expected_set` above. That gate
+    /// only reaches `apply_materialized_local_app_collections` -- the SEAM --
+    /// and cannot see either of the two places `launch` itself injects
+    /// `workflow_run_id` (workflow_support.rs:1711, top-level, before the
+    /// seam runs; and :1732, inside `host_context`, after the seam runs --
+    /// the ONLY source of `host_context.workflow_run_id` on the `update`
+    /// path, since the seam's own `host_context` literal for `update` never
+    /// mentions the key), nor the create branch (:1303-1331), which returns
+    /// before the seam's `runtime_profile` / `expected_writable_collections`
+    /// inserts are reached at all.
+    ///
+    /// This drives the real `launch` end to end for both `operation`s and
+    /// pins, at the launcher layer:
+    /// - both `workflow_run_id` injections land the SAME id the workflow
+    ///   actually ran under (`launched.run_id`), read back off the persisted
+    ///   task row rather than off `spec` -- the row is what the workflow
+    ///   script and any resume actually see;
+    /// - the injected-key delta across the WHOLE launch path -- `launch`
+    ///   itself PLUS the seam it calls -- is EXACTLY the expected set per
+    ///   operation, using the same caller-key-snapshot-then-delta method as
+    ///   the seam-level gate; each expected key is carried with the layer
+    ///   that really writes it, so a key added or dropped fails loudly, by
+    ///   name, and against the RIGHT layer instead of silently passing the
+    ///   seam-level gate that cannot see the launcher.
+    ///
+    /// Scope, deliberately not over-claimed: this covers the launcher's
+    /// local-app BUILD path (`PLUGIN_BUILD_WORKFLOW_ID`) only. `launch`'s
+    /// other injection site, `enrich_persisted_plugin_workflow_context`
+    /// (workflow_support.rs:2023), writes the same four key names for the
+    /// use-test and mcp-authoring workflows and still has no key-set gate.
+    #[tokio::test]
+    async fn launch_injects_workflow_run_id_and_exactly_the_expected_launcher_keys() {
+        use tool_workflow::WorkflowLauncher as _;
+
+        for operation in ["update", "create"] {
+            let root = tempfile::tempdir().expect("tempdir");
+            let app_id = "demo1234";
+            let layout = local_apps::AppLayout::new(root.path(), app_id).expect("layout");
+            if operation == "create" {
+                // The create branch requires an UNscaffolded shell (it is the
+                // one operation allowed to start before manifest/profile
+                // persistence); see workflow_support.rs:1277-1298.
+                stamp_record_mirror(&layout, false);
+            } else {
+                let mut manifest = local_apps::AppManifest::for_new_app(app_id, "Fixture");
+                stamp_profile(&mut manifest, local_apps::AppRuntimeProfile::ReactDom);
+                local_apps::save_manifest(&layout, &manifest).expect("manifest");
+                stamp_record_mirror(&layout, true);
+            }
+
+            let registry = scope_test_registry();
+            let launcher = scope_test_launcher(root.path(), registry.clone());
+
+            let caller_args = serde_json::json!({
+                "app_id": app_id,
+                "operation": operation,
+            });
+            let caller_keys: std::collections::BTreeSet<String> = caller_args
+                .as_object()
+                .expect("caller args object")
+                .keys()
+                .cloned()
+                .collect();
+
+            let launched = launcher
+                .launch(tool_workflow::WorkflowLaunchSpec {
+                    name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
+                    args: Some(caller_args),
+                    session_uuid: Some("session-scope".into()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("plugin build workflow must launch for operation {operation:?}: {error}")
+                });
+
+            let row = registry
+                .get(&launched.task_id)
+                .await
+                .expect("the launch really did create a task row");
+            let tasks::state::TaskState::LocalWorkflow(state) = row else {
+                panic!("operation {operation:?}: expected a LocalWorkflow task row")
+            };
+            let args_json = state.args.as_deref().unwrap_or_else(|| {
+                panic!("operation {operation:?}: the launcher must persist args onto the task row")
+            });
+            let after: serde_json::Value = serde_json::from_str(args_json)
+                .unwrap_or_else(|error| panic!("operation {operation:?}: persisted args are not valid json: {error}"));
+            let after_object = after
+                .as_object()
+                .unwrap_or_else(|| panic!("operation {operation:?}: persisted args are not an object"));
+
+            assert_eq!(
+                after_object
+                    .get("workflow_run_id")
+                    .and_then(serde_json::Value::as_str),
+                launched.run_id.as_deref(),
+                "operation {operation:?}: the top-level `workflow_run_id` `launch` injects at \
+                 workflow_support.rs:1711 must be the SAME id the launch actually ran under \
+                 (persisted args: {after_object:?})"
+            );
+            let host_context_run_id_provenance = if operation == "update" {
+                "`launch` at workflow_support.rs:1732 is its ONLY source on the `update` path \
+                 -- the seam's update-path `host_context` literal (:1448-1462) never mentions \
+                 the key"
+            } else {
+                "on `create` the seam writes it at workflow_support.rs:1331 and `launch` \
+                 overwrites it at :1732 -- both must be the id the launch actually ran under"
+            };
+            assert_eq!(
+                after_object
+                    .get("host_context")
+                    .and_then(|value| value.get("workflow_run_id"))
+                    .and_then(serde_json::Value::as_str),
+                launched.run_id.as_deref(),
+                "operation {operation:?}: `host_context.workflow_run_id` is absent or is not \
+                 the id this launch ran under. {host_context_run_id_provenance}. If that \
+                 injection is dropped the workflow script silently loses the run id from \
+                 `host_context` (persisted host_context: {:?})",
+                after_object.get("host_context")
+            );
+
+            let injected: std::collections::BTreeSet<String> = after_object
+                .keys()
+                .filter(|key| !caller_keys.contains(*key))
+                .cloned()
+                .collect();
+            // Verified against the source, not assumed. This delta spans BOTH
+            // layers of the launch path -- `launch` itself and the seam
+            // `apply_materialized_local_app_collections_with_identity` it
+            // calls -- so every expected key is carried together with the
+            // layer that really writes it, and a dropped key is reported
+            // against that layer instead of always being blamed on `launch`.
+            // The `create` branch (:1277-1347) returns before the seam's
+            // `runtime_profile` / `expected_writable_collections` inserts are
+            // reached at all. `selector_capability` (minted only on
+            // `create`) is r3-never-wired-11: the Host used to ALSO write it
+            // at the top level, which `local-app-build.js` never reads
+            // (`context.selector_capability` is the only read site) -- that
+            // top-level copy was removed, leaving only the `host_context`
+            // member below. So the two key sets are disjoint-ish, not
+            // superset/subset.
+            let expected_by_layer: std::collections::BTreeMap<String, &'static str> =
+                if operation == "create" {
+                    vec![
+                        ("workflow_run_id", "`launch` itself, workflow_support.rs:1711"),
+                        (
+                            "host_context",
+                            "the seam, workflow_support.rs:1331 (create-only), including its \
+                             `selector_capability` member; `launch` then overwrites the \
+                             `workflow_run_id` member at :1732",
+                        ),
+                    ]
+                } else {
+                    vec![
+                        ("workflow_run_id", "`launch` itself, workflow_support.rs:1711"),
+                        (
+                            "runtime_profile",
+                            "the seam `apply_materialized_local_app_collections_with_identity`, \
+                             workflow_support.rs:1433",
+                        ),
+                        (
+                            "expected_writable_collections",
+                            "the seam, workflow_support.rs:1435",
+                        ),
+                        (
+                            "host_context",
+                            "the seam, workflow_support.rs:1446; its `workflow_run_id` member \
+                             has no source other than `launch` at :1732",
+                        ),
+                    ]
+                }
+                .into_iter()
+                .map(|(key, layer)| (key.to_string(), layer))
+                .collect();
+            let expected: std::collections::BTreeSet<String> =
+                expected_by_layer.keys().cloned().collect();
+
+            let unexpected: Vec<&String> = injected.difference(&expected).collect();
+            assert!(
+                unexpected.is_empty(),
+                "operation {operation:?}: the launch path -- `launch` itself AND the seam \
+                 `apply_materialized_local_app_collections_with_identity` it calls -- injected \
+                 workflow arg key(s) {unexpected:?} this test does not account for; a further \
+                 injection at either layer needs its own coverage here, not silent acceptance \
+                 (seen: {injected:?})"
+            );
+            let missing: Vec<(&String, &&'static str)> = expected_by_layer
+                .iter()
+                .filter(|(key, _)| !injected.contains(*key))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "operation {operation:?}: the launch path stopped injecting the key(s) \
+                 {missing:?}, each listed with the layer that writes it -- on this operation \
+                 not all of them come from `launch` itself (seen: {injected:?})"
+            );
+        }
+    }
+
+    /// r1-workflow-runtime-03 / r1-e2e-trace-005 / r1-backlog-workflow-runtime-04:
+    /// the Workflow tool's OWN resume hint (workflow_support.rs's sibling
+    /// `tools/workflow/src/lib.rs:1497`) tells the model to resume with
+    /// `{scriptPath, resumeFromRunId}` alone -- no `name`. Both places
+    /// `launch` injects `workflow_run_id` (:1709 top-level, :1724 into
+    /// `host_context`) were gated on `spec.name == Some(build id)`, so a
+    /// resume shaped exactly like that hint got neither injection and the
+    /// script's `HOST_CONTEXT_MISSING_RUN` guard would fire on the very next
+    /// run. This drives a real `update` resume end to end through
+    /// host-owned checkpoint provenance (never `spec.name`) and asserts both
+    /// injections land the run id the launch actually ran under.
+    #[tokio::test]
+    async fn scriptpath_resume_of_update_injects_workflow_run_id_without_a_name() {
+        use tool_workflow::WorkflowLauncher as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let app_id = "resume123";
+        let layout = local_apps::AppLayout::new(root.path(), app_id).expect("layout");
+        let mut manifest = local_apps::AppManifest::for_new_app(app_id, "Resume Fixture");
+        stamp_profile(&mut manifest, local_apps::AppRuntimeProfile::ReactDom);
+        local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        stamp_record_mirror(&layout, true);
+
+        let registry = scope_test_registry();
+        let launcher = scope_test_launcher(root.path(), registry.clone());
+
+        // Host-owned checkpoint provenance: the same bytes as the Host's
+        // verified plugin registry entry, recorded under this run id/session
+        // by a PRIOR launch. This is what `trusted_local_app_resume` proves --
+        // never `spec.name`, which the resume hint never sends.
+        let session = "session-scope";
+        let run_id = "wf_resumecase1";
+        let script_path = root.path().join("resumed-local-app-build.js");
+        let trusted_script = plugin_build_script();
+        std::fs::write(&script_path, trusted_script).expect("resumed script file");
+        launcher
+            .checkpoints
+            .upsert(
+                session,
+                super::WorkflowCheckpoint {
+                    task_id: "tresume01".into(),
+                    workflow_run_id: run_id.into(),
+                    workflow_id: crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
+                    script_path: script_path.to_string_lossy().into_owned(),
+                    script_sha256: Some(super::sha256_hex(trusted_script.as_bytes())),
+                    script_is_verbatim_builtin: Some(true),
+                    args_json: Some(
+                        serde_json::json!({"app_id": app_id, "operation": "update"}).to_string(),
+                    ),
+                    description: "Resumed local app build".into(),
+                    start_time: None,
+                    transcript_dir: root
+                        .path()
+                        .join("transcript")
+                        .to_string_lossy()
+                        .into_owned(),
+                },
+            )
+            .expect("checkpoint upsert");
+
+        let launched = launcher
+            .launch(tool_workflow::WorkflowLaunchSpec {
+                name: None,
+                script_path: Some(script_path.to_string_lossy().into_owned()),
+                resume_from_run_id: Some(run_id.into()),
+                session_uuid: Some(session.into()),
+                args: Some(serde_json::json!({
+                    "app_id": app_id,
+                    "operation": "update",
+                })),
+                ..Default::default()
+            })
+            .await
+            .unwrap_or_else(|error| {
+                panic!("a scriptPath resume shaped like the tool's own hint must launch: {error}")
+            });
+
+        let row = registry
+            .get(&launched.task_id)
+            .await
+            .expect("the resume really did create a task row");
+        let tasks::state::TaskState::LocalWorkflow(state) = row else {
+            panic!("expected a LocalWorkflow task row")
+        };
+        let args_json = state
+            .args
+            .as_deref()
+            .expect("the launcher must persist args onto the task row");
+        let after: serde_json::Value =
+            serde_json::from_str(args_json).expect("persisted args are valid json");
+        let after_object = after.as_object().expect("persisted args are an object");
+
+        assert_eq!(
+            after_object
+                .get("workflow_run_id")
+                .and_then(serde_json::Value::as_str),
+            launched.run_id.as_deref(),
+            "a scriptPath resume with no `name` must still receive the top-level \
+             `workflow_run_id` `launch` injects at workflow_support.rs:1709/1711 -- gating \
+             that injection on `spec.name` leaves it absent on exactly the resume shape the \
+             tool's own hint text produces (persisted args: {after_object:?})"
+        );
+        assert_eq!(
+            after_object
+                .get("host_context")
+                .and_then(|value| value.get("workflow_run_id"))
+                .and_then(serde_json::Value::as_str),
+            launched.run_id.as_deref(),
+            "a scriptPath resume with no `name` must still receive \
+             `host_context.workflow_run_id` (workflow_support.rs:1724/1732) -- without it the \
+             resumed script's HOST_CONTEXT_MISSING_RUN guard fires on every update/verify \
+             resume (persisted host_context: {:?})",
+            after_object.get("host_context")
+        );
     }
 
     /// §8.1's other half, which the fix above must not trade away: a CUSTOM

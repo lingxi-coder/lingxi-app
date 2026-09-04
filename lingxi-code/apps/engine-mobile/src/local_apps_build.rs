@@ -1468,8 +1468,17 @@ fn validate_dependency_snapshot_files(
         "workspace pnpm-lock.yaml",
     )?;
     if root_package != effective || root_lock != lock {
+        // WP8: this copy is reachable from the MODEL-callable `LocalAppBuild`
+        // (`local_apps_host.rs`'s `build_app` -> `build_workspace` ->
+        // `build_workspace_locked` -> here), unlike the two sibling copies. It
+        // used to name `LocalAppConfirmDependencyChange` /
+        // `LocalAppUpdateDependencies` as something the caller could "use";
+        // neither is in `LOCAL_APP_TOOLS` and the MCP transport refuses their
+        // static spelling outright, so that sent the agent to retry a call that
+        // fails closed forever. Tell it to report the drift instead — same
+        // wording as `ensure_dependency_install`'s copy.
         return Err(AppError::InvalidRequest(
-            "dependencies_dirty: workspace package.json or pnpm-lock.yaml differs from the host-owned dependency snapshot; use LocalAppConfirmDependencyChange and LocalAppUpdateDependencies"
+            "dependencies_dirty: workspace package.json or pnpm-lock.yaml differs from the host-owned dependency snapshot; this cannot be repaired by re-editing package.json/lockfile — report the drift to the user/workflow as a finding instead of retrying"
                 .into(),
         ));
     }

@@ -53,22 +53,6 @@ class LocalAppsContractTest {
     }
 
     @Test
-    fun `an app item carries the brief and its workspace-relative path`() {
-        val item = LocalAppItem(
-            id = "a",
-            name = "记事本",
-            brief = "一个记事本 app",
-            workflow = LocalAppWorkflow.PublishedUnverified,
-            updatedAtMs = 0,
-            workspaceRel = "apps/a/workspace",
-            initSessionId = "11111111-1111-4111-8111-111111111111",
-            scaffolded = true,
-        )
-        assertEquals("一个记事本 app", item.brief)
-        assertEquals("apps/a/workspace", item.workspaceRel)
-    }
-
-    @Test
     fun `the details screen defaults to the sessions tab`() {
         assertEquals(
             LocalAppDetailsTab.Sessions,

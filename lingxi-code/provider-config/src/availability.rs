@@ -56,7 +56,11 @@ pub async fn compute_availability_with_isolation(
             "anthropic-oauth" => anthropic_has_oauth,
             "openai-chatgpt" => openai_chatgpt_available,
             id => {
-                let keychain_has = matches!(credentials.get_provider_key(id).await, Ok(Some(_)));
+                // Availability needs presence, not secret bytes. On macOS the
+                // attribute-only query avoids decrypting every provider key
+                // (and therefore avoids one ACL prompt per saved item) while a
+                // session still loads its selected provider below during boot.
+                let keychain_has = credentials.has_provider_key(id).await.unwrap_or(false);
                 let env_set = !isolated
                     && source
                         .env_var
@@ -106,6 +110,8 @@ mod tests {
         map: std::sync::Mutex<
             std::collections::HashMap<(String, String), protocol::SecureStorageData>,
         >,
+        retrieves: std::sync::atomic::AtomicUsize,
+        contains: std::sync::atomic::AtomicUsize,
     }
     #[async_trait::async_trait]
     impl platform_api::SecureStorage for MemStorage {
@@ -126,12 +132,27 @@ mod tests {
             service: &str,
             account: &str,
         ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
+            self.retrieves
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(self
                 .map
                 .lock()
                 .unwrap()
                 .get(&(service.into(), account.into()))
                 .cloned())
+        }
+        async fn contains(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<bool, platform_api::SecureStorageError> {
+            self.contains
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .contains_key(&(service.into(), account.into())))
         }
         async fn delete(
             &self,
@@ -211,7 +232,12 @@ mod tests {
     #[allow(clippy::await_holding_lock)] // serialize env-var mutation across async tests
     async fn keychain_makes_available() {
         let _g = ENV_LOCK.lock().unwrap();
-        let cm = manager();
+        let storage = Arc::new(MemStorage::default());
+        let cm = Arc::new(secret::CredentialManager::new(
+            storage.clone(),
+            Arc::new(FixedClock),
+            Arc::new(NoHttp),
+        ));
         cm.set_provider_key("openrouter", "k").await.expect("store");
         let map = compute_availability(
             &cm,
@@ -226,6 +252,15 @@ mod tests {
             .find(|a| a.profile_name == "openrouter")
             .expect("entry");
         assert!(entry.available);
+        assert_eq!(
+            storage.retrieves.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "availability must not decrypt provider credentials"
+        );
+        assert_eq!(
+            storage.contains.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
     #[tokio::test]

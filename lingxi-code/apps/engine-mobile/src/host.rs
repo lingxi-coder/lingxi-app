@@ -2261,7 +2261,7 @@ fn anthropic_models(default_model: &str) -> Vec<llm_client::ModelProfile> {
         "claude-sonnet-5".to_string(),
         "claude-sonnet-4-6".to_string(),
         "claude-haiku-4-5".to_string(),
-        "claude-fable-5".to_string(),
+        "claude-fable-5-1".to_string(),
     ];
     // The configured default, when it routes here — see `anthropic_route_id`.
     ids.extend(anthropic_route_id(default_model));
@@ -7572,9 +7572,17 @@ impl MobileEngineHandle {
             .enqueue_engine(ClientEvent::AppEvent { event });
     }
 
-    /// Post-mutation `AppsChanged` snapshot: every successful mutation
-    /// announces the full record set (records carry `workflow_state` /
-    /// `updated_at_ms`, so any mutation changes the set). Delegated to
+    /// Post-mutation `AppsChanged` snapshot: every mutating `submit` arm that
+    /// reaches THIS helper announces the full record set (records carry
+    /// `workflow_state` / `updated_at_ms`, so any mutation changes the set).
+    ///
+    /// 🚨 Not every successful mutation reaches it. `AppService::
+    /// set_init_session` — the create flow's init-session pin, the event the
+    /// "+" hand-off waits on — deliberately announces a SINGLE record
+    /// (`AppEvent::RecordChanged`), and `handle_create_app`'s fallback calls
+    /// `announce_record` for the same reason. A client must therefore fold
+    /// single-record events into its catalog and must NOT rebuild the catalog
+    /// from `AppsChanged` alone. Delegated to
     /// [`AppService::announce_apps`] — the snapshot and its emission ride the
     /// service's emission-order lock (through the installed
     /// `SinkAppEventObserver`), so a concurrent mutation on another `submit`
@@ -8485,16 +8493,25 @@ impl MobileEngineHandle {
             ClientCommand::ListProviderCredentials {
                 operation_id,
                 provider_ids,
+                preview_provider_ids,
             } => {
                 let validation_error = if provider_ids.len() > 32
                     || provider_ids.iter().any(|id| !provider_id_is_valid(id))
+                    || preview_provider_ids
+                        .iter()
+                        .any(|id| !provider_ids.contains(id))
                 {
                     Some("invalid provider credential query".to_string())
                 } else {
                     None
                 };
-                self.emit_provider_credential_status(operation_id, &provider_ids, validation_error)
-                    .await;
+                self.emit_provider_credential_status(
+                    operation_id,
+                    &provider_ids,
+                    &preview_provider_ids,
+                    validation_error,
+                )
+                .await;
                 Ok(())
             }
             ClientCommand::SetProviderCredential {
@@ -8502,6 +8519,8 @@ impl MobileEngineHandle {
                 provider_id,
                 credential,
             } => {
+                let credential_preview =
+                    secret::masked_credential_preview(credential.expose_secret());
                 let error = if !provider_id_is_valid(&provider_id)
                     || credential.expose_secret().is_empty()
                     || credential.expose_secret().len() > 16_384
@@ -8517,6 +8536,9 @@ impl MobileEngineHandle {
                         .map(|failure| format!("failed to store provider credential: {failure}"))
                 };
                 let applied = error.is_none();
+                let credential_previews = applied
+                    .then(|| HashMap::from([(provider_id.clone(), credential_preview)]))
+                    .unwrap_or_default();
                 self.event_sink
                     .emit(ClientEvent::ProviderCredentialStatus {
                         operation_id,
@@ -8532,6 +8554,7 @@ impl MobileEngineHandle {
                             .inner
                             .credentials
                             .provider_key_storage_is_encrypted(),
+                        credential_previews,
                         error,
                     })
                     .await;
@@ -8564,6 +8587,7 @@ impl MobileEngineHandle {
                             .inner
                             .credentials
                             .provider_key_storage_is_encrypted(),
+                        credential_previews: HashMap::new(),
                         error,
                     })
                     .await;
@@ -9191,14 +9215,18 @@ impl MobileEngineHandle {
                 self.handle_get_app_details(app_id).await;
                 Ok(())
             }
-            // `mode` FORKS the handler (`Shell` = the empty shell the "+"
-            // button creates, `Scaffolded` = create + scaffold in one step) and
+            // `mode` selects the create path. `Shell` — the empty shell the
+            // "+" button creates — is the ONLY success path since protocol v9;
+            // `Scaffolded` is retained purely as a wire-compat variant and is
+            // rejected typed by the handler (see the `AppCreateModeDto::
+            // Scaffolded` arm in `handle_create_app`). The live create is
+            // Shell first, then a runtime-profile confirmation in the native
+            // UI, then a later one-shot scaffold receipt.
             // `request_id` rides both outcomes — the `AppCreated` event and,
             // when the create fails, the `AppOperationFailed` event — so the
             // client that started this creation recognises its own result.
-            // Neither is optional plumbing: without the fork every create is a
-            // scaffolded one, and without the key a failing create leaves the
-            // client waiting out a 30-second timeout.
+            // Without that key a failing create leaves the client waiting out
+            // a 30-second timeout.
             ClientCommand::CreateApp {
                 name,
                 origin,
@@ -9724,6 +9752,7 @@ impl MobileEngineHandle {
         &self,
         operation_id: u64,
         provider_ids: &[String],
+        preview_provider_ids: &[String],
         operation_error: Option<String>,
     ) {
         if let Some(error) = operation_error {
@@ -9733,6 +9762,7 @@ impl MobileEngineHandle {
                     configured_provider_ids: Vec::new(),
                     unavailable_provider_ids: provider_ids.to_vec(),
                     storage_encrypted: self.inner.credentials.provider_key_storage_is_encrypted(),
+                    credential_previews: HashMap::new(),
                     error: Some(error),
                 })
                 .await;
@@ -9741,11 +9771,28 @@ impl MobileEngineHandle {
 
         let mut configured_provider_ids = Vec::new();
         let mut unavailable_provider_ids = Vec::new();
+        let mut credential_previews = HashMap::new();
         let mut failures = Vec::new();
         for provider_id in provider_ids {
-            match self.inner.credentials.get_provider_key(provider_id).await {
-                Ok(Some(_)) => configured_provider_ids.push(provider_id.clone()),
-                Ok(None) => {}
+            match self.inner.credentials.has_provider_key(provider_id).await {
+                Ok(true) => {
+                    configured_provider_ids.push(provider_id.clone());
+                    if preview_provider_ids.contains(provider_id) {
+                        match self.inner.credentials.get_provider_key(provider_id).await {
+                            Ok(Some(secret)) => {
+                                credential_previews.insert(
+                                    provider_id.clone(),
+                                    secret::masked_credential_preview(secret.expose_secret()),
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(failure) => {
+                                failures.push(format!("{provider_id} preview: {failure}"))
+                            }
+                        }
+                    }
+                }
+                Ok(false) => {}
                 Err(failure) => {
                     unavailable_provider_ids.push(provider_id.clone());
                     failures.push(format!("{provider_id}: {failure}"));
@@ -9764,6 +9811,7 @@ impl MobileEngineHandle {
                 configured_provider_ids,
                 unavailable_provider_ids,
                 storage_encrypted: self.inner.credentials.provider_key_storage_is_encrypted(),
+                credential_previews,
                 error,
             })
             .await;
@@ -11735,6 +11783,8 @@ pub(crate) async fn mint_app_init_session(
 /// The boot backfill sweep, as a named function so it has a test.
 ///
 /// Walks every app record once per launch. Per record, in this order:
+/// 0. for an unscaffolded shell, repair `workspace/LINGXI.md` if it is
+///    missing, empty, or missing the guided-contract header;
 /// 1. migrate/merge a session catalog stranded under a drifted directory name;
 /// 2. re-anchor a pinned init session whose transcript file is gone;
 /// 3. reconcile a pinned init session still carrying the shell placeholder
@@ -11746,17 +11796,63 @@ pub(crate) async fn mint_app_init_session(
 /// the next launch, which is what makes each of them genuinely retryable
 /// rather than merely described as such.
 ///
-/// Steps 1-3 run for EVERY record; step 4 is the only one gated on the pin
+/// Steps 0-3 run for EVERY record; step 4 is the only one gated on the pin
 /// being absent, and step 3 deliberately runs before that gate because every
 /// record it can help already has a pin.
+///
+/// Step 0 matters because `workspace/LINGXI.md` is the ONE channel that
+/// reaches the model on every turn for a shell app (auto-loaded by the memory
+/// hierarchy): every other repair in this sweep is session bookkeeping, but a
+/// lost or truncated guided contract leaves the create interview with nothing
+/// to read at all, and nothing else in the create transaction ever revisits
+/// it after the initial write.
 pub(crate) async fn run_app_boot_backfill_sweep(
     backfill_home: std::path::PathBuf,
     backfill_cwd: String,
     backfill_root: std::path::PathBuf,
     backfill_fs: Arc<dyn platform_api::FileSystem>,
     backfill_service: Arc<local_apps::AppService>,
+    backfill_host: Arc<LocalAppsHostBroker>,
 ) {
     for record in backfill_service.records().await {
+        // Step 0: an unscaffolded shell's ONLY channel to the model is
+        // `workspace/LINGXI.md`. If it is gone, empty, or missing the guided
+        // header, the create interview has nothing to read and the agent
+        // sees an ordinary empty directory. Rewriting it is idempotent and
+        // safe to retry every launch. The header literal below is the first
+        // line of `guided_workspace_contract` in `local_apps_host.rs`; the two
+        // must stay in lockstep, or this check calls a healthy contract
+        // malformed and rewrites it on every boot.
+        if !record.scaffolded {
+            let workspace = backfill_root.join(&record.workspace_rel);
+            let lingxi_md = workspace.join("LINGXI.md");
+            let needs_repair = match std::fs::read_to_string(&lingxi_md) {
+                Ok(contents) => !contents.contains("# Local App（新建，尚未定形态）"),
+                Err(_) => true,
+            };
+            if needs_repair {
+                // `write_guided_contract_value` writes with `std::fs::write`,
+                // which does NOT create parents — its own doc comment states
+                // it "runs inside the create transaction, after
+                // `layout.initialize()` (so the workspace directory exists)".
+                // This sweep has no such guarantee: the very failure it
+                // repairs can have taken the directory along with the file,
+                // and `write` would then fail with NotFound on every launch
+                // forever. Best-effort, like the write itself.
+                let _ = std::fs::create_dir_all(&workspace);
+                match backfill_host.write_guided_contract_value(&record).await {
+                    Ok(()) => tracing::info!(
+                        app_id = %record.id,
+                        "boot sweep repaired a missing or malformed guided workspace contract"
+                    ),
+                    Err(error) => tracing::warn!(
+                        app_id = %record.id,
+                        %error,
+                        "boot sweep guided workspace contract repair failed"
+                    ),
+                }
+            }
+        }
         // Self-heal the app's catalog location FIRST. Two
         // real-world drifts strand it: (a) an app reinstall
         // changes the iOS data-container UUID, so the old
@@ -12265,6 +12361,7 @@ pub fn build_mobile_engine_inner(
                 mobile_apps_data_root(&firer_cfg),
                 fs.clone(),
                 service.clone(),
+                local_apps_host.clone(),
             ));
         }
         Err(error) => {
@@ -16456,6 +16553,7 @@ mod tests {
                 .submit(ClientCommand::ListProviderCredentials {
                     operation_id: 12,
                     provider_ids: vec!["openai".into()],
+                    preview_provider_ids: vec!["openai".into()],
                 })
                 .await
                 .expect("list provider credentials");
@@ -20191,7 +20289,7 @@ mod anthropic_model_registry_tests {
         for curated in [
             "claude-sonnet-5",
             "claude-opus-5",
-            "claude-fable-5",
+            "claude-fable-5-1",
             "claude-haiku-4-5",
         ] {
             assert!(
@@ -20342,8 +20440,8 @@ mod default_model_resolution_tests {
     #[test]
     fn a_bare_id_served_by_two_profiles_stays_unscoped() {
         let listing = |provider: &str| platform_api::ModelListing {
-            display_model: "claude-fable-5".to_string(),
-            request_model: "claude-fable-5".to_string(),
+            display_model: "claude-fable-5-1".to_string(),
+            request_model: "claude-fable-5-1".to_string(),
             provider_id: provider.to_string(),
             provider_label: provider.to_string(),
             description: None,
@@ -20354,8 +20452,8 @@ mod default_model_resolution_tests {
         };
         let listings = vec![listing("anthropic"), listing("github-copilot")];
         assert_eq!(
-            resolve_default_model_ref("claude-fable-5", &listings),
-            ("claude-fable-5".to_string(), None)
+            resolve_default_model_ref("claude-fable-5-1", &listings),
+            ("claude-fable-5-1".to_string(), None)
         );
     }
 

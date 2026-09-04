@@ -27,6 +27,7 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { ComputerAccessRequestDto, ComputerAccessResponseDto } from '@lingxi/bridge-client';
 import type { SystemSettingsPane } from '../bridge/lingxi';
 import { useT } from '../theme/ThemeContext';
+import { DesktopDialog, DesktopDialogActions, DesktopDialogButton } from './DesktopDialog';
 
 export interface ComputerAccessPromptProps {
   /** The head request to render, or `null` to render nothing. */
@@ -103,107 +104,64 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
   };
 
   return (
-    <div
-      role="dialog"
-      aria-label={title}
-      aria-describedby="lingxi-computer-access-detail"
+    <DesktopDialog
+      title={title}
+      summary={request.reason}
+      icon={tcc ? 'shieldAlert' : 'hand'}
+      size="regular"
+      titleId="lingxi-computer-access-title"
+      summaryId="lingxi-computer-access-detail"
+      ariaLabelledBy="lingxi-computer-access-title"
+      ariaDescribedBy="lingxi-computer-access-detail"
+      className="computer-access-dialog"
       onFocusCapture={() => { promptHasFocus.current = true; }}
       onBlurCapture={(event) => { promptHasFocus.current = event.currentTarget.contains(event.relatedTarget as Node | null); }}
-      onKeyDown={(event) => {
-        if (event.key !== 'Escape') return;
-        event.preventDefault();
-        onDeny(request.request_id);
-      }}
-      style={{
-        position: 'absolute', inset: 0, zIndex: 60,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: 'rgba(0,0,0,0.32)',
-      }}
-    >
-      <div
-        style={{
-          width: 440, maxWidth: '90%', borderRadius: 14, overflow: 'hidden',
-          background: t.windowBg, border: `0.5px solid ${t.border}`,
-          boxShadow: '0 18px 48px rgba(0,0,0,0.34)',
-        }}
-      >
-        <div style={{ padding: '18px 20px 14px' }}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: t.text, marginBottom: 8 }}>{title}</div>
-          <div
-            id="lingxi-computer-access-detail"
-            style={{ fontSize: 12, color: t.text2, lineHeight: 1.5 }}
-          >
-            {request.reason}
-          </div>
-        </div>
-
-        {tcc ? (
-          <TccPanel tcc={tcc} onOpenSystemSettings={onOpenSystemSettings} />
-        ) : (
-          <AppAllowlistPanel
-            request={request}
-            checkedApps={checkedApps}
-            onToggleApp={toggleApp}
-            clipboardRead={clipboardRead}
-            onClipboardRead={setClipboardRead}
-            clipboardWrite={clipboardWrite}
-            onClipboardWrite={setClipboardWrite}
-            systemKeyCombos={systemKeyCombos}
-            onSystemKeyCombos={setSystemKeyCombos}
-            checkboxRowStyle={checkboxRowStyle}
-          />
-        )}
-
-        <div
-          style={{
-            display: 'flex', gap: 8, padding: '12px 16px',
-            borderTop: `0.5px solid ${t.border}`, background: t.surface,
-          }}
-        >
-          <button
-            type="button"
+      onEscape={() => onDeny(request.request_id)}
+      footer={(
+        <DesktopDialogActions>
+          <DesktopDialogButton
+            variant="cancel"
             onClick={() => onDeny(request.request_id)}
-            style={{
-              flex: 1, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
-              fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit',
-              color: t.danger, background: 'transparent',
-              border: `0.5px solid ${t.border}`,
-            }}
           >
             Deny
-          </button>
+          </DesktopDialogButton>
           {tcc ? (
-            <button
+            <DesktopDialogButton
               ref={primaryRef}
-              type="button"
+              variant="primary"
               onClick={() => onDeny(request.request_id)}
-              style={{
-                flex: 1, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
-                fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit',
-                color: '#fff', background: t.accent,
-                border: `0.5px solid ${t.accentBorder}`,
-              }}
             >
               Try again
-            </button>
+            </DesktopDialogButton>
           ) : (
-            <button
+            <DesktopDialogButton
               ref={primaryRef}
-              type="button"
+              variant="primary"
               onClick={submit}
-              style={{
-                flex: 1, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
-                fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit',
-                color: '#fff', background: t.accent,
-                border: `0.5px solid ${t.accentBorder}`,
-              }}
             >
               {`Allow for this session (${grantedCount} apps)`}
-            </button>
+            </DesktopDialogButton>
           )}
-        </div>
-      </div>
-    </div>
+        </DesktopDialogActions>
+      )}
+    >
+      {tcc ? (
+        <TccPanel tcc={tcc} onOpenSystemSettings={onOpenSystemSettings} />
+      ) : (
+        <AppAllowlistPanel
+          request={request}
+          checkedApps={checkedApps}
+          onToggleApp={toggleApp}
+          clipboardRead={clipboardRead}
+          onClipboardRead={setClipboardRead}
+          clipboardWrite={clipboardWrite}
+          onClipboardWrite={setClipboardWrite}
+          systemKeyCombos={systemKeyCombos}
+          onSystemKeyCombos={setSystemKeyCombos}
+          checkboxRowStyle={checkboxRowStyle}
+        />
+      )}
+    </DesktopDialog>
   );
 }
 
@@ -220,7 +178,7 @@ function TccPanel({
     { pane: 'screen_recording', label: 'Screen Recording', granted: tcc.screen_recording },
   ];
   return (
-    <div style={{ padding: '0 20px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       {rows.map((row) => (
         <div
           key={row.pane}
@@ -286,7 +244,7 @@ function AppAllowlistPanel({
 }) {
   const t = useT();
   return (
-    <div style={{ padding: '0 20px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div>
         <div style={{ fontSize: 10.5, fontWeight: 600, color: t.text3, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 4 }}>
           {`Apps (${request.tier})`}

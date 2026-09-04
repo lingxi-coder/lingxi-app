@@ -70,10 +70,31 @@
 
 # local_apps_host.rs — P-1.4 removed the Host's two prose sentences naming
 # which build workflow the app's surface requires (§19.3: the Host contract
-# carries no workflow/skill/agent names). The Host now selects and enforces
-# the build workflow itself via LocalAppPluginBinding::resolve/enforce
-# (local_app_plugin_binding.rs, below) instead of telling the model which one
-# to launch, so this file has no entries here any more.
+# carries no workflow/skill/agent names). The Host still selects and enforces
+# the build WORKFLOW itself via LocalAppPluginBinding::resolve/enforce
+# (local_app_plugin_binding.rs, below); no workflow id appears in this file.
+#
+# WP8 (2026-09-02 create-flow audit) reintroduces a narrower, deliberate
+# exception for the SKILL name only: the guided workspace contract
+# (`guided_workspace_contract`) and the empty-shell handoff prose
+# (`create_next_step_guidance`) both point the model at the `create-local-app`
+# skill for the next step, because there is NO host-initiated launch site for
+# the create build workflow (the host only auto-starts MCP authoring and
+# resume) — the model can only continue create by name, and the model is
+# already only in this workspace because it ran that skill once already, to
+# create the shell. This does not reopen P-1.4: the WORKFLOW the skill goes
+# on to launch is still resolved entirely inside the skill/workflow layer and
+# still appears nowhere in this file.
+#
+# The literal is the PLUGIN-QUALIFIED name `lingxi-local-app:create-local-app`,
+# not the bare skill name: plugin skills are registered only as
+# `<plugin>:<skill>` (`plugin/src/manager.rs`), and the Skill tool's mobile
+# loader resolves through `CommandRegistry::resolve`, an exact-match lookup with
+# no bare-name fallback (the bare->qualified retry in
+# `skill_loader.rs::resolve_agent_skill_name` serves agent-frontmatter
+# preloading, NOT the tool). Host prose naming the bare form would send the
+# model to `Unknown skill: create-local-app`.
+apps/engine-mobile/src/local_apps_host.rs:lingxi-local-app:create-local-app:2
 
 # local_app_plugin_binding.rs — the one place a build target maps to the
 # plugin-owned build workflow id. The Host never reads these literals itself:
@@ -82,6 +103,13 @@
 apps/engine-mobile/src/local_app_plugin_binding.rs:lingxi-local-app:local-app-build:1
 apps/engine-mobile/src/local_app_plugin_binding.rs:lingxi-local-app:local-app-mcp-authoring:1
 apps/engine-mobile/src/local_app_plugin_binding.rs:lingxi-local-app:local-app-use-test:1
+
+# local_apps_mcp.rs — same WP8 exception as local_apps_host.rs above, on the
+# two model-visible error copies that tell an agent stuck on an unscaffolded
+# shell how to proceed: the pre-scaffold operation gate's refusal message and
+# `create`'s `runtime_profile`/`surface` rejection message. Both name only the
+# `create-local-app` skill, never the build workflow it launches.
+apps/engine-mobile/src/local_apps_mcp.rs:lingxi-local-app:create-local-app:2
 
 # --- tasks/src -------------------------------------------------------------
 

@@ -14,20 +14,14 @@
  * see `shared/settings.ts`) and legacy-key migration (iOS's
  * `legacyRecognitionMode`/`legacySystemVoice`/`voiceSpeed`/`voiceAutoPlay`
  * and the old `"on-device"` spelling; Android's
- * `migrateLegacyVoiceSelection`). Desktop has never shipped voice settings,
- * so there is no legacy state to migrate — only normalization (accepting
- * today's contract leniently) is ported.
+ * `migrateLegacyVoiceSelection`). Desktop keeps its own schema but accepts
+ * the historical `system:<voice-name>` alias until the settings page can
+ * resolve and save the stable macOS voice identifier.
  *
- * Also deliberately NOT mirrored: mobile's auto-play-replies flag (iOS's
- * `voiceAutoPlay`, Android's equivalent). Desktop has no code path that
- * speaks a reply — the renderer speaks only when the ENGINE sends
- * `AudioOpDto::Synthesize` — and no manual play control either, so the
- * setting was persisted and read by nothing. It is omitted rather than kept
- * "for parity": a preference that saves a value and changes nothing tells the
- * next reader it works. Persisting it again means implementing the playback
- * first. The removal needs no schema bump — `parseVoicePreferences` builds a
- * complete value from known keys only, so a flag left behind in an existing
- * settings file is simply dropped on the next write.
+ * Desktop now mirrors mobile's auto-play-replies flag too. Flow Mode owns its
+ * own streaming playback loop, while ordinary composer prompts use
+ * `autoPlayReplies` to decide whether the final assistant reply should be
+ * spoken automatically.
  *
  * This lives in `shared/` — not `main/` or `renderer/` — because, like
  * `PublicSettings` in `shared/settings.ts`, it has to be reachable from the
@@ -62,6 +56,7 @@ export interface VoicePreferences {
   language: string;
   voiceSelection: string;
   rate: number;
+  autoPlayReplies: boolean;
 }
 
 /** The value a fresh install (no persisted voice preferences yet) gets on every platform. */
@@ -72,6 +67,7 @@ export function defaultVoicePreferences(): VoicePreferences {
     language: LANGUAGE_AUTO,
     voiceSelection: DEFAULT_VOICE_SELECTION,
     rate: DEFAULT_RATE,
+    autoPlayReplies: false,
   };
 }
 
@@ -87,7 +83,7 @@ export function normalizeLanguage(raw: unknown): string {
   return trimmed;
 }
 
-/** Port of iOS's `VoicePreferencesSnapshot.normalizeVoiceSelection` / Android's `normalizeVoiceSelection` (legacy-alias branches excluded — see file header). */
+/** Port of iOS's `VoicePreferencesSnapshot.normalizeVoiceSelection` / Android's `normalizeVoiceSelection`, retaining the Desktop name alias until device voices are available. */
 export function normalizeVoiceSelection(raw: string | undefined): string {
   const trimmed = (raw ?? '').trim();
   if (trimmed === '' || trimmed === DEFAULT_VOICE_ID) return DEFAULT_VOICE_SELECTION;
@@ -95,10 +91,26 @@ export function normalizeVoiceSelection(raw: string | undefined): string {
   return `${SYSTEM_VOICE_PREFIX}${trimmed}`;
 }
 
+/**
+ * Legacy desktop/macOS builds persisted `system:<voice-name>` rather than the
+ * stable voice identifier. Keep that value parseable so existing settings stay
+ * usable until the next save, where the voice settings page can normalize it to
+ * the authoritative identifier it probed from the device.
+ */
+export function isLegacySystemVoiceAlias(value: string): boolean {
+  if (!value.startsWith(SYSTEM_VOICE_PREFIX)) return false;
+  const payload = value.slice(SYSTEM_VOICE_PREFIX.length);
+  return payload.length > 0 && !payload.includes('.');
+}
+
 /** Port of Android's `rate.coerceIn(0.5f, 2.0f)` / iOS's `min(2, max(0.5, rate))` — clamps, never rejects; defaults to 1.0 when absent or unparseable. */
 function normalizeRate(raw: unknown): number {
   const value = typeof raw === 'number' && Number.isFinite(raw) ? raw : DEFAULT_RATE;
   return Math.min(MAX_RATE, Math.max(MIN_RATE, value));
+}
+
+function normalizeAutoPlayReplies(raw: unknown): boolean {
+  return raw === true;
 }
 
 /** Parse an arbitrary (e.g. persisted-JSON or IPC-supplied) value into a complete, normalized `VoicePreferences`. Never throws. */
@@ -112,5 +124,6 @@ export function parseVoicePreferences(value: unknown): VoicePreferences {
       typeof raw['voiceSelection'] === 'string' ? raw['voiceSelection'] : undefined,
     ),
     rate: normalizeRate(raw['rate']),
+    autoPlayReplies: normalizeAutoPlayReplies(raw['autoPlayReplies']),
   };
 }

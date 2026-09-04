@@ -966,6 +966,7 @@ final class ProviderRepository {
             configuredProviderIds,
             unavailableProviderIds,
             storageEncrypted,
+            _,
             error
         ) = event else {
             return
@@ -1298,7 +1299,16 @@ final class ProviderRepository {
                     result.append(target.credentialID)
                 }
             }
-            try await commandSubmitter(.listProviderCredentials(operationId: operationID, providerIds: credentialIDs))
+            // `previewProviderIds` is an opt-in subset of `providerIds` for
+            // which the engine returns a MASKED credential preview
+            // (`engine-mobile/src/host.rs:9768`). iOS surfaces no preview yet,
+            // so it asks for none — the same default Electron's wrapper uses
+            // (`clients/electron/src/main/bridge.ts:1165`). Empty here is the
+            // behaviour this call had before the parameter existed, not a
+            // stub: an id listed for preview and not for status is rejected.
+            try await commandSubmitter(
+                .listProviderCredentials(
+                    operationId: operationID, providerIds: credentialIDs, previewProviderIds: []))
         } catch {
             failCredentialOperation(operationID, error: error)
             return

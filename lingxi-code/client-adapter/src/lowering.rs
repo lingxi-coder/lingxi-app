@@ -38,8 +38,9 @@ use client_protocol::events::CostDto;
 use client_protocol::listings::{
     AgentDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, ModelBillingModeDto,
-    ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto, ModelPricingTierDto, SessionModeDto,
-    SessionRowDto, SkillDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto, ModelPricingTierDto,
+    ProviderModelCatalogEntryDto, SessionModeDto, SessionRowDto, SkillDto, StatusSnapshotDto,
+    TaskRowDto, TaskStatusDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto, MessageImageDto};
 
@@ -48,7 +49,7 @@ use protocol::ConversationMessage;
 use permission::PromptDefault;
 use platform_api::orchestrator::{
     AgentInfo, CheckStatus, CostSnapshot, DoctorCheck, DoctorReport, DoctorSummary, HookInfo,
-    McpServerInfo, McpStatus, SkillInfo, StatusSnapshot,
+    McpServerInfo, McpStatus, ProviderModelCatalogEntry, SkillInfo, StatusSnapshot,
 };
 use platform_api::task_registry::{TaskOutputChunk, TaskRecord};
 use platform_api::team_registry::WorkerInfo;
@@ -180,6 +181,18 @@ pub fn lower_model_details(listing: &platform_api::ModelListing) -> ModelDetails
                 &listing.request_model,
                 platform_api::model_capabilities::ModelCapability::FastMode,
             ),
+    }
+}
+
+/// Lower one settings-visible provider catalog group from route listings.
+#[must_use]
+pub fn lower_provider_model_catalog_entry(
+    entry: &ProviderModelCatalogEntry,
+) -> ProviderModelCatalogEntryDto {
+    ProviderModelCatalogEntryDto {
+        provider_id: entry.provider_id.clone(),
+        provider_label: entry.provider_label.clone(),
+        models: entry.models.iter().map(lower_model_details).collect(),
     }
 }
 

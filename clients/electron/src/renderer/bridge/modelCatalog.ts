@@ -1,4 +1,9 @@
+import type { ModelDetailsDto, ProviderModelCatalogEntryDto } from '@lingxi/bridge-client';
 import { providerById } from '../../shared/providers';
+import type {
+  ModelPickerVisibilitySettings,
+  ProviderModelPickerVisibility,
+} from '../../shared/settings';
 
 export interface ModelReference {
   readonly reference: string;
@@ -19,9 +24,31 @@ export interface ModelCatalogDetail {
   readonly pricing?: { readonly billing_mode?: string } | null;
 }
 
+export interface VisibleProviderCatalog {
+  readonly providerId: string;
+  readonly displayName: string;
+  readonly models: readonly ModelDetailsDto[];
+}
+
 export interface ModelBillingGroup {
   readonly label: 'Paid' | 'Free' | null;
   readonly models: readonly ModelReference[];
+}
+
+export function modelCapabilitySummary(model: ModelDetailsDto): string {
+  const capabilities = model.capabilities;
+  const labels = [
+    capabilities?.tools ? 'Tools' : null,
+    capabilities?.vision ? 'Vision' : null,
+    capabilities?.documents ? 'Documents' : null,
+    capabilities?.reasoning ? 'Reasoning' : null,
+    capabilities?.structured_output ? 'Structured output' : null,
+    model.attachments ? 'Attachments' : null,
+  ].filter((label): label is string => label !== null);
+  if (model.context_window_tokens) {
+    labels.push(`${Math.round(model.context_window_tokens / 1_000)}k context`);
+  }
+  return labels.join(' · ');
 }
 
 export type ModelSelectionDecision =
@@ -211,4 +238,73 @@ export function groupModelReferences(references: readonly string[]): readonly Mo
   }
 
   return [...groups.values()];
+}
+
+export function providerVisibilityConfig(
+  settings: ModelPickerVisibilitySettings | undefined,
+  providerId: string,
+): ProviderModelPickerVisibility | undefined {
+  return settings?.[providerId];
+}
+
+export function visibleModelsForProvider(
+  providerId: string,
+  models: readonly ModelDetailsDto[],
+  settings: ModelPickerVisibilitySettings | undefined,
+): readonly ModelDetailsDto[] {
+  const config = providerVisibilityConfig(settings, providerId);
+  if (config?.showInModelPicker === false) return [];
+  if (config?.visibleModelIds === undefined) return models;
+  if (config.visibleModelIds.length === 0) return [];
+  const allowed = new Set(config.visibleModelIds);
+  return models.filter((model) => allowed.has(model.model_id));
+}
+
+export function selectedModelIdsForPickerSettings(
+  candidates: readonly string[],
+  visibility: ProviderModelPickerVisibility | undefined,
+): string[] {
+  const unique = [...new Set(candidates.filter((id) => id.trim().length > 0))];
+  if (visibility?.visibleModelIds === undefined) return unique;
+  const allowed = new Set(visibility.visibleModelIds);
+  return unique.filter((id) => allowed.has(id));
+}
+
+export function visibleProviderModelCatalog(
+  providers: readonly ProviderModelCatalogEntryDto[],
+  settings: ModelPickerVisibilitySettings | undefined,
+): readonly VisibleProviderCatalog[] {
+  return providers.flatMap((provider) => {
+    const models = visibleModelsForProvider(provider.provider_id, provider.models, settings);
+    return models.length > 0
+      ? [{ providerId: provider.provider_id, displayName: provider.provider_label, models }]
+      : [];
+  });
+}
+
+export function filterVisibleModelReferences(
+  references: readonly string[],
+  providers: readonly ProviderModelCatalogEntryDto[] | undefined,
+  settings: ModelPickerVisibilitySettings | undefined,
+): readonly string[] {
+  const catalog = providers ?? [];
+  if (catalog.length === 0 && (!settings || Object.keys(settings).length === 0)) return references;
+  const providerIds = new Set(catalog.map((provider) => provider.provider_id));
+  const visible = new Set(
+    visibleProviderModelCatalog(catalog, settings).flatMap((provider) => provider.models.map((model) => model.reference)),
+  );
+  return references.filter((reference) => {
+    const parsed = modelReference(reference);
+    if (!parsed.providerId) return true;
+    if (visible.has(reference)) return true;
+    const config = providerVisibilityConfig(settings, parsed.providerId);
+    if (!providerIds.has(parsed.providerId)) {
+      if (!config) return true;
+      if (config.showInModelPicker === false) return false;
+      if (config.visibleModelIds === undefined) return true;
+      if (config.visibleModelIds.length === 0) return false;
+      return config.visibleModelIds.includes(parsed.requestModel);
+    }
+    return false;
+  });
 }

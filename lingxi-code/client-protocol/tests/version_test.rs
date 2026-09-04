@@ -33,12 +33,12 @@ fn version_is_semver() {
     }
 }
 
-/// Mobile session-mode propagation pins the contract at `11.0.0`.
-/// The required Chat/Code mode now travels through session rows and lifecycle
-/// events, and the mobile launch configs version-lock on the added mode field.
+/// Shared provider model catalogs pin the contract at `12.0.0`.
+/// The JSON addition is additive, but the UniFFI-generated mobile bindings gain
+/// a new event and record layout.
 #[test]
-fn version_is_eleven_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "11.0.0");
+fn version_is_twelve_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "12.0.0");
 }
 
 fn repository_root() -> PathBuf {

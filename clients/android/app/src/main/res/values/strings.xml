@@ -388,6 +388,11 @@
     <string name="settings_provider_model_id">模型 ID</string>
     <string name="settings_provider_custom_model_id">自定义模型 ID</string>
     <string name="settings_provider_custom_model_hint">可直接输入未列出的模型 ID；上方预设选择器会写回这个字段。</string>
+    <string name="settings_provider_show_in_picker">显示在对话模型列表</string>
+    <string name="settings_provider_visible_models_count_fmt">已选 %1$d / %2$d 个模型</string>
+    <string name="settings_provider_picker_hidden_empty">当前没有可显示模型，这个 Provider 会从对话模型列表隐藏。</string>
+    <string name="settings_provider_catalog_loading">正在加载 Provider 模型目录…</string>
+    <string name="composer_no_visible_models">没有可显示模型</string>
     <string name="settings_provider_enable">启用</string>
     <string name="settings_provider_set_default">设为默认</string>
     <string name="settings_provider_remove">移除此提供商</string>

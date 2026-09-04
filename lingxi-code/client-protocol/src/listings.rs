@@ -197,6 +197,16 @@ pub struct ModelDetailsDto {
     pub supports_fast_mode: bool,
 }
 
+/// One provider's settings-visible conversation model catalog.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[allow(missing_docs)]
+pub struct ProviderModelCatalogEntryDto {
+    pub provider_id: String,
+    pub provider_label: String,
+    pub models: Vec<ModelDetailsDto>,
+}
+
 // ── MCP ──────────────────────────────────────────────────────────────────────
 
 /// One MCP server entry — the lowered `McpServerInfo`

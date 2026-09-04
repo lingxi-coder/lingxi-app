@@ -30,6 +30,7 @@ import {
 } from '../bridge/slashCommands';
 import {
   filterModelGroups,
+  filterVisibleModelReferences,
   groupModelReferences,
   modelBillingGroups,
   modelDisplayLabel,
@@ -944,6 +945,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const voicePrefs = bridge.bootstrap?.settings.voice ?? defaultVoicePreferences();
   const voicePrefsRef = useRef(voicePrefs);
   voicePrefsRef.current = voicePrefs;
+  const modelPickerVisibility = bridge.bootstrap?.settings.modelPickerVisibility;
   const dictationOwner = useRef<NativeAudioOwner | null>(null);
   const autoplayOwner = useRef<NativeAudioOwner | null>(null);
   const autoplaySubscription = useRef<(() => void) | null>(null);
@@ -957,9 +959,17 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     () => filterSlashCommands(bridge.desktop.slashCommands, slashQuery ?? ''),
     [bridge.desktop.slashCommands, slashQuery],
   );
+  const visibleModelReferences = useMemo(
+    () => filterVisibleModelReferences(
+      bridge.desktop.models,
+      bridge.desktop.providerModelCatalog,
+      modelPickerVisibility,
+    ),
+    [bridge.desktop.models, bridge.desktop.providerModelCatalog, modelPickerVisibility],
+  );
   const modelGroups = useMemo(
-    () => groupModelReferences(bridge.desktop.models),
-    [bridge.desktop.models],
+    () => groupModelReferences(visibleModelReferences),
+    [visibleModelReferences],
   );
   const filteredModelGroups = useMemo(
     () => filterModelGroups(modelGroups, modelQuery, bridge.desktop.modelDetails),
@@ -2297,7 +2307,13 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                         );
                       })}
                       {filteredModelGroups.length === 0 && (
-                        <div role="status" style={{ padding: '28px 16px 30px', color: t.text4, fontSize: 12, textAlign: 'center' }}>No models match “{modelQuery.trim()}”</div>
+                        <div role="status" style={{ padding: '28px 16px 30px', color: t.text4, fontSize: 12, textAlign: 'center' }}>
+                          {modelQuery.trim()
+                            ? `No models match “${modelQuery.trim()}”`
+                            : visibleModelReferences.length === 0
+                              ? 'No models are visible in this picker'
+                              : 'No models match your current filters'}
+                        </div>
                       )}
                     </div>
                   </div>

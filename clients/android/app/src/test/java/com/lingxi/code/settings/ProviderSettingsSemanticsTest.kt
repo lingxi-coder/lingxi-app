@@ -150,6 +150,18 @@ class ProviderSettingsSemanticsTest {
                 original.copy(enabled = false),
             ),
         )
+        assertFalse(
+            providerLaunchConfigurationChanged(
+                original,
+                original.copy(showInModelPicker = false),
+            ),
+        )
+        assertFalse(
+            providerLaunchConfigurationChanged(
+                original,
+                original.copy(visibleModelIds = listOf("gpt-4o-mini")),
+            ),
+        )
     }
 
     @Test

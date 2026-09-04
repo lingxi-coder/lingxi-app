@@ -44,6 +44,13 @@ export interface PinnedSessionRecord {
 /** What a caller supplies to pin a session — `pinnedAt` is the main process's to assign. */
 export type SessionPinInput = Omit<PinnedSessionRecord, 'pinnedAt'>;
 
+export interface ProviderModelPickerVisibility {
+  showInModelPicker?: boolean;
+  visibleModelIds?: string[];
+}
+
+export type ModelPickerVisibilitySettings = Record<string, ProviderModelPickerVisibility>;
+
 /**
  * The subset of the persisted device settings that leaves the main process.
  * Everything in `PersistedSettings` that is NOT here (today:
@@ -76,4 +83,5 @@ export interface PublicSettings {
    * field here.
    */
   voice?: VoicePreferences;
+  modelPickerVisibility?: ModelPickerVisibilitySettings;
 }

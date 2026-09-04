@@ -41,6 +41,7 @@ struct ChatView: View {
     // Held as view state (not read on every render) so the sheet re-sorts the
     // moment a pick lands instead of only after the next engine `ModelList`.
     private let modelRecents = ModelRecents()
+    @State private var providerRepository = ProviderRepository.shared
     @State private var recentModels: [String] = []
     /// The questionnaire sheet's detent. Starts (and re-starts for each new
     /// request) at `.large` so a full-size question is readable without a drag.
@@ -76,6 +77,7 @@ struct ChatView: View {
     }
 
     var body: some View {
+        let visibleAvailableModels = providerRepository.visibleModelReferences(convo.availableModels)
         ZStack {
             t.windowBg.ignoresSafeArea()
             // Ambient radial glow at the top.
@@ -136,7 +138,7 @@ struct ChatView: View {
                              // resume, reconnect), and recording those would fill
                              // the list with models the user never chose.
                              modelRecents.record(reference)
-                             recentModels = modelRecents.resolved(against: convo.availableModels)
+                             recentModels = modelRecents.resolved(against: visibleAvailableModels)
                          },
                          reasoningSelection: convo.reasoningSelection,
                          reasoningOptions: convo.reasoningOptions,
@@ -205,7 +207,7 @@ struct ChatView: View {
             // (`ModelList`) populates the picker before the first send. No-op on the mock.
             source.warmUp()
             source.listSessionAgents()
-            recentModels = modelRecents.resolved(against: convo.availableModels)
+            recentModels = modelRecents.resolved(against: visibleAvailableModels)
         }
         .onChange(of: session.id) { _, _ in
             // Re-arm following only for a real session switch. A sheet or
@@ -213,7 +215,7 @@ struct ChatView: View {
             // that must not discard the user's current scroll position.
             followsLatestMessage = true
         }
-        .onChange(of: convo.availableModels) { _, models in
+        .onChange(of: visibleAvailableModels) { _, models in
             // Re-resolve against the new catalog so a remembered model whose
             // provider was removed stops being offered.
             recentModels = modelRecents.resolved(against: models)

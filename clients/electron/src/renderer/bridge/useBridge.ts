@@ -35,6 +35,7 @@ import {
   type NativeAudioSnapshot,
 } from '../../shared/nativeAudio.js';
 import type { VoicePreferences } from '../../shared/voicePreferences';
+import type { ModelPickerVisibilitySettings } from '../../shared/settings';
 import {
   appendPendingUserPrompt,
   beginCompaction,
@@ -222,6 +223,7 @@ export interface UseBridge {
    * changes what the running engine talks to.
    */
   setVoicePreferences(voice: VoicePreferences): Promise<void>;
+  setModelPickerVisibility(modelPickerVisibility: ModelPickerVisibilitySettings): Promise<void>;
   /**
    * Writes a JSON-object patch into one engine settings file layer via the
    * `update_settings` wire command (`patch_json`; a `null` value in the patch
@@ -1861,6 +1863,11 @@ export function useBridge(): UseBridge {
     try { patchBootstrap({ settings: await host.updateSettings({ voice }) }); } catch (cause) { capture(cause); }
   }, [capture, host, patchBootstrap]);
 
+  const setModelPickerVisibility = useCallback(async (modelPickerVisibility: ModelPickerVisibilitySettings) => {
+    if (!host) return;
+    try { patchBootstrap({ settings: await host.updateSettings({ modelPickerVisibility }) }); } catch (cause) { capture(cause); }
+  }, [capture, host, patchBootstrap]);
+
   const restartBridge = useCallback(async (requestedSessionId?: string) => {
     const sessionId = requestedSessionId ?? activeSessionIdRef.current;
     const preconditionError = restartBridgePreconditionError(sessionLoadingRef.current, Boolean(host), sessionId);
@@ -2268,6 +2275,7 @@ export function useBridge(): UseBridge {
     setThemePreference,
     setApiBaseUrl,
     setVoicePreferences,
+    setModelPickerVisibility,
     updateEngineSettings,
     updatePermissionRules,
     setDefaultPermissionMode,

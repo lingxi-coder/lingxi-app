@@ -365,6 +365,15 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::SessionList", "session_list");
     put("ClientEvent::SessionList.sessions", "Vec<SessionRowDto>");
 
+    put(
+        "ClientEvent::ProviderModelCatalog",
+        "provider_model_catalog",
+    );
+    put(
+        "ClientEvent::ProviderModelCatalog.providers",
+        "Vec<ProviderModelCatalogEntryDto>",
+    );
+
     put("ClientEvent::ModelList", "model_list");
     put("ClientEvent::ModelList.models", "Vec<String>");
     put("ClientEvent::ModelList.current", "String");
@@ -1365,6 +1374,13 @@ fn current_contract_index() -> ContractIndex {
     put("ModelDetailsDto.capabilities", "ModelCapabilitiesDto");
     put("ModelDetailsDto.reasoning", "ReasoningControlSpecDto");
     put("ModelDetailsDto.supports_fast_mode", "bool");
+
+    put("ProviderModelCatalogEntryDto.provider_id", "String");
+    put("ProviderModelCatalogEntryDto.provider_label", "String");
+    put(
+        "ProviderModelCatalogEntryDto.models",
+        "Vec<ModelDetailsDto>",
+    );
 
     put("PermissionModeOptionDto.mode", "String");
     put("PermissionModeOptionDto.available", "bool");

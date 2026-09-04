@@ -13,6 +13,12 @@ typealias ProviderCatalogLoader = () async throws -> [ProviderCatalogEntry]
 
 typealias ProviderApplyReconnectHandler = (ProviderLaunchSnapshot) async throws -> Void
 
+private enum ProviderCatalogLoadState {
+    case idle
+    case loaded
+    case failed
+}
+
 enum ProviderConnectionTestResult: Equatable {
     case success(message: String? = nil, usedStoredCredential: Bool = true)
     case failure(message: String)
@@ -139,6 +145,20 @@ struct ProviderStoredProfile: Codable, Equatable, Identifiable {
     var modelID: String
     var enabled: Bool
     var isDefault: Bool
+    var showInModelPicker: Bool
+    var visibleModelIDs: [String]?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case presetID
+        case name
+        case baseURL
+        case modelID
+        case enabled
+        case isDefault
+        case showInModelPicker
+        case visibleModelIDs = "visibleModelIds"
+    }
 
     init(
         id: String,
@@ -147,7 +167,9 @@ struct ProviderStoredProfile: Codable, Equatable, Identifiable {
         baseURL: String,
         modelID: String,
         enabled: Bool,
-        isDefault: Bool
+        isDefault: Bool,
+        showInModelPicker: Bool = true,
+        visibleModelIDs: [String]? = nil
     ) {
         self.id = id
         self.presetID = presetID
@@ -156,6 +178,21 @@ struct ProviderStoredProfile: Codable, Equatable, Identifiable {
         self.modelID = modelID
         self.enabled = enabled
         self.isDefault = isDefault
+        self.showInModelPicker = showInModelPicker
+        self.visibleModelIDs = visibleModelIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        presetID = try container.decode(String.self, forKey: .presetID)
+        name = try container.decode(String.self, forKey: .name)
+        baseURL = try container.decode(String.self, forKey: .baseURL)
+        modelID = try container.decode(String.self, forKey: .modelID)
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        isDefault = try container.decode(Bool.self, forKey: .isDefault)
+        showInModelPicker = try container.decodeIfPresent(Bool.self, forKey: .showInModelPicker) ?? true
+        visibleModelIDs = try container.decodeIfPresent([String].self, forKey: .visibleModelIDs)
     }
 }
 
@@ -214,6 +251,12 @@ struct ProviderCatalogEntry: Identifiable, Equatable {
     var supportsOAuth: Bool {
         authName == "ChatGptOAuth" || authName == "OAuthBearer"
     }
+}
+
+enum ProviderEditorModelCatalog {
+    case loading
+    case unavailable
+    case ready(models: [String], detailsByModelID: [String: ModelRuntimeDetails])
 }
 
 struct ProviderSettingsSummary: Equatable {
@@ -452,6 +495,7 @@ final class ProviderRepository {
     private(set) var syncRevision = 0
     private(set) var runtimeSnapshot = ProviderRuntimeSnapshot()
     private(set) var catalogEntries: [ProviderCatalogEntry] = []
+    private var catalogLoadState: ProviderCatalogLoadState = .idle
 
     init(
         persistenceURL: URL? = nil,
@@ -521,6 +565,7 @@ final class ProviderRepository {
         // previous runtime's entries visible while the new source is loading.
         if resetCatalog {
             catalogEntries = []
+            catalogLoadState = .idle
         }
         runtimeSnapshot = ProviderRuntimeSnapshot()
         bumpSyncRevision()
@@ -532,15 +577,18 @@ final class ProviderRepository {
         catalogGeneration &+= 1
         let requestGeneration = catalogGeneration
         catalogEntries = []
+        catalogLoadState = .idle
         do {
             let entries = try await catalogLoader()
             guard requestGeneration == catalogGeneration else { return false }
             catalogEntries = entries
+            catalogLoadState = .loaded
             lastRepositoryError = nil
             bumpSyncRevision()
             return true
         } catch {
             guard requestGeneration == catalogGeneration else { return false }
+            catalogLoadState = .failed
             lastRepositoryError = error.localizedDescription
             bumpSyncRevision()
             return false
@@ -558,18 +606,11 @@ final class ProviderRepository {
         }
         guard !entries.isEmpty else { return Presets.llm }
         let fallback = Dictionary(uniqueKeysWithValues: Presets.llm.map { ($0.id, $0) })
-        return entries.map { entry in
-            let base = fallback[entry.id] ?? ProviderPreset(
-                id: entry.id,
-                name: entry.displayName,
-                sub: entry.protocolName,
-                color: Accents.color(for: entry.id),
-                defaultUrl: entry.baseURL,
-                keyPrefix: "",
-                models: entry.models
-            )
+        return entries.compactMap { entry in
+            let localPresetID = entry.id == "gemini" ? "google" : entry.id
+            guard let base = fallback[localPresetID], localPresetID != "custom" else { return nil }
             return ProviderPreset(
-                id: entry.id,
+                id: base.id,
                 name: entry.displayName,
                 sub: base.sub,
                 color: base.color,
@@ -815,6 +856,7 @@ final class ProviderRepository {
             normalizedDraft.profile.isDefault = keepsOAuth
         }
         let previousState = state(for: normalizedDraft.id)
+        let previousLaunchSnapshot = makeLaunchSnapshot()
         var persistedProfile: ProviderStoredProfile?
         var didPersistProfiles = false
         var didStartCredentialOperation = false
@@ -887,8 +929,15 @@ final class ProviderRepository {
                 for: launchProfile,
                 state: state(from: normalizedDraft)
             )
-            if let applyReconnectHandler {
-                try await applyReconnectHandler(makeLaunchSnapshot())
+            let nextLaunchSnapshot = makeLaunchSnapshot()
+            let requiresReconnect = applyDraftRequiresReconnect(
+                from: previousLaunchSnapshot,
+                to: nextLaunchSnapshot,
+                previousState: previousState,
+                currentState: currentState
+            )
+            if requiresReconnect, let applyReconnectHandler {
+                try await applyReconnectHandler(nextLaunchSnapshot)
                 if let index = indexOfProfile(id: normalizedDraft.id) {
                     profiles[index].detailMessage = String(localized: "settings_provider_applied_reconnect")
                 }
@@ -1075,6 +1124,88 @@ final class ProviderRepository {
 
     func state(for id: String) -> ProviderProfileState? {
         profiles.first(where: { $0.id == id })
+    }
+
+    func visibleModelReferences(_ references: [String]) -> [String] {
+        references.filter(visibleConversationModelReference(_:))
+    }
+
+    func visibleModelIDs(
+        for profile: ProviderStoredProfile,
+        from candidates: [String]
+    ) -> [String] {
+        let models = Array(NSOrderedSet(array: candidates)).compactMap { $0 as? String }
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard let allowlist = profile.visibleModelIDs else { return models }
+        let allowed = Set(allowlist)
+        return models.filter { allowed.contains($0) }
+    }
+
+    func visibleModelCount(
+        for profile: ProviderStoredProfile,
+        from candidates: [String]
+    ) -> Int {
+        visibleModelIDs(for: profile, from: candidates).count
+    }
+
+    func editorModelCatalog(
+        for profile: ProviderStoredProfile,
+        runtimeModelReferences: [String]
+    ) -> ProviderEditorModelCatalog {
+        if profile.presetID == "custom" {
+            let runtimeModels = runtimeModelReferences.compactMap { ref -> String? in
+                guard let slash = ref.firstIndex(of: "/") else { return nil }
+                let providerID = String(ref[..<slash])
+                guard providerID == profile.id || providerID == profile.presetID else { return nil }
+                return String(ref[ref.index(after: slash)...])
+            }
+            let currentModel = profile.modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let models = Array(
+                NSOrderedSet(array: runtimeModels + (currentModel.isEmpty ? [] : [currentModel]))
+            ).compactMap { $0 as? String }
+            return .ready(models: models, detailsByModelID: [:])
+        }
+        if let entry = catalogEntries.first(where: { $0.id == profile.presetID }) {
+            return .ready(
+                models: entry.models,
+                detailsByModelID: Dictionary(
+                    uniqueKeysWithValues: entry.modelDetails.values.map { ($0.modelId, $0) }
+                )
+            )
+        }
+        if catalogLoader != nil {
+            switch catalogLoadState {
+            case .idle:
+                return .loading
+            case .loaded, .failed:
+                return .unavailable
+            }
+        }
+        return .ready(
+            models: preset(for: profile.presetID).models,
+            detailsByModelID: [:]
+        )
+    }
+
+    private func visibleConversationModelReference(_ reference: String) -> Bool {
+        let parts = reference.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return true }
+        if catalogLoader != nil, catalogLoadState == .loaded {
+            guard authoritativeCatalogReferences().contains(reference) else { return false }
+        }
+        guard let state = profiles.first(where: { engineProfileID(for: $0.profile) == parts[0] }) else {
+            return true
+        }
+        guard state.profile.showInModelPicker else { return false }
+        guard let allowlist = state.profile.visibleModelIDs else { return true }
+        return allowlist.contains(parts[1])
+    }
+
+    private func authoritativeCatalogReferences() -> Set<String> {
+        Set(catalogEntries.flatMap { entry in
+            let providerID = entry.id == "google" ? "gemini" : entry.id
+            return Array(entry.modelDetails.keys) + entry.models.map { "\(providerID)/\($0)" }
+        })
     }
 
     func preset(for presetID: String) -> ProviderPreset {
@@ -1751,6 +1882,21 @@ final class ProviderRepository {
             hasLegacyAnthropicCredential: draft.hasLegacyAnthropicCredential,
             oauthState: draft.oauthState
         )
+    }
+
+    private func applyDraftRequiresReconnect(
+        from previousLaunchSnapshot: ProviderLaunchSnapshot,
+        to nextLaunchSnapshot: ProviderLaunchSnapshot,
+        previousState: ProviderProfileState?,
+        currentState: ProviderProfileState
+    ) -> Bool {
+        if previousLaunchSnapshot != nextLaunchSnapshot {
+            return true
+        }
+        if currentState.clearCredentialOnApply || effectiveSecret(for: currentState) != nil {
+            return true
+        }
+        return previousState?.oauthState != currentState.oauthState
     }
 
     /// Restore only the profile touched by a failed draft operation. The

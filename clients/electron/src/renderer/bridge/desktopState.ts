@@ -7,6 +7,7 @@ import type {
   ConversationControlsDto,
   HookDto,
   ModelDetailsDto,
+  ProviderModelCatalogEntryDto,
   SlashCommandDto,
   PermissionModeId,
   SessionRowDto,
@@ -25,6 +26,7 @@ export interface DesktopState {
   readonly activeSessionId: string | null;
   readonly models: string[];
   readonly modelDetails: ModelDetailsDto[];
+  readonly providerModelCatalog: ProviderModelCatalogEntryDto[];
   readonly currentModel: string | null;
   readonly conversationControls: ConversationControlsDto | null;
   readonly fastMode: boolean;
@@ -49,6 +51,7 @@ export function emptyDesktopState(): DesktopState {
     activeSessionId: null,
     models: [],
     modelDetails: [],
+    providerModelCatalog: [],
     currentModel: null,
     conversationControls: null,
     fastMode: false,
@@ -115,6 +118,8 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
       return { ...state, activeSessionId: null };
     case 'model_list':
       return { ...state, models: [...event.models], modelDetails: [...(event.details ?? [])], currentModel: event.current };
+    case 'provider_model_catalog':
+      return { ...state, providerModelCatalog: [...event.providers] };
     case 'model_changed':
       return { ...state, currentModel: event.model };
     case 'conversation_controls_changed':

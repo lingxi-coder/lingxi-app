@@ -21,6 +21,53 @@ final class ProviderRepositoryTests: XCTestCase {
         }
     }
 
+    private func runtimeModelDetails(
+        reference: String,
+        providerID: String,
+        providerLabel: String,
+        displayName: String,
+        modelID: String
+    ) -> ModelRuntimeDetails {
+        ModelRuntimeDetails(
+            reference: reference,
+            providerId: providerID,
+            providerLabel: providerLabel,
+            displayName: displayName,
+            modelId: modelID,
+            description: nil,
+            family: nil,
+            status: nil,
+            releaseDate: nil,
+            lastUpdated: nil,
+            knowledgeCutoff: nil,
+            inputModalities: [],
+            outputModalities: [],
+            contextWindowTokens: nil,
+            maxInputTokens: nil,
+            maxOutputTokens: nil,
+            openWeights: nil,
+            attachments: nil,
+            temperatureControl: nil,
+            pricing: nil,
+            capabilities: ModelCapabilitiesDto(
+                streaming: true,
+                tools: true,
+                vision: false,
+                documents: false,
+                reasoning: false,
+                structuredOutput: false
+            ),
+            reasoning: ReasoningControlSpecDto(
+                options: [],
+                budgetRange: nil,
+                providerDefault: .automatic,
+                forcedReasoning: false,
+                editable: false,
+                disabledReason: nil
+            )
+        )
+    }
+
     func testLaunchSnapshotUsesBuiltInProfileForOfficialEndpoint() async throws {
         let repository = ProviderRepository(persistenceURL: persistenceURL)
         let anthropic = repository.addProfile(presetID: "anthropic")
@@ -72,6 +119,78 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertFalse(reloaded.makeLaunchSnapshot().visionDelegationEnabled)
     }
 
+    func testStoredProfileDecodesMissingVisibilityFieldsToShowAll() throws {
+        let data = try XCTUnwrap(
+            """
+            {"id":"openai","presetID":"openai","name":"OpenAI","baseURL":"https://api.openai.com/v1","modelID":"gpt-5.6-sol","enabled":true,"isDefault":false}
+            """.data(using: .utf8)
+        )
+
+        let profile = try JSONDecoder().decode(ProviderStoredProfile.self, from: data)
+
+        XCTAssertTrue(profile.showInModelPicker)
+        XCTAssertNil(profile.visibleModelIDs)
+    }
+
+    func testStoredProfileEncodesVisibleModelIdsUsingCrossPlatformKey() throws {
+        let profile = ProviderStoredProfile(
+            id: "openai",
+            presetID: "openai",
+            name: "OpenAI",
+            baseURL: "https://api.openai.com/v1",
+            modelID: "gpt-5.6-sol",
+            enabled: true,
+            isDefault: false,
+            showInModelPicker: true,
+            visibleModelIDs: ["gpt-5.6-sol"]
+        )
+
+        let data = try JSONEncoder().encode(profile)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertEqual(object["visibleModelIds"] as? [String], ["gpt-5.6-sol"])
+        XCTAssertNil(object["visibleModelIDs"])
+    }
+
+    func testVisibleModelHelpersHonorProviderSwitchAndExplicitAllowlist() throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let openai = repository.addProfile(presetID: "openai")
+        let deepseek = repository.addProfile(presetID: "deepseek")
+        repository.updateProfile(openai) {
+            $0.visibleModelIDs = ["gpt-5.6-sol"]
+        }
+        repository.updateProfile(deepseek) {
+            $0.showInModelPicker = false
+        }
+
+        let openaiProfile = try XCTUnwrap(repository.state(for: openai)?.profile)
+        let deepseekProfile = try XCTUnwrap(repository.state(for: deepseek)?.profile)
+
+        XCTAssertEqual(
+            repository.visibleModelIDs(
+                for: openaiProfile,
+                from: ["gpt-5.6-sol", "gpt-5.7-preview", "gpt-5.6-sol"]
+            ),
+            ["gpt-5.6-sol"]
+        )
+        XCTAssertEqual(
+            repository.visibleModelIDs(
+                for: deepseekProfile,
+                from: ["deepseek-v4-flash"]
+            ),
+            ["deepseek-v4-flash"]
+        )
+        XCTAssertEqual(
+            repository.visibleModelReferences([
+                "openai/gpt-5.6-sol",
+                "openai/gpt-5.7-preview",
+                "deepseek/deepseek-v4-flash",
+                "community/custom-model",
+            ]),
+            ["openai/gpt-5.6-sol", "community/custom-model"]
+        )
+    }
+
     func testAnthropicOAuthCountsAsCredentialWithoutReplacingAPIKeyState() throws {
         let profile = ProviderStoredProfile(
             id: "anthropic",
@@ -109,7 +228,7 @@ final class ProviderRepositoryTests: XCTestCase {
 
         await repository.refreshCredentialStatus()
 
-        guard case let .listProviderCredentials(_, providerIDs) = try XCTUnwrap(recorder.commands.last) else {
+        guard case let .listProviderCredentials(_, providerIDs, _) = try XCTUnwrap(recorder.commands.last) else {
             return XCTFail("expected list provider credentials")
         }
         XCTAssertEqual(providerIDs, ["anthropic"], "Anthropic API Key must be restored independently of OAuth")
@@ -290,7 +409,7 @@ final class ProviderRepositoryTests: XCTestCase {
         })
 
         await repository.refreshCredentialStatus()
-        guard case let .listProviderCredentials(operationId, _) = try XCTUnwrap(recorder.commands.last) else {
+        guard case let .listProviderCredentials(operationId, _, _) = try XCTUnwrap(recorder.commands.last) else {
             return XCTFail("expected credential status request")
         }
         repository.handle(event: .providerCredentialStatus(
@@ -448,6 +567,166 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertEqual(reloaded.state(for: draft.id)?.profile.name, "Saved before reconnect")
     }
 
+    func testApplyDraftVisibilityToggleOnlySkipsReconnectAndKeepsLaunchSnapshot() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "deepseek")
+        repository.updateProfile(id) {
+            $0.enabled = false
+            $0.isDefault = false
+        }
+        let before = repository.makeLaunchSnapshot()
+        var reconnectSnapshots: [ProviderLaunchSnapshot] = []
+        repository.configure(
+            submitCommand: nil,
+            applyReconnect: { snapshot in
+                reconnectSnapshots.append(snapshot)
+            }
+        )
+
+        var draft = try XCTUnwrap(repository.makeDraft(for: id))
+        draft.profile.showInModelPicker = false
+
+        let applied = await repository.applyDraft(draft)
+        XCTAssertTrue(applied)
+        XCTAssertTrue(reconnectSnapshots.isEmpty)
+        XCTAssertEqual(repository.makeLaunchSnapshot(), before)
+        XCTAssertFalse(try XCTUnwrap(repository.state(for: id)).profile.showInModelPicker)
+
+        let reloaded = ProviderRepository(persistenceURL: persistenceURL)
+        XCTAssertFalse(try XCTUnwrap(reloaded.state(for: id)).profile.showInModelPicker)
+    }
+
+    func testApplyDraftVisibleModelAllowlistOnlySkipsReconnectAndKeepsLaunchSnapshot() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        repository.updateProfile(id) {
+            $0.enabled = false
+            $0.isDefault = false
+        }
+        let before = repository.makeLaunchSnapshot()
+        var reconnectSnapshots: [ProviderLaunchSnapshot] = []
+        repository.configure(
+            submitCommand: nil,
+            applyReconnect: { snapshot in
+                reconnectSnapshots.append(snapshot)
+            }
+        )
+
+        var draft = try XCTUnwrap(repository.makeDraft(for: id))
+        draft.profile.visibleModelIDs = ["gpt-5.6-sol"]
+
+        let applied = await repository.applyDraft(draft)
+        XCTAssertTrue(applied)
+        XCTAssertTrue(reconnectSnapshots.isEmpty)
+        XCTAssertEqual(repository.makeLaunchSnapshot(), before)
+        XCTAssertEqual(try XCTUnwrap(repository.state(for: id)).profile.visibleModelIDs, ["gpt-5.6-sol"])
+
+        let reloaded = ProviderRepository(persistenceURL: persistenceURL)
+        XCTAssertEqual(try XCTUnwrap(reloaded.state(for: id)).profile.visibleModelIDs, ["gpt-5.6-sol"])
+    }
+
+    func testApplyDraftMasterTogglePreservesExplicitModelSelectionWhenTurnedBackOn() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        repository.updateProfile(id) {
+            $0.enabled = false
+            $0.isDefault = false
+            $0.visibleModelIDs = ["gpt-5.6-terra"]
+            $0.showInModelPicker = false
+        }
+        var reconnectSnapshots: [ProviderLaunchSnapshot] = []
+        repository.configure(
+            submitCommand: nil,
+            applyReconnect: { snapshot in
+                reconnectSnapshots.append(snapshot)
+            }
+        )
+
+        var draft = try XCTUnwrap(repository.makeDraft(for: id))
+        XCTAssertEqual(draft.profile.visibleModelIDs, ["gpt-5.6-terra"])
+        XCTAssertFalse(draft.profile.showInModelPicker)
+        draft.profile.showInModelPicker = true
+
+        let applied = await repository.applyDraft(draft)
+        XCTAssertTrue(applied)
+        let stored = try XCTUnwrap(repository.state(for: id)?.profile)
+        XCTAssertTrue(stored.showInModelPicker)
+        XCTAssertEqual(stored.visibleModelIDs, ["gpt-5.6-terra"])
+        XCTAssertTrue(reconnectSnapshots.isEmpty)
+    }
+
+    func testApplyDraftRuntimeChangeStillReconnectsWhenVisibilityAlsoChanges() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        repository.updateProfile(id) {
+            $0.enabled = false
+            $0.isDefault = false
+        }
+        let before = repository.makeLaunchSnapshot()
+        var reconnectSnapshots: [ProviderLaunchSnapshot] = []
+        repository.configure(
+            submitCommand: nil,
+            applyReconnect: { snapshot in
+                reconnectSnapshots.append(snapshot)
+            }
+        )
+
+        var draft = try XCTUnwrap(repository.makeDraft(for: id))
+        draft.profile.modelID = "gpt-5.6-terra"
+        draft.profile.visibleModelIDs = ["gpt-5.6-terra"]
+
+        let applied = await repository.applyDraft(draft)
+        XCTAssertTrue(applied)
+        XCTAssertEqual(reconnectSnapshots.count, 1)
+        XCTAssertNotEqual(reconnectSnapshots[0], before)
+        XCTAssertEqual(reconnectSnapshots[0], repository.makeLaunchSnapshot())
+    }
+
+    func testApplyDraftCredentialOnlyStillReconnectsWhenLaunchSnapshotIsUnchanged() async throws {
+        let recorder = CommandRecorder()
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        repository.updateProfile(id) {
+            $0.enabled = false
+            $0.isDefault = false
+        }
+        let before = repository.makeLaunchSnapshot()
+        var reconnectSnapshots: [ProviderLaunchSnapshot] = []
+        repository.configure(
+            submitCommand: { command in
+                try await recorder.submit(command: command)
+            },
+            applyReconnect: { snapshot in
+                reconnectSnapshots.append(snapshot)
+            }
+        )
+
+        var draft = try XCTUnwrap(repository.makeDraft(for: id))
+        draft.pendingSecret = "sk-openai"
+
+        let apply = Task { await repository.applyDraft(draft) }
+        await waitForCommandCount(1, recorder: recorder)
+        guard case let .setProviderCredential(operationId, providerId, _) = try XCTUnwrap(recorder.commands.last) else {
+            return XCTFail("expected set provider credential")
+        }
+        XCTAssertEqual(providerId, id)
+
+        repository.handle(event: .providerCredentialStatus(
+            operationId: operationId,
+            configuredProviderIds: [id],
+            unavailableProviderIds: [],
+            storageEncrypted: true,
+            credentialPreviews: [:],
+            error: nil
+        ))
+
+        let applied = await apply.value
+        XCTAssertTrue(applied)
+        XCTAssertEqual(repository.makeLaunchSnapshot(), before)
+        XCTAssertEqual(reconnectSnapshots.count, 1)
+        XCTAssertEqual(reconnectSnapshots[0], before)
+    }
+
     func testEditingAndDiscardingDraftDoesNotChangeSavedSnapshot() throws {
         let repository = ProviderRepository(persistenceURL: persistenceURL)
         let id = repository.addProfile(presetID: "deepseek")
@@ -491,7 +770,7 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertTrue(repository.settingsSummary.runtimeMatchesDefault)
     }
 
-    func testCatalogRefreshUsesEngineEntriesAndKeepsCustomFallback() async throws {
+    func testCatalogRefreshKeepsOnlyKnownBuiltInPresetsInAddPicker() async throws {
         let repository = ProviderRepository(persistenceURL: persistenceURL)
         let entry = ProviderCatalogEntry(
             id: "engine-only",
@@ -507,9 +786,158 @@ final class ProviderRepositoryTests: XCTestCase {
 
         await repository.refreshCatalog()
 
-        XCTAssertEqual(repository.catalogPresets.map(\.id), ["engine-only", "custom"])
+        XCTAssertEqual(repository.catalogPresets.map(\.id), ["custom"])
         XCTAssertEqual(repository.preset(for: "engine-only").models, ["engine-model"])
         XCTAssertEqual(repository.preset(for: "engine-only").defaultUrl, "https://engine.example.test/v1")
+    }
+
+    func testEditorModelCatalogUsesLoadingStateUntilBuiltInCatalogArrives() throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        let profile = try XCTUnwrap(repository.state(for: id)?.profile)
+        repository.configure(submitCommand: nil, providerCatalog: { [] })
+
+        if case .loading = repository.editorModelCatalog(
+            for: profile,
+            runtimeModelReferences: []
+        ) {
+        } else {
+            XCTFail("expected built-in editor catalog to stay in loading state while shared catalog is empty")
+        }
+    }
+
+    func testEditorModelCatalogShowsUnavailableAfterLoadedCatalogOmitsBuiltInProvider() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        let profile = try XCTUnwrap(repository.state(for: id)?.profile)
+        repository.configure(submitCommand: nil, providerCatalog: { [] })
+
+        let refreshed = await repository.refreshCatalog()
+        XCTAssertTrue(refreshed)
+
+        if case .unavailable = repository.editorModelCatalog(
+            for: profile,
+            runtimeModelReferences: []
+        ) {
+        } else {
+            XCTFail("expected built-in editor catalog to become unavailable after a loaded empty catalog")
+        }
+    }
+
+    func testEditorModelCatalogDoesNotShowStaleBuiltInCurrentModelOutsideSharedCatalog() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        repository.updateProfile(id) {
+            $0.modelID = "gpt-stale-hidden"
+        }
+        let profile = try XCTUnwrap(repository.state(for: id)?.profile)
+        let entry = ProviderCatalogEntry(
+            id: "openai",
+            displayName: "OpenAI",
+            baseURL: "https://api.openai.com/v1",
+            protocolName: "ChatGPT API",
+            authName: "ApiKey",
+            credentialEnv: "OPENAI_API_KEY",
+            models: ["gpt-5.6-sol", "gpt-5.6-terra"],
+            modelDetails: [:]
+        )
+        repository.configure(submitCommand: nil, providerCatalog: { [entry] })
+        let refreshed = await repository.refreshCatalog()
+        XCTAssertTrue(refreshed)
+
+        guard case let .ready(models, _) = repository.editorModelCatalog(
+            for: profile,
+            runtimeModelReferences: ["openai/gpt-stale-hidden"]
+        ) else {
+            return XCTFail("expected built-in editor catalog to be ready")
+        }
+
+        XCTAssertEqual(models, ["gpt-5.6-sol", "gpt-5.6-terra"])
+        XCTAssertFalse(models.contains("gpt-stale-hidden"))
+    }
+
+    func testVisibleModelReferencesUsesAuthoritativeCatalogAfterLoad() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        _ = repository.addProfile(presetID: "openai")
+        let entry = ProviderCatalogEntry(
+            id: "openai",
+            displayName: "OpenAI",
+            baseURL: "https://api.openai.com/v1",
+            protocolName: "ChatGPT API",
+            authName: "ApiKey",
+            credentialEnv: "OPENAI_API_KEY",
+            models: ["gpt-5.6-sol", "gpt-5.6-terra"],
+            modelDetails: [
+                "openai/gpt-5.6-sol": runtimeModelDetails(
+                    reference: "openai/gpt-5.6-sol",
+                    providerID: "openai",
+                    providerLabel: "OpenAI",
+                    displayName: "GPT-5.6 Sol",
+                    modelID: "gpt-5.6-sol"
+                ),
+                "openai/gpt-5.6-terra": runtimeModelDetails(
+                    reference: "openai/gpt-5.6-terra",
+                    providerID: "openai",
+                    providerLabel: "OpenAI",
+                    displayName: "GPT-5.6 Terra",
+                    modelID: "gpt-5.6-terra"
+                ),
+            ]
+        )
+        repository.configure(submitCommand: nil, providerCatalog: { [entry] })
+
+        XCTAssertEqual(
+            repository.visibleModelReferences([
+                "openai/gpt-5.6-sol",
+                "openai/gpt-stale-hidden",
+            ]),
+            ["openai/gpt-5.6-sol", "openai/gpt-stale-hidden"],
+            "before catalog arrival, preserve engine rows"
+        )
+
+        let refreshed = await repository.refreshCatalog()
+        XCTAssertTrue(refreshed)
+
+        XCTAssertEqual(
+            repository.visibleModelReferences([
+                "openai/gpt-5.6-sol",
+                "openai/gpt-5.6-terra",
+                "openai/gpt-stale-hidden",
+            ]),
+            ["openai/gpt-5.6-sol", "openai/gpt-5.6-terra"]
+        )
+    }
+
+    func testVisibleModelReferencesDefaultsToVisibleForCatalogMemberWithoutStoredProfile() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let entry = ProviderCatalogEntry(
+            id: "openai",
+            displayName: "OpenAI",
+            baseURL: "https://api.openai.com/v1",
+            protocolName: "ChatGPT API",
+            authName: "ApiKey",
+            credentialEnv: "OPENAI_API_KEY",
+            models: ["gpt-5.6-sol"],
+            modelDetails: [
+                "openai/gpt-5.6-sol": runtimeModelDetails(
+                    reference: "openai/gpt-5.6-sol",
+                    providerID: "openai",
+                    providerLabel: "OpenAI",
+                    displayName: "GPT-5.6 Sol",
+                    modelID: "gpt-5.6-sol"
+                ),
+            ]
+        )
+        repository.configure(submitCommand: nil, providerCatalog: { [entry] })
+        let refreshed = await repository.refreshCatalog()
+        XCTAssertTrue(refreshed)
+
+        XCTAssertEqual(
+            repository.visibleModelReferences([
+                "openai/gpt-5.6-sol",
+            ]),
+            ["openai/gpt-5.6-sol"]
+        )
     }
 
     func testRoutingFiltersInvalidFallbackSelections() throws {
@@ -598,7 +1026,7 @@ final class ProviderRepositoryTests: XCTestCase {
         await apply.value
 
         await repository.refreshCredentialStatus()
-        guard case let .listProviderCredentials(operationId: listOperationID, providerIds) = try XCTUnwrap(recorder.commands.last) else {
+        guard case let .listProviderCredentials(listOperationID, providerIds, _) = try XCTUnwrap(recorder.commands.last) else {
             return XCTFail("expected list provider credentials")
         }
         XCTAssertEqual(Set(providerIds), Set([openAI, kimi]))
@@ -630,7 +1058,7 @@ final class ProviderRepositoryTests: XCTestCase {
         })
 
         await repository.refreshCredentialStatus()
-        guard case let .listProviderCredentials(operationId: operationID, _) = try XCTUnwrap(recorder.commands.last) else {
+        guard case let .listProviderCredentials(operationID, _, _) = try XCTUnwrap(recorder.commands.last) else {
             return XCTFail("expected list provider credentials")
         }
         XCTAssertTrue(try XCTUnwrap(repository.state(for: openAI)).operationInFlight)
@@ -664,11 +1092,11 @@ final class ProviderRepositoryTests: XCTestCase {
         })
 
         await repository.refreshCredentialStatus()
-        guard case let .listProviderCredentials(operationId: oldOperationID, _) = try XCTUnwrap(recorder.commands.last) else {
+        guard case let .listProviderCredentials(oldOperationID, _, _) = try XCTUnwrap(recorder.commands.last) else {
             return XCTFail("expected first list provider credentials")
         }
         await repository.refreshCredentialStatus()
-        guard case let .listProviderCredentials(operationId: currentOperationID, _) = try XCTUnwrap(recorder.commands.last) else {
+        guard case let .listProviderCredentials(currentOperationID, _, _) = try XCTUnwrap(recorder.commands.last) else {
             return XCTFail("expected replacement list provider credentials")
         }
         XCTAssertNotEqual(oldOperationID, currentOperationID)

@@ -20,8 +20,9 @@ use crate::controls::ConversationControlsDto;
 use crate::listings::{
     AgentDto, AuthStateDto, ConfigurationDomainDto, ConfigurationEffectDto,
     ConfigurationOperationStatusDto, CoordinatorWorkerDto, DoctorReportDto, HookDto, McpServerDto,
-    MemoryEntryDto, ModelDetailsDto, SessionAgentSummaryDto, SessionModeDto, SessionRowDto,
-    SkillDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    MemoryEntryDto, ModelDetailsDto, ProviderModelCatalogEntryDto, SessionAgentSummaryDto,
+    SessionModeDto, SessionRowDto, SkillDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto,
+    TaskStatusDto,
 };
 use crate::local_apps::{
     AppCheckpointDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeDetailsDto,
@@ -561,6 +562,10 @@ pub enum ClientEvent {
 
     PluginCatalog {
         catalog_json: String,
+    },
+
+    ProviderModelCatalog {
+        providers: Vec<ProviderModelCatalogEntryDto>,
     },
 }
 

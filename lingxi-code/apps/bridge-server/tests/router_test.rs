@@ -1060,9 +1060,15 @@ async fn list_models_routes() {
     router.route(ClientCommand::ListModels, sink.clone()).await;
 
     let events = sink.events().await;
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
     assert_eq!(
         events[0],
+        ClientEvent::ProviderModelCatalog {
+            providers: Vec::new(),
+        }
+    );
+    assert_eq!(
+        events[1],
         ClientEvent::ModelList {
             models: vec!["a".into(), "b".into()],
             current: "a".into(),
@@ -1083,7 +1089,10 @@ async fn list_models_curates_and_preserves_provider_identity() {
             provider_label: "OpenAI".into(),
             description: None,
             metadata: Default::default(),
-            capabilities: Default::default(),
+            capabilities: platform_api::ModelCapabilities {
+                tools: true,
+                ..Default::default()
+            },
             reasoning: Default::default(),
             supports_reasoning: true,
         },
@@ -1094,7 +1103,10 @@ async fn list_models_curates_and_preserves_provider_identity() {
             provider_label: "OpenAI".into(),
             description: None,
             metadata: Default::default(),
-            capabilities: Default::default(),
+            capabilities: platform_api::ModelCapabilities {
+                tools: true,
+                ..Default::default()
+            },
             reasoning: Default::default(),
             supports_reasoning: false,
         },
@@ -1105,7 +1117,10 @@ async fn list_models_curates_and_preserves_provider_identity() {
             provider_label: "GitHub Copilot".into(),
             description: None,
             metadata: Default::default(),
-            capabilities: Default::default(),
+            capabilities: platform_api::ModelCapabilities {
+                tools: true,
+                ..Default::default()
+            },
             reasoning: Default::default(),
             supports_reasoning: true,
         },
@@ -1121,12 +1136,22 @@ async fn list_models_curates_and_preserves_provider_identity() {
     router.route(ClientCommand::ListModels, sink.clone()).await;
 
     let events = sink.events().await;
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
+    let ClientEvent::ProviderModelCatalog { providers } = &events[0] else {
+        panic!("expected provider model catalog event");
+    };
+    assert_eq!(
+        providers
+            .iter()
+            .map(|provider| provider.provider_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["openai", "github-copilot"]
+    );
     let ClientEvent::ModelList {
         models,
         current,
         details,
-    } = &events[0]
+    } = &events[1]
     else {
         panic!("expected model list event");
     };
@@ -1141,6 +1166,83 @@ async fn list_models_curates_and_preserves_provider_identity() {
             .map(|detail| detail.reference.as_str())
             .collect::<Vec<_>>(),
         vec!["github-copilot/gpt-5.6-sol", "openai/gpt-5.6-sol"]
+    );
+}
+
+#[tokio::test]
+async fn list_models_uses_full_provider_catalog_when_provided() {
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    handle.set_available_models(vec!["deepseek-v4-flash".into()]);
+    handle.set_model_listings(vec![platform_api::ModelListing {
+        display_model: "DeepSeek V4 Flash".into(),
+        request_model: "deepseek-v4-flash".into(),
+        provider_id: "deepseek".into(),
+        provider_label: "DeepSeek".into(),
+        description: None,
+        metadata: Default::default(),
+        capabilities: platform_api::ModelCapabilities {
+            tools: true,
+            ..Default::default()
+        },
+        reasoning: Default::default(),
+        supports_reasoning: true,
+    }]);
+    handle.set_status_snapshot(StatusSnapshot {
+        model: "deepseek-v4-flash".into(),
+        model_profile: Some("deepseek".into()),
+        ..StatusSnapshot::default()
+    });
+    let router = EngineCommandRouter::new(
+        handle as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
+        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
+        Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
+        None,
+        None,
+    )
+    .with_provider_model_catalog_listings(vec![
+        platform_api::ModelListing {
+            display_model: "Claude Sonnet 5".into(),
+            request_model: "claude-sonnet-5".into(),
+            provider_id: "anthropic".into(),
+            provider_label: "Anthropic".into(),
+            description: None,
+            metadata: Default::default(),
+            capabilities: platform_api::ModelCapabilities {
+                tools: true,
+                ..Default::default()
+            },
+            reasoning: Default::default(),
+            supports_reasoning: true,
+        },
+        platform_api::ModelListing {
+            display_model: "Internal 7B".into(),
+            request_model: "internal-7b".into(),
+            provider_id: "my-proxy".into(),
+            provider_label: "My Proxy".into(),
+            description: None,
+            metadata: Default::default(),
+            capabilities: platform_api::ModelCapabilities {
+                tools: true,
+                ..Default::default()
+            },
+            reasoning: Default::default(),
+            supports_reasoning: true,
+        },
+    ]);
+    let sink = CapturingSink::arc();
+
+    router.route(ClientCommand::ListModels, sink.clone()).await;
+
+    let events = sink.events().await;
+    let ClientEvent::ProviderModelCatalog { providers } = &events[0] else {
+        panic!("expected provider model catalog event");
+    };
+    assert_eq!(
+        providers
+            .iter()
+            .map(|provider| provider.provider_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["anthropic", "my-proxy"]
     );
 }
 

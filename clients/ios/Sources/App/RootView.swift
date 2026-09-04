@@ -1183,6 +1183,7 @@ struct RootView: View {
         }
 
         private func handleExternalEvent(_ event: ClientEvent) {
+            providerRepository.handle(event: event)
             switch event {
             case let .sessionStarted(sessionId, mode):
                 guard SessionMode(dto: mode) == activeMode else { return }

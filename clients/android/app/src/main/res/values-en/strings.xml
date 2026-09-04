@@ -388,6 +388,11 @@
     <string name="settings_provider_model_id">Model ID</string>
     <string name="settings_provider_custom_model_id">Custom Model ID</string>
     <string name="settings_provider_custom_model_hint">You can type a model ID that isn\'t listed; the preset picker above writes back into this field.</string>
+    <string name="settings_provider_show_in_picker">Show in conversation model list</string>
+    <string name="settings_provider_visible_models_count_fmt">%1$d of %2$d models selected</string>
+    <string name="settings_provider_picker_hidden_empty">No models are visible, so this provider will be hidden from the conversation model list.</string>
+    <string name="settings_provider_catalog_loading">Loading the provider model catalog…</string>
+    <string name="composer_no_visible_models">No visible models</string>
     <string name="settings_provider_enable">Enable</string>
     <string name="settings_provider_set_default">Set as Default</string>
     <string name="settings_provider_remove">Remove This Provider</string>

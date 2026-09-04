@@ -139,6 +139,7 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   session_agent_updated: true,
   session_agent_message: true,
   model_list: true,
+  provider_model_catalog: true,
   model_changed: true,
   permission_mode_changed: true,
   typescript_lsp_mode_changed: true,

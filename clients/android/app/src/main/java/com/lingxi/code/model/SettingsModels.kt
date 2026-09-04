@@ -80,6 +80,8 @@ data class GenericProvider(
     val isDefault: Boolean = false,
     val enabled: Boolean,
     val credentialConfigured: Boolean = false,
+    val showInModelPicker: Boolean = true,
+    val visibleModelIds: List<String>? = null,
 )
 
 data class Skill(

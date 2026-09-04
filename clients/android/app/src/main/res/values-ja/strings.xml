@@ -1887,6 +1887,11 @@
     <string name="chat_error_finish_background_turn_first">先にバックグラウンドの会話を再開するか破棄してください。</string>
     <string name="chat_error_open_conversation_failed">通知からこの会話を開けませんでした。セッション一覧から選んでください。</string>
     <string name="composer_discard_background_turn">バックグラウンドの会話を破棄</string>
+    <string name="settings_provider_show_in_picker">会話モデル一覧に表示</string>
+    <string name="settings_provider_visible_models_count_fmt">%1$d / %2$d 件のモデルを表示</string>
+    <string name="settings_provider_picker_hidden_empty">表示できるモデルがないため、この Provider は会話モデル一覧から非表示になります。</string>
+    <string name="settings_provider_catalog_loading">Provider のモデルカタログを読み込み中…</string>
+    <string name="composer_no_visible_models">表示できるモデルがありません</string>
     <string name="chat_live_activity_status_running">実行中</string>
     <string name="chat_live_activity_status_waiting">あなたを待っています</string>
     <string name="chat_live_activity_status_paused">安全に一時停止中</string>

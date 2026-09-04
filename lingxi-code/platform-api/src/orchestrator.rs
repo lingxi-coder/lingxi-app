@@ -1033,6 +1033,17 @@ pub struct ModelListing {
     pub reasoning: ReasoningControlSpec,
 }
 
+/// One provider section in the shared client-side model directory.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProviderModelCatalogEntry {
+    /// Stable profile/provider id (`anthropic`, `openai`, custom profile name, …).
+    pub provider_id: String,
+    /// Human-facing provider label shown in settings.
+    pub provider_label: String,
+    /// Provider-scoped model rows that remain eligible for conversation UIs.
+    pub models: Vec<ModelListing>,
+}
+
 /// Provider-neutral user selection for reasoning / effort controls.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -1740,6 +1751,30 @@ pub fn curated_model_listings(
     out
 }
 
+/// Filter model listings for the shared provider-settings directory.
+///
+/// This applies the same deprecated and provider-curation rules as the picker,
+/// but keeps the natural provider/model order instead of injecting or moving a
+/// session-specific current model.
+#[must_use]
+pub fn provider_model_catalog_listings(listings: &[ModelListing]) -> Vec<ModelListing> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for listing in listings {
+        if !listing.capabilities.tools
+            || !is_offered_model(&listing.provider_id, &listing.request_model)
+            || listing.metadata.status.as_deref() == Some("deprecated")
+        {
+            continue;
+        }
+        let key = (listing.provider_id.clone(), listing.request_model.clone());
+        if seen.insert(key) {
+            out.push(listing.clone());
+        }
+    }
+    out
+}
+
 /// Whether a listing belongs in a client's model picker.
 ///
 /// For a provider the shared catalog curates, that means the "latest few"
@@ -1756,6 +1791,39 @@ fn is_offered_model(provider_id: &str, request_model: &str) -> bool {
     } else {
         true
     }
+}
+
+/// Curate the full provider model directory shared by settings UIs.
+///
+/// This keeps the same deprecated/custom-provider trimming rule as
+/// [`curated_model_listings`], but groups the surviving rows under their stable
+/// provider id so clients can apply local visibility preferences without
+/// guessing cross-provider ownership from a flat model list.
+#[must_use]
+pub fn provider_model_catalog(listings: &[ModelListing]) -> Vec<ProviderModelCatalogEntry> {
+    let mut catalog: Vec<ProviderModelCatalogEntry> = Vec::new();
+    let mut indexes: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    for listing in provider_model_catalog_listings(listings) {
+        let provider_id = listing.provider_id.clone();
+        let provider_label = if listing.provider_label.is_empty() {
+            provider_id.clone()
+        } else {
+            listing.provider_label.clone()
+        };
+        let index = *indexes.entry(provider_id.clone()).or_insert_with(|| {
+            let index = catalog.len();
+            catalog.push(ProviderModelCatalogEntry {
+                provider_id: provider_id.clone(),
+                provider_label,
+                models: Vec::new(),
+            });
+            index
+        });
+        catalog[index].models.push(listing);
+    }
+
+    catalog
 }
 
 /// Curate a flat list of display names for legacy text-only listing callers.

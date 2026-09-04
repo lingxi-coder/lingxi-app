@@ -13,6 +13,7 @@ import SwiftUI
 /// reference verbatim, so two providers exposing the same wire id stay distinct.
 struct ModelPickerSheet: View {
     @Environment(\.theme) private var t
+    @State private var repository = ProviderRepository.shared
 
     /// The engine's curated references (`ClientEvent::ModelList.models`).
     let availableModels: [String]
@@ -30,8 +31,12 @@ struct ModelPickerSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                if matches.isEmpty {
-                    Text("composer_no_matching_models")
+                if let emptyStateKey = Self.emptyStateKey(
+                    query: query,
+                    visibleModels: visibleModels,
+                    matches: matches
+                ) {
+                    Text(LocalizedStringKey(emptyStateKey))
                         .font(.system(size: 13))
                         .foregroundStyle(t.text3)
                         .listRowBackground(Color.clear)
@@ -80,8 +85,28 @@ struct ModelPickerSheet: View {
     }
 
     /// The references surviving the search box, in engine order.
+    private var visibleModels: [String] {
+        repository.visibleModelReferences(availableModels)
+    }
+
+    /// The references surviving the search box, in engine order.
     private var matches: [String] {
-        ModelDisplay.filter(availableModels, matching: query, detailsByReference: detailsByReference)
+        ModelDisplay.filter(
+            visibleModels,
+            matching: query,
+            detailsByReference: detailsByReference
+        )
+    }
+
+    static func emptyStateKey(
+        query: String,
+        visibleModels: [String],
+        matches: [String]
+    ) -> String? {
+        guard matches.isEmpty else { return nil }
+        return query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && visibleModels.isEmpty
+            ? "composer_no_visible_models"
+            : "composer_no_matching_models"
     }
 
     /// Provider sections built from the surviving references — filter first,

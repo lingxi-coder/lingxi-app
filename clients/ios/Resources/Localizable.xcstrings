@@ -104,6 +104,74 @@
         }
       }
     },
+    "settings_provider_picker_hidden_empty": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前没有可显示模型，这个 Provider 会从对话模型列表隐藏。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前沒有可顯示的模型，因此此 Provider 會從對話模型列表中隱藏。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No models are visible, so this provider will be hidden from the conversation model list."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "表示できるモデルがないため、このプロバイダーは会話モデル一覧に表示されません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "표시할 모델이 없어 이 제공자는 대화 모델 목록에서 숨겨집니다."
+          }
+        }
+      }
+    },
+    "settings_provider_show_in_picker": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示在对话模型列表"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "顯示在對話模型列表"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show in conversation model list"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話モデル一覧に表示"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대화 모델 목록에 표시"
+          }
+        }
+      }
+    },
     "NSPhotoLibraryUsageDescription": {
       "localizations": {
         "zh-Hans": {
@@ -10294,6 +10362,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "일치하는 모델이 없습니다"
+          }
+        }
+      }
+    },
+    "composer_no_visible_models": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前没有可显示模型"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前沒有可顯示的模型"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No models are visible right now"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "現在表示できるモデルはありません"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "현재 표시할 수 있는 모델이 없습니다"
           }
         }
       }
@@ -52042,6 +52144,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "모델 ID"
+          }
+        }
+      }
+    },
+    "settings_provider_model_catalog_loading": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在加载共享模型目录…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在載入共用模型目錄…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading shared model catalog…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "共有モデルカタログを読み込み中…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "공유 모델 카탈로그를 불러오는 중…"
+          }
+        }
+      }
+    },
+    "settings_provider_model_catalog_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前无法获取这个 Provider 的共享模型目录。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前無法取得此 Provider 的共用模型目錄。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The shared model catalog for this provider is unavailable right now."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "現在、このプロバイダーの共有モデルカタログを取得できません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "현재 이 제공자의 공유 모델 카탈로그를 가져올 수 없습니다."
           }
         }
       }

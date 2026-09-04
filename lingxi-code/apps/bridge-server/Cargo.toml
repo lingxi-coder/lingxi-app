@@ -76,6 +76,8 @@ telemetry = { path = "../../telemetry" }
 # S2: `boot::load_settings_blocks` reads the layered settings `providers` /
 # `routing` blocks (same loader the CLI uses) to fill the DesktopConfig.
 core = { path = "../../core" }
+provider-config = { path = "../../provider-config" }
+llm-client = { path = "../../llm-client" }
 # S2: resolve `~/.claude` (claude_home) + the global `.mcp.json` path, and the
 # F2-04 `~/.claude/bridge/<port>.lock` discovery dir.
 dirs = "5"

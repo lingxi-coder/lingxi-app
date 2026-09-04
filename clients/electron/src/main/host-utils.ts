@@ -3,7 +3,13 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSy
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 
 import { SETTINGS_VERSION } from '../shared/settings.js';
-import type { PinnedSessionRecord, PublicSettings, SessionRef } from '../shared/settings.js';
+import type {
+  ModelPickerVisibilitySettings,
+  PinnedSessionRecord,
+  ProviderModelPickerVisibility,
+  PublicSettings,
+  SessionRef,
+} from '../shared/settings.js';
 import { parseVoicePreferences } from '../shared/voicePreferences.js';
 import type { VoicePreferences } from '../shared/voicePreferences.js';
 
@@ -24,6 +30,10 @@ export const MAX_DIAGNOSTIC_LENGTH = 2_000;
 export const MAX_TRUST_FINGERPRINT_ENTRIES = 512;
 export const MAX_TRUST_FINGERPRINT_BYTES = 512 * 1024;
 export const MAX_TRUST_FINGERPRINT_DEPTH = 12;
+export const MAX_MODEL_PICKER_PROVIDERS = 128;
+export const MAX_MODEL_PICKER_MODELS_PER_PROVIDER = 512;
+export const MAX_PROVIDER_ID_LENGTH = 256;
+export const MAX_MODEL_ID_LENGTH = 512;
 
 export const TRUST_CONFIG_PATHS = [
   '.mcp.json',
@@ -73,6 +83,8 @@ export interface PersistedSettings {
   /** Voice recognition/synthesis preferences — see `shared/voicePreferences.ts`.
    * Omitted (not defaulted) until the first `SettingsStore.update({ voice })` call. */
   voice?: VoicePreferences;
+  /** Device-local conversation model picker visibility by provider id. */
+  modelPickerVisibility?: ModelPickerVisibilitySettings;
 }
 
 export interface DiagnosticEntry {
@@ -135,6 +147,9 @@ export function parseSettings(value: unknown): PersistedSettings {
   if (value['voice'] !== undefined) {
     settings.voice = parseVoicePreferences(value['voice']);
   }
+  if (value['modelPickerVisibility'] !== undefined) {
+    settings.modelPickerVisibility = parseModelPickerVisibility(value['modelPickerVisibility']);
+  }
 
   const legacyActive = boundedString(value['lastWorkspace'], 32_768);
   const persistedProjects = boundedStringArray(value['projects'], MAX_PROJECTS);
@@ -188,7 +203,7 @@ export function parseSettings(value: unknown): PersistedSettings {
 export function publicSettings(settings: PersistedSettings): PublicSettings {
   const {
     version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions,
-    bypassPermissionsModeAccepted, voice,
+    bypassPermissionsModeAccepted, voice, modelPickerVisibility,
   } = settings;
   return {
     version,
@@ -201,7 +216,63 @@ export function publicSettings(settings: PersistedSettings): PublicSettings {
     pinnedSessions: pinnedSessions.map((session) => ({ ...session })),
     ...(bypassPermissionsModeAccepted ? { bypassPermissionsModeAccepted: true } : {}),
     ...(voice ? { voice: { ...voice } } : {}),
+    ...(modelPickerVisibility ? { modelPickerVisibility: cloneModelPickerVisibility(modelPickerVisibility) } : {}),
   };
+}
+
+function parseProviderModelPickerVisibility(value: unknown): ProviderModelPickerVisibility | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const parsed: ProviderModelPickerVisibility = {};
+  if (value['showInModelPicker'] === true || value['showInModelPicker'] === false) {
+    parsed.showInModelPicker = value['showInModelPicker'];
+  }
+  if (value['visibleModelIds'] === null) {
+    parsed.visibleModelIds = undefined;
+  } else if (Array.isArray(value['visibleModelIds'])) {
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    for (const item of value['visibleModelIds']) {
+      const id = boundedString(item, MAX_MODEL_ID_LENGTH);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+      if (ids.length >= MAX_MODEL_PICKER_MODELS_PER_PROVIDER) break;
+    }
+    parsed.visibleModelIds = ids;
+  }
+  return parsed;
+}
+
+export function parseModelPickerVisibility(value: unknown): ModelPickerVisibilitySettings {
+  if (!isPlainObject(value)) return {};
+  const out: ModelPickerVisibilitySettings = {};
+  for (const [providerId, rawVisibility] of Object.entries(value)) {
+    const boundedProviderId = boundedString(providerId, MAX_PROVIDER_ID_LENGTH);
+    if (!boundedProviderId) continue;
+    const parsed = parseProviderModelPickerVisibility(rawVisibility);
+    if (!parsed) continue;
+    out[boundedProviderId] = parsed;
+    if (Object.keys(out).length >= MAX_MODEL_PICKER_PROVIDERS) break;
+  }
+  return out;
+}
+
+function cloneModelPickerVisibility(
+  value: ModelPickerVisibilitySettings,
+): ModelPickerVisibilitySettings {
+  return Object.fromEntries(
+    Object.entries(value).map(([providerId, visibility]) => [
+      providerId,
+      {
+        ...(visibility.showInModelPicker !== undefined
+          ? { showInModelPicker: visibility.showInModelPicker }
+          : {}),
+        ...(visibility.visibleModelIds !== undefined
+          ? { visibleModelIds: [...visibility.visibleModelIds] }
+          : {}),
+      },
+    ]),
+  );
 }
 
 export function canonicalWorkspace(input: string): string {

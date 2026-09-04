@@ -734,7 +734,7 @@ mod reasoning_controls_tests {
 mod curated_model_tests {
     use super::{
         curated_model_listings, curated_model_names, curated_model_refs, is_curated_model,
-        qualified_model_ref, ModelListing,
+        provider_model_catalog, provider_model_catalog_listings, qualified_model_ref, ModelListing,
     };
 
     fn listing(provider_id: &str, request_model: &str, display: &str) -> ModelListing {
@@ -749,6 +749,12 @@ mod curated_model_tests {
             reasoning: Default::default(),
             supports_reasoning: false,
         }
+    }
+
+    fn chat_listing(provider_id: &str, request_model: &str, display: &str) -> ModelListing {
+        let mut listing = listing(provider_id, request_model, display);
+        listing.capabilities.tools = true;
+        listing
     }
 
     #[test]
@@ -847,6 +853,84 @@ mod curated_model_tests {
         let current = curated_model_listings(&[deprecated], "gpt-5.6-sol", Some("openai"));
         assert_eq!(current.len(), 1);
         assert_eq!(current[0].request_model, "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn provider_model_catalog_groups_in_provider_order_and_keeps_model_order() {
+        let listings = vec![
+            chat_listing("openai", "gpt-5.6-sol", "GPT-5.6 Sol"),
+            chat_listing("my-proxy", "llama-3.3-70b", "Llama 3.3 70B"),
+            chat_listing("my-proxy", "internal-reasoner", "Internal Reasoner"),
+            chat_listing("anthropic", "claude-opus-5", "Claude Opus 5"),
+        ];
+
+        let catalog = provider_model_catalog(&listings);
+
+        assert_eq!(
+            catalog
+                .iter()
+                .map(|entry| entry.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["openai", "my-proxy", "anthropic"]
+        );
+        assert_eq!(
+            catalog[1]
+                .models
+                .iter()
+                .map(|entry| entry.request_model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["llama-3.3-70b", "internal-reasoner"]
+        );
+    }
+
+    #[test]
+    fn provider_model_catalog_uses_chat_capability_and_curation_rules() {
+        let mut deprecated = chat_listing("openai", "gpt-5.6-terra", "GPT-5.6 Terra");
+        deprecated.metadata.status = Some("deprecated".to_string());
+        let mut no_tools = chat_listing("openai", "gpt-5.6-sol", "GPT-5.6 Sol");
+        no_tools.capabilities.tools = false;
+        let listings = vec![
+            no_tools,
+            chat_listing("openai", "gpt-5.6-sol", "GPT-5.6 Sol"),
+            chat_listing("openai", "gpt-4o", "GPT-4o"),
+            deprecated,
+            chat_listing("my-proxy", "internal-a", "Internal A"),
+            chat_listing("my-proxy", "internal-b", "Internal B"),
+        ];
+
+        let curated = provider_model_catalog_listings(&listings);
+        assert_eq!(
+            curated
+                .iter()
+                .map(|entry| (entry.provider_id.as_str(), entry.request_model.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("openai", "gpt-5.6-sol"),
+                ("my-proxy", "internal-a"),
+                ("my-proxy", "internal-b"),
+            ]
+        );
+
+        let catalog = provider_model_catalog(&listings);
+        assert_eq!(catalog.len(), 2);
+        assert_eq!(catalog[0].provider_id, "openai");
+        assert_eq!(
+            catalog[0]
+                .models
+                .iter()
+                .map(|entry| entry.request_model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-5.6-sol"]
+        );
+        assert_eq!(catalog[1].provider_id, "my-proxy");
+        assert_eq!(
+            catalog[1]
+                .models
+                .iter()
+                .map(|entry| entry.request_model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["internal-a", "internal-b"]
+        );
     }
 
     #[test]

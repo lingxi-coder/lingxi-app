@@ -1887,6 +1887,11 @@
     <string name="chat_error_finish_background_turn_first">請先處理背景對話（繼續或捨棄），再進行此操作。</string>
     <string name="chat_error_open_conversation_failed">無法從通知開啟該對話，請在對話列表中選擇。</string>
     <string name="composer_discard_background_turn">捨棄背景對話</string>
+    <string name="settings_provider_show_in_picker">顯示在對話模型列表</string>
+    <string name="settings_provider_visible_models_count_fmt">已選 %1$d / %2$d 個模型</string>
+    <string name="settings_provider_picker_hidden_empty">目前沒有可顯示模型，這個 Provider 會從對話模型列表隱藏。</string>
+    <string name="settings_provider_catalog_loading">正在載入 Provider 模型目錄…</string>
+    <string name="composer_no_visible_models">沒有可顯示模型</string>
     <string name="chat_live_activity_status_running">執行中</string>
     <string name="chat_live_activity_status_waiting">正在等待你</string>
     <string name="chat_live_activity_status_paused">已安全暫停</string>

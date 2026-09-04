@@ -209,6 +209,70 @@ class ProviderProfileMappingTest {
         assertEquals("gpt-5.6-luna", provider.model)
     }
 
+    @Test
+    fun newProvider_withoutSharedCatalogLeavesLlmModelBlank() {
+        val provider = ProviderSettingsRepository.newProvider(
+            kind = com.lingxi.code.model.ProviderKind.Llm,
+            preset = com.lingxi.code.model.Presets.llm.first { it.id == "openai" },
+            catalogEntries = emptyList(),
+        )
+
+        assertEquals("", provider.model)
+    }
+
+    @Test
+    fun providerProfileCodec_missingVisibilityFieldsDecodesToShowAll() {
+        val decoded = ProviderSettingsRepository.decodeProvidersJson(
+            """
+            [{"id":"l_openai","preset":"openai","name":"OpenAI","url":"https://api.openai.com/v1","model":"gpt-5.6-sol","enabled":true,"isDefault":false}]
+            """.trimIndent(),
+        )
+
+        assertEquals(1, decoded.size)
+        assertTrue(decoded.single().showInModelPicker)
+        assertEquals(null, decoded.single().visibleModelIds)
+    }
+
+    @Test
+    fun providerProfileCodec_explicitEmptyVisibleModelIdsRoundTrips() {
+        val encoded = ProviderSettingsRepository.encodeProvidersJson(
+            listOf(
+                provider(
+                    id = "l_openai",
+                    preset = "openai",
+                    url = "https://api.openai.com/v1",
+                ).copy(
+                    showInModelPicker = true,
+                    visibleModelIds = emptyList(),
+                ),
+            ),
+        )
+
+        val decoded = ProviderSettingsRepository.decodeProvidersJson(encoded).single()
+        assertTrue(decoded.showInModelPicker)
+        assertEquals(emptyList<String>(), decoded.visibleModelIds)
+    }
+
+    @Test
+    fun providerProfileCodec_masterOffRoundTripsPreservingAllowlist() {
+        val encoded = ProviderSettingsRepository.encodeProvidersJson(
+            listOf(
+                provider(
+                    id = "l_openai",
+                    preset = "openai",
+                    url = "https://api.openai.com/v1",
+                ).copy(
+                    showInModelPicker = false,
+                    visibleModelIds = listOf("gpt-5.6-sol"),
+                ),
+            ),
+        )
+
+        val decoded = ProviderSettingsRepository.decodeProvidersJson(encoded).single()
+        assertFalse(decoded.showInModelPicker)
+        assertEquals(listOf("gpt-5.6-sol"), decoded.visibleModelIds)
+    }
+
     private fun provider(
         id: String = "l_provider",
         preset: String,

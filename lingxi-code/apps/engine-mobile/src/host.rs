@@ -54,7 +54,8 @@ use client_protocol::controls::{
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto, TurnRecoveryStateDto};
 use client_protocol::listings::{
-    ModelDetailsDto, SessionAgentSummaryDto, SessionModeDto, SlashCommandDto,
+    ModelDetailsDto, ProviderModelCatalogEntryDto, SessionAgentSummaryDto, SessionModeDto,
+    SlashCommandDto,
 };
 use client_protocol::local_apps::{
     AppCreateOriginDto, AppEventDto, AppSurfaceDto, LocalAppPluginComponentCountsDto,
@@ -587,6 +588,9 @@ pub struct MobileRuntime {
     /// Desktop needs no equivalent: its picker gates the same static catalog on
     /// per-provider availability maps that mobile does not have.
     pub routable_listings: Vec<platform_api::ModelListing>,
+    /// Settings-visible provider model directory generated before the mobile
+    /// routing allowlist is applied.
+    pub provider_model_catalog: Vec<ProviderModelCatalogEntryDto>,
     /// Transport retained so the engine handle can attach the AppService after
     /// the client event bridge has been constructed.
     local_apps_mcp: Arc<LocalAppsMcpTransport>,
@@ -1068,6 +1072,15 @@ fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
             .map(to_entry),
     );
     entries
+}
+
+fn provider_model_catalog_from_listings(
+    listings: &[platform_api::ModelListing],
+) -> Vec<ProviderModelCatalogEntryDto> {
+    platform_api::provider_model_catalog(listings)
+        .iter()
+        .map(client_adapter::lowering::lower_provider_model_catalog_entry)
+        .collect()
 }
 
 /// Tag an OAuth failure with the STAGE it happened in, and log it.
@@ -3178,6 +3191,8 @@ async fn build_mobile_inner_with_ask(
         user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
         routing: cfg.routing.clone(),
     });
+    let full_provider_model_catalog =
+        provider_model_catalog_from_listings(&model_listings(&assembled.client_config.providers));
     apply_mobile_profile_allowlist(&mut assembled, cfg.routing.as_ref());
     for w in &assembled.warnings {
         tracing::warn!(warning = %w, "provider-config assembly (mobile)");
@@ -5185,6 +5200,7 @@ async fn build_mobile_inner_with_ask(
         mcp_reload_generations,
         mcp_oauth_authorization_url: mcp_auth_url,
         routable_listings: default_listings.clone(),
+        provider_model_catalog: full_provider_model_catalog,
         local_apps_mcp,
         local_apps_llm,
         task_registry,
@@ -10313,6 +10329,11 @@ impl MobileEngineHandle {
         let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
         match kind {
             ProtocolListingKind::Models => {
+                self.event_sink
+                    .emit(ClientEvent::ProviderModelCatalog {
+                        providers: self.inner.provider_model_catalog.clone(),
+                    })
+                    .await;
                 // Curate to the "latest few" per provider instead of flooding the
                 // client with the full assembled catalog (~hundreds of ids — every
                 // preset is injected into the live config by `provider_config::assemble`).
@@ -16632,6 +16653,13 @@ mod tests {
                     _ => None,
                 })
                 .expect("ModelList must be emitted");
+            let providers = events
+                .iter()
+                .find_map(|event| match event {
+                    Ev::ProviderModelCatalog { providers } => Some(providers.clone()),
+                    _ => None,
+                })
+                .expect("ProviderModelCatalog must be emitted");
 
             assert!(
                 models.iter().all(|m| m.starts_with("deepseek/")),
@@ -16640,6 +16668,14 @@ mod tests {
             assert!(
                 models.iter().any(|m| m == "deepseek/deepseek-v4-flash"),
                 "the allowlisted provider's curated models must still be offered: {models:?}"
+            );
+            assert!(
+                providers.iter().any(|provider| provider.provider_id == "anthropic"),
+                "settings catalog must retain built-in providers before the mobile allowlist: {providers:?}"
+            );
+            assert!(
+                providers.iter().any(|provider| provider.provider_id == "deepseek"),
+                "settings catalog must retain the configured provider: {providers:?}"
             );
         });
     }

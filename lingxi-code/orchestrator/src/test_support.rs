@@ -810,6 +810,8 @@ pub struct MockOrchestratorHandle {
     files_in_context: StdMutex<Vec<PathBuf>>,
     /// Pre-loaded model listings returned by `list_model_listings`.
     model_listings: StdMutex<Vec<platform_api::ModelListing>>,
+    /// Local slash-command transcript pairs requested by a host.
+    slash_command_transcript: StdMutex<Vec<(String, String)>>,
 }
 
 impl MockOrchestratorHandle {
@@ -857,6 +859,7 @@ impl MockOrchestratorHandle {
             available_models: StdMutex::new(Vec::new()),
             files_in_context: StdMutex::new(Vec::new()),
             model_listings: StdMutex::new(Vec::new()),
+            slash_command_transcript: StdMutex::new(Vec::new()),
         }
     }
 
@@ -1007,6 +1010,11 @@ impl MockOrchestratorHandle {
     pub fn set_model_listings(&self, listings: Vec<platform_api::ModelListing>) {
         *self.model_listings.lock().unwrap() = listings;
     }
+
+    /// Transcript pairs supplied through [`OrchestratorHandle::append_slash_command_transcript`].
+    pub fn slash_command_transcript(&self) -> Vec<(String, String)> {
+        self.slash_command_transcript.lock().unwrap().clone()
+    }
 }
 
 impl Default for MockOrchestratorHandle {
@@ -1019,6 +1027,18 @@ impl Default for MockOrchestratorHandle {
 impl OrchestratorHandle for MockOrchestratorHandle {
     async fn current_session_id(&self) -> SessionId {
         self.session_id
+    }
+
+    async fn append_slash_command_transcript(
+        &self,
+        raw: &str,
+        display: &str,
+    ) -> Result<(), HandleError> {
+        self.slash_command_transcript
+            .lock()
+            .unwrap()
+            .push((raw.to_string(), display.to_string()));
+        Ok(())
     }
 
     async fn clear_session(&self) -> Result<(), HandleError> {

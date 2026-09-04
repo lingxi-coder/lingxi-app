@@ -1395,6 +1395,9 @@ aside[data-resizing='true'] > .sidebar-resize-handle::after { opacity: .72; }
 button { font-family: inherit; }
 textarea, input { font-family: inherit; }
 :focus-visible { outline: 2px solid oklch(72% 0.18 268); outline-offset: 2px; }
+.slash-command-row {
+  transition: background-color 110ms ease, color 110ms ease;
+}
 .drag-region { -webkit-app-region: drag; }
 .no-drag { -webkit-app-region: no-drag; }
 
@@ -1404,6 +1407,7 @@ textarea, input { font-family: inherit; }
   .desktop-topbar-action,
   .context-summary-item,
   .context-summary-close,
+  .slash-command-row,
   .sidebar-primary-action,
   .dictation-recorder-action,
   .beta-composer { transition-duration: 0ms !important; }

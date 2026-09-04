@@ -615,6 +615,25 @@ test('session_resumed atomically replaces the transcript with lowered history', 
   assert.equal(tool.result, DISPLAY);
 });
 
+test('session_resumed keeps a persisted slash command and its display result visible', () => {
+  const s = reduceEvent(emptyConversation(), {
+    type: 'session_resumed',
+    session_id: 'cron-session',
+    messages: [
+      { role: 'user', blocks: [{ type: 'text', text: '/cron list' }] },
+      { role: 'assistant', blocks: [{ type: 'text', text: 'No scheduled prompts.' }] },
+    ],
+  });
+
+  assert.deepEqual(
+    s.items.map((item) => item.type === 'narration' ? [item.role, item.text] : [item.type]),
+    [
+      ['user', '/cron list'],
+      ['assistant', 'No scheduled prompts.'],
+    ],
+  );
+});
+
 test('a resumed tool_use without a header falls back to the shared summarizer', () => {
   const s = reduceEvent(emptyConversation(), {
     type: 'session_resumed',

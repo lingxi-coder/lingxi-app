@@ -279,6 +279,32 @@ fn resume_detects_an_open_plan_segment_from_the_latest_user_permission_mode() {
 }
 
 #[test]
+fn resume_restores_model_exclusion_for_assistant_transcript_messages() {
+    let sid = Uuid::new_v4();
+    let message_id = Uuid::new_v4();
+    let messages = vec![serde_json::from_value(json!({
+        "type":"assistant", "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+        "sessionId":sid.to_string(), "timestamp":"2026-09-04T00:00:00.000Z",
+        "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+        "isModelContextExcluded":true,
+        "message":{
+            "id":message_id.to_string(),
+            "role":"assistant",
+            "content":"No scheduled prompts."
+        }
+    }))
+    .unwrap()];
+
+    let state = state_from_messages(sid, &messages);
+    assert!(
+        state
+            .model_context_excluded_messages
+            .contains(&protocol::MessageId::from_uuid(message_id)),
+        "a persisted slash result must remain excluded from model input after resume",
+    );
+}
+
+#[test]
 fn resume_does_not_reenter_a_plan_segment_after_a_successful_exit() {
     let sid = Uuid::new_v4();
     let tool_use_id = "toolu_exit_plan";

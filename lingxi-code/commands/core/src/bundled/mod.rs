@@ -10,6 +10,7 @@ use command_api::{
 
 pub mod batch_skill;
 pub mod code_review_skill;
+pub mod cron_skill;
 pub mod dataviz_skill;
 pub mod deep_research_skill;
 pub mod fewer_permission_prompts_skill;
@@ -24,10 +25,12 @@ pub mod verify_skill;
 ///
 /// `cron_enabled` is the host's `isKairosCronEnabled` equivalent
 /// (`cron_scheduler_enabled(LINGXI_DISABLE_CRON)` on desktop). When `false`
-/// the `/loop` skill is not registered — mirroring the reference
-/// `isEnabled: isKairosCronEnabled` gate (loop.ts:83).
+/// neither `/loop` nor `LingXi`'s `/cron` management command is registered. The
+/// `/loop` half mirrors the reference `isEnabled: isKairosCronEnabled` gate
+/// (loop.ts:83); `/cron` shares it so it cannot advertise a stopped scheduler.
 pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_loop_skill(reg, cron_enabled);
+    register_cron_skill(reg, cron_enabled);
     register_verify_skill(reg);
     register_run_skill(reg);
     register_simplify_skill(reg);
@@ -37,6 +40,47 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_deep_research_skill(reg);
     register_batch_skill(reg);
     register_dataviz_skill(reg);
+}
+
+/// Register the user-facing `/cron` scheduler command.
+///
+/// Unlike `/loop`, which intentionally accepts only interval-shaped inputs and
+/// immediately runs the prompt once, `/cron` is the management surface for
+/// natural-language or raw five-field schedules. Both commands share the
+/// scheduler kill-switch so the palette never advertises an unusable command.
+fn register_cron_skill(reg: &mut CommandRegistry, cron_enabled: bool) {
+    if !cron_enabled {
+        return;
+    }
+    reg.register_command(SlashCommand {
+        name: "cron".into(),
+        description:
+            "Create, list, or cancel scheduled prompts using natural-language or five-field cron schedules."
+                .into(),
+        menu_description: Some("Create, list, or cancel scheduled prompts".into()),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter {
+                allowed_tools: Some(
+                    ["CronCreate", "CronList", "CronDelete"]
+                        .map(str::to_string)
+                        .to_vec(),
+                ),
+                ..CommandFrontmatter::default()
+            },
+            prompt_fn: Some(Arc::new(cron_skill::CronPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        disable_model_invocation: true,
+        has_user_specified_description: true,
+        argument_hint: Some("<schedule or action>".into()),
+        when_to_use: Some(
+            "When the user explicitly invokes /cron to create, inspect, or cancel a scheduled prompt."
+                .into(),
+        ),
+        ..SlashCommand::default()
+    });
 }
 
 /// Register the `/dataviz` design-guidance skill. The 2.1.252 oracle exposes
@@ -331,11 +375,52 @@ mod tests {
     }
 
     #[test]
-    fn skips_loop_when_cron_disabled() {
-        // loop.ts:83 — `isEnabled: isKairosCronEnabled`. Disabled ⇒ not registered.
+    fn registers_cron_when_scheduler_is_enabled() {
+        let mut reg = CommandRegistry::new();
+        register_bundled_skills(&mut reg, true);
+
+        let cmd = reg.resolve("cron").expect("cron registered");
+        assert_eq!(cmd.source, CommandSource::Bundled);
+        assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
+        assert_eq!(cmd.user_invocable, Some(true));
+        assert!(cmd.disable_model_invocation);
+        assert_eq!(cmd.argument_hint.as_deref(), Some("<schedule or action>"));
+        assert_eq!(
+            cmd.menu_description.as_deref(),
+            Some("Create, list, or cancel scheduled prompts")
+        );
+        assert!(cmd.has_user_specified_description);
+        match &cmd.kind {
+            SlashCommandKind::Bundled {
+                frontmatter,
+                prompt_fn,
+            } => {
+                assert_eq!(
+                    frontmatter.allowed_tools.as_deref(),
+                    Some(
+                        ["CronCreate", "CronList", "CronDelete"]
+                            .map(str::to_string)
+                            .as_slice()
+                    )
+                );
+                let prompt = prompt_fn
+                    .as_ref()
+                    .expect("prompt_fn set")
+                    .build("启动一个每天早上汇报武汉天气的任务");
+                assert!(prompt.contains("CronCreate"));
+                assert!(prompt.contains("启动一个每天早上汇报武汉天气的任务"));
+            }
+            other => panic!("expected Bundled kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skips_cron_backed_commands_when_scheduler_is_disabled() {
+        // The shared scheduler kill-switch keeps both entry points out of the catalog.
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, false);
         assert!(reg.resolve("loop").is_none());
+        assert!(reg.resolve("cron").is_none());
     }
 
     #[test]

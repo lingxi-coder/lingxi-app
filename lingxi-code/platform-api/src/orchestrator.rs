@@ -2316,6 +2316,17 @@ pub trait OrchestratorHandle: Send + Sync {
         Ok(())
     }
 
+    /// Persist the visible input and display output of a local slash command
+    /// without feeding either synthetic row back into the model on later turns.
+    /// Hosts that do not own a durable transcript may keep the default no-op.
+    async fn append_slash_command_transcript(
+        &self,
+        _raw: &str,
+        _display: &str,
+    ) -> Result<(), HandleError> {
+        Ok(())
+    }
+
     /// Append a transcript meta message to one specific session without
     /// starting a model turn.
     ///

@@ -284,6 +284,7 @@ struct PendingAssistant {
     /// UUID (the common case); falls back to the first row's own uuid.
     message_id: Uuid,
     content: Vec<ContentBlock>,
+    model_context_excluded: bool,
 }
 
 /// Flush an accumulated per-block assistant run into `state.history` as ONE
@@ -302,8 +303,12 @@ struct PendingAssistant {
 /// instead of papering over it in the OpenAI-chat encoder.
 fn flush_pending_assistant(state: &mut SessionState, pending: Option<PendingAssistant>) {
     if let Some(pending) = pending {
+        let message_id = MessageId::from_uuid(pending.message_id);
+        if pending.model_context_excluded {
+            state.model_context_excluded_messages.insert(message_id);
+        }
         state.history.push(ConversationMessage::Assistant {
-            id: MessageId::from_uuid(pending.message_id),
+            id: message_id,
             content: pending.content,
             stop_reason: None,
         });
@@ -441,6 +446,11 @@ fn build_state_from_jsonl(
                 match &mut pending_assistant {
                     Some(pending) if pending.inner_key == inner_key => {
                         pending.content.extend(content_blocks);
+                        pending.model_context_excluded |= m
+                            .extra
+                            .get("isModelContextExcluded")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
                     }
                     _ => {
                         flush_pending_assistant(&mut state, pending_assistant.take());
@@ -449,6 +459,11 @@ fn build_state_from_jsonl(
                             inner_key,
                             message_id,
                             content: content_blocks,
+                            model_context_excluded: m
+                                .extra
+                                .get("isModelContextExcluded")
+                                .and_then(serde_json::Value::as_bool)
+                                .unwrap_or(false),
                         });
                     }
                 }

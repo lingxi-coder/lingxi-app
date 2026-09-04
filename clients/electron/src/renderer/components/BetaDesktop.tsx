@@ -3,7 +3,6 @@ import type {
   ImageRefDto,
   ModelDetailsDto,
   ReasoningSelectionDto,
-  SlashCommandDto,
   SessionRowDto,
 } from '@lingxi/bridge-client';
 
@@ -39,7 +38,7 @@ import {
   resolveModelSelection,
 } from '../bridge/modelCatalog';
 import { formatSessionMetadata } from '../bridge/sessionPresentation';
-import { ALL_DESKTOP_COMMANDS, DESKTOP_COMMANDS } from '../bridge/desktopCommands';
+import { ALL_DESKTOP_COMMANDS } from '../bridge/desktopCommands';
 import {
   desktopCommandIsShadowed,
   resolveDesktopCommand,
@@ -53,6 +52,7 @@ import {
 import { sanitizeSpeakableText } from '../audio/flow/segmenter';
 import { shouldAutoplayTrackedReply } from '../audio/autoplay';
 import { Icon } from './Icon';
+import { commandPaletteIcon } from './commandPaletteIcons';
 import { MarkdownContent } from './MarkdownContent';
 import { VoiceFlowPanel } from './voice/VoiceFlowPanel';
 import { providerById } from '../../shared/providers';
@@ -110,68 +110,6 @@ export function composerGoalActive(items: readonly RunItem[]): boolean {
     ) active = false;
   }
   return active;
-}
-
-export interface CommandPaletteEntry {
-  readonly name: string;
-  readonly source: 'desktop' | 'engine';
-  readonly description: string;
-  readonly argumentHint?: string;
-}
-
-function desktopCommandDescription(name: string): string {
-  switch (name) {
-    case 'help': return 'Show commands available in Desktop';
-    case 'clear': return 'Clear the current session after confirmation';
-    case 'compact': return 'Compact the current session';
-    case 'add-dir': return 'Add an allowed working directory';
-    case 'cd': return 'Switch the active project';
-    case 'copy': return 'Copy the last assistant response';
-    case 'config': return 'Open Desktop settings';
-    case 'theme': return 'Switch the Desktop theme';
-    case 'model': return 'Switch the active model';
-    case 'permissions': return 'Change the current permission mode';
-    case 'effort': return 'Change reasoning effort';
-    case 'fast': return 'Toggle fast mode';
-    case 'plugin': return 'Open plugin settings';
-    case 'reload-plugins': return 'Reload plugins by restarting the engine';
-    case 'tasks': return 'Open background tasks';
-    default: return 'Desktop action';
-  }
-}
-
-export function commandPaletteEntries(
-  slashCommands: readonly SlashCommandDto[],
-  localCommands = DESKTOP_COMMANDS,
-): CommandPaletteEntry[] {
-  const byName = new Map<string, CommandPaletteEntry>();
-  for (const command of filterSlashCommands(slashCommands, '', 100)) {
-    byName.set(command.name, {
-      name: command.name,
-      source: byName.has(command.name) ? 'desktop' : 'engine',
-      description: command.menu_description ?? command.description,
-      ...(command.argument_hint ? { argumentHint: command.argument_hint } : {}),
-    });
-  }
-  for (const command of localCommands.filter((entry) => entry.advertised !== false)) {
-    const existing = byName.get(command.name);
-    byName.set(command.name, {
-      name: command.name,
-      source: 'desktop',
-      description: existing?.description ?? desktopCommandDescription(command.name),
-      argumentHint: existing?.argumentHint,
-    });
-  }
-  return [...byName.values()].sort((left, right) => left.name.localeCompare(right.name));
-}
-
-export function filterCommandPaletteEntries(entries: readonly CommandPaletteEntry[], query: string): CommandPaletteEntry[] {
-  const needle = query.trim().toLowerCase().replace(/^\//, '');
-  if (!needle) return [...entries];
-  return entries.filter((entry) =>
-    entry.name.toLowerCase().includes(needle)
-    || entry.description.toLowerCase().includes(needle)
-    || entry.argumentHint?.toLowerCase().includes(needle));
 }
 
 function Button({ children, onClick, disabled = false, primary = false, success = false, danger = false, title }: {
@@ -2238,7 +2176,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           style={{ display: 'block', width: '100%', minHeight: 56, maxHeight: 160, overflowY: 'auto', border: 0, outline: 0, background: 'transparent', color: t.text, lineHeight: 1.5, fontSize: 16, padding: '14px 18px 2px', fontWeight: 400, letterSpacing: '-.01em', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', cursor: ready ? 'text' : 'default', opacity: ready ? 1 : .68 }}
         />
         {slashMenuOpen && (
-          <div ref={slashControl} id="slash-command-results" role="listbox" aria-label="Slash commands" style={{ ...composerMenuStyle(t, 'left'), width: 600, maxWidth: 'min(600px, calc(100vw - 44px))', maxHeight: 300, overflowY: 'auto', padding: 7 }}>
+          <div ref={slashControl} id="slash-command-results" role="listbox" aria-label="Slash commands" style={{ ...composerMenuStyle(t, 'left'), width: 820, maxWidth: 'min(820px, calc(100vw - 44px))', maxHeight: 'min(420px, calc(100vh - 190px))', overflowY: 'auto', padding: 7 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 9px 7px', borderBottom: `0.5px solid ${t.border}`, color: t.text3, fontSize: 10.5 }}>
               <strong style={{ color: t.text2, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>Commands</strong>
               <span className="mono" style={{ color: t.accent }}>/{slashQuery}</span>
@@ -2251,28 +2189,33 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             )}
             {slashCommands.map((entry, index) => {
               const selected = index === slashResultIndex;
+              const description = slashMenuLabel(entry);
               return (
                 <button
                   id={`slash-command-result-${index}`}
                   data-slash-index={index}
+                  className="slash-command-row"
                   key={entry.name}
                   type="button"
                   role="option"
                   aria-selected={selected}
+                  title={description}
                   onMouseDown={(event) => event.preventDefault()}
                   onMouseEnter={() => setSlashResultIndex(index)}
+                  onFocus={() => setSlashResultIndex(index)}
                   onClick={() => chooseSlashCommand(entry.name)}
-                  style={{ width: '100%', display: 'grid', gridTemplateColumns: 'minmax(92px, auto) minmax(0, 1fr) auto', gap: 10, alignItems: 'center', padding: '8px 9px', border: 0, borderRadius: 7, background: selected ? t.accentBg : 'transparent', color: t.text, textAlign: 'left', cursor: 'pointer', font: 'inherit' }}
+                  style={{ width: '100%', minHeight: 44, display: 'grid', gridTemplateColumns: '26px minmax(0, 1fr)', gap: 10, alignItems: 'center', padding: '7px 10px', border: 0, borderRadius: 9, background: selected ? t.surfaceHover : 'transparent', color: t.text, textAlign: 'left', cursor: 'pointer', font: 'inherit' }}
                 >
-                  <span
-                    className="mono"
-                    style={{ color: t.accent, fontWeight: 650, borderRadius: 6, padding: '2px 0', fontSize: 11.5 }}
-                  >
-                    /{entry.name}
-                    {entry.argument_hint ? <span style={{ color: t.text4, fontWeight: 400 }}> {entry.argument_hint}</span> : null}
+                  <span aria-hidden="true" style={{ width: 26, height: 26, display: 'grid', placeItems: 'center', color: t.text2 }}>
+                    <Icon name={commandPaletteIcon(entry.name)} size={18} stroke={1.7} />
                   </span>
-                  <span style={{ color: t.text2, fontSize: 12.5 }}>{slashMenuLabel(entry)}</span>
-                  <span style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.source}</span>
+                  <span style={{ minWidth: 0, display: 'flex', alignItems: 'baseline', gap: 10, overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                    <span className="slash-command-name" style={{ flexShrink: 0, color: t.text, fontWeight: 500, fontSize: 14.5, letterSpacing: '-.01em' }}>
+                      {entry.name}
+                    </span>
+                    {entry.argument_hint ? <span style={{ flexShrink: 0, color: t.text4, fontSize: 12.5 }}>{entry.argument_hint}</span> : null}
+                    <span className="slash-command-description" style={{ minWidth: 0, overflow: 'hidden', color: t.text3, fontSize: 13.5, lineHeight: 1.35, textOverflow: 'ellipsis' }}>{description}</span>
+                  </span>
                 </button>
               );
             })}

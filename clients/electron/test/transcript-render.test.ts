@@ -43,6 +43,7 @@ import { DiffView } from '../src/renderer/components/DiffView';
 import { Disclosure } from '../src/renderer/components/Disclosure';
 import { PermissionPrompt } from '../src/renderer/components/PermissionPrompt';
 import { Stage } from '../src/renderer/components/Stage';
+import { parseSlashCommandMessage } from '../src/renderer/components/slashCommandMessage';
 import { ToolCall, toolIconName } from '../src/renderer/components/ToolCall';
 import {
   ASSISTANT_NARRATION_COLLAPSE_MAX_CHARS,
@@ -219,6 +220,30 @@ test('user messages use a neutral rounded Codex-style bubble', () => {
   assert.match(html, /border-radius:22px/);
   assert.match(html, /border:0/);
   assert.doesNotMatch(html, /accentBg/);
+});
+
+test('slash command message parsing is strict and keeps command arguments', () => {
+  assert.deepEqual(parseSlashCommandMessage('/cron list'), { name: 'cron', arguments: 'list' });
+  assert.deepEqual(parseSlashCommandMessage('  /code-review --fix  '), { name: 'code-review', arguments: '--fix' });
+  assert.equal(parseSlashCommandMessage('/path/to/file'), null);
+  assert.equal(parseSlashCommandMessage('/cron\nlist'), null);
+  assert.equal(parseSlashCommandMessage('please run /cron list'), null);
+});
+
+test('user slash commands replace the visible slash with a semantic icon', () => {
+  const html = renderStage({ type: 'narration', id: 'slash-1', role: 'user', text: '/cron list' });
+  assert.match(html, /class="user-slash-command"/);
+  assert.match(html, /data-command-name="cron"/);
+  assert.match(html, /data-command-icon="clock"/);
+  assert.match(html, />cron<\/span>/);
+  assert.match(html, />list<\/span>/);
+  assert.doesNotMatch(html, />\/cron<\/span>/);
+});
+
+test('assistant slash-like text keeps its literal slash rendering', () => {
+  const html = renderStage({ type: 'narration', id: 'slash-2', role: 'assistant', text: '/cron list' });
+  assert.doesNotMatch(html, /class="user-slash-command"/);
+  assert.match(html, />\/cron list<\/span>/);
 });
 
 test('active agent thinking shimmers the text without a leading indicator', () => {

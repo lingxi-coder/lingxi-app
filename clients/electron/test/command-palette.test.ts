@@ -1,47 +1,50 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
-import {
-  commandPaletteEntries,
-  filterCommandPaletteEntries,
-} from '../src/renderer/components/BetaDesktop';
-import { isCommandPaletteShortcut } from '../src/renderer/App';
+import { commandPaletteIcon } from '../src/renderer/components/commandPaletteIcons';
 
-test('command palette merges engine and desktop commands under one searchable list', () => {
-  const entries = commandPaletteEntries([
-    { name: 'model', description: 'Switch models', source: 'builtin' },
-    { name: 'status', description: 'Show current status', source: 'builtin' },
-  ]);
-
-  assert.ok(entries.some((entry) => entry.name === 'model' && entry.source === 'desktop'));
-  assert.ok(entries.some((entry) => entry.name === 'status' && entry.source === 'engine'));
-  assert.equal(entries.filter((entry) => entry.name === 'model').length, 1);
+test('slash command popup gives known commands stable semantic icons', () => {
+  assert.equal(commandPaletteIcon('model'), 'box');
+  assert.equal(commandPaletteIcon('mcp'), 'mcp');
+  assert.equal(commandPaletteIcon('cron'), 'clock');
+  assert.equal(commandPaletteIcon('permissions'), 'shield');
+  assert.equal(commandPaletteIcon('plan'), 'bulb');
+  assert.equal(commandPaletteIcon('rename'), 'pencil');
+  assert.equal(commandPaletteIcon('share'), 'share');
+  assert.equal(commandPaletteIcon('open-provider-credentials'), 'key');
+  assert.equal(commandPaletteIcon('copy-last-response'), 'copy');
+  assert.equal(commandPaletteIcon('new'), 'chatPlus');
+  assert.equal(commandPaletteIcon('pet'), 'user');
+  assert.equal(commandPaletteIcon('status'), 'gauge');
+  assert.equal(commandPaletteIcon('autocompact'), 'compact');
+  assert.equal(commandPaletteIcon('brief'), 'summary');
+  assert.equal(commandPaletteIcon('btw'), 'chatPlus');
 });
 
-test('command palette filtering matches name and description case-insensitively', () => {
-  const entries = [
-    { name: 'model', source: 'desktop', description: 'Switch the active model' },
-    { name: 'status', source: 'engine', description: 'Show current session status' },
-  ] as const;
-
-  assert.deepEqual(filterCommandPaletteEntries(entries, 'MODEL').map((entry) => entry.name), ['model']);
-  assert.deepEqual(filterCommandPaletteEntries(entries, 'session').map((entry) => entry.name), ['status']);
-  assert.equal(filterCommandPaletteEntries(entries, '').length, 2);
+test('slash command popup categorizes extensions and keeps a visible fallback', () => {
+  assert.equal(commandPaletteIcon('team-agents'), 'users');
+  assert.equal(commandPaletteIcon('deep-research'), 'search');
+  assert.equal(commandPaletteIcon('format-code'), 'code');
+  assert.equal(commandPaletteIcon('third-party-command'), 'terminal');
 });
 
-test('command palette opens from Command-K and Control-K only', () => {
-  const event = (overrides: Partial<KeyboardEvent>) => ({
-    altKey: false,
-    ctrlKey: false,
-    key: 'k',
-    metaKey: false,
-    shiftKey: false,
-    ...overrides,
-  }) as KeyboardEvent;
-  assert.equal(isCommandPaletteShortcut(event({ metaKey: true })), true);
-  assert.equal(isCommandPaletteShortcut(event({ ctrlKey: true })), true);
-  assert.equal(isCommandPaletteShortcut(event({ ctrlKey: true, key: 'K' })), true);
-  assert.equal(isCommandPaletteShortcut(event({ ctrlKey: true, shiftKey: true })), false);
-  assert.equal(isCommandPaletteShortcut(event({ altKey: true, metaKey: true })), false);
-  assert.equal(isCommandPaletteShortcut(event({ key: 'p', metaKey: true })), false);
+test('the composer owns the only command popup', () => {
+  const app = readFileSync(join(process.cwd(), 'src/renderer/App.tsx'), 'utf8');
+  const composer = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
+
+  assert.doesNotMatch(app, /DesktopCommandPalette|commandPaletteOpen|isCommandPaletteShortcut/);
+  assert.equal(existsSync(join(process.cwd(), 'src/renderer/components/DesktopCommandPalette.tsx')), false);
+  assert.match(composer, /commandPaletteIcon\(entry\.name\)/);
+  assert.match(composer, /className="slash-command-row"/);
+});
+
+test('slash command rows use Codex-style neutral labels without a visible slash prefix', () => {
+  const composer = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
+
+  assert.doesNotMatch(composer, /\/{entry\.name}/);
+  assert.match(composer, /className="slash-command-name"/);
+  assert.match(composer, /className="slash-command-description"/);
+  assert.match(composer, /background: selected \? t\.surfaceHover : 'transparent'/);
 });

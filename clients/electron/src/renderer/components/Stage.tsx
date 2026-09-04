@@ -12,6 +12,8 @@ import { CompactionStatus } from './CompactionStatus';
 import { Icon } from './Icon';
 import { Disclosure } from './Disclosure';
 import { MarkdownContent } from './MarkdownContent';
+import { commandPaletteIcon } from './commandPaletteIcons';
+import { parseSlashCommandMessage } from './slashCommandMessage';
 import { ToolCall } from './ToolCall';
 
 // ─── RUN ITEMS ───────────────────────────────────────────────
@@ -27,6 +29,8 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
   const collapsible = narrationShouldCollapse(item);
   const expanded = !collapsible || open;
   const contentId = `narration-content-${item.id}`;
+  const slashCommand = user ? parseSlashCommandMessage(item.text) : null;
+  const slashIcon = slashCommand ? commandPaletteIcon(slashCommand.name) : null;
   return (
     <div className={user ? 'user-message-bubble' : undefined} style={{
       maxWidth: user ? images.length ? 430 : 700 : 880,
@@ -64,7 +68,28 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
           textWrap: 'pretty',
         }}
       >
-        <MarkdownContent text={item.text} />
+        {slashCommand && slashIcon ? (
+          <div
+            className="user-slash-command"
+            data-command-name={slashCommand.name}
+            aria-label={item.text.trim()}
+            style={{ display: 'flex', alignItems: 'center', gap: 7, minHeight: 23 }}
+          >
+            <span
+              data-command-icon={slashIcon}
+              aria-hidden="true"
+              style={{ width: 19, height: 22, flexShrink: 0, display: 'grid', placeItems: 'center', color: t.text2 }}
+            >
+              <Icon name={slashIcon} size={17} stroke={1.75} />
+            </span>
+            <span style={{ fontWeight: 650, letterSpacing: '-.015em' }}>{slashCommand.name}</span>
+            {slashCommand.arguments && (
+              <span style={{ color: t.text2, fontWeight: 450, whiteSpace: 'pre-wrap' }}>{slashCommand.arguments}</span>
+            )}
+          </div>
+        ) : (
+          <MarkdownContent text={item.text} />
+        )}
       </div>
       {collapsible && (
         <button

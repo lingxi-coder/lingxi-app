@@ -135,6 +135,12 @@ impl TaskStatusSink for RegistryStatusSink {
         }
     }
 
+    async fn mark_fusion_result_published(&self, task_id: &str) {
+        if let Some(reg) = self.registry.get() {
+            reg.mark_fusion_result_published(task_id).await;
+        }
+    }
+
     async fn finish_fusion_terminal(
         &self,
         task_id: &str,

@@ -1561,6 +1561,25 @@ impl TaskRegistry {
         }
     }
 
+    /// Record that [`platform_api::FusionCompletionSink::publish`]'s durable
+    /// `<fusion-result>` session append has completed for a `Completed` run
+    /// — called from `local_fusion`'s worker AFTER `sink.publish` resolves,
+    /// necessarily after [`Self::finish_fusion_terminal`] already flipped the
+    /// status (the notification drain's ordering requirement runs the other
+    /// way and is unaffected). A one-shot host (print mode) that returns the
+    /// instant it observes `Completed` can otherwise exit the process while
+    /// the append is still in flight and lose the row entirely (review
+    /// finding #17) — `apps/cli`'s `await_local_fusion_result_bounded` keeps
+    /// polling a `Completed` run until this flips. Best-effort: a
+    /// since-evicted task is a benign no-op.
+    pub async fn mark_fusion_result_published(&self, task_id: &str) {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        if let Some(TaskState::LocalFusion(fusion)) = map.get_mut(&task_id) {
+            fusion.result_published = true;
+        }
+    }
+
     /// Atomically publish a Fusion run's terminal payload and terminal status.
     pub async fn finish_fusion_terminal(
         &self,
@@ -2338,6 +2357,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             egress_profiles: Vec::new(),
             usage: None,
             stage: None,
+            result_published: false,
         }),
     }
 }

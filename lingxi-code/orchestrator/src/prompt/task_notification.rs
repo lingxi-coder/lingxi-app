@@ -522,9 +522,22 @@ fn render_one(n: &TaskNotification) -> String {
                 Some(err) => format!("\n<error>{}</error>", escape_xml(err)),
                 None => String::new(),
             };
+            // Review finding #18: `AgentRunUsage.tool_uses` is a shared,
+            // fixed-shape field (mirrors claude-code's `totalToolUseCount`
+            // for `local_agent`/`local_workflow` — see `task_registry.rs`),
+            // but `local_fusion`'s producer (`tasks::handlers::local_fusion::
+            // finalize_fusion_outcome`) has no real tool-call count to put
+            // in it and stores `FusionUsage::provider_requests` (provider
+            // HTTP/API requests) there instead. Since this render arm has no
+            // claude-code counterpart to stay byte-aligned with (see the
+            // comment atop this arm), render that value under its own
+            // `<provider_requests>` tag instead of reusing `<tool_uses>` —
+            // the model has learned that tag's meaning from every OTHER
+            // task-notification in this same file and must not be told a
+            // false tool-call count.
             let usage_section = match &n.usage {
                 Some(u) => format!(
-                    "\n<usage><subagent_tokens>{}</subagent_tokens><tool_uses>{}</tool_uses><duration_ms>{}</duration_ms></usage>",
+                    "\n<usage><subagent_tokens>{}</subagent_tokens><provider_requests>{}</provider_requests><duration_ms>{}</duration_ms></usage>",
                     u.subagent_tokens, u.tool_uses, u.duration_ms
                 ),
                 None => String::new(),
@@ -791,11 +804,25 @@ mod tests {
         );
         assert!(block.contains("<result>final &lt;answer&gt;</result>"), "got: {block}");
         assert!(!block.contains("<error>"), "completed run must not render <error>: {block}");
+        // Review finding #18: `AgentRunUsage.tool_uses` mirrors claude-code's
+        // `totalToolUseCount` for `local_agent`/`local_workflow`, but
+        // `local_fusion` (this crate has no oracle to follow — see the
+        // comment above) stuffs `FusionUsage::provider_requests` (provider
+        // HTTP/API requests, e.g. panel+analyst+synthesizer calls) into that
+        // SAME field. Rendered under the model-facing `<tool_uses>` tag
+        // every other task type fills with a real tool-call count, that
+        // reads as "this run made N tool calls" when N is something else
+        // entirely — a Fusion run that used zero tools still reports a
+        // non-zero `<tool_uses>`. Render it under its own tag instead.
         assert!(
             block.contains(
-                "<usage><subagent_tokens>4200</subagent_tokens><tool_uses>6</tool_uses><duration_ms>91000</duration_ms></usage>"
+                "<usage><subagent_tokens>4200</subagent_tokens><provider_requests>6</provider_requests><duration_ms>91000</duration_ms></usage>"
             ),
             "got: {block}"
+        );
+        assert!(
+            !block.contains("<tool_uses>"),
+            "local_fusion usage must never claim a tool-use count it doesn't have: {block}"
         );
         assert!(
             block.contains("<egress-profiles>anthropic, openai</egress-profiles>"),

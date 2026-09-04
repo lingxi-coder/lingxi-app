@@ -1322,6 +1322,7 @@ mod tests {
             egress_profiles: Vec::new(),
             usage: None,
             stage: None,
+            result_published: false,
         });
         registry.insert_state_for_test(state).await;
 

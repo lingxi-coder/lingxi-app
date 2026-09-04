@@ -2803,6 +2803,24 @@ fn fusion_result_exit_code(outcome: Option<&FusionPrintOutcome>) -> i32 {
     }
 }
 
+/// Whether `state` is DONE for print mode's purposes — terminal, AND (for a
+/// `Completed` run specifically) its durable `<fusion-result>` session
+/// append has actually landed. `finish_fusion_terminal` flips the task to
+/// `Completed` before the handler's worker awaits
+/// `FusionCompletionSink::publish` (the registry's own notification drain
+/// needs that ordering and it cannot flip), so a waiter that stopped at
+/// terminal status alone could return — and let the print-mode process
+/// exit — while the append was still in flight, silently dropping it
+/// (review finding #17). `Failed`/`Killed` never call `publish`, so they
+/// are ready the instant they go terminal, same as before.
+fn fusion_result_ready(state: &tasks::state::TaskState) -> bool {
+    let tasks::state::TaskState::LocalFusion(fusion) = state else {
+        return state.base().status.is_terminal();
+    };
+    fusion.base.status.is_terminal()
+        && (fusion.base.status != tasks::state::TaskStatus::Completed || fusion.result_published)
+}
+
 fn fusion_print_outcome(state: &tasks::state::TaskState) -> Option<FusionPrintOutcome> {
     let tasks::state::TaskState::LocalFusion(fusion) = state else {
         return None;
@@ -2823,10 +2841,37 @@ fn fusion_print_outcome(state: &tasks::state::TaskState) -> Option<FusionPrintOu
 
 /// Poll interval while print mode waits for a background `/fusion` run.
 const FUSION_PRINT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
-/// Generous overall bound: a quality-preset panel can run up to 12 turns
-/// with its own 600s timeout, so the whole run needs real room to finish
-/// rather than being truncated arbitrarily.
-const FUSION_PRINT_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// Mirrors `fusion::config::FusionRuntimeConfig::defaults().total_timeout_ms`
+/// (`fusion/src/config.rs`) — the wall-clock ceiling the orchestrator itself
+/// enforces on a default-configured run. `apps/cli` deliberately does not
+/// depend on the `fusion` crate (only on `platform_api`'s executor trait),
+/// so this is a plain literal, not an import; a future change to that
+/// default must update this too (review finding #6's residual: this is
+/// still exact only for the DEFAULT config — a settings file that raises
+/// `fusion.totalTimeoutMs` past this can still truncate a healthy run,
+/// since print mode has no live handle on the effective config here).
+const FUSION_DEFAULT_TOTAL_TIMEOUT_MS: u64 = 1_200_000;
+/// Mirrors `fusion::orchestrator::FINALIZE_GRACE_MS` — the grace the
+/// orchestrator's own outer backstop gives its inner per-stage deadline past
+/// `total_timeout_ms` before firing.
+const FUSION_FINALIZE_GRACE_MS: u64 = 250;
+/// Headroom past `total_timeout_ms + FINALIZE_GRACE_MS` for the finalize
+/// tail print mode must ALSO wait through: result assembly, `lease.commit`,
+/// telemetry, and `finalize_fusion_outcome`'s spool write, three registry
+/// writes, and durable `<fusion-result>` session append (review finding
+/// #17). Review finding #6: the previous bound equaled
+/// `FUSION_DEFAULT_TOTAL_TIMEOUT_MS` EXACTLY, leaving zero room for any of
+/// that tail — a run that genuinely reached its own timeout could never
+/// have its real terminal outcome (`TimedOutEmpty`) surface in print mode,
+/// it just hit THIS bound first and reported a generic "wait timed out"
+/// instead.
+const FUSION_PRINT_FINALIZE_MARGIN_MS: u64 = 120_000;
+/// Overall bound print mode waits for a background `/fusion` run before
+/// giving up and letting the process exit without its real outcome.
+const FUSION_PRINT_MAX_WAIT: std::time::Duration = std::time::Duration::from_millis(
+    FUSION_DEFAULT_TOTAL_TIMEOUT_MS + FUSION_FINALIZE_GRACE_MS + FUSION_PRINT_FINALIZE_MARGIN_MS,
+);
 
 /// G002: await one `local_fusion` task to a terminal status and print its
 /// result, instead of leaving print mode's only trace of the run as a bare
@@ -2866,7 +2911,7 @@ where
             // Evicted or never created — nothing left to report.
             return None;
         };
-        if state.base().status.is_terminal() {
+        if fusion_result_ready(&state) {
             let outcome = fusion_print_outcome(&state);
             match &outcome {
                 Some(FusionPrintOutcome::FinalText(text)) => {
@@ -2887,11 +2932,19 @@ where
             return outcome;
         }
         if tokio::time::Instant::now() >= deadline {
+            // Review finding #6: this process is print mode's ONLY caller of
+            // this function (confirmed: no other in-repo caller of the
+            // public `run_slash_command` wrapper), and it exits with this
+            // function's return value moments after this fires — dropping
+            // the in-process `local_fusion` worker future along with it.
+            // "it may still be running" was therefore never true on this
+            // path; say what actually happens instead.
             sink.error(
                 "fusion",
                 &format!(
                     "fusion run {task_id} did not finish before print mode's wait timed \
-                     out; it may still be running, but this process is exiting"
+                     out; this process is exiting, which aborts the run's in-process \
+                     worker along with it — it will not keep running in the background"
                 ),
             )
             .await;
@@ -6797,7 +6850,26 @@ mod tests {
             egress_profiles: Vec::new(),
             usage: None,
             stage: None,
+            // Every existing caller of this helper wants "the run is fully
+            // done, print it now" — the one test that cares about the
+            // publish-not-landed-yet window builds its own
+            // `LocalFusionTaskState` with `result_published: false`.
+            result_published: true,
         })
+    }
+
+    /// Like [`fusion_state`] with `status: Completed`, but returns the inner
+    /// [`tasks::state::LocalFusionTaskState`] (not the wrapping enum) so a
+    /// caller can override `result_published` with struct-update syntax.
+    fn completed_fusion_state(final_text: &str) -> tasks::state::LocalFusionTaskState {
+        let tasks::state::TaskState::LocalFusion(fusion) = fusion_state(
+            tasks::state::TaskStatus::Completed,
+            Some(final_text),
+            None,
+        ) else {
+            unreachable!("fusion_state always builds a LocalFusion state");
+        };
+        fusion
     }
 
     #[test]
@@ -6925,6 +6997,63 @@ mod tests {
         );
     }
 
+    /// Review finding #17: `finish_fusion_terminal` flips the task to
+    /// `Completed` BEFORE the handler's worker has awaited
+    /// `FusionCompletionSink::publish` (the durable `<fusion-result>`
+    /// session append) — that ordering is required by the registry's own
+    /// terminal-status-gated notification drain and cannot flip. A waiter
+    /// that returns the instant it observes `Completed` can therefore race
+    /// the still-in-flight append: in print mode the process exits right
+    /// after this function returns, so the append is aborted mid-flight and
+    /// the session never gets its `<fusion-result>` row. This pins that the
+    /// waiter keeps polling a `Completed`-but-not-yet-published run instead
+    /// of returning immediately, and only reports the outcome once
+    /// `result_published` flips true.
+    #[tokio::test]
+    async fn await_local_fusion_result_waits_for_publish_before_reporting_completed() {
+        let unpublished = tasks::state::TaskState::LocalFusion(tasks::state::LocalFusionTaskState {
+            result_published: false,
+            ..completed_fusion_state("not yet on disk")
+        });
+        let published = tasks::state::TaskState::LocalFusion(tasks::state::LocalFusionTaskState {
+            result_published: true,
+            ..completed_fusion_state("not yet on disk")
+        });
+        let lookup = ScriptedLookup::new(vec![
+            Some(unpublished.clone()),
+            Some(unpublished),
+            Some(published),
+        ]);
+        let sink = RecordingFusionSink::default();
+
+        let outcome = await_local_fusion_result_bounded(
+            "ftest0001",
+            &lookup,
+            &sink,
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+
+        assert_eq!(
+            lookup.call_count(),
+            3,
+            "must keep polling past the first two Completed-but-unpublished \
+             observations instead of returning on the first one"
+        );
+        assert_eq!(
+            outcome,
+            Some(FusionPrintOutcome::FinalText("not yet on disk".to_string())),
+            "must still report the real outcome once publish lands"
+        );
+        assert_eq!(
+            sink.outputs.lock().await.as_slice(),
+            &[("fusion".to_string(), "not yet on disk".to_string())],
+            "must print exactly once, after publish lands — never on an \
+             unpublished Completed observation"
+        );
+    }
+
     #[tokio::test]
     async fn await_local_fusion_result_reports_the_failure_reason() {
         let lookup = ScriptedLookup::new(vec![Some(fusion_state(
@@ -6988,9 +7117,22 @@ mod tests {
             errors[0].1.contains("ftest0001"),
             "diagnostic must name the task id: {errors:?}"
         );
-        assert!(errors[0].1.contains("still be running"), "{errors:?}");
-        // §13: the print-mode timeout must also exit non-zero — the run may
-        // still be completing elsewhere, but THIS process printed no answer.
+        // Review finding #6: print mode is confirmed the only caller of this
+        // function and exits with this outcome moments after it returns,
+        // aborting the in-process worker — the diagnostic must say so
+        // instead of the old, false "it may still be running".
+        assert!(
+            errors[0].1.contains("aborts the run's in-process worker"),
+            "{errors:?}"
+        );
+        assert!(
+            !errors[0].1.contains("may still be running"),
+            "print mode is this function's only caller and exits right \
+             after — nothing survives to still be running: {errors:?}"
+        );
+        // §13: the print-mode timeout must also exit non-zero — THIS
+        // process printed no answer, and (finding #6) its worker is gone
+        // too, not merely unreported.
         assert_eq!(outcome, None);
         assert_eq!(
             fusion_result_exit_code(outcome.as_ref()),
@@ -7041,5 +7183,36 @@ mod tests {
             exit_codes::RUNTIME_ERROR
         );
         assert_eq!(fusion_result_exit_code(None), exit_codes::RUNTIME_ERROR);
+    }
+
+    /// Review finding #6: `FUSION_PRINT_MAX_WAIT` used to equal
+    /// `fusion::config::FusionRuntimeConfig::defaults().total_timeout_ms`
+    /// (1_200_000 ms) EXACTLY — a run that genuinely reached its own
+    /// `total_timeout_ms` could never have that real terminal outcome
+    /// surface in print mode, because this bound always fired at the same
+    /// instant or earlier, with zero room for the orchestrator's own
+    /// `FINALIZE_GRACE_MS` backstop or any of `finalize_fusion_outcome`'s
+    /// tail (result assembly, `lease.commit`, telemetry, spool + registry
+    /// writes, and — finding #17 — the durable session append). Pin that a
+    /// real margin now exists past both.
+    #[test]
+    fn fusion_print_max_wait_leaves_real_margin_past_the_default_total_timeout_and_finalize_grace(
+    ) {
+        let default_total_plus_grace = std::time::Duration::from_millis(
+            FUSION_DEFAULT_TOTAL_TIMEOUT_MS + FUSION_FINALIZE_GRACE_MS,
+        );
+        assert!(
+            FUSION_PRINT_MAX_WAIT > default_total_plus_grace,
+            "FUSION_PRINT_MAX_WAIT ({FUSION_PRINT_MAX_WAIT:?}) must exceed the \
+             orchestrator's own default total_timeout_ms + FINALIZE_GRACE_MS \
+             ({default_total_plus_grace:?}), not merely equal it"
+        );
+        assert!(
+            FUSION_PRINT_MAX_WAIT - default_total_plus_grace
+                >= std::time::Duration::from_secs(30),
+            "the margin past total_timeout_ms + FINALIZE_GRACE_MS must be a real \
+             finalize-tail allowance, not a rounding artifact: got {:?}",
+            FUSION_PRINT_MAX_WAIT - default_total_plus_grace
+        );
     }
 }

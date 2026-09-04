@@ -1809,6 +1809,7 @@ fn local_fusion_state_for_test(id: &str, output_dir: &std::path::Path) -> TaskSt
         egress_profiles: Vec::new(),
         usage: None,
         stage: None,
+        result_published: false,
     })
 }
 
@@ -1954,6 +1955,50 @@ async fn set_fusion_stage_updates_the_local_fusion_task_state_in_place() {
         Some("Running panels 2/3".to_string()),
         "a later progress event overwrites the previous stage in place"
     );
+}
+
+/// Review finding #17: a `Completed` `local_fusion` task must let a
+/// downstream waiter (e.g. print mode's `await_local_fusion_result_bounded`)
+/// distinguish "terminal status landed" from "the durable `<fusion-result>`
+/// session append actually finished" — otherwise a one-shot host can return
+/// (and exit the process) while the append is still in flight and silently
+/// lose the row. `TaskRegistry::mark_fusion_result_published` is the seam
+/// `local_fusion`'s worker calls, AFTER `FusionCompletionSink::publish`
+/// resolves, to flip that flag.
+#[tokio::test]
+async fn mark_fusion_result_published_flips_the_flag_in_place() {
+    use crate::handlers::TaskStatusSink;
+    use crate::registry_status_sink::RegistryStatusSink;
+
+    let (dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    let id = "fu_publish01";
+    registry
+        .insert_state_for_test(local_fusion_state_for_test(id, dir.path()))
+        .await;
+
+    let published_of = |state: &TaskState| match state {
+        TaskState::LocalFusion(fusion) => fusion.result_published,
+        other => panic!("expected LocalFusion, got {other:?}"),
+    };
+
+    assert!(
+        !published_of(&registry.get(id).await.expect("task exists")),
+        "a freshly spawned run has not published its result yet"
+    );
+
+    let sink = RegistryStatusSink::new();
+    sink.bind(registry.clone());
+    sink.mark_fusion_result_published(id).await;
+
+    assert!(
+        published_of(&registry.get(id).await.expect("task exists")),
+        "mark_fusion_result_published must flip result_published to true"
+    );
+
+    // An unknown/evicted task id is a benign no-op, same as the other
+    // best-effort fusion status-sink writes above (set_fusion_stage etc).
+    sink.mark_fusion_result_published("fu_does_not_exist").await;
 }
 
 #[test]

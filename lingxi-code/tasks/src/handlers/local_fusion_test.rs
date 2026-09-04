@@ -504,7 +504,7 @@ impl FusionExecutor for FailingExecutor {
 /// rather than only that *some* status/outcome eventually landed).
 #[derive(Default)]
 struct RecordingStatusSink {
-    events: StdMutex<Vec<String>>,
+    events: Arc<StdMutex<Vec<String>>>,
     statuses: StdMutex<Vec<(String, TaskStatus)>>,
     errors: StdMutex<Vec<(String, String)>>,
     egress_and_usage: StdMutex<Vec<(String, Vec<String>, Option<platform_api::task_registry::AgentRunUsage>)>>,
@@ -513,6 +513,14 @@ struct RecordingStatusSink {
 impl RecordingStatusSink {
     fn events(&self) -> Vec<String> {
         self.events.lock().unwrap().clone()
+    }
+
+    /// Shares this sink's event log with a [`PublishOrderCompletionSink`] so
+    /// a test can assert `publish` and `mark_fusion_result_published` land
+    /// in the SAME ordered timeline as `finish_fusion_terminal` / the other
+    /// status-sink calls, not just that both eventually happened.
+    fn events_handle(&self) -> Arc<StdMutex<Vec<String>>> {
+        self.events.clone()
     }
 
     fn last_status(&self) -> Option<TaskStatus> {
@@ -570,6 +578,10 @@ impl TaskStatusSink for RecordingStatusSink {
         self.set_status(task_id, status).await;
     }
 
+    async fn mark_fusion_result_published(&self, _task_id: &str) {
+        self.events.lock().unwrap().push("published".to_string());
+    }
+
     async fn is_terminal(&self, task_id: &str) -> bool {
         self.statuses
             .lock()
@@ -578,6 +590,20 @@ impl TaskStatusSink for RecordingStatusSink {
             .rev()
             .find(|(id, _)| id == task_id)
             .is_some_and(|(_, status)| status.is_terminal())
+    }
+}
+
+/// Pushes `"publish"` into a [`RecordingStatusSink`]'s shared event log
+/// (via [`RecordingStatusSink::events_handle`]) so a test can assert the
+/// exact interleaving of `FusionCompletionSink::publish` against
+/// `TaskStatusSink` calls on the SAME timeline, not two separately-ordered
+/// logs a test would have to correlate by hand.
+struct PublishOrderCompletionSink(Arc<StdMutex<Vec<String>>>);
+
+#[async_trait]
+impl FusionCompletionSink for PublishOrderCompletionSink {
+    async fn publish(&self, _conversation_id: &str, _result: &FusionResult) {
+        self.0.lock().unwrap().push("publish".to_string());
     }
 }
 
@@ -738,6 +764,62 @@ async fn spawn_forwards_fusion_progress_into_set_fusion_stage() {
         status_sink.stages(),
         vec!["Resolving models".to_string(), "Running panels 2/3".to_string()],
         "expected the 2 scripted FusionProgress events forwarded in order"
+    );
+}
+
+/// Review finding #17: a print-mode waiter that returns on terminal status
+/// alone can race the still-in-flight `FusionCompletionSink::publish`
+/// append and, on process exit, lose the durable `<fusion-result>` session
+/// row. The fix is `TaskStatusSink::mark_fusion_result_published`, called
+/// from the worker AFTER `publish` resolves — this pins that it fires, and
+/// fires strictly AFTER `publish`, on the SAME shared timeline as the
+/// terminal-status transition (never before it, since the notification
+/// drain still needs `finish_fusion_terminal` first).
+#[tokio::test]
+async fn finalize_fusion_outcome_marks_result_published_after_the_completion_sink_publish() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let status_sink = Arc::new(RecordingStatusSink::default());
+    let completion_sink = Arc::new(PublishOrderCompletionSink(status_sink.events_handle()));
+    let executor = ImmediateExecutor::new();
+    let handler = make_handler(
+        executor.clone(),
+        output_manager,
+        status_sink.clone(),
+        completion_sink,
+    );
+
+    handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: "conv".into(),
+            },
+            make_ctx(fs),
+        )
+        .await
+        .expect("spawn succeeds");
+
+    for _ in 0..200 {
+        if status_sink.events().contains(&"published".to_string()) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(
+        status_sink.events(),
+        vec![
+            "status:Running".to_string(),
+            "egress_and_usage:0:true".to_string(),
+            "outcome".to_string(),
+            "status:Completed".to_string(),
+            "publish".to_string(),
+            "published".to_string(),
+        ],
+        "mark_fusion_result_published must fire, and strictly after both \
+         finish_fusion_terminal (\"outcome\"/\"status:Completed\") and the \
+         completion sink's own publish — never before either"
     );
 }
 
@@ -1035,7 +1117,11 @@ async fn ok_executor_records_egress_and_usage_before_completed_status() {
     assert_eq!(usage.subagent_tokens, 0);
     assert_eq!(usage.tool_uses, 0);
     assert_eq!(usage.duration_ms, 0);
-    // Ordering: egress/usage lands before the terminal `outcome` publish.
+    // Ordering: egress/usage lands before the terminal `outcome` publish,
+    // and `mark_fusion_result_published` (review finding #17) fires last —
+    // after the completion sink's own publish, which for `CountingCompletionSink`
+    // has already run by the time we observe a terminal status (there is no
+    // real await point between them here), so it is on this same log too.
     assert_eq!(
         status_sink.events(),
         vec![
@@ -1043,6 +1129,7 @@ async fn ok_executor_records_egress_and_usage_before_completed_status() {
             "egress_and_usage:0:true".to_string(),
             "outcome".to_string(),
             "status:Completed".to_string(),
+            "published".to_string(),
         ]
     );
     assert_eq!(completion_sink.0.load(Ordering::SeqCst), 1);

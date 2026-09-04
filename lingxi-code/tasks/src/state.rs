@@ -486,6 +486,19 @@ pub struct LocalFusionTaskState {
     /// until the first `FusionProgress` event lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
+    /// Whether `DesktopFusionCompletionSink::publish` (the durable
+    /// `<fusion-result>` session append) has completed for a `Completed`
+    /// run. `finish_fusion_terminal` flips [`TaskStateBase::status`] to
+    /// `Completed` BEFORE the handler's worker awaits the publish (the
+    /// registry's notification drain is terminal-status-gated, so that
+    /// ordering cannot change) — so a consumer that returns the instant it
+    /// observes `Completed` can race the still-in-flight append and, in a
+    /// one-shot host, exit the process before it lands (review finding
+    /// #17). `false` until `TaskRegistry::mark_fusion_result_published`
+    /// flips it once the publish resolves; irrelevant for `Failed`/`Killed`,
+    /// which never call `publish` at all. Additive.
+    #[serde(default)]
+    pub result_published: bool,
 }
 
 /// Tripwire for the residual documented on

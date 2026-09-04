@@ -145,6 +145,17 @@ async fn finalize_fusion_outcome(
                 )
                 .await;
             sink.publish(conversation_id, result).await;
+            // Review finding #17: `await_local_fusion_result_bounded` (print
+            // mode) polls terminal status alone and can return — and the
+            // process can exit — between `finish_fusion_terminal` above and
+            // `publish` finishing its durable session append. Flip this
+            // AFTER `publish` resolves (never before finish_fusion_terminal:
+            // the notification drain is terminal-status-gated the other way)
+            // so a one-shot host can wait for the append to actually land
+            // instead of racing it.
+            status_sink
+                .mark_fusion_result_published(worker_task_id)
+                .await;
         }
         Err(FusionError::Cancelled) => {
             status_sink

@@ -211,6 +211,18 @@ pub trait TaskStatusSink: Send + Sync {
     /// change.
     async fn set_fusion_stage(&self, _task_id: &str, _stage: String) {}
 
+    /// Record that a `Completed` Fusion run's durable `<fusion-result>`
+    /// session append (`FusionCompletionSink::publish`) has finished. Call
+    /// this AFTER `publish` resolves — necessarily after
+    /// [`Self::finish_fusion_terminal`] already flipped the status, since the
+    /// registry's notification drain still needs terminal-status-first
+    /// ordering. Registry-backed sinks override this so a one-shot host can
+    /// keep polling past `Completed` until the append actually landed instead
+    /// of racing process exit against it (review finding #17); standalone
+    /// sinks stay no-ops. `Failed`/`Killed` runs never call `publish` and so
+    /// never call this either.
+    async fn mark_fusion_result_published(&self, _task_id: &str) {}
+
     /// Atomically publish a Fusion run's terminal payload together with its
     /// terminal task status. Registry-backed sinks override this to close the
     /// outcome/status race; the default preserves legacy standalone behavior.

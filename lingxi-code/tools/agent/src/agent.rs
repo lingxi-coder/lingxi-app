@@ -851,6 +851,84 @@ fn fusion_error_is_preflight(err: &platform_api::FusionError) -> bool {
     )
 }
 
+/// [round-2 review, findings 4 & 13] RAII guard over `call_fusion`'s
+/// up-front `panel_n` spawn-slot reservation.
+///
+/// The dispatcher (`orchestrator::turn_loop`'s biased `tokio::select!` around
+/// a `Cancel`-behavior tool's call future) races `call_fusion`'s own future
+/// against the SAME `CancellationToken` the tool was handed as
+/// `ctx.cancel`/`inherit.cancel`; when the token wins, the future is DROPPED
+/// mid-flight and neither the `Ok` nor the `Err` match arm below ever runs.
+/// Any release logic that lived only in those arms was therefore dead code
+/// on an interactive user interrupt, permanently leaking `panel_n` spawn
+/// slots for panels that may never have existed.
+///
+/// The normal arms release exactly what they decide to release and then
+/// call [`Self::disarm`]; if the future is instead dropped before either
+/// arm runs, `Drop` releases whatever is still outstanding — using the same
+/// "did a panel genuinely spawn" signal the `Err(Cancelled)` arm uses, so
+/// the drop path and the normal path agree.
+struct FusionSpawnReservationGuard {
+    registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    outstanding: u64,
+    panel_stage_observed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FusionSpawnReservationGuard {
+    fn new(
+        registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+        panel_n: u64,
+        panel_stage_observed: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            registry,
+            outstanding: panel_n,
+            panel_stage_observed,
+        }
+    }
+
+    /// Release `amount` (capped at what is still outstanding) right now.
+    fn release(&mut self, amount: u64) {
+        let amount = amount.min(self.outstanding);
+        if amount == 0 {
+            return;
+        }
+        self.registry.release_total_agent_spawn_reservations(amount);
+        self.outstanding -= amount;
+    }
+
+    /// The caller has finished deciding what to release for this run;
+    /// whatever remains outstanding is deliberately kept charged (panels
+    /// genuinely ran). Stops `Drop` from acting a second time.
+    fn disarm(&mut self) {
+        self.outstanding = 0;
+    }
+}
+
+impl Drop for FusionSpawnReservationGuard {
+    fn drop(&mut self) {
+        if self.outstanding == 0 {
+            return;
+        }
+        // Only reached when `call_fusion`'s future was dropped before an
+        // `Ok`/`Err` arm ran to `disarm()` it — mirror the `Err(Cancelled)`
+        // arm's own release decision: [round-2 review, finding 13] the
+        // forwarder only sets `panel_stage_observed` on a `RunningPanels`
+        // event with `completed > 0`, which is emitted from INSIDE
+        // `panel::run_panels` after a panel has genuinely run to
+        // completion — never on the `completed: 0` event
+        // `run_panel_stage` emits before any panel task is spawned.
+        if !self
+            .panel_stage_observed
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.registry
+                .release_total_agent_spawn_reservations(self.outstanding);
+        }
+        self.outstanding = 0;
+    }
+}
+
 /// Default per-session subagent spawn cap (claude 2.1.212 `ofg = 200`).
 const MAX_SUBAGENTS_PER_SESSION_DEFAULT: u64 = 200;
 
@@ -995,6 +1073,14 @@ impl AgentTool {
         });
     }
 
+    // [round-2 review, finding 20] Both `call_fusion` not-found returns
+    // (executor absent / `!surface.enabled`) render this tail. Every OTHER
+    // `Available agents:` tail in this file (the omitted-type and
+    // explicit-type not-found arms below) filters out `Agent(<type>)` deny
+    // rules and tools-denied types first, "so a denied type never appears as
+    // a suggestion" — this one used to skip that filter entirely, so the
+    // model could be steered into dispatching a type that is immediately
+    // hard-rejected. Apply the SAME deny set here.
     async fn fusion_available_agents_display(&self, is_coordinator: bool) -> String {
         let mut listing = match &self.ctx.subagent_spawner {
             Some(s) => s.agent_listing().await,
@@ -1002,9 +1088,17 @@ impl AgentTool {
         };
         drop_coordinator_hidden_builtins(&mut listing, is_coordinator);
         self.append_fusion_listing(&mut listing);
+        let mut denied: Vec<String> = match &self.ctx.permission_gate {
+            Some(gate) => gate.agent_deny_content_types().await,
+            None => Vec::new(),
+        };
+        if let Some(spawner) = &self.ctx.subagent_spawner {
+            denied.extend(spawner.tools_denied_agent_types().await);
+        }
         render_available_agents(
             &listing
                 .iter()
+                .filter(|a| !denied.iter().any(|d| d == &a.agent_type))
                 .map(|a| a.agent_type.clone())
                 .collect::<Vec<_>>(),
         )
@@ -1166,6 +1260,13 @@ impl AgentTool {
         )?;
         let panel_n = u64::from(fusion_panel_count(&parsed, surface));
         let cap = max_subagents_per_session();
+        // [round-2 review, findings 4 & 13] `panel_stage_observed` must exist
+        // BEFORE the reservation so the drop-safety guard below can be
+        // constructed with it — see `FusionSpawnReservationGuard`'s doc
+        // comment for why the release has to survive `call_fusion`'s own
+        // future being dropped, not just an `Ok`/`Err` return.
+        let panel_stage_observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut reservation_guard: Option<FusionSpawnReservationGuard> = None;
         if let Some(registry) = &self.ctx.task_registry {
             if let Err(spawned) = registry.try_reserve_total_agent_spawns(panel_n, cap) {
                 Self::emit_failed(
@@ -1181,6 +1282,11 @@ Complete the remaining work directly with your tools instead of spawning more ag
 If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION."
                 )));
             }
+            reservation_guard = Some(FusionSpawnReservationGuard::new(
+                Arc::clone(registry),
+                panel_n,
+                Arc::clone(&panel_stage_observed),
+            ));
         }
 
         let parent_registry = ctx
@@ -1208,13 +1314,23 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // and from a cancel observed mid-run (panels genuinely spawned).
         // The forwarder already sees every progress event on this channel,
         // so it is the cheapest place to learn which side of that boundary
-        // a `Cancelled` fell on: once a `RunningPanels` event is observed,
-        // at least one panel definitely spawned.
-        let panel_stage_observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // a `Cancelled` fell on.
+        //
+        // [round-2 review, finding 13] `RunningPanels{completed:0,total:N}`
+        // is emitted by `FusionOrchestrator::run_panel_stage` BEFORE it logs
+        // N telemetry events and THEN calls `panel::run_panels` — so that
+        // event alone does NOT mean a panel spawned. Only a `RunningPanels`
+        // event with `completed > 0` is emitted from inside `run_panels`,
+        // after a panel has genuinely run to completion; use that as the
+        // "a panel definitely spawned" signal instead of "any RunningPanels
+        // event".
         let panel_stage_observed_writer = panel_stage_observed.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = prog_rx.recv().await {
-                if matches!(event.stage, platform_api::FusionStage::RunningPanels { .. }) {
+                if matches!(
+                    event.stage,
+                    platform_api::FusionStage::RunningPanels { completed, .. } if completed > 0
+                ) {
                     panel_stage_observed_writer.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 let _ = forward_progress
@@ -1247,12 +1363,14 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 // spawned fewer (over-reservation is not trimmed at
                 // resolution time — see F011). Release only the surplus that
                 // never spawned, not the whole reservation.
-                if let Some(registry) = &self.ctx.task_registry {
+                if let Some(guard) = reservation_guard.as_mut() {
                     let spawned = u64::try_from(result.panels.len()).unwrap_or(panel_n);
                     let surplus = panel_n.saturating_sub(spawned);
-                    if surplus > 0 {
-                        registry.release_total_agent_spawn_reservations(surplus);
-                    }
+                    guard.release(surplus);
+                    // The remaining (spawned) count is deliberately kept
+                    // charged — disarm so a later drop of THIS guard (at
+                    // function return) does not act on it again.
+                    guard.disarm();
                 }
                 Self::emit_completed(
                     bus,
@@ -1288,10 +1406,14 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 let releases_full_reservation = fusion_error_is_preflight(&err)
                     || (matches!(err, platform_api::FusionError::Cancelled)
                         && !panel_stage_observed.load(std::sync::atomic::Ordering::Relaxed));
-                if releases_full_reservation {
-                    if let Some(registry) = &self.ctx.task_registry {
-                        registry.release_total_agent_spawn_reservations(panel_n);
+                if let Some(guard) = reservation_guard.as_mut() {
+                    if releases_full_reservation {
+                        guard.release(panel_n);
                     }
+                    // Either the release above just settled it, or the
+                    // reservation stays deliberately charged — disarm so a
+                    // later drop of THIS guard does not act on it again.
+                    guard.disarm();
                 }
                 Self::emit_failed(
                     bus,

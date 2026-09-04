@@ -1013,6 +1013,54 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
     }
 
+    /// [round-2 review, finding 20] The Fusion not-found tail must apply the
+    /// SAME `Agent(<type>)` deny filter every other `Available agents:` tail
+    /// in this file applies (see `prompt_filters_denied_agent_types`) —
+    /// before the fix `fusion_available_agents_display` rendered the raw
+    /// catalog with no deny filtering at all, so the model could be steered
+    /// into dispatching a denied type and getting hard-rejected on the very
+    /// next turn.
+    #[tokio::test]
+    async fn fusion_not_found_tail_excludes_denied_agent_types() {
+        let spawner = arc_mock_spawner();
+        let mut bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        bctx.permission_gate = Some(Arc::new(DenyExploreGate));
+        // No `.with_fusion(...)` — `self.fusion` is `None`, hitting the
+        // executor-absent not-found branch that renders
+        // `fusion_available_agents_display`.
+        let tool = AgentTool::new(bctx);
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("general-purpose"),
+                    "general-purpose should remain available; {msg}"
+                );
+                assert!(
+                    !msg.contains("Explore"),
+                    "a denied agent type must not appear as a Fusion not-found suggestion: {msg}"
+                );
+            }
+            other => panic!("expected not found InvalidInput, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn fusion_enabled_lists_and_returns_ok_including_needs_parent() {
@@ -1257,13 +1305,81 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     }
 
     /// F008: a `Cancelled` that lands AFTER at least one panel genuinely
-    /// spawned must NOT release the reservation — mirrors
+    /// spawned (and completed) must NOT release the reservation — mirrors
     /// `fusion_min_panels_not_met_keeps_all_reserved_spawns` for the one
     /// error variant that spans both sides of the panel-spawn boundary.
+    ///
+    /// [round-2 review, finding 13] Sends `RunningPanels{completed: 1, ..}`
+    /// with a `panel_id` — the shape `panel::run_panels` actually emits from
+    /// INSIDE the panel-spawn loop, after a panel has genuinely run to
+    /// completion. The previous version of this fixture sent
+    /// `completed: 0, panel_id: None` — the shape
+    /// `FusionOrchestrator::run_panel_stage` emits BEFORE any panel task is
+    /// spawned — so it modeled the PRE-spawn event while asserting the
+    /// POST-spawn "keep charged" behaviour; see
+    /// `fusion_cancelled_with_only_prespawn_progress_releases_the_full_reservation`
+    /// for the fixture that now covers that pre-spawn shape correctly.
     struct CancelledAfterPanelSpawnFusion;
 
     #[async_trait::async_trait]
     impl platform_api::FusionExecutor for CancelledAfterPanelSpawnFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            if let Some(tx) = progress {
+                let stage = platform_api::FusionStage::RunningPanels {
+                    completed: 1,
+                    total: 3,
+                };
+                let _ = tx
+                    .send(platform_api::FusionProgress {
+                        message: stage.label(),
+                        stage,
+                        panel_id: Some("p1".to_string()),
+                    realized_output_tokens: None,
+                })
+                    .await;
+            }
+            Err(platform_api::FusionError::Cancelled)
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn resolve_parent_profile(
+            &self,
+            _parent_model: &str,
+            explicit_profile: Option<&str>,
+        ) -> Option<String> {
+            explicit_profile
+                .map(str::to_string)
+                .or_else(|| Some("resolved-profile".into()))
+        }
+    }
+
+    /// [round-2 review, finding 13] `Cancelled` observed after ONLY the
+    /// pre-spawn `RunningPanels{completed: 0, total: N}` event —
+    /// `FusionOrchestrator::run_panel_stage` emits exactly this event
+    /// BEFORE calling `panel::run_panels`, i.e. before any panel task is
+    /// spawned — must still release the full `panel_n` reservation. Before
+    /// the fix, the forwarder treated ANY `RunningPanels` event (including
+    /// this pre-spawn one) as proof a panel spawned, so a cancel landing in
+    /// that window permanently kept the whole reservation charged for
+    /// panels that never existed.
+    struct CancelledAfterPrespawnEventOnlyFusion;
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for CancelledAfterPrespawnEventOnlyFusion {
         async fn run(
             &self,
             _request: platform_api::FusionRequest,
@@ -1280,8 +1396,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                         message: stage.label(),
                         stage,
                         panel_id: None,
-                    realized_output_tokens: None,
-                })
+                        realized_output_tokens: None,
+                    })
                     .await;
             }
             Err(platform_api::FusionError::Cancelled)
@@ -1349,9 +1465,48 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
     }
 
-    /// F008: `Cancelled` observed AFTER a panel-stage progress event must
-    /// leave the reservation charged, exactly like `MinPanelsNotMet` —
-    /// those panels made real provider calls.
+    /// [round-2 review, finding 13] A `RunningPanels{completed: 0, ..}`
+    /// event alone — the shape emitted BEFORE any panel task is spawned —
+    /// must NOT be mistaken for "a panel spawned". A `Cancelled` that lands
+    /// having observed only that event must release the full reservation,
+    /// exactly like observing no progress event at all.
+    #[tokio::test]
+    async fn fusion_cancelled_with_only_prespawn_progress_releases_the_full_reservation() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner,
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool =
+            AgentTool::new(bctx).with_fusion(Arc::new(CancelledAfterPrespawnEventOnlyFusion));
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Aborted), "{err:?}");
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            0,
+            "only the pre-spawn RunningPanels{{completed:0,..}} event was observed — no panel \
+             ever spawned, so the full panel_n reservation must be released, not kept charged"
+        );
+    }
+
+    /// F008: `Cancelled` observed AFTER a genuine per-panel completion
+    /// progress event must leave the reservation charged, exactly like
+    /// `MinPanelsNotMet` — those panels made real provider calls.
     #[tokio::test]
     async fn fusion_cancelled_after_panels_spawned_keeps_reservation_charged() {
         use platform_api::task_registry::TaskRegistryHandle;
@@ -1381,7 +1536,119 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert_eq!(
             registry.get_total_agent_spawns(),
             3,
-            "a panel-stage progress event was observed before Cancelled — the reservation must stay charged"
+            "a genuine per-panel completion progress event was observed before Cancelled — the \
+             reservation must stay charged"
+        );
+    }
+
+    /// [round-2 review, finding 4] A Fusion executor whose `run()` never
+    /// resolves on its own — used to prove the spawn-quota reservation
+    /// survives `call_fusion`'s OWN future being dropped mid-flight, not
+    /// just an `Ok`/`Err` return from it.
+    struct NeverCompletesFusion;
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for NeverCompletesFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            std::future::pending().await
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn resolve_parent_profile(
+            &self,
+            _parent_model: &str,
+            explicit_profile: Option<&str>,
+        ) -> Option<String> {
+            explicit_profile
+                .map(str::to_string)
+                .or_else(|| Some("resolved-profile".into()))
+        }
+    }
+
+    /// [round-2 review, finding 4] The dispatcher
+    /// (`orchestrator::turn_loop::dispatch_tool_uses_tracked_deferred`) does
+    /// not let `call_fusion` run to completion on a user interrupt — it
+    /// races the tool's call future against the SAME `CancellationToken` the
+    /// tool was handed as `ctx.cancel`, with `biased; () = cancel.cancelled()
+    /// => Err(Aborted), outcome = &mut tool_call => outcome`, and drops
+    /// `tool_call` when cancel wins. `call_fusion`'s own `Ok`/`Err` match
+    /// arms never run in that case — reproduce that EXACT shape here (a
+    /// biased select racing the pinned call future against the same token,
+    /// dropping the future when cancel wins) against an executor that never
+    /// resolves on its own, and assert the reservation is still released.
+    #[tokio::test]
+    async fn fusion_dropped_future_on_dispatcher_cancel_releases_the_full_reservation() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner,
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(NeverCompletesFusion));
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.cancel = Some(cancel.clone());
+
+        let cancel_for_task = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel_for_task.cancel();
+        });
+        // Mirrors turn_loop.rs's dispatcher verbatim: the call future is
+        // built AND raced INSIDE this inner block (turn_loop.rs:5183-5199's
+        // own `let tool_outcome = { let tool_call = ...; tokio::pin!(...);
+        // tokio::select! { ... } };`), so leaving the block drops the true
+        // owned future (not merely the `Pin<&mut _>` handle `tokio::pin!`
+        // shadows it with) the moment cancellation wins the race — exactly
+        // what strands `call_fusion`'s own `Ok`/`Err` arms.
+        let completed = {
+            let call_future = tool.call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                ctx,
+                fresh_tx(),
+            );
+            tokio::pin!(call_future);
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => false,
+                _ = &mut call_future => true,
+            }
+        };
+        assert!(!completed, "fusion call must not complete on its own");
+
+        for _ in 0..2000 {
+            if registry.get_total_agent_spawns() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            0,
+            "call_fusion's future was dropped before any panel spawned (mirrors the \
+             dispatcher's cancel-races-the-tool select) — the reservation must not leak"
         );
     }
 

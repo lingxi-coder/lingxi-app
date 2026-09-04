@@ -359,7 +359,20 @@ impl AdapterPermissionGate {
         // The parked receiver is the turn-ownership proof. A cancellation drain
         // or timeout drops it; in that case a late AllowAlways must not create a
         // session or durable rule for a tool call that no longer exists.
+        //
+        // [round-2 review, finding 8] This branch already removed the
+        // `pending` entry (the `remove` above) before discovering the
+        // receiver is dead, so `ParkedRequestGuard`'s backstop (armed only
+        // while the entry is still IN the map) finds nothing to clean up and
+        // emits nothing either. Without an explicit emit here, a resolve()
+        // that races a dropped asker produces NO
+        // `PermissionRequestResolved` event at all — on a client that does
+        // not optimistically dequeue (Android), the permission card is then
+        // stuck on screen until connection-teardown `drain()`. Emit the same
+        // terminal event the guard would have.
         if sender.send(mapped).is_err() {
+            self.emit_resolution(request_id, PermissionResolutionDto::Cancelled)
+                .await;
             return false;
         }
 
@@ -1304,6 +1317,56 @@ mod tests {
                 .await
         );
         assert!(gate.session_allow_rules.lock().await.is_empty());
+    }
+
+    /// [round-2 review, finding 8] `resolve()` already removes the `pending`
+    /// entry (proven by `late_allow_always_does_not_write_rule` above)
+    /// before discovering the receiver is dead. Before the fix it then
+    /// returned `false` with NO terminal event at all — the entry was gone,
+    /// so `ParkedRequestGuard`'s backstop (armed only while the entry is
+    /// still in the map) finds nothing to clean up either, and the id's
+    /// `PermissionRequestResolved` is lost forever. On a client that does
+    /// not optimistically dequeue (Android), that stranded the permission
+    /// card on screen until connection teardown. `resolve()` must still emit
+    /// exactly one terminal event on this branch.
+    #[tokio::test]
+    async fn resolve_on_dead_receiver_still_emits_one_resolution_event() {
+        let sink = MockRequestSink::arc();
+        let events = MockSink::arc();
+        let gate = AdapterPermissionGate::new(sink).with_event_sink(events.clone());
+        let (sender, receiver) = oneshot::channel();
+        drop(receiver);
+        gate.pending.lock().await.insert(
+            77,
+            ParkedRequest {
+                sender,
+                input: json!({"command": "dangerous"}),
+                tool_name: "Bash".to_string(),
+                owner: None,
+                suppress_always_allow_rule: false,
+                auto_mode_prompt: None,
+            },
+        );
+
+        let resolved = gate
+            .resolve(77, PermissionResponseDto::AllowOnce, "Bash")
+            .await;
+        assert!(
+            !resolved,
+            "no live asker remains, so resolve() must still report false"
+        );
+
+        let seen = events.events().await;
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [ClientEvent::PermissionRequestResolved {
+                    request_id: 77,
+                    resolution: PermissionResolutionDto::Cancelled,
+                }]
+            ),
+            "resolve() racing a dropped asker must still emit exactly one terminal event; got: {seen:?}"
+        );
     }
 
     /// `timeout_resolves_deny` — a `check()` parked past the per-request timeout

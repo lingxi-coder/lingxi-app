@@ -224,6 +224,17 @@ impl McpReceiptBook {
         // non-streaming fallback, before `ReceiptClaim`'s `Drop` guard could
         // release it — or before that guard existed) self-clears once its TTL
         // has passed instead of wedging the app until the process restarts.
+        //
+        // r3-engine-core-5: `slots` had no eviction at all, so every receipt
+        // ever issued — consumed, superseded, or simply abandoned — lived for
+        // the process lifetime. `claim_candidate` and `consume` both already
+        // refuse an expired receipt (`now_ms >= expires_at_ms`), so a slot
+        // past its TTL can never again succeed at anything; only the
+        // `receipt_duplicate` id-collision scan below still walks it. Drop
+        // those slots here, before that scan runs, bounding the book to
+        // receipts issued within the last TTL window instead of forever.
+        self.slots
+            .retain(|_, existing| existing.expires_at_ms > receipt.issued_at_ms);
         if self.slots.values().any(|existing| {
             existing.app_id == receipt.app_id
                 && existing.claimed
@@ -2124,5 +2135,43 @@ mod tests {
         );
         book.issue(after_ttl)
             .expect("an expired claimed slot must not block a new receipt from being issued");
+    }
+
+    /// r3-engine-core-5 REGRESSION: `slots` had no eviction at all — issued,
+    /// consumed, and superseded receipts alike were retained for the process
+    /// lifetime, so a long-running host's book only ever grew. Assert the
+    /// map's actual size, not just that later calls still succeed.
+    #[test]
+    fn issue_prunes_expired_slots_from_every_app_not_just_the_caller() {
+        let digest = "0".repeat(64);
+        let mut book = McpReceiptBook::default();
+        for i in 0..5 {
+            book.issue(McpConfirmationReceipt::new(
+                format!("app-{i}"),
+                "run",
+                digest.clone(),
+                digest.clone(),
+                0,
+            ))
+            .unwrap();
+        }
+        assert_eq!(book.slots.len(), 5, "all five receipts should be live");
+
+        // Issuing one more receipt, after every prior receipt's TTL has
+        // elapsed, must evict all five stale slots — not just the one for
+        // the app being issued to.
+        book.issue(McpConfirmationReceipt::new(
+            "app-new",
+            "run",
+            digest.clone(),
+            digest,
+            McpConfirmationReceipt::TTL_MS,
+        ))
+        .unwrap();
+        assert_eq!(
+            book.slots.len(),
+            1,
+            "expired slots for every app must be pruned, leaving only the new one"
+        );
     }
 }

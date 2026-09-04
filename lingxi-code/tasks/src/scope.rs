@@ -5,16 +5,33 @@
 //! Three things used to derive Local App authority from a workflow's NAME:
 //! `registry.rs`'s `find_nonterminal_local_app_workflows` (delete guard) and
 //! `handlers/local_workflow.rs`'s `requires_workspace_lease` both asked "is
-//! `workflow_id` a member of this crate's (now-deleted) `LOCAL_APP_BUILD_WORKFLOWS`?",
-//! and `tool-workflow` asked the same question of `meta.name` to pick a
-//! `workflowModel` default. A `workflow_id`/`meta.name` is a string a
-//! *caller* supplies when launching a workflow -- so any custom workflow
-//! that happens to reuse one of those names got the same answer as the
-//! real one. The first two now read a scope instead; `tool-workflow`'s
-//! `workflowModel` default (P-1.9, design §18 Phase -1 step 9) is now keyed
-//! on the resolved SCRIPT's identity against
-//! `tool_workflow::BuiltinWorkflowDescriptor::is_local_app_build`, which a
-//! caller-supplied name cannot spoof either.
+//! `workflow_id` a member of this crate's (now-deleted) `LOCAL_APP_BUILD_WORKFLOWS`?".
+//! A `workflow_id`/`meta.name` is a string a *caller* supplies when launching
+//! a workflow -- so any custom workflow that happens to reuse one of those
+//! names got the same answer as the real one. Both now read a scope instead.
+//!
+//! Design §18 Phase -1 step 9 additionally called for the app's stored
+//! `workflowModel` (`local_apps::types`'s `workflow_model` field, accepted on
+//! the `scaffold` MCP tool and persisted by `LocalAppsService::commit_scaffold`)
+//! to key a `workflowModel` default the same way. As of this correction that
+//! step is unimplemented: `workflow_model` is written and preserved across
+//! scaffold/update, but `git grep -n 'workflow_model\|workflowModel'` across
+//! the tree turns up no production reader of the persisted value, and
+//! `tool_workflow::BuiltinWorkflowDescriptor` (`tools/workflow/src/builtins.rs`)
+//! has no `is_local_app_build` field or method -- a name a stale copy of this
+//! very comment once claimed existed. Do not restate either "keyed on the
+//! script's identity" or "keys on the name" here until a real reader exists;
+//! today there is none.
+//!
+//! ⚠️ Known-unfixed, outside this crate: three sibling comments still assert
+//! the same non-existent symbol and were left untouched because they live in
+//! `apps/engine-mobile`, not here --
+//! `apps/engine-mobile/src/local_apps_build.rs:4747`,
+//! `apps/engine-mobile/tests/component_literal_scan.rs:15-17` and
+//! `apps/engine-mobile/tests/component_literal_allowlist.txt:123`. The scan
+//! one additionally names `BUILTIN_WORKFLOWS.local_app_build_workflow_names()`,
+//! which does not exist either. Correct them from the package that owns
+//! `apps/engine-mobile`; the grep above is the evidence.
 //!
 //! [`LocalAppWorkflowTaskScope`] is the replacement authority token: the Host
 //! (the composition binding that just resolved a real `LocalAppPluginBinding`
@@ -123,9 +140,9 @@
 //!
 //! This module only introduces the type. The two `tasks` call sites above now
 //! read a scope, which reaches a task row through
-//! [`crate::task_trait::TaskSpawnInput::LocalWorkflow`]'s `scope` field;
-//! `tool-workflow`'s `workflowModel` default still keys on the name (design
-//! §18 Phase -1 step 9).
+//! [`crate::task_trait::TaskSpawnInput::LocalWorkflow`]'s `scope` field. The
+//! design §18 Phase -1 step 9 `workflowModel` default has no implementation
+//! to migrate onto a scope yet -- see the module-level note above.
 
 use serde::{Deserialize, Serialize};
 

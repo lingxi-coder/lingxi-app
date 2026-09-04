@@ -158,14 +158,51 @@ pub(crate) fn issue_selector_capability(
     app_id: &str,
     workflow_run_id: &str,
 ) -> Result<String, String> {
+    issue_selector_capability_impl(root, app_id, workflow_run_id, false)
+}
+
+/// Same as [`issue_selector_capability`], but for a Host-VERIFIED resume
+/// (`trusted_local_app_resume`, resolved from checkpoint provenance, never
+/// from caller-supplied args) of an interrupted create run.
+///
+/// r1-backlog-workflow-runtime-04 / r1-workflow-runtime-06: the plain
+/// function fails closed with `selector_capability_exists` whenever the
+/// LIVE (never-consumed) token from a prior attempt is still on disk --
+/// which is exactly the case for a create that died inside the selector
+/// before it could journal a candidate and mark the token `.used`. That
+/// fail-closed property is exactly right against a genuine duplicate
+/// launch (a second concurrent call for the same run id from an
+/// UNverified caller), so this rotation path exists only for the one
+/// caller that has already proven the resume is legitimate.
+pub(crate) fn issue_selector_capability_for_verified_resume(
+    root: &Path,
+    app_id: &str,
+    workflow_run_id: &str,
+) -> Result<String, String> {
+    issue_selector_capability_impl(root, app_id, workflow_run_id, true)
+}
+
+fn issue_selector_capability_impl(
+    root: &Path,
+    app_id: &str,
+    workflow_run_id: &str,
+    allow_live_rotation: bool,
+) -> Result<String, String> {
     safe_segment(app_id, "app_id")?;
     safe_segment(workflow_run_id, "workflow_run_id")?;
     let path = selector_capability_path(root, app_id, workflow_run_id);
     let used_path = path.with_file_name(format!("{SELECTOR_CAPABILITY_FILE}.used"));
     if path.exists() {
-        return Err(
-            "selector_capability_exists: create run already has a selector capability".into(),
-        );
+        if !allow_live_rotation {
+            return Err(
+                "selector_capability_exists: create run already has a selector capability".into(),
+            );
+        }
+        // Host-verified resume of the interrupted run: the live token is
+        // exactly what an unfinished selector attempt left behind. Rotate
+        // it the same way the `.used` branch below rotates a consumed one.
+        std::fs::remove_file(&path)
+            .map_err(|error| format!("rotate live selector capability: {error}"))?;
     }
     // A resumed run may already have consumed its first selector capability
     // after journaling a candidate. Re-issue a fresh one for an interrupted
@@ -547,6 +584,49 @@ mod tests {
             .contains("selector_capability_missing"));
         assert!(resolve(root.path(), "bbbb2222", run_id, handle).is_err());
         assert!(resolve(root.path(), app_id, "wf_other1", handle).is_err());
+    }
+
+    /// r1-backlog-workflow-runtime-04 / r1-workflow-runtime-06: a create run
+    /// that dies inside the selector -- before it can journal a candidate
+    /// and mark its token `.used` -- leaves a LIVE (never-consumed)
+    /// capability on disk. The plain function must keep failing closed on
+    /// that (a genuine concurrent duplicate launch must not mint a second
+    /// live token), but a Host-verified resume of the SAME interrupted run
+    /// must succeed by rotating it.
+    #[test]
+    fn issue_selector_capability_fails_closed_on_a_live_duplicate_but_rotates_for_a_verified_resume(
+    ) {
+        let root = tempfile::tempdir().expect("temp root");
+        let app_id = "bbbb2222";
+        let run_id = "wf_selector_resume";
+
+        let first = issue_selector_capability(root.path(), app_id, run_id).expect("first mint");
+
+        let duplicate = issue_selector_capability(root.path(), app_id, run_id);
+        assert_eq!(
+            duplicate,
+            Err("selector_capability_exists: create run already has a selector capability"
+                .to_string()),
+            "an UNverified duplicate call must still fail closed on a live token, got {duplicate:?}"
+        );
+
+        let resumed = issue_selector_capability_for_verified_resume(root.path(), app_id, run_id)
+            .expect("a Host-verified resume must rotate the live capability, not fail closed");
+        assert_ne!(
+            resumed, first,
+            "the resumed capability must be a freshly rotated token, not the stale one"
+        );
+
+        // The old token must actually be GONE, not merely shadowed: a plain
+        // call right after still sees exactly one live token (the new one),
+        // proving the rotation replaced rather than duplicated it.
+        let second_duplicate = issue_selector_capability(root.path(), app_id, run_id);
+        assert_eq!(
+            second_duplicate,
+            Err("selector_capability_exists: create run already has a selector capability"
+                .to_string()),
+            "the rotation must leave exactly one live token behind, got {second_duplicate:?}"
+        );
     }
 
     #[test]

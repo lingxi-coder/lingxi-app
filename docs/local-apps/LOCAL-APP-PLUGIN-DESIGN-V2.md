@@ -154,6 +154,14 @@ Local App Plugin 随 LingXi app bundle 发布，默认启用，可整体禁用�
 `mcp_authoring_required` 是 staging/journal 的可恢复结果，不是 published 状态。用户可以继续
 澄清希望 LLM 完成的任务，或修改 App 需求；authoring 与 QA 通过后再生成一次 Native receipt。
 
+> **实现现状**：`create` 入口今天恒定以 `create_without_mcp=true` 调用 `approve_mcp_proposal`
+> （`local_apps_mcp.rs`/`local_apps_host.rs`）——create 事务本身完全不跑 MCP authoring，
+> `AppRecord.mcp_intent` 只是留给后续流程的备忘，不授予任何东西。本节的 1–16 tool 下界因此
+> 不是在 create 内强制的；它在 App 之后经由独立的 MCP authoring 流程（对应 §10.2 Update 里
+> 的 `active MCP catalog` 步骤）完成并 promote 时才生效。§10.1 的时序图已按这条路径更新。
+
+
+
 ### 1.8 桌面端不安装本 Plugin
 
 `lingxi-local-app`（source=`BuiltIn`）只随移动端 app bundle 发布。桌面端今天没有 Local Apps
@@ -1222,8 +1230,7 @@ create empty shell
 → Host prepares isolated staging from that handle
 → designer produces design_spec
 → builder writes App-managed source in staging
-→ initial MCP authoring generates 1–16 app-specific tools (§1.7)
-→ zero valid tools returns mcp_authoring_required and keeps staging resumable; nothing is published
+→ create runs with create_without_mcp=true: no MCP authoring here, MCP stays unconfigured (§1.7 实现现状注)
 → missing Flow changes return to builder（repair budget 见 §11.4）
 → Host validates source/profile/dependencies/MCP proposal
 → Native create confirmation

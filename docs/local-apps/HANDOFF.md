@@ -209,7 +209,7 @@ Android additionally binds the host path to the configured app-private sandbox
 root and matching app/channel. iOS applies, runs, and restores the request-only
 mount set as one native coordinator transaction.
 
-After a successful initial build, the workflow starts the runtime. After a repair build, it restarts the runtime and passes the new non-empty `preview_url` into the next verification round. The workflow rejects `ok=true` build results that omit the preview URL.
+After a successful initial build, the workflow starts the runtime. After a repair build, it restarts the runtime; the workflow rejects `ok=true` build results that omit a non-empty `preview_url`, but that URL is not threaded into the operator/tester/verifier prompts of the next round — the runtime serves on the same derived loopback port across a restart, so those prompts re-drive the app without needing it.
 
 The runtime serves only on a derived loopback port. External data access goes through the native bridge, not direct page fetches.
 
@@ -512,7 +512,7 @@ record instead of the confirmed one, and the interview's result is gone.
 
 - A repair build must call runtime `restart`, not leave the old process serving.
 - The rebuild result must return the restarted non-empty `preview_url`.
-- The next verification prompt must contain that new URL.
+- The next verification round re-drives the app on the same loopback port rather than being handed that URL — confirm the runtime actually restarted, not that a prompt quotes the URL.
 
 ### Restore cannot build
 

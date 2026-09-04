@@ -36,7 +36,7 @@ const tester = await run(`Check operator evidence for app ${input.app_id} agains
 phase('Verify');
 const report = await run(`Verify the operator/tester evidence for app ${input.app_id} and return a truthful structured report. Do not edit or repair source. For Canvas/Three/Phaser/Babylon report render_check and motion_check; render not_applicable is valid only for DOM with zero canvas surfaces. Include frames=0, zero surfaces, missing motion, and frames<2 as blocking evidence when applicable. Host context=${JSON.stringify(context)}. Tester evidence=${JSON.stringify(tester)}`, { agentType: 'verifier', label: 'verifier', phase: 'Verify', schema: reportSchema });
 if (!Array.isArray(report.findings)) throw new Error(`${WORKFLOW_ID}: malformed finding container`);
-const countAtLeast = (value, minimum) => Number.isFinite(Number(value)) && Number(value) >= minimum;
+const countAtLeast = (value, minimum) => typeof value === 'number' && Number.isFinite(value) && value >= minimum;
 const findings = report.findings.map((value) => (value && typeof value === 'object' && !Array.isArray(value) && typeof value.evidence === 'string' && value.evidence.trim()) ? value : { kind: 'acceptance', severity: 'blocking', evidence: 'malformed finding' });
 if (report.webview_checked !== true) findings.push({ kind: 'webview', severity: 'blocking', evidence: 'webview_checked=false' });
 if (isCanvas && (report.render_check?.status !== 'passed' || !countAtLeast(report.render_check?.canvas_surfaces, 1) || !countAtLeast(report.render_check?.frames_captured, 1))) findings.push({ kind: 'render', severity: 'blocking', evidence: 'render policy gate requires one surface and one captured frame' });

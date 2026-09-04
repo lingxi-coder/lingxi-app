@@ -27,10 +27,16 @@ pub mod task_trait;
 // `scope::LocalAppWorkflowTaskScope` instead of a workflow-name string (see
 // `registry::TaskRegistry::find_nonterminal_local_app_workflows` and
 // `handlers::local_workflow::requires_workspace_lease`), and the ONLY other
-// reader was that twin-agreement test. `tool_workflow` now answers "is this
-// a Local App build workflow" from a typed field on its own
-// `BuiltinWorkflowDescriptor` (`is_local_app_build`), so there is no second
-// list left anywhere to twin this crate's (deleted) list against.
+// reader was that twin-agreement test, so there is no second list left
+// anywhere to twin this crate's (deleted) list against.
+//
+// NOTE: an earlier version of this comment additionally claimed
+// `tool_workflow::BuiltinWorkflowDescriptor` carries a typed
+// `is_local_app_build` field/method answering the same question over there.
+// It does not (`tools/workflow/src/builtins.rs`'s descriptor has only
+// `name`/`description`/`script`/`manual_only`); no such symbol exists
+// anywhere in the tree. Do not resurrect that claim without a grep proving
+// the symbol first.
 
 pub use handlers::{
     escape_xml, fusion_result_xml, DreamHandler, InProcessTeammateHandler, LocalAgentHandler,

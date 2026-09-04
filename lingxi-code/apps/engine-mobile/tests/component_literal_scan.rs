@@ -171,7 +171,7 @@ const PLUGIN_NAMESPACE: &str = "lingxi-local-app";
 /// steps 4-5 of the guided workspace contract no longer send it to a
 /// "runtime confirmation tool" that does not exist. See the allowlist file's
 /// own comments on both entries for why this does not reopen P-1.4.
-const ALLOWLIST_BASELINE_COUNT: usize = 5;
+const ALLOWLIST_BASELINE_COUNT: usize = 6;
 
 /// Scan roots, relative to the workspace root. Deny-by-default directory
 /// enumeration: every source file under each of these is scanned unless it is

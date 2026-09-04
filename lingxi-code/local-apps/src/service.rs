@@ -3285,19 +3285,16 @@ mod tests {
         let _ = create.await;
         release.notify_one();
 
-        let committed_id = {
-            let observed_id = Arc::clone(&observed_id);
-            timeout(Duration::from_secs(5), async move {
-                loop {
-                    if let Some(app_id) = observed_id.lock().expect("lock app id").clone() {
-                        break app_id;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("initializer observed a minted id")
-        };
+        // `started.notified().await` above already proves the initializer
+        // ran `*observed_id.lock() = Some(record.id)` before it called
+        // `started.notify_one()`, so a wait loop here can only ever take its
+        // first iteration and proves nothing — read it directly, the same as
+        // `panicking_create_initializer_cleans_the_uncommitted_app` does.
+        let committed_id = observed_id
+            .lock()
+            .expect("lock app id")
+            .clone()
+            .expect("initializer observed a minted id");
 
         timeout(Duration::from_secs(5), async {
             loop {

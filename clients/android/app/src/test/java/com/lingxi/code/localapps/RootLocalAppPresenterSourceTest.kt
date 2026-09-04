@@ -22,18 +22,71 @@ class RootLocalAppPresenterSourceTest {
 
     @Test
     fun `phase8 surfaces do not keep raw placeholder copy`() {
-        val localAppsScreen = File("src/main/java/com/lingxi/code/localapps/LocalAppsScreen.kt").readText()
         val skillsPage = File("src/main/java/com/lingxi/code/settings/SkillsPages.kt").readText()
         val mcpPages = File("src/main/java/com/lingxi/code/settings/MCPPages.kt").readText()
 
-        assertTrue("approval sheet must use generated create-confirm title", "R.string.local_apps_create_confirm_title" in localAppsScreen)
-        assertTrue("approval sheet must use generated MCP-proposal title", "R.string.local_apps_mcp_proposal_title" in localAppsScreen)
-        assertTrue("approval sheet must not keep raw fact labels", "LocalAppApprovalFact(\"" !in localAppsScreen)
-        assertTrue("approval sheet must not keep hardcoded approve text", "Text(\"批准\")" !in localAppsScreen)
         assertTrue("skills page must use generated plugin title", "R.string.local_apps_plugin_title" in skillsPage)
         assertTrue("skills page must not keep raw plugin section label", "SettingsSection(label = \"Plugin\")" !in skillsPage)
         assertTrue("MCP pages must use generated managed-source title", "R.string.local_apps_plugin_managed_mcp_source" in mcpPages)
         assertTrue("MCP pages must not keep the raw managed-source warning", "Managed source cannot edit transport or remove this server." !in mcpPages)
+    }
+
+    // Kept as its OWN @Test rather than sharing a method with the settings-page
+    // assertions above: the slice guards below are vacuity checks on
+    // LocalAppsScreen.kt, and JUnit's assertTrue throws, so a renamed `when`
+    // arm here would have silently stopped the SkillsPages.kt / MCPPages.kt
+    // assertions from ever running while naming only the create arm.
+    @Test
+    fun `the approval sheet title block and create arm carry no raw copy`() {
+        val localAppsScreen = File("src/main/java/com/lingxi/code/localapps/LocalAppsScreen.kt").readText()
+
+        // Slice the approval dialog's own title lambda. A whole-file
+        // containment check for the title ids only proves the id appears
+        // SOMEWHERE in a 2000+ line file that mentions it in comments and
+        // sibling surfaces, so hardcoding the arm at `title = {` while the id
+        // survives anywhere else would leave the gate green. Anchored off the
+        // composable's unique declaration because `title = {` alone first
+        // matches an unrelated error dialog earlier in the file.
+        val dialogStart = localAppsScreen.indexOf("fun LocalAppApprovalSheetDialog(")
+        assertTrue("read the wrong file: LocalAppApprovalSheetDialog( not found", dialogStart >= 0)
+        val titleStart = localAppsScreen.indexOf("title = {", dialogStart)
+        assertTrue("the approval dialog must still declare a title block", titleStart > dialogStart)
+        val titleEnd = localAppsScreen.indexOf("text = {", titleStart)
+        assertTrue("the approval dialog must still declare a text block after its title", titleEnd > titleStart)
+        val titleBlock = localAppsScreen.substring(titleStart, titleEnd)
+
+        // Slice the create-approval arm specifically: there are 18
+        // `LocalAppApprovalFact(` calls across three sheet branches, and the
+        // raw-literal negatives below are defeated by a named `label = "..."`
+        // argument on its own line, which never contains the literal substring
+        // `LocalAppApprovalFact("`.
+        val createArmStart = localAppsScreen.indexOf("is LocalAppCreateApprovalSheet -> {")
+        assertTrue("read the wrong file: create-approval sheet arm not found", createArmStart >= 0)
+        val createArmEnd = localAppsScreen.indexOf("is LocalAppMcpProposalApprovalSheet -> {", createArmStart)
+        assertTrue("read the wrong file: mcp-proposal arm not found after the create arm", createArmEnd > createArmStart)
+        val createArm = localAppsScreen.substring(createArmStart, createArmEnd)
+
+        assertTrue(
+            "the approval dialog's title block must resolve the create-confirm title from " +
+                "R.string, not a raw literal — asserted inside the title lambda, not whole-file",
+            "R.string.local_apps_create_confirm_title" in titleBlock,
+        )
+        assertTrue(
+            "the approval dialog's title block must resolve the MCP-proposal title from R.string",
+            "R.string.local_apps_mcp_proposal_title" in titleBlock,
+        )
+        assertTrue(
+            "approval sheet must not keep a raw fact label in the create arm: this must hold " +
+                "whether the literal is the first positional argument or a named `label = ` " +
+                "argument reformatted onto its own line",
+            !Regex("LocalAppApprovalFact\\(\\s*\"").containsMatchIn(createArm) &&
+                !Regex("label\\s*=\\s*\"").containsMatchIn(createArm),
+        )
+        assertTrue(
+            "approval sheet must not keep hardcoded CJK copy in any Text(...) call, including one " +
+                "reformatted so the literal sits on its own line after the opening paren",
+            !Regex("Text\\(\\s*\"[^\"]*[\\u4e00-\\u9fff]").containsMatchIn(localAppsScreen),
+        )
     }
 
     @Test

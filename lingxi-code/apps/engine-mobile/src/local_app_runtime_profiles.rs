@@ -465,6 +465,16 @@ const UNAVAILABLE_PROFILES: &[RuntimeProfileUnavailable] = &[RuntimeProfileUnava
         "babylon_3d remains gated pending iOS/Android Babylon + glTF + Havok real-device validation",
 }];
 
+/// r1-critic-05: an already-scaffolded app's manifest pins one of these
+/// contracts by family + revision (`AppRuntimeProfileBinding`), and nothing
+/// re-validates that pin against this list after scaffold. The design doc's
+/// §9.6 per-App template snapshot (`<app-data>/templates/<snapshot-digest>/`)
+/// was meant to let such an app survive a revision being retired from here,
+/// but it was never implemented in any language — `grep -rn 'templates/'
+/// local-apps/src/*.rs` finds only a comment, no writer. Removing an entry a
+/// live app has pinned therefore leaves that app with NO restore source for
+/// its managed files; retire a revision here only alongside an app-side
+/// migration (or once §9.6 lands for real).
 fn published_available_contracts() -> &'static [RuntimeProfileContract] {
     &[
         REACT_DOM_R1,

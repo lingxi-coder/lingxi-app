@@ -447,9 +447,9 @@ private struct LocalAppMcpAuthoringCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Customize MCP")
+            Text(String(localized: "local_apps_mcp_customize_title"))
                 .font(.headline)
-            Text("Describe what the assistant should do inside this local app. The host will use that goal to author or revise the app-owned MCP surface.")
+            Text(String(localized: "local_apps_mcp_customize_detail"))
                 .font(.footnote)
                 .foregroundStyle(theme.text3)
 
@@ -463,13 +463,25 @@ private struct LocalAppMcpAuthoringCard: View {
                 )
 
             HStack {
-                Text(status == .needsSetup ? "MCP is off by default until a surface is authored." : status.summary)
-                    .font(.footnote)
-                    .foregroundStyle(theme.text3)
+                Text(
+                    status == .needsSetup
+                        ? String(localized: "local_apps_mcp_needs_setup_detail") : status.summary
+                )
+                .font(.footnote)
+                .foregroundStyle(theme.text3)
                 Spacer()
-                Button("Start Customizing", action: onStart)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isPending || goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                // Mirrors Android's split (`LocalAppsScreen.kt`): a fresh app
+                // GENERATES a design, a previously-authored one is REVISED —
+                // one shared "Start Customizing" label made every visit after
+                // the first one say the wrong verb.
+                Button(
+                    status == .needsSetup
+                        ? String(localized: "local_apps_mcp_start_authoring")
+                        : String(localized: "local_apps_mcp_update_authoring"),
+                    action: onStart
+                )
+                .buttonStyle(.borderedProminent)
+                .disabled(isPending || goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding()

@@ -150,8 +150,11 @@ class DrawerCreateEntryTest {
             ".clickable(onClick = onOpenApps)" in body,
         )
         assertTrue(
-            "the browse row must use the generated open-library string, not a raw literal",
-            "R.string.drawer_open_apps_library" in body,
+            "the browse row must use the generated apps-library string, not a raw literal, and " +
+                "must name the SAME key iOS's equivalent row uses (Drawer.swift renders " +
+                "`String(localized: \"drawer_apps_library\")` on the matching browse affordance) " +
+                "so the one affordance does not read differently per platform",
+            "R.string.drawer_apps_library" in body,
         )
         assertTrue(
             "the browse row must carry a stable testTag sourced from UiTags",

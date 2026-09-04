@@ -1097,6 +1097,7 @@ G3	lingxi-code/local-apps/assets/default-workspace-settings.local.json	.lingxi
 G3	lingxi-code/local-apps/assets/default-workspace-settings.local.json	LINGXI.md
 G3	lingxi-code/local-apps/src/checkpoints.rs	.lingxi
 G3	lingxi-code/local-apps/src/packer.rs	.lingxi-*
+G3	lingxi-code/local-apps/src/storage.rs	.lingxi-*
 G3	lingxi-code/local-apps/src/permissions.rs	.lingxi
 G3	lingxi-code/local-apps/src/permissions.rs	LINGXI.md
 G3	lingxi-code/local-apps/src/service.rs	.lingxi

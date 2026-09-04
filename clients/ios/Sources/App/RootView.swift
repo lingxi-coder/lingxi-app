@@ -473,8 +473,9 @@ struct RootView: View {
                 settingsStore.llmProviders = providerRepository.legacyProviders()
             }
             // Land the user in the new app. See `landCreatedAppIfReady` for why
-            // all three of these re-check the same gate rather than one of them
-            // driving.
+            // this and every other sink that re-checks the same gate (the
+            // `projectSwitching` and `navigation.settingsOpen` edges below
+            // included) call it again rather than one of them driving alone.
             // `@Published` publishes from `willSet`, so `source.model.streaming`
             // still reads the OLD value inside this sink — on the true→false
             // edge it reads `true` and the gate below would refuse forever.
@@ -493,6 +494,15 @@ struct RootView: View {
                 guard let requestedAppID = appID else { return }
                 navigation.openLocalApps(appID: requestedAppID)
                 _ = localAppsStore.consumeRequestedPresentationAppID()
+            }
+            // A landing held back by `landCreatedAppIfReady`'s Settings gate
+            // (above) is not re-driven by any of the other three sinks —
+            // none of them fire on Settings closing — so without this a
+            // create that finished while Settings was open would sit
+            // unconsumed until some UNRELATED event happened to re-check.
+            .onChange(of: navigation.settingsOpen) { _, settingsOpen in
+                guard !settingsOpen else { return }
+                landCreatedAppIfReady()
             }
         let notificationLifecycle = presentationLifecycle
             .onReceive(NotificationCenter.default.publisher(for: .lingxiCronNotificationOpened)) { note in
@@ -701,12 +711,22 @@ struct RootView: View {
     /// own alert owns the message (`LocalAppsLibraryView`), and UIKit refuses
     /// to raise an alert from a controller that is already presenting — so
     /// this one also yields to the settings sheet and to the permission sheet
-    /// and picks the message up once they are down. `errorMessage` is not
-    /// cleared by yielding, so nothing is lost in the meantime.
+    /// and picks the message up once they are down. It also yields to BOTH
+    /// root-owned approval sheets: `errorMessage` can be set by an
+    /// unrelated app's workflow while the user is mid-create — or mid-MCP
+    /// review — on a DIFFERENT app, and that in-progress approval must not be
+    /// yanked off screen by a notice about something else. Both terms are
+    /// required, not just the create one: `localAppApprovalPresenterIsFree`
+    /// deliberately no longer yields to `errorMessage`, so this gate is the
+    /// only thing keeping the alert and the two approval sheets exclusive on
+    /// a single controller. `errorMessage` is not cleared by yielding, so
+    /// nothing is lost in the meantime.
     private var localAppErrorPresenterIsFree: Bool {
         navigation.presentedRoute == nil
             && !navigation.settingsOpen
             && localAppsStore.pendingPermission == nil
+            && localAppsStore.pendingCreateConfirmation == nil
+            && localAppsStore.pendingMcpProposalApproval == nil
     }
 
     /// The same gate guards the SETTER, not only the getter. Without it, the
@@ -744,11 +764,20 @@ struct RootView: View {
 
     /// Root-owned approval sheets must survive page-level Local App UI
     /// lifetimes, so unlike the error alert / permission presenter they do not
-    /// yield to `presentedRoute`.
+    /// yield to `presentedRoute`. They also do not yield to `errorMessage`:
+    /// that field is a single shared channel for every Local App, so an
+    /// error raised by app B's workflow must not pull down the create
+    /// confirmation the user is actively answering for app A. Priority is
+    /// the mirror image of `localAppErrorPresenterIsFree` above, which yields
+    /// to `pendingCreateConfirmation` AND to `pendingMcpProposalApproval` for
+    /// the same reason. Both of those terms are load-bearing: dropping
+    /// `errorMessage` from THIS gate means the alert/sheet exclusivity that
+    /// UIKit requires (one controller, one modal) is now asserted only over
+    /// there, so removing either term lets the alert and a sheet be raised
+    /// from the same controller at once.
     private var localAppApprovalPresenterIsFree: Bool {
         !navigation.settingsOpen
             && localAppsStore.pendingPermission == nil
-            && localAppsStore.errorMessage == nil
     }
 
     private var localAppCreateConfirmationItem: Binding<LocalAppCreateConfirmationPrompt?> {
@@ -856,8 +885,13 @@ struct RootView: View {
             onSelectProject: { switchProject(to: $0) },
             onSelectSession: { switchProject(to: $0, resumeSessionID: $1) },
             onNewChat: { switchProject(to: $0, startNew: true) },
-            onSelectAppSession: { appID, sessionID in
-                switchScope(to: .localApp(appID), mode: activeMode, resumeSessionID: sessionID)
+            onSelectAppSession: { appID, sessionID, mode in
+                // `mode` and the scope switch fold into ONE `switchScope`
+                // call, not a separate `onModeChanged` fired first: two
+                // switches raced the in-flight `projectSwitching` guard, so a
+                // tap that both entered the app scope and changed mode was
+                // silently refused.
+                switchScope(to: .localApp(appID), mode: mode ?? activeMode, resumeSessionID: sessionID)
             },
             onNewAppChat: { appID in
                 switchScope(to: .localApp(appID), mode: activeMode, startNew: true)
@@ -1035,6 +1069,16 @@ struct RootView: View {
     private func landCreatedAppIfReady(streaming: Bool? = nil) {
         guard !(streaming ?? source.model.streaming),
               localAppsStore.pendingWidgetSetup == nil,
+              // Yield to an open Settings sheet: `openCreatedAppSession`
+              // below fires the scope switch immediately, and
+              // `localAppApprovalPresenterIsFree`/`localAppErrorPresenterIsFree`
+              // both already gate on `navigation.settingsOpen` for the same
+              // reason — a create landing must not switch scope underneath a
+              // sheet the user still has open, only to have the resulting
+              // create-confirmation sheet then refuse to present because
+              // Settings is still up. The `.onChange(of: navigation.settingsOpen)`
+              // sink below re-checks this the moment Settings closes.
+              !navigation.settingsOpen,
               let landing = localAppsStore.consumeCreatedAppLanding() else { return }
         openCreatedAppSession(
             appID: landing.appID,
@@ -1462,6 +1506,47 @@ struct RootView: View {
     }
 
     @State private var pendingInitKickoff: PendingInitKickoff?
+    @State private var pendingInitKickoffTimeoutTask: Task<Void, Never>?
+
+    /// Stop-loss for `pendingInitKickoff`: how long to wait for the switch
+    /// that armed it to be adopted, superseded, or fail before giving up.
+    ///
+    /// Without this the latch has NO expiry at all: if none of
+    /// `adoptEngineSession` / `clearUnavailableSession` /
+    /// `rollbackFailedSession` ever fires for the scope it was armed for —
+    /// the engine hangs, or the event that would drive one of those three
+    /// never arrives — the create-flow brief waits forever with nothing to
+    /// expire it and no error ever shown. Same value as Android's
+    /// `SESSION_READY_TIMEOUT_MS` (`RootScreen.kt`), the closest analogue:
+    /// that one at least reports the drop after 20s where this had no
+    /// stop-loss whatsoever.
+    private static let pendingInitKickoffTimeout: Duration = .seconds(20)
+
+    /// Arm (or re-arm) the stop-loss above. Called every time
+    /// `pendingInitKickoff` is SET, never when it is merely read.
+    private func armPendingInitKickoffTimeout() {
+        pendingInitKickoffTimeoutTask?.cancel()
+        pendingInitKickoffTimeoutTask = Task { @MainActor in
+            try? await Task.sleep(for: Self.pendingInitKickoffTimeout)
+            guard !Task.isCancelled, pendingInitKickoff != nil else { return }
+            pendingInitKickoff = nil
+            // The record exists (this latch only ever carries the
+            // create-flow brief — see the doc comment below) and the
+            // one-shot landing signal is already spent, so this is the same
+            // "result unknown, check the library" situation the bounded
+            // retry's own give-up path reports.
+            localAppsStore.reportCreatedAppLandingExhausted()
+        }
+    }
+
+    /// Disarm the stop-loss without touching `pendingInitKickoff` itself —
+    /// every site that resolves the latch (fired, superseded, or dropped)
+    /// calls this too, so the timer never fires later against whatever the
+    /// latch holds next.
+    private func clearPendingInitKickoffTimeout() {
+        pendingInitKickoffTimeoutTask?.cancel()
+        pendingInitKickoffTimeoutTask = nil
+    }
 
     /// Returns `false` when the switch was refused because another one is
     /// still in flight — callers holding a one-shot signal (the create-flow
@@ -1510,6 +1595,7 @@ struct RootView: View {
         if let initialPrompt, resumeSessionID != nil || startNew {
             pendingInitKickoff = PendingInitKickoff(
                 scope: scope, sessionID: resumeSessionID, text: initialPrompt)
+            armPendingInitKickoffTimeout()
         }
         if scope == activeScope && targetMode == activeMode {
             navigation.closeSidebar()
@@ -1569,6 +1655,7 @@ struct RootView: View {
                 // it, whenever `kickoff.sessionID == nil`.
                 if let kickoff = pendingInitKickoff, kickoff.scope != scope {
                     pendingInitKickoff = nil
+                    clearPendingInitKickoffTimeout()
                 }
                 activeMode = targetMode
                 collapsedWorkspaceKeys = scopedPreferences.workspaceCollapsedKeys(mode: targetMode)
@@ -1585,6 +1672,10 @@ struct RootView: View {
                     confirmedSession = ""
                     scopedPreferences.setActiveSessionID("", scope: scope, mode: targetMode)
                     replacement.startNewConversation()
+                    if let pendingDraft = pendingBeginActionDraft {
+                        pendingBeginActionDraft = nil
+                        draft = pendingDraft
+                    }
                 } else if !activeSession.isEmpty {
                     requestSessionResume(
                         activeSession,
@@ -1601,7 +1692,14 @@ struct RootView: View {
                 // The scope we armed the kickoff for is not the one we are in;
                 // leaving it armed would fire the create-flow opener into
                 // whatever session happens to match later.
-                if pendingInitKickoff?.scope == scope { pendingInitKickoff = nil }
+                if pendingInitKickoff?.scope == scope {
+                    pendingInitKickoff = nil
+                    clearPendingInitKickoffTimeout()
+                }
+                // The mode-pinning switch this armed for never landed either
+                // — drop it rather than leave it to load into some LATER
+                // unrelated `startNew`.
+                pendingBeginActionDraft = nil
                 if let pending = pendingSessionFork,
                    pending.sourceScope == scope,
                    pending.sourceMode == targetMode {
@@ -1637,6 +1735,7 @@ struct RootView: View {
            kickoff.sessionID == nil || kickoff.sessionID == sessionID,
            kickoff.scope == activeScope {
             pendingInitKickoff = nil
+            clearPendingInitKickoffTimeout()
             // Only an EMPTY init session gets the kickoff — re-entering one
             // that already has a conversation must not re-trigger it.
             if source.model.items.isEmpty {
@@ -1672,6 +1771,7 @@ struct RootView: View {
         // never fire into an unrelated session later.
         if let kickoff = pendingInitKickoff, kickoff.sessionID == sessionID {
             pendingInitKickoff = nil
+            clearPendingInitKickoffTimeout()
             if kickoff.scope == activeScope, source.model.items.isEmpty {
                 _ = source.send(kickoff.text)
             }
@@ -1710,6 +1810,7 @@ struct RootView: View {
         // from this file does not compile.
         if let kickoff = pendingInitKickoff, kickoff.sessionID == sessionID {
             pendingInitKickoff = nil
+            clearPendingInitKickoffTimeout()
             localAppsStore.reportCreatedAppLandingExhausted()
         }
         if let pending = pendingSessionFork,
@@ -2102,6 +2203,13 @@ struct RootView: View {
         parkRefusedAppAction(action, applied: applyAppAction(action))
     }
 
+    /// Draft text waiting to be loaded into the composer once a MODE-PINNING
+    /// `switchScope` (below) finishes minting the fresh conversation it was
+    /// asked to start. `switchScope` itself only ever fires-and-sends a
+    /// `pendingInitKickoff`; this app action wants the text left for the user
+    /// to review, not auto-sent, so it cannot reuse that latch.
+    @State private var pendingBeginActionDraft: String?
+
     @discardableResult
     private func beginAppIntegratedConversation(draftText: String) -> Bool {
         guard ConversationSessionMutationPolicy.allowsCallerMutation(
@@ -2109,6 +2217,26 @@ struct RootView: View {
             hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
             isCancelling: source.model.isCancelling
         ) else { return false }
+        // A Local App's own `LINGXI.md` contract requires the
+        // create-local-app skill and the `Workflow`/`LocalApp*`/`Write`
+        // tools, all of which `apply_mobile_session_tool_policy` strips in
+        // Chat mode (see `switchScope`'s own pin, just below). `switchMode`
+        // deliberately leaves an app scope free to sit in Chat, so a
+        // `lingxi://` new-conversation/ask action reached while it does must
+        // still pin here — otherwise it mints an app-scoped Chat
+        // conversation whose interview cannot run.
+        if activeScope.isLocalApp, activeMode != .code {
+            pendingBeginActionDraft = draftText
+            // `switchScope` refuses SYNCHRONOUSLY (`projectSwitching`, or the
+            // mutation policy) BEFORE reaching either of the two sites that
+            // drain this latch — the `startNew` branch of its async Task and
+            // that Task's `catch`. Leaving the draft armed on a refusal lets
+            // the NEXT unrelated `startNew` scope switch overwrite the
+            // composer it restores, so clear it here.
+            let switched = switchScope(to: activeScope, mode: .code, startNew: true)
+            if !switched { pendingBeginActionDraft = nil }
+            return switched
+        }
         voiceInteraction.handleContextChange()
         pendingSessionRestoreID = nil
         activeSession = ""

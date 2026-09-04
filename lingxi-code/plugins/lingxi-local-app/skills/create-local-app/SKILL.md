@@ -427,6 +427,16 @@ budgets are fast=1, balanced=1, thorough=2. Host derives writable collection
 ids and all template/profile identity; do not pass `renderer`,
 `runtime_profile`, template paths, or expected collections.
 
+A create run can come back two ways that are not build defects. If the
+workflow returns `{"ok":false,"status":"create_declined",...}`, the user
+declined the native create confirmation — that is their answer, not a host
+failure: re-confirm the name/brief/spec (offering to change them) and relaunch
+`operation: "create"` once the user is ready to try again. If instead the
+workflow throws after scaffold succeeded (Build or Verify failed), the app
+record and workspace already exist under `app_id`: report the failure with
+evidence, and continue from that same `app_id` with `operation: "update"` when
+the user wants to.
+
 The workflow phases are:
 
 The directory contract is fixed across every phase. The persistent source

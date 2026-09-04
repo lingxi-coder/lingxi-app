@@ -1350,24 +1350,29 @@ fn apply_materialized_local_app_collections_with_identity(
                 )
             })?
             .to_string();
-        // AUD-WF-02, known-unfixed: injecting `workflow_run_id` on a trusted
-        // scriptPath resume (r1-backlog-workflow-runtime-04) lets a CREATE
-        // resume reach this call, but it does not yet make that resume
-        // succeed. `mint_run_id` reuses the run id on a resume, so this is the
-        // same capability path the interrupted run already holds, and
-        // `issue_selector_capability` fails closed with
-        // `selector_capability_exists` whenever the live (never-consumed)
-        // token is still on disk -- i.e. exactly the interrupted run one would
-        // want to resume. It only rotates the `.used` marker. Making a create
-        // resume actually resumable needs that function to rotate a LIVE
-        // capability on a Host-verified resume too; that lives in
-        // `local_app_template_catalog.rs`, outside this work package. Only the
-        // update/verify resume is proven end to end today.
-        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
-            app_data_root,
-            &app_id,
-            &workflow_run_id,
-        )
+        // AUD-WF-02, r1-backlog-workflow-runtime-04 / r1-workflow-runtime-06:
+        // injecting `workflow_run_id` on a trusted scriptPath resume lets a
+        // CREATE resume reach this call with the SAME capability path the
+        // interrupted run already held (`mint_run_id` reuses the run id on a
+        // resume). The plain `issue_selector_capability` fails closed
+        // against that -- correctly, for an UNverified caller -- so a
+        // Host-verified resume goes through the rotation-aware sibling
+        // instead, which is the only thing this branch has proven
+        // (`trusted_local_app_resume`) that a duplicate concurrent launch
+        // has not.
+        let selector_capability = if trusted_local_app_resume {
+            crate::local_app_template_catalog::issue_selector_capability_for_verified_resume(
+                app_data_root,
+                &app_id,
+                &workflow_run_id,
+            )
+        } else {
+            crate::local_app_template_catalog::issue_selector_capability(
+                app_data_root,
+                &app_id,
+                &workflow_run_id,
+            )
+        }
         .map_err(tool_workflow::WorkflowLaunchError)?;
         // r3-never-wired-11: `selector_capability` is also copied into
         // `host_context` below, which is the ONLY copy the build workflow
@@ -1488,6 +1493,7 @@ fn apply_materialized_local_app_collections_with_identity(
         "family": binding_family.as_str(),
         "revision": binding_revision,
         "contract_sha256": binding_contract_sha256,
+        "surface": binding_family.surface().as_str(),
     });
     let collection_ids = manifest
         .collections
@@ -2217,18 +2223,25 @@ fn enrich_persisted_plugin_workflow_context(
 }
 
 /// Remove all authority-bearing fields from caller args before a namespaced
-/// Local App workflow is enriched. The workflow receives these values only
-/// from this launch boundary; allowing a caller-provided `runtime_profile`,
-/// template handle, collection list or context to survive would turn the
-/// Plugin script into its own authority source.
+/// Local App workflow is enriched, on every launch shape this sanitizer can
+/// currently recognize as such a workflow. The workflow receives these
+/// values only from this launch boundary; allowing a caller-provided
+/// `runtime_profile`, template handle, collection list or context to
+/// survive on a recognized shape would turn the Plugin script into its own
+/// authority source.
 ///
 /// `spec.name` proves this on a fresh launch, but a `scriptPath` resume --
 /// the shape the Workflow tool's own resume hint produces -- carries no
 /// `name` at all. `expected_workflow_id` is the launcher's host-owned
-/// checkpoint-provenance answer for that case (only ever
-/// `PLUGIN_BUILD_WORKFLOW_ID` today; see `local_app_resume_resolution_for_record`),
-/// so a caller cannot forge it by omitting `name` and supplying a
-/// `scriptPath` instead.
+/// checkpoint-provenance answer for that case, but
+/// `local_app_resume_resolution_for_record` only ever resolves it to
+/// `PLUGIN_BUILD_WORKFLOW_ID`; a `scriptPath` resume of the use-test or
+/// mcp-authoring workflows produces neither signal, so this sanitizer is
+/// currently a NO-OP on those two resume shapes (`validate_namespaced_local_app_external_args`
+/// also early-returns there, since it too keys off `spec.name`). Narrowing
+/// this gap requires extending `local_app_resume_resolution_for_record` to
+/// resolve those workflow ids from checkpoint provenance the same way it
+/// does for the build workflow.
 fn sanitize_namespaced_local_app_args(
     spec: &mut tool_workflow::WorkflowLaunchSpec,
     expected_workflow_id: Option<&str>,

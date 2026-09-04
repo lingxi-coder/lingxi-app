@@ -287,6 +287,19 @@ pub type InitSessionMinter = dyn Fn(
 ///   conversation is not the mistake this gate exists to catch; what it
 ///   catches is building, installing into, running or driving a workspace
 ///   that has no source tree yet.
+/// - `runtime_profiles` / `template_catalog` / `validate_template_selection`
+///   / `resolve_template_selection` / `stage_create` — the create-flow
+///   orientation and staging steps that run *before* a template is
+///   materialized; refusing them would gate the same way out as `scaffold`.
+/// - `validate_mcp_proposal` / `approve_mcp_proposal` — the `create`
+///   surface's own pre-scaffold branch: a brand-new app is proposed and
+///   confirmed as `create_without_mcp` through these two before any source
+///   tree exists (see `load_create_proposal_context`'s staged MCP flow
+///   context, written for exactly this branch). `qa_mcp_candidate` and
+///   `promote_mcp_candidate` are deliberately NOT here: both require an
+///   `Approved`-or-later candidate journal plus an active build id, and an
+///   unscaffolded app has no build — so their true operating window starts
+///   only after `scaffold`, unlike the two above.
 const SHELL_ALLOWED_OPERATIONS: &[&str] = &[
     "scaffold",
     "list",
@@ -299,8 +312,6 @@ const SHELL_ALLOWED_OPERATIONS: &[&str] = &[
     "stage_create",
     "validate_mcp_proposal",
     "approve_mcp_proposal",
-    "qa_mcp_candidate",
-    "promote_mcp_candidate",
 ];
 
 /// Stable machine-readable prefix on the shell gate's refusal.
@@ -1404,7 +1415,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "approve_mcp_proposal",
-                "Approve one prepared Local App MCP candidate and mint its one-shot receipt. For initial app creation, create_without_mcp=true prepares an empty Host-owned create review surface and does not author, publish, or enable MCP.",
+                "Approve one prepared Local App MCP candidate and mint its one-shot receipt. For initial app creation, create_without_mcp=true prepares an empty Host-owned create review surface and does not author, publish, or enable MCP. The create branch then BLOCKS for up to 5 minutes on a native user approval sheet before this call returns. It can fail with `user denied the Local App create proposal` (stop; the user said no), `approval_pending: this Local App already has a pending approval` (do not retry; a sheet is already outstanding), `native Local App approval was cancelled`, or `native Local App approval timed out` (safe to retry once, after re-confirming with the user).",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
@@ -2286,12 +2297,13 @@ impl LocalAppsMcpTransport {
                     if !record.scaffolded {
                         return Ok(Self::tool_error(format!(
                             "{SHELL_GATE_CODE}: app `{app_id}` has no shape yet. \
-                             Confirm what the user wants first, then use the `Skill` tool to \
-                             start `lingxi-local-app:create-local-app` (that exact, \
-                             plugin-qualified name; the bare name does not resolve) — it runs \
-                             the unified create flow, raises one native confirmation, and only \
+                             Confirm what the user wants first, then get the guided create flow \
+                             `lingxi-local-app:create-local-app` (that exact, plugin-qualified \
+                             name; the bare name does not resolve) running — with the `Skill` \
+                             tool yourself if you hold it, otherwise by asking the calling agent \
+                             or the user to run it. It raises one native confirmation and only \
                              then lands `LocalAppScaffold` with the name, brief and shape. Do \
-                             not call `LocalAppScaffold` directly."
+                             not call `LocalAppScaffold` directly yourself."
                         )));
                     }
                 }

@@ -3,6 +3,18 @@ import SwiftUI
 enum LocalAppsRoute: Hashable {
     case details(String)
     case preview(String)
+
+    /// The app this route is showing. Both cases carry exactly one, and
+    /// `.preview` is only ever pushed from `LocalAppDetailView` for the SAME
+    /// app it is already showing, so every route on the stack at once shares
+    /// one id — see `LocalAppsRootView`'s collapse-on-disappear below, which
+    /// relies on that.
+    var appID: String {
+        switch self {
+        case let .details(id): id
+        case let .preview(id): id
+        }
+    }
 }
 
 struct LocalAppPublicationBadgeView: View {
@@ -64,6 +76,17 @@ struct LocalAppsRootView: View {
         // Dismissing it between the '+' tap and `AppCreated` must not leave
         // that claim armed for a much later, unrelated visit to walk into.
         .onDisappear { store.clearLibraryFallbackArm() }
+        // Mirrors Android's collapse in `LocalAppsViewModel.kt`
+        // (`appIdOnScreen()` against `liveIds`). `pendingDelete`'s
+        // confirmation dialog is anchored on THIS screen (the list), not on
+        // `.details`/`.preview`, so a delete never pops the stack on its
+        // own — without this, deleting the app currently open in one of
+        // those two routes left the stack pushed on a route for an app that
+        // no longer exists.
+        .onChange(of: store.apps.map(\.id)) { _, liveIDs in
+            guard let onScreen = path.first?.appID, !liveIDs.contains(onScreen) else { return }
+            path.removeAll()
+        }
         .task {
             await store.refresh()
             if let initialAppID {
@@ -411,9 +434,6 @@ private struct LocalAppsLibraryScreen: View {
     let onOpenAppSession: (String, String, SessionMode) -> Void
     let onNewAppSession: (String) -> Void
     @State private var pendingDelete: LocalAppSummary?
-    /// True between tapping "+" and the command reaching the engine. Only the
-    /// round-trip — the CREATE itself resolves out of band on `AppCreated`.
-    @State private var creating = false
 
     var body: some View {
         Group {
@@ -447,7 +467,7 @@ private struct LocalAppsLibraryScreen: View {
                 } label: {
                     Label("local_apps_create", systemImage: "plus")
                 }
-                .disabled(creating)
+                .disabled(store.isCreateInFlight)
                 .accessibilityIdentifier("local-apps.create")
             }
         }
@@ -511,7 +531,7 @@ private struct LocalAppsLibraryScreen: View {
         } actions: {
             Button("local_apps_create") { Task { await createShellApp() } }
                 .buttonStyle(.borderedProminent)
-                .disabled(creating)
+                .disabled(store.isCreateInFlight)
                 .accessibilityIdentifier("local-apps.create.empty-state")
         }
     }
@@ -538,16 +558,20 @@ private struct LocalAppsLibraryScreen: View {
 
     /// The "+" button: create the empty shell and let the landing take the
     /// user into its conversation. There is no form to push any more.
+    ///
+    /// The button's `.disabled` above reads `store.isCreateInFlight`
+    /// directly rather than a local flag around this `await`: that `await`
+    /// only spans the round-trip to the engine, but the create itself
+    /// resolves out of band on `AppCreated` / `AppOperationFailed` roughly
+    /// 30s later, and `isCreateInFlight` stays true for that whole window —
+    /// see its doc comment on `LocalAppsStore`.
     private func createShellApp() async {
-        guard !creating else { return }
-        creating = true
         // `armLibraryFallback` spelled out rather than left to the default:
         // this screen IS the fallback landing's only consumer
         // (`openCreatedAppIfNeeded` below), and it is the only caller that can
         // truthfully claim the cover is mounted to consume it. The drawer's
         // create passes `false` for exactly that reason.
         _ = await store.createShellApp(armLibraryFallback: true)
-        creating = false
     }
 
     private func openCreatedAppIfNeeded() {

@@ -63,8 +63,8 @@ shape yet. Settling what the app IS is your work in that conversation:
    standalone runtime-profile selector or pass a model-authored
    surface/profile override. Do not supply `args.runtime_profile` as an authority; on a create launch the host strips any caller-supplied `runtime_profile` at the launch boundary and injects no profile at all — the profile is fixed later in the run by the Host-verified template selection:
 
-```json
-{"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<the id LINGXI.md names>","name":"<the display name confirmed in step 3>","brief":"<the one-line brief confirmed in step 3>","spec":"<confirmed product + UI + data + runtime intent>","quality_level":"balanced"}}
+```
+Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<the id LINGXI.md names>","name":"<the display name confirmed in step 3>","brief":"<the one-line brief confirmed in step 3>","spec":"<confirmed product + UI + data + runtime intent>","quality_level":"balanced"}})
 ```
 
 5. Re-read `LINGXI.md`. `LocalAppScaffold` overwrites the guided text with the
@@ -385,8 +385,8 @@ Call one namespaced build workflow through the `Workflow` tool, with the confirm
 launch with the verified catalog (Create) or persisted profile/snapshot
 (Update/Verify); caller input never selects a renderer or profile:
 
-```json
-{"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<id>","name":"<confirmed display name>","brief":"<confirmed one-line brief>","spec":"<confirmed spec>","quality_level":"balanced"}}
+```
+Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<id>","name":"<confirmed display name>","brief":"<confirmed one-line brief>","spec":"<confirmed spec>","quality_level":"balanced"}})
 ```
 
 `name` and `brief` are create-only and carry the user-confirmed wording; every

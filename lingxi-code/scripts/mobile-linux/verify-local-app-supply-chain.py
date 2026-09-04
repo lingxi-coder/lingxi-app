@@ -860,6 +860,29 @@ def validate_create_skill(repo: pathlib.Path) -> None:
     missing = sorted(token for token in required_tokens if token not in text)
     if missing:
         fail(f"create-local-app skill is missing host contract tokens: {missing}")
+
+    # Every `local-app-build` block must be written as a CALL, not a bare
+    # payload: `Workflow({...})`, so the tool name travels with the text the
+    # model copies.
+    #
+    # Measured, not theorised: on a real device the model arrived here through
+    # the `Skill` tool, met a bare ```json {"name": ..., "args": ...} block, and
+    # called `Skill` again — `Unknown skill: lingxi-local-app:local-app-build`,
+    # create stalled. The prose did say "through the `Workflow` tool", sixteen
+    # lines earlier behind a long paragraph. Naming the tool in the block the
+    # model copies is what removes the choice; a prohibition further up the file
+    # costs tokens and still loses to the shape in front of it.
+    stray = [
+        index + 1
+        for index, line in enumerate(text.split("\n"))
+        if line.lstrip().startswith('{"name":"lingxi-local-app:local-app-build"')
+    ]
+    if stray:
+        fail(
+            f"create-local-app skill line(s) {stray}: a local-app-build block is "
+            'a bare payload. Write it as a call — Workflow({"name":...,"args":...}) '
+            "— so the tool name is inside the text the model copies."
+        )
     local_apps_host_path = (
         repo / "lingxi-code" / "apps" / "engine-mobile" / "src" / "local_apps_host.rs"
     )

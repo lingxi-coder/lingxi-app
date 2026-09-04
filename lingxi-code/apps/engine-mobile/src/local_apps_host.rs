@@ -6635,7 +6635,17 @@ impl LocalAppsHostBroker {
         .await;
         let committed = match scaffolded {
             Ok(committed) => {
-                self.pending_mcp_receipts
+                // The scaffold above already committed to disk and to the app
+                // record: files are written, `record.scaffolded` is true, a
+                // retry would now hit "already scaffolded". A failure in this
+                // purely-bookkeeping receipt commit must not be reported as a
+                // failed create on top of that — it would tell the model (and
+                // the user) the app was never made when it was, and a retry
+                // could not recover since the app already exists. Warn and
+                // continue, matching the same idiom already used for the
+                // journal-stamp failure a few lines below.
+                if let Err(issue) = self
+                    .pending_mcp_receipts
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .commit_claimed_candidate(
@@ -6645,32 +6655,21 @@ impl LocalAppsHostBroker {
                         &journal.approval_contract_sha256,
                         &candidate.validated.proposal_sha256,
                     )
-                    .map_err(|issue| issue.message)?;
-                let layout = self.layout(&app_id)?;
-                match local_apps::load_candidate_journal(&layout)
-                    .map_err(|error| error.to_string())
-                    .and_then(|mut journal| {
-                        if journal.workflow_run_id != workflow_run_id {
-                            return Err(
-                                "journal_invalid: create receipt workflow run changed before scaffold commit"
-                                    .to_string(),
-                            );
-                        }
-                        journal.consumed_receipt_sha256 =
-                            Some(format!("{:x}", Sha256::digest(receipt_id.as_bytes())));
-                        journal = journal.seal().map_err(|issue| issue.message)?;
-                        local_apps::save_candidate_journal(&layout, &journal)
-                            .map_err(|error| error.to_string())
-                    }) {
-                    Ok(()) => {}
-                    Err(error) => tracing::warn!(
+                {
+                    tracing::warn!(
                         app_id = %app_id,
                         workflow_run_id = %workflow_run_id,
-                        %error,
-                        "create scaffold committed and receipt consumed, but the candidate journal did not record the consumed receipt"
-                    ),
+                        error = %issue.message,
+                        "create scaffold committed but receipt commit bookkeeping failed"
+                    );
                 }
-                if candidate.validated.tools.is_empty() {
+                let layout = self.layout(&app_id)?;
+                let create_only = candidate.validated.tools.is_empty();
+                if create_only {
+                    // The candidate journal is about to be deleted outright;
+                    // stamping `consumed_receipt_sha256` into it first would
+                    // only be a write immediately followed by its own
+                    // deletion.
                     if let Err(error) =
                         self.delete_mcp_candidate_state(&layout, &app_id, &workflow_run_id)
                     {
@@ -6680,6 +6679,30 @@ impl LocalAppsHostBroker {
                             %error,
                             "plain create committed but create-only candidate cleanup failed"
                         );
+                    }
+                } else {
+                    match local_apps::load_candidate_journal(&layout)
+                        .map_err(|error| error.to_string())
+                        .and_then(|mut journal| {
+                            if journal.workflow_run_id != workflow_run_id {
+                                return Err(
+                                    "journal_invalid: create receipt workflow run changed before scaffold commit"
+                                        .to_string(),
+                                );
+                            }
+                            journal.consumed_receipt_sha256 =
+                                Some(format!("{:x}", Sha256::digest(receipt_id.as_bytes())));
+                            journal = journal.seal().map_err(|issue| issue.message)?;
+                            local_apps::save_candidate_journal(&layout, &journal)
+                                .map_err(|error| error.to_string())
+                        }) {
+                        Ok(()) => {}
+                        Err(error) => tracing::warn!(
+                            app_id = %app_id,
+                            workflow_run_id = %workflow_run_id,
+                            %error,
+                            "create scaffold committed and receipt consumed, but the candidate journal did not record the consumed receipt"
+                        ),
                     }
                 }
                 committed
@@ -7383,8 +7406,8 @@ fn formal_workspace_contract(
             "{profile_identity}\
              - This app's surface is `dom`. The host authorizes exactly one build workflow for this surface and refuses any other; you never name or choose a workflow yourself, and a request that named a different one would be refused. The surface and runtime profile are fixed at creation; do not infer them from source.\n\
              - This workspace already contains the repository-verified Vite + Ionic foundation. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
-             - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
-             - Default editable entry points are `app/screens/home-screen.jsx`, `app/screens/detail-screen.jsx`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
+             - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `LINGXI.md`, the whole `.lingxi/` directory, `node_modules/`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
+             - Default editable entry points are `app/screens/home-screen.jsx`, `app/screens/detail-screen.jsx`, and `app/globals.css`. You may edit files under `app/`, `src/`, `components/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
              - The UI kit is Ionic. Import components from `@ionic/react`; never from `@ionic/core/components`, which cannot be bundled here. There is no Tailwind: use Ionic's CSS variables and its utility classes (`ion-padding`, `ion-margin`, `ion-text-center`, `ion-justify-content-*`, `ion-hide-*`), and put anything else in `app/globals.css`.\n\
              - Routing is `IonRouterOutlet` with react-router 6 `Routes`/`Route`. Every routed screen must render `IonPage` as its ROOT element, or the outlet has nothing to animate and the platform back gesture does not attach. Navigate with `routerLink`, not an onClick handler.\n\
              - The platform look is chosen for you: the checked-in provider calls `setupIonicReact` with the host's OS, so components already render iOS or Material chrome. Do not branch on the user agent and do not hard-code one platform's metrics.\n\
@@ -7401,6 +7424,21 @@ fn formal_workspace_contract(
                 local_apps::AppRuntimeProfile::Babylon3d => "lib/babylon-runtime.js",
                 local_apps::AppRuntimeProfile::ReactDom => unreachable!(),
             };
+            // The Phaser and Babylon templates ship `lib/frame-loop.js` NEXT
+            // TO their engine adapter, and both their
+            // `.lingxi/source-policy.json` and
+            // `local_apps_build::HOST_MANAGED_FILES` list it as host-managed.
+            // Naming only `{helper}` for those two profiles would leave the
+            // contract silently narrower than the set actually enforced: the
+            // lease accepts an edit to `lib/frame-loop.js`, the next build's
+            // `restore_host_managed_files` reverts it, and the only trace is
+            // a `tracing::warn!` while the model loops against a file the
+            // contract never told it was managed.
+            let managed_extra = match binding.family {
+                local_apps::AppRuntimeProfile::Phaser2d
+                | local_apps::AppRuntimeProfile::Babylon3d => "`lib/frame-loop.js`, ",
+                _ => "",
+            };
             let engine_rule = match binding.family {
                 local_apps::AppRuntimeProfile::Canvas2d =>
                     "- This is a Canvas 2D profile: use the checked-in `lib/frame-loop.js` helper and the Canvas 2D APIs; do not add a game engine or physics library.",
@@ -7416,8 +7454,8 @@ fn formal_workspace_contract(
                 "{profile_identity}\
                  - This app's surface is `canvas`. The host authorizes exactly one build workflow for this surface and refuses any other; you never name or choose a workflow yourself, and a request that named a different one would be refused. It is one drawn surface plus overlays; do not infer a screen hierarchy or the surface from source.\n\
                  - This workspace already contains the repository-verified Vite + Ionic foundation, scaffolded for a single DRAWN SURFACE. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
-                 - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, `{helper}`, and `styles/foundation.css`. Do not edit them; `{helper}` is the profile's checked-in runtime adapter.\n\
-                 - Default editable entry points are `app/screens/game-screen.jsx`, `src/stores/game-store.js`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`, but never edit the managed adapter `{helper}`.\n\
+                 - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `LINGXI.md`, the whole `.lingxi/` directory, `node_modules/`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, {managed_extra}`{helper}`, and `styles/foundation.css`. Do not edit them; `{helper}` is the profile's checked-in runtime adapter.\n\
+                 - Default editable entry points are `app/screens/game-screen.jsx`, `src/stores/game-store.js`, and `app/globals.css`. You may edit files under `app/`, `src/`, `components/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`, but never edit the managed adapter `{helper}`.\n\
                  - There is NO router: menus, pause and game-over are Ionic components layered on top of the canvas, not separate pages.\n\
                  {engine_rule}\n\
                  - Keep per-frame simulation state in a ref, NOT in React or the store. The store is for the phase machine, score and settings; pushing positions through React re-renders turns the app into a slideshow.\n\
@@ -7442,14 +7480,15 @@ fn formal_workspace_contract(
          Brief: {brief}\n\n\
          ## Workspace contract\n\
          - This workspace is already bound to local app `{id}`. Treat `{id}` as authoritative; do not call `LocalAppList` or `LocalAppGet` to rediscover or confirm it, and do not call `LocalAppCreate` again.\n\
-         - Edit ONLY app-owned files under `app/`, `src/`, `lib/`, `styles/`, `public/`.\n\
+         - Edit ONLY app-owned files under `app/`, `src/`, `components/`, `lib/`, `styles/`, `public/`.\n\
+         - The host draws NO chrome around a running app: the app must provide every visible title, navigation and back affordance. The host floats ONE control over the bottom-leading corner, so keep the leading 80 CSS px by the bottom 80 CSS px clear from the safe area and keep time-critical controls off its temporary expansion strip.\n\
          {setup_path}\
          - The page reaches host data/network/device ONLY through `window.lingxi.v2` \
          (see `lib/lingxi-bridge.js`).\n\
          - Declare data collections / network domains / capabilities through \
          `LocalAppManifest` BEFORE the page relies on them; runtime \
          authorization still prompts the user. Every collection is `{{id,name,fields}}`; every field is `{{id,label,kind,required?,enumOptions?}}`; IDs use lower snake_case. Never declare host-owned `recordId`, `revision`, `createdAtMs`, or `updatedAtMs` as fields. Repair and retry any rejected manifest before building.\n\
-         - If a material requirement is unresolved, call `AskUserQuestion` so the native client presents its sheet. Never leave unresolved questions in ordinary assistant text; when the brief and device context are sufficient, infer and continue.\n\n\
+         - If a material requirement is unresolved, the app's conversation agent calls `AskUserQuestion` so the native client presents its sheet; a build-workflow subagent has no such tool and must infer from the confirmed spec and device context and continue. Never leave unresolved questions in ordinary assistant text.\n\n\
          ## Build & preview\n\
          {build_preview}\
          - `LocalAppRuntime {{\"app_id\":\"{id}\",\"action\":\"start\"}}` \
@@ -8264,6 +8303,38 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         if record.scaffolded {
             return Err("create_staging_rejected: app is already scaffolded".into());
         }
+        // THIS RUN's `stage_create` may already have been approved — the
+        // native create sheet shown, the user's answer journaled — and that
+        // approval is bound to the exact staging bytes the sheet rendered.
+        // Re-staging past that point would let a second call silently
+        // rewrite `design-spec.json`/`evidence.json` underneath an approval
+        // the user already gave for the OLD content, so the approved receipt
+        // would end up committing bytes nobody confirmed.
+        //
+        // Scoped to the SAME `workflow_run_id`, exactly as `create_without
+        // _mcp`'s already-approved reuse arm spells the same check. The
+        // candidate journal is per-APP (one `load_candidate_journal(&layout)`
+        // file), and staging is per-RUN
+        // (`.lingxi-build-state/template-candidates/<app>/<run>/staging/…`,
+        // which is also where `load_create_proposal_context` reads
+        // `evidence.json` back out), so a DIFFERENT run cannot reach the
+        // approved run's bytes and must stay allowed. Refusing it outright
+        // would brick the app: the journal survives a failed
+        // `LocalAppScaffold` (that arm returns the error without deleting
+        // it), so an app whose scaffold was refused for an invalid name or
+        // brief could never be staged again in any run — including the new
+        // run this very error tells the caller to start.
+        if let Ok(layout) = self.layout(app_id) {
+            if let Ok(existing_journal) = local_apps::load_candidate_journal(&layout) {
+                if existing_journal.workflow_run_id == workflow_run_id
+                    && existing_journal.stage >= local_apps::McpAuthoringStage::Approved
+                {
+                    return Err(
+                        "create_staging_rejected: this create candidate is already approved; start a new workflow run".into(),
+                    );
+                }
+            }
+        }
         let selection = crate::local_app_template_catalog::resolve_typed(
             &self.root,
             app_id,
@@ -8297,24 +8368,19 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .find(|(path, _)| *path == crate::local_app_runtime_profiles::LOCKFILE_FILE_REL)
             .map(|(_, bytes)| bytes.as_slice())
             .ok_or_else(|| "create_staging_invalid: base lock input missing".to_string())?;
+        // Not a verification: `dependency_input_sha256` is a pure function of
+        // `requested`/`effective`/`lock`, taken from the same in-memory
+        // `artifacts.files` with no I/O in between, so computing it twice and
+        // comparing can never disagree — the branch below used to do exactly
+        // that and was unreachable dead weight. The digest is still recorded
+        // into `evidence.json` for provenance; nothing re-verifies it against
+        // the materialized staging bytes at landing time (a separate gap).
         let dependency_input_sha256 = crate::local_app_template_catalog::dependency_input_sha256(
             requested,
             effective,
             lock,
             crate::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY,
         );
-        let verified_dependency_input_sha256 =
-            crate::local_app_template_catalog::dependency_input_sha256(
-                requested,
-                effective,
-                lock,
-                crate::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY,
-            );
-        if dependency_input_sha256 != verified_dependency_input_sha256 {
-            return Err(
-                "create_staging_invalid: dependency_input_sha256 verification mismatch".into(),
-            );
-        }
         let staging = self
             .root
             .join(".lingxi-build-state/template-candidates")
@@ -8423,8 +8489,6 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             "dependencyInputSha256": dependency_input_sha256,
             "designSpecSha256": design_spec_sha256,
             "stagedFiles": staged_files,
-            "published": false,
-            "manifestCommitted": false,
         });
         let evidence_path = staging.join("evidence.json");
         let bytes = serde_json::to_vec_pretty(&evidence)
@@ -9277,7 +9341,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             "app_id": app_id,
             "target": target.template_id(),
             "dependencies": dependencies,
-            "hint": "start or restart the runtime with manage_runtime to serve the new build",
+            "hint": "start or restart the runtime with LocalAppRuntime to serve the new build",
         }))
     }
 
@@ -14052,6 +14116,139 @@ mod tests {
         );
     }
 
+    /// `stage_create` must refuse to re-stage once THIS RUN's create
+    /// candidate journal is already sealed at `Approved` — the native create
+    /// sheet already rendered these staged bytes and the user already
+    /// answered for them. Without a guard, a second `stage_create` for the
+    /// same run silently overwrites `design-spec.json`/`evidence.json` under
+    /// an approval bound to the OLD content, so the approved receipt would
+    /// end up committing bytes nobody actually confirmed
+    /// (`r1-backlog-scaffold-build-14`).
+    ///
+    /// The refusal is scoped to the approved RUN, and the second half of this
+    /// test pins that scope: staging is per-run
+    /// (`.lingxi-build-state/template-candidates/<app>/<run>/staging/…`), so
+    /// a DIFFERENT run cannot reach the approved run's bytes and must stay
+    /// allowed — otherwise the remedy the error message itself prescribes
+    /// ("start a new workflow run") would be refused too, and an app whose
+    /// `LocalAppScaffold` was rejected after approval could never be staged
+    /// again in any run.
+    #[tokio::test]
+    async fn stage_create_after_approval_is_refused_and_cannot_rewrite_the_approved_bytes() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let (first_workflow_run_id, _receipt_id) =
+            approved_create_receipt(&broker, &shell.id, "dom").await;
+        let sealed_journal_before =
+            local_apps::load_candidate_journal(&broker.layout(&shell.id).expect("layout"))
+                .expect("sealed journal");
+        assert_eq!(
+            sealed_journal_before.stage,
+            local_apps::McpAuthoringStage::Approved
+        );
+
+        // The exact bytes the native sheet rendered, in the approved run.
+        let approved_handle = broker
+            .create_selection_handle_for_run(&shell.id, &first_workflow_run_id)
+            .expect("the approved run's selection handle");
+        let approved_evidence_path = broker
+            .create_staging_root(&shell.id, &first_workflow_run_id, &approved_handle)
+            .join("evidence.json");
+        let evidence_before =
+            fs::read_to_string(&approved_evidence_path).expect("approved staging evidence");
+        assert!(
+            evidence_before.contains(TEST_DEFAULT_APP_NAME),
+            "the approved evidence must carry the confirmed name: {evidence_before}"
+        );
+
+        // Re-staging INSIDE the approved run — the hazard — must be refused.
+        let error = broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": first_workflow_run_id,
+                "validated_selection_handle": approved_handle,
+                "quality_level": "fast",
+                "name": "a different name the user never saw",
+                "brief": "a different brief the user never saw",
+            }))
+            .await
+            .expect_err("re-staging an already-approved create candidate must be refused");
+        assert!(
+            error.contains("create_staging_rejected") && error.contains("already approved"),
+            "expected the re-stage refusal to name both the code and the reason, got: {error}"
+        );
+
+        // And it must refuse BEFORE writing anything: the approved bytes the
+        // user answered for are byte-identical afterwards.
+        let evidence_after = fs::read_to_string(&approved_evidence_path)
+            .expect("approved staging evidence still present");
+        assert_eq!(
+            evidence_before, evidence_after,
+            "the refusal must not have rewritten the approved staging evidence"
+        );
+        assert!(
+            !evidence_after.contains("a different name the user never saw"),
+            "the unconfirmed name must never reach the approved staging evidence: {evidence_after}"
+        );
+
+        // The refusal is a pure read-side check: the sealed journal approved
+        // for `first_workflow_run_id` is untouched.
+        let sealed_journal_after =
+            local_apps::load_candidate_journal(&broker.layout(&shell.id).expect("layout"))
+                .expect("sealed journal still present");
+        assert_eq!(sealed_journal_after.workflow_run_id, first_workflow_run_id);
+        assert_eq!(
+            sealed_journal_after.stage,
+            local_apps::McpAuthoringStage::Approved
+        );
+
+        // A genuinely NEW workflow run — the remedy the error names — is
+        // still allowed, because it writes its own staging tree and cannot
+        // touch the approved run's bytes.
+        let second_workflow_run_id = format!("wf_restage_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &second_workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id,
+                "workflow_run_id": second_workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": template_id_for_scaffold_surface("dom"),
+                "reason": "a fresh run after the first approval",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection for the second run");
+        let second_handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle")
+            .to_string();
+        broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": second_workflow_run_id,
+                "validated_selection_handle": second_handle,
+                "quality_level": "fast",
+                "name": "a name for the fresh run",
+                "brief": "a brief for the fresh run",
+            }))
+            .await
+            .expect("a NEW workflow run must still be allowed to stage");
+        // The approved run's bytes are still exactly what the sheet showed.
+        assert_eq!(
+            evidence_before,
+            fs::read_to_string(&approved_evidence_path).expect("approved staging evidence"),
+            "a second run must write its own staging tree, never the approved run's"
+        );
+    }
+
     /// WP-C gate (`r4-engine-core-01`): a SECOND `create_without_mcp` call for
     /// a `workflow_run_id` whose candidate journal is already sealed at
     /// `Approved` must reuse that approval — no second native
@@ -16970,6 +17167,82 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The formal contract's "Host-managed files are …" sentence must name
+    /// every `lib/` file the profile's OWN `.lingxi/source-policy.json`
+    /// reserves. That policy is the same set
+    /// `permission::workspace_lease::host_owned_relative` and
+    /// `local_apps_build::restore_host_managed_files` enforce, so a file the
+    /// prose leaves out is a file the agent is never told it may not edit:
+    /// the lease accepts the `Edit`, the next build silently reverts it, and
+    /// the only trace is a `tracing::warn!` while the model loops against a
+    /// file it cannot change.
+    ///
+    /// The needle set is DERIVED from the shipped profile contracts, never
+    /// typed here, and every profile must contribute at least one needle —
+    /// otherwise this assertion would be vacuous. Demonstrated red by
+    /// dropping `lib/frame-loop.js` from the canvas-family sentence: the
+    /// Phaser and Babylon profiles ship it beside their engine adapter and
+    /// reserve BOTH in their policy, while the prose named only the adapter.
+    #[tokio::test]
+    async fn the_formal_contract_names_every_host_managed_helper_its_profile_reserves() {
+        let (_root, service, broker) = create_broker(false, None).await;
+        let record = shell_app_fixture(&broker, &service).await;
+        let mut checked = Vec::new();
+        for family in [
+            local_apps::AppRuntimeProfile::ReactDom,
+            local_apps::AppRuntimeProfile::Canvas2d,
+            local_apps::AppRuntimeProfile::Three3d,
+            local_apps::AppRuntimeProfile::Phaser2d,
+            local_apps::AppRuntimeProfile::Babylon3d,
+        ] {
+            // `babylon_3d` is deliberately gated out of this host build
+            // (`UNAVAILABLE_PROFILES`), so it has no current binding to
+            // render. Skipping it is why `checked` is asserted below.
+            let Ok(binding) = crate::local_app_runtime_profiles::current_binding_for_family(family)
+            else {
+                continue;
+            };
+            let profile_contract =
+                crate::local_app_runtime_profiles::contract_for_binding(&binding)
+                    .expect("the current binding resolves to its contract");
+            let policy_bytes = profile_contract
+                .managed_files
+                .iter()
+                .find(|(path, _)| *path == ".lingxi/source-policy.json")
+                .map(|(_, bytes)| *bytes)
+                .expect("every profile ships a source policy");
+            let policy: Value =
+                serde_json::from_slice(policy_bytes).expect("source policy json parses");
+            let reserved_helpers = policy
+                .get("host_managed_paths")
+                .and_then(Value::as_array)
+                .expect("source policy host_managed_paths")
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|path| path.starts_with("lib/"))
+                .collect::<Vec<_>>();
+            assert!(
+                !reserved_helpers.is_empty(),
+                "{family}: an empty needle set would make this test vacuous"
+            );
+            let contract = formal_workspace_contract(&record, &binding);
+            for helper in reserved_helpers {
+                assert!(
+                    contract.contains(&format!("`{helper}`")),
+                    "{family}: the formal workspace contract must name host-managed \
+                     `{helper}`, or the agent is never told it may not edit it: {contract}"
+                );
+            }
+            checked.push(family);
+        }
+        assert!(
+            checked.contains(&local_apps::AppRuntimeProfile::Phaser2d) && checked.len() >= 4,
+            "this gate is only meaningful while the scaffoldable profiles — Phaser above all, \
+             which ships `lib/frame-loop.js` BESIDE its engine adapter — are actually \
+             rendered here, got {checked:?}"
+        );
     }
 
     /// WP8: every backticked `LocalApp*` token in a workspace contract must
@@ -19896,6 +20169,7 @@ mod tests {
                 self.root.path().to_path_buf(),
                 self.fs.clone(),
                 self.service.clone(),
+                self.broker.clone(),
             )
             .await;
         }
@@ -20082,6 +20356,77 @@ mod tests {
         shell.run_boot_backfill_sweep().await;
 
         assert_eq!(shell.title(), "我的宝贝项目");
+    }
+
+    /// `workspace/LINGXI.md` is the ONE channel that reaches the model for an
+    /// unscaffolded shell (`r3-e2e-trace-01`). Nothing in the create
+    /// transaction ever revisits it after the initial write, so if it is ever
+    /// lost — a partial restore, a wiped workspace mount — the boot sweep must
+    /// be the thing that notices and rewrites it; otherwise the interview
+    /// never restarts and the agent sees an ordinary empty directory.
+    #[tokio::test]
+    async fn boot_sweep_repairs_a_missing_guided_workspace_contract() {
+        let shell = pinned_shell().await;
+        let lingxi_md = workspace_of(&shell.root, &shell.app_id).join("LINGXI.md");
+        // `pinned_shell()` builds its record straight off `AppService`,
+        // bypassing the broker's create-time initializer hook (the one that
+        // normally writes the guided contract) — so this fixture's workspace
+        // starts with no `LINGXI.md` at all, which is exactly the "lost"
+        // state this test needs. Removing it too makes that starting point
+        // explicit regardless of what the fixture happens to do.
+        let _ = fs::remove_file(&lingxi_md);
+        assert!(!lingxi_md.exists(), "the guided contract must be absent before the sweep runs");
+
+        shell.run_boot_backfill_sweep().await;
+
+        let repaired = fs::read_to_string(&lingxi_md)
+            .expect("the boot sweep must rewrite a missing guided workspace contract");
+        assert!(
+            repaired.contains("尚未定形态"),
+            "the repaired file must be the real guided contract, not a stub: {repaired}"
+        );
+    }
+
+    /// Same repair, but for a TRUNCATED file rather than an absent one — an
+    /// interrupted write can leave bytes on disk that are not the contract.
+    #[tokio::test]
+    async fn boot_sweep_repairs_a_truncated_guided_workspace_contract() {
+        let shell = pinned_shell().await;
+        let lingxi_md = workspace_of(&shell.root, &shell.app_id).join("LINGXI.md");
+        fs::write(&lingxi_md, "").expect("truncate the guided contract to simulate a partial write");
+
+        shell.run_boot_backfill_sweep().await;
+
+        let repaired = fs::read_to_string(&lingxi_md)
+            .expect("guided contract still present after repair");
+        assert!(
+            repaired.contains("尚未定形态"),
+            "a truncated guided contract must be rewritten, not left empty: {repaired}"
+        );
+    }
+
+    /// The repair must be scoped to UNSCAFFOLDED shells: once an app is
+    /// formed, `workspace/LINGXI.md` carries the FORMAL contract, and step 0
+    /// rewriting it back to the guided text on every boot would erase the
+    /// surface-specific rules the formal contract exists to state.
+    #[tokio::test]
+    async fn boot_sweep_never_rewrites_a_formed_apps_formal_contract() {
+        let shell = pinned_shell().await;
+        shell.scaffold("打飞机").await.expect("scaffold");
+        let lingxi_md = workspace_of(&shell.root, &shell.app_id).join("LINGXI.md");
+        let formal_before = fs::read_to_string(&lingxi_md).expect("formal contract");
+        assert!(
+            !formal_before.contains("尚未定形态"),
+            "a formed app's contract must already be the FORMAL one: {formal_before}"
+        );
+
+        shell.run_boot_backfill_sweep().await;
+
+        let formal_after = fs::read_to_string(&lingxi_md).expect("formal contract after sweep");
+        assert_eq!(
+            formal_before, formal_after,
+            "step 0 must never overwrite a formed app's formal contract with the guided one"
+        );
     }
 
     /// Clause 1 of the predicate, pinned directly: an app still in its

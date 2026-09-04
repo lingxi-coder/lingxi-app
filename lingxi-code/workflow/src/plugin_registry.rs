@@ -22,15 +22,25 @@
 //! its own script failing to parse (`W(o,s){if(!s||BBn(o.script))return!0;…}`,
 //! `O(o,s){return o.filter(t=>W(t,s.get(t.name)))}` @169052203).
 //!
-//! The port's resolvers short-circuit on the built-in table BEFORE consulting
-//! this registry, which inverts that half of the order on paper. It is
-//! unobservable today and deliberately left alone rather than "tidied": every
-//! key in this registry contains a `:` (namespacing is unconditional in
-//! `plugin::manager`) and no built-in name does (`tools/workflow`'s
-//! `BUILTIN_WORKFLOWS`: `deep-research`, `local-app-build`,
-//! `local-canvas-build`), so the two orders cannot disagree on any reachable
-//! input. ⚠️ The day a built-in gains a namespaced name, this becomes a live
-//! divergence and the resolvers must check the registry first.
+//! The port's `name` resolver (`tool_workflow::resolve_script_at`,
+//! `tools/workflow/src/lib.rs`) already checks saved (project/user) workflows,
+//! then this registry, then the built-in table last — matching the oracle
+//! order above. Local App workflows are plugin-owned as of Phase 9 and are
+//! never duplicated in `tools/workflow`'s `BUILTIN_WORKFLOWS`, which today
+//! holds only the generic `deep-research` workflow
+//! (`tools/workflow/src/builtins.rs`); every key in this registry contains a
+//! `:` (namespacing is unconditional in `plugin::manager`) and no built-in
+//! name does, so the two orders cannot disagree on any reachable input
+//! regardless.
+//!
+//! ⚠️ AUD-WF-04, known-unfixed: `resolve_script_at`'s OWN doc comment
+//! (`tools/workflow/src/lib.rs`, above the `pub fn`) still describes the old,
+//! inverted order — "looks first under the immutable built-ins", "Built-ins
+//! win before filesystem lookup", "the plugin registry is checked LAST". Its
+//! body has not done that for some time; the paragraph above matches the code.
+//! That file is outside this work package, so when the two disagree, believe
+//! this one and the body, and fix the sibling doc from the package that owns
+//! `tools/workflow`.
 //!
 //! Namespacing likewise means a project/user collision only happens if such a
 //! file is itself literally named `<plugin>:<name>.js`.

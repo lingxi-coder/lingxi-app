@@ -51,7 +51,13 @@ use crate::local_apps_mcp::LocalAppsMcpTransport;
 /// PROMPT default for each name lives in `permission::defaults_per_tool` — one
 /// table for every tool in the product, rather than a second policy here.
 pub const LOCAL_APP_TOOLS: &[(&str, &str, bool)] = &[
-    // Read-only.
+    // Read-only unless noted: SEVEN entries below this header are `false`.
+    // `LocalAppValidateTemplateSelection`, `LocalAppStageCreate`,
+    // `LocalAppValidateMcpProposal`, `LocalAppApproveMcpProposal`,
+    // `LocalAppQaMcpCandidate` and `LocalAppPromoteMcpCandidate` journal Host
+    // state in the create/MCP-authoring pipeline; `LocalAppEvents` drains a
+    // queue (its own note below). The header groups by PIPELINE STAGE, not by
+    // the `is_read_only` flag each row carries; read the third column.
     ("LocalAppList", "list", true),
     ("LocalAppGet", "get", true),
     ("LocalAppRuntimeProfiles", "runtime_profiles", true),

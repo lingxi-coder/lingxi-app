@@ -1346,7 +1346,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "runtime_profiles",
-                "List the scaffoldable Local App runtime profiles this host knows about. Read this before choosing a non-default runtime_profile. The catalog is authoritative: do not infer profile availability from source code or package names.",
+                "List the scaffoldable Local App runtime profiles this host knows about. Read this to discuss runtime shape with the user; the profile itself is Host-derived from the validated template selection and is never sent as an argument. The catalog is authoritative: do not infer profile availability from source code or package names.",
                 json!({"type":"object","properties":{},"additionalProperties":false}),
             ),
             Self::tool(
@@ -1369,7 +1369,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "resolve_template_selection",
-                "Resolve an opaque Host-validated Local App template selection for a downstream designer, builder, tester or verifier. App, workflow run and current catalog are checked again.",
+                "Resolve an opaque Host-validated Local App template selection for a downstream designer, builder, operator, tester or verifier. App, workflow run and current catalog are checked again.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
@@ -1427,7 +1427,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "create",
-                "Create a local app record, an empty workspace, and the guided `LINGXI.md` contract that drives the follow-up interview inside the app's own session. This call does not scaffold source, install dependencies, or bind a runtime profile; those happen later through one unified native create confirmation plus `scaffold`.",
+                "Create a local app record, an empty workspace, and the guided `LINGXI.md` contract that drives the follow-up interview inside the app's own session. This call does not scaffold source, install dependencies, or bind a runtime profile; those happen later through one unified native create confirmation plus `LocalAppScaffold`.",
                 json!({"type":"object","properties":{
                     "brief":{"type":"string","minLength":1,"maxLength":2000},
                     "name":{"type":"string","minLength":1,"maxLength":200}
@@ -1435,11 +1435,11 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "scaffold",
-                "Commit the Host-approved create candidate onto an app the user created as an empty workspace, then atomically lay down its draft source tree. The display name and one-line brief the Host commits are the ones staged through `stage_create`; the `name` and `brief` sent here are re-confirmation only and never override the staged values. Call this ONLY after the unified native create confirmation has produced its one-shot `receipt_id`, together with the same `workflow_run_id` used to validate the prepared create candidate. The Host derives the immutable runtime binding, staged scaffold snapshot, dependency inputs, and MCP approval contract from that approved create candidate and rejects model-supplied overrides. It is the single step that turns an empty workspace into a buildable app, and until it succeeds every build, dependency, runtime and UI operation on that app refuses. Anything already written into the workspace is replaced.",
+                "Commit the Host-approved create candidate onto an app the user created as an empty workspace, then atomically lay down its draft source tree. The display name and one-line brief the Host commits are the ones staged through `LocalAppStageCreate`; the `name` and `brief` sent here are re-confirmation only and never override the staged values. Call this ONLY after the unified native create confirmation has produced its one-shot `receipt_id`, together with the same `workflow_run_id` used to validate the prepared create candidate. The Host derives the immutable runtime binding, staged scaffold snapshot, dependency inputs, and MCP approval contract from that approved create candidate and rejects model-supplied overrides. It is the single step that turns an empty workspace into a buildable app, and until it succeeds every build, dependency, runtime and UI operation on that app refuses. Anything already written into the workspace is replaced.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
-                    "name":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_NAME_BYTES,"description":"Re-confirmation of the display name staged through `stage_create`; the Host commits the staged value."},
-                    "brief":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_BRIEF_BYTES,"description":"Re-confirmation of the one-line brief staged through `stage_create`; the Host commits the staged value."},
+                    "name":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_NAME_BYTES,"description":"Re-confirmation of the display name staged through `LocalAppStageCreate`; the Host commits the staged value."},
+                    "brief":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_BRIEF_BYTES,"description":"Re-confirmation of the one-line brief staged through `LocalAppStageCreate`; the Host commits the staged value."},
                     "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$","description":"Required with receipt_id so the Host can re-bind the scaffold to the exact prepared create candidate."},
                     "receipt_id":{"type":"string","minLength":1,"description":"One-shot receipt from the unified native create confirmation. The Host binds it to the exact app, workflow run and approved create candidate before scaffolding."},
                     "workflow_model":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_WORKFLOW_MODEL_BYTES,"description":"Optional model id to record for this app's own generation runs; omit to keep the device default."}
@@ -1583,7 +1583,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "capture_ui",
-                "Capture a still image of a running local app's own view and return it as an image. Use this when the DOM snapshot cannot describe what the app is showing — a canvas or WebGL surface renders no inspectable elements, so inspect_ui returns an empty list whether the app is drawing correctly, drawing nothing, or crashed.",
+                "Capture a still image of a running local app's own view and return it as an image. Use this when the DOM snapshot cannot describe what the app is showing — a canvas or WebGL surface renders no inspectable elements, so `LocalAppInspectUi` returns an empty list whether the app is drawing correctly, drawing nothing, or crashed.",
                 json!({"type":"object","properties":{
                     "app_id": app_id.clone(),
                     "rect": {"type":"object","description":"Optional region to crop, in viewport CSS pixels. Omit for the whole view.",
@@ -2281,10 +2281,13 @@ impl LocalAppsMcpTransport {
                 if let Ok(record) = service.record(app_id).await {
                     if !record.scaffolded {
                         return Ok(Self::tool_error(format!(
-                            "{SHELL_GATE_CODE}: 应用 `{app_id}` 还没有形态。\
-                             先与用户确认要做什么，再用 `Skill` 工具启动 `lingxi-local-app:create-local-app`（只以这个带插件前缀的名字注册）——\
-                             它会走统一的创建流程弹出一次原生确认，确认后才落地 \
-                             `LocalAppScaffold` 定下名称、简介与形态；不要自己直接调用它。"
+                            "{SHELL_GATE_CODE}: app `{app_id}` has no shape yet. \
+                             Confirm what the user wants first, then use the `Skill` tool to \
+                             start `lingxi-local-app:create-local-app` (that exact, \
+                             plugin-qualified name; the bare name does not resolve) — it runs \
+                             the unified create flow, raises one native confirmation, and only \
+                             then lands `LocalAppScaffold` with the name, brief and shape. Do \
+                             not call `LocalAppScaffold` directly."
                         )));
                     }
                 }
@@ -2544,10 +2547,31 @@ impl LocalAppsMcpTransport {
                     "app": record,
                     "next_step": host.create_next_step(),
                 });
-                if let (Some(object), Some(init_id)) =
-                    (result.as_object_mut(), init_session_id.as_ref())
-                {
-                    object.insert("init_session_id".into(), Value::String(init_id.clone()));
+                // Only a genuine mint/pin FAILURE (a minter is attached and it
+                // did not produce an `init_session_id`) needs the guidance
+                // corrected — a build with no minter attached at all never
+                // claimed a session in the first place, so `create_next_step`'s
+                // ordinary wording is not wrong for it.
+                let mint_failed =
+                    init_session_id.is_none() && self.init_session_minter.get().is_some();
+                if let Some(object) = result.as_object_mut() {
+                    if let Some(init_id) = init_session_id.as_ref() {
+                        object.insert("init_session_id".into(), Value::String(init_id.clone()));
+                    } else if mint_failed {
+                        if let Some(Value::String(next_step)) = object.get_mut("next_step") {
+                            // `create_next_step`'s guidance names
+                            // `init_session_id` as present in this result; the
+                            // best-effort mint/pin above just failed, so there
+                            // is no such field this time. Correct the guidance
+                            // in place rather than sending the agent looking
+                            // for a field that is not there.
+                            next_step.push_str(
+                                " The pinned init session could not be minted this time, so this \
+                                 result carries no `init_session_id`: tell the user to open the \
+                                 app from the library to continue the interview there instead.",
+                            );
+                        }
+                    }
                 }
                 if init_session_id.is_none()
                     && service
@@ -4253,7 +4277,7 @@ mod tests {
             create.description().contains("does not scaffold source")
                 && create
                     .description()
-                    .contains("unified native create confirmation plus `scaffold`"),
+                    .contains("unified native create confirmation plus `LocalAppScaffold`"),
             "create must describe the deferred scaffold contract: {}",
             create.description()
         );
@@ -5261,6 +5285,50 @@ mod tests {
             host.calls.lock().expect("lock").as_slice(),
             &[app_id],
             "create must write the shell contract before the app is committed"
+        );
+    }
+
+    /// When an init-session minter IS attached but fails to mint/pin, the
+    /// result must not tell the agent to go find `init_session_id` in a
+    /// result that does not carry one (`r2-prompt-layer-05`): the field must
+    /// stay absent AND `next_step` must say the mint failed rather than
+    /// repeating the host's ordinary "continue there" guidance verbatim.
+    #[tokio::test]
+    async fn create_corrects_next_step_guidance_when_the_init_session_mint_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, _service) = attached_transport(root.path()).await;
+        let host = Arc::new(RecordingScaffoldHost {
+            calls: StdMutex::new(Vec::new()),
+            failure: None,
+        });
+        assert!(transport
+            .attach_host(host.clone() as Arc<dyn LocalAppsMcpHost>)
+            .is_ok());
+        assert!(transport
+            .attach_init_session_minter(Arc::new(|_record| {
+                Box::pin(async move { Err("mint boom".to_string()) })
+            }))
+            .is_ok());
+
+        let result = transport
+            .call("create", json!({ "brief": "一个记事本 app" }))
+            .await
+            .expect("create");
+        let structured = result.structured_content.expect("structured");
+        assert!(
+            structured.get("init_session_id").is_none()
+                || structured["init_session_id"].is_null(),
+            "a failed mint must not fabricate an init_session_id: {structured}"
+        );
+        let next_step = structured["next_step"].as_str().expect("next_step string");
+        assert_ne!(
+            next_step, "host-specific next step",
+            "a failed mint must not leave the host's ordinary guidance \
+             unmodified — it names a field this result does not carry"
+        );
+        assert!(
+            next_step.contains("could not be minted") && next_step.contains("init_session_id"),
+            "next_step must say the mint failed and name the missing field: {next_step}"
         );
     }
 

@@ -101,6 +101,24 @@ fn every_checked_in_plugin_workflow_passes_the_runtime_validators() {
     );
 }
 
+/// r2-tests-honesty-011: blank out every `//`-comment line before running the
+/// substring checks below, so a comment merely MENTIONING `agent(`,
+/// `lingxi-local-app:` or `HOST_PRECONDITION_UNAVAILABLE` can no longer
+/// satisfy (or defeat) them the way live code would.
+fn strip_line_comments(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("//") {
+                ""
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn phase4_and_phase6_workflows_use_real_orchestration() {
     let build = std::fs::read_to_string(workflow_dir().join("local-app-build.js"))
@@ -111,31 +129,39 @@ fn phase4_and_phase6_workflows_use_real_orchestration() {
         ("local-app-build.js", build),
         ("local-app-use-test.js", use_test),
     ] {
+        let code = strip_line_comments(&source);
         assert!(
-            source.contains("agent("),
+            code.contains("agent("),
             "{name} must orchestrate Plugin agents"
         );
+        // Not a bare substring: the namespaced identity must be the script's
+        // OWN declared `WORKFLOW_ID`, not merely a string that happens to
+        // appear somewhere (a comment mentioning the namespace used to be
+        // enough to satisfy this).
         assert!(
-            source.contains("lingxi-local-app:"),
-            "{name} must carry the namespaced workflow identity"
+            code.lines()
+                .any(|line| line.trim_start().starts_with("const WORKFLOW_ID = 'lingxi-local-app:")),
+            "{name} must declare `const WORKFLOW_ID = 'lingxi-local-app:...'`, not merely \
+             mention the namespace"
         );
         assert!(
-            !source.contains("HOST_PRECONDITION_UNAVAILABLE"),
+            !code.contains("HOST_PRECONDITION_UNAVAILABLE"),
             "{name} must no longer be a Phase2 placeholder"
         );
     }
     let mcp = std::fs::read_to_string(workflow_dir().join("local-app-mcp-authoring.js"))
         .expect("read mcp workflow");
+    let mcp_code = strip_line_comments(&mcp);
     assert!(
-        mcp.contains("agent("),
+        mcp_code.contains("agent("),
         "Phase6 MCP authoring must orchestrate agents"
     );
     assert!(
-        mcp.contains("mcp_authoring_required"),
+        mcp_code.contains("mcp_authoring_required"),
         "zero-tool authoring must be explicit"
     );
     assert!(
-        !mcp.contains("HOST_PRECONDITION_UNAVAILABLE"),
+        !mcp_code.contains("HOST_PRECONDITION_UNAVAILABLE"),
         "Phase6 MCP authoring must no longer be a placeholder"
     );
 }
@@ -174,34 +200,64 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
     });
     let stage = serde_json::json!({"ok": true, "dependency_input_sha256": "a".repeat(64), "summary": "staged"});
     let build = serde_json::json!({"ok": true, "preview_url": "http://127.0.0.1:20000", "summary": "built"});
+    // r2-tests-honesty-002: capture every (label, prompt) pair the workflow
+    // actually sends an agent, keyed by the SAME `options` substring the stub
+    // dispatches on below, so the test can assert on real script OUTPUT (the
+    // literal command text an agent would have received) instead of only on
+    // the workflow's return value -- where two of the four prior assertions
+    // were literals hardcoded in the script itself (`WORKFLOW_ID`, the
+    // unconditional `const promotion = null`) and a third was simply the
+    // stub's own canned response echoed straight through the `approval`
+    // passthrough field.
+    let seen_prompts: Arc<std::sync::Mutex<Vec<(String, String)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen_prompts_for_stub = seen_prompts.clone();
     let outcome = workflow::run_with_progress(
         &source,
         move |prompts, options| {
             prompts
                 .iter()
                 .zip(options.iter())
-                .map(|(_prompt, options)| {
-                    if options.contains("template-selector") {
-                        return serde_json::json!({"catalog_digest":"digest","template_id":"react-dom-r2","reason":"ordinary form","rejected":[],"validated_selection_handle":"vsel_0123456789abcdef0123456789abcdef"}).to_string();
+                .map(|(prompt, options)| {
+                    // r3-workflow-runtime-07: dispatch on the exact `label`
+                    // field of the PARSED opts, not a substring of the whole
+                    // serialized `options` string. `native-create-approval`'s
+                    // agentType is `mcp-designer`, which itself contains the
+                    // substring "designer" -- a `options.contains("designer")`
+                    // check only stayed correct because it was ORDERED after
+                    // the `native-create-approval` check, and would have
+                    // silently misdispatched that call to the designer
+                    // response had the branches been reordered.
+                    let opts: serde_json::Value =
+                        serde_json::from_str(options).unwrap_or(serde_json::Value::Null);
+                    let opts_label = opts
+                        .get("label")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    let capture_label = if opts_label.starts_with("repair-") {
+                        "repair-"
+                    } else {
+                        opts_label
                     }
-                    if options.contains("native-create-approval") {
-                        return serde_json::json!({
+                    .to_string();
+                    seen_prompts_for_stub
+                        .lock()
+                        .expect("prompt log")
+                        .push((capture_label, prompt.clone()));
+                    match opts_label {
+                        "template-selector" => serde_json::json!({"catalog_digest":"digest","template_id":"react-dom-r2","reason":"ordinary form","rejected":[],"validated_selection_handle":"vsel_0123456789abcdef0123456789abcdef"}).to_string(),
+                        "native-create-approval" => serde_json::json!({
                             "approved": true,
                             "receipt_id": "mcp-create-receipt",
                             "status": "create_approved_no_mcp"
                         })
-                        .to_string();
+                        .to_string(),
+                        "designer" => serde_json::json!({"runtime_family":"react_dom","acceptance_checks":[],"summary":"design"}).to_string(),
+                        "builder-stage" => stage.to_string(),
+                        "builder-build" => build.to_string(),
+                        _ if opts_label.starts_with("repair-") => build.to_string(),
+                        _ => report.to_string(),
                     }
-                    if options.contains("designer") {
-                        return serde_json::json!({"runtime_family":"react_dom","acceptance_checks":[],"summary":"design"}).to_string();
-                    }
-                    if options.contains("builder-stage") {
-                        return stage.to_string();
-                    }
-                    if options.contains("builder-build") || options.contains("repair-") {
-                        return build.to_string();
-                    }
-                    report.to_string()
                 })
                 .collect()
         },
@@ -213,10 +269,57 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
     )
     .expect("hermetic workflow should execute");
     let result = outcome.result.expect("workflow result");
-    assert!(result.contains("lingxi-local-app:local-app-build"));
+    // The only assertion on the return value that is neither a script-side
+    // literal (WORKFLOW_ID, `promotion: null`) nor an echoed stub response:
+    // `repairRounds` is a real counter, and a hermetic run where every stub
+    // reports success must complete the create identity chain without
+    // entering the repair loop.
     assert!(result.contains("\"repair_rounds\":0"));
-    assert!(result.contains("\"status\":\"create_approved_no_mcp\""));
-    assert!(result.contains("\"promotion\":null"));
+
+    let prompts = seen_prompts.lock().expect("prompt log");
+    let agent_calls = prompts.len();
+    assert_eq!(
+        agent_calls, 8,
+        "a hermetic create run with quality_level 'balanced' and every stub reporting success \
+         must make exactly template-selector, designer, builder-stage, native-create-approval, \
+         builder-build, operator, tester, verifier — 8 agent calls (saw: {:?})",
+        prompts.iter().map(|(label, _)| label).collect::<Vec<_>>()
+    );
+    let prompt_for = |label: &str| -> &str {
+        prompts
+            .iter()
+            .find(|(seen_label, _)| seen_label == label)
+            .map(|(_, prompt)| prompt.as_str())
+            .unwrap_or_else(|| panic!("no agent call was dispatched under label {label:?}"))
+    };
+    let stage_prompt = prompt_for("builder-stage");
+    assert!(
+        stage_prompt.contains("Call LocalAppStageCreate with app_id=aaaa1111"),
+        "builder-stage prompt must instruct the agent to stage the create candidate for the \
+         real app_id: {stage_prompt}"
+    );
+    assert!(
+        stage_prompt.contains("workflow_run_id=wf_hermetic1"),
+        "builder-stage prompt must carry the Host-minted workflow_run_id from host_context, \
+         not a value the script invented: {stage_prompt}"
+    );
+    let approval_prompt = prompt_for("native-create-approval");
+    assert!(
+        approval_prompt.contains("create_without_mcp=true"),
+        "native-create-approval prompt must request the native (no-MCP) create path: \
+         {approval_prompt}"
+    );
+    let build_prompt = prompt_for("builder-build");
+    assert!(
+        build_prompt.contains("receipt_id=mcp-create-receipt"),
+        "builder-build prompt must carry the receipt_id returned by the create approval step, \
+         not a value the script invented: {build_prompt}"
+    );
+    assert!(
+        build_prompt.contains("LocalAppManifest"),
+        "builder-build prompt must instruct the agent to declare collections through \
+         LocalAppManifest before writing against them: {build_prompt}"
+    );
 }
 
 #[test]

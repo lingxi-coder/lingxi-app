@@ -1308,6 +1308,57 @@ async fn plugin_workflow_resolves_bare_agent_type_under_its_namespace() {
     );
 }
 
+/// r1-workflow-runtime-15 / r3-tests-honesty-13: the bare-name check runs
+/// FIRST and the namespaced retry only fires when the bare name is absent
+/// (local_workflow.rs:2766) -- deliberately, on the same "closer scope wins"
+/// precedence `resolve_script_at` documents for workflow name resolution
+/// itself (`tools/workflow/src/lib.rs:320-331`, "project/user file always
+/// wins a name collision" over a plugin). A project/user agent named
+/// `builder` is therefore meant to shadow the plugin's own
+/// `lingxi-local-app:builder` when both are registered, exactly like a
+/// project workflow file shadows a plugin workflow of the same name. This
+/// pins that contract so a later flip to namespace-first is caught here
+/// instead of silently changing which agent definition a plugin workflow
+/// runs under.
+#[tokio::test]
+async fn bare_agent_type_shadows_the_plugin_namespaced_agent_when_both_are_registered() {
+    let spawner = Arc::new(NamespacedListingSpawner {
+        listing: vec![
+            "builder".to_string(),
+            "lingxi-local-app:builder".to_string(),
+        ],
+        ..Default::default()
+    });
+    let outcome = run_workflow_script(
+        "const r = await agent('p', { agentType: 'builder' }); return r;",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        "lingxi-local-app:local-app-build",
+        spawner.clone(),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    )
+    .await
+    .expect("a bare agentType present in the listing must resolve without the namespaced retry");
+    assert_eq!(outcome.result.as_deref(), Some("\"echo:p\""));
+    let reqs = spawner.seen_reqs.lock().unwrap();
+    assert_eq!(reqs.len(), 1, "exactly one agent() call must have spawned");
+    assert_eq!(
+        reqs[0].subagent_type, "builder",
+        "a project/user agent registered under the bare name must shadow the plugin's own \
+         namespaced agent of the same name, the same precedence workflow name resolution uses"
+    );
+}
+
 /// P0-2 negative case: even under a plugin-qualified workflow id, a name that
 /// matches NEITHER the bare spelling NOR `<plugin>:<name>` still throws --
 /// and the error must name BOTH spellings it tried, so a user debugging a

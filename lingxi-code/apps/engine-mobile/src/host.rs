@@ -11771,6 +11771,8 @@ pub(crate) async fn mint_app_init_session(
 /// The boot backfill sweep, as a named function so it has a test.
 ///
 /// Walks every app record once per launch. Per record, in this order:
+/// 0. for an unscaffolded shell, repair `workspace/LINGXI.md` if it is
+///    missing, empty, or missing the guided-contract header;
 /// 1. migrate/merge a session catalog stranded under a drifted directory name;
 /// 2. re-anchor a pinned init session whose transcript file is gone;
 /// 3. reconcile a pinned init session still carrying the shell placeholder
@@ -11782,17 +11784,63 @@ pub(crate) async fn mint_app_init_session(
 /// the next launch, which is what makes each of them genuinely retryable
 /// rather than merely described as such.
 ///
-/// Steps 1-3 run for EVERY record; step 4 is the only one gated on the pin
+/// Steps 0-3 run for EVERY record; step 4 is the only one gated on the pin
 /// being absent, and step 3 deliberately runs before that gate because every
 /// record it can help already has a pin.
+///
+/// Step 0 matters because `workspace/LINGXI.md` is the ONE channel that
+/// reaches the model on every turn for a shell app (auto-loaded by the memory
+/// hierarchy): every other repair in this sweep is session bookkeeping, but a
+/// lost or truncated guided contract leaves the create interview with nothing
+/// to read at all, and nothing else in the create transaction ever revisits
+/// it after the initial write.
 pub(crate) async fn run_app_boot_backfill_sweep(
     backfill_home: std::path::PathBuf,
     backfill_cwd: String,
     backfill_root: std::path::PathBuf,
     backfill_fs: Arc<dyn platform_api::FileSystem>,
     backfill_service: Arc<local_apps::AppService>,
+    backfill_host: Arc<LocalAppsHostBroker>,
 ) {
     for record in backfill_service.records().await {
+        // Step 0: an unscaffolded shell's ONLY channel to the model is
+        // `workspace/LINGXI.md`. If it is gone, empty, or missing the guided
+        // header, the create interview has nothing to read and the agent
+        // sees an ordinary empty directory. Rewriting it is idempotent and
+        // safe to retry every launch. The header literal below is the first
+        // line of `guided_workspace_contract` in `local_apps_host.rs`; the two
+        // must stay in lockstep, or this check calls a healthy contract
+        // malformed and rewrites it on every boot.
+        if !record.scaffolded {
+            let workspace = backfill_root.join(&record.workspace_rel);
+            let lingxi_md = workspace.join("LINGXI.md");
+            let needs_repair = match std::fs::read_to_string(&lingxi_md) {
+                Ok(contents) => !contents.contains("# Local App（新建，尚未定形态）"),
+                Err(_) => true,
+            };
+            if needs_repair {
+                // `write_guided_contract_value` writes with `std::fs::write`,
+                // which does NOT create parents — its own doc comment states
+                // it "runs inside the create transaction, after
+                // `layout.initialize()` (so the workspace directory exists)".
+                // This sweep has no such guarantee: the very failure it
+                // repairs can have taken the directory along with the file,
+                // and `write` would then fail with NotFound on every launch
+                // forever. Best-effort, like the write itself.
+                let _ = std::fs::create_dir_all(&workspace);
+                match backfill_host.write_guided_contract_value(&record).await {
+                    Ok(()) => tracing::info!(
+                        app_id = %record.id,
+                        "boot sweep repaired a missing or malformed guided workspace contract"
+                    ),
+                    Err(error) => tracing::warn!(
+                        app_id = %record.id,
+                        %error,
+                        "boot sweep guided workspace contract repair failed"
+                    ),
+                }
+            }
+        }
         // Self-heal the app's catalog location FIRST. Two
         // real-world drifts strand it: (a) an app reinstall
         // changes the iOS data-container UUID, so the old
@@ -12301,6 +12349,7 @@ pub fn build_mobile_engine_inner(
                 mobile_apps_data_root(&firer_cfg),
                 fs.clone(),
                 service.clone(),
+                local_apps_host.clone(),
             ));
         }
         Err(error) => {

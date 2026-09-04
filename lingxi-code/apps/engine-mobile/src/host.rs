@@ -19989,6 +19989,7 @@ mod tests {
             id: "app00001".into(),
             name: "Habits".into(),
             brief: "a habit tracker".into(),
+            mcp_intent: None,
             workflow_model: None,
             git_enabled: true,
             scaffolded: false,

@@ -35,8 +35,8 @@ use crate::permissions::{
 use crate::state::AppState;
 use crate::storage;
 use crate::types::{
-    AppCheckpoint, AppCheckpointKind, AppDependencyRecord, AppDependencyState, AppRecord,
-    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, APPS_SCHEMA_VERSION,
+    AppCheckpoint, AppCheckpointKind, AppDependencyRecord, AppDependencyState, AppMcpIntent,
+    AppRecord, AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, APPS_SCHEMA_VERSION,
 };
 use platform_api::Clock;
 use std::collections::{BTreeSet, HashMap};
@@ -75,6 +75,10 @@ pub const MAX_BRIEF_BYTES: usize = 4_000;
 pub const MAX_WORKFLOW_MODEL_BYTES: usize = 512;
 /// Maximum `conversation_id` length in bytes.
 pub const MAX_CONVERSATION_ID_BYTES: usize = 128;
+/// Maximum number of MCP services an `AppMcpIntent::Requested` may name.
+pub const MAX_MCP_INTENT_SERVICES: usize = 16;
+/// Maximum length in bytes of one named MCP service in an `AppMcpIntent`.
+pub const MAX_MCP_INTENT_SERVICE_NAME_BYTES: usize = 200;
 /// Maximum text value length in bytes (also the runtime `last_error` cap).
 pub const MAX_TEXT_VALUE_BYTES: usize = 20_000;
 
@@ -104,6 +108,49 @@ fn ensure_within(what: &str, len: usize, max: usize) -> Result<(), AppError> {
             "{what} is {len} bytes (limit {max})"
         )))
     }
+}
+
+/// The service's own bounds on an `AppMcpIntent`, independent of whatever the
+/// Host already checked — the same "public API, own guarantee" reasoning
+/// `commit_scaffold`'s other field validation follows.
+///
+/// A `Requested` intent with an empty `services` list is rejected: "asked,
+/// wants these" with no "these" is not a third state, it is a malformed
+/// `Requested` masquerading as one — the caller meant `Declined` and must say
+/// so.
+fn validate_mcp_intent(intent: &AppMcpIntent) -> Result<(), AppError> {
+    let AppMcpIntent::Requested { services } = intent else {
+        return Ok(());
+    };
+    if services.is_empty() {
+        return Err(AppError::InvalidRequest(
+            "mcp_intent Requested must name at least one service".into(),
+        ));
+    }
+    // Not `ensure_within`: that helper's message is "{what} is {len} bytes",
+    // and this bound counts SERVICES, not bytes. "17 bytes (limit 16)" for 17
+    // service names sends the reader hunting an over-long string that does not
+    // exist. The Host's twin check (`parse_staged_mcp_intent`) already words it
+    // as a count; match it.
+    if services.len() > MAX_MCP_INTENT_SERVICES {
+        return Err(AppError::InvalidRequest(format!(
+            "mcp_intent names {} services (limit {MAX_MCP_INTENT_SERVICES})",
+            services.len()
+        )));
+    }
+    for service in services {
+        if service.trim().is_empty() {
+            return Err(AppError::InvalidRequest(
+                "mcp_intent service name must not be blank".into(),
+            ));
+        }
+        ensure_within(
+            "mcp_intent service name",
+            service.len(),
+            MAX_MCP_INTENT_SERVICE_NAME_BYTES,
+        )?;
+    }
+    Ok(())
 }
 
 /// Marker appended when a runtime `last_error` had to be truncated.
@@ -786,6 +833,14 @@ impl AppService {
     /// device default"), and a shell create can already carry a client-chosen
     /// model; a scaffold that simply did not mention one must not drop it.
     ///
+    /// `mcp_intent = None` likewise PRESERVES rather than clears — but unlike
+    /// `workflow_model` there is no earlier writer, so in practice it is
+    /// always `None` going in and this is the field's one production writer.
+    /// It carries the outcome of the create-time MCP interview staged through
+    /// `LocalAppStageCreate` (see [`crate::types::AppMcpIntent`]); passing
+    /// `None` does NOT mean the user declined, it means this call was not
+    /// given a staged answer to commit.
+    ///
     /// `git_enabled` is deliberately NOT writable here (§C.1.5): it is fixed
     /// at create time and the workspace's Git history depends on it.
     pub async fn commit_scaffold(
@@ -794,6 +849,7 @@ impl AppService {
         name: &str,
         brief: &str,
         workflow_model: Option<&str>,
+        mcp_intent: Option<&AppMcpIntent>,
     ) -> Result<AppRecord, AppError> {
         let name = name.trim();
         if name.is_empty() {
@@ -817,8 +873,12 @@ impl AppService {
                 Ok::<_, AppError>(model.to_string())
             })
             .transpose()?;
+        if let Some(intent) = mcp_intent {
+            validate_mcp_intent(intent)?;
+        }
         let name = name.to_string();
         let brief = brief.to_string();
+        let mcp_intent = mcp_intent.cloned();
         let root = self.root.clone();
         self.with_app(app_id, move |app, now| {
             if app.record.scaffolded {
@@ -837,6 +897,13 @@ impl AppService {
             app.record.brief = brief;
             if let Some(model) = workflow_model {
                 app.record.workflow_model = Some(model);
+            }
+            // `None` here means "the caller did not stage an intent", not
+            // "clear it" — the same preserve-if-not-given semantics as
+            // `workflow_model` above. In practice a shell's `mcp_intent` is
+            // always `None` until this, its one commit point, ever runs.
+            if let Some(intent) = mcp_intent {
+                app.record.mcp_intent = Some(intent);
             }
             app.record.scaffolded = true;
             app.record.updated_at_ms = now;
@@ -2220,9 +2287,10 @@ mod tests {
         );
     }
 
-    /// §C.1.5 / §C.1 step 4. The four fields land TOGETHER or not at all, and
-    /// the commit emits the single-record update a client needs to redraw the
-    /// library entry without reloading the whole catalog.
+    /// §C.1.5 / §C.1 step 4. The five fields (name, brief, workflow_model,
+    /// mcp_intent, scaffolded) land TOGETHER or not at all, and the commit
+    /// emits the single-record update a client needs to redraw the library
+    /// entry without reloading the whole catalog.
     #[tokio::test]
     async fn commit_scaffold_writes_the_four_fields_in_one_transaction() {
         let dir = tempfile::tempdir().unwrap();
@@ -2258,6 +2326,9 @@ mod tests {
                 "  打飞机  ",
                 "  一个竖版射击小游戏  ",
                 Some("openai/gpt-5"),
+                Some(&AppMcpIntent::Requested {
+                    services: vec!["github".to_string()],
+                }),
             )
             .await
             .unwrap();
@@ -2265,6 +2336,13 @@ mod tests {
         assert_eq!(committed.name, "打飞机", "the name is stored trimmed");
         assert_eq!(committed.brief, "一个竖版射击小游戏");
         assert_eq!(committed.workflow_model.as_deref(), Some("openai/gpt-5"));
+        assert_eq!(
+            committed.mcp_intent,
+            Some(AppMcpIntent::Requested {
+                services: vec!["github".to_string()]
+            }),
+            "the staged mcp_intent must land on the committed record in the same transaction"
+        );
 
         // Durable, not just in memory.
         let reloaded = reload_service(&h.service).await;
@@ -2273,6 +2351,13 @@ mod tests {
         assert_eq!(after.name, "打飞机");
         assert_eq!(after.brief, "一个竖版射击小游戏");
         assert_eq!(after.workflow_model.as_deref(), Some("openai/gpt-5"));
+        assert_eq!(
+            after.mcp_intent,
+            Some(AppMcpIntent::Requested {
+                services: vec!["github".to_string()]
+            }),
+            "mcp_intent must survive a reload from disk, not just live in memory"
+        );
 
         let events = h.take_events().await;
         assert!(
@@ -2309,11 +2394,11 @@ mod tests {
             ),
         );
         service
-            .commit_scaffold(&shell.id, "A", "b", None)
+            .commit_scaffold(&shell.id, "A", "b", None, None)
             .await
             .unwrap();
         let error = service
-            .commit_scaffold(&shell.id, "B", "c", None)
+            .commit_scaffold(&shell.id, "B", "c", None, None)
             .await
             .unwrap_err();
         assert_eq!(error.code(), AppErrorCode::InvalidRequest);
@@ -2358,10 +2443,151 @@ mod tests {
             ),
         );
         let committed = service
-            .commit_scaffold(&shell.id, "A", "b", None)
+            .commit_scaffold(&shell.id, "A", "b", None, None)
             .await
             .unwrap();
         assert_eq!(committed.workflow_model.as_deref(), Some("openai/gpt-5"));
+    }
+
+    /// THREE states, not two: an app whose interview never ran must be
+    /// distinguishable on the record from one where the user was asked and
+    /// said no. A bool or an empty `services` list would collapse them.
+    #[tokio::test]
+    async fn commit_scaffold_distinguishes_never_asked_from_declined() {
+        let never_asked = test_service().await;
+        let never_asked_shell = never_asked
+            .create_app_with_mode(None, "", None, CreateMode::Shell, None)
+            .await
+            .unwrap();
+        let binding = scaffolded_runtime_binding();
+        let snapshot =
+            scaffolded_dependency_snapshot(&binding, &"f".repeat(64), "pnpm@11.22.0/node@24.18.1");
+        seed_scaffold_commit_ready_state(
+            &never_asked.root,
+            &never_asked_shell,
+            &binding,
+            &snapshot,
+            &scaffolded_dependency_record(
+                &never_asked_shell.id,
+                AppDependencyState::Ready,
+                &snapshot.lockfile_sha256,
+                &snapshot.toolchain_key,
+            ),
+        );
+        let never_asked_committed = never_asked
+            .commit_scaffold(&never_asked_shell.id, "A", "b", None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            never_asked_committed.mcp_intent, None,
+            "an app whose interview never staged an intent must carry None, not a declined-shaped value"
+        );
+
+        let declined = test_service().await;
+        let declined_shell = declined
+            .create_app_with_mode(None, "", None, CreateMode::Shell, None)
+            .await
+            .unwrap();
+        seed_scaffold_commit_ready_state(
+            &declined.root,
+            &declined_shell,
+            &binding,
+            &snapshot,
+            &scaffolded_dependency_record(
+                &declined_shell.id,
+                AppDependencyState::Ready,
+                &snapshot.lockfile_sha256,
+                &snapshot.toolchain_key,
+            ),
+        );
+        let declined_committed = declined
+            .commit_scaffold(
+                &declined_shell.id,
+                "A",
+                "b",
+                None,
+                Some(&AppMcpIntent::Declined),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            declined_committed.mcp_intent,
+            Some(AppMcpIntent::Declined),
+            "asked-and-declined must be recorded explicitly, distinct from never-asked"
+        );
+        assert_ne!(
+            never_asked_committed.mcp_intent, declined_committed.mcp_intent,
+            "never-asked and declined are two different states and must serialize differently"
+        );
+    }
+
+    /// A `Requested` intent with no services is a malformed `Requested`, not
+    /// a valid third state — the service enforces its own bound the same as
+    /// `commit_scaffold_enforces_its_own_field_bounds` does for name/brief.
+    #[tokio::test]
+    async fn commit_scaffold_rejects_an_empty_requested_mcp_intent() {
+        let service = test_service().await;
+        let shell = service
+            .create_app_with_mode(None, "", None, CreateMode::Shell, None)
+            .await
+            .unwrap();
+        let binding = scaffolded_runtime_binding();
+        let snapshot =
+            scaffolded_dependency_snapshot(&binding, &"f".repeat(64), "pnpm@11.22.0/node@24.18.1");
+        seed_scaffold_commit_ready_state(
+            &service.root,
+            &shell,
+            &binding,
+            &snapshot,
+            &scaffolded_dependency_record(
+                &shell.id,
+                AppDependencyState::Ready,
+                &snapshot.lockfile_sha256,
+                &snapshot.toolchain_key,
+            ),
+        );
+        let error = service
+            .commit_scaffold(
+                &shell.id,
+                "A",
+                "b",
+                None,
+                Some(&AppMcpIntent::Requested { services: vec![] }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), AppErrorCode::InvalidRequest);
+        assert!(
+            error.to_string().contains("at least one service"),
+            "got {error}"
+        );
+        let after = service.record(&shell.id).await.unwrap();
+        assert!(
+            !after.scaffolded,
+            "a rejected commit must leave the shell a shell"
+        );
+    }
+
+    /// This bound counts SERVICES. Reported through `ensure_within` it read
+    /// "mcp_intent services is 17 bytes (limit 16)", which sends the reader
+    /// hunting an over-long string that does not exist — and diverges from the
+    /// Host's twin check, which already words it as a count.
+    #[test]
+    fn over_limit_mcp_intent_services_are_reported_as_a_count_not_bytes() {
+        let services: Vec<String> = (0..=MAX_MCP_INTENT_SERVICES)
+            .map(|index| format!("s{index}"))
+            .collect();
+        let over_by_one = services.len();
+        let error = validate_mcp_intent(&AppMcpIntent::Requested { services }).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("names {over_by_one} services")),
+            "the message must name the SERVICE COUNT: {message}"
+        );
+        assert!(
+            !message.contains("bytes"),
+            "a service count must not be reported as a byte length: {message}"
+        );
     }
 
     /// The validation branches are the service's own, not the host's: this is
@@ -2397,7 +2623,7 @@ mod tests {
             ("A", "b", Some(&over_long_model[..])),
         ] {
             let error = service
-                .commit_scaffold(&shell.id, name, brief, model)
+                .commit_scaffold(&shell.id, name, brief, model, None)
                 .await
                 .unwrap_err();
             assert_eq!(error.code(), AppErrorCode::InvalidRequest);
@@ -2420,7 +2646,7 @@ mod tests {
             .unwrap();
 
         let error = service
-            .commit_scaffold(&shell.id, "A", "b", None)
+            .commit_scaffold(&shell.id, "A", "b", None, None)
             .await
             .unwrap_err();
         assert_eq!(error.code(), AppErrorCode::InvalidRequest);

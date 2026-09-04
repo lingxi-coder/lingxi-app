@@ -47,7 +47,20 @@ shape yet. Settling what the app IS is your work in that conversation:
    core engine, revision, and recommendation reason in the same final
    confirmation. Profile family is immutable once committed, so it is the
    user's call to confirm.
-4. After the conversational confirmation, call the unified
+4. In **ordinary conversational text**, tell the user in one or two sentences
+   what MCP is and what it would let this specific app do — reach a live
+   external service or data source it could not reach on its own. Call
+   `LocalAppTemplateCatalog` and read the `mcpSuggestions` for the template
+   family matching the confirmed runtime profile, then turn those into 2-3
+   concrete named recommendations for THIS app rather than asking a bare
+   "do you want MCP?" with nothing to say yes to. Use `AskUserQuestion` to let
+   the user pick which of those to set up, or none. If this conversation already
+   carries that answer — the workspace contract's own step 4 asked it before the
+   skill started, and wrote the picked service names or the refusal back in plain
+   text — carry that answer forward instead of asking a second time. Nothing is
+   set up now — creating the app never runs MCP authoring — this only decides
+   what carries forward into step 5 below as `mcp_intent`.
+5. After the conversational confirmation, call the unified
    `lingxi-local-app:local-app-build` create branch through the `Workflow`
    tool for this shell app. That
    Host-owned path re-reads the template catalog, stages the create candidate,
@@ -57,17 +70,26 @@ shape yet. Settling what the app IS is your work in that conversation:
    are what the native create confirmation sheet renders, and they are what the
    Host commits onto the record — the shell app created in step 1 is still the
    empty `untitled` placeholder, so a create launched without them cannot show
-   or commit the confirmed wording. App creation never runs MCP authoring: the
-   app-owned MCP remains unconfigured and disabled until the user explicitly
+   or commit the confirmed wording. Pass the user's step 4 MCP choice as
+   `mcp_intent` in the same call — `{"status":"declined"}` when they declined,
+   or `{"status":"requested","services":["<name>", ...]}` naming the exact
+   services they picked from `mcpSuggestions`. If step 4 never ran at all, omit
+   `mcp_intent` from the call entirely: a create that omits it is recorded as
+   never-asked, and sending `{"status":"declined"}` for a question nobody asked
+   is what stops the app's settings from ever offering MCP again. `LocalAppStageCreate` stages it
+   alongside name/brief and the Host commits it onto the record, where the
+   app's formal `LINGXI.md` carries it forward for the Settings MCP flow to
+   read later. App creation itself never runs MCP authoring: the app-owned MCP
+   remains unconfigured and disabled until the user explicitly
    starts MCP setup from that app's settings. Never call a
    standalone runtime-profile selector or pass a model-authored
    surface/profile override. Do not supply `args.runtime_profile` as an authority; on a create launch the host strips any caller-supplied `runtime_profile` at the launch boundary and injects no profile at all — the profile is fixed later in the run by the Host-verified template selection:
 
 ```
-Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<the id LINGXI.md names>","name":"<the display name confirmed in step 3>","brief":"<the one-line brief confirmed in step 3>","spec":"<confirmed product + UI + data + runtime intent>","quality_level":"balanced"}})
+Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<the id LINGXI.md names>","name":"<the display name confirmed in step 3>","brief":"<the one-line brief confirmed in step 3>","spec":"<confirmed product + UI + data + runtime intent>","quality_level":"balanced","mcp_intent":<the step 4 answer — {"status":"declined"} or {"status":"requested","services":["<each service they picked>"]}; omit this key entirely if step 4 never ran>}})
 ```
 
-5. Re-read `LINGXI.md`. `LocalAppScaffold` overwrites the guided text with the
+6. Re-read `LINGXI.md`. `LocalAppScaffold` overwrites the guided text with the
    app's formal workspace contract — editable roots, host-managed files, the
    entry points that now exist, and which build workflow the persisted profile takes —
    and that contract, not this step list, governs everything after it.
@@ -386,11 +408,15 @@ launch with the verified catalog (Create) or persisted profile/snapshot
 (Update/Verify); caller input never selects a renderer or profile:
 
 ```
-Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<id>","name":"<confirmed display name>","brief":"<confirmed one-line brief>","spec":"<confirmed spec>","quality_level":"balanced"}})
+Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<id>","name":"<confirmed display name>","brief":"<confirmed one-line brief>","spec":"<confirmed spec>","quality_level":"balanced","mcp_intent":<the step 4 answer — {"status":"declined"} or {"status":"requested","services":["<each service they picked>"]}; omit this key entirely if step 4 never ran>}})
 ```
 
-`name` and `brief` are create-only and carry the user-confirmed wording; every
-other identity field stays Host-derived.
+`name`, `brief`, and `mcp_intent` are create-only and carry the user-confirmed
+wording; every other identity field stays Host-derived. `mcp_intent` is the
+create-time MCP interview's outcome from step 4 above —
+`{"status":"declined"}` or `{"status":"requested","services":[...]}` naming
+the concrete services the user picked from `LocalAppTemplateCatalog`'s
+`mcpSuggestions`, never free text the model invented.
 For update use `operation: "update"` and pass the user-confirmed change as
 `revision_prompt` (a plain string carrying what the user asked to change —
 `spec` is create-only and ignored on update); for a verification-only run use

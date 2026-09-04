@@ -1058,6 +1058,14 @@ fn is_verified_plugin_workflow(
 /// which is what the native create confirmation sheet renders and what
 /// `LocalAppScaffold` commits. Without them the create flow falls back to the
 /// `untitled` placeholder.
+///
+/// WP-MCP-intent: `mcp_intent` is the create-time MCP interview outcome the
+/// user already gave conversationally (absent = never asked,
+/// `{"status":"declined"}`, `{"status":"requested","services":[...]}`). It
+/// belongs here for the same reason `name`/`brief` do: the launch boundary
+/// forwards ONLY the declared contract, so a key the script declares but this
+/// list omits is rejected before the script runs — which does not lose the
+/// answer, it fails the whole create launch.
 pub(crate) const BUILD_EXTERNAL_ARG_KEYS: &[&str] = &[
     "operation",
     "app_id",
@@ -1066,6 +1074,7 @@ pub(crate) const BUILD_EXTERNAL_ARG_KEYS: &[&str] = &[
     "quality_level",
     "name",
     "brief",
+    "mcp_intent",
 ];
 
 /// External argument keys accepted for the plugin use-test workflow.

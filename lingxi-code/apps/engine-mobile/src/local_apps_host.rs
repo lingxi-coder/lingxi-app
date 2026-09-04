@@ -194,6 +194,21 @@ struct CreateProposalContext {
     /// placeholder until `commit_scaffold` runs.
     name: String,
     brief: String,
+    /// Outcome of the create-time MCP interview, staged through
+    /// `LocalAppStageCreate` alongside `name`/`brief`. `None` means the
+    /// interview was skipped or the app predates it — NOT that the user
+    /// declined. See [`local_apps::AppMcpIntent`].
+    ///
+    /// ⚠️ Unlike `name`/`brief` this is DELIBERATELY outside the native create
+    /// confirmation sheet's rendered set: it grants nothing (create still runs
+    /// no MCP authoring — `create_without_mcp` stays the only create-time MCP
+    /// path), so there is no authorization for the user to answer for here. It
+    /// is a note-to-self carried onto the record for the Settings MCP flow to
+    /// read later. The receipt's "the user already answered for these bytes"
+    /// claim (see `stage_create_after_approval_is_refused_and_cannot_rewrite_the_approved_bytes`) covers the
+    /// bytes the sheet renders; the moment this intent starts GRANTING
+    /// anything, it must be rendered on that sheet before it is committed.
+    mcp_intent: Option<local_apps::AppMcpIntent>,
 }
 
 #[derive(Clone, Debug)]
@@ -205,6 +220,8 @@ struct CreateScaffoldSeed {
     /// the model echoes back into `LocalAppScaffold`. See `CreateProposalContext`.
     name: String,
     brief: String,
+    /// See `CreateProposalContext::mcp_intent`.
+    mcp_intent: Option<local_apps::AppMcpIntent>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2454,6 +2471,30 @@ impl LocalAppsHostBroker {
                 "create_staging_evidence_invalid: staged evidence is missing brief".to_string()
             })?
             .to_string();
+        // WP-MCP-intent: `stage_create` always writes this key, `null` when
+        // no interview ran this call — so a MISSING key (not merely a `null`
+        // value) means staging predates this field or is corrupt, while a
+        // present-but-malformed value is a genuine parse error. Either way
+        // this is the only place a staged intent is read back for the
+        // create-in-progress path, so a silent fallback to `None` here would
+        // let a corrupt or unparsable staged answer quietly turn into
+        // "never asked" on the committed record.
+        let mcp_intent = match staging_evidence.get("mcpIntent") {
+            None => {
+                return Err(
+                    "create_staging_evidence_invalid: staged evidence is missing mcpIntent"
+                        .to_string(),
+                )
+            }
+            Some(Value::Null) => None,
+            Some(value) => Some(
+                serde_json::from_value::<local_apps::AppMcpIntent>(value.clone()).map_err(
+                    |error| {
+                        format!("create_staging_evidence_invalid: staged mcpIntent is malformed: {error}")
+                    },
+                )?,
+            ),
+        };
         let design_path = staging_root.join("design-spec.json");
         let (design_spec, design_spec_sha256) = match std::fs::read(&design_path) {
             Ok(bytes) => {
@@ -2484,6 +2525,7 @@ impl LocalAppsHostBroker {
                         contexts,
                         name,
                         brief,
+                        mcp_intent,
                     });
                 }
                 Err(error) => {
@@ -2520,6 +2562,7 @@ impl LocalAppsHostBroker {
             contexts: create_context.contexts,
             name: create_context.name,
             brief: create_context.brief,
+            mcp_intent: create_context.mcp_intent,
         })
     }
 
@@ -6689,6 +6732,12 @@ impl LocalAppsHostBroker {
             let mut proposed = record.clone();
             proposed.name = name.clone();
             proposed.brief = brief.clone();
+            // WP-MCP-intent: rendered into the formal contract below via
+            // `formal_workspace_contract(proposed, ...)` — same reasoning as
+            // name/brief above: the shell record has no intent yet, so the
+            // contract must read it from the staged candidate, not from
+            // `record`.
+            proposed.mcp_intent = create_seed.mcp_intent.clone();
             if let Some(model) = &workflow_model {
                 proposed.workflow_model = Some(model.clone());
             }
@@ -6705,7 +6754,13 @@ impl LocalAppsHostBroker {
                 self.install_scaffold_dependencies(&service, &app_id, &layout)
                     .await?;
                 service
-                    .commit_scaffold(&app_id, &name, &brief, workflow_model.as_deref())
+                    .commit_scaffold(
+                        &app_id,
+                        &name,
+                        &brief,
+                        workflow_model.as_deref(),
+                        create_seed.mcp_intent.as_ref(),
+                    )
                     .await
                     .map_err(|error| error.to_string())
             }
@@ -7490,6 +7545,23 @@ fn scaffold_next_step_guidance() -> String {
         .into()
 }
 
+/// Render the create-time MCP interview outcome for [`formal_workspace_contract`].
+/// Empty string when the interview never ran — there is nothing to tell the
+/// model about a question that was not asked, and the surrounding contract
+/// reads correctly either way since this is spliced in as its own line.
+fn mcp_intent_contract_line(intent: Option<&local_apps::AppMcpIntent>) -> String {
+    match intent {
+        None => String::new(),
+        Some(local_apps::AppMcpIntent::Declined) => {
+            "MCP intent: asked during creation; the user declined MCP for this app.\n\n".into()
+        }
+        Some(local_apps::AppMcpIntent::Requested { services }) => format!(
+            "MCP intent: asked during creation; the user asked for MCP access to {}.\n\n",
+            services.join(", ")
+        ),
+    }
+}
+
 /// Render the FORMAL workspace contract — the `workspace/LINGXI.md` a
 /// formed app carries, and the twin of [`guided_workspace_contract`].
 ///
@@ -7590,9 +7662,11 @@ fn formal_workspace_contract(
          `build/store/dist/`.\n",
         id = record.id,
     );
+    let mcp_intent_line = mcp_intent_contract_line(record.mcp_intent.as_ref());
     format!(
         "# Local App: {name} ({id})\n\n\
          Brief: {brief}\n\n\
+         {mcp_intent_line}\
          ## Workspace contract\n\
          - This workspace is already bound to local app `{id}`. Treat `{id}` as authoritative; do not call `LocalAppList` or `LocalAppGet` to rediscover or confirm it, and do not call `LocalAppCreate` again.\n\
          - Edit ONLY app-owned files under `app/`, `src/`, `components/`, `lib/`, `styles/`, `public/`.\n\
@@ -7639,6 +7713,7 @@ fn formal_workspace_contract(
         name = record.name,
         id = record.id,
         brief = record.brief,
+        mcp_intent_line = mcp_intent_line,
         setup_path = setup_path,
         build_preview = build_preview,
     )
@@ -7676,7 +7751,23 @@ fn formal_workspace_contract(
 ///   wrong for the one turn that has none — which is why step 1 states the
 ///   exception in the same breath as the tool, rather than leaving a reader to
 ///   reconcile the two.
-/// - step 4 names the create SKILL below, not the build workflow it launches
+/// - step 4 (the MCP interview) grounds its recommendations in
+///   `LocalAppTemplateCatalog`'s `mcpSuggestions` rather than free invention,
+///   and asks with concrete named options rather than a bare "do you want
+///   MCP?" — a yes/no with nothing to say yes TO gives the user nothing to
+///   decide between. It does NOT call `LocalAppStageCreate` itself: staging
+///   is the workflow's own sub-agent call (see below), so this step only
+///   determines the answer and lets it ride the conversation into step 5.
+///   That is why the step asks the model to restate the answer in plain text
+///   instead of promising it a slot to put it in: the ONLY thing that makes
+///   this answer durable is the create skill/workflow passing it to
+///   `LocalAppStageCreate`'s `mcp_intent` argument, and until that wiring
+///   exists the step must not describe a carry-forward mechanism the model
+///   would then have to invent. The create workflow's launch-argument
+///   allowlist rejects unknown keys outright (`unknown external field(s)`),
+///   so a model improvising an `mcp_intent` launch argument would not
+///   silently lose the answer — it would fail the whole create.
+/// - step 5 names the create SKILL below, not the build workflow it launches
 ///   internally. There is no host-initiated launch site for the build
 ///   workflow (the host only auto-starts MCP authoring and resume), so an
 ///   agent that reaches this file can only get to `LocalAppScaffold` through
@@ -7724,14 +7815,23 @@ fn guided_workspace_contract(record: &local_apps::AppRecord) -> String {
          **shape**:\n\
          \u{20}  - `dom` — a multi-screen interface (forms, lists, page navigation)\n\
          \u{20}  - `canvas` — a single drawing surface (games, 3D, visualizations)\n\
-         4. Once the name and shape are confirmed, use the `Skill` tool to start \
+         4. In **ordinary conversational text**, tell the user in one or two sentences what MCP \
+         is and what it would let this specific app do — reach a live external service or data \
+         source it could not reach on its own. Call `LocalAppTemplateCatalog` and read the \
+         `mcpSuggestions` for the template family matching their confirmed shape and what they \
+         described, then turn those into 2-3 concrete named recommendations for THIS app. Use \
+         `AskUserQuestion` to let them pick which of those to set up, or none. Then write their \
+         answer back in one short line of ordinary text — the exact service names they picked, or \
+         that they declined — so the choice is stated plainly in this conversation for step 5 to \
+         read. Nothing is set up now: creating the app never configures MCP.\n\
+         5. Once the name, shape, and MCP choice are confirmed, use the `Skill` tool to start \
          `lingxi-local-app:create-local-app` (the skill is registered only under this \
          plugin-prefixed name; the bare name will not resolve) to continue: it reads \
          `LocalAppRuntimeProfiles` to decide the runtime sub-profile, stages a candidate through \
          the unified create flow, raises one native confirmation, and only then lands \
          `LocalAppScaffold`. Do not call `LocalAppScaffold` yourself — it needs the receipt that \
          flow issues; there is no shortcut around it.\n\
-         5. Re-read this file and continue under the new contract.\n\n\
+         6. Re-read this file and continue under the new contract.\n\n\
          The shape cannot change once it lands, so it must be the user's confirmed choice, never \
          something you decide on their behalf.\n",
         id = record.id,
@@ -8422,6 +8522,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 local_apps::service::MAX_BRIEF_BYTES
             ));
         }
+        let mcp_intent = parse_staged_mcp_intent(&input)?;
         let design_spec = input.get("design_spec").cloned();
         let record = self
             .service()?
@@ -8613,6 +8714,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             "validatedSelectionHandle": handle,
             "name": name,
             "brief": brief,
+            "mcpIntent": mcp_intent,
             "templateId": selection.template_id,
             "dependencyInputSha256": dependency_input_sha256,
             "designSpecSha256": design_spec_sha256,
@@ -10433,6 +10535,53 @@ fn confirmed_field<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
     required_string(input, key)
         .map(str::trim)
         .map_err(|_| format!("invalid_argument: {key} must be a non-empty string"))
+}
+
+/// Parse the optional `mcp_intent` staged alongside `name`/`brief` in
+/// `LocalAppStageCreate`. Absent or `null` means the interview was not run
+/// this call (staged evidence then records `None`, distinct from a staged
+/// `Declined`); present-but-malformed is a caller error, not silently
+/// dropped — `local_apps::AppMcpIntent`'s own `commit_scaffold`-side bounds
+/// still apply later, but a caller that got the SHAPE wrong should hear
+/// about it at staging time, not at scaffold time several steps later.
+fn parse_staged_mcp_intent(input: &Value) -> Result<Option<local_apps::AppMcpIntent>, String> {
+    match input.get("mcp_intent") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let intent: local_apps::AppMcpIntent = serde_json::from_value(value.clone())
+                .map_err(|error| format!("invalid_argument: mcp_intent is malformed: {error}"))?;
+            if let local_apps::AppMcpIntent::Requested { services } = &intent {
+                if services.is_empty() {
+                    return Err(
+                        "invalid_argument: mcp_intent Requested must name at least one service"
+                            .into(),
+                    );
+                }
+                if services.len() > local_apps::service::MAX_MCP_INTENT_SERVICES {
+                    return Err(format!(
+                        "invalid_argument: mcp_intent names {} services (limit {})",
+                        services.len(),
+                        local_apps::service::MAX_MCP_INTENT_SERVICES
+                    ));
+                }
+                for service in services {
+                    if service.trim().is_empty() {
+                        return Err(
+                            "invalid_argument: mcp_intent service name must not be blank".into(),
+                        );
+                    }
+                    if service.len() > local_apps::service::MAX_MCP_INTENT_SERVICE_NAME_BYTES {
+                        return Err(format!(
+                            "invalid_argument: mcp_intent service name is {} bytes (limit {})",
+                            service.len(),
+                            local_apps::service::MAX_MCP_INTENT_SERVICE_NAME_BYTES
+                        ));
+                    }
+                }
+            }
+            Ok(Some(intent))
+        }
+    }
 }
 
 fn required_string<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -12991,7 +13140,7 @@ mod tests {
             .expect("create app");
         seed_launchable_runtime_fixture(root.path(), &record, name);
         service
-            .commit_scaffold(&record.id, name, "a test app", None)
+            .commit_scaffold(&record.id, name, "a test app", None, None)
             .await
             .expect("commit fixture scaffold");
         record.id
@@ -15485,6 +15634,262 @@ mod tests {
             .await
             .expect("promoted tool executes through active contexts");
         assert!(flow_result.get("state").is_some(), "{flow_result}");
+    }
+
+    /// WP-MCP-intent gate: an mcp_intent staged through `LocalAppStageCreate`
+    /// must survive the whole stage → approve → scaffold chain onto the
+    /// COMMITTED record, and the formal contract `LocalAppScaffold` writes
+    /// must carry it — the same shape as
+    /// `unscaffolded_create_uses_single_confirmation_then_scaffolds_builds_and_promotes`'s
+    /// WP5 gate for name/brief, but for the new field.
+    #[tokio::test]
+    async fn staged_mcp_intent_survives_create_and_reaches_the_formal_contract() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sink = MockSink::arc();
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            sink.clone(),
+            Some(runtime.clone()),
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let shell = shell_app_fixture(&broker, &service).await;
+
+        let workflow_run_id = format!("wf_mcp_intent_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "mcp intent staging e2e",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle");
+        const STAGED_NAME: &str = "记账本";
+        const STAGED_BRIEF: &str = "记录日常收支的小工具";
+        let stage = broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": STAGED_NAME,
+                "brief": STAGED_BRIEF,
+                "mcp_intent": {"status": "requested", "services": ["github", "google-drive"]},
+            }))
+            .await
+            .expect("stage create");
+        assert_eq!(stage["ok"], true);
+        write_initial_staging_flow_contexts(&broker, &shell.id, &workflow_run_id, handle);
+        let layout = broker.layout(&shell.id).expect("layout");
+        let manifest = load_manifest(&layout).expect("manifest");
+        let validated = broker
+            .validate_mcp_proposal(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "proposal": initial_mcp_proposal_fixture(&shell.id, manifest.revision),
+            }))
+            .await
+            .expect("validate mcp proposal");
+        let approval_contract_sha256 = validated["approval_contract_sha256"]
+            .as_str()
+            .expect("approval digest")
+            .to_string();
+
+        let approval_task = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            let workflow_run_id = workflow_run_id.clone();
+            async move {
+                broker
+                    .approve_mcp_proposal(json!({
+                        "app_id": app_id,
+                        "workflow_run_id": workflow_run_id,
+                        "approval_contract_sha256": approval_contract_sha256,
+                    }))
+                    .await
+            }
+        });
+        let request = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(request) = sink.events().await.into_iter().find_map(|event| {
+                    if let ClientEvent::AppEvent {
+                        event: AppEventDto::CreateConfirmationRequested { request },
+                    } = event
+                    {
+                        Some(request)
+                    } else {
+                        None
+                    }
+                }) {
+                    break request;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("create confirmation event");
+        assert!(
+            broker
+                .resolve_create_confirmation(&request.request_id, true)
+                .await
+        );
+        let approval = approval_task
+            .await
+            .expect("approval task")
+            .expect("approved");
+        let receipt_id = approval["receipt_id"].as_str().expect("receipt id");
+
+        broker
+            .scaffold_shell_app_value(json!({
+                "app_id": shell.id,
+                "name": STAGED_NAME,
+                "brief": STAGED_BRIEF,
+                "workflow_run_id": workflow_run_id,
+                "receipt_id": receipt_id,
+            }))
+            .await
+            .expect("scaffold from unified create receipt");
+
+        let record = service.record(&shell.id).await.expect("record");
+        assert!(record.scaffolded);
+        assert_eq!(
+            record.mcp_intent,
+            Some(local_apps::AppMcpIntent::Requested {
+                services: vec!["github".to_string(), "google-drive".to_string()]
+            }),
+            "the staged mcp_intent must land on the committed record, not be dropped or genericized"
+        );
+
+        let contract = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
+            .expect("read the formal contract");
+        assert!(
+            contract.contains("MCP intent: asked during creation; the user asked for MCP access to github, google-drive."),
+            "the formal contract must carry the recorded MCP intent: {contract}"
+        );
+    }
+
+    /// Cheap unit-level complement to the e2e gate above: exercises every
+    /// `mcp_intent` shape `formal_workspace_contract` renders — including
+    /// `Declined`, which the full pipeline test above does not cover — without
+    /// paying for a broker/service fixture.
+    #[test]
+    fn mcp_intent_contract_line_covers_every_shape() {
+        assert_eq!(mcp_intent_contract_line(None), "");
+        assert_eq!(
+            mcp_intent_contract_line(Some(&local_apps::AppMcpIntent::Declined)),
+            "MCP intent: asked during creation; the user declined MCP for this app.\n\n"
+        );
+        assert_eq!(
+            mcp_intent_contract_line(Some(&local_apps::AppMcpIntent::Requested {
+                services: vec!["github".to_string(), "google-drive".to_string()]
+            })),
+            "MCP intent: asked during creation; the user asked for MCP access to github, google-drive.\n\n"
+        );
+    }
+
+    /// WP-MCP-intent gate, second state: `Declined` must cross the STAGING
+    /// seam, not just render.
+    ///
+    /// `staged_mcp_intent_survives_create_and_reaches_the_formal_contract`
+    /// stages only `requested`; `commit_scaffold_distinguishes_never_asked_from_declined`
+    /// starts BELOW staging; `mcp_intent_contract_line_covers_every_shape` does
+    /// no serde at all. So nothing proved `{"status":"declined"}` survives
+    /// `parse_staged_mcp_intent` → `evidence.json` → `load_create_proposal_context`.
+    /// Declined is the whole reason this field is not a bool: if it were the one
+    /// shape that failed to round-trip, every declining user would silently
+    /// become "never asked" and be re-prompted forever, and the rest of the
+    /// suite would stay green. This stops at the scaffold seed rather than
+    /// running the full confirmation e2e — the seed is the value
+    /// `scaffold_shell_app_value` commits, and the e2e above already pins the
+    /// seed → record → contract half.
+    #[tokio::test]
+    async fn a_staged_declined_mcp_intent_survives_the_staging_seam() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sink = MockSink::arc();
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            sink.clone(),
+            Some(runtime.clone()),
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let shell = shell_app_fixture(&broker, &service).await;
+
+        let workflow_run_id = format!("wf_mcp_declined_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r2",
+                "reason": "declined mcp intent staging",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle");
+        let stage = broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "fast",
+                "name": "无 MCP 的记账本",
+                "brief": "用户问过 MCP 但拒绝了",
+                "mcp_intent": {"status": "declined"},
+            }))
+            .await
+            .expect("stage create with a declined intent");
+        assert_eq!(stage["ok"], true);
+        write_initial_staging_flow_contexts(&broker, &shell.id, &workflow_run_id, handle);
+
+        let seed = broker
+            .load_create_scaffold_seed(&shell.id, &workflow_run_id)
+            .expect("scaffold seed reads the staged evidence back");
+        assert_eq!(
+            seed.mcp_intent,
+            Some(local_apps::AppMcpIntent::Declined),
+            "a staged `declined` must read back as Declined, never collapse into None \
+             (\"never asked\") — that collapse is what would re-prompt the user forever"
+        );
+        assert_ne!(
+            seed.mcp_intent, None,
+            "asked-and-declined must stay distinguishable from never-asked at the staging seam"
+        );
+        assert_eq!(
+            mcp_intent_contract_line(seed.mcp_intent.as_ref()),
+            "MCP intent: asked during creation; the user declined MCP for this app.\n\n"
+        );
     }
 
     #[tokio::test]

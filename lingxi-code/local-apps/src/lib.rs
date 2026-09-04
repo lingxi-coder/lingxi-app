@@ -117,7 +117,7 @@ pub use runtime_v2::{
 pub use service::{AppService, CreateMode, PLACEHOLDER_APP_NAME};
 pub use state::{runtime_transition_allowed, AppState};
 pub use types::{
-    AppCheckpoint, AppCheckpointKind, AppDependencyRecord, AppDependencyState, AppRecord,
-    AppRuntimeMode, AppRuntimeProfile, AppRuntimeRecord, AppRuntimeState, APPS_SCHEMA_VERSION,
-    DEFAULT_GIT_VERSION_CONTROL,
+    AppCheckpoint, AppCheckpointKind, AppDependencyRecord, AppDependencyState, AppMcpIntent,
+    AppRecord, AppRuntimeMode, AppRuntimeProfile, AppRuntimeRecord, AppRuntimeState,
+    APPS_SCHEMA_VERSION, DEFAULT_GIT_VERSION_CONTROL,
 };

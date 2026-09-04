@@ -144,6 +144,37 @@ impl fmt::Display for AppRuntimeProfile {
     }
 }
 
+/// Outcome of the create-time MCP interview: whether the agent asked the
+/// user, during the requirements interview, if they want MCP services set up
+/// for this app, and if so, what they answered.
+///
+/// THREE states, deliberately not a bool and not a plain list — those two
+/// shapes cannot tell "never asked" apart from "asked and the user said no",
+/// and the Settings flow that later offers MCP authorization needs exactly
+/// that distinction: an app whose record carries `None` here should still be
+/// offered the interview (an old app, or one whose interview skipped this
+/// step), while `Some(Declined)` means it already ran and the user does not
+/// want it repeated on every visit.
+///
+/// - Absent from the record (`None`): never asked.
+/// - [`Self::Declined`]: asked; the user said no.
+/// - [`Self::Requested`]: asked; the user wants these MCP services. `services`
+///   are concrete names drawn from `LocalAppTemplateCatalog`'s
+///   `mcpSuggestions` for the confirmed shape's family, never free text the
+///   agent invented.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AppMcpIntent {
+    /// Asked; the user declined MCP for this app.
+    Declined,
+    /// Asked; the user wants these MCP services set up.
+    Requested {
+        /// Concrete MCP service names, drawn from
+        /// `LocalAppTemplateCatalog`'s `mcpSuggestions`.
+        services: Vec<String>,
+    },
+}
+
 /// One app as listed in `apps/index.json` (and mirrored into the app's
 /// `workspace/.lingxi/app.json`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +192,12 @@ pub struct AppRecord {
     /// mobile workflow launcher reads this from the app-scoped metadata file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_model: Option<String>,
+    /// Outcome of the create-time MCP interview. See [`AppMcpIntent`] —
+    /// `None` means the question was never asked, NOT that the user
+    /// declined; do not conflate the two when deciding whether to offer the
+    /// interview again from Settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_intent: Option<AppMcpIntent>,
     /// Whether Git controls this app's source checkpoints and restores.
     #[serde(default = "default_git_version_control")]
     pub git_enabled: bool,
@@ -325,6 +362,7 @@ mod tests {
             name: "Habits".into(),
             brief: "Track daily habits".into(),
             workflow_model: None,
+            mcp_intent: None,
             git_enabled: true,
             scaffolded: true,
             created_at_ms: 1_700_000_000_000,
@@ -340,8 +378,54 @@ mod tests {
         assert!(json.contains("\"gitEnabled\":true"));
         assert!(json.contains("\"scaffolded\":true"));
         assert!(!json.contains("conversationId"));
+        assert!(
+            !json.contains("mcpIntent"),
+            "a never-asked mcp_intent must be omitted from the wire, not written as null"
+        );
         let back: AppRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back, record);
+    }
+
+    #[test]
+    fn record_round_trips_a_requested_mcp_intent() {
+        let record = AppRecord {
+            id: "abc123".into(),
+            name: "Habits".into(),
+            brief: "Track daily habits".into(),
+            workflow_model: None,
+            mcp_intent: Some(AppMcpIntent::Requested {
+                services: vec!["github".into()],
+            }),
+            git_enabled: true,
+            scaffolded: true,
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_000_001,
+            conversation_id: None,
+            init_session_id: None,
+            workspace_rel: "apps/abc123/workspace".into(),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains(r#""mcpIntent":{"status":"requested","services":["github"]}"#));
+        let back: AppRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, record);
+    }
+
+    #[test]
+    fn a_legacy_record_without_mcp_intent_deserializes_as_never_asked() {
+        let json = r#"{
+            "id": "abc123",
+            "name": "Habits",
+            "brief": "Track daily habits",
+            "scaffolded": true,
+            "createdAtMs": 1,
+            "updatedAtMs": 2,
+            "workspaceRel": "apps/abc123/workspace"
+        }"#;
+        let record: AppRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            record.mcp_intent, None,
+            "a pre-existing record with no mcpIntent key must deserialize as never-asked"
+        );
     }
 
     #[test]

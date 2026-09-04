@@ -1610,7 +1610,7 @@ mod tests {
         )
         .expect("write build receipt");
         service
-            .commit_scaffold(&record.id, &record.name, &record.brief, None)
+            .commit_scaffold(&record.id, &record.name, &record.brief, None, None)
             .await
             .expect("commit formed fixture")
     }

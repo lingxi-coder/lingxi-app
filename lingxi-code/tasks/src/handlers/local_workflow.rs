@@ -381,6 +381,40 @@ fn workflow_fusion_cap_message(cap: u32) -> String {
     format!("Workflow fusion() call cap reached ({cap})")
 }
 
+/// [R4-18] `WorkflowFusionOpts.models` (`fusion()`'s structured `models`
+/// option) is deserialized straight from the caller's JSON with no
+/// emptiness check on either half — unlike the CLI (`/fusion --models`) and
+/// Agent-tool string entrypoints, which both route through
+/// `platform_api::parse_fusion_model_ref` and reject a blank profile/model
+/// up front (`"invalid fusion models entry"`). A workflow script can easily
+/// produce `{profile: cfg.profile ?? "", model: "gpt-5.4"}`; without this
+/// check the blank profile reaches `model_resolver::resolve_custom` and
+/// surfaces as an unrelated `cross-provider fusion is not allowed` (or, for
+/// a blank model, an ``unknown model `<profile>/` `` lookup failure)
+/// instead of a malformed-entry error naming the actual problem. Mirrors
+/// `parse_fusion_model_ref`'s emptiness rule for the already-structured
+/// form — there is no `"profile:model"` string here to re-parse, so the
+/// check is duplicated rather than shared (`FusionModelRef` gives no
+/// on-the-wire string to hand the string-grammar parser).
+fn validate_workflow_fusion_model_ref(model_ref: &FusionModelRef) -> Result<(), FusionError> {
+    if model_ref
+        .profile
+        .as_deref()
+        .is_some_and(|profile| profile.trim().is_empty())
+    {
+        return Err(FusionError::InvalidRequest(format!(
+            "invalid fusion models entry: profile must not be empty (model `{}`)",
+            model_ref.model
+        )));
+    }
+    if model_ref.model.trim().is_empty() {
+        return Err(FusionError::InvalidRequest(
+            "invalid fusion models entry: model must not be empty".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_workflow_fusion_request(
     executor: Option<&Arc<dyn FusionExecutor>>,
     prompt: &str,
@@ -418,6 +452,11 @@ fn parse_workflow_fusion_request(
             FusionError::InvalidRequest(detail)
         }
     })?;
+    if let Some(models) = &opts.models {
+        for model_ref in models {
+            validate_workflow_fusion_model_ref(model_ref)?;
+        }
+    }
     let surface = executor.agent_surface();
     let preset = parse_workflow_fusion_preset(opts.preset.as_deref(), surface.default_preset)?;
     let parent_model = parent_model
@@ -2635,43 +2674,53 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                     }
                 }
                 fusion_calls_seen = fusion_calls_seen.saturating_add(1);
-                let response = match parse_workflow_fusion_request(
-                    fusion.as_ref(),
-                    &call.prompt,
-                    &call.opts_json,
-                    workflow_run_id.as_deref().unwrap_or_default(),
-                    parent_model.as_deref(),
-                    parent_model_profile.as_deref(),
-                ) {
-                    Ok(request) => {
-                        // Chain into the SAME resume cursor `agent()` calls
-                        // advance (`running_key`/`gone_live`), discriminated
-                        // by an out-of-band `"fusion"` field
-                        // (`chain_key_with_discriminator`) folded as its own
-                        // hashed field rather than prepended as text into the
-                        // prompt slot agent() also hashes over — that keeps
-                        // this key space disjoint from agent()'s BY
-                        // CONSTRUCTION, so a fusion() call can never
-                        // journal-cache-collide with an agent() call, even
-                        // one whose prompt happens to be spelled
-                        // "fusion:<the same text>". Every fusion opt
-                        // participates in the key (unlike agent()'s
-                        // fixed-field projection) since `WorkflowFusionOpts`
-                        // has no display-only fields to strip. `key` was
-                        // already computed and `running_key` already advanced
-                        // above, before the cap/budget gates, so both the
-                        // cache lookup and the journal write below reuse it.
-                        let cached = if gone_live {
-                            None
-                        } else {
-                            journal
-                                .as_ref()
-                                .and_then(|j| j.lock().unwrap().get(&key).cloned())
-                        };
-                        if let Some(cached) = cached {
-                            cached
-                        } else {
-                            gone_live = true;
+                // [R4-12] Look the journal up BEFORE re-deriving the request
+                // from LIVE executor state. `parse_workflow_fusion_request`
+                // calls `executor.preflight_error()` (re-validates the
+                // `fusion.*` settings from disk on every call on desktop),
+                // `executor.agent_surface().enabled`, and
+                // `executor.resolve_parent_profile(..)` (fail-closed on an
+                // ambiguous catalog match) — any of which can flip between
+                // the run that journaled this key and a later resume, even
+                // though replaying an already-journaled string needs no
+                // executor at all. R3-16 hoisted `key`/`running_key` above
+                // the cap/budget gates so a refusal still advances the
+                // resume cursor for later calls; this hoists the cache
+                // lookup itself above the live re-derivation for the same
+                // reason — a cache HIT must not be discarded just because
+                // live executor state now rejects a fresh request. Chains
+                // into the SAME resume cursor `agent()` calls advance
+                // (`running_key`/`gone_live`), discriminated by an
+                // out-of-band `"fusion"` field (`chain_key_with_discriminator`)
+                // folded as its own hashed field rather than prepended as
+                // text into the prompt slot agent() also hashes over — that
+                // keeps this key space disjoint from agent()'s BY
+                // CONSTRUCTION, so a fusion() call can never
+                // journal-cache-collide with an agent() call, even one whose
+                // prompt happens to be spelled "fusion:<the same text>".
+                // Every fusion opt participates in the key (unlike agent()'s
+                // fixed-field projection) since `WorkflowFusionOpts` has no
+                // display-only fields to strip.
+                let cached = if gone_live {
+                    None
+                } else {
+                    journal
+                        .as_ref()
+                        .and_then(|j| j.lock().unwrap().get(&key).cloned())
+                };
+                let response = if let Some(cached) = cached {
+                    cached
+                } else {
+                    gone_live = true;
+                    match parse_workflow_fusion_request(
+                        fusion.as_ref(),
+                        &call.prompt,
+                        &call.opts_json,
+                        workflow_run_id.as_deref().unwrap_or_default(),
+                        parent_model.as_deref(),
+                        parent_model_profile.as_deref(),
+                    ) {
+                        Ok(request) => {
                             let inherit = FusionInheritance::new(
                                 SubagentInheritance {
                                     tool_invoker: tool_invoker.clone(),
@@ -2778,8 +2827,8 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                                 }
                             }
                         }
+                        Err(error) => wf_throw(&error.to_string()),
                     }
-                    Err(error) => wf_throw(&error.to_string()),
                 };
                 let _ = call.reply.send(response);
             }

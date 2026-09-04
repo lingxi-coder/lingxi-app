@@ -1336,6 +1336,48 @@ async fn egress_includes_parent_profile_when_synthesis_timed_out_after_being_bil
     );
 }
 
+/// [Round-4 review finding 14] A successful (`Completed`) run's
+/// `egress_profiles` must list only the panels ACTUALLY dispatched. A
+/// panel rejected pre-allocation by the spawner (`error_category ==
+/// Some("spawn")`) never made a provider call — the other two panels'
+/// success still lets the run complete (`min_successful_panels: 2`,
+/// `partial_ok: true`), but including the rejected panel's profile would
+/// falsely tell the caller their prompt reached a provider it never
+/// touched.
+#[tokio::test]
+async fn completed_run_egress_excludes_a_pre_allocation_rejected_panel() {
+    let map = HashMap::from([
+        (
+            "claude-sonnet-5".into(),
+            FakePanel::Report(report("ANSWER_A")),
+        ),
+        (
+            "gpt-5.6-terra".into(),
+            FakePanel::Report(report("ANSWER_B")),
+        ),
+        ("deepseek-v4-pro".into(), FakePanel::SpawnErr),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let result = orch_scripted(spawner, side)
+        .run(request("task"), inherit(), None)
+        .await
+        .expect("2 of 3 panels succeed, min_successful_panels is 2, partial_ok is true");
+    assert_eq!(result.status, FusionStatus::Completed);
+    assert!(
+        !result.egress_profiles.contains(&"deepseek".to_string()),
+        "the spawn-rejected panel's profile must not appear in egress_profiles — it \
+never made a provider call: got {:?}",
+        result.egress_profiles
+    );
+    assert!(
+        result.egress_profiles.contains(&"anthropic".to_string())
+            && result.egress_profiles.contains(&"openai".to_string()),
+        "the two panels that really dispatched must still be reported: got {:?}",
+        result.egress_profiles
+    );
+}
+
 #[tokio::test]
 async fn critical_contradiction_skips_synth() {
     let spawner = FakeSpawner::new(three_ok());
@@ -1486,6 +1528,7 @@ async fn panel_idle_timeout_stops_spawns_that_make_no_progress() {
         "fu_idle",
         std::time::Duration::from_millis(config.panel_total_timeout_ms),
         &None,
+        None,
     )
     .await
     .expect("panel collection");
@@ -1519,6 +1562,7 @@ async fn provider_stream_progress_can_outlive_one_idle_interval_in_total() {
         "fu_heartbeat",
         std::time::Duration::from_millis(config.panel_total_timeout_ms),
         &None,
+        None,
     )
     .await
     .expect("panel collection");
@@ -2509,8 +2553,37 @@ async fn budget_reservation_releases_on_cancel() {
     let err = handle.await.unwrap().unwrap_err();
     assert_eq!(err, platform_api::FusionError::Cancelled);
     settle_spawned_drops().await;
-    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 1);
+    // [Round-4 review findings 1/2/3/19 — cancel path never settles] Before
+    // the fix, a cancel landing while every panel is still hung (mid
+    // fan-out, nothing collected yet) dropped `run_inner`'s future with the
+    // reservation lease still owned by its stack, so
+    // `ReservationLease::drop` only released the hold — the panels' real,
+    // already-in-flight spend was billed to nobody. This is the SAME
+    // 3-Hang-panel fixture `budget_reservation_releases_on_total_timeout`
+    // (right below) already bills via the inner per-panel timeout's
+    // estimate fallback: a cancel must settle identically, not for $0.
+    // `run()`'s outer `Err` arm now commits the coarse pre-panel estimate
+    // latched the instant the lease was acquired
+    // (`estimate_pre_panel_settlement`), which prices exactly one turn of
+    // `panel::panel_prompt` per resolved panel — the same formula, and the
+    // same expected total, as the timeout test below.
+    let per_panel_input_tokens = llm_client::model::count_tokens::approximate_tokens_for_bytes(
+        crate::panel::panel_prompt("task").len() as u64,
+    );
+    let expected_committed = 3 * per_panel_input_tokens;
+    assert_eq!(
+        budget.commit_calls.load(Ordering::SeqCst),
+        1,
+        "a cancel with every panel still in flight must commit the in-flight estimate, \
+not just release the hold for $0"
+    );
+    assert_eq!(
+        budget.committed.lock().unwrap().clone(),
+        vec![expected_committed],
+        "must commit the same in-flight estimate the total-timeout path commits for the \
+identical 3-Hang-panel state"
+    );
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
     assert_reservation_settled_exactly_once(&budget);
 }
 
@@ -2562,6 +2635,245 @@ no longer silently reported as exact $0"
     );
     assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
     assert_reservation_settled_exactly_once(&budget);
+}
+
+/// [Round-4 review findings 1/2/3/19 — cancel path never settles] A cancel
+/// landing AFTER the panel stage has already returned real, billed usage
+/// (mid-analyst-call) must commit that REAL panel spend, not merely the
+/// coarse pre-panel estimate `budget_reservation_releases_on_cancel` above
+/// falls back to when nothing has completed yet. `run_inner` refreshes the
+/// settlement cell with the actual `price_realized_usage` figure the
+/// instant `run_panel_stage` returns (before `check_panel_bar` even runs),
+/// so `run()`'s outer `Err` arm commits the precise 3-panel total here.
+#[tokio::test]
+async fn cancel_mid_analyst_call_commits_the_real_panel_spend_already_billed() {
+    let budget = RecordingBudget::new();
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let side = Arc::new(BlockingSideQuery {
+        stage: BlockingStage::Analysis,
+        started: started.clone(),
+        dropped: dropped.clone(),
+    });
+    let spawner = FakeSpawner::new(three_ok());
+    let orch =
+        FusionOrchestrator::new(spawner, side, Arc::new(test_config()), Arc::new(catalog()))
+            .with_price_book(Arc::new(priced_book()));
+    let cancel = CancellationToken::new();
+    let inherit = inherit_recording_cancel(budget.clone(), cancel.clone());
+    let handle = tokio::spawn(async move { orch.run(request("task"), inherit, None).await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .expect("analyst should start once all 3 panels have billed real usage");
+    cancel.cancel();
+    let err = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("cancelled analyst should unwind")
+        .expect("join")
+        .expect_err("cancelled fusion");
+    assert_eq!(err, platform_api::FusionError::Cancelled);
+    assert!(dropped.load(Ordering::SeqCst));
+    settle_spawned_drops().await;
+
+    assert_eq!(
+        budget.commit_calls.load(Ordering::SeqCst),
+        1,
+        "the 3 panels' real, already-billed usage must be committed, not released for $0"
+    );
+    assert_eq!(
+        budget.committed.lock().unwrap().clone(),
+        vec![36],
+        "3 panels * (8 input + 4 output) tokens at $1/token = 36 nano-USD — the REAL \
+priced panel spend, not the coarser pre-panel estimate"
+    );
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
+    assert_reservation_settled_exactly_once(&budget);
+}
+
+/// [Round-4 rework, item 2] A cancel landing mid-PANEL-FAN-OUT — after some
+/// panels have already reported real, billed usage but BEFORE the whole
+/// panel stage returns `Ok` — must still leave the terminal `Cancelled`
+/// progress event carrying that real usage and the profiles it really
+/// dispatched to, not `None`/empty.
+///
+/// `cancel_mid_analyst_call_commits_the_real_panel_spend_already_billed`
+/// above only stalls the ANALYST (`BlockingSideQuery`), so all 3 panels
+/// there always finish before its cancel lands and it cannot exercise this
+/// window at all. Here one panel is a permanent `FakePanel::Hang`, so the
+/// cancel below lands squarely inside `panel::run_panels`' own fan-out loop,
+/// with the other two panels' real usage already collected.
+///
+/// Before this fix, `realized_tokens`/`resolved_egress` were latched
+/// exactly once in `run_inner`, only after `run_panel_stage(...).await?`
+/// returned — and `panel::run_panels`' own cancel arm discards its whole
+/// `collected` vector (every finished panel's usage) before that line is
+/// ever reached. So this exact scenario used to report zero tokens and no
+/// egress on the terminal `Cancelled` event even though 2 of the 3 panels
+/// here already made a real, billed provider call. See
+/// `panel::RealizedSpendSink`, which now refreshes both cells incrementally
+/// as each panel is collected — see the two `sink.update(&collected)` call
+/// sites in `panel::run_panels`.
+#[tokio::test]
+async fn cancel_mid_panel_fan_out_after_partial_completion_reports_realized_progress() {
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Report(report("A"))),
+        ("gpt-5.6-terra".into(), FakePanel::Report(report("B"))),
+        ("deepseek-v4-pro".into(), FakePanel::Hang),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(spawner, side).with_price_book(Arc::new(priced_book()));
+    let cancel = CancellationToken::new();
+    let inherit = inherit_cancel(cancel.clone());
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<platform_api::FusionProgress>(64);
+    let handle = tokio::spawn(async move { orch.run(request("task"), inherit, Some(tx)).await });
+
+    // Both `Report` panels resolve ~15ms after spawn (`FakeSpawner::spawn`'s
+    // fixed delay); the `Hang` panel never does. Give the two real panels
+    // ample margin to land in `collected` before cancelling squarely inside
+    // the fan-out, with the third still outstanding.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    cancel.cancel();
+    let err = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("cancelled run should unwind promptly")
+        .expect("join")
+        .expect_err("cancelled fusion");
+    assert_eq!(err, platform_api::FusionError::Cancelled);
+    settle_spawned_drops().await;
+
+    let mut terminal_cancelled = None;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event.stage, platform_api::FusionStage::Cancelled) {
+            terminal_cancelled = Some(event);
+        }
+    }
+    let event = terminal_cancelled.expect("a terminal Cancelled progress event");
+    assert!(
+        matches!(event.realized_output_tokens, Some(tokens) if tokens > 0),
+        "2 panels already made a real, billed provider call before the cancel — \
+realized_output_tokens must not be None, got {:?}",
+        event.realized_output_tokens
+    );
+    assert!(
+        matches!(&event.egress_profiles, Some(profiles) if !profiles.is_empty()),
+        "2 panels really dispatched to a provider before the cancel — egress_profiles must \
+not be None/empty, got {:?}",
+        event.egress_profiles
+    );
+}
+
+/// A budget whose `commit_reservation` parks on a `Notify` handshake so a
+/// test can land a cancellation squarely inside the window `finalize_result`
+/// is suspended on `lease.commit(..).await` — after it has already flipped
+/// `finalizing` (and emitted the terminal `Completed` progress stage), but
+/// before `run_inner`'s own future has resolved.
+struct HangingCommitBudget {
+    commit_started: Arc<Notify>,
+    release_commit: Arc<Notify>,
+    commit_calls: AtomicUsize,
+    committed: Mutex<Vec<u64>>,
+}
+
+#[async_trait]
+impl BudgetEnforcerHandle for HangingCommitBudget {
+    async fn check_and_charge(&self, _: u64) -> Result<(), BudgetError> {
+        Ok(())
+    }
+    async fn snapshot_total_nano_usd(&self) -> u64 {
+        0
+    }
+    async fn commit_reservation(
+        &self,
+        _id: BudgetReservationId,
+        actual_nano_usd: u64,
+    ) -> Result<(), BudgetError> {
+        self.commit_started.notify_one();
+        self.release_commit.notified().await;
+        self.commit_calls.fetch_add(1, Ordering::SeqCst);
+        self.committed.lock().unwrap().push(actual_nano_usd);
+        Ok(())
+    }
+}
+
+/// [Round-4 review item 19] A cancellation landing while `finalize_result`
+/// is parked mid-`lease.commit` — i.e. AFTER the terminal `Completed`
+/// progress stage was already emitted — must not make `run()`'s outer
+/// select discard the (about to complete) run and report it `Cancelled`.
+/// Before the `finalizing`-flag guard, the biased `cancel.cancelled()` arm
+/// would win this race unconditionally and `run()` would return
+/// `Err(Cancelled)` for a run that had already committed real spend and
+/// logged `COMPLETED` telemetry.
+#[tokio::test]
+async fn cancel_landing_mid_finalize_commit_does_not_discard_a_completed_run() {
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let (orch, sink) = orch_with_telemetry(spawner, side, test_config()).await;
+
+    let cancel = CancellationToken::new();
+    let commit_started = Arc::new(Notify::new());
+    let release_commit = Arc::new(Notify::new());
+    let budget = Arc::new(HangingCommitBudget {
+        commit_started: commit_started.clone(),
+        release_commit: release_commit.clone(),
+        commit_calls: AtomicUsize::new(0),
+        committed: Mutex::new(Vec::new()),
+    });
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: budget.clone(),
+        },
+        cancel.clone(),
+    );
+    let handle = tokio::spawn(async move { orch.run(request("task"), inherit, None).await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), commit_started.notified())
+        .await
+        .expect("finalize_result should reach lease.commit");
+    // At this point `finalize_result` has already stored `finalizing = true`
+    // and emitted the terminal `Completed` progress stage — well before
+    // this cancellation and this release, in program order on the same
+    // task. Fire both without any ordering guarantee between them: the
+    // fix must be correct regardless of which wakes the task first.
+    cancel.cancel();
+    release_commit.notify_one();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("run should settle")
+        .expect("join")
+        .expect(
+            "a cancel landing after finalize_result already committed must not discard the \
+completed FusionResult",
+        );
+    assert_eq!(result.status, FusionStatus::Completed);
+    assert_eq!(
+        budget.commit_calls.load(Ordering::SeqCst),
+        1,
+        "the lease must still be committed exactly once"
+    );
+
+    let events = sink.events().await;
+    let terminal: Vec<&str> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.name.as_str(),
+                telemetry::tengu::fusion::COMPLETED
+                    | telemetry::tengu::fusion::FAILED
+                    | telemetry::tengu::fusion::CANCELLED
+            )
+        })
+        .map(|event| event.name.as_str())
+        .collect();
+    assert_eq!(
+        terminal,
+        vec![telemetry::tengu::fusion::COMPLETED],
+        "exactly one terminal telemetry event, and it must be COMPLETED — not a CANCELLED \
+event logged over a run that already committed its lease"
+    );
 }
 
 // ── F003 / F004 / F010 (WP3) ────────────────────────────────────────────────
@@ -3064,6 +3376,7 @@ async fn panel_spawn_requests_are_when_done_capped_and_named() {
         "fu_named",
         std::time::Duration::from_millis(config.panel_total_timeout_ms),
         &None,
+        None,
     )
     .await
     .expect("panel collection");
@@ -3138,6 +3451,7 @@ async fn panel_spawn_name_matches_the_post_shuffle_anonymous_id() {
         "fu_named",
         std::time::Duration::from_millis(config.panel_total_timeout_ms),
         &None,
+        None,
     )
     .await
     .expect("panel collection");
@@ -3224,6 +3538,7 @@ async fn provider_requests_reflects_assistant_message_count_not_a_hardcoded_one(
         "fu_count",
         std::time::Duration::from_millis(test_config().panel_total_timeout_ms),
         &None,
+        None,
     )
     .await
     .expect("panel collection");
@@ -3265,6 +3580,7 @@ async fn a_pool_full_spawn_error_aborts_the_still_running_sibling() {
         "fu_early_abort",
         std::time::Duration::from_millis(config.panel_total_timeout_ms),
         &None,
+        None,
     )
     .await
     .expect("panel collection");
@@ -3370,6 +3686,7 @@ async fn early_abort_seals_on_the_callers_effective_partial_ok_not_just_config()
         "fu_partial_ok_early_abort",
         std::time::Duration::from_millis(config.panel_total_timeout_ms),
         &None,
+        None,
     )
     .await
     .expect("panel collection");
@@ -3521,6 +3838,7 @@ async fn a_panel_that_exhausts_its_turn_budget_is_not_reported_as_a_protocol_vio
         "fu_max_turns",
         std::time::Duration::from_millis(test_config().panel_total_timeout_ms),
         &None,
+        None,
     )
     .await
     .expect("panel collection");
@@ -3580,6 +3898,7 @@ async fn a_panicking_panel_task_still_yields_a_slot_instead_of_vanishing() {
         "fu_panic",
         std::time::Duration::from_millis(test_config().panel_total_timeout_ms),
         &None,
+        None,
     )
     .await
     .expect("panel collection");

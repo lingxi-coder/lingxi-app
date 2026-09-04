@@ -287,6 +287,56 @@ impl FusionExecutor for BlockingCancelAwareExecutor {
     }
 }
 
+/// [Round-4 review finding 10] Sends ONE progress event carrying real
+/// `realized_output_tokens`/`egress_profiles` (the shape `run()`'s outer
+/// cancel/timeout `Err` arm emits after real panel spend — see
+/// `fusion::orchestrator::run`), signals `started` once that event is
+/// sent, then blocks on the inherited cancel token before returning
+/// `Err(Cancelled)` — the same production shape `BlockingCancelAwareExecutor`
+/// models, plus the progress payload a real cancelled run would have
+/// already reported before `kill` ever removes the worker record.
+struct RealizedProgressBlockingExecutor {
+    started: StdMutex<Option<oneshot::Sender<()>>>,
+    runs: AtomicUsize,
+}
+
+impl RealizedProgressBlockingExecutor {
+    fn new(started: oneshot::Sender<()>) -> Arc<Self> {
+        Arc::new(Self {
+            started: StdMutex::new(Some(started)),
+            runs: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl FusionExecutor for RealizedProgressBlockingExecutor {
+    async fn run(
+        &self,
+        _request: FusionRequest,
+        inherit: FusionInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        if let Some(tx) = &progress {
+            let _ = tx
+                .send(platform_api::FusionProgress {
+                    message: "panels billed real usage".into(),
+                    stage: platform_api::FusionStage::Analyzing,
+                    panel_id: None,
+                    realized_output_tokens: Some(12),
+                    egress_profiles: Some(vec!["anthropic".into(), "openai".into()]),
+                })
+                .await;
+        }
+        if let Some(tx) = self.started.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        inherit.cancel.cancelled().await;
+        Err(FusionError::Cancelled)
+    }
+}
+
 #[derive(Default)]
 struct CountingCompletionSink(AtomicUsize);
 
@@ -1240,6 +1290,83 @@ async fn kill_while_running_lets_executor_observe_cancellation_and_status_killed
         1,
         "status must reach Killed exactly once; got: {:?}",
         status_sink.calls()
+    );
+}
+
+/// [Round-4 review finding 10] Killing a running `/fusion` whose executor
+/// already reported real, already-billed usage on the progress channel
+/// must still disclose that egress/usage on the terminal `Killed` row —
+/// not silently drop it. `kill` removes the worker record from `workers`
+/// BEFORE firing `cancel` (see `kill`'s own comment), so by the time
+/// `executor.run` returns `Err(Cancelled)`, `finalize_fusion_outcome`'s
+/// `Err(FusionError::Cancelled)` arm — and the `disclose_partial_usage` it
+/// calls — is unreachable through the worker's own `may_finalize` check;
+/// the fix recovers that disclosure on the early-return path instead.
+#[tokio::test]
+async fn kill_discloses_realized_usage_the_progress_channel_already_reported() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let status_sink = Arc::new(RecordingStatusSink::default());
+    let completion_sink = Arc::new(CountingCompletionSink::default());
+    let (started_tx, started_rx) = oneshot::channel();
+    let executor = RealizedProgressBlockingExecutor::new(started_tx);
+    let handler = make_handler(
+        executor.clone(),
+        output_manager,
+        status_sink.clone(),
+        completion_sink,
+    );
+    let ctx = make_ctx(fs);
+
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: "conv".into(),
+            },
+            ctx.clone(),
+        )
+        .await
+        .expect("spawn succeeds");
+
+    started_rx
+        .await
+        .expect("executor must report progress and signal started before blocking");
+
+    handler
+        .kill(&handle.task_id, ctx)
+        .await
+        .expect("kill succeeds");
+
+    // `kill` only waits for the worker's completion signal, which fires
+    // once the worker future is fully dropped — poll briefly for the
+    // disclosure write (`disclose_partial_usage`) that happens just before
+    // that inside the worker's early-return path.
+    for _ in 0..200 {
+        if !status_sink.egress_and_usage().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    let egress_and_usage = status_sink.egress_and_usage();
+    assert!(
+        !egress_and_usage.is_empty(),
+        "the realized egress/usage the executor reported on the progress channel before \
+being killed must still be recorded on the Killed row — got no \
+set_fusion_egress_and_usage calls at all; events so far: {:?}",
+        status_sink.events()
+    );
+    let (_, egress_profiles, usage) = &egress_and_usage[0];
+    assert_eq!(
+        egress_profiles,
+        &vec!["anthropic".to_string(), "openai".to_string()],
+        "must disclose the egress profiles the progress channel already reported"
+    );
+    assert_eq!(
+        usage.as_ref().map(|u| u.subagent_tokens),
+        Some(12),
+        "must disclose the realized tokens the progress channel already reported"
     );
 }
 

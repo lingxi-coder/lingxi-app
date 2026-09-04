@@ -1118,6 +1118,139 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert_eq!(fusion.runs.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    /// [round-4 review, finding 17] `call_fusion` emits `AGENT_COMPLETED_M4_05`
+    /// on a successful run (agent.rs's `Ok` arm) but, before this fix, never
+    /// emitted the matching `AGENT_STARTED` — the pair every OTHER
+    /// successful `Agent(...)` dispatch produces on the same
+    /// `invocation_id` (via `call`'s own `emit_started` call, downstream of
+    /// the Fusion intercept and therefore never reached for `fusion`). A
+    /// dashboard joining started -> completed by `invocation_id`, or
+    /// counting launches-by-type from `AGENT_STARTED`, would see this run's
+    /// completion with no matching start.
+    #[tokio::test]
+    async fn fusion_successful_run_emits_started_before_completed() {
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx_with_bus(spawner, bus).await;
+        let fusion = Arc::new(ScriptedFusion {
+            enabled: true,
+            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        tool.call(
+            serde_json::json!({
+                "description": "deliberate",
+                "prompt": "review this",
+                "subagent_type": "fusion"
+            }),
+            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_tx(),
+        )
+        .await
+        .expect("Completed is Ok");
+
+        let events = sink.events().await;
+        let started: Vec<_> = events.iter().filter(|e| e.name == AGENT_STARTED).collect();
+        let completed: Vec<_> = events
+            .iter()
+            .filter(|e| e.name == AGENT_COMPLETED_M4_05)
+            .collect();
+        assert_eq!(
+            started.len(),
+            1,
+            "exactly one AGENT_STARTED event for the successful Fusion run: {events:?}"
+        );
+        assert_eq!(
+            completed.len(),
+            1,
+            "exactly one AGENT_COMPLETED_M4_05 event: {events:?}"
+        );
+        match started[0].metadata.get("subagent_type") {
+            Some(AnalyticsValue::String(s)) => assert_eq!(s, FUSION_AGENT_TYPE),
+            other => panic!("AGENT_STARTED subagent_type must be \"fusion\": {other:?}"),
+        }
+        // Both events must carry the SAME invocation_id — a real
+        // started -> completed pair a dashboard can join on.
+        let started_id = match started[0].metadata.get("invocation_id") {
+            Some(AnalyticsValue::String(s)) => s.clone(),
+            other => panic!("AGENT_STARTED invocation_id missing: {other:?}"),
+        };
+        let completed_id = match completed[0].metadata.get("invocation_id") {
+            Some(AnalyticsValue::String(s)) => s.clone(),
+            other => panic!("AGENT_COMPLETED_M4_05 invocation_id missing: {other:?}"),
+        };
+        assert_eq!(
+            started_id, completed_id,
+            "AGENT_STARTED and AGENT_COMPLETED_M4_05 must share one invocation_id: {events:?}"
+        );
+    }
+
+    /// [round-4 review, finding 9] The Ok-path spawn-quota release counts
+    /// EVERY panel `result.panels` carries, including ones the orchestrator
+    /// finished with `error_category: Some("spawn")` — a pre-allocation
+    /// spawner rejection where no subagent was ever actually spawned (the
+    /// exact category `dispatched_egress_profiles` and
+    /// `fusion_error_is_preflight` already exclude for the identical
+    /// "did this panel really run" question). A mixed run — 2 panels
+    /// genuinely dispatched, 1 rejected before allocation, `partial_ok`
+    /// still satisfied so the orchestrator returns `Ok` — must release the
+    /// one phantom reservation slot, leaving only the 2 real spawns charged
+    /// against the session's lifetime `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`
+    /// counter. Asserting the QUOTA COUNT (not a result field) is the
+    /// judgment call this finding turns on: the tool result looks identical
+    /// either way, only `get_total_agent_spawns()` reveals the phantom
+    /// charge.
+    #[tokio::test]
+    async fn fusion_ok_result_releases_spawn_rejected_panels_from_the_quota() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner,
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let mut result = sample_fusion_result(platform_api::FusionStatus::Completed);
+        // Panel 3 never reached the subagent spawner (e.g. `PoolFull`) —
+        // the orchestrator still returns `Ok` because `partial_ok` is
+        // satisfied by the other two panels.
+        result.panels[2] = platform_api::PanelOutcome {
+            panel_id: "P3".into(),
+            status: platform_api::PanelRunStatus::Failed,
+            duration_ms: 0,
+            error_category: Some("spawn".into()),
+            error_detail: Some("pool full".into()),
+            usage: None,
+        };
+        let fusion = Arc::new(ScriptedFusion {
+            enabled: true,
+            result,
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        tool.call(
+            serde_json::json!({
+                "description": "deliberate",
+                "prompt": "review this",
+                "subagent_type": "fusion"
+            }),
+            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_tx(),
+        )
+        .await
+        .expect("2 of 3 panels succeeding under partial_ok is Ok");
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            2,
+            "the spawn-rejected panel never reached the spawner and must not \
+             stay charged against the session's lifetime spawn quota"
+        );
+    }
+
     /// F008: `call`'s catalog-lookup dispatch intercepts `subagent_type:
     /// "fusion"` before it ever reaches the `agent_type_deny`/`tools_denied`
     /// checks every other subagent type passes through, so a user's
@@ -2282,6 +2415,188 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             inv[0].request.tool_use_id.as_deref(),
             Some(tid.to_string().as_str()),
             "tool_use_id threaded into the async spawn request"
+        );
+    }
+
+    /// [round-4 review, finding 15] `dispatch_async` — the invoker EVERY
+    /// background `Agent(...)` spawn actually dispatches through — must mark
+    /// its `RegistryToolInvoker` `background_owned`, the same as the
+    /// composition root already does for `local_workflow_invoker` /
+    /// `fusion_invoker`. Without it, a permission ask this background child
+    /// raises is indistinguishable (on the wire, via
+    /// `PermissionCheckContext::background_owned`) from one raised by the
+    /// interactive turn itself, and the TUI wipes it on an unrelated Ctrl-C.
+    /// Verified end to end: pull the REAL `ToolInvoker` handed to
+    /// `spawn_async` out of the mock spawner's recorded invocation, dispatch
+    /// a tool through it, and assert the permission gate it consults sees
+    /// `background_owned: true` on the check context.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn dispatch_async_marks_its_invoker_background_owned() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+
+        /// A no-op tool whose only job is to reach the gate. Not
+        /// `requires_user_interaction`, so dispatch takes the plain
+        /// `check_with_context_or_abort` branch rather than the ASK
+        /// transport.
+        struct NoopTool;
+        static NOOP_SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+            once_cell::sync::Lazy::new(|| serde_json::json!({"type": "object"}));
+        #[async_trait::async_trait]
+        impl Tool for NoopTool {
+            fn name(&self) -> &str {
+                "NoopTool"
+            }
+            fn input_schema(&self) -> &serde_json::Value {
+                &NOOP_SCHEMA
+            }
+            fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+                true
+            }
+            fn max_result_size_chars(&self) -> usize {
+                1024
+            }
+            fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+                true
+            }
+            fn is_read_only(&self, _: &serde_json::Value) -> bool {
+                true
+            }
+            async fn check_permissions(
+                &self,
+                _: &serde_json::Value,
+                _: &ToolUseContext,
+            ) -> PermissionResult {
+                PermissionResult::Allow {
+                    reason: PermissionDecisionReason::Other {
+                        reason: "test".into(),
+                    },
+                    updated_input: None,
+                    update_destination: None,
+                    metadata: PermissionMetadata::default(),
+                }
+            }
+            async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+                "noop".into()
+            }
+            async fn prompt(&self, _: &PromptOptions) -> String {
+                "noop".into()
+            }
+            async fn call(
+                &self,
+                _: serde_json::Value,
+                _: ToolUseContext,
+                _: ToolProgressSender,
+            ) -> Result<ToolCallResult, ToolError> {
+                Ok(ToolCallResult {
+                    data: json!({}),
+                    model_content: None,
+                    new_messages: vec![],
+                    context_modifier: None,
+                    is_error: false,
+                    mcp_meta: None,
+                })
+            }
+        }
+
+        /// Captures `PermissionCheckContext::background_owned` from the one
+        /// dispatch it sees.
+        struct CapturingGate {
+            seen_background_owned: std::sync::Mutex<Option<bool>>,
+        }
+        #[async_trait::async_trait]
+        impl platform_api::permission_gate::PermissionGate for CapturingGate {
+            async fn check(
+                &self,
+                _name: &str,
+                _input: &serde_json::Value,
+            ) -> platform_api::permission_gate::PermissionDecision {
+                platform_api::permission_gate::PermissionDecision::Allow
+            }
+            async fn check_with_context(
+                &self,
+                _name: &str,
+                _input: &serde_json::Value,
+                ctx: &platform_api::permission_gate::PermissionCheckContext,
+            ) -> platform_api::permission_gate::PermissionOutcome {
+                *self.seen_background_owned.lock().unwrap() = Some(ctx.background_owned);
+                platform_api::permission_gate::PermissionOutcome::Allow {
+                    updated_input: None,
+                    permission_updates: Vec::new(),
+                    decision_classification: None,
+                }
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(NoopTool));
+        let registry = Arc::new(registry);
+
+        let spawner = arc_mock_spawner();
+        let mut bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let gate = Arc::new(CapturingGate {
+            seen_background_owned: std::sync::Mutex::new(None),
+        });
+        bctx.permission_gate = Some(gate.clone());
+        let tool = AgentTool::new(bctx);
+
+        tool.call(
+            serde_json::json!({
+                "description": "bg work",
+                "prompt": "go",
+                "run_in_background": true
+            }),
+            fresh_ctx_with_registry(registry),
+            fresh_tx(),
+        )
+        .await
+        .expect("async launch ok");
+
+        // Pull the REAL invoker `dispatch_async` handed to `spawn_async` and
+        // dispatch through it, exactly as the child subagent's runner would.
+        let inv = spawner.invocations();
+        assert_eq!(inv.len(), 1);
+        let invoker = inv[0].inherit.tool_invoker.clone();
+        invoker
+            .invoke(
+                "NoopTool",
+                serde_json::json!({}),
+                platform_api::tool_invoker::SubagentInvocationContext {
+                    parent_agent_id: None,
+                    agent_name: None,
+                    team_name: None,
+                    is_async: true,
+                    is_non_interactive_session: false,
+                    can_show_permission_prompts: false,
+                    cwd: None,
+                    tool_use_id: None,
+                    assistant_message_id: None,
+                    depth: 0,
+                    observer: None,
+                    parent_model: None,
+                    parent_model_profile: None,
+                    mode_override: None,
+                    request_source: None,
+                    frozen_command_denies: Vec::new(),
+                },
+            )
+            .await
+            .expect("noop dispatch ok");
+
+        assert_eq!(
+            *gate.seen_background_owned.lock().unwrap(),
+            Some(true),
+            "dispatch_async's invoker must mark every check background_owned \
+             — otherwise this background child's permission ask is wiped by \
+             Ctrl-C on an unrelated foreground turn"
         );
     }
 

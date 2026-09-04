@@ -2562,18 +2562,24 @@ fn cap_input_bytes(
             .sum()
     };
 
-    // [F009] `history`'s FIRST unit is the caller's seeded task/fork prefix
-    // (`ctx.prompt_messages`, extended onto `history` before the first turn
-    // — see the seeding block above `run_subagent`'s turn loop). A Fusion
-    // panel's entire task text lives in that one unit and nothing
-    // re-injects it on a later turn, so the tail-only fill below must not
-    // silently evict it while a newer unit still fits the budget. Pin it
-    // whenever it fits the budget alone; when it does not (or there is only
-    // one unit total), fall back to the original "keep only what fits,
-    // newest first" behavior so an oversized prefix can still be dropped —
-    // `loop_completed_cumulative_usage_sums_turns_and_reports_real_uncapped_output`'s
-    // "over-budget prefix must be dropped" assertion still exercises that path.
-    let pin_head = units.len() > 1 && unit_bytes(units[0]) <= max;
+    // [F009, round-4 review item 6] `history`'s FIRST unit is the caller's
+    // seeded task/fork prefix (`ctx.prompt_messages`, extended onto
+    // `history` before the first turn — see the seeding block above
+    // `run_subagent`'s turn loop). A Fusion panel's ENTIRE task text lives
+    // in that one unit and nothing re-injects it on a later turn, so the
+    // tail-only fill below must never evict it — including when that one
+    // unit alone is bigger than `max`. Pinning it only when it happened to
+    // fit the budget (the round-3 version of this comment) meant that on
+    // any turn where the lone prompt unit was itself over-budget, the
+    // "keep only what fits, newest-first" tail fallback below dropped it
+    // outright, silently sending a request with NO task from turn 2 onward
+    // — an over-budget task sent whole is strictly better than a request
+    // with no task at all, so the head is pinned unconditionally whenever
+    // there is more than one unit. `tail_budget` still saturates to 0 in
+    // that case, so the tail loop below falls back to its own
+    // `!out.is_empty()` guard and keeps at least the single newest unit on
+    // top of the pinned head.
+    let pin_head = units.len() > 1;
     let head_bytes = if pin_head { unit_bytes(units[0]) } else { 0 };
     let tail_budget = max.saturating_sub(head_bytes);
     let tail_start = usize::from(pin_head);

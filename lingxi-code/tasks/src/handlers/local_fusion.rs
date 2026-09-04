@@ -359,6 +359,27 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
     let (last_realized_output_tokens, last_egress_profiles) =
         forwarder.await.unwrap_or((None, None));
     if !may_finalize {
+        // [Round-4 review finding 10] `kill`/`drain_pending_kills` both
+        // remove this worker's record from `workers` BEFORE firing
+        // `cancel` (see their own comments), so `finalize_fusion_outcome`'s
+        // `Err(FusionError::Cancelled)` arm — and the `disclose_partial_usage`
+        // it calls — can never run for a user-stopped `/fusion`: by the
+        // time `executor.run` returns `Err(Cancelled)` here, the record is
+        // already gone and `may_finalize` is `false`. `kill`/
+        // `drain_pending_kills` still write the terminal `Killed` status
+        // themselves; this call recovers only the disclosure that arm
+        // would otherwise have written — the egress profiles / realized
+        // token usage the forwarder above already latched from the
+        // progress channel before the record was removed. A no-op when
+        // nothing ever egressed (both `last_*` are `None`), matching
+        // `disclose_partial_usage`'s own guard.
+        disclose_partial_usage(
+            &status_sink,
+            &worker_task_id,
+            last_realized_output_tokens,
+            last_egress_profiles,
+        )
+        .await;
         return;
     }
     finalize_fusion_outcome(

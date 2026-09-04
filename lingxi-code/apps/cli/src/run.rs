@@ -2706,7 +2706,7 @@ async fn run_slash_command_with_budget(
                             .await;
                     fusion_result_exit_code(outcome.as_ref())
                 }
-                None => exit_codes::SUCCESS,
+                None => fusion_spawn_failure_exit_code(input, &display),
             }
         }
         // A prompt-expanding command (`/loop`, Markdown/Plugin): run the expanded
@@ -2783,6 +2783,29 @@ fn local_fusion_task_id_to_await<'a>(input: &str, display: &'a str) -> Option<&'
     dispatches_to_fusion_command(input)
         .then(|| pending_local_fusion_task_id(display))
         .flatten()
+}
+
+/// Exit code for a dispatched `/fusion` that produced a `Handled` display
+/// with no task id to await ([`local_fusion_task_id_to_await`] returned
+/// `None`) — i.e. `/fusion` never actually started a `local_fusion` task.
+///
+/// Review finding #11: `TaskRegistry::spawn` failing (`fusion_command.rs`'s
+/// `Err(err) => Done { display: Some(format!("fusion failed to start:
+/// {err}")) }`) used to fall through to `exit_codes::SUCCESS` like every
+/// other `Handled` display, silently contradicting the very contract
+/// [`fusion_result_exit_code`] exists to provide: a script gating on `$?`
+/// could not tell a run that truly never started from one that produced an
+/// answer. A flag/usage rejection (`FUSION_SLASH_USAGE`, `unknown flag
+/// ...`) is left at `SUCCESS` deliberately — that is the pre-existing,
+/// CLI-wide convention for every `Handled` command's argument errors
+/// (`CommandResult::Done` carries no error channel), and special-casing
+/// `/fusion` alone there would be a new inconsistency, not a fix.
+fn fusion_spawn_failure_exit_code(input: &str, display: &str) -> i32 {
+    if dispatches_to_fusion_command(input) && display.starts_with("fusion failed to start: ") {
+        exit_codes::RUNTIME_ERROR
+    } else {
+        exit_codes::SUCCESS
+    }
 }
 
 /// The minimal `local_fusion`-state lookup [`await_local_fusion_result_bounded`]
@@ -6972,6 +6995,44 @@ mod tests {
                 "f1a2b3c4d  quality  same-provider"
             ),
             None
+        );
+    }
+
+    /// Review finding #11: `/fusion` whose `TaskRegistry::spawn` failed
+    /// (`fusion_command.rs`'s `"fusion failed to start: {err}"` display) must
+    /// exit non-zero in print mode — it never started a `local_fusion` task,
+    /// so `local_fusion_task_id_to_await` correctly returns `None`, but the
+    /// `None` arm used to hardcode `exit_codes::SUCCESS` for every such
+    /// display, indistinguishable from a `/fusion` that actually ran and
+    /// answered. A plain flag/usage rejection is deliberately left at
+    /// `SUCCESS`: that is the pre-existing, CLI-wide convention for every
+    /// `Handled` command's argument errors, not something this fix touches.
+    #[test]
+    fn fusion_spawn_failure_exits_non_zero_but_usage_rejection_does_not() {
+        assert_eq!(
+            fusion_spawn_failure_exit_code(
+                "/fusion review this",
+                "fusion failed to start: too few models"
+            ),
+            exit_codes::RUNTIME_ERROR,
+            "a /fusion that never started a task must not exit 0"
+        );
+        assert_eq!(
+            fusion_spawn_failure_exit_code(
+                "/fusion",
+                "Usage: /fusion [--quality|--fast] ... PROMPT"
+            ),
+            exit_codes::SUCCESS,
+            "a usage/flag rejection is the pre-existing CLI-wide convention, not this fix's concern"
+        );
+        // Non-fusion commands never take the RUNTIME_ERROR arm, even if
+        // their display happens to start with the same text.
+        assert_eq!(
+            fusion_spawn_failure_exit_code(
+                "/btw did fusion fail to start?",
+                "fusion failed to start: unrelated collision"
+            ),
+            exit_codes::SUCCESS
         );
     }
 

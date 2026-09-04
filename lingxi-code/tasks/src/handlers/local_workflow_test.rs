@@ -483,6 +483,20 @@ fn workflow_fusion_uses_runtime_preset_and_resolves_a_missing_parent_profile() {
 /// while `agent_surface().enabled` stays `false`.
 struct PreflightRejectedFusionExecutor {
     error: FusionError,
+    // [R4-12] Call counter — a journal-cache hit must replay without ever
+    // invoking `run()`, even when this executor's `preflight_error()` would
+    // reject a freshly-parsed request. Zero-initialized by every existing
+    // caller (`Default`).
+    calls: AtomicU32,
+}
+
+impl Default for PreflightRejectedFusionExecutor {
+    fn default() -> Self {
+        Self {
+            error: FusionError::InvalidConfiguration(String::new()),
+            calls: AtomicU32::new(0),
+        }
+    }
 }
 
 #[async_trait]
@@ -493,6 +507,7 @@ impl FusionExecutor for PreflightRejectedFusionExecutor {
         _inherit: FusionInheritance,
         _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
     ) -> Result<FusionResult, FusionError> {
+        self.calls.fetch_add(1, AtomicOrdering::SeqCst);
         Err(self.error.clone())
     }
 
@@ -511,6 +526,7 @@ impl FusionExecutor for PreflightRejectedFusionExecutor {
 fn workflow_fusion_preflight_error_surfaces_before_the_disabled_gate() {
     let executor: Arc<dyn FusionExecutor> = Arc::new(PreflightRejectedFusionExecutor {
         error: FusionError::InvalidConfiguration("fusion.maxPanel must be between 1 and 12".into()),
+        ..Default::default()
     });
 
     let err = parse_workflow_fusion_request(
@@ -526,6 +542,77 @@ fn workflow_fusion_preflight_error_surfaces_before_the_disabled_gate() {
     assert!(
         matches!(&err, FusionError::InvalidConfiguration(msg) if msg == "fusion.maxPanel must be between 1 and 12"),
         "expected the preflight InvalidConfiguration to pass through unchanged, got {err:?}"
+    );
+}
+
+/// [R4-18] The workflow entry's structured `models` option
+/// (`WorkflowFusionOpts.models`) bypasses the shared
+/// `platform_api::parse_fusion_model_ref` the CLI (`/fusion --models`) and
+/// Agent-tool string entrypoints both route through. Without an emptiness
+/// check on the already-structured form, `{profile: "", model: "gpt-5.4"}`
+/// used to reach `model_resolver::resolve_custom` unrejected and surface as
+/// an unrelated `CrossProviderDenied`, and `{model: ""}` as an ``unknown
+/// model `<profile>/` `` lookup failure — instead of the accurate
+/// malformed-entry error the string entrypoints give for the equivalent
+/// `":gpt-5.4"` / `"profile:"`.
+#[test]
+fn workflow_fusion_rejects_an_empty_profile_or_model_in_the_structured_models_option() {
+    let executor: Arc<dyn FusionExecutor> = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        },
+        3,
+        Ok(workflow_fusion_result()),
+    );
+
+    let empty_profile_err = parse_workflow_fusion_request(
+        Some(&executor),
+        "pick one",
+        r#"{"models":[{"profile":"","model":"gpt-5.4"}]}"#,
+        "wf_fusion",
+        Some("gpt-5.4"),
+        Some("openai"),
+    )
+    .expect_err(
+        "an empty profile must be rejected as a malformed models entry, \
+         not silently reach cross-provider resolution",
+    );
+    assert!(
+        matches!(&empty_profile_err, FusionError::InvalidRequest(msg) if msg.contains("invalid fusion models entry")),
+        "expected a malformed-entry InvalidRequest, got {empty_profile_err:?}"
+    );
+
+    let empty_model_err = parse_workflow_fusion_request(
+        Some(&executor),
+        "pick one",
+        r#"{"models":[{"model":""}]}"#,
+        "wf_fusion",
+        Some("gpt-5.4"),
+        Some("openai"),
+    )
+    .expect_err("an empty model must be rejected as a malformed models entry");
+    assert!(
+        matches!(&empty_model_err, FusionError::InvalidRequest(msg) if msg.contains("invalid fusion models entry")),
+        "expected a malformed-entry InvalidRequest, got {empty_model_err:?}"
+    );
+
+    // A well-formed entry must still parse through unaffected.
+    let ok = parse_workflow_fusion_request(
+        Some(&executor),
+        "pick one",
+        r#"{"models":[{"profile":"openai","model":"gpt-5.4"}]}"#,
+        "wf_fusion",
+        Some("gpt-5.4"),
+        Some("openai"),
+    )
+    .expect("a well-formed models entry must still parse");
+    assert_eq!(
+        ok.models,
+        Some(vec![FusionModelRef {
+            profile: Some("openai".into()),
+            model: "gpt-5.4".into(),
+        }])
     );
 }
 
@@ -2490,6 +2577,77 @@ async fn workflow_fusion_resume_hits_the_journal_and_never_calls_the_executor() 
     assert!(
         executor.seen.lock().unwrap().is_empty(),
         "a journal-cache hit must never dispatch to the executor"
+    );
+}
+
+/// [R4-12] A journaled fusion() result must still replay on resume when the
+/// LIVE executor's state has changed enough that a FRESHLY-PARSED request
+/// would now be rejected before ever reaching `run()` — e.g. the user
+/// edited `fusion.*` settings between the run that journaled this key and
+/// the resume, and `preflight_error()` now returns
+/// `Some(InvalidConfiguration)`. R3-16 fixed only the sibling half of this
+/// (a REFUSAL still advances the resume cursor); the cache lookup itself
+/// must not sit behind `parse_workflow_fusion_request`'s live
+/// re-derivation, since replaying an already-journaled string needs no
+/// executor at all. Judged by REPLAY, not by inspecting `preflight_error()`
+/// — the executor's own call counter must stay at 0.
+#[tokio::test]
+async fn workflow_fusion_resume_replays_the_journal_even_when_the_live_executor_would_now_reject_a_fresh_request()
+{
+    let executor = Arc::new(PreflightRejectedFusionExecutor {
+        error: FusionError::InvalidConfiguration(
+            "fusion.totalTimeoutMs exceeds the sum of its stage timeouts".into(),
+        ),
+        ..Default::default()
+    });
+    let cached_result = serde_json::to_string(&workflow_fusion_result()).unwrap();
+    let key = fusion_chain_key(
+        "",
+        "review this",
+        &normalize_fusion_opts_for_chain_key("{}"),
+    );
+    let journal = Arc::new(StdMutex::new(HashMap::from([(
+        key,
+        cached_result.clone(),
+    )])));
+    let outcome = run_workflow_script_with_live_updates_and_fusion(
+        "return await fusion('review this');",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        "",
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        Some(journal),
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        CancellationToken::new(),
+        Some(executor.clone()),
+        Some("wf_fusion".into()),
+        Some("gpt-5.4".into()),
+        Some("openai".into()),
+        None,
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect(
+        "a journaled fusion() result must replay even though a fresh \
+         request would be preflight-rejected",
+    );
+    assert_eq!(outcome.result.as_deref(), Some(cached_result.as_str()));
+    assert_eq!(
+        executor.calls.load(AtomicOrdering::SeqCst),
+        0,
+        "a journal-cache hit must never call the executor, even one whose \
+         preflight_error() would reject a freshly-parsed request"
     );
 }
 

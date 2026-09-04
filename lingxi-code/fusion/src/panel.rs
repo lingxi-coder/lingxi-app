@@ -1,7 +1,9 @@
 //! Parallel Fusion panel execution via [`platform_api::SubagentSpawner`].
 
+use crate::budget::FusionPriceBook;
 use crate::config::FusionRuntimeConfig;
-use crate::model_resolver::ResolvedPanel;
+use crate::model_resolver::{ModelSource, ResolvedPanel};
+use crate::orchestrator::price_realized_usage;
 use crate::progress;
 use platform_api::subagent_output_guard::sanitize_blocks;
 use platform_api::subagent_spawn::{
@@ -15,11 +17,107 @@ use platform_api::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
+
+/// [Round-4 rework, item 2] Live sink for a panel stage's realized spend,
+/// updated by `run_panels` after EVERY panel reaches a terminal outcome
+/// (not just once, after the whole stage returns `Ok`). Bundles the three
+/// survives-a-drop cells `run()`/`run_inner` already thread through the
+/// orchestrator (see their own field docs) with everything
+/// `price_realized_usage` needs to price what has ACTUALLY completed so
+/// far, so a cancel landing mid-fan-out — after some panels finished with
+/// real, billed usage but before the stage as a whole resolves — still
+/// leaves the cells holding that real data instead of `None`/the coarse
+/// pre-panel estimate latched before any panel was even dispatched. Every
+/// field mirrors a `price_realized_usage` parameter naming an analyst/synth
+/// call that has provably not happened yet at this point in the run (the
+/// panel stage always precedes `analyze_and_decide`), so `update` always
+/// passes `analyst_usage: None`, `analyst_attempted: false`,
+/// `synth_usage: None`, `synth_attempted: false` — exactly the same
+/// arguments `run_inner`'s own `check_panel_bar`-failure arm uses.
+pub struct RealizedSpendSink<'a> {
+    pub realized_tokens: &'a Arc<Mutex<Option<u64>>>,
+    pub resolved_egress: &'a Arc<Mutex<Option<Vec<String>>>>,
+    pub settlement: &'a Arc<Mutex<Option<(u64, bool)>>>,
+    pub catalog: &'a dyn ModelSource,
+    pub prices: &'a dyn FusionPriceBook,
+    pub analyst: &'a ResolvedPanel,
+    pub parent_profile: &'a str,
+    pub parent_model: &'a str,
+    pub request_prompt: &'a str,
+}
+
+impl RealizedSpendSink<'_> {
+    /// Refresh all three cells from whatever has been collected so far.
+    /// Called from inside `run_panels`' collection loop after every push to
+    /// `collected` — see the two call sites below — so the cells are never
+    /// more than one panel-completion stale when a cancel drops the whole
+    /// future and discards `collected` itself.
+    fn update(&self, collected: &[(usize, PanelInternal)]) {
+        if let Ok(mut guard) = self.realized_tokens.lock() {
+            *guard = Some(realized_output_tokens_so_far(collected));
+        }
+        if let Ok(mut guard) = self.resolved_egress.lock() {
+            *guard = dispatched_profiles_so_far(collected);
+        }
+        if let Ok(mut guard) = self.settlement.lock() {
+            // `price_realized_usage` prices a `&[PanelInternal]`, not the
+            // `(index, PanelInternal)` pairs `collected` holds — a small
+            // clone of whatever has finished so far (never more than
+            // `total` panels) is cheap next to the provider round-trips
+            // that produced them.
+            let priced_so_far: Vec<PanelInternal> =
+                collected.iter().map(|(_, panel)| panel.clone()).collect();
+            *guard = Some(price_realized_usage(
+                self.catalog,
+                self.prices,
+                &priced_so_far,
+                self.analyst,
+                None,
+                false,
+                self.parent_profile,
+                self.parent_model,
+                None,
+                false,
+                self.request_prompt,
+            ));
+        }
+    }
+}
+
+/// `output_tokens` across every panel collected so far — the same field
+/// `run_inner`'s post-stage refresh reads off `aggregate_panel_usage`, just
+/// computed incrementally over `run_panels`' own in-progress `collected`
+/// rather than once over the finished, sorted `Vec<PanelInternal>`.
+fn realized_output_tokens_so_far(collected: &[(usize, PanelInternal)]) -> u64 {
+    collected
+        .iter()
+        .filter_map(|(_, panel)| panel.usage.as_ref())
+        .fold(0_u64, |acc, usage| acc.saturating_add(usage.output_tokens))
+}
+
+/// Mirrors `orchestrator::dispatched_egress_profiles`'s exact filter
+/// (every panel except a pre-allocation `"spawn"` rejection — the one
+/// category provably reached before any provider call) and `None`-vs-empty
+/// contract, computed over `run_panels`' own in-progress `collected` instead
+/// of the finished `Vec<PanelInternal>` `run_inner` aggregates post-stage.
+fn dispatched_profiles_so_far(collected: &[(usize, PanelInternal)]) -> Option<Vec<String>> {
+    let mut profiles: Vec<String> = collected
+        .iter()
+        .filter(|(_, panel)| panel.error_category.as_deref() != Some("spawn"))
+        .map(|(_, panel)| panel.profile.clone())
+        .collect();
+    if profiles.is_empty() {
+        return None;
+    }
+    profiles.sort();
+    profiles.dedup();
+    Some(profiles)
+}
 
 /// Host-side view of one panel after `JoinSet` collection (pre-anonymization).
 #[derive(Debug, Clone)]
@@ -279,6 +377,12 @@ pub async fn run_panels(
     run_id: &str,
     overall_deadline: Duration,
     progress: &Option<Sender<FusionProgress>>,
+    // [Round-4 rework, item 2] `None` in tests that don't exercise the
+    // survives-a-drop cells; `Some` from `FusionOrchestrator::run_panel_stage`
+    // on every real run, so a cancel landing mid-fan-out — see the two
+    // `sink.update(&collected)` call sites below — still leaves them
+    // holding whatever finished before it did. See `RealizedSpendSink`.
+    sink: Option<&RealizedSpendSink<'_>>,
 ) -> Result<Vec<PanelInternal>, FusionError> {
     let schema = serde_json::to_string(&panel_report_json_schema()).unwrap_or_default();
     let total = panels.len();
@@ -357,6 +461,15 @@ pub async fn run_panels(
                             failed += 1;
                         }
                         collected.push((index, internal));
+                        // [Round-4 rework, item 2] Refresh the survives-a-drop
+                        // cells with this panel's real usage/egress/spend
+                        // BEFORE the next `cancel.cancelled()` poll of this
+                        // same `select!` can win the race — otherwise a
+                        // cancel landing right after this panel's own
+                        // completion would still see stale (or `None`) cells.
+                        if let Some(sink) = sink {
+                            sink.update(&collected);
+                        }
                         // F005: fan out ONE `RunningPanels{completed,total}`
                         // event per finished panel (not just once at 0/total
                         // before the stage starts) so the longest stage of a
@@ -385,6 +498,13 @@ pub async fn run_panels(
                             );
                             failed += 1;
                             collected.push((index, internal));
+                            // [Round-4 rework, item 2] Same incremental
+                            // refresh as the completed-panel arm above — a
+                            // panicked/aborted slot still needs to be
+                            // reflected before the next cancel poll.
+                            if let Some(sink) = sink {
+                                sink.update(&collected);
+                            }
                             emit_running_panels(progress, index, collected.len(), total);
                         }
                     }
@@ -605,6 +725,24 @@ fn finish_panel(
             internal.error_detail = Some(sanitize_detail(&reason));
             internal.usage = Some(usage_from_failed_subagent(&usage));
         }
+        PanelFinish::Done(SubagentResult::Failed { reason, usage, .. })
+            if is_structured_retry_cap_exceeded_reason(&reason) =>
+        {
+            // [Round-4 review item 16] `agent/src/runner.rs` has a SECOND
+            // schema-contract failure, distinct from
+            // `is_missing_structured_output_reason` above: the model DID call
+            // `StructuredOutput`, but every one of `structured_retry_cap`
+            // attempts failed schema validation. Left unrecognized this fell
+            // through to the generic `"provider"` arm below, telling the
+            // operator the *provider* failed when the panel's own output
+            // never matched the schema — a distinct cause from
+            // `"no_structured_output"` (which means the model never called
+            // `StructuredOutput` at all) and from a genuine provider error,
+            // so it gets its own category rather than folding into either.
+            internal.error_category = Some("schema_retry_exhausted".into());
+            internal.error_detail = Some(sanitize_detail(&reason));
+            internal.usage = Some(usage_from_failed_subagent(&usage));
+        }
         PanelFinish::Done(SubagentResult::Failed { reason, usage, .. }) => {
             internal.error_category = Some("provider".into());
             internal.error_detail = Some(sanitize_detail(&reason));
@@ -652,7 +790,30 @@ fn finish_panel(
                         internal.report = Some(report);
                     }
                     Err(category) => {
-                        internal.error_category = Some(category);
+                        // [Round-4 review item 5] `usage_complete: false` is
+                        // ONLY ever set by the runner's CC 2.1.207
+                        // `api_error_partial` salvage arm
+                        // (`agent::runner::build_recovered_result`, taken when
+                        // a mid-stream provider rate-limit/overload/transport
+                        // error cuts a turn off after the panel has already
+                        // produced some text). That shape has none of
+                        // `PanelReport`'s required fields, so
+                        // `parse_and_sanitize` always returns `Err("protocol")`
+                        // for it — reporting a provider-side connection drop
+                        // as "the panel returned a malformed report" and
+                        // silently dropping the "Agent terminated early due to
+                        // an API error: …" text the runner already carried in
+                        // the first block of `content`. Recover it here so the
+                        // operator (and `tengu.fusion` telemetry) see the real
+                        // cause instead of a generic parse failure.
+                        let cutoff_detail =
+                            (!usage_complete).then(|| api_error_cutoff_detail(&content)).flatten();
+                        if let Some(detail) = cutoff_detail {
+                            internal.error_category = Some("provider_cutoff".into());
+                            internal.error_detail = Some(sanitize_detail(&detail));
+                        } else {
+                            internal.error_category = Some(category);
+                        }
                     }
                 }
             }
@@ -691,6 +852,30 @@ fn max_turns_exhausted_detail(content: &Value) -> Option<String> {
     })
 }
 
+/// [Round-4 review item 5] Extract the human-readable cause from the
+/// runner's CC 2.1.207 `api_error_partial` salvage shape
+/// (`agent::runner::build_recovered_result`):
+/// `{"content":[{"type":"text","text": cutoff_note}, ...], "text":…,
+/// "stop_reason":null}` where `cutoff_note` is
+/// `agent::runner::build_cutoff_note`'s byte-locked
+/// `"Agent terminated early due to an API error: {api_error_text}\n\n\
+/// Everything below is PARTIAL output…"` text, always the FIRST block
+/// (`build_recovered_result` inserts it at index 0). Returns just the
+/// `{api_error_text}` line — trimmed of the boilerplate that follows the
+/// blank-line separator — or `None` when `content` doesn't match this exact
+/// shape (so a caller can fall back to the generic "protocol" category
+/// instead of fabricating a cause for an unrelated malformed report).
+fn api_error_cutoff_detail(content: &Value) -> Option<String> {
+    let first_text = content
+        .get("content")?
+        .as_array()?
+        .first()?
+        .get("text")?
+        .as_str()?;
+    let cause = first_text.strip_prefix("Agent terminated early due to an API error: ")?;
+    Some(cause.split("\n\n").next().unwrap_or(cause).trim().to_string())
+}
+
 fn is_query_watchdog_timeout(reason: &str) -> bool {
     reason.starts_with(SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX)
 }
@@ -705,6 +890,20 @@ fn is_query_watchdog_timeout(reason: &str) -> bool {
 /// `"provider"`.
 fn is_missing_structured_output_reason(reason: &str) -> bool {
     reason == "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)"
+}
+
+/// [Round-4 review item 16] The runner's other schema-contract `Failed`
+/// reason (`agent/src/runner.rs`'s `force_structured_tool.is_some() &&
+/// structured_result.is_none() && structured_failed_count >=
+/// structured_retry_cap` guard): the model called `StructuredOutput`
+/// `structured_retry_cap` times and every call failed schema validation, so
+/// the loop gives up rather than exhausting its turn budget. The prefix
+/// (not full-string `==`) is deliberate: the byte-locked format embeds the
+/// live `structured_retry_cap`/`structured_failed_count`/pluralized-"call(s)"
+/// values after this point, so a full match would silently stop matching the
+/// moment either counter changed.
+fn is_structured_retry_cap_exceeded_reason(reason: &str) -> bool {
+    reason.starts_with("agent({schema}): StructuredOutput retry cap (")
 }
 
 fn usage_from_subagent(
@@ -1239,6 +1438,215 @@ usage_from_failed_subagent), not a prompt-length estimate"
 }
 
 #[cfg(test)]
+mod structured_retry_cap_exceeded_tests {
+    use super::*;
+    use platform_api::{PanelRunStatus, SubagentUsage};
+
+    fn panel() -> ResolvedPanel {
+        ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "sonnet".into(),
+        }
+    }
+
+    /// [Round-4 review item 16] `agent/src/runner.rs` has a SECOND
+    /// schema-contract `Failed` reason distinct from
+    /// `is_missing_structured_output_reason`: the model called
+    /// `StructuredOutput` `structured_retry_cap` times and every call failed
+    /// schema validation. Before this fix that string fell through to the
+    /// generic `"provider"` arm, telling the operator the *provider* failed
+    /// when the panel's own output never matched the schema.
+    #[test]
+    fn retry_cap_exceeded_is_not_mislabeled_provider() {
+        let usage = SubagentUsage {
+            total_tokens: 900,
+            input_tokens: 700,
+            output_tokens: 200,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            reasoning_output_tokens: 0,
+        };
+        let internal = finish_panel(
+            0,
+            panel(),
+            "panel prompt".into(),
+            Duration::from_secs(5),
+            PanelFinish::Done(SubagentResult::Failed {
+                agent_id: protocol::AgentId::new(),
+                reason: "agent({schema}): StructuredOutput retry cap (5) exceeded \u{2014} 5 \
+failed calls with no valid output"
+                    .to_string(),
+                usage,
+            }),
+        );
+        assert_eq!(internal.status, PanelRunStatus::Failed);
+        assert_eq!(
+            internal.error_category.as_deref(),
+            Some("schema_retry_exhausted"),
+            "a StructuredOutput retry-cap exhaustion is the PANEL's own output repeatedly \
+failing schema validation, not a provider failure — it must not be labelled \"provider\" \
+(the misattribution this fix removes), and it is not \"no_structured_output\" either since \
+the model DID call StructuredOutput, just never validly"
+        );
+        assert_eq!(
+            internal.error_detail.as_deref(),
+            Some(
+                "agent({schema}): StructuredOutput retry cap (5) exceeded \u{2014} 5 failed \
+calls with no valid output"
+            ),
+        );
+        let priced = internal
+            .usage
+            .expect("real, already-billed spend from turns before the cap fired must be priced");
+        assert_eq!(priced.input_tokens, 700);
+    }
+
+    /// The single-call singular ("1 failed call") variant must match too —
+    /// the recognizer is a prefix match, not tied to a specific count.
+    #[test]
+    fn retry_cap_exceeded_singular_call_also_recognized() {
+        let internal = finish_panel(
+            0,
+            panel(),
+            "panel prompt".into(),
+            Duration::from_secs(1),
+            PanelFinish::Done(SubagentResult::Failed {
+                agent_id: protocol::AgentId::new(),
+                reason: "agent({schema}): StructuredOutput retry cap (1) exceeded \u{2014} 1 \
+failed call with no valid output"
+                    .to_string(),
+                usage: SubagentUsage::default(),
+            }),
+        );
+        assert_eq!(
+            internal.error_category.as_deref(),
+            Some("schema_retry_exhausted")
+        );
+    }
+}
+
+#[cfg(test)]
+mod api_error_cutoff_tests {
+    use super::*;
+    use platform_api::{PanelRunStatus, SubagentUsage};
+
+    fn panel() -> ResolvedPanel {
+        ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "sonnet".into(),
+        }
+    }
+
+    /// The runner's `build_recovered_result` shape, exactly as
+    /// `agent::runner::build_cutoff_note` + `build_recovered_result` emit it
+    /// for the CC 2.1.207 `api_error_partial` salvage path.
+    fn salvaged_completed(api_error_text: &str) -> SubagentResult {
+        let cutoff_note = format!(
+            "Agent terminated early due to an API error: {api_error_text}\n\n\
+Everything below is PARTIAL output recovered from the agent before it was cut off. The agent \
+did NOT finish its task \u{2014} treat these results as incomplete."
+        );
+        SubagentResult::Completed {
+            agent_id: protocol::AgentId::new(),
+            content: serde_json::json!({
+                "content": [{"type": "text", "text": cutoff_note}],
+                "text": cutoff_note,
+                "stop_reason": serde_json::Value::Null,
+            }),
+            usage: SubagentUsage {
+                total_tokens: 900,
+                input_tokens: 700,
+                output_tokens: 200,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                reasoning_output_tokens: 0,
+            },
+            total_tool_use_count: 1,
+            total_duration_ms: 1,
+            total_tokens: 900,
+            assistant_message_count: 2,
+            response_char_count: 1,
+            last_request_id: None,
+            cumulative_usage: SubagentUsage {
+                total_tokens: 900,
+                input_tokens: 700,
+                output_tokens: 200,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                reasoning_output_tokens: 0,
+            },
+            // The defect's precondition: this is the ONLY production path
+            // that ever sets `usage_complete: false` on a `Completed` event.
+            usage_complete: false,
+        }
+    }
+
+    /// [Round-4 review item 5] A panel cut off mid-stream by a provider
+    /// rate-limit/overload/connection-drop after producing at least one
+    /// assistant text block takes the runner's `api_error_partial` salvage
+    /// arm, which emits `Completed{ usage_complete: false, .. }` with a
+    /// content shape that has none of `PanelReport`'s required fields.
+    /// Before this fix, `parse_and_sanitize` always failed that shape with
+    /// the generic `"protocol"` category and NO detail — reporting a
+    /// provider-side connection drop as "the panel returned a malformed
+    /// report" and discarding the "Agent terminated early due to an API
+    /// error: …" text the runner already carried.
+    #[test]
+    fn salvaged_api_error_is_reported_as_provider_cutoff_with_detail() {
+        let internal = finish_panel(
+            0,
+            panel(),
+            "panel prompt".into(),
+            Duration::from_secs(5),
+            PanelFinish::Done(salvaged_completed(
+                "Connection closed mid-response. The response above may be incomplete.",
+            )),
+        );
+        assert_eq!(internal.status, PanelRunStatus::Failed);
+        assert_eq!(
+            internal.error_category.as_deref(),
+            Some("provider_cutoff"),
+            "a provider-side mid-stream cutoff must not be labelled \"protocol\" — that says \
+\"the panel's own output was malformed\", which is a different cause entirely"
+        );
+        assert_eq!(
+            internal.error_detail.as_deref(),
+            Some("Connection closed mid-response. The response above may be incomplete."),
+            "the runner's API-error cause text must survive into error_detail instead of \
+being silently discarded"
+        );
+    }
+
+    /// A genuinely malformed `PanelReport` (the model just emitted broken
+    /// JSON, `usage_complete: true`) must still take the generic
+    /// `"protocol"` path — this fix must not over-match every parse failure.
+    #[test]
+    fn malformed_report_with_complete_usage_still_reports_protocol() {
+        let internal = finish_panel(
+            0,
+            panel(),
+            "panel prompt".into(),
+            Duration::from_secs(1),
+            PanelFinish::Done(SubagentResult::Completed {
+                agent_id: protocol::AgentId::new(),
+                content: serde_json::json!({"not": "a valid panel report"}),
+                usage: SubagentUsage::default(),
+                total_tool_use_count: 0,
+                total_duration_ms: 1,
+                total_tokens: 0,
+                assistant_message_count: 1,
+                response_char_count: 1,
+                last_request_id: None,
+                cumulative_usage: SubagentUsage::default(),
+                usage_complete: true,
+            }),
+        );
+        assert_eq!(internal.error_category.as_deref(), Some("protocol"));
+        assert_eq!(internal.error_detail, None);
+    }
+}
+
+#[cfg(test)]
 mod panel_stall_timeout_clamp_tests {
     use super::*;
 
@@ -1391,6 +1799,7 @@ mod panels_dispatched_emission_tests {
                 "run-id",
                 Duration::from_secs(60),
                 &progress,
+                None,
             )
             .await
         });

@@ -2188,9 +2188,15 @@ async fn loop_completed_cumulative_usage_sums_turns_and_reports_real_uncapped_ou
     let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
     ctx.max_output_tokens_per_turn = Some(8);
     ctx.max_input_bytes_per_turn = Some(64);
+    // [Round-4 review item 6] The FIRST prompt unit is now pinned
+    // unconditionally (never dropped, even over-budget — see
+    // `cap_input_bytes`), so it must be the short one here; the oversized
+    // one is the SECOND message so this test still exercises "an
+    // over-budget non-head unit gets dropped" rather than the now-retired
+    // "the head gets dropped when it doesn't fit" behavior.
     ctx.prompt_messages = vec![
-        ConversationMessage::user(MessageId::new(), "x".repeat(200)),
         ConversationMessage::user(MessageId::new(), "keep-me".into()),
+        ConversationMessage::user(MessageId::new(), "x".repeat(200)),
     ];
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
@@ -2225,7 +2231,11 @@ async fn loop_completed_cumulative_usage_sums_turns_and_reports_real_uncapped_ou
     let joined = format!("{last:?}");
     assert!(
         !joined.contains(&"x".repeat(200)),
-        "over-budget prefix must be dropped before the API call"
+        "an over-budget non-head unit must still be dropped before the API call"
+    );
+    assert!(
+        joined.contains("keep-me"),
+        "the pinned head unit must survive trimming: {joined}"
     );
     assert!(!last.is_empty(), "at least the newest message is retained");
 }
@@ -5024,5 +5034,106 @@ fn cap_input_bytes_pins_the_task_prompt_when_tool_results_crowd_it_out() {
         "the OLDER, over-budget tool-result pair must still be dropped — a \
          `cap_input_bytes` that just returned the whole history unchanged \
          would also contain TASK-MARKER, so this must go red on its own"
+    );
+}
+
+/// [Round-4 review item 6] The prior fix above only pinned the task prompt
+/// when it happened to fit the budget on its own. Whenever the task text
+/// itself (a pasted stack trace, a large file's contents) is bigger than
+/// `max_input_bytes_per_turn`, that half of `pin_head`'s condition was
+/// false, and the tail-only fallback below dropped the sole task-carrying
+/// unit outright — sending a request with NO task at all from turn 2
+/// onward. An over-budget task sent whole must still beat a request with no
+/// task.
+#[test]
+fn cap_input_bytes_keeps_the_task_prompt_even_when_it_alone_exceeds_the_cap() {
+    let prompt = ConversationMessage::user(
+        MessageId::new(),
+        format!("TASK-MARKER: {}", "x".repeat(50_000)),
+    );
+    let tool_id = ToolUseId::new();
+    let pair = [
+        assistant_tool_use(tool_id.clone(), "Read"),
+        user_tool_result(tool_id, "small result"),
+    ];
+    let mut history = vec![prompt];
+    history.extend(pair.iter().cloned());
+
+    let pair_bytes: u64 = pair
+        .iter()
+        .map(|m| serde_json::to_vec(m).unwrap().len() as u64)
+        .sum();
+    // Comfortably fits the newest pair, nowhere near fitting the ~50 KB
+    // prompt too.
+    let max = pair_bytes + 32;
+
+    let capped = super::cap_input_bytes(&history, Some(max));
+    let joined = format!("{capped:?}");
+    assert!(
+        joined.contains("TASK-MARKER"),
+        "the sole task-carrying unit must survive turn-2+ trimming even when \
+         it alone exceeds the byte cap — capped history: {joined}"
+    );
+}
+
+/// [Round-4 review item 6] Companion to the fix above: pinning an
+/// over-budget head unconditionally must not reopen the tool_use/tool_result
+/// pairing invariant `cap_input_bytes_keeps_tool_use_and_tool_result_paired`
+/// pins. With the head pinned and `tail_budget` saturated to 0, the tail
+/// loop must still drop an older pair as one atomic unit (never just its
+/// `ToolResult` half) rather than splitting it while making room for the
+/// pinned, oversized head.
+#[test]
+fn cap_input_bytes_keeps_pairing_when_the_oversized_head_is_pinned() {
+    let prompt = ConversationMessage::user(MessageId::new(), "x".repeat(50_000));
+    let tool_id_1 = ToolUseId::new();
+    let tool_id_2 = ToolUseId::new();
+    let pair1 = [
+        assistant_tool_use(tool_id_1.clone(), "Read"),
+        user_tool_result(tool_id_1.clone(), &"y".repeat(200)),
+    ];
+    let pair2 = [
+        assistant_tool_use(tool_id_2.clone(), "Read"),
+        user_tool_result(tool_id_2.clone(), &"z".repeat(50_000)),
+    ];
+    let mut history = vec![prompt];
+    history.extend(pair1.iter().cloned());
+    history.extend(pair2.iter().cloned());
+
+    let pair1_bytes: u64 = pair1
+        .iter()
+        .map(|m| serde_json::to_vec(m).unwrap().len() as u64)
+        .sum();
+    // Room for one small pair, nowhere near enough for the ~50 KB pinned
+    // head — `tail_budget` saturates to 0, so only the atomic-unit guard
+    // decides what else survives.
+    let max = pair1_bytes + 16;
+
+    let capped = super::cap_input_bytes(&history, Some(max));
+
+    let has = |id: &ToolUseId| {
+        let has_tool_use = capped.iter().any(|m| {
+            matches!(m, ConversationMessage::Assistant { content, .. }
+                if content.iter().any(|b| matches!(b, ContentBlock::ToolUse { id: bid, .. } if bid == id)))
+        });
+        let has_tool_result = capped.iter().any(|m| {
+            matches!(m, ConversationMessage::User { content, .. }
+                if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id)))
+        });
+        (has_tool_use, has_tool_result)
+    };
+    let (use1, result1) = has(&tool_id_1);
+    let (use2, result2) = has(&tool_id_2);
+    assert_eq!(
+        use1, result1,
+        "pair 1 must be kept or dropped as a whole unit: tool_use kept={use1}, tool_result kept={result1}"
+    );
+    assert_eq!(
+        use2, result2,
+        "pair 2 must be kept or dropped as a whole unit: tool_use kept={use2}, tool_result kept={result2}"
+    );
+    assert!(
+        use2 && result2,
+        "the newest pair must survive via the `!out.is_empty()` guard"
     );
 }

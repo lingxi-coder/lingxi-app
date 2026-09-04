@@ -1262,6 +1262,23 @@ impl AgentTool {
             )));
         }
 
+        // [round-4 review, finding 17] Every OTHER successful `call_fusion`
+        // return emits `emit_completed` (below, on `Ok`) with no matching
+        // `emit_started` — the ordinary `call` dispatch always pairs them
+        // (its own `emit_started` fires at the identical point in its own
+        // gate sequence: right after every pre-dispatch validation gate has
+        // cleared, immediately before the actual dispatch is attempted). A
+        // dashboard that joins started -> completed on `invocation_id`, or
+        // counts launches-by-type from `AGENT_STARTED`, undercounts Fusion
+        // launches to zero while still seeing its completions.
+        Self::emit_started(
+            bus,
+            invocation_id,
+            FUSION_AGENT_TYPE,
+            parsed.prompt.chars().count(),
+        )
+        .await;
+
         let budget = self.ctx.budget_enforcer.clone().ok_or_else(|| {
             ToolError::Internal(
                 "AgentTool: BudgetEnforcerHandle not wired into BuiltinToolContext".into(),
@@ -1395,8 +1412,28 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 // spawned fewer (over-reservation is not trimmed at
                 // resolution time — see F011). Release only the surplus that
                 // never spawned, not the whole reservation.
+                //
+                // [round-4 review, finding 9] `result.panels` includes every
+                // slot the orchestrator collected, INCLUDING panels that
+                // never reached the subagent spawner at all — the ones
+                // `panel.rs` finished as `error_category: "spawn"` because
+                // `spawn_workflow_with_observer` returned an error before
+                // any subagent was allocated. Counting those as "spawned"
+                // under-releases the reservation and permanently over-charges
+                // the session's lifetime spawn quota for subagents that
+                // never existed. Use the same "did this panel actually reach
+                // the spawner" predicate `dispatched_egress_profiles` and
+                // `fusion_error_is_preflight` already rely on for the
+                // identical distinction.
                 if let Some(guard) = reservation_guard.as_mut() {
-                    let spawned = u64::try_from(result.panels.len()).unwrap_or(panel_n);
+                    let spawned = u64::try_from(
+                        result
+                            .panels
+                            .iter()
+                            .filter(|panel| panel.error_category.as_deref() != Some("spawn"))
+                            .count(),
+                    )
+                    .unwrap_or(panel_n);
                     let surplus = panel_n.saturating_sub(spawned);
                     guard.release(surplus);
                     // The remaining (spawned) count is deliberately kept
@@ -2327,8 +2364,24 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
         resolved_cwd: Option<String>,
         agent_worktree: Option<platform_api::worktree::WorktreeHandle>,
     ) -> Result<ToolCallResult, ToolError> {
-        let mut invoker_impl =
-            tool_api::tool_invoker_impl::RegistryToolInvoker::new(parent_registry);
+        // [round-4 review, finding 15] `dispatch_async` is reached ONLY when
+        // `run_in_background` is true (its sole caller gates on that flag
+        // before calling), so every dispatch through this invoker is a
+        // background task no interactive turn owns — the same invariant
+        // `local_workflow_invoker` / `fusion_invoker` mark at the
+        // composition root. Without `with_background_owned(true)`, a
+        // permission ask this background child raises is wiped by Ctrl-C on
+        // an unrelated foreground turn (`pending_prompts.retain` /
+        // `dismiss_turn_prompts` in the TUI key on this exact flag), and this
+        // invoker — not `local_agent_invoker` — is the one the dominant
+        // background `Agent(...)` spawn path actually dispatches through
+        // (`local_agent.rs`'s `inheritance.unwrap_or_else(|| ... )` only
+        // falls back to `local_agent_invoker` for legacy direct tasks with
+        // no inheritance at all).
+        let mut invoker_impl = tool_api::tool_invoker_impl::RegistryToolInvoker::new(
+            parent_registry,
+        )
+        .with_background_owned(true);
         if let Some(gate) = self.ctx.permission_gate.clone() {
             invoker_impl = invoker_impl.with_gate(gate);
         }

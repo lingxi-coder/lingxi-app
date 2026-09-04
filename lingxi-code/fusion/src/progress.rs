@@ -20,19 +20,25 @@ pub fn emit(
             panel_id,
             message: message.into(),
             realized_output_tokens: None,
+            egress_profiles: None,
         });
     }
 }
 
-/// [Finding 12] Same as [`emit`], but carries this run's realized
-/// output-token spend so far — for the one caller (`local_workflow`'s
-/// `fusion()` bridge arm) that needs to charge already-billed spend even
-/// when the overall call ends in `Err`.
+/// [Finding 12; round-3 review B2 extends this with `egress_profiles`] Same
+/// as [`emit`], but carries this run's realized output-token spend so far —
+/// for the one caller (`local_workflow`'s `fusion()` bridge arm) that needs
+/// to charge already-billed spend even when the overall call ends in
+/// `Err` — and, when the orchestrator already knows the resolved egress
+/// profile set at the emission point, that list too (see
+/// `tasks::handlers::local_fusion`'s failure-path `<egress-profiles>`
+/// disclosure).
 pub fn emit_with_realized_tokens(
     progress: &Option<Sender<FusionProgress>>,
     stage: FusionStage,
     message: impl Into<String>,
     realized_output_tokens: u64,
+    egress_profiles: Option<Vec<String>>,
 ) {
     if let Some(tx) = progress {
         let _ = tx.try_send(FusionProgress {
@@ -40,6 +46,7 @@ pub fn emit_with_realized_tokens(
             panel_id: None,
             message: message.into(),
             realized_output_tokens: Some(realized_output_tokens),
+            egress_profiles,
         });
     }
 }

@@ -129,6 +129,22 @@ pub fn panel_report_json_schema() -> Value {
 /// slot's [`PanelInternal`]), how long it ran, and how it finished.
 type PanelTaskOutput = (usize, ResolvedPanel, String, Duration, PanelFinish);
 
+/// The stall-detector deadline passed to each panel's [`WorkflowQueryWatchdog`].
+///
+/// Must never exceed `panel_total_timeout_ms`: the panel's own hard timeout
+/// wraps the whole `spawn_workflow_with_observer` future in `timeout()`
+/// (see [`spawn_panel_tasks`]), so once that outer timeout fires the panel
+/// task is gone and its watchdog can never fire afterward. A
+/// `panel_idle_timeout_ms` configured above `panel_total_timeout_ms` is
+/// therefore unreachable dead configuration — the stall detector is
+/// silently inert for the run's entire duration — rather than a stricter
+/// setting. Clamp it here, at the use site, so a merged settings view that
+/// slips past the per-file and per-load checks still can't produce an
+/// unusable watchdog deadline.
+fn panel_stall_timeout_ms(config: &FusionRuntimeConfig) -> u64 {
+    config.panel_idle_timeout_ms.min(config.panel_total_timeout_ms)
+}
+
 /// `run_panels` helper: spawn every panel's subagent task onto a fresh
 /// `JoinSet`, returning it plus a task-id → panel-index map (the collection
 /// loop needs this to recover a panicked/aborted task's identity — a join
@@ -170,7 +186,7 @@ fn spawn_panel_tasks(
         let panel_total_timeout =
             Duration::from_millis(config.panel_total_timeout_ms).min(overall_deadline);
         let panel_watchdog = WorkflowQueryWatchdog {
-            stall_timeout_ms: config.panel_idle_timeout_ms,
+            stall_timeout_ms: panel_stall_timeout_ms(config),
             max_retries: 0,
         };
         let name_index = anon_rank[index];
@@ -309,6 +325,15 @@ pub async fn run_panels(
         &generic_prompt,
         max_input_bytes,
     );
+    // [round-3 review, findings 11/19] Every panel task above has now been
+    // handed to the spawner (real provider calls are, or immediately were,
+    // in flight) — signal that DISTINCTLY from `run_panel_stage`'s pre-spawn
+    // `RunningPanels{completed:0,..}` event, which fires before this
+    // function is even called. `emit_running_panels` below only fires once a
+    // panel reaches a terminal outcome, so without this a cancel landing
+    // between spawn and the first completion looked, to every consumer,
+    // identical to a cancel that landed before any panel task existed.
+    emit_panels_dispatched(progress, total);
 
     let mut collected: Vec<(usize, PanelInternal)> = Vec::with_capacity(total);
     let mut succeeded = 0usize;
@@ -387,6 +412,18 @@ pub async fn run_panels(
 /// caller's side after this returns), so `panel_id` is the pre-shuffle spawn
 /// slot (`p{index+1}`) — an identifier for progress purposes only, never
 /// exposed as the panel's real anonymous id.
+/// [round-3 review, findings 11/19] Emit `PanelsDispatched{total}` once,
+/// right after every panel task has been handed to the spawner (see the
+/// call site in [`run_panels`] for why this must be distinct from both the
+/// pre-spawn `RunningPanels{completed:0,..}` event and the post-completion
+/// `RunningPanels{completed>0,..}` events [`emit_running_panels`] sends).
+fn emit_panels_dispatched(progress: &Option<Sender<FusionProgress>>, total: usize) {
+    let stage = FusionStage::PanelsDispatched {
+        total: u8::try_from(total).unwrap_or(u8::MAX),
+    };
+    progress::emit(progress, stage.clone(), None, stage.label());
+}
+
 fn emit_running_panels(
     progress: &Option<Sender<FusionProgress>>,
     finished_index: usize,
@@ -512,6 +549,24 @@ fn finish_panel(
             internal.usage = Some(estimate_in_flight_usage(&internal.spawn_prompt));
         }
         PanelFinish::Failed { category, detail } => {
+            // Round-3 review item 2 fix: a `"aborted"`/`"panic"` category
+            // comes from the `JoinError` arm in `run_panels` — the bar-abort
+            // path (a still-streaming panel killed by `abort_all()` once the
+            // remaining panels can no longer reach `min_successful_panels`)
+            // or a genuine task panic. Either way the task was cut down
+            // MID-FLIGHT, exactly the "future never produced a terminal
+            // `SubagentResult`" shape the `TotalTimedOut`/`Cancelled` arms
+            // above already estimate for under the same T1 policy — settling
+            // it at exact `usage: None` silently drops real, already-billed
+            // spend. A `"spawn"` category, in contrast, is a PRE-FLIGHT
+            // failure (the spawner's `Result::Err` returned before any
+            // provider call could possibly have happened) and must stay at
+            // `None`: estimating there would invent spend for a call that
+            // never happened (see `spawn_failure_still_reports_no_usage_at_all`
+            // below).
+            if category == "aborted" || category == "panic" {
+                internal.usage = Some(estimate_in_flight_usage(&internal.spawn_prompt));
+            }
             internal.error_category = Some(category);
             internal.error_detail = detail;
         }
@@ -526,13 +581,35 @@ fn finish_panel(
             // silently ate that spend instead of pricing it.
             internal.usage = Some(usage_from_failed_subagent(&usage));
         }
+        PanelFinish::Done(SubagentResult::Failed { reason, usage, .. })
+            if is_missing_structured_output_reason(&reason) =>
+        {
+            // Round-3 review items 9/20 fix: `agent/src/runner.rs`'s
+            // `!terminated_cleanly` arm now intercepts EVERY schema run that
+            // falls out of its turn loop without a captured StructuredOutput
+            // call — BEFORE it can ever reach the `Completed{"reason":
+            // "max_turns_exhausted"}` shape `max_turns_exhausted_detail`
+            // below recognizes. Since every Fusion panel spawns with
+            // `schema: Some(..)` (`spawn_request` below), that means turn-
+            // budget exhaustion (and the nudge-give-up path, which shares
+            // the identical byte-locked reason string — the runner cannot
+            // be edited to tell them apart without breaking oracle parity,
+            // see `runner.rs`'s own comment at the emission site) now always
+            // arrives HERE, as a `SubagentResult::Failed`, not as the
+            // `Completed` shape below. Label it distinctly from a genuine
+            // provider error rather than folding it into `"provider"`
+            // (the [Finding 25] misattribution this was filed to remove) —
+            // and distinctly from `"max_turns"` too, since this string alone
+            // cannot promise a turn count or distinguish the two causes.
+            internal.error_category = Some("no_structured_output".into());
+            internal.error_detail = Some(sanitize_detail(&reason));
+            internal.usage = Some(usage_from_failed_subagent(&usage));
+        }
         PanelFinish::Done(SubagentResult::Failed { reason, usage, .. }) => {
             internal.error_category = Some("provider".into());
             internal.error_detail = Some(sanitize_detail(&reason));
             // Finding [11]: same reasoning as the idle-timeout arm above — a
-            // provider-error termination (including the runner's max-turns /
-            // structured-output-retry give-up, which also routes through
-            // `SubagentResult::Failed`) still carries whatever billed spend
+            // provider-error termination still carries whatever billed spend
             // happened on turns before the one that failed.
             internal.usage = Some(usage_from_failed_subagent(&usage));
         }
@@ -591,6 +668,19 @@ fn finish_panel(
 /// present) when `content` matches, `None` for every other completion shape
 /// (including a genuinely malformed `PanelReport`, which still falls through
 /// to the `"protocol"` category as before).
+///
+/// Round-3 review items 9/20: `agent/src/runner.rs`'s schema-contract guard
+/// (added alongside P0-1's `tool_choice` relaxation) now intercepts turn-
+/// budget exhaustion BEFORE this shape can be produced for any run with
+/// `ctx.schema.is_some()` — and every Fusion panel sets `schema` (see
+/// `spawn_request` below). So this recognizer, and the `Completed` arm that
+/// calls it, are unreachable for a real panel today; `finish_panel`'s
+/// `is_missing_structured_output_reason` arm on the `SubagentResult::Failed`
+/// case is what actually fires. Left in place rather than deleted: it is
+/// still exactly correct for any FUTURE non-schema producer of this shape
+/// (the runner's non-schema `!terminated_cleanly` path already emits it —
+/// see `runner_test.rs`'s `loop_exhausts_max_turns_when_never_terminal`),
+/// and deleting it would only trade one silent gap for another.
 fn max_turns_exhausted_detail(content: &Value) -> Option<String> {
     if content.get("reason").and_then(Value::as_str) != Some("max_turns_exhausted") {
         return None;
@@ -603,6 +693,18 @@ fn max_turns_exhausted_detail(content: &Value) -> Option<String> {
 
 fn is_query_watchdog_timeout(reason: &str) -> bool {
     reason.starts_with(SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX)
+}
+
+/// Round-3 review items 9/20: the exact, byte-locked reason
+/// `agent/src/runner.rs` emits (from BOTH its two-nudge give-up path and its
+/// newer max-turns schema-contract guard — the runner cannot be edited to
+/// tell the two apart without breaking oracle parity, see the emission
+/// site's own comment) when a schema run ends without a captured
+/// `StructuredOutput` call. Recognized here so `finish_panel` can label it
+/// distinctly from a genuine provider error instead of folding it into
+/// `"provider"`.
+fn is_missing_structured_output_reason(reason: &str) -> bool {
+    reason == "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)"
 }
 
 fn usage_from_subagent(
@@ -990,5 +1092,326 @@ prompt, not a second, divergent formula"
             "a pre-flight spawn failure never reached a provider — inventing an estimated \
 usage here would over-bill a call that never happened"
         );
+    }
+
+    /// Round-3 review item 2: an `"aborted"` `JoinError` — the shape a panel
+    /// killed mid-flight by `run_panels`' early-abort bar (`abort_all()`
+    /// once the remaining panels can no longer reach `min_successful_panels`)
+    /// produces — must settle like `TotalTimedOut`/`Cancelled` above, NOT
+    /// like the pre-flight `"spawn"` case: the task genuinely reached a
+    /// provider before being cut down, so `usage: None` would silently drop
+    /// real, already-billed spend to exact $0.
+    #[test]
+    fn aborted_join_error_estimates_usage_from_the_sent_prompt() {
+        let prompt = "z".repeat(120);
+        let internal = finish_panel(
+            0,
+            panel(),
+            prompt.clone(),
+            Duration::default(),
+            PanelFinish::Failed {
+                category: "aborted".into(),
+                detail: Some("task was cancelled".into()),
+            },
+        );
+        let usage = internal.usage.expect(
+            "an aborted (bar-killed) panel was genuinely in flight and must carry an \
+estimated usage, not None",
+        );
+        assert!(usage.estimated, "the estimate must be flagged, never exact");
+        assert_eq!(
+            usage.input_tokens,
+            llm_client::model::count_tokens::approximate_tokens_for_bytes(prompt.len() as u64),
+            "must reuse the same in-flight estimate formula as TotalTimedOut/Cancelled"
+        );
+        assert_eq!(internal.error_category.as_deref(), Some("aborted"));
+    }
+
+    /// Same policy, the `"panic"` category (a genuine task panic mid-flight
+    /// carries the identical "already billed, never confirmed" shape).
+    #[test]
+    fn panicked_join_error_estimates_usage_from_the_sent_prompt() {
+        let prompt = "w".repeat(40);
+        let internal = finish_panel(
+            0,
+            panel(),
+            prompt.clone(),
+            Duration::default(),
+            PanelFinish::Failed {
+                category: "panic".into(),
+                detail: Some("task panicked".into()),
+            },
+        );
+        let usage = internal
+            .usage
+            .expect("a panicked panel must carry an estimated usage, not None");
+        assert!(usage.estimated);
+        assert_eq!(
+            usage.input_tokens,
+            llm_client::model::count_tokens::approximate_tokens_for_bytes(prompt.len() as u64)
+        );
+    }
+}
+
+#[cfg(test)]
+mod missing_structured_output_reason_tests {
+    use super::*;
+    use platform_api::{PanelRunStatus, SubagentUsage};
+
+    fn panel() -> ResolvedPanel {
+        ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "sonnet".into(),
+        }
+    }
+
+    /// Round-3 review items 9/20: for a real Fusion panel (every panel spawns
+    /// with `schema: Some(..)`), `agent/src/runner.rs`'s schema-contract
+    /// guard now intercepts turn-budget exhaustion BEFORE the
+    /// `Completed{"reason":"max_turns_exhausted"}` shape `finish_panel`'s
+    /// `[Finding 25]` arm recognizes can ever be produced — it always
+    /// arrives as this exact `SubagentResult::Failed` reason instead. Before
+    /// this fix that fell into the generic `"provider"` arm, misattributing
+    /// a turn-budget/schema-contract outcome as a provider error. It must
+    /// instead be labelled distinctly, and must still price the real,
+    /// already-billed spend from every turn that ran before the guard fired
+    /// (same [Finding 11] policy as the generic provider-Failed arm).
+    #[test]
+    fn missing_structured_output_failure_is_not_mislabeled_provider() {
+        let usage = SubagentUsage {
+            total_tokens: 900,
+            input_tokens: 700,
+            output_tokens: 200,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            reasoning_output_tokens: 0,
+        };
+        let internal = finish_panel(
+            0,
+            panel(),
+            "panel prompt".into(),
+            Duration::from_secs(5),
+            PanelFinish::Done(SubagentResult::Failed {
+                agent_id: protocol::AgentId::new(),
+                reason: "agent({schema}): subagent completed without calling StructuredOutput \
+(after in-conversation nudge)"
+                    .to_string(),
+                usage,
+            }),
+        );
+        assert_eq!(internal.status, PanelRunStatus::Failed);
+        assert_eq!(
+            internal.error_category.as_deref(),
+            Some("no_structured_output"),
+            "a turn-budget/schema-contract exhaustion must not be labelled \"provider\" — \
+that is the [Finding 25] misattribution this fix removes, and it must not be labelled \
+\"max_turns\" either, since this reason string alone cannot promise a turn count or rule \
+out the nudge-give-up path"
+        );
+        let priced = internal
+            .usage
+            .expect("real, already-billed spend from turns before the guard fired must be priced");
+        assert_eq!(
+            priced.input_tokens, 700,
+            "must price the REAL provider-reported token counts (via \
+usage_from_failed_subagent), not a prompt-length estimate"
+        );
+    }
+
+    /// A genuinely different provider error (unrelated reason string) must
+    /// still take the generic `"provider"` path — this fix must not
+    /// over-match.
+    #[test]
+    fn unrelated_provider_failure_still_reports_provider_category() {
+        let internal = finish_panel(
+            0,
+            panel(),
+            "panel prompt".into(),
+            Duration::from_secs(1),
+            PanelFinish::Done(SubagentResult::Failed {
+                agent_id: protocol::AgentId::new(),
+                reason: "upstream 503".to_string(),
+                usage: SubagentUsage::default(),
+            }),
+        );
+        assert_eq!(internal.error_category.as_deref(), Some("provider"));
+    }
+}
+
+#[cfg(test)]
+mod panel_stall_timeout_clamp_tests {
+    use super::*;
+
+    /// Round-3 review finding [24] (rework): a settings tier that sets only
+    /// `panelIdleTimeoutMs` (no `panelTotalTimeoutMs` in that same file)
+    /// passes `FusionSettingsJson::validate`'s same-file-only check and can
+    /// reach `FusionRuntimeConfig` with `panel_idle_timeout_ms` far above
+    /// `panel_total_timeout_ms`. The watchdog deadline handed to
+    /// `spawn_workflow_with_observer` must still never exceed the panel's
+    /// own hard timeout — that outer `timeout()` cancels the whole panel
+    /// task at `panel_total_timeout_ms`, so a higher stall deadline can
+    /// never fire and the stall detector goes silently inert for the run.
+    #[test]
+    fn panel_stall_timeout_ms_never_exceeds_the_panel_total_timeout() {
+        let config = FusionRuntimeConfig {
+            panel_idle_timeout_ms: 5_000_000,
+            panel_total_timeout_ms: 600_000,
+            ..FusionRuntimeConfig::defaults()
+        };
+        assert_eq!(
+            panel_stall_timeout_ms(&config),
+            600_000,
+            "a panel_idle_timeout_ms above panel_total_timeout_ms must be clamped to the \
+panel's own hard timeout — otherwise the stall watchdog is configured with a deadline it can \
+never reach before the panel is aborted out from under it, leaving the run with zero stall \
+protection"
+        );
+    }
+
+    /// The common case (idle below total) must pass through unclamped.
+    #[test]
+    fn panel_stall_timeout_ms_passes_through_when_already_below_total() {
+        let config = FusionRuntimeConfig {
+            panel_idle_timeout_ms: 90_000,
+            panel_total_timeout_ms: 600_000,
+            ..FusionRuntimeConfig::defaults()
+        };
+        assert_eq!(panel_stall_timeout_ms(&config), 90_000);
+    }
+}
+
+/// Round-3 review findings 11/19 (rework): `run_panels` must signal "panels
+/// genuinely dispatched" distinctly and BEFORE the first one can possibly
+/// reach a terminal outcome. Kept inline rather than in `orchestrator_test.rs`
+/// so this fixer's changes stay isolated to files it owns (same rationale as
+/// `record_failed_analyst_usage_tests` in `orchestrator.rs`) — the mocks
+/// below are deliberately minimal duplicates of the ones in that file, not a
+/// shared import, for the same reason.
+#[cfg(test)]
+mod panels_dispatched_emission_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
+    use platform_api::subagent_spawn::{SubagentInheritance, SubagentSpawnError};
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use tokio_util::sync::CancellationToken;
+
+    struct InertInvoker;
+    #[async_trait]
+    impl ToolInvoker for InertInvoker {
+        async fn invoke(
+            &self,
+            _name: &str,
+            _input: Value,
+            _ctx: SubagentInvocationContext,
+        ) -> Result<Value, ToolInvokerError> {
+            Ok(Value::Null)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    struct InertBudget;
+    #[async_trait]
+    impl BudgetEnforcerHandle for InertBudget {
+        async fn check_and_charge(&self, _nano_usd: u64) -> Result<(), BudgetError> {
+            Ok(())
+        }
+        async fn snapshot_total_nano_usd(&self) -> u64 {
+            0
+        }
+    }
+
+    /// Every panel hangs forever — never produces a terminal
+    /// `SubagentResult` — so this test can observe the progress emitted
+    /// BEFORE any panel completes without racing a real completion. Only
+    /// `spawn` needs implementing: `spawn_workflow_with_observer` (what
+    /// `run_panels` actually calls) has no override here, so it falls
+    /// through the trait's own default chain to this.
+    struct HangingSpawner;
+    #[async_trait]
+    impl SubagentSpawner for HangingSpawner {
+        async fn spawn(
+            &self,
+            _request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            std::future::pending::<()>().await;
+            unreachable!("hangs forever; the test cancels before this could resolve")
+        }
+    }
+
+    fn two_panels() -> Vec<ResolvedPanel> {
+        vec![
+            ResolvedPanel {
+                profile: "anthropic".into(),
+                model: "claude-sonnet-5".into(),
+            },
+            ResolvedPanel {
+                profile: "openai".into(),
+                model: "gpt-5.6-terra".into(),
+            },
+        ]
+    }
+
+    /// The defect this fixes: before the branch, the whole window between
+    /// "N panel tasks spawned and calling the provider" and "the first
+    /// panel finishes" produced NOTHING on the progress channel — a cancel
+    /// landing there was indistinguishable from a cancel that landed before
+    /// any panel task existed. Every panel here hangs forever, so if
+    /// `PanelsDispatched` is ever observed, it can only have come from
+    /// immediately after `spawn_panel_tasks` returns, never from a
+    /// completion event.
+    #[tokio::test]
+    async fn emits_panels_dispatched_before_any_panel_can_possibly_complete() {
+        let config = FusionRuntimeConfig {
+            panel_total_timeout_ms: 60_000,
+            ..FusionRuntimeConfig::defaults()
+        };
+        let cancel = CancellationToken::new();
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                tool_invoker: Arc::new(InertInvoker),
+                budget: Arc::new(InertBudget),
+            },
+            cancel.clone(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<FusionProgress>(8);
+        let progress = Some(tx);
+
+        let run = tokio::spawn(async move {
+            run_panels(
+                Arc::new(HangingSpawner),
+                &inherit,
+                &config,
+                true,
+                "task",
+                &two_panels(),
+                "run-id",
+                Duration::from_secs(60),
+                &progress,
+            )
+            .await
+        });
+
+        let first = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect(
+                "a PanelsDispatched event must arrive promptly — before this fix, nothing at \
+all was emitted between spawn and the first panel completion, so this would hang until the \
+5s timeout instead",
+            )
+            .expect("channel must not close before an event is sent");
+        assert_eq!(
+            first.stage,
+            FusionStage::PanelsDispatched { total: 2 },
+            "run_panels must emit PanelsDispatched immediately after spawn_panel_tasks \
+returns, before it can possibly have collected a completion — got {:?} instead",
+            first.stage
+        );
+
+        cancel.cancel();
+        let _ = run.await;
     }
 }

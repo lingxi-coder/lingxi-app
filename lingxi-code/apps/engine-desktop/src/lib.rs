@@ -3203,19 +3203,23 @@ impl fusion::FusionPriceBook for DesktopFusionPriceBook {
             .token_rates
             .get(&cost::pricing::TokenClass::CacheWrite)
             .map_or(0, |rate| rate.nano_usd_per_token);
-        // Finding [1]: same `0`-default rule as cache-read/cache-write — a
-        // model with real Input/Output rates but no separate
-        // `ReasoningOutput` catalog entry (the common case: only DeepSeek /
-        // Gemini / a handful of OpenRouter rows price reasoning separately
-        // in models.dev) must stay token-priced, never flip to fully
-        // unpriced. When the class IS present (`provider-config::cost_translate`
-        // inserts it from the models.dev `reasoning_per_million` slice), the
-        // real rate is read here so `price_component` bills it instead of
-        // silently dropping the reasoning-heavy panel's largest cost bucket.
+        // Finding [1]: `provider-config::cost_translate::model_pricing_from_token_pricing`
+        // now ALWAYS inserts a `ReasoningOutput` rate — a model that publishes
+        // a real, separate reasoning price (DeepSeek / a handful of
+        // OpenRouter rows) keeps it; everyone else (most OpenAI / Gemini /
+        // Copilot / … rows, which bill reasoning tokens at the plain output
+        // rate) gets the output rate as the class's value. That fix lives at
+        // the shared catalog layer so both this Fusion price book and the
+        // main turn loop's `cost::CostCalculator` (which iterates only the
+        // classes present in `token_rates`) recover the bucket identically.
+        // The `map_or(output, …)` here is a second line of defense for any
+        // pricing entry that reaches this book without going through
+        // `cost_translate` (e.g. a future direct catalog entry) — it must
+        // still stay token-priced, never flip to fully unpriced.
         let reasoning = pricing
             .token_rates
             .get(&cost::pricing::TokenClass::ReasoningOutput)
-            .map_or(0, |rate| rate.nano_usd_per_token);
+            .map_or(output, |rate| rate.nano_usd_per_token);
         Some(fusion::ModelRates {
             input_nano_usd_per_token: input,
             output_nano_usd_per_token: output,
@@ -11894,9 +11898,28 @@ pub async fn build(
     //        to the real `RegistryToolInvoker` now that `tools` exists — so a
     //        workflow's `agent()` subagents dispatch their tools through the
     //        parent registry under the same recursion-lock + boot gate.
+    //
+    // Finding [23]: this is the ONE invoker every `LocalWorkflow` background
+    // task dispatches through — its own script's direct tool calls, every
+    // `agent()` subagent (`local_workflow.rs:3391 self.tool_invoker.clone()`,
+    // optionally wrapped by `WorkspaceLeaseToolInvoker`, a transparent
+    // delegate that does not touch this flag), and every workflow `fusion()`
+    // panel (`local_workflow.rs:2658-2663`'s `SubagentInheritance {
+    // tool_invoker: tool_invoker.clone(), .. }`, the SAME clone). No
+    // interactive turn ever owns a `LocalWorkflow` task (it is spawned as a
+    // background task, mirroring `fusion_invoker` below), and this cell has
+    // no other reader (`local_workflow_invoker` referenced only at its
+    // creation, at `LocalWorkflowHandler::new`, and here) — so the
+    // `fusion_invoker` comment's "cannot mislabel a foreground direct tool
+    // call" justification holds verbatim for it too. Without this, a
+    // permission ask raised by a workflow's `fusion()` panel (or its
+    // `agent()` subagents) is wiped by Ctrl-C on an UNRELATED foreground
+    // turn, exactly the bug `with_background_owned` was introduced to close
+    // for the `/fusion` slash entrypoint.
     local_workflow_invoker.set(Arc::new(
         tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
-            .with_gate(perms.clone()),
+            .with_gate(perms.clone())
+            .with_background_owned(true),
     ));
 
     // Finding 22: this is the ONE invoker `LocalFusionHandler` uses for every
@@ -13325,6 +13348,53 @@ mod tests {
             build_src.matches(&uses).count(),
             2,
             "the launcher must pass its registry to BOTH resolve_script_at and workflow_source_for_name (`{uses}`)"
+        );
+    }
+
+    /// Finding [23]: `local_workflow_invoker` is the ONE invoker every
+    /// `LocalWorkflow` background task's script dispatches its tools through
+    /// — its own direct tool calls, every `agent()` subagent
+    /// (`local_workflow.rs:3391` `self.tool_invoker.clone()`, optionally
+    /// wrapped by `WorkspaceLeaseToolInvoker`, a transparent delegate that
+    /// does not touch this flag), and every workflow `fusion()` panel
+    /// (`local_workflow.rs:2658-2663`'s `SubagentInheritance { tool_invoker:
+    /// tool_invoker.clone(), .. }`, the SAME clone). No interactive turn owns
+    /// a `LocalWorkflow` task, so every dispatch through this cell must carry
+    /// `background_owned: true` — otherwise a permission ask it raises is
+    /// dropped by Ctrl-C on an unrelated foreground turn, exactly the bug
+    /// `with_background_owned` exists to close for the sibling `/fusion`
+    /// slash entrypoint (`fusion_invoker` below, already wired).
+    ///
+    /// No runtime test can observe this without standing up the whole
+    /// desktop stack plus a live TUI permission gate — same reasoning as
+    /// `build_wires_one_plugin_workflow_registry_into_every_participant`
+    /// above — so this reads the composition root's own source instead.
+    #[test]
+    fn local_workflow_invoker_is_wired_background_owned_like_the_fusion_invoker() {
+        const SRC: &str = include_str!("lib.rs");
+        let build_src = SRC
+            .split_once("\n#[cfg(test)]\nmod tests")
+            .map_or(SRC, |(production, _)| production);
+
+        let marker = "local_workflow_invoker.set(Arc::new(".to_string();
+        let start = build_src
+            .find(&marker)
+            .expect("local_workflow_invoker must be bound in build()");
+        let close = build_src[start..]
+            .find("));")
+            .expect("the local_workflow_invoker binding must close with `));`");
+        let binding = &build_src[start..start + close];
+
+        // Assembled from split literals so this needle cannot match itself
+        // if ever copy-pasted verbatim into a comment near the binding.
+        let flag = "with_background_owned".to_string() + "(true)";
+        assert!(
+            binding.contains(&flag),
+            "local_workflow_invoker must be bound with `.{flag}` — every \
+             LocalWorkflow background task (its own script, agent() \
+             subagents, and fusion() panels) dispatches through this one \
+             cell, and none of them is owned by any interactive turn: \
+             {binding}"
         );
     }
 

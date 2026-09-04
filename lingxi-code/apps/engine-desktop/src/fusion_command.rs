@@ -49,6 +49,17 @@ impl FusionCompletionSink for DesktopFusionCompletionSink {
             .await
         {
             tracing::warn!(error = %err, "fusion completion sink failed; task status unchanged");
+            // [Finding 13] Before this, the append failure left the run with
+            // NO trace at all: `finalize_fusion_outcome` still calls
+            // `mark_fusion_result_published` unconditionally after
+            // `publish()` returns, so the durable `<fusion-result>` row is
+            // missing here AND the one live signal (this F006 notice) was
+            // skipped too — the user got nothing until the next turn's task
+            // notification. Fire the notice anyway, worded so it does not
+            // point at a durable record that does not exist.
+            self.handle
+                .emit_background_system_notice(&fusion_completion_notice_unrecorded())
+                .await;
             return;
         }
         // F006: before this, a finished background run's only trace was the
@@ -75,6 +86,17 @@ fn fusion_completion_notice(result: &FusionResult) -> String {
             "Fusion run finished — it needs your judgment; see the summary appended to this conversation.".to_string()
         }
     }
+}
+
+/// [Finding 13] Notice text for the append-failure path: unlike
+/// [`fusion_completion_notice`] this must NOT claim the result was appended
+/// to the conversation — the whole reason it fires is that the append
+/// failed, so pointing at a durable record that does not exist would be
+/// actively misleading.
+fn fusion_completion_notice_unrecorded() -> String {
+    "Fusion run finished, but its result could not be recorded in this conversation \
+     — it may have been cleared or moved. Check the task list for the result."
+        .to_string()
 }
 
 /// Fill-later wrapper so the task handler can be registered before the
@@ -381,6 +403,43 @@ mod tests {
         assert!(
             notices[0].contains("needs your judgment"),
             "got: {notices:?}"
+        );
+    }
+
+    // ---- [Finding 13]: a durable-append failure (e.g. the target session
+    // is no longer current — the default `append_meta_user_message_to_session`
+    // fails exactly this way when the id it is given no longer matches
+    // `current_session_id`, which is what a `/clear` mid-run or a JSONL
+    // write error looks like from this sink's point of view) used to leave
+    // the run with NO trace at all: the F006 notice sat after the early
+    // `return`, so it never fired on the one path where a live signal is
+    // the user's only timely trace. ----
+
+    #[tokio::test]
+    async fn publish_still_emits_a_notice_when_the_durable_append_fails() {
+        let mock = Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
+        let sink = DesktopFusionCompletionSink::new(mock.clone());
+        let mut result = dummy_result("fu_append_fails");
+        result.status = FusionStatus::Completed;
+
+        // A conversation id that does NOT match the mock's current session id
+        // drives the trait's default `append_meta_user_message_to_session`
+        // straight into its `Err(ActionFailed(...))` arm — the same shape a
+        // real desktop handle returns once the target session is no longer
+        // current (e.g. after `/clear`) or the JSONL append itself fails.
+        sink.publish("some-other-session-that-is-not-current", &result)
+            .await;
+
+        let notices = mock.background_notices();
+        assert_eq!(
+            notices.len(),
+            1,
+            "an append failure must still surface a live notice, not silence: {notices:?}"
+        );
+        assert!(
+            notices[0].contains("could not be recorded"),
+            "the failure notice must not claim the result was appended to \
+             this conversation (it was not): {notices:?}"
         );
     }
 }

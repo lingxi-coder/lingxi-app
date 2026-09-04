@@ -350,6 +350,7 @@ impl FusionExecutor for FailingAfterRealSpendFusionExecutor {
                     panel_id: None,
                     message: "panel bar failed after real provider spend".into(),
                     realized_output_tokens: Some(self.realized_output_tokens),
+                    egress_profiles: None,
                 })
                 .await;
         }
@@ -2489,6 +2490,169 @@ async fn workflow_fusion_resume_hits_the_journal_and_never_calls_the_executor() 
     assert!(
         executor.seen.lock().unwrap().is_empty(),
         "a journal-cache hit must never dispatch to the executor"
+    );
+}
+
+/// [Item 16 rework] A fusion() call rejected by the per-workflow cap must
+/// still advance the SAME `running_key` resume cursor a served fusion() call
+/// advances — exactly like the agent() arm's Phase A, which advances
+/// unconditionally before its own cap/budget gates run in Phase B
+/// (local_workflow.rs:~2801 vs ~2854). Otherwise every subsequently
+/// journaled call chained off the fusion key misses on resume and re-spawns
+/// instead of hitting the journal that exists precisely to prevent that.
+///
+/// Run 1 (fresh): `fusion('one')` and `fusion('two')` both really run (cap
+/// 2), chaining `running_key` through F1 then F2, then `agent('three')`
+/// chains off F2 into key A — all three journaled to disk. Run 2 (resume,
+/// cap 1): `fusion('one')` hits the journal (seen 0 < cap 1, consumes the
+/// only cap slot); `fusion('two')` is now cap-rejected (seen 1 >= cap 1)
+/// without ever reaching `parse_workflow_fusion_request` or the executor.
+/// The script catches that (the documented `WorkflowFusionCapError` idiom)
+/// and falls through to `agent('three')`, which must still replay from the
+/// journal at key A — reachable only if the cap-rejected `fusion('two')`
+/// still advanced `running_key` from F1 to F2.
+#[tokio::test]
+async fn workflow_fusion_cap_rejection_still_advances_the_resume_cursor_for_later_calls() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let script = r#"
+        await fusion('one');
+        let caught = false;
+        try { await fusion('two'); } catch (e) { caught = true; }
+        const b = await agent('three');
+        log('caught:' + caught + ' b:' + b);
+        return {};
+    "#;
+
+    // Run 1: fresh run, cap 2 — both fusion calls really run, then agent()
+    // chains off the second fusion key.
+    let spawner1 = Arc::new(EchoSpawner::default());
+    let sink1 = Arc::new(RecordingSink::default());
+    let executor1 = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        },
+        2,
+        Ok(workflow_fusion_result()),
+    );
+    let handler1 = LocalWorkflowHandler::new(
+        spawner1.clone(),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        mgr.clone(),
+    )
+    .with_status_sink(sink1.clone())
+    .with_fusion(executor1.clone());
+    let mut input1 = workflow_input(script);
+    if let TaskSpawnInput::LocalWorkflow {
+        parent_model,
+        parent_model_profile,
+        ..
+    } = &mut input1
+    {
+        *parent_model = Some("gpt-5.4".into());
+        *parent_model_profile = Some("openai".into());
+    }
+    let handle1 = handler1.spawn(input1, make_ctx(fs.clone())).await.unwrap();
+    assert_eq!(await_terminal(&sink1).await, TaskStatus::Completed);
+    assert_eq!(
+        executor1.seen.lock().unwrap().len(),
+        2,
+        "run 1: both fusion calls really run"
+    );
+    assert_eq!(
+        spawner1.seen.lock().unwrap().len(),
+        1,
+        "run 1: agent('three') really spawns"
+    );
+
+    let spool1 = dir.path().join(format!("{}.output", handle1.task_id));
+    let out1 = mgr
+        .read(&spool1, crate::output_manager::OutputOptions::default())
+        .await
+        .unwrap();
+    let run_id = out1
+        .content
+        .lines()
+        .find_map(|l| l.strip_prefix("runId: "))
+        .expect("runId surfaced")
+        .to_string();
+    assert!(
+        out1.content.contains("caught:false"),
+        "run 1's second fusion call must succeed (cap 2): {}",
+        out1.content
+    );
+
+    // Run 2: resume with cap 1 — fusion('one') consumes the only cap slot
+    // (from the journal, no executor call), fusion('two') is cap-rejected,
+    // and agent('three') must still replay from the journal.
+    let spawner2 = Arc::new(EchoSpawner::default());
+    let sink2 = Arc::new(RecordingSink::default());
+    let executor2 = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        },
+        1,
+        Ok(workflow_fusion_result()),
+    );
+    let handler2 = LocalWorkflowHandler::new(
+        spawner2.clone(),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        mgr.clone(),
+    )
+    .with_status_sink(sink2.clone())
+    .with_fusion(executor2.clone());
+    let input2 = TaskSpawnInput::LocalWorkflow {
+        session_uuid: None,
+        workflow_id: "wf".into(),
+        script: script.into(),
+        resume_from_run_id: Some(run_id),
+        args: None,
+        run_id: None,
+        parent_model: Some("gpt-5.4".into()),
+        parent_model_profile: Some("openai".into()),
+        invocation_mode: Some("inline".to_string()),
+        workflow_source: Some("inline".to_string()),
+        script_is_verbatim_builtin: Some(false),
+        transcript_subdir: None,
+        launched_from_subagent: false,
+        tool_use_id: None,
+        creator_teammate_name: None,
+        creator_team_name: None,
+        creator_agent_id: None,
+        scope: None,
+    };
+    let handle2 = handler2.spawn(input2, make_ctx(fs.clone())).await.unwrap();
+    assert_eq!(await_terminal(&sink2).await, TaskStatus::Completed);
+
+    assert!(
+        executor2.seen.lock().unwrap().is_empty(),
+        "neither fusion() call should reach the executor on resume: the \
+first hits the journal, the second is cap-rejected"
+    );
+    let spool2 = dir.path().join(format!("{}.output", handle2.task_id));
+    let out2 = mgr
+        .read(&spool2, crate::output_manager::OutputOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        out2.content.contains("caught:true"),
+        "run 2's second fusion call must be cap-rejected (cap 1): {}",
+        out2.content
+    );
+    assert!(
+        spawner2.seen.lock().unwrap().is_empty(),
+        "agent('three') must still replay from the journal after a \
+cap-rejected fusion() call advanced the resume cursor — got a live spawn \
+instead: {:?}",
+        spawner2.seen.lock().unwrap()
     );
 }
 

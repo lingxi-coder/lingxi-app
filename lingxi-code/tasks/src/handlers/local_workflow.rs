@@ -2586,6 +2586,24 @@ async fn run_workflow_script_with_live_updates_and_fusion(
         };
         match work {
             WorkflowBridgeRequest::Fusion(call) => {
+                // Advance the SAME resume cursor `agent()` advances (`running_key`)
+                // for EVERY fusion() dispatch — cap refusal, budget refusal, parse
+                // rejection, or a real run — mirroring the agent() arm's Phase A,
+                // which advances unconditionally at line ~2801 before its own
+                // budget/cap gates run in Phase B. Computing `key` here (rather
+                // than only inside the `Ok(request)` branch below, as before) does
+                // not touch the executor: `fusion_chain_key`/
+                // `normalize_fusion_opts_for_chain_key` are pure functions over
+                // `call.prompt`/`call.opts_json`, so this cannot skip any
+                // validation `parse_workflow_fusion_request` still performs below.
+                // Without this, a call refused here leaves the cursor exactly
+                // where it was, so every subsequently journaled agent() key
+                // (chained off the pre-refusal cursor) misses on replay and the
+                // whole downstream fleet re-spawns instead of hitting the journal.
+                let normalized_opts = normalize_fusion_opts_for_chain_key(&call.opts_json);
+                let key = fusion_chain_key(&running_key, &call.prompt, &normalized_opts);
+                running_key.clone_from(&key);
+
                 if fusion_calls_seen >= fusion_cap {
                     let _ = call
                         .reply
@@ -2639,11 +2657,10 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                         // "fusion:<the same text>". Every fusion opt
                         // participates in the key (unlike agent()'s
                         // fixed-field projection) since `WorkflowFusionOpts`
-                        // has no display-only fields to strip.
-                        let normalized_opts =
-                            normalize_fusion_opts_for_chain_key(&call.opts_json);
-                        let key = fusion_chain_key(&running_key, &call.prompt, &normalized_opts);
-                        running_key.clone_from(&key);
+                        // has no display-only fields to strip. `key` was
+                        // already computed and `running_key` already advanced
+                        // above, before the cap/budget gates, so both the
+                        // cache lookup and the journal write below reuse it.
                         let cached = if gone_live {
                             None
                         } else {

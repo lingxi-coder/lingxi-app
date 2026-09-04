@@ -124,6 +124,17 @@ globalThis.__wf_pump = () => {
       if (msg.startsWith("Workflow token budget exceeded")) err.name = "WorkflowBudgetExceededError";
       else if (msg.startsWith("Workflow fusion() call cap reached")) err.name = "WorkflowFusionCapError";
       else if (msg === "fusion is disabled") err.name = "WorkflowFusionDisabledError";
+      // Two more shapes reach this same channel with no host-side refusal
+      // recognized above: `FusionError::UnavailableOnPlatform`'s Display
+      // (mobile hosts build the workflow handler without a Fusion executor)
+      // and `WORKFLOW_FUSION_UNAVAILABLE_MESSAGE` (the fusion dispatch
+      // channel closed). From a script's point of view both are the same
+      // "not available, fall back" condition as the disabled case above, so
+      // they carry the same documented `err.name` rather than leaving
+      // `err.name` at the JS default "Error" — which the fusion() bullet in
+      // workflow_description.txt never distinguishes from the others.
+      else if (msg === "fusion is unavailable on this platform") err.name = "WorkflowFusionDisabledError";
+      else if (msg === "fusion() is unavailable in this workflow runtime") err.name = "WorkflowFusionDisabledError";
       // Unlike the three checks above, this one goes through
       // `FusionError::InvalidRequest`'s Display, which prepends "invalid
       // fusion request: " — search rather than anchor at the start.
@@ -2666,6 +2677,32 @@ try {
                 "invalid fusion request: fusion preset `sloppy` must be quality or fast"
             ),
             "Error:invalid fusion request: fusion preset `sloppy` must be quality or fast"
+        );
+    }
+
+    #[test]
+    fn fusion_unavailable_on_platform_rejection_is_named_workflow_fusion_disabled_error() {
+        // Mobile hosts build `LocalWorkflowHandler` without `.with_fusion(...)`,
+        // so `parse_workflow_fusion_request` (tasks/src/handlers/local_workflow.rs)
+        // returns `FusionError::UnavailableOnPlatform` on the very first line —
+        // whose Display is "fusion is unavailable on this platform"
+        // (platform-api/src/fusion.rs). From a script's point of view this is
+        // the same "not available, fall back" condition as the session-disabled
+        // case, so it must carry the same documented `err.name`.
+        assert_eq!(
+            fusion_rejection_name("fusion is unavailable on this platform"),
+            "WorkflowFusionDisabledError:fusion is unavailable on this platform"
+        );
+    }
+
+    #[test]
+    fn fusion_unavailable_in_runtime_rejection_is_named_workflow_fusion_disabled_error() {
+        // The other unnamed "unavailable" shape: `WORKFLOW_FUSION_UNAVAILABLE_MESSAGE`,
+        // thrown when the fusion dispatch channel is closed
+        // (tasks/src/handlers/local_workflow.rs).
+        assert_eq!(
+            fusion_rejection_name(WORKFLOW_FUSION_UNAVAILABLE_MESSAGE),
+            format!("WorkflowFusionDisabledError:{WORKFLOW_FUSION_UNAVAILABLE_MESSAGE}")
         );
     }
 }

@@ -110,6 +110,17 @@ async fn finalize_fusion_outcome(
     status_sink: &Arc<dyn TaskStatusSink>,
     sink: &Arc<dyn FusionCompletionSink>,
     conversation_id: &str,
+    // [Finding 14] The last `realized_output_tokens` seen on the progress
+    // channel before the run ended in `Err` — `None` when nothing egressed
+    // yet (a preflight refusal) or the orchestrator never reported it for
+    // this failure shape. Used to give the Err arms a best-effort `<usage>`
+    // disclosure instead of the structural silence a bare `None` produces
+    // downstream.
+    last_realized_output_tokens: Option<u64>,
+    // [Round-3 review B2] Same latching as `last_realized_output_tokens`,
+    // for the resolved egress profile list — see
+    // `platform_api::FusionProgress::egress_profiles`.
+    last_egress_profiles: Option<Vec<String>>,
 ) {
     match outcome {
         Ok(result) => {
@@ -158,6 +169,18 @@ async fn finalize_fusion_outcome(
                 .await;
         }
         Err(FusionError::Cancelled) => {
+            // [Finding 14] Same ordering rule as the `Ok` arm above: write
+            // whatever usage disclosure we have BEFORE the terminal status
+            // transition, so the notification drain (terminal-status-gated)
+            // never observes a `Killed` task whose partial usage hasn't
+            // landed yet.
+            disclose_partial_usage(
+                status_sink,
+                worker_task_id,
+                last_realized_output_tokens,
+                last_egress_profiles,
+            )
+            .await;
             status_sink
                 .set_status(worker_task_id, TaskStatus::Killed)
                 .await;
@@ -166,6 +189,13 @@ async fn finalize_fusion_outcome(
             let _ = output_manager
                 .append(worker_spool_path, &err.to_string())
                 .await;
+            disclose_partial_usage(
+                status_sink,
+                worker_task_id,
+                last_realized_output_tokens,
+                last_egress_profiles,
+            )
+            .await;
             status_sink
                 .set_fusion_error(worker_task_id, err.to_string())
                 .await;
@@ -173,6 +203,38 @@ async fn finalize_fusion_outcome(
                 .set_status(worker_task_id, TaskStatus::Failed)
                 .await;
         }
+    }
+}
+
+/// [Finding 14; round-3 review B2 follow-up] Best-effort `<usage>` AND
+/// `<egress-profiles>` disclosure for a fusion run that ends in `Err` after
+/// real panel spend: `FusionError` carries neither payload, so the progress
+/// channel's last-seen `realized_output_tokens` / `egress_profiles`
+/// (latched by `run_fusion_worker`'s forwarder — see
+/// `platform_api::FusionProgress::egress_profiles`'s doc for where the
+/// orchestrator populates it) are the only signals available at this seam.
+/// `tool_uses`/`duration_ms` are still unknown too and stay at `0` rather
+/// than fabricated. A no-op when nothing ever egressed (e.g. a preflight
+/// refusal — both `last_*` arguments are `None`), matching the render arm's
+/// existing `usage: None` omission.
+async fn disclose_partial_usage(
+    status_sink: &Arc<dyn TaskStatusSink>,
+    worker_task_id: &str,
+    last_realized_output_tokens: Option<u64>,
+    last_egress_profiles: Option<Vec<String>>,
+) {
+    if let Some(tokens) = last_realized_output_tokens {
+        status_sink
+            .set_fusion_egress_and_usage(
+                worker_task_id,
+                last_egress_profiles.unwrap_or_default(),
+                Some(platform_api::task_registry::AgentRunUsage {
+                    subagent_tokens: tokens,
+                    tool_uses: 0,
+                    duration_ms: 0,
+                }),
+            )
+            .await;
     }
 }
 
@@ -237,20 +299,53 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
     let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel::<platform_api::FusionProgress>(32);
     let forward_status_sink = status_sink.clone();
     let forward_task_id = worker_task_id.clone();
+    // [Finding 14; round-3 review B2 follow-up] Track the LAST
+    // `realized_output_tokens` AND `egress_profiles` the orchestrator emits
+    // (it does so when a post-fan-out failure follows real panel spend —
+    // `fusion::orchestrator::run_inner`'s `check_panel_bar` arm, and on the
+    // outer cancel/timeout choke point in `FusionOrchestrator::run`) so a
+    // terminal `Err` below can disclose what already egressed instead of
+    // the task notification silently omitting `<usage>`/`<egress-profiles>`
+    // for a run that really burned tokens and really reached those
+    // providers. `FusionError` itself carries neither payload, so these
+    // progress-channel values are the only carrier available at this seam.
+    // Only a `Some` overwrites the running latch — a later event with
+    // `None` (the ordinary case for most progress stages) must not erase
+    // an earlier `Some`.
     let forwarder = tokio::spawn(async move {
+        let mut last_realized_output_tokens: Option<u64> = None;
+        let mut last_egress_profiles: Option<Vec<String>> = None;
         while let Some(event) = prog_rx.recv().await {
+            if let Some(tokens) = event.realized_output_tokens {
+                last_realized_output_tokens = Some(tokens);
+            }
+            if let Some(profiles) = event.egress_profiles {
+                last_egress_profiles = Some(profiles);
+            }
             forward_status_sink
                 .set_fusion_stage(&forward_task_id, event.stage.label())
                 .await;
         }
+        (last_realized_output_tokens, last_egress_profiles)
     });
 
     let outcome = executor.run(request, inherit, Some(prog_tx)).await;
-    let _ = forwarder.await;
     // Natural completion and TaskStop race on this same worker-map lock.
     // Whichever removes/marks the record first owns the terminal
     // transition. Once finalizing wins, kill must not abort the
     // commit→completion-sink window.
+    //
+    // [Finding 18] Claim `finalizing` BEFORE `forwarder.await`, not after:
+    // the forwarder task must be rescheduled and can itself take
+    // contended registry locks per buffered stage event, so awaiting it
+    // first widens the race window in which a concurrent `kill` (which
+    // short-circuits only on `finalizing`) can see the record still
+    // un-claimed and discard an already-successful `Ok(FusionResult)` as
+    // `Killed` with none of its terminal side effects run. Claiming first
+    // makes `kill` land on the same "already finalizing" short-circuit
+    // whether it arrives before or during the forwarder drain; the
+    // forwarder's own stage writes are harmless either way since `kill`
+    // no longer touches the record once `finalizing` is set.
     let may_finalize = {
         let mut workers = workers.lock().await;
         match workers.get_mut(&worker_task_id) {
@@ -261,6 +356,8 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
             None => false,
         }
     };
+    let (last_realized_output_tokens, last_egress_profiles) =
+        forwarder.await.unwrap_or((None, None));
     if !may_finalize {
         return;
     }
@@ -272,6 +369,8 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
         &status_sink,
         &sink,
         &conversation_id,
+        last_realized_output_tokens,
+        last_egress_profiles,
     )
     .await;
     workers.lock().await.remove(&worker_task_id);

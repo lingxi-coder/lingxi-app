@@ -401,6 +401,18 @@ pub const APPEND_SUBAGENT_PROMPT_GATE_ENV: &str = "LINGXI_ENABLE_APPEND_SUBAGENT
 /// gate, before any runtime is built.
 pub const APPEND_SUBAGENT_PROMPT_VALUE_ENV: &str = "LINGXI_APPEND_SUBAGENT_SYSTEM_PROMPT";
 
+/// The subagent-type name reserved for the Fusion Agent surface
+/// (`tools/agent/src/agent.rs`'s private `FUSION_AGENT_TYPE`, `"fusion"`).
+/// That crate's `call` intercepts any `subagent_type` normalizing to this
+/// name into a multi-model panel BEFORE its catalog lookup ever runs, so a
+/// disk agent claiming the literal name `fusion` can never be dispatched by
+/// any spelling. Kept as a plain literal here (rather than importing the
+/// constant) because `tools/agent` depends on this crate, not the other way
+/// around. [Finding 25]: `lookup_definition` and `agent_listing_entries`
+/// both drop a catalog entry under this name so it is neither resolvable
+/// nor advertised as if it were.
+const FUSION_RESERVED_AGENT_TYPE: &str = "fusion";
+
 /// (CLI-15) The operator-supplied suffix appended to every Task-tool subagent's
 /// system prompt, or `None` when the flag was not passed or its gate is off.
 ///
@@ -1131,6 +1143,36 @@ impl PoolSubagentSpawner {
         // named `fusion-panel` cannot shadow the synthetic definition.
         if subagent_type == platform_api::FUSION_PANEL_TYPE {
             return crate::builtins::fusion_panel_definition();
+        }
+        // 0c. [Finding 25] `fusion` is reserved for the Fusion Agent surface:
+        // tools/agent's `call` intercepts any subagent_type normalizing to
+        // `fusion` into a multi-model panel BEFORE the catalog lookup, so a
+        // disk agent claiming this literal name can never be dispatched by
+        // any spelling. Drop it here too — for any caller that resolves a
+        // definition directly instead of going through that intercept — by
+        // falling through past the catalog to the same general-purpose
+        // fallback a wholly unknown type gets, matching the fork /
+        // fusion-panel precedent of never letting a user file shadow the
+        // reserved name.
+        if subagent_type == FUSION_RESERVED_AGENT_TYPE {
+            if let Some(catalog) = self.agent_catalog.get() {
+                if catalog
+                    .read()
+                    .await
+                    .iter()
+                    .any(|d| d.agent_type == subagent_type)
+                {
+                    tracing::warn!(
+                        "a disk agent is named `fusion`, which is reserved for \
+                         the Fusion Agent surface and can never be dispatched; \
+                         rename it so it is not silently unreachable"
+                    );
+                }
+            }
+            if let Some(def) = self.builtins.get("general-purpose").cloned() {
+                return def;
+            }
+            return Self::fallback_definition(subagent_type);
         }
         // 1. File catalog (user/project) wins on collision.
         if let Some(catalog) = self.agent_catalog.get() {
@@ -2017,6 +2059,20 @@ pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEnt
         if def.agent_type == platform_api::FUSION_PANEL_TYPE {
             continue;
         }
+        // [Finding 25] `fusion` is reserved for the Fusion Agent surface (see
+        // `PoolSubagentSpawner::lookup_definition`'s matching 0c case):
+        // advertising a disk agent under this name would promise a
+        // definition that can never be dispatched, since `tools/agent`'s
+        // `call` intercepts the name into the multi-model panel before any
+        // catalog lookup runs. Drop it from the listing rather than show the
+        // model an entry point that always resolves to something else.
+        if def.agent_type == FUSION_RESERVED_AGENT_TYPE {
+            tracing::warn!(
+                "dropping a disk agent named `fusion` from the Agent listing: \
+                 the name is reserved for the Fusion Agent surface"
+            );
+            continue;
+        }
         // Later-wins: a same-typed definition later in the slice overrides.
         by_type.insert(def.agent_type.clone(), def);
     }
@@ -2152,11 +2208,21 @@ const SPAWN_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(2
 /// observers still see exactly one terminal lifecycle event per spawn. The
 /// guard is disarmed on the normal terminal path, where all of this already
 /// happened inline.
+///
+/// The guard also owns `mcp_cleanups`/`agent_type`: the normal terminal path
+/// tears down exactly the MCP connections this spawn newly created via
+/// `run_agent_mcp_cleanups` (§24b), and the early-drop path must mirror that
+/// — otherwise a cancelled subagent (Esc mid-`Agent(...)`, a Fusion panel
+/// the panel-bar `join_set.abort_all()` drops, `panel_total_timeout`, …)
+/// leaks every MCP connection its spawn opened, since nothing else ever
+/// reaches those handles once the future is dropped [round-3 finding 17].
 struct SpawnDeallocGuard {
     pool: Arc<StateMachinePool>,
     agent_id: AgentId,
     observer_events: crate::api::ObserverEventSink,
     armed: bool,
+    mcp_cleanups: Vec<crate::agent_mcp_tools::AgentMcpCleanupHandle>,
+    agent_type: String,
 }
 
 impl Drop for SpawnDeallocGuard {
@@ -2171,6 +2237,8 @@ impl Drop for SpawnDeallocGuard {
             let pool = self.pool.clone();
             let id = self.agent_id;
             let observer_events = self.observer_events.clone();
+            let mcp_cleanups = std::mem::take(&mut self.mcp_cleanups);
+            let agent_type = std::mem::take(&mut self.agent_type);
             handle.spawn(async move {
                 // Best-effort: a slot that is already gone (naturally
                 // completed, or raced by another deallocate) makes this a
@@ -2179,9 +2247,36 @@ impl Drop for SpawnDeallocGuard {
                 let _ = pool
                     .send_event(&id, lingxi_core::Event::UserInterrupt)
                     .await;
-                tokio::time::sleep(SPAWN_CANCEL_GRACE).await;
+                // [round-3 finding 28] Poll down the fixed grace instead of
+                // blindly sleeping the whole window: the runner typically
+                // reacts to `UserInterrupt` within a turn or two, and
+                // holding the pool slot (and the capacity permit stored
+                // inside it) any longer than that would let
+                // cancelled-but-already-finished spawns starve the
+                // concurrency cap for the next `Agent`/Fusion panel spawn.
+                let mut elapsed = std::time::Duration::ZERO;
+                let poll_interval = std::time::Duration::from_millis(50);
+                while elapsed < SPAWN_CANCEL_GRACE {
+                    if pool.agent_runner_finished(&id).await {
+                        break;
+                    }
+                    tokio::time::sleep(poll_interval).await;
+                    elapsed += poll_interval;
+                }
                 let _ = pool.deallocate(&id).await;
+                // Emit the caller-visible terminal observation BEFORE
+                // running MCP teardown, mirroring the normal terminal
+                // path's ordering (see "Normal terminal path" above): a
+                // wedged MCP `disconnect` must not be able to block the
+                // `Killed` observation forever [round-3 finding B1 — a
+                // regression introduced while fixing finding 17, which put
+                // the cleanup await before this emit].
                 observer_events.emit_terminal(SubagentObservation::Killed { agent_id: id });
+                // §24b: mirror the normal terminal path's
+                // `run_agent_mcp_cleanups` call so a spawn whose future is
+                // dropped before reaching that line does not leak the MCP
+                // connections it newly created.
+                crate::agent_mcp_tools::run_agent_mcp_cleanups(mcp_cleanups, &agent_type).await;
             });
         }
     }
@@ -2303,6 +2398,8 @@ impl SubagentSpawner for PoolSubagentSpawner {
             agent_id,
             observer_events: observer_events.clone(),
             armed: true,
+            mcp_cleanups: agent_mcp_cleanups,
+            agent_type: resolved_agent_type.clone(),
         };
         observer_events.try_emit(SubagentObservation::Allocated {
             agent_id,
@@ -2501,12 +2598,12 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // Disarm the guard so it does not double-deallocate (or double-emit
         // a `Killed`) on drop. `pool.deallocate` below is best-effort and no
         // longer guarded by it, matching the guard's early-drop path, which
-        // also deallocates. `run_agent_mcp_cleanups` below is NOT mirrored by
-        // the drop path (`SpawnDeallocGuard::drop` only sends `UserInterrupt`,
-        // waits `SPAWN_CANCEL_GRACE`, deallocates, and emits `Killed` — see
-        // its impl above) — an MCP connection this spawn newly created can
-        // still leak if the future is dropped before reaching this line.
+        // also deallocates. Reclaim the MCP cleanup handles the guard has
+        // held since construction (`mem::take` leaves an empty `Vec` behind
+        // it, so if a drop races in after this point its own `Drop` runs no
+        // cleanups — this path already reached them).
         dealloc_guard.armed = false;
+        let agent_mcp_cleanups = std::mem::take(&mut dealloc_guard.mcp_cleanups);
         // Best-effort deallocate; failures here don't change the surfaced
         // result.
         let _ = self.pool.deallocate(&agent_id).await;
@@ -3621,6 +3718,296 @@ mod tests {
             Some("cancelled"),
             "the runner must reach its own cooperative terminal write before the hard-abort \
              fallback, not get killed mid-turn with the transcript stuck \"running\": {body}"
+        );
+    }
+
+    /// [round-3 finding 17] `SpawnDeallocGuard`'s early-drop path must tear
+    /// down exactly the MCP connections THIS spawn newly created, mirroring
+    /// the normal terminal path's `run_agent_mcp_cleanups` call — otherwise a
+    /// cancelled subagent (Esc mid-`Agent(...)`, or a Fusion panel the
+    /// panel-bar `join_set.abort_all()` drops) leaks every MCP connection its
+    /// spawn opened, since nothing else on the drop path ever reaches those
+    /// handles.
+    #[tokio::test(start_paused = true)]
+    async fn dropped_spawn_future_still_runs_its_mcp_cleanups() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
+            dir.path().to_path_buf(),
+        ));
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let observer = Arc::new(RecordingLifecycleObserver::default());
+
+        // Cleanup that resolves immediately but records that it ran — unlike
+        // the `hangs` builder above, this must actually execute, not merely
+        // stay in flight.
+        let cleanup_ran = Arc::new(AtomicUsize::new(0));
+        let cleanup_ran_for_builder = cleanup_ran.clone();
+        let builder: crate::agent_mcp_tools::AgentMcpToolBuilder =
+            Arc::new(move |_agent_id, _def| {
+                let cleanup_ran = cleanup_ran_for_builder.clone();
+                Box::pin(async move {
+                    let cleanup_ran = cleanup_ran.clone();
+                    let cleanup = crate::agent_mcp_tools::AgentMcpCleanupHandle {
+                        server_name: "newly-created".into(),
+                        run: Arc::new(move || {
+                            let cleanup_ran = cleanup_ran.clone();
+                            Box::pin(async move {
+                                cleanup_ran.fetch_add(1, Ordering::SeqCst);
+                                Ok(())
+                            })
+                        }),
+                    };
+                    crate::agent_mcp_tools::AgentMcpToolSet {
+                        tools: vec![],
+                        cleanups: vec![cleanup],
+                    }
+                })
+            });
+
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_api_client(Arc::new(HangingApi))
+            .with_spawn_observer(observer.clone())
+            .with_mcp_tool_builder(builder)
+            .with_hook_context(
+                protocol::SessionId::nil(),
+                std::path::PathBuf::from("/tmp"),
+                Some(dir.path().to_path_buf()),
+            )
+            .with_transcript_fs(fs);
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": "go"
+        }))
+        .expect("minimal spawn request");
+
+        // Drop the `spawn` future while the child is still genuinely
+        // in-flight (the API call never resolves) — this is the drop path
+        // `SpawnDeallocGuard` exists for, and the ONLY path this test
+        // exercises (never the normal terminal path's own
+        // `run_agent_mcp_cleanups` call).
+        let spawn_result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            spawner.spawn(
+                request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+            ),
+        )
+        .await;
+        assert!(
+            spawn_result.is_err(),
+            "the hanging API call must still be in flight when the caller times out"
+        );
+
+        // Poll under the paused virtual clock until the guard's cleanup task
+        // has had a chance to run the MCP teardown — bounded so a regression
+        // hangs the test instead of looping forever.
+        for _ in 0..200 {
+            if cleanup_ran.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        assert_eq!(
+            cleanup_ran.load(Ordering::SeqCst),
+            1,
+            "the spawn's newly-created MCP connection must be torn down even when the caller \
+             drops the spawn future before the normal terminal path reaches \
+             `run_agent_mcp_cleanups`"
+        );
+    }
+
+    /// [round-3 finding B1] `SpawnDeallocGuard::drop`'s spawned cleanup task
+    /// must emit its terminal `Killed` observation even when its OWN MCP
+    /// cleanup hangs forever — mirroring the normal terminal path, which
+    /// emits the terminal observation FIRST and only afterwards runs
+    /// `run_agent_mcp_cleanups` (see "Normal terminal path" above). A prior
+    /// fix for finding 17 (MCP cleanups leaking on the drop path) put the
+    /// `run_agent_mcp_cleanups(...).await` BEFORE the terminal emit instead,
+    /// so a wedged MCP `disconnect` (exactly what this test injects) would
+    /// suppress the `Killed` observation forever, leaving the transcript
+    /// permanently stuck reporting the subagent as running. Unlike
+    /// `dropped_spawn_future_during_mcp_cleanup_still_emits_one_terminal_event`
+    /// (which hangs the NORMAL path's cleanup, after the guard already
+    /// disarmed and already emitted), this test forces the caller to drop
+    /// the `spawn` future while the child's API call is still genuinely in
+    /// flight, so it is the GUARD's own drop-path cleanup — not the normal
+    /// path's — that gets stuck.
+    #[tokio::test(start_paused = true)]
+    async fn dropped_spawn_future_emits_terminal_event_even_when_its_own_mcp_cleanup_hangs() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
+            dir.path().to_path_buf(),
+        ));
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let observer = Arc::new(RecordingLifecycleObserver::default());
+
+        // MCP cleanup that never resolves — models a wedged `disconnect` on
+        // a stdio MCP server.
+        let builder: crate::agent_mcp_tools::AgentMcpToolBuilder =
+            Arc::new(move |_agent_id, _def| {
+                Box::pin(async move {
+                    let cleanup = crate::agent_mcp_tools::AgentMcpCleanupHandle {
+                        server_name: "wedged".into(),
+                        run: Arc::new(|| Box::pin(std::future::pending())),
+                    };
+                    crate::agent_mcp_tools::AgentMcpToolSet {
+                        tools: vec![],
+                        cleanups: vec![cleanup],
+                    }
+                })
+            });
+
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_api_client(Arc::new(HangingApi))
+            .with_spawn_observer(observer.clone())
+            .with_mcp_tool_builder(builder)
+            .with_hook_context(
+                protocol::SessionId::nil(),
+                std::path::PathBuf::from("/tmp"),
+                Some(dir.path().to_path_buf()),
+            )
+            .with_transcript_fs(fs);
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": "go"
+        }))
+        .expect("minimal spawn request");
+
+        // Drop the `spawn` future while the child is still genuinely
+        // in-flight (the API call never resolves) — this puts the GUARD, not
+        // the normal terminal path, on the hook for both the MCP teardown
+        // and the terminal emit.
+        let spawn_result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            spawner.spawn(
+                request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+            ),
+        )
+        .await;
+        assert!(
+            spawn_result.is_err(),
+            "the hanging API call must still be in flight when the caller times out"
+        );
+
+        // Poll under the paused virtual clock well past `SPAWN_CANCEL_GRACE`
+        // (2s) — long enough for the guard to reach `deallocate` and start
+        // (and get stuck in) its own `run_agent_mcp_cleanups` call, which
+        // never returns. Bounded so a regression hangs the test instead of
+        // looping forever.
+        let mut terminal_count = 0;
+        for _ in 0..200 {
+            terminal_count = observer
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        SubagentObservation::Completed { .. }
+                            | SubagentObservation::Failed { .. }
+                            | SubagentObservation::Killed { .. }
+                    )
+                })
+                .count();
+            if terminal_count >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        assert_eq!(
+            terminal_count, 1,
+            "the guard must emit its terminal Killed observation even when its own MCP \
+             cleanup hangs forever — a wedged `disconnect` must not permanently swallow the \
+             cancel-path terminal event; events observed: {:?}",
+            observer.events.lock().unwrap()
+        );
+    }
+
+    /// [round-3 finding 28] `SpawnDeallocGuard`'s early-drop path must not
+    /// blindly hold the pool slot (and the capacity permit stored inside it)
+    /// for the whole fixed `SPAWN_CANCEL_GRACE` window once the runner has
+    /// actually reached its terminal state — otherwise the concurrency cap
+    /// stays artificially occupied by cancelled spawns that finished
+    /// milliseconds ago, and the next `Agent`/Fusion panel spawn can be
+    /// rejected at the cap even though nothing is really running.
+    #[tokio::test(start_paused = true)]
+    async fn dropped_spawn_future_releases_pool_slot_before_full_grace_elapses() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
+            dir.path().to_path_buf(),
+        ));
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let observer = Arc::new(RecordingLifecycleObserver::default());
+        let spawner = PoolSubagentSpawner::new(pool.clone())
+            .with_api_client(Arc::new(HangingApi))
+            .with_spawn_observer(observer.clone())
+            .with_hook_context(
+                protocol::SessionId::nil(),
+                std::path::PathBuf::from("/tmp"),
+                Some(dir.path().to_path_buf()),
+            )
+            .with_transcript_fs(fs);
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": "go"
+        }))
+        .expect("minimal spawn request");
+
+        let spawn_result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            spawner.spawn(
+                request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+            ),
+        )
+        .await;
+        assert!(
+            spawn_result.is_err(),
+            "the hanging API call must still be in flight when the caller times out"
+        );
+
+        let start = tokio::time::Instant::now();
+        // Poll (under the paused virtual clock — each `sleep` auto-advances
+        // to the next pending timer) until the pool slot is released;
+        // bounded so a regression hangs the test instead of looping forever.
+        for _ in 0..200 {
+            if pool.slot_count().await == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let elapsed = start.elapsed();
+        assert_eq!(
+            pool.slot_count().await,
+            0,
+            "the pool slot must eventually be released"
+        );
+        // The runner reacts to `UserInterrupt` almost immediately (it races
+        // `event_rx` against the still-pending, never-resolving model call),
+        // so the slot must be freed well short of the full 2s
+        // `SPAWN_CANCEL_GRACE` — a fixed blind sleep before `deallocate`
+        // would hold it for the entire window regardless.
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "the runner finished almost immediately, so the pool slot (and its capacity \
+             permit) should not still be held {elapsed:?} later — SpawnDeallocGuard must not \
+             blindly hold it for the whole fixed grace window"
         );
     }
 
@@ -5387,6 +5774,31 @@ mod tests {
         }
     }
 
+    /// [Finding 25] A disk agent named `fusion` collides with the name
+    /// `tools/agent`'s `call` intercept reserves for the Fusion Agent
+    /// surface. `lookup_definition` must drop the catalog shadow (fall
+    /// through to `general-purpose`) rather than hand back a definition that
+    /// can never actually be reached through the real dispatch path.
+    #[tokio::test]
+    async fn lookup_definition_drops_catalog_shadow_named_fusion() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let shadow = AgentDefinition {
+            agent_type: "fusion".to_string(),
+            when_to_use: "user shadow".to_string(),
+            ..agent_def(AgentToolPolicy::Explicit(vec!["Write".to_string()]))
+        };
+        let catalog = Arc::new(RwLock::new(vec![shadow]));
+        let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);
+        let def = spawner.lookup_definition("fusion").await;
+        assert_ne!(
+            def.when_to_use, "user shadow",
+            "lookup_definition must not resolve a disk agent shadowing the \
+             reserved `fusion` name — it should fall through to general-purpose"
+        );
+        assert_eq!(def.agent_type, "general-purpose");
+    }
+
     #[test]
     fn make_subagent_context_fork_parent_prompt_skips_notes_trailer() {
         // fork_parent_system_prompt → rendered_system_prompt is the parent's
@@ -5638,6 +6050,25 @@ mod tests {
         let mut sorted = entries.clone();
         sorted.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
         assert_eq!(entries, sorted);
+    }
+
+    /// [Finding 25] A disk agent named `fusion` must never be advertised in
+    /// the Agent listing — it names a real definition (unlike `fusion-panel`,
+    /// which is hidden because it is synthetic) that would look reachable
+    /// but can never be dispatched, since `tools/agent`'s `call` intercepts
+    /// the name into the multi-model panel before any catalog lookup runs.
+    #[test]
+    fn agent_listing_entries_drops_disk_agent_named_fusion() {
+        let mut defs = builtin_agent_definitions();
+        let n_builtins = defs.len();
+        defs.push(AgentDefinition {
+            agent_type: "fusion".to_string(),
+            when_to_use: "a user's own fusion agent".to_string(),
+            ..agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()]))
+        });
+        let entries = crate::agent_listing_entries(&defs);
+        assert_eq!(entries.len(), n_builtins);
+        assert!(!entries.iter().any(|e| e.agent_type == "fusion"));
     }
 
     #[tokio::test]

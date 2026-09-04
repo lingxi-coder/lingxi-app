@@ -1619,6 +1619,65 @@ async fn when_done_uses_auto_tool_choice_until_the_last_turn() {
     );
 }
 
+/// Round-3 review items 3/7 regression test. Every REAL Fusion panel
+/// advertises more than one tool (`fusion_panel_definition`:
+/// `Read`/`Grep`/`Glob`/`WebFetch` plus the injected `StructuredOutput`) —
+/// a shape `when_done_uses_auto_tool_choice_until_the_last_turn` above never
+/// exercises, since it builds on `tool_schemas: vec![]` and StructuredOutput
+/// ends up the sole advertised tool. Before the round-3 fix, the runner's
+/// wire gate ANDed `force_this_turn` with the P0-1 single-tool check
+/// (`force_tool_choice_for_api.is_some()`, `true` only when
+/// `tool_schemas.len() == 1`), so with `Read`/`Grep` also advertised that
+/// second conjunct was permanently `false` and WhenDone's last-turn force
+/// never reached the wire for any panel — turn 3 here would have gone out
+/// with `tool_choice` unpinned. Reproduces the panel shape directly: two
+/// tools stay advertised across all three turns; turns 1-2 dispatch `Read`
+/// under AUTO tool_choice, and turn 3 (the last) MUST be forced.
+#[tokio::test]
+async fn when_done_forces_the_last_turn_even_with_other_tools_still_advertised() {
+    let structured = serde_json::json!({ "answer": 9 });
+    let api = StructuredOutputModeCapturingApiClient::new(vec![
+        tool_use_response("Read", Some("tool_use")),
+        tool_use_response("Read", Some("tool_use")),
+        structured_output_call_response(structured.clone()),
+    ]);
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
+    ctx.schema = Some(r#"{"type":"object"}"#.to_string());
+    ctx.structured_output_mode = platform_api::subagent_spawn::StructuredOutputMode::WhenDone;
+    // The exact shape every real Fusion panel spawns with: MORE than one
+    // tool advertised alongside the injected `StructuredOutput`, so
+    // `tool_schemas.len() != 1` and the P0-1 `force_tool_choice_for_api`
+    // gate is `None` for the whole run.
+    ctx.tool_schemas = vec![
+        serde_json::json!({"name": "Read", "input_schema": {"type": "object"}}),
+        serde_json::json!({"name": "Grep", "input_schema": {"type": "object"}}),
+    ];
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+    assert_eq!(
+        one_completed(&evs),
+        structured,
+        "the forced final turn's StructuredOutput call must be the result \
+         even with Read/Grep still advertised — a real panel that answers \
+         in prose on the unforced last turn ends Failed with no report"
+    );
+    assert_eq!(
+        api.forced_calls(),
+        vec![false, false, true],
+        "WhenDone must pin tool_choice on the last turn regardless of how \
+         many other tools are advertised — this is exactly the >1-tool \
+         configuration every real Fusion panel runs in"
+    );
+    assert_eq!(
+        invoker.call_count(),
+        2,
+        "the two non-final turns still dispatch Read under auto tool_choice"
+    );
+}
+
 /// WP2a item 1 / `StructuredOutputMode::WhenDone`: once the model has
 /// produced TWO consecutive turns with no tool call and no `StructuredOutput`
 /// call, the runner forces `StructuredOutput` on the very next turn — even

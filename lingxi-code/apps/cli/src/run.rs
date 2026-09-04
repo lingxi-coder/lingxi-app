@@ -2699,7 +2699,7 @@ async fn run_slash_command_with_budget(
             // recover it from the `/fusion` `Done` display's own format
             // (`fusion_command.rs`: `"{task_id}  {preset}  {scope}"`) and
             // await that one task to a terminal status before returning.
-            match pending_local_fusion_task_id(&display) {
+            match local_fusion_task_id_to_await(input, &display) {
                 Some(task_id) => {
                     let outcome =
                         await_local_fusion_result(task_id, runtime.task_registry.as_ref(), sink)
@@ -2749,11 +2749,40 @@ async fn run_slash_command_with_budget(
 /// fusion_command.rs`), if the display looks like one. `local_fusion` ids
 /// are `'f'` + 8 lowercase-base36 chars (`tasks::id::TaskType::id_prefix`) —
 /// unique among every other task-id prefix in the workspace.
+///
+/// Shape-only: does NOT know which command produced `display`. Review
+/// finding #26 — some other `Handled` command's display can collide with
+/// this shape (e.g. a `/btw`/`/recap` answer beginning with an abbreviated
+/// git SHA, or a bare word like "following"). Callers must gate on the
+/// dispatched command actually being `/fusion` first —
+/// [`local_fusion_task_id_to_await`] is that combined, safe-to-call form;
+/// this function stays a private shape-matcher only.
 fn pending_local_fusion_task_id(display: &str) -> Option<&str> {
     let first = display.split_whitespace().next()?;
     let suffix = first.strip_prefix('f')?;
     (suffix.len() == 8 && suffix.bytes().all(|b| b.is_ascii_digit() || b.is_ascii_lowercase()))
         .then_some(first)
+}
+
+/// Whether `input` dispatches to the `/fusion` command by name, per the same
+/// name extraction [`SlashCommandDispatcher::dispatch`] itself uses
+/// (`command_api::parser::parse_slash_command`).
+fn dispatches_to_fusion_command(input: &str) -> bool {
+    command_api::parser::parse_slash_command(input).is_some_and(|parsed| parsed.name == "fusion")
+}
+
+/// The `local_fusion` task id (if any) `run_slash_command_with_budget`
+/// should await for a `Handled` result — [Finding 26]: `None` for every
+/// command except `/fusion` itself, regardless of whether its `display`
+/// happens to have the `f`+8 shape [`pending_local_fusion_task_id`] looks
+/// for. Without this gate, ANY `Handled` command whose display collided
+/// with that shape triggered a registry lookup for a task that never
+/// existed, silently exiting print mode non-zero for a command that
+/// actually succeeded.
+fn local_fusion_task_id_to_await<'a>(input: &str, display: &'a str) -> Option<&'a str> {
+    dispatches_to_fusion_command(input)
+        .then(|| pending_local_fusion_task_id(display))
+        .flatten()
 }
 
 /// The minimal `local_fusion`-state lookup [`await_local_fusion_result_bounded`]
@@ -2908,7 +2937,15 @@ where
     let deadline = tokio::time::Instant::now() + max_wait;
     loop {
         let Some(state) = lookup.get(task_id).await else {
-            // Evicted or never created — nothing left to report.
+            // Evicted or never created — nothing left to report. [Finding
+            // 26] Say so before returning `None`: this branch used to exit
+            // print mode non-zero with nothing on stderr, indistinguishable
+            // from every other silent failure.
+            sink.error(
+                "fusion",
+                &format!("fusion task {task_id} was not found (evicted, or never created)"),
+            )
+            .await;
             return None;
         };
         if fusion_result_ready(&state) {
@@ -6893,6 +6930,51 @@ mod tests {
         assert_eq!(pending_local_fusion_task_id(""), None);
     }
 
+    /// [Finding 26]: `pending_local_fusion_task_id`'s shape-only detector
+    /// must never be applied to a command other than `/fusion`, even when
+    /// that command's `Handled` display happens to collide with the shape
+    /// (`f` + 8 lowercase-alnum chars) — e.g. a `/btw`/`/recap` answer
+    /// beginning with an abbreviated git SHA, or a bare word like
+    /// "following"/"formatted".
+    #[test]
+    fn local_fusion_task_id_to_await_requires_the_dispatched_command_to_be_fusion() {
+        // The real /fusion shape: recovered.
+        assert_eq!(
+            local_fusion_task_id_to_await(
+                "/fusion review this",
+                "f1a2b3c4d  quality  same-provider"
+            ),
+            Some("f1a2b3c4d")
+        );
+        // A DIFFERENT command's Handled display that collides with the
+        // f+8 shape must NOT be mistaken for a fusion task id.
+        assert_eq!(
+            local_fusion_task_id_to_await(
+                "/btw which commit fixed the panel cap?",
+                "f3ac93bac fixed it in the panel bar"
+            ),
+            None,
+            "a non-fusion command's display must never be parsed as a \
+             fusion task id, even when it happens to have the f+8 shape"
+        );
+        assert_eq!(
+            local_fusion_task_id_to_await(
+                "/recap",
+                "following up on yesterday's investigation"
+            ),
+            None
+        );
+        // A command whose NAME merely starts with "fusion" must not match
+        // either — only the exact command name counts.
+        assert_eq!(
+            local_fusion_task_id_to_await(
+                "/fusionx review this",
+                "f1a2b3c4d  quality  same-provider"
+            ),
+            None
+        );
+    }
+
     #[test]
     fn fusion_print_outcome_maps_each_terminal_status() {
         assert_eq!(
@@ -7159,7 +7241,17 @@ mod tests {
         .await;
 
         assert!(sink.outputs.lock().await.is_empty());
-        assert!(sink.errors.lock().await.is_empty());
+        // [Finding 26] The evicted/never-created branch must not exit
+        // non-zero SILENTLY — it now reports a named diagnostic before
+        // returning `None`, same as the timeout branch already did.
+        let errors = sink.errors.lock().await.clone();
+        assert_eq!(errors.len(), 1, "exactly one diagnostic: {errors:?}");
+        assert_eq!(errors[0].0, "fusion");
+        assert!(
+            errors[0].1.contains("ftest0001") && errors[0].1.contains("not found"),
+            "diagnostic must name the task id: {:?}",
+            errors[0].1
+        );
         assert_eq!(outcome, None);
         assert_eq!(
             fusion_result_exit_code(outcome.as_ref()),

@@ -184,6 +184,24 @@ impl StateMachinePool {
     pub async fn slot_count(&self) -> usize {
         self.slots.read().await.len()
     }
+
+    /// True once the runner for `agent_id` has actually reached its terminal
+    /// state — either the slot is already gone, or the slot's inbound event
+    /// channel is closed because [`crate::runner::run_subagent`] dropped its
+    /// `event_rx` on return (the same signal [`Self::send_event`] surfaces as
+    /// [`PoolError::AgentGone`]).
+    ///
+    /// Used by `SpawnDeallocGuard`'s early-drop path (`handle.rs`) to poll
+    /// down the fixed cancel grace once the runner is genuinely done, instead
+    /// of blindly holding the slot — and the capacity permit stored inside it
+    /// (`_capacity_permit` above) — for the whole grace window regardless of
+    /// how quickly the runner actually stopped.
+    pub async fn agent_runner_finished(&self, agent_id: &AgentId) -> bool {
+        match self.slots.read().await.get(agent_id) {
+            Some(slot) => slot.event_tx.is_closed(),
+            None => true,
+        }
+    }
 }
 
 /// Failure modes for [`StateMachinePool`] operations.

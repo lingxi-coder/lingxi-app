@@ -408,13 +408,26 @@ impl SideQueryClient for ProviderSideQueryClient {
         let resp = match &self.backend {
             ProviderSideQueryBackend::Session(service) => {
                 let query_source = request.query_source.as_str().to_string();
+                // Round-3 review finding 4: an explicit `temperature`
+                // override (e.g. the fusion analyst's hard `Some(0.0)`) used
+                // to be silently dropped by the old 7-arg `stream_json_schema`
+                // this backend called; now that it reaches the wire
+                // verbatim, it must be withheld from a model whose own
+                // vendored capability row says temperature control is
+                // unsupported — see `temperature_for_capable_model`.
+                let temperature = temperature_for_capable_model(
+                    &service.model_listings(),
+                    request.profile.as_deref(),
+                    &request.model,
+                    request.temperature,
+                );
                 // F003 round 2: route through the `_with_thinking` sibling
-                // so an explicit `temperature` override (e.g. the fusion
-                // analyst's 0.0) is never sent alongside a session-derived
-                // `thinking` block — `StrictStructuredQueryRequest` has no
-                // thinking field of its own, so `None` here means the same
-                // "no reasoning field at all" that `SideQueryRequest{thinking:
-                // None}` already means for the non-strict path above.
+                // so an explicit `temperature` override is never sent
+                // alongside a session-derived `thinking` block —
+                // `StrictStructuredQueryRequest` has no thinking field of
+                // its own, so `None` here means the same "no reasoning
+                // field at all" that `SideQueryRequest{thinking: None}`
+                // already means for the non-strict path above.
                 let stream = service
                     .stream_json_schema_with_thinking(
                         &request.model,
@@ -425,7 +438,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                         Some(request.max_tokens),
                         None,
                         None,
-                        request.temperature,
+                        temperature,
                         Some(query_source.as_str()),
                     )
                     .await
@@ -439,6 +452,14 @@ impl SideQueryClient for ProviderSideQueryClient {
                     .map(|s| vec![SystemBlock::text(s)])
                     .unwrap_or_default();
                 let messages = convert_messages(request.messages)?;
+                // Same capability gate as the Session arm above, sourced
+                // from this client's own registry.
+                let temperature = temperature_for_capable_model(
+                    &client.available_models(),
+                    request.profile.as_deref(),
+                    &request.model,
+                    request.temperature,
+                );
                 let llm_req = LlmRequest {
                     model: request.model,
                     profile: request.profile,
@@ -446,7 +467,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                     messages,
                     tools: Vec::new(),
                     max_tokens: Some(request.max_tokens),
-                    temperature: request.temperature.map(f64::from),
+                    temperature: temperature.map(f64::from),
                     capture_retry_count: true,
                     query_source: Some(request.query_source.as_str().to_string()),
                     response_format: Some(llm_client::ResponseFormat::JsonSchema {
@@ -484,6 +505,53 @@ impl SideQueryClient for ProviderSideQueryClient {
             ProviderSideQueryBackend::Session(service) => service.last_retry_count(),
             ProviderSideQueryBackend::Direct { .. } => 0,
         }
+    }
+}
+
+/// Round-3 review finding 4: whether the vendored catalog data reachable
+/// from this client explicitly marks `(profile, model)` as NOT accepting a
+/// `temperature` parameter — `models.dev`'s `temperature` bit, already
+/// surfaced on every configured model's listing as
+/// `ModelListing.metadata.temperature_control == Some(false)` (see
+/// `llm_client::catalog::map::to_metadata`, consumed identically by the
+/// client-facing `/model` picker). `profile: None` matches any listing with
+/// the given `request_model`; every `StrictStructuredQueryRequest` built in
+/// this codebase carries an explicit profile (the Fusion analyst always
+/// does), so that branch only matters for a hypothetical profile-less
+/// caller. A model with no listing, or an unset/`true` bit, is unaffected.
+fn model_rejects_temperature(
+    listings: &[llm_client::ModelListing],
+    profile: Option<&str>,
+    model: &str,
+) -> bool {
+    listings.iter().any(|listing| {
+        let profile_matches = match profile {
+            Some(p) => listing.profile_name == p,
+            None => true,
+        };
+        profile_matches
+            && listing.request_model == model
+            && listing.metadata.temperature_control == Some(false)
+    })
+}
+
+/// Withhold an explicit `temperature` override from a model whose own
+/// vendored capability row says temperature control is unsupported —
+/// otherwise the provider rejects the whole call (no retry, see
+/// `analyze`'s doc comment in the fusion crate), after every panel has
+/// already been billed. A `None` temperature (the common case outside the
+/// Fusion analyst) is returned unchanged regardless of capability, since
+/// there is nothing to withhold.
+fn temperature_for_capable_model(
+    listings: &[llm_client::ModelListing],
+    profile: Option<&str>,
+    model: &str,
+    temperature: Option<f32>,
+) -> Option<f32> {
+    if temperature.is_some() && model_rejects_temperature(listings, profile, model) {
+        None
+    } else {
+        temperature
     }
 }
 
@@ -1572,6 +1640,91 @@ mod tests {
             ),
             "got {:?}",
             query_source_event.metadata.get("querySource")
+        );
+    }
+
+    /// Round-3 review finding 4: a model whose vendored `models.dev` row says
+    /// temperature control is unsupported
+    /// (`ModelListing.metadata.temperature_control == Some(false)`, the value
+    /// every listed gpt-5.6-*/kimi-* judge row in the real catalog carries)
+    /// must never receive an explicit `temperature` override on the wire —
+    /// otherwise the provider rejects the whole call outright and `analyze`
+    /// deliberately does not retry a `SideQueryError::Api`, degrading the
+    /// entire run to `AnalysisFailed` after every panel is already billed.
+    #[tokio::test]
+    async fn session_backend_withholds_temperature_from_a_model_that_declares_it_unsupported() {
+        let transport = Arc::new(StreamStubTransport::text_response("{\"ok\":true}"));
+        let config = ClientConfig {
+            providers: vec![ProviderProfile {
+                provider_id: ProviderId::AnthropicFirstParty,
+                profile_name: "anthropic".to_string(),
+                base_url: DEFAULT_BASE_URL.to_string(),
+                protocol: ProtocolFamily::AnthropicMessages,
+                auth: AuthStrategy::OAuthBearer,
+                credential: CredentialConfig::Static {
+                    id: "session-key".to_string(),
+                },
+                models: vec![ModelProfile {
+                    display_model: "claude-sonnet-4-20250514".to_string(),
+                    request_model: "claude-sonnet-4-20250514".to_string(),
+                    billing_model: "claude-sonnet-4".to_string(),
+                    aliases: vec![],
+                    description: None,
+                    // The vendored capability bit this fix must consult —
+                    // real gpt-5.6-*/kimi-* judge rows carry this exact
+                    // value (`llm-client/data/models-dev/openai.json` etc.,
+                    // mapped by `catalog::map::to_metadata`).
+                    metadata: platform_api::ModelMetadata {
+                        temperature_control: Some(false),
+                        ..Default::default()
+                    },
+                    capabilities: Capabilities {
+                        streaming: true,
+                        tools: true,
+                        reasoning: true,
+                        structured_output: true,
+                        ..Capabilities::default()
+                    },
+                }],
+                pricing: PricingConfig::default(),
+                signing: None,
+                azure: None,
+                supports_websockets: false,
+                supports_websocket_compression: false,
+                websocket_connect_timeout_ms: None,
+                vision_delegate: None,
+            }],
+        };
+        let session_client = DefaultLlmClient::from_config(config)
+            .expect("session client config")
+            .with_credential_provider(Arc::new(StaticCredentialProvider::new(
+                Credential::BearerToken("session-oauth-token".to_string()),
+            )));
+        let session_transport: Arc<dyn llm_client::Transport> = transport.clone();
+        let service = Arc::new(llm_client::ApiService::new(
+            Arc::new(session_client),
+            session_transport,
+            llm_client::SubscriberState::default(),
+            llm_client::model::user_agent::UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        ));
+        let client = ProviderSideQueryClient::from_service(service);
+
+        let result = client
+            .query_json_schema(strict_req())
+            .await
+            .expect("session structured query succeeds even though temperature is withheld");
+        assert_eq!(result.value, serde_json::json!({ "ok": true }));
+
+        let received = transport.received_bodies.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert!(
+            received[0].get("temperature").is_none(),
+            "a model whose catalog row declares temperature control unsupported \
+             must never receive an explicit temperature override: {}",
+            received[0]
         );
     }
 }

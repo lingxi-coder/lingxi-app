@@ -493,10 +493,21 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
   // once per selected task and the interval itself decides per tick
   // whether to poll, so a background refresh flipping the status can never
   // retrigger the effect that issued it.
+  //
+  // [Finding 22] `!!task` IS a dependency, unlike `task?.status.type`
+  // above: the effect body early-returns on `!task`, so if the row is
+  // still absent from `bridge.desktop.tasks` the moment this effect last
+  // ran (e.g. a task tab selected during the one round-trip window a
+  // non-preserve `task_list` refresh empties that map), no interval is
+  // ever started, and nothing re-runs this effect when the row lands --
+  // `task.stage` then freezes for the rest of the run while the output
+  // poll effect above keeps ticking. `!!task` only flips on that one
+  // arrival (or a genuine non-preserve wipe), so it cannot reintroduce the
+  // per-tick storm `task?.status.type` was excluded to prevent.
   useEffect(() => {
     if (!active || active.kind !== 'task' || !task) return undefined;
     return startPollingWhileActive(() => taskInFlightRef.current, bridge.refreshTasks);
-  }, [active?.kind, active?.id, bridge.refreshTasks]);
+  }, [active?.kind, active?.id, !!task, bridge.refreshTasks]);
 
   if (!center.inspectorOpen || !active) return null;
   const subtitle = active.kind === 'agent' ? agent?.agent_type : active.kind === 'task' ? task?.status.type : active.kind === 'resource' ? resource?.path : undefined;

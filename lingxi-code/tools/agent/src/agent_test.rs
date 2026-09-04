@@ -842,6 +842,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                             stage,
                             panel_id: None,
                         realized_output_tokens: None,
+                        egress_profiles: None,
                     })
                         .await;
                 }
@@ -1340,6 +1341,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                         stage,
                         panel_id: Some("p1".to_string()),
                     realized_output_tokens: None,
+                    egress_profiles: None,
                 })
                     .await;
             }
@@ -1397,6 +1399,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                         stage,
                         panel_id: None,
                         realized_output_tokens: None,
+                        egress_profiles: None,
                     })
                     .await;
             }

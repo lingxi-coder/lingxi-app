@@ -728,6 +728,7 @@ fn fusion_stage_name(stage: &FusionStage) -> &'static str {
         FusionStage::ResolvingModels => "resolving_models",
         FusionStage::ReservingBudget => "reserving_budget",
         FusionStage::RunningPanels { .. } => "running_panels",
+        FusionStage::PanelsDispatched { .. } => "panels_dispatched",
         FusionStage::Analyzing => "analyzing",
         FusionStage::Selecting => "selecting",
         FusionStage::Synthesizing => "synthesizing",
@@ -735,6 +736,27 @@ fn fusion_stage_name(stage: &FusionStage) -> &'static str {
         FusionStage::NeedsParent => "needs_parent",
         FusionStage::Failed => "failed",
         FusionStage::Cancelled => "cancelled",
+    }
+}
+
+/// [round-3 review, findings 11/19] Whether a [`FusionStage`] progress event
+/// is proof that at least one panel task has genuinely reached the spawner —
+/// i.e. real provider calls are (or were) in flight — as opposed to merely
+/// "the panel STAGE has started". `RunningPanels { completed: 0, .. }` alone
+/// is NOT proof: `FusionOrchestrator::run_panel_stage` emits that BEFORE
+/// `panel::run_panels` ever spawns a task. `PanelsDispatched` IS proof —
+/// `run_panels` emits it itself, immediately after every panel task has been
+/// handed to the spawner, before any of them can have reached a terminal
+/// outcome. `RunningPanels { completed, .. }` with `completed > 0` is proof
+/// too (a panel can only complete after spawning) — kept as a second arm
+/// rather than relying on `PanelsDispatched` alone so this stays correct
+/// even against an executor that (legitimately, per the trait's own
+/// contract) never emits `PanelsDispatched` at all.
+fn stage_proves_panel_spawned(stage: &FusionStage) -> bool {
+    match stage {
+        FusionStage::PanelsDispatched { .. } => true,
+        FusionStage::RunningPanels { completed, .. } => *completed > 0,
+        _ => false,
     }
 }
 
@@ -794,7 +816,8 @@ fn fusion_tool_result(result: platform_api::FusionResult) -> ToolCallResult {
 ///   cancelled", inviting the model to "fix" its arguments and retry a
 ///   cancelled 4-5x-cost run.
 /// - The runtime-exhaustion family (`Internal`, `AllPanelsFailed`,
-///   `MinPanelsNotMet`, `PanelSetIncomplete`, `TimedOutEmpty`) →
+///   `AllPanelsFailedPreflight`, `MinPanelsNotMet`, `PanelSetIncomplete`,
+///   `TimedOutEmpty`) →
 ///   [`ToolError::Internal`] — these are host/provider-side outcomes, not a
 ///   malformed tool call the model could correct by rewriting its input.
 ///
@@ -817,6 +840,7 @@ fn fusion_tool_error(err: platform_api::FusionError) -> ToolError {
         FusionError::Cancelled => ToolError::Aborted,
         FusionError::Internal
         | FusionError::AllPanelsFailed
+        | FusionError::AllPanelsFailedPreflight
         | FusionError::MinPanelsNotMet
         | FusionError::PanelSetIncomplete
         | FusionError::TimedOutEmpty => ToolError::Internal(err.to_string()),
@@ -848,6 +872,15 @@ fn fusion_error_is_preflight(err: &platform_api::FusionError) -> bool {
             | FusionError::BudgetReservationUnavailable
             | FusionError::BudgetExceeded
             | FusionError::SpawnLimitExceeded
+            // [round-3 review, finding 12] Every panel failed via a
+            // pre-allocation spawner rejection — the orchestrator only
+            // returns this variant when EVERY collected panel's
+            // `error_category` is `"spawn"` (`check_panel_bar`), which
+            // guarantees zero provider calls, same as every other variant
+            // above. The general `AllPanelsFailed` (NOT listed here) can
+            // also cover panels that DID call a provider and lost, so it
+            // stays charged.
+            | FusionError::AllPanelsFailedPreflight
     )
 }
 
@@ -912,12 +945,12 @@ impl Drop for FusionSpawnReservationGuard {
         }
         // Only reached when `call_fusion`'s future was dropped before an
         // `Ok`/`Err` arm ran to `disarm()` it — mirror the `Err(Cancelled)`
-        // arm's own release decision: [round-2 review, finding 13] the
-        // forwarder only sets `panel_stage_observed` on a `RunningPanels`
-        // event with `completed > 0`, which is emitted from INSIDE
-        // `panel::run_panels` after a panel has genuinely run to
-        // completion — never on the `completed: 0` event
-        // `run_panel_stage` emits before any panel task is spawned.
+        // arm's own release decision: [round-2 review, finding 13; round-3
+        // review, findings 11/19] the forwarder only sets
+        // `panel_stage_observed` when `stage_proves_panel_spawned` says a
+        // panel task has genuinely reached the spawner — never on the
+        // `completed: 0` event `run_panel_stage` emits before any panel task
+        // is spawned.
         if !self
             .panel_stage_observed
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -1316,21 +1349,20 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // so it is the cheapest place to learn which side of that boundary
         // a `Cancelled` fell on.
         //
-        // [round-2 review, finding 13] `RunningPanels{completed:0,total:N}`
-        // is emitted by `FusionOrchestrator::run_panel_stage` BEFORE it logs
-        // N telemetry events and THEN calls `panel::run_panels` — so that
-        // event alone does NOT mean a panel spawned. Only a `RunningPanels`
-        // event with `completed > 0` is emitted from inside `run_panels`,
-        // after a panel has genuinely run to completion; use that as the
-        // "a panel definitely spawned" signal instead of "any RunningPanels
-        // event".
+        // [round-2 review, finding 13; round-3 review, findings 11/19]
+        // `RunningPanels{completed:0,total:N}` is emitted by
+        // `FusionOrchestrator::run_panel_stage` BEFORE it logs N telemetry
+        // events and THEN calls `panel::run_panels` — so that event alone
+        // does NOT mean a panel spawned. `stage_proves_panel_spawned`
+        // recognizes the two shapes that DO: `PanelsDispatched` (emitted by
+        // `run_panels` itself, right after every panel task has been handed
+        // to the spawner — covers the whole window up to the first
+        // completion) and `RunningPanels` with `completed > 0` (a panel
+        // could only complete after spawning).
         let panel_stage_observed_writer = panel_stage_observed.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = prog_rx.recv().await {
-                if matches!(
-                    event.stage,
-                    platform_api::FusionStage::RunningPanels { completed, .. } if completed > 0
-                ) {
+                if stage_proves_panel_spawned(&event.stage) {
                     panel_stage_observed_writer.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 let _ = forward_progress
@@ -1401,8 +1433,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 // free retry); treating it as never-preflight (the prior
                 // behaviour) permanently leaks `panel_n` reservations for
                 // agents that never existed on every pre-panel cancel. Use
-                // whether the forwarder ever observed a `RunningPanels`
-                // progress event to tell the two cases apart.
+                // whether the forwarder ever observed a progress event that
+                // `stage_proves_panel_spawned` recognizes as proof a panel
+                // task genuinely reached the spawner to tell the two cases
+                // apart.
                 let releases_full_reservation = fusion_error_is_preflight(&err)
                     || (matches!(err, platform_api::FusionError::Cancelled)
                         && !panel_stage_observed.load(std::sync::atomic::Ordering::Relaxed));
@@ -1551,10 +1585,36 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // description carries only the static pointer line. A LEGACY inline body is
         // retained behind an explicit `LINGXI_AGENT_LIST_IN_MESSAGES=false`
         // opt-out (gate OFF) — not a 2.1.193 form, but a usable escape hatch.
+        //
+        // [round-3 review, finding 6] The externalized catalog is built by
+        // `agent_listing_reminder_message` from `builtin_agent_definitions()` +
+        // the disk catalog — NEITHER of which knows about the synthetic
+        // `fusion` entry `append_fusion_listing` adds to `agents` (that
+        // reminder path lives in a different crate and has no seam onto the
+        // Agent tool's Fusion state). So under the DEFAULT gate (this arm),
+        // the pointer-only text above used to be the model's ENTIRE Fusion
+        // signal — which is to say none at all: the reminder catalog never
+        // carries `fusion`, so a stock session never sees its `when_to_use`
+        // guidance or the "about 4-5x the cost" warning, no matter how many
+        // turns pass. `agents` (built by the caller, `Self::prompt`) already
+        // carries the synthetic entry whenever the Fusion surface is enabled
+        // and an executor is wired — the exact same gate `append_fusion_listing`
+        // itself enforces — and already reflects any `Agent(fusion)` deny rule
+        // (the caller's deny-filter `retain` runs after the append). Fold that
+        // one entry's guidance directly into the pointer line here instead of
+        // relying on the reminder catalog to carry it, so the entrypoint stays
+        // discoverable under stock settings without depending on a cross-crate
+        // wire this file cannot reach.
+        let fusion_notice = agents
+            .iter()
+            .find(|a| a.agent_type == FUSION_AGENT_TYPE)
+            .map(|entry| format!(" `{}` is also available: {}", entry.agent_type, entry.when_to_use));
         let agent_list_section =
             if platform_api::subagent_spawn::should_inject_agent_list_in_messages() {
-                "Available agent types are listed in <system-reminder> messages in the conversation."
-                .to_string()
+                format!(
+                    "Available agent types are listed in <system-reminder> messages in the conversation.{}",
+                    fusion_notice.unwrap_or_default()
+                )
             } else {
                 let agent_lines = agents
                     .iter()
@@ -3894,5 +3954,150 @@ mod f_description_l_gate_tests {
             assert!(!p.contains("relay what matters"));
             assert!(!p.contains("Subagents run in the background"));
         }
+    }
+
+    /// [round-3 review, finding 6] Under the DEFAULT gate
+    /// (`LINGXI_AGENT_LIST_IN_MESSAGES` unset ⇒ `should_inject_agent_list_in_messages()`
+    /// true), the externalized system-reminder catalog
+    /// (`agent_listing_reminder_message`, a different crate) is built from
+    /// `builtin_agent_definitions()` + the disk catalog — neither of which
+    /// carries the synthetic `fusion` entry `append_fusion_listing` adds to
+    /// `agents`. Before this fix the default-gate pointer line ignored
+    /// `agents` entirely, so a stock session (Fusion enabled, executor wired)
+    /// never saw the `fusion` entry's `when_to_use` guidance or its
+    /// "about 4-5x the cost" warning through ANY surface — the entry was
+    /// computed and then silently discarded. `caller`-supplied `agents`
+    /// already carries the entry only when the Fusion surface is enabled and
+    /// an executor is wired (`append_fusion_listing`'s own gate) and already
+    /// reflects an `Agent(fusion)` deny rule (the caller's deny-filter runs
+    /// after the append) — so folding it into the pointer line here is exact,
+    /// not a new gate.
+    #[test]
+    fn default_gate_still_advertises_fusion_when_the_entry_is_present() {
+        let mut fixture = agents();
+        fixture.push(platform_api::subagent_spawn::SubagentListingEntry {
+            agent_type: "fusion".into(),
+            when_to_use: "Parallel multi-model deliberation for complex code, task, plan, or review work. About 4\u{2013}5\u{d7} the cost of a single agent.".into(),
+            tools_description: "Fusion deliberation (read-only panel)".into(),
+        });
+        // `prompt_env` already takes `AGENT_LIST_ENV_LOCK` — do the
+        // `LINGXI_AGENT_LIST_IN_MESSAGES` reset INSIDE its closure rather
+        // than locking the (non-reentrant) mutex a second time out here.
+        let p = prompt_env(|| {
+            std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
+            AgentTool::build_prompt_with_async_agents(&fixture, &[], false, true, LEAN_MODEL, true)
+        });
+        assert!(
+            p.contains(
+                "Available agent types are listed in <system-reminder> messages in the conversation."
+            ),
+            "the default-gate pointer sentence must still be present verbatim; got: {p:?}"
+        );
+        assert!(
+            p.contains("`fusion` is also available")
+                && p.contains("Parallel multi-model deliberation"),
+            "the fusion entry's when_to_use guidance must reach the model under the default gate; got: {p:?}"
+        );
+    }
+
+    /// Sibling: when `agents` carries no `fusion` entry (surface disabled or
+    /// no executor wired — `append_fusion_listing`'s own no-op case), the
+    /// default-gate pointer line must stay byte-identical to the pre-fix
+    /// text — no stray advertisement for a feature that is not actually
+    /// available.
+    #[test]
+    fn default_gate_omits_fusion_notice_when_the_entry_is_absent() {
+        let p = prompt_env(|| {
+            std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
+            AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true, LEAN_MODEL, true)
+        });
+        assert!(!p.contains("also available"), "no fusion entry ⇒ no notice; got: {p:?}");
+    }
+}
+
+/// Round-3 review findings 11/19 (rework): narrow, direct unit tests for the
+/// two pure decision points a Fusion cancel's spawn-reservation refund
+/// depends on — `stage_proves_panel_spawned` (does a progress event prove a
+/// panel task genuinely reached the spawner?) and `fusion_error_is_preflight`
+/// (does a terminal `FusionError` guarantee zero provider calls?). Kept
+/// inline rather than in `agent_test.rs` so this fixer's changes stay
+/// isolated to files it owns — a full end-to-end run through
+/// `AgentTool::execute` with a fake executor belongs there, alongside the
+/// existing `fusion_cancelled_after_panels_spawned_keeps_reservation_charged`
+/// / `fusion_cancelled_with_only_prespawn_progress_releases_the_full_reservation`
+/// pair it should extend with a third case: a fake executor that emits
+/// `PanelsDispatched` and then `Cancelled` with NO completion event at all,
+/// asserting `get_total_agent_spawns()` stays at its pre-cancel value (i.e.
+/// asserting the release call count / resulting total, not just that the
+/// call returned `Err`).
+#[cfg(test)]
+mod round3_finding_11_19_spawn_signal_tests {
+    use super::{fusion_error_is_preflight, stage_proves_panel_spawned};
+    use platform_api::{FusionError, FusionStage};
+
+    /// The defect: before this fix, the ENTIRE window between "N panel
+    /// tasks spawned and calling the provider" and "the first panel
+    /// finishes" produced no signal a caller could use to tell it apart
+    /// from "no panel task exists yet" — a cancel landing there refunded
+    /// the whole reservation for panels that really ran.
+    #[test]
+    fn panels_dispatched_proves_a_panel_spawned_even_with_zero_completions() {
+        assert!(stage_proves_panel_spawned(&FusionStage::PanelsDispatched {
+            total: 3
+        }));
+    }
+
+    #[test]
+    fn pre_spawn_running_panels_with_zero_completed_does_not_prove_a_spawn() {
+        assert!(!stage_proves_panel_spawned(&FusionStage::RunningPanels {
+            completed: 0,
+            total: 3
+        }));
+    }
+
+    #[test]
+    fn running_panels_with_at_least_one_completed_proves_a_spawn() {
+        assert!(stage_proves_panel_spawned(&FusionStage::RunningPanels {
+            completed: 1,
+            total: 3
+        }));
+    }
+
+    #[test]
+    fn every_other_stage_does_not_prove_a_spawn() {
+        for stage in [
+            FusionStage::ResolvingModels,
+            FusionStage::ReservingBudget,
+            FusionStage::Analyzing,
+            FusionStage::Selecting,
+            FusionStage::Synthesizing,
+            FusionStage::Completed,
+            FusionStage::NeedsParent,
+            FusionStage::Failed,
+            FusionStage::Cancelled,
+        ] {
+            assert!(
+                !stage_proves_panel_spawned(&stage),
+                "{stage:?} must not be mistaken for proof a panel spawned"
+            );
+        }
+    }
+
+    /// [round-3 review, finding 12] `AllPanelsFailedPreflight` guarantees
+    /// zero provider calls (the orchestrator only returns it when EVERY
+    /// panel's `error_category` is `"spawn"`) and must release the full
+    /// reservation, same as every other preflight variant.
+    #[test]
+    fn all_panels_failed_preflight_is_treated_as_preflight() {
+        assert!(fusion_error_is_preflight(
+            &FusionError::AllPanelsFailedPreflight
+        ));
+    }
+
+    /// Negative guard: the general `AllPanelsFailed` can cover panels that
+    /// DID call a provider and lost — it must stay charged.
+    #[test]
+    fn general_all_panels_failed_stays_charged_not_preflight() {
+        assert!(!fusion_error_is_preflight(&FusionError::AllPanelsFailed));
     }
 }

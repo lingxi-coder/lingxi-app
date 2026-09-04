@@ -210,15 +210,29 @@ fn resolve_preset(
 /// (`"openai" -> "gpt-5.6-sol"`) does not, so a bare string compare misses the
 /// duplicate. Stripping to the last `/`-segment aligns both spellings.
 ///
+/// (Round-3 review finding 5): the `/`-strip alone is not enough — the
+/// checked-in hint table's own anthropic/openrouter Claude Fable 5.1 rows
+/// diverge in punctuation (`"claude-fable-5-1"` vs
+/// `"anthropic/claude-fable-5.1"`), both the table's unique top rank, so an
+/// exact byte compare after the strip leaves them as two "distinct" models
+/// and `select_deduped` seats the same underlying model in two of three
+/// panel slots. Case-fold and normalise `.` to `-` as well, so a gateway's
+/// dotted-version spelling of the same id collapses onto its dashed sibling.
+///
 /// `pub(crate)` so `orchestrator.rs`'s `analyst_overlaps_panel` telemetry can
 /// key off the SAME canonical identity `resolve_analyst`'s `is_panelist` uses
 /// below — otherwise the flag and the selection rule can disagree about
 /// whether two rows are "the same model" (F011 round-2 blocking issue #2).
-pub(crate) fn canonical_key(model: &str) -> &str {
-    model.rsplit('/').next().unwrap_or(model)
+pub(crate) fn canonical_key(model: &str) -> String {
+    model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase()
+        .replace('.', "-")
 }
 
-fn canonical_model_key(row: &CatalogModel) -> &str {
+fn canonical_model_key(row: &CatalogModel) -> String {
     canonical_key(&row.model)
 }
 
@@ -246,12 +260,12 @@ fn select_deduped<'a>(
 ) -> Vec<&'a CatalogModel> {
     let mut picked: Vec<&CatalogModel> = Vec::new();
     let mut seen_profiles = std::collections::BTreeSet::new();
-    let mut seen_models = std::collections::BTreeSet::new();
+    let mut seen_models: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     // Pass 1: one distinct underlying model per profile (quality preset) or
     // just one per underlying model in rank order (fast preset).
     for row in sorted.iter().copied() {
         let model_key = canonical_model_key(row);
-        if seen_models.contains(model_key) {
+        if seen_models.contains(&model_key) {
             continue;
         }
         if dedup_profile_first && seen_profiles.contains(row.profile.as_str()) {
@@ -276,7 +290,7 @@ fn select_deduped<'a>(
                 continue;
             }
             let model_key = canonical_model_key(row);
-            if seen_models.contains(model_key) {
+            if seen_models.contains(&model_key) {
                 continue;
             }
             seen_models.insert(model_key);
@@ -1055,7 +1069,7 @@ mod tests {
         // so the parent-profile tie-break key never discriminates here.
         let set = resolve(&req(), &FusionRuntimeConfig::defaults(), &catalog).unwrap();
         assert_eq!(set.panels.len(), 3);
-        let panel_keys: Vec<&str> = set
+        let panel_keys: Vec<String> = set
             .panels
             .iter()
             .map(|p| canonical_key(&p.model))
@@ -1071,6 +1085,77 @@ mod tests {
             set.analyst.model, "gpt4o",
             "the genuinely distinct 5th model must win, not the higher-ranked \
              leftover gateway duplicate: {set:?}"
+        );
+    }
+
+    /// Round-3 review finding 5: the checked-in hint table's anthropic
+    /// (`"claude-fable-5-1"`) and openrouter (`"anthropic/claude-fable-5.1"`)
+    /// rows for the SAME underlying model — Claude Fable 5.1 — diverge in
+    /// punctuation (dash vs dot) and are the table's unique top rank (105).
+    /// Built from the REAL `llm_client::hints_for` rows (not synthetic ids
+    /// like the fixture above), so a future divergent gateway spelling in
+    /// the real table would fail this test too. Before the `canonical_key`
+    /// case/punctuation fold, a cross-provider quality run with both
+    /// anthropic and openrouter credentialed seated the identical model in
+    /// two of three panel slots.
+    #[test]
+    fn quality_preset_dedups_the_real_fable_row_despite_gateway_spelling_divergence() {
+        let fable_anthropic = llm_client::hints_for("anthropic", "claude-fable-5-1")
+            .expect("anthropic claude-fable-5-1 must be a real hinted row");
+        let fable_openrouter = llm_client::hints_for("openrouter", "anthropic/claude-fable-5.1")
+            .expect("openrouter anthropic/claude-fable-5.1 must be a real hinted row");
+        let opus = llm_client::hints_for("anthropic", "claude-opus-5")
+            .expect("anthropic claude-opus-5 must be a real hinted row");
+        let deepseek = llm_client::hints_for("deepseek", "deepseek-v4-pro")
+            .expect("deepseek deepseek-v4-pro must be a real hinted row");
+        let catalog = vec![
+            CatalogModel {
+                profile: "anthropic".into(),
+                model: "claude-fable-5-1".into(),
+                hints: fable_anthropic,
+                structured_output: true,
+            },
+            CatalogModel {
+                profile: "openrouter".into(),
+                model: "anthropic/claude-fable-5.1".into(),
+                hints: fable_openrouter,
+                structured_output: true,
+            },
+            CatalogModel {
+                profile: "anthropic".into(),
+                model: "claude-opus-5".into(),
+                hints: opus,
+                structured_output: true,
+            },
+            CatalogModel {
+                profile: "deepseek".into(),
+                model: "deepseek-v4-pro".into(),
+                hints: deepseek,
+                structured_output: true,
+            },
+        ];
+        let set = resolve(&req(), &FusionRuntimeConfig::defaults(), &catalog).unwrap();
+        assert_eq!(set.panels.len(), 3);
+        // Count by the two REAL spellings directly (not via `canonical_key`,
+        // which is the function under test) so this assertion cannot be
+        // fooled by the very bug it exists to catch.
+        let fable_slots = set
+            .panels
+            .iter()
+            .filter(|p| p.model == "claude-fable-5-1" || p.model == "anthropic/claude-fable-5.1")
+            .count();
+        assert_eq!(
+            fable_slots, 1,
+            "the same underlying model (Claude Fable 5.1) must occupy exactly \
+             one panel slot regardless of which gateway's spelling it was \
+             picked through, not two: {:?}",
+            set.panels
+        );
+        assert!(
+            set.panels.iter().any(|p| p.model == "deepseek-v4-pro"),
+            "the genuinely distinct 3rd model must fill the panel instead of \
+             a second copy of the duplicate: {:?}",
+            set.panels
         );
     }
 }

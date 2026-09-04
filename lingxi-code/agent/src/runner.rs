@@ -1173,10 +1173,20 @@ async fn run_subagent_loop(
     // `force_tool_choice_for_api` is computed ONCE, HERE, before the turn loop
     // is entered, from the advertised-tool count alone; the nudge path below
     // deliberately does NOT re-arm it, and there is no other assignment to this
-    // binding anywhere in the loop (it is a `let`, not a `let mut`). A run that
-    // advertises tools besides StructuredOutput sends `tool_choice = None` on
-    // every round-trip, before AND after the nudge. Believe this comment and
-    // the shipped test, not the commit message.
+    // binding anywhere in the loop (it is a `let`, not a `let mut`). Under
+    // `StructuredOutputMode::Forced` (the byte-parity default this comment was
+    // originally written about), a run that advertises tools besides
+    // StructuredOutput sends `tool_choice = None` on every round-trip, before
+    // AND after the nudge — this binding alone is the whole story there.
+    //
+    // Round-3 review items 3/7/9/20 fix: under `StructuredOutputMode::WhenDone`
+    // (Fusion panels), this binding is NOT the whole story any more — the wire
+    // call below additionally pins on the run's designated last-chance turn
+    // (final turn, or two consecutive idle turns) even when `tool_schemas.len()
+    // != 1`, because that turn is the one place WhenDone's "forced only on the
+    // last turn" contract (`platform-api/src/subagent_spawn.rs`) cannot be
+    // honored by this binding's single-tool gate alone — see the wire call's
+    // own comment below for the mode-aware condition.
     let force_tool_choice_for_api: Option<&'static str> =
         if force_structured_tool.is_some() && tool_schemas.len() == 1 {
             force_structured_tool
@@ -1477,20 +1487,35 @@ async fn run_subagent_loop(
                         query_source_label: ctx.query_source_label.clone(),
                     };
                     let open_stream = async {
-                        // Combine both fixes: `force_tool_choice_for_api.is_some()`
-                        // (main, P0-1) is the oracle-verified wire-level gate —
-                        // pinning `tool_choice` is only ever safe when
+                        // Combine both fixes, per-mode rather than by blind
+                        // conjunction (round-3 review items 2/3/7/9/20 fix:
+                        // the merge's plain `&&` made `force_this_turn`'s
+                        // last-turn / two-idle-turn force permanently dead on
+                        // the wire for every real Fusion panel, since a panel
+                        // always advertises more than one tool). Under
+                        // `StructuredOutputMode::Forced` (`force_every_turn`)
+                        // the oracle-verified P0-1 gate is preserved exactly:
+                        // pinning `tool_choice` is only safe when
                         // StructuredOutput is the ONLY advertised tool, since
                         // pinning it otherwise silently removes the model's
                         // ability to call any other tool for the rest of the
-                        // turn. `force_this_turn` (WP2a `StructuredOutputMode`)
-                        // is the run's own turn-scoped policy for WHEN forcing
-                        // is even desired (every turn under `Forced`, or only
-                        // the last/idle-exhausted turn under `WhenDone`). Both
-                        // must hold: a turn this policy wants forced still only
-                        // gets pinned on the wire when there is nothing else the
-                        // model could usefully call anyway.
-                        if force_this_turn && force_tool_choice_for_api.is_some() {
+                        // turn — and under `Forced`, `force_this_turn` is
+                        // true on EVERY turn, so a bare OR would re-pin every
+                        // round-trip of a multi-tool schema subagent and
+                        // regress P0-1. Under `StructuredOutputMode::WhenDone`
+                        // (`!force_every_turn`), `force_this_turn` is true
+                        // only on the run's designated last-chance turn (the
+                        // final turn, or after two consecutive idle turns) —
+                        // exactly the turn the policy singles out as having
+                        // nothing else useful left to explore — so that turn
+                        // pins `tool_choice` regardless of how many other
+                        // tools are advertised, restoring the documented
+                        // "forced only on the last turn" contract
+                        // (`platform-api/src/subagent_spawn.rs`,
+                        // `fusion/src/panel.rs`) for every real panel.
+                        if force_this_turn
+                            && (force_tool_choice_for_api.is_some() || !force_every_turn)
+                        {
                             api_client
                                 .messages_create_stream_forced_in_opts(
                                     &current_model,

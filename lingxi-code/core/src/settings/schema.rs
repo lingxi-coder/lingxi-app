@@ -921,8 +921,14 @@ impl FusionSettingsJson {
             // `read_layer_or_skip` silently dropped that tier's unrelated
             // `permissions`/`hooks`/`model` along with it.
             // `FusionRuntimeConfig::from_settings` re-checks the identical
-            // per-stage-vs-total invariant on the MERGED view and fails
-            // only the fusion run, which is the right blast radius.
+            // per-stage-vs-total invariant on the MERGED view for
+            // `panelTotalTimeoutMs`, `analystTimeoutMs` and
+            // `synthesizerTimeoutMs` — each is a term of its stage-sum
+            // check (fusion/src/config.rs). `panelIdleTimeoutMs` is NOT a
+            // term of that sum, so nothing re-checks it once this gate
+            // closes; see the same-file `panelIdleTimeoutMs` vs
+            // `panelTotalTimeoutMs` check below, which restores the
+            // invariant that actually governs it (Finding [24]).
             if let Some(stage) = value {
                 if self.total_timeout_ms.is_some() && stage > total {
                     return Err(SchemaViolation(format!(
@@ -934,6 +940,42 @@ impl FusionSettingsJson {
                 if stage == 0 {
                     return Err(SchemaViolation(format!("{name} must be positive")));
                 }
+            }
+        }
+        // Finding [24]: `panelIdleTimeoutMs` is the one stage field above
+        // that is NOT a term of `FusionRuntimeConfig::from_settings`'s
+        // stage-sum re-check (fusion/src/config.rs), and the
+        // `totalTimeoutMs`-gated loop above says nothing about it either —
+        // the invariant that actually governs it is not "<= totalTimeoutMs"
+        // anyway: the panel-level stall detector (`stall_timeout_ms`,
+        // fusion/src/panel.rs) is only ever reachable while the panel
+        // itself is still running, i.e. while
+        // `panelIdleTimeoutMs <= panelTotalTimeoutMs`. Check that
+        // invariant directly, same-file only (no cross-tier hazard: both
+        // sides must be present IN THIS FILE, so a tier that sets only one
+        // of them is left to the other tier/default exactly as before —
+        // `FusionRuntimeConfig::from_settings` re-checks the identical
+        // invariant on the merged view, comparing the merged/defaulted
+        // `panel_total_timeout_ms` against the pre-default
+        // `panel_idle_timeout_ms` — but ONLY when some tier actually set
+        // `panelIdleTimeoutMs` at all, so a merged DEFAULT idle value
+        // (180_000) can never trip that check just because a different
+        // tier lowered `panelTotalTimeoutMs` below it; a settings file that
+        // never mentions `panelIdleTimeoutMs` must not be rejected over a
+        // field it never touched. Same gating pattern as the stage-sum and
+        // min-successful-panels merged-view checks beside it. Independent
+        // of validation, `panel::panel_stall_timeout_ms` also clamps the
+        // watchdog deadline at the spawn use site as defense in depth for a
+        // config built in-process without going through `from_settings` at
+        // all).
+        if let (Some(idle), Some(panel_total)) =
+            (self.panel_idle_timeout_ms, self.panel_total_timeout_ms)
+        {
+            if idle > panel_total {
+                return Err(SchemaViolation(
+                    "fusion.panelIdleTimeoutMs must not exceed fusion.panelTotalTimeoutMs"
+                        .into(),
+                ));
             }
         }
         // F004: a run whose panels all completed must not be able to report
@@ -1238,6 +1280,64 @@ mod tests {
         settings
             .validate()
             .expect("no totalTimeoutMs present in this file — must not be rejected");
+    }
+
+    #[test]
+    fn fusion_panel_idle_timeout_above_same_file_panel_total_is_rejected() {
+        // Finding [24]: `panelIdleTimeoutMs` is the one stage field in the
+        // `totalTimeoutMs`-gated loop above that `FusionRuntimeConfig::
+        // from_settings`'s merged-view stage-sum re-check does NOT cover
+        // (it is not a term of that sum), so once `totalTimeoutMs` is
+        // absent from a file nothing validates it — and the invariant that
+        // actually matters is `panelIdleTimeoutMs <= panelTotalTimeoutMs`
+        // (the panel-level stall detector can only ever fire while the
+        // panel itself is still running), not a comparison against
+        // `totalTimeoutMs`. This must be rejected even with no
+        // `totalTimeoutMs` anywhere in the file.
+        let settings: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{"panelIdleTimeoutMs":5000000,"panelTotalTimeoutMs":600000}}"#,
+        )
+        .unwrap();
+        let err = settings.validate().unwrap_err();
+        assert!(
+            matches!(&err, crate::settings::SettingsError::SchemaViolation(msg) if msg.contains("panelIdleTimeoutMs") && msg.contains("panelTotalTimeoutMs")),
+            "expected a panelIdleTimeoutMs vs panelTotalTimeoutMs violation, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fusion_panel_idle_timeout_at_or_below_same_file_panel_total_is_accepted() {
+        let settings: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{"panelIdleTimeoutMs":600000,"panelTotalTimeoutMs":600000}}"#,
+        )
+        .unwrap();
+        settings
+            .validate()
+            .expect("panelIdleTimeoutMs == panelTotalTimeoutMs must pass");
+    }
+
+    #[test]
+    fn fusion_panel_idle_timeout_alone_in_a_file_does_not_trip_the_same_file_check() {
+        // Same per-file hazard as the other checks in this module: a tier
+        // that sets only `panelIdleTimeoutMs` has no opinion on
+        // `panelTotalTimeoutMs` — it may be raised in a different tier —
+        // so THIS same-file-only check must not fire when the counterpart
+        // field is absent from this file. That is NOT the same claim as "a
+        // panelIdleTimeoutMs of 5000000 with no panelTotalTimeoutMs
+        // anywhere is safe to run with" — it plainly isn't (the default
+        // panel_total_timeout_ms is 600_000). Round-3 review finding [24]:
+        // that merged-view case is rejected by
+        // `FusionRuntimeConfig::from_settings`
+        // (fusion/src/config.rs::from_settings_rejects_a_merged_panel_idle_timeout_above_the_default_panel_total),
+        // and the watchdog deadline is additionally clamped at the spawn
+        // use site (fusion/src/panel.rs::panel_stall_timeout_ms) as defense
+        // in depth. This test covers only THIS function's narrow, correct,
+        // per-file scope.
+        let settings: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"panelIdleTimeoutMs":5000000}}"#).unwrap();
+        settings
+            .validate()
+            .expect("no panelTotalTimeoutMs present in this file — must not be rejected here");
     }
 
     #[test]

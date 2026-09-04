@@ -31,6 +31,38 @@ pub enum AnalystError {
     Failed(String),
 }
 
+/// Usage accumulated by [`analyze`], returned on EVERY exit — success or
+/// failure alike (round-3 review findings 8 and 10).
+///
+/// Before this, a caller only ever saw `usage` on the success path: every
+/// error return (a per-attempt timeout, an `Unsupported`/last-attempt
+/// `ParseFailed`, or the transport/4xx/5xx arm) discarded `usage_acc`
+/// outright, throwing away real, already-billed provider spend from any
+/// EARLIER attempt in the same retry loop (finding 8). Separately, the one
+/// arm that retries a billed-but-undecodable response
+/// (`SideQueryError::InvalidResponse` — the provider answered and was
+/// charged, but `query_json_schema` has no usage figure to hand back for
+/// that specific attempt, since `provider_side_query::decode_response`'s
+/// usage is discarded before the error crosses the trait boundary) let a
+/// real dollar amount go uncounted while the run still went on to claim
+/// `estimated: false` over what remained — a knowingly short number
+/// reported as exact (finding 10).
+#[derive(Debug, Clone, Default)]
+pub struct AnalystUsage {
+    /// Sum of every attempt's provider-reported usage this call COULD
+    /// capture. May still understate the true billed total — see
+    /// `incomplete`.
+    pub usage: cost::Usage,
+    /// Number of provider calls made (every attempt, decoded or not).
+    pub calls: u32,
+    /// Set once at least one attempt is known to have been billed by the
+    /// provider without a usage figure to add to `usage` (an
+    /// `InvalidResponse` retry). When true, a caller must never report
+    /// `estimated: false` over `usage` — it is known-short, not merely
+    /// approximate.
+    pub incomplete: bool,
+}
+
 impl From<AnalystError> for FusionError {
     fn from(err: AnalystError) -> Self {
         match err {
@@ -54,18 +86,19 @@ pub async fn analyze(
     request: &FusionRequest,
     analyst: &ResolvedPanel,
     panels: &[PanelInternal],
-) -> Result<(FusionAnalysis, cost::Usage, u32), AnalystError> {
+) -> Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)> {
     let panel_ids = successful_panel_ids(panels);
     let schema = analyst_json_schema(&panel_ids, &request.dimensions);
     let attempts = 1 + u32::from(config.analysis_protocol_retries);
-    let mut calls = 0_u32;
     let mut last_decode_error: Option<String> = None;
     // Accumulated across every attempt that reached a real (billed) provider
     // response, including ones whose JSON then failed `decode_analysis` and
-    // got retried. Without this, only the LAST attempt's usage survived the
-    // loop and every earlier attempt's real, billed tokens vanished from
-    // `realized_nano_usd` / `FusionUsage` / the committed lease.
-    let mut usage_acc = cost::Usage::default();
+    // got retried — and now returned on EVERY exit of this loop, not just
+    // the success path (round-3 review finding 8). Without this, only the
+    // LAST attempt's usage survived and every earlier attempt's real,
+    // billed tokens vanished from `realized_nano_usd` / `FusionUsage` / the
+    // committed lease the moment the run ultimately failed.
+    let mut acc = AnalystUsage::default();
     for attempt in 0..attempts {
         let user = analyst_user_message(request, panels, last_decode_error.as_deref());
         let req = StrictStructuredQueryRequest {
@@ -84,41 +117,51 @@ pub async fn analyze(
             client.query_json_schema(req),
         )
         .await;
-        calls += 1;
+        acc.calls += 1;
         match outcome {
             // A stalled/slow provider call is not retried — see the doc
             // comment above.
-            Err(_) => return Err(AnalystError::Failed("timeout".into())),
+            Err(_) => return Err((AnalystError::Failed("timeout".into()), acc)),
             Ok(Err(SideQueryError::StructuredOutputUnsupported)) => {
-                return Err(AnalystError::Unsupported);
+                return Err((AnalystError::Unsupported, acc));
             }
             Ok(Err(SideQueryError::InvalidResponse(reason))) => {
+                // Round-3 review finding 10: the provider answered — and was
+                // billed — but `query_json_schema` has no usage figure to
+                // hand back for THIS attempt (`provider_side_query`'s
+                // `decode_response` usage is discarded before the error
+                // crosses the trait boundary). Mark the accumulator
+                // incomplete so neither this failure path nor a later
+                // successful retry ever reports `estimated: false` over a
+                // total that is silently missing this attempt's real spend.
+                acc.incomplete = true;
                 if attempt + 1 == attempts {
-                    return Err(AnalystError::ParseFailed);
+                    return Err((AnalystError::ParseFailed, acc));
                 }
                 last_decode_error = Some(reason);
             }
             // Transport / 4xx / 5xx / partial: not a decode failure, not
             // retried (see doc comment above).
             Ok(Err(other)) => {
-                return Err(AnalystError::Failed(
-                    analyst_failure_category(&other).into(),
+                return Err((
+                    AnalystError::Failed(analyst_failure_category(&other).into()),
+                    acc,
                 ));
             }
             Ok(Ok(StrictStructuredQueryResponse { value, usage, .. })) => {
-                usage_acc.add(&usage);
+                acc.usage.add(&usage);
                 match decode_analysis(&value, request, panels) {
-                    Ok(analysis) => return Ok((analysis, usage_acc, calls)),
+                    Ok(analysis) => return Ok((analysis, acc)),
                     Err(reason) if attempt + 1 == attempts => {
                         let _ = reason;
-                        return Err(AnalystError::ParseFailed);
+                        return Err((AnalystError::ParseFailed, acc));
                     }
                     Err(reason) => last_decode_error = Some(reason),
                 }
             }
         }
     }
-    Err(AnalystError::ParseFailed)
+    Err((AnalystError::ParseFailed, acc))
 }
 
 /// Successful (completed, reported) panel anonymous ids, sorted. Shared by
@@ -714,18 +757,216 @@ mod tests {
         let client: Arc<dyn SideQueryClient> = Arc::new(FlakyThenGoodClient {
             calls: std::sync::atomic::AtomicU32::new(0),
         });
-        let (_, usage, calls) = analyze(client, &config, &request, &analyst, &panels)
+        let (_, acc) = analyze(client, &config, &request, &analyst, &panels)
             .await
             .expect("second attempt must decode successfully");
-        assert_eq!(calls, 2, "both attempts must be counted");
+        assert_eq!(acc.calls, 2, "both attempts must be counted");
         assert_eq!(
-            usage.tokens.input, 120,
+            acc.usage.tokens.input, 120,
             "the first (decode-failed) attempt's 100 input tokens must not be \
 dropped — only the second attempt's 20 survived before this fix"
         );
         assert_eq!(
-            usage.tokens.output, 60,
+            acc.usage.tokens.output, 60,
             "the first (decode-failed) attempt's 50 output tokens must not be dropped"
         );
+        assert!(
+            !acc.incomplete,
+            "a pure decode-failure retry (not an InvalidResponse) captures every \
+attempt's real usage — the total is not incomplete"
+        );
+    }
+
+    /// Round-3 review finding 8: every `analyze` error exit must carry the
+    /// real usage `usage_acc` accumulated before that exit, not discard it —
+    /// otherwise a caller has no way to price the attempts that DID bill the
+    /// provider before the run ultimately failed.
+    #[tokio::test]
+    async fn a_failing_final_attempt_still_returns_the_earlier_attempts_real_usage() {
+        let panels = vec![stub_panel("P1")];
+        let request = FusionRequest {
+            schema_version: 1,
+            origin: platform_api::FusionOrigin::Slash,
+            prompt: "task".into(),
+            preset: platform_api::FusionPreset::Quality,
+            models: None,
+            dimensions: vec!["coverage".into()],
+            partial_ok: true,
+            max_panel: None,
+            cross_provider: true,
+            parent_profile: "anthropic".into(),
+            parent_model: "claude-sonnet-5".into(),
+            conversation_id: None,
+            workflow_run_id: None,
+        };
+        let analyst = ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        };
+        // Default config: `analysis_protocol_retries == 1` -> 2 attempts.
+        // BOTH scripted calls decode-fail (empty `scores`), so the loop
+        // exhausts its retries and returns `Err` — but `usage_acc` has real,
+        // non-zero tokens from both billed attempts by then.
+        let config = FusionRuntimeConfig::defaults();
+        let client: Arc<dyn SideQueryClient> = Arc::new(AlwaysDecodeFailsClient {
+            calls: std::sync::atomic::AtomicU32::new(0),
+        });
+        let (err, acc) = analyze(client, &config, &request, &analyst, &panels)
+            .await
+            .expect_err("both attempts decode-fail");
+        assert_eq!(err, AnalystError::ParseFailed);
+        assert_eq!(acc.calls, 2, "both billed attempts must be counted");
+        assert_eq!(
+            acc.usage.tokens.input, 120,
+            "the first attempt's 100 input tokens must not be discarded on the \
+error exit — before this fix every AnalystError arm dropped usage_acc entirely"
+        );
+        assert_eq!(
+            acc.usage.tokens.output, 60,
+            "the first attempt's 50 output tokens must not be discarded either"
+        );
+    }
+
+    /// A [`SideQueryClient`] whose every `query_json_schema` call returns
+    /// structurally-valid JSON that fails `decode_analysis` (empty `scores`),
+    /// with real, distinct, non-zero usage on every attempt — so a test can
+    /// tell whether an error exit still carries the accumulated total.
+    struct AlwaysDecodeFailsClient {
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl sidequery::SideQueryClient for AlwaysDecodeFailsClient {
+        async fn query(
+            &self,
+            _request: sidequery::SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, SideQueryError> {
+            unreachable!("analyze() only calls query_json_schema")
+        }
+
+        async fn query_json_schema(
+            &self,
+            _request: StrictStructuredQueryRequest,
+        ) -> Result<StrictStructuredQueryResponse, SideQueryError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (input, output) = if call == 0 { (100_u64, 50_u64) } else { (20_u64, 10_u64) };
+            Ok(StrictStructuredQueryResponse {
+                value: serde_json::json!({
+                    "consensus": [],
+                    "contradictions": [],
+                    "unique_insights": [],
+                    "coverage_gaps": [],
+                    "scores": {},
+                    "confidence": 50,
+                    "recommendation": { "type": "needs_parent", "reason": "unsure" }
+                }),
+                usage: cost::Usage {
+                    tokens: cost::TokenUsage {
+                        input,
+                        output,
+                        ..cost::TokenUsage::default()
+                    },
+                    ..cost::Usage::default()
+                },
+                model: "m".into(),
+                profile: None,
+                request_id: None,
+                retry_count: 0,
+            })
+        }
+    }
+
+    /// Round-3 review finding 10: an `InvalidResponse` retry (the provider
+    /// answered and was billed, but no usage is available for that attempt)
+    /// must mark the accumulator `incomplete` even when a later attempt
+    /// succeeds — otherwise the run reports `estimated: false` over a total
+    /// that is silently missing the first attempt's real spend.
+    #[tokio::test]
+    async fn an_invalid_response_retry_marks_the_accumulator_incomplete_even_on_success() {
+        let panels = vec![stub_panel("P1")];
+        let request = FusionRequest {
+            schema_version: 1,
+            origin: platform_api::FusionOrigin::Slash,
+            prompt: "task".into(),
+            preset: platform_api::FusionPreset::Quality,
+            models: None,
+            dimensions: vec!["coverage".into()],
+            partial_ok: true,
+            max_panel: None,
+            cross_provider: true,
+            parent_profile: "anthropic".into(),
+            parent_model: "claude-sonnet-5".into(),
+            conversation_id: None,
+            workflow_run_id: None,
+        };
+        let analyst = ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        };
+        let config = FusionRuntimeConfig::defaults();
+        let client: Arc<dyn SideQueryClient> = Arc::new(InvalidThenGoodClient {
+            calls: std::sync::atomic::AtomicU32::new(0),
+        });
+        let (_, acc) = analyze(client, &config, &request, &analyst, &panels)
+            .await
+            .expect("second attempt decodes successfully");
+        assert_eq!(acc.calls, 2);
+        assert!(
+            acc.incomplete,
+            "a billed InvalidResponse attempt whose usage could not be captured \
+must force the accumulator incomplete, even though the run went on to succeed"
+        );
+    }
+
+    /// A [`SideQueryClient`] whose first `query_json_schema` call returns
+    /// `SideQueryError::InvalidResponse` (a billed, provider-answered call
+    /// this crate cannot attach usage to) and whose second call decodes.
+    struct InvalidThenGoodClient {
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl sidequery::SideQueryClient for InvalidThenGoodClient {
+        async fn query(
+            &self,
+            _request: sidequery::SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, SideQueryError> {
+            unreachable!("analyze() only calls query_json_schema")
+        }
+
+        async fn query_json_schema(
+            &self,
+            _request: StrictStructuredQueryRequest,
+        ) -> Result<StrictStructuredQueryResponse, SideQueryError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                return Err(SideQueryError::InvalidResponse(
+                    "structured output was not valid JSON".into(),
+                ));
+            }
+            Ok(StrictStructuredQueryResponse {
+                value: serde_json::json!({
+                    "consensus": [],
+                    "contradictions": [],
+                    "unique_insights": [],
+                    "coverage_gaps": [],
+                    "scores": { "P1": { "coverage": 80 } },
+                    "confidence": 50,
+                    "recommendation": { "type": "needs_parent", "reason": "unsure" }
+                }),
+                usage: cost::Usage {
+                    tokens: cost::TokenUsage {
+                        input: 20,
+                        output: 10,
+                        ..cost::TokenUsage::default()
+                    },
+                    ..cost::Usage::default()
+                },
+                model: "m".into(),
+                profile: None,
+                request_id: None,
+                retry_count: 0,
+            })
+        }
     }
 }

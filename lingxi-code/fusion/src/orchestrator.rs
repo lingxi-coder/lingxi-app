@@ -1,6 +1,6 @@
 //! Fusion state machine. Implements [`platform_api::FusionExecutor`].
 
-use crate::analyst::{analyze, AnalystError};
+use crate::analyst::{analyze, AnalystError, AnalystUsage};
 use crate::budget::{self, FusionPriceBook, ReservationLease};
 use crate::config::{FusionConfigSource, FusionRuntimeConfig};
 use crate::decision::{interpret, panel_by_id, successful, HostDecision};
@@ -18,7 +18,7 @@ use platform_api::{
 };
 use sidequery::SideQueryClient;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::AnalyticsBus;
@@ -82,6 +82,16 @@ struct AnalysisOutcome {
     /// `price_realized_usage`, which otherwise cannot tell the two apart from
     /// `priced_synth: None` alone.
     synth_attempted: bool,
+    /// Round-3 review finding 10: `true` when at least one analyst attempt
+    /// is known to have been billed by the provider without a usage figure
+    /// this crate could capture for it (an `AnalystUsage::incomplete` from
+    /// an `InvalidResponse` retry), OR the analyst call ultimately failed
+    /// (finding 8 — even when `priced_analyst` carries real, non-empty
+    /// usage from earlier attempts, the failing final attempt's own spend,
+    /// if any, is still uncaptured by definition). ORed into
+    /// `FusionUsage.estimated` at `finalize_result` so the run never claims
+    /// an exact total over a figure that is known-short.
+    analyst_usage_incomplete: bool,
 }
 
 impl FusionOrchestrator {
@@ -390,6 +400,29 @@ impl FusionOrchestrator {
         progress: Option<Sender<FusionProgress>>,
         run_id: String,
         started: Instant,
+        // Review-round3 item 27 (rework): a plain local variable here is
+        // invisible to `run()`'s outer `Err` handling once this whole
+        // future is DROPPED (the outer cancel race) or abandoned
+        // (`tokio::time::timeout` on the outer total-timeout race) — there
+        // is no unwind, the stack (including a local `panels` binding) is
+        // simply gone. This cell is the one piece of state that survives
+        // that: `run()` allocates it, hands a clone in here, and reads
+        // whatever was last written after the race decides the run.
+        realized_tokens: Arc<Mutex<Option<u64>>>,
+        // [Round-3 review B2, reworked] Same survives-a-drop cell as
+        // `realized_tokens`, for the resolved egress profile list. Unlike
+        // `realized_tokens` this is NOT latched from the `resolved` set
+        // returned by `resolve_and_reserve` — that set is merely the
+        // INTENDED panels, not the ones actually dispatched, and
+        // `FusionProgress::egress_profiles`'s own contract (platform-api's
+        // `fusion.rs`) promises "the provider profiles the request was
+        // ACTUALLY dispatched to". It is written only once `run_panel_stage`
+        // returns (below), from panels that made a real provider call, and
+        // the analyst's profile is folded in only once `run_analyst_call`
+        // actually issues that call — never on a path where dispatch never
+        // happened (e.g. every panel rejected pre-allocation by the
+        // spawner).
+        resolved_egress: Arc<Mutex<Option<Vec<String>>>>,
     ) -> Result<FusionResult, FusionError> {
         let (request, resolved, lease) = self
             .resolve_and_reserve(config, request, &inherit, &progress, &run_id)
@@ -398,6 +431,25 @@ impl FusionOrchestrator {
         let (panels, panels_ms) = self
             .run_panel_stage(config, &request, &resolved, &inherit, &progress, &run_id, started)
             .await?;
+        // Panels are the earliest point in `run_inner` where real,
+        // already-billed provider spend exists. Record it now so a cancel
+        // or outer-timeout that later drops this future's own stack still
+        // leaves `run()` able to report it — see the field doc above and
+        // `run()`'s outer `Err` arm.
+        if let Ok(mut guard) = realized_tokens.lock() {
+            *guard = Some(aggregate_panel_usage(&panels).output_tokens);
+        }
+        // [Round-3 review B2, reworked] Latch the DISPATCHED egress set
+        // (panels that made a real provider call — see
+        // `dispatched_egress_profiles`) now, right after dispatch is known,
+        // so an outer cancel/timeout that drops this future's own stack
+        // during the analyst/synthesizer stage still reports it. A panel
+        // set where nothing dispatched (every panel rejected pre-allocation)
+        // latches `None`, matching the contract that this field discloses
+        // only real egress.
+        if let Ok(mut guard) = resolved_egress.lock() {
+            *guard = dispatched_egress_profiles(&panels);
+        }
         if let Err(error) = check_panel_bar(&panels, &request, config) {
             // The bar failing (not enough successful panels, or an
             // incomplete set under `partial_ok: false`) does not mean
@@ -435,12 +487,25 @@ impl FusionOrchestrator {
             // pool only advances on `Ok`) has no way to learn what this
             // errored run already billed — emit it on the progress channel
             // so such a caller can charge it before propagating the error.
+            //
+            // [Round-3 review B2, reworked] `egress_profiles` here is built
+            // from `panels` directly (not read back from the `resolved_egress`
+            // latch, though the two agree at this point) and deliberately
+            // does NOT add `resolved.analyst.profile`: the panel bar failing
+            // means `analyze_and_decide` never ran, so the analyst is
+            // provably un-called on this arm — see the comment a few lines
+            // above on the sibling `price_realized_usage` call. An
+            // all-`"spawn"` panel set (nothing ever dispatched, e.g.
+            // `AllPanelsFailedPreflight`) yields `None` here, matching the
+            // "guarantees zero provider calls" contract on that error
+            // variant.
             let realized_usage = aggregate_panel_usage(&panels);
             progress::emit_with_realized_tokens(
                 &progress,
                 FusionStage::Failed,
                 "panel bar failed after real provider spend",
                 realized_usage.output_tokens,
+                dispatched_egress_profiles(&panels),
             );
 
             let mut md = fusion_event_metadata(&request);
@@ -461,7 +526,16 @@ impl FusionOrchestrator {
         }
 
         let outcome = self
-            .analyze_and_decide(config, &request, &resolved, &panels, &progress, &run_id, started)
+            .analyze_and_decide(
+                config,
+                &request,
+                &resolved,
+                &panels,
+                &progress,
+                &run_id,
+                started,
+                &resolved_egress,
+            )
             .await;
 
         self.finalize_result(
@@ -499,6 +573,7 @@ impl FusionOrchestrator {
             priced_analyst,
             priced_synth,
             synth_attempted,
+            analyst_usage_incomplete,
         } = outcome;
 
         let status = match &decision {
@@ -557,7 +632,16 @@ impl FusionOrchestrator {
             &request.prompt,
         );
         usage.realized_nano_usd = priced_nano_usd;
-        usage.estimated = usage.estimated || priced_estimated;
+        // Round-3 review finding 10: `analyst_usage_incomplete` catches the
+        // case `price_realized_usage` cannot see on its own —
+        // `priced_analyst` carrying REAL, non-empty usage that is still
+        // known-short (a billed `InvalidResponse` attempt whose tokens
+        // could not be captured, or an earlier attempt priced in place of a
+        // discarded failure — see finding 8). Without this, `price_component`
+        // succeeds on the real-but-short figure and `priced_estimated` never
+        // fires, so the run would claim `estimated: false` over a number
+        // that is silently missing real, already-billed spend.
+        usage.estimated = usage.estimated || priced_estimated || analyst_usage_incomplete;
         if let Err(error) = lease.commit(usage.realized_nano_usd).await {
             let mut md = fusion_event_metadata(request);
             md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
@@ -664,6 +748,7 @@ impl FusionOrchestrator {
         progress: &Option<Sender<FusionProgress>>,
         run_id: &str,
         started: Instant,
+        resolved_egress: &Arc<Mutex<Option<Vec<String>>>>,
     ) -> AnalysisOutcome {
         progress::emit(
             progress,
@@ -672,7 +757,7 @@ impl FusionOrchestrator {
             FusionStage::Analyzing.label(),
         );
         let (analysis_outcome, analyst_ms) = self
-            .run_analyst_call(config, request, resolved, panels, started)
+            .run_analyst_call(config, request, resolved, panels, started, resolved_egress)
             .await;
 
         let mut usage = aggregate_panel_usage(panels);
@@ -683,8 +768,14 @@ impl FusionOrchestrator {
         let mut priced_analyst: Option<(cost::Usage, u32)> = None;
         let mut priced_synth: Option<cost::Usage> = None;
         let mut synth_attempted = false;
+        // Round-3 review findings 8/10: `true` once ANY analyst usage is
+        // known-incomplete — set by `record_failed_analyst_usage` on every
+        // error exit, or copied from `AnalystUsage::incomplete` on success
+        // (an `InvalidResponse` attempt that was retried into a decode).
+        let mut analyst_usage_incomplete = false;
         let (decision, final_text, analysis, synthesizer_ms) = match analysis_outcome {
-            Err(AnalystError::ParseFailed) => {
+            Err((AnalystError::ParseFailed, acc)) => {
+                Self::record_failed_analyst_usage(acc, &mut priced_analyst, &mut analyst_usage_incomplete);
                 self.analysis_failed_outcome(
                     request,
                     panels,
@@ -702,7 +793,8 @@ impl FusionOrchestrator {
             // (the preflight check there is the normal gate) — degrade to
             // NeedsParent like every other post-panel analyst failure instead
             // of throwing the panel material away.
-            Err(AnalystError::Unsupported) => {
+            Err((AnalystError::Unsupported, acc)) => {
+                Self::record_failed_analyst_usage(acc, &mut priced_analyst, &mut analyst_usage_incomplete);
                 self.analysis_failed_outcome(
                     request,
                     panels,
@@ -716,7 +808,8 @@ impl FusionOrchestrator {
                 )
                 .await
             }
-            Err(AnalystError::Failed(category)) => {
+            Err((AnalystError::Failed(category), acc)) => {
+                Self::record_failed_analyst_usage(acc, &mut priced_analyst, &mut analyst_usage_incomplete);
                 self.analysis_failed_outcome(
                     request,
                     panels,
@@ -730,7 +823,8 @@ impl FusionOrchestrator {
                 )
                 .await
             }
-            Ok((analysis, analyst_usage, analyst_calls)) => {
+            Ok((analysis, acc)) => {
+                analyst_usage_incomplete = acc.incomplete;
                 self.handle_analyst_success(
                     config,
                     request,
@@ -740,8 +834,8 @@ impl FusionOrchestrator {
                     started,
                     analyst_ms,
                     analysis,
-                    analyst_usage,
-                    analyst_calls,
+                    acc.usage,
+                    acc.calls,
                     &mut usage,
                     &mut priced_analyst,
                     &mut priced_synth,
@@ -761,6 +855,32 @@ impl FusionOrchestrator {
             priced_analyst,
             priced_synth,
             synth_attempted,
+            analyst_usage_incomplete,
+        }
+    }
+
+    /// `analyze_and_decide` helper (round-3 review finding 8): when the
+    /// analyst call ultimately failed, price whatever REAL usage `acc`
+    /// accumulated before the error — an earlier attempt in the same retry
+    /// loop can have billed the provider and decoded valid JSON before a
+    /// LATER attempt failed — instead of discarding it and forcing
+    /// `price_realized_usage`'s fallback to substitute a coarse, input-only,
+    /// zero-output byte estimate for money that is already known. `estimated`
+    /// is still forced true unconditionally either way: `acc.incomplete`
+    /// (an `InvalidResponse` attempt's own tokens are unrecoverable) may
+    /// already be set, and even when it is not, the failing FINAL attempt's
+    /// own usage — if it billed at all — is by definition not reflected in
+    /// `acc.usage` for a non-decode-failure error (timeout, unsupported, or
+    /// a transport/4xx/5xx arm never had usage to capture in the first
+    /// place). This never reports a knowingly incomplete total as exact.
+    fn record_failed_analyst_usage(
+        acc: AnalystUsage,
+        priced_analyst: &mut Option<(cost::Usage, u32)>,
+        analyst_usage_incomplete: &mut bool,
+    ) {
+        *analyst_usage_incomplete = true;
+        if acc.usage.total_tokens() > 0 {
+            *priced_analyst = Some((acc.usage, acc.calls));
         }
     }
 
@@ -832,6 +952,7 @@ impl FusionOrchestrator {
 
     /// `analyze_and_decide` helper: the timeout-bounded analyst call itself.
     /// Split out purely to keep the caller under the line-count lint.
+    #[allow(clippy::too_many_arguments)]
     async fn run_analyst_call(
         &self,
         config: &FusionRuntimeConfig,
@@ -839,7 +960,26 @@ impl FusionOrchestrator {
         resolved: &ResolvedSet,
         panels: &[PanelInternal],
         started: Instant,
-    ) -> (Result<(FusionAnalysis, cost::Usage, u32), AnalystError>, u64) {
+        resolved_egress: &Arc<Mutex<Option<Vec<String>>>>,
+    ) -> (
+        Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)>,
+        u64,
+    ) {
+        // [Round-3 review B2, reworked] Fold the analyst's profile into the
+        // survives-a-drop egress latch right here, before the call below is
+        // issued — this is the one place in `run_inner`'s call graph where
+        // the analyst call is actually about to be dispatched. An outer
+        // cancel/timeout that drops `run_inner`'s future while this call is
+        // in flight now correctly reports the analyst profile as reached;
+        // nothing before this point ever adds it.
+        if let Ok(mut guard) = resolved_egress.lock() {
+            let mut egress = guard.clone().unwrap_or_default();
+            if !egress.iter().any(|profile| profile == &resolved.analyst.profile) {
+                egress.push(resolved.analyst.profile.clone());
+                egress.sort();
+            }
+            *guard = Some(egress);
+        }
         let analyst_started = Instant::now();
         // F004: bound the analyst stage by what actually remains of the
         // end-to-end deadline, not just its own `analystTimeoutMs` budget —
@@ -849,7 +989,11 @@ impl FusionOrchestrator {
         // this always resolves before — never after — that outer wrapper).
         // Reusing `AnalystError::Failed("timeout")` here folds this into the
         // SAME NeedsParent handling as `analyze`'s own per-attempt timeout,
-        // below.
+        // below. This outer timeout races the WHOLE `analyze` call, so on
+        // expiry there is no accumulator to recover — `analyze` itself is
+        // cancelled mid-flight and `AnalystUsage::default()` (empty) is the
+        // honest answer; `record_failed_analyst_usage` still marks the run
+        // `estimated` for it.
         let remaining_for_analyst = Self::remaining(config, started);
         let analysis_outcome = match tokio::time::timeout(
             remaining_for_analyst,
@@ -864,7 +1008,7 @@ impl FusionOrchestrator {
         .await
         {
             Ok(outcome) => outcome,
-            Err(_) => Err(AnalystError::Failed("timeout".into())),
+            Err(_) => Err((AnalystError::Failed("timeout".into()), AnalystUsage::default())),
         };
         (analysis_outcome, millis_since(analyst_started))
     }
@@ -1067,6 +1211,18 @@ impl FusionExecutor for FusionOrchestrator {
         let total = std::time::Duration::from_millis(
             config.total_timeout_ms.saturating_add(FINALIZE_GRACE_MS),
         );
+        // Review-round3 item 27 (rework): shared with `run_inner` so the
+        // cancel/timeout arms below can still report realized panel spend
+        // after `run_inner`'s own future is dropped/abandoned — see the
+        // parameter doc on `run_inner` for why a plain local can't do this.
+        let realized_tokens: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+        // [Round-3 review B2] Same survives-a-drop rationale as
+        // `realized_tokens` above, for the resolved egress profile list
+        // instead of the token count — `run_inner` latches it as soon as
+        // `resolve_and_reserve` returns, well before any panel completes,
+        // so it is available here even when the cancel/timeout arm below
+        // wins the race and drops `run_inner`'s own future/stack.
+        let resolved_egress: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
         let outcome = tokio::select! {
             biased;
             () = cancel.cancelled() => {
@@ -1090,6 +1246,8 @@ impl FusionExecutor for FusionOrchestrator {
                     progress.clone(),
                     run_id.clone(),
                     started,
+                    Arc::clone(&realized_tokens),
+                    Arc::clone(&resolved_egress),
                 ),
             ) => if let Ok(result) = result {
                 result
@@ -1116,7 +1274,39 @@ impl FusionExecutor for FusionOrchestrator {
             } else {
                 FusionStage::Failed
             };
-            progress::emit(&progress, stage.clone(), None, stage.label());
+            let label = stage.label();
+            // Review-round3 item 27 (rework): before this fix every path
+            // through this shared choke point (the outer cancel race, the
+            // outer total-timeout race, AND `finalize_result`'s
+            // `lease.commit` failure — all of them return `Err` here, not
+            // just `check_panel_bar`'s) hardcoded `realized_output_tokens:
+            // None`, so a caller tracking a separate token budget (the
+            // `local_workflow` `fusion()` bridge arm) never learned about
+            // real, already-billed panel spend on those paths and its
+            // budget ceiling never engaged. Use whatever `run_inner`
+            // managed to record before its own future was dropped/timed
+            // out, when there is one.
+            // [Round-3 review B2] Mirror the same "use whatever survived
+            // the drop" treatment for the resolved egress list: a run that
+            // reached `resolve_and_reserve` before this outer cancel/timeout
+            // won the race really did dispatch to these profiles, and the
+            // failure disclosure should say so even though `run_inner`'s
+            // own stack is gone.
+            let egress = resolved_egress.lock().ok().and_then(|guard| guard.clone());
+            match realized_tokens.lock().ok().and_then(|guard| *guard) {
+                Some(tokens) => {
+                    progress::emit_with_realized_tokens(
+                        &progress,
+                        stage.clone(),
+                        label,
+                        tokens,
+                        egress,
+                    );
+                }
+                None => {
+                    progress::emit(&progress, stage.clone(), None, label);
+                }
+            }
         }
         outcome
     }
@@ -1219,6 +1409,24 @@ pub(crate) fn check_panel_bar(
         {
             return Err(FusionError::TimedOutEmpty);
         }
+        // [round-3 review, finding 12] When EVERY panel's error_category is
+        // "spawn" — a pre-allocation spawner rejection (panel.rs's
+        // `Ok(Err(err)) => PanelFinish::Failed { category: "spawn".into(),
+        // .. }` arm) — no panel here could possibly have made a provider
+        // call. That is a strictly stronger, provably-preflight shape than
+        // the general `AllPanelsFailed` (which also covers panels that DID
+        // call a provider and lost), so report it distinctly: the caller's
+        // spawn-reservation accounting must not keep a session's spawn cap
+        // charged for subagents that never existed. Deliberately narrow —
+        // this does NOT extend to `MinPanelsNotMet`/`PanelSetIncomplete`
+        // below, where at least `min`/some panels genuinely ran.
+        if !panels.is_empty()
+            && panels
+                .iter()
+                .all(|panel| panel.error_category.as_deref() == Some("spawn"))
+        {
+            return Err(FusionError::AllPanelsFailedPreflight);
+        }
         return Err(FusionError::AllPanelsFailed);
     }
     if ok < min {
@@ -1229,6 +1437,34 @@ pub(crate) fn check_panel_bar(
         return Err(FusionError::PanelSetIncomplete);
     }
     Ok(())
+}
+
+/// [Round-3 review B2, reworked] The provider profiles this panel set was
+/// ACTUALLY dispatched to — every panel except those whose `error_category`
+/// is `"spawn"` (`panel.rs`'s pre-allocation spawner-rejection arm, the ONE
+/// category that is provably reached before any provider call could have
+/// been made — see round-3 review finding 12's own reasoning, which this
+/// mirrors). Equivalently: every panel with `usage.is_some()`, plus any
+/// panel that dispatched but failed AFTER making its call (whose
+/// `error_category` is something other than `"spawn"`, e.g. a timeout or a
+/// provider error, and which therefore still reached the provider even
+/// though it has no `usage` to show for it). Returns `None` (never
+/// `Some(vec![])`) when nothing dispatched, so a caller renders no
+/// `<egress-profiles>` section rather than an empty one — this is what
+/// keeps `AllPanelsFailedPreflight`'s "guarantees zero provider calls"
+/// contract honest all the way out to the failure disclosure.
+fn dispatched_egress_profiles(panels: &[PanelInternal]) -> Option<Vec<String>> {
+    let mut profiles: Vec<String> = panels
+        .iter()
+        .filter(|panel| panel.error_category.as_deref() != Some("spawn"))
+        .map(|panel| panel.profile.clone())
+        .collect();
+    if profiles.is_empty() {
+        return None;
+    }
+    profiles.sort();
+    profiles.dedup();
+    Some(profiles)
 }
 
 fn panel_outcome(panel: &PanelInternal) -> PanelOutcome {
@@ -1668,6 +1904,7 @@ fn fusion_error_label(error: &FusionError) -> &'static str {
         FusionError::BudgetExceeded => "budget_exceeded",
         FusionError::SpawnLimitExceeded => "spawn_limit_exceeded",
         FusionError::AllPanelsFailed => "all_panels_failed",
+        FusionError::AllPanelsFailedPreflight => "all_panels_failed_preflight",
         FusionError::MinPanelsNotMet => "min_panels_not_met",
         FusionError::PanelSetIncomplete => "panel_set_incomplete",
         FusionError::TimedOutEmpty => "timed_out_empty",
@@ -1783,6 +2020,584 @@ fn add_egress_metadata(md: &mut LogEventMetadata, egress: &[String]) {
         md.insert(
             "egress_profiles".into(),
             AnalyticsValue::String(egress.join(",")),
+        );
+    }
+}
+
+/// Narrow unit tests for `record_failed_analyst_usage` (round-3 review
+/// finding 8) — kept inline rather than in `orchestrator_test.rs` so this
+/// fixer's changes stay isolated to files it owns. Full end-to-end coverage
+/// (the analyst retry loop itself, on both the success and failure paths)
+/// lives in `analyst.rs`'s own test module.
+#[cfg(test)]
+mod record_failed_analyst_usage_tests {
+    use super::*;
+
+    #[test]
+    fn prices_real_non_empty_usage_instead_of_discarding_it_and_flags_incomplete() {
+        let acc = AnalystUsage {
+            usage: cost::Usage {
+                tokens: cost::TokenUsage {
+                    input: 120,
+                    output: 60,
+                    ..cost::TokenUsage::default()
+                },
+                ..cost::Usage::default()
+            },
+            calls: 2,
+            incomplete: false,
+        };
+        let mut priced_analyst: Option<(cost::Usage, u32)> = None;
+        let mut incomplete = false;
+        FusionOrchestrator::record_failed_analyst_usage(acc, &mut priced_analyst, &mut incomplete);
+        assert!(
+            incomplete,
+            "any analyst error exit must flag the run's usage as not exact"
+        );
+        let (usage, calls) = priced_analyst
+            .expect("a non-empty accumulator must be priced for real, not discarded");
+        assert_eq!(usage.tokens.input, 120, "real input tokens must survive");
+        assert_eq!(usage.tokens.output, 60, "real output tokens must survive");
+        assert_eq!(calls, 2, "both billed attempts must be counted");
+    }
+
+    #[test]
+    fn leaves_priced_analyst_none_when_the_accumulator_is_genuinely_empty() {
+        // The outer per-stage timeout (`run_analyst_call`) cancels `analyze`
+        // mid-flight and hands back `AnalystUsage::default()` — nothing to
+        // price for real, so the caller's `judge_input_token_estimate`
+        // fallback must still run.
+        let acc = AnalystUsage::default();
+        let mut priced_analyst: Option<(cost::Usage, u32)> = None;
+        let mut incomplete = false;
+        FusionOrchestrator::record_failed_analyst_usage(acc, &mut priced_analyst, &mut incomplete);
+        assert!(incomplete);
+        assert!(
+            priced_analyst.is_none(),
+            "a genuinely empty accumulator must fall through to the coarse \
+estimate fallback, not price a bogus exact zero"
+        );
+    }
+}
+
+/// Narrow unit tests for `check_panel_bar`'s `ok == 0` branch (round-3 review
+/// finding 12, rework) — kept inline for the same reason as
+/// `record_failed_analyst_usage_tests` above. `check_panel_bar` is a pure
+/// function of `&[PanelInternal]` plus a request/config, so these need no
+/// spawner mock at all.
+#[cfg(test)]
+mod check_panel_bar_preflight_tests {
+    use super::*;
+
+    fn panel_with_category(category: Option<&str>) -> PanelInternal {
+        PanelInternal {
+            index: 0,
+            profile: "profile".into(),
+            model: "model".into(),
+            anonymous_id: String::new(),
+            status: PanelRunStatus::Failed,
+            report: None,
+            duration_ms: 0,
+            error_category: category.map(str::to_string),
+            error_detail: None,
+            usage: None,
+            spawn_prompt: String::new(),
+        }
+    }
+
+    /// `check_panel_bar`'s `request` parameter is only read in the
+    /// `ok >= min` tail (`request.partial_ok`) — every case below is in the
+    /// `ok == 0` branch, so the exact field values here are irrelevant.
+    fn minimal_request() -> FusionRequest {
+        FusionRequest {
+            schema_version: 1,
+            origin: FusionOrigin::Agent,
+            prompt: "task".into(),
+            preset: FusionPreset::Quality,
+            models: None,
+            dimensions: vec![],
+            partial_ok: true,
+            max_panel: None,
+            cross_provider: false,
+            parent_profile: "p".into(),
+            parent_model: "m".into(),
+            conversation_id: None,
+            workflow_run_id: None,
+        }
+    }
+
+    /// The defect this fixes: a spawner-rejection ahead of every panel
+    /// (`SubagentSpawnError::PoolFull`, or an unresolvable panel agent
+    /// definition) collapses every panel to `error_category: "spawn"`, and
+    /// before this fix that reported the same `AllPanelsFailed` as a run
+    /// where panels genuinely called a provider and lost — `tools/agent`
+    /// cannot then tell "zero provider calls" apart from "provider calls
+    /// that failed", so it keeps the whole spawn reservation charged for
+    /// subagents that never existed.
+    #[test]
+    fn every_panel_spawn_rejected_reports_the_distinct_preflight_variant() {
+        let panels = vec![
+            panel_with_category(Some("spawn")),
+            panel_with_category(Some("spawn")),
+            panel_with_category(Some("spawn")),
+        ];
+        let err =
+            check_panel_bar(&panels, &minimal_request(), &FusionRuntimeConfig::defaults())
+                .unwrap_err();
+        assert_eq!(
+            err,
+            FusionError::AllPanelsFailedPreflight,
+            "every panel failed via a pre-allocation spawner rejection — zero provider calls \
+were possible — so this must be reported distinctly from a genuine all-panels-failed run"
+        );
+    }
+
+    /// Negative guard: a MIXED failure set (at least one panel genuinely
+    /// called a provider and lost) must keep reporting the general
+    /// `AllPanelsFailed` — this is NOT a preflight shape, since at least one
+    /// panel really spawned and was billed.
+    #[test]
+    fn a_single_genuine_provider_failure_keeps_the_general_all_panels_failed_variant() {
+        let panels = vec![
+            panel_with_category(Some("spawn")),
+            panel_with_category(Some("provider")),
+        ];
+        let err =
+            check_panel_bar(&panels, &minimal_request(), &FusionRuntimeConfig::defaults())
+                .unwrap_err();
+        assert_eq!(
+            err,
+            FusionError::AllPanelsFailed,
+            "at least one panel genuinely called a provider (and was billed) — this must NOT \
+be classified as preflight, or a real spend would be refunded as if it never happened"
+        );
+    }
+
+    /// Every real provider-side failure category (not just `\"provider\"`
+    /// itself) must also keep the general variant — none of them guarantee
+    /// zero provider calls the way `\"spawn\"` does.
+    #[test]
+    fn all_panels_failed_stays_general_for_non_spawn_categories() {
+        for category in ["provider", "aborted", "panic", "no_structured_output"] {
+            let panels = vec![
+                panel_with_category(Some(category)),
+                panel_with_category(Some(category)),
+            ];
+            let err =
+                check_panel_bar(&panels, &minimal_request(), &FusionRuntimeConfig::defaults())
+                    .unwrap_err();
+            assert_eq!(
+                err,
+                FusionError::AllPanelsFailed,
+                "category {category:?} does not guarantee zero provider calls; must not be \
+classified as preflight"
+            );
+        }
+    }
+}
+
+/// Review-round3 item 27 (rework): `run()`'s outer `Err` choke point (the
+/// `if let Err(error) = &outcome` block right before `run()` returns) must
+/// not silently emit `realized_output_tokens: None` when the run's own
+/// panels already made real, billed provider calls before the outer
+/// cancel/timeout race decided the run — that number is what lets a caller
+/// tracking a SEPARATE token budget (`local_workflow`'s `fusion()` bridge
+/// arm) charge already-spent tokens instead of leaving its budget ceiling
+/// stuck at whatever it was before the call. Kept inline rather than in
+/// `orchestrator_test.rs` so this fixer's changes stay isolated to files it
+/// owns (same rationale as `record_failed_analyst_usage_tests` above) — the
+/// mocks below are deliberately minimal duplicates of the ones in that file,
+/// not a shared import, for the same reason.
+#[cfg(test)]
+mod outer_err_arm_realized_tokens_tests {
+    use super::*;
+    use crate::model_resolver::CatalogModel;
+    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
+    use platform_api::subagent_spawn::{
+        SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest,
+        SubagentUsage,
+    };
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use platform_api::{
+        EvidenceKind, FusionModelHints, FusionModelRef, FusionOrigin, FusionPreset, PanelClaim,
+        PanelEvidence, PanelReport, DEFAULT_FUSION_DIMENSIONS,
+    };
+    use serde_json::Value;
+    use sidequery::{
+        SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse,
+        StrictStructuredQueryRequest, StrictStructuredQueryResponse,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    struct InertInvoker;
+    #[async_trait]
+    impl ToolInvoker for InertInvoker {
+        async fn invoke(
+            &self,
+            _name: &str,
+            _input: Value,
+            _ctx: SubagentInvocationContext,
+        ) -> Result<Value, ToolInvokerError> {
+            Ok(Value::Null)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    struct InertBudget;
+    #[async_trait]
+    impl BudgetEnforcerHandle for InertBudget {
+        async fn check_and_charge(&self, _nano_usd: u64) -> Result<(), BudgetError> {
+            Ok(())
+        }
+        async fn snapshot_total_nano_usd(&self) -> u64 {
+            0
+        }
+    }
+
+    /// Every panel completes immediately with real, non-zero usage (8 input
+    /// + 4 output tokens each — 12 output tokens total across 3 panels).
+    struct QuickReportSpawner;
+    #[async_trait]
+    impl SubagentSpawner for QuickReportSpawner {
+        async fn spawn(
+            &self,
+            _request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            let report = PanelReport {
+                schema_version: 1,
+                summary: "summary".into(),
+                candidate_answer: "answer".into(),
+                claims: vec![PanelClaim {
+                    statement: "claim".into(),
+                    evidence_refs: vec!["e1".into()],
+                    confidence: 80,
+                }],
+                evidence: vec![PanelEvidence {
+                    id: "e1".into(),
+                    kind: EvidenceKind::File,
+                    locator: "src/lib.rs".into(),
+                    excerpt: None,
+                }],
+                assumptions: vec![],
+                risks: vec![],
+                unresolved_questions: vec![],
+            };
+            Ok(SubagentResult::Completed {
+                agent_id: protocol::AgentId::new(),
+                content: serde_json::to_value(&report).unwrap(),
+                usage: SubagentUsage {
+                    total_tokens: 12,
+                    input_tokens: 8,
+                    output_tokens: 4,
+                    ..SubagentUsage::default()
+                },
+                total_tool_use_count: 0,
+                total_duration_ms: 1,
+                total_tokens: 12,
+                assistant_message_count: 1,
+                response_char_count: 1,
+                last_request_id: None,
+                cumulative_usage: SubagentUsage {
+                    total_tokens: 12,
+                    input_tokens: 8,
+                    output_tokens: 4,
+                    ..SubagentUsage::default()
+                },
+                usage_complete: true,
+            })
+        }
+    }
+
+    /// The analyst call (`query_json_schema`) never returns — models the
+    /// run being cancelled while it is genuinely still in flight, well
+    /// after every panel already completed and billed real usage.
+    struct HangingAnalyst;
+    #[async_trait]
+    impl SideQueryClient for HangingAnalyst {
+        async fn query(
+            &self,
+            _request: SideQueryRequest,
+        ) -> Result<SideQueryResponse, SideQueryError> {
+            Err(SideQueryError::InvalidResponse(
+                "unexpected synthesizer call in this test".into(),
+            ))
+        }
+        async fn query_json_schema(
+            &self,
+            _request: StrictStructuredQueryRequest,
+        ) -> Result<StrictStructuredQueryResponse, SideQueryError> {
+            std::future::pending::<()>().await;
+            unreachable!("cancelled before the pending future is ever polled to completion")
+        }
+    }
+
+    fn catalog() -> Vec<CatalogModel> {
+        [
+            "anthropic:claude-sonnet-5",
+            "openai:gpt-5.6-terra",
+            "deepseek:deepseek-v4-pro",
+        ]
+        .into_iter()
+        .map(|pair| {
+            let (profile, model) = pair.split_once(':').unwrap();
+            CatalogModel {
+                profile: profile.into(),
+                model: model.into(),
+                hints: FusionModelHints {
+                    eligible: true,
+                    quality_rank: 90,
+                    judge_eligible: true,
+                    ..FusionModelHints::default()
+                },
+                structured_output: true,
+            }
+        })
+        .collect()
+    }
+
+    fn request() -> FusionRequest {
+        FusionRequest {
+            schema_version: 1,
+            origin: FusionOrigin::Slash,
+            prompt: "task".into(),
+            preset: FusionPreset::Quality,
+            models: Some(vec![
+                FusionModelRef {
+                    profile: Some("anthropic".into()),
+                    model: "claude-sonnet-5".into(),
+                },
+                FusionModelRef {
+                    profile: Some("openai".into()),
+                    model: "gpt-5.6-terra".into(),
+                },
+                FusionModelRef {
+                    profile: Some("deepseek".into()),
+                    model: "deepseek-v4-pro".into(),
+                },
+            ]),
+            dimensions: DEFAULT_FUSION_DIMENSIONS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            partial_ok: true,
+            max_panel: None,
+            cross_provider: true,
+            parent_profile: "anthropic".into(),
+            parent_model: "claude-sonnet-5".into(),
+            conversation_id: None,
+            workflow_run_id: None,
+        }
+    }
+
+    fn test_config() -> FusionRuntimeConfig {
+        let mut cfg = FusionRuntimeConfig::defaults();
+        cfg.panel_total_timeout_ms = 5_000;
+        cfg.analyst_timeout_ms = 5_000;
+        cfg.synthesizer_timeout_ms = 5_000;
+        cfg.total_timeout_ms = 5_000;
+        cfg.min_successful_panels = 2;
+        cfg
+    }
+
+    #[tokio::test]
+    async fn cancel_after_real_panel_spend_carries_realized_tokens_on_the_outer_err_arm() {
+        let orch = FusionOrchestrator::new(
+            Arc::new(QuickReportSpawner),
+            Arc::new(HangingAnalyst),
+            Arc::new(test_config()),
+            Arc::new(catalog()),
+        );
+        let cancel = CancellationToken::new();
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                tool_invoker: Arc::new(InertInvoker),
+                budget: Arc::new(InertBudget),
+            },
+            cancel.clone(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<FusionProgress>(64);
+        let handle = tokio::spawn(async move { orch.run(request(), inherit, Some(tx)).await });
+        // Panels resolve on the next few poll cycles; the analyst call then
+        // blocks forever. 100ms is generous headroom for the panels to
+        // really finish (and bill real usage) before cancellation lands
+        // mid-analyst-call.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel.cancel();
+        let err = handle
+            .await
+            .expect("run() task must not panic")
+            .expect_err("a cancelled run must return Err");
+        assert_eq!(err, FusionError::Cancelled);
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        let cancelled_event = events
+            .iter()
+            .find(|event| matches!(event.stage, FusionStage::Cancelled))
+            .expect("run() must emit a Cancelled-stage progress event on the outer cancel arm");
+        assert_eq!(
+            cancelled_event.realized_output_tokens,
+            Some(12),
+            "the outer cancel arm must carry the 3 panels' already-billed \
+output tokens (3 * 4 = 12), not silently report None for real, billed \
+spend — got {:?} (all events: {:?})",
+            cancelled_event.realized_output_tokens,
+            events
+                .iter()
+                .map(|e| (format!("{:?}", e.stage), e.realized_output_tokens))
+                .collect::<Vec<_>>()
+        );
+        // [Round-3 review B2, reworked, blocking issue 2] All 3 panels
+        // (anthropic/openai/deepseek) genuinely dispatched and completed
+        // before the analyst call hung and the cancel landed — the real
+        // orchestrator, not a fabricated progress event, must report all 3
+        // as egress on the outer cancel arm.
+        let mut got = cancelled_event.egress_profiles.clone().unwrap_or_default();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "anthropic".to_string(),
+                "deepseek".to_string(),
+                "openai".to_string(),
+            ],
+            "the outer cancel arm must disclose the 3 panel profiles that \
+were genuinely dispatched before cancellation, not None or a subset — got \
+{:?} (all events: {:?})",
+            cancelled_event.egress_profiles,
+            events
+                .iter()
+                .map(|e| (format!("{:?}", e.stage), e.egress_profiles.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// One panel (`deepseek`) is rejected pre-allocation by the spawner
+    /// (`SubagentSpawnError::PoolFull`, the same shape `panel.rs` folds
+    /// into `error_category: "spawn"`) while the other two genuinely
+    /// dispatch and complete with real, billed usage. `partial_ok: false`
+    /// on the request means `check_panel_bar` rejects this as
+    /// `PanelSetIncomplete` (2 of 3 completed) — the `check_panel_bar`
+    /// arm in `run_inner`, not the outer cancel/timeout choke point.
+    struct PartialSpawnFailureSpawner {
+        /// The profile whose spawn is rejected before dispatch.
+        failing_profile: &'static str,
+    }
+    #[async_trait]
+    impl SubagentSpawner for PartialSpawnFailureSpawner {
+        async fn spawn(
+            &self,
+            request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            if request.model_profile.as_deref() == Some(self.failing_profile) {
+                return Err(SubagentSpawnError::PoolFull);
+            }
+            let report = PanelReport {
+                schema_version: 1,
+                summary: "summary".into(),
+                candidate_answer: "answer".into(),
+                claims: vec![PanelClaim {
+                    statement: "claim".into(),
+                    evidence_refs: vec!["e1".into()],
+                    confidence: 80,
+                }],
+                evidence: vec![PanelEvidence {
+                    id: "e1".into(),
+                    kind: EvidenceKind::File,
+                    locator: "src/lib.rs".into(),
+                    excerpt: None,
+                }],
+                assumptions: vec![],
+                risks: vec![],
+                unresolved_questions: vec![],
+            };
+            Ok(SubagentResult::Completed {
+                agent_id: protocol::AgentId::new(),
+                content: serde_json::to_value(&report).unwrap(),
+                usage: SubagentUsage {
+                    total_tokens: 12,
+                    input_tokens: 8,
+                    output_tokens: 4,
+                    ..SubagentUsage::default()
+                },
+                total_tool_use_count: 0,
+                total_duration_ms: 1,
+                total_tokens: 12,
+                assistant_message_count: 1,
+                response_char_count: 1,
+                last_request_id: None,
+                cumulative_usage: SubagentUsage {
+                    total_tokens: 12,
+                    input_tokens: 8,
+                    output_tokens: 4,
+                    ..SubagentUsage::default()
+                },
+                usage_complete: true,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn check_panel_bar_failure_discloses_only_dispatched_panel_profiles_never_the_analyst()
+    {
+        let orch = FusionOrchestrator::new(
+            Arc::new(PartialSpawnFailureSpawner {
+                failing_profile: "deepseek",
+            }),
+            // The analyst must never be called on this arm — a client that
+            // DOES call it would make this test fail with an unexpected-call
+            // panic/error, which is exactly the assertion this test wants
+            // for the analyst side of the finding.
+            Arc::new(HangingAnalyst),
+            Arc::new(test_config()),
+            Arc::new(catalog()),
+        );
+        let cancel = CancellationToken::new();
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                tool_invoker: Arc::new(InertInvoker),
+                budget: Arc::new(InertBudget),
+            },
+            cancel,
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<FusionProgress>(64);
+        let mut req = request();
+        req.partial_ok = false;
+        let err = orch
+            .run(req, inherit, Some(tx))
+            .await
+            .expect_err("2 of 3 panels completing under partial_ok:false must fail the bar");
+        assert_eq!(err, FusionError::PanelSetIncomplete);
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        let failed_event = events
+            .iter()
+            .find(|event| matches!(event.stage, FusionStage::Failed))
+            .expect("check_panel_bar's Err arm must emit a Failed-stage progress event");
+        let mut got = failed_event.egress_profiles.clone().unwrap_or_default();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["anthropic".to_string(), "openai".to_string()],
+            "must disclose exactly the 2 panels that genuinely dispatched \
+(anthropic, openai) — never the rejected `deepseek` panel (error_category \
+\"spawn\", zero provider calls) and never the analyst profile (the panel \
+bar failed before `analyze_and_decide` ever ran, so the analyst was \
+provably never called) — got {:?} (all events: {:?})",
+            failed_event.egress_profiles,
+            events
+                .iter()
+                .map(|e| (format!("{:?}", e.stage), e.egress_profiles.clone()))
+                .collect::<Vec<_>>()
         );
     }
 }

@@ -572,6 +572,19 @@ pub enum FusionStage {
         /// Started count.
         total: u8,
     },
+    /// [round-3 review, findings 11/19] `panel::run_panels` has dispatched
+    /// every panel task to the spawner — real provider calls are (or were,
+    /// if they failed immediately) in flight — but none has reached a
+    /// terminal outcome yet. Distinct from `RunningPanels { completed: 0,
+    /// .. }`, which `run_panel_stage` emits BEFORE `run_panels` is even
+    /// called (zero panel tasks exist yet): a consumer that needs to know
+    /// "did a panel genuinely spawn" (e.g. `tools/agent`'s spawn-reservation
+    /// accounting) cannot tell the two `completed: 0`-shaped moments apart
+    /// without this separate signal.
+    PanelsDispatched {
+        /// Panel count dispatched.
+        total: u8,
+    },
     /// Analyst running.
     Analyzing,
     /// Pick path (no synth).
@@ -601,6 +614,11 @@ impl FusionStage {
             Self::RunningPanels { completed, total } => {
                 format!("Running panels {completed}/{total}")
             }
+            // Deliberately the SAME text `RunningPanels { completed: 0, .. }`
+            // renders — this is a distinct SIGNAL for consumers that need to
+            // tell "about to spawn" from "genuinely dispatched" apart, not a
+            // distinct user-visible progress state (F005).
+            Self::PanelsDispatched { total } => format!("Running panels 0/{total}"),
             Self::Analyzing => "Analyzing reports".to_string(),
             Self::Selecting => "Selecting answer".to_string(),
             Self::Synthesizing => "Synthesizing answer".to_string(),
@@ -632,6 +650,27 @@ pub struct FusionProgress {
     /// of treating an errored call as having spent nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realized_output_tokens: Option<u64>,
+    /// [Round-3 review B2, reworked] The provider profiles the request was
+    /// ACTUALLY dispatched to — never the merely-intended/resolved set.
+    /// `FusionOrchestrator::run_inner` latches this only once
+    /// `run_panel_stage` returns, from panels whose `error_category` is not
+    /// `"spawn"` (i.e. panels that made a real provider call — see
+    /// `dispatched_egress_profiles`), and folds in the analyst's profile
+    /// only once the analyst call is actually issued
+    /// (`run_analyst_call`) — never before dispatch happened. `None` on
+    /// every progress event emitted before panel dispatch completes
+    /// (including every preflight refusal, and a panel-bar failure where
+    /// every panel was rejected pre-allocation, both of which guarantee
+    /// zero provider calls) and on ordinary non-terminal progress events
+    /// that carry no new information here. This is the privacy-relevant
+    /// counterpart to `realized_output_tokens`: `tasks::handlers::local_fusion`
+    /// latches the LAST `Some` value seen and uses it to fill
+    /// `<egress-profiles>` in a failure's task notification instead of
+    /// silently reporting no egress for a run that really sent the
+    /// prompt to these providers — and, symmetrically, never claims egress
+    /// to a provider the run never actually reached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_profiles: Option<Vec<String>>,
 }
 
 /// Fusion failure. Preflight variants guarantee zero provider calls.
@@ -702,6 +741,17 @@ pub enum FusionError {
     /// Every panel failed.
     #[error("all fusion panels failed")]
     AllPanelsFailed,
+    /// [round-3 review, finding 12] Every panel failed via a pre-allocation
+    /// spawner rejection (e.g. `SubagentSpawnError::PoolFull`, or an
+    /// unresolvable panel agent definition) — a distinct, STRONGER shape
+    /// than [`Self::AllPanelsFailed`], which can also cover panels that made
+    /// a real (unrecovered) provider call. Every panel here is guaranteed to
+    /// have made ZERO provider calls, so — unlike the general
+    /// `AllPanelsFailed` — this variant is preflight: it must not keep a
+    /// caller's up-front spawn-slot reservation charged for subagents that
+    /// never existed.
+    #[error("all fusion panels failed before dispatch")]
+    AllPanelsFailedPreflight,
     /// Successful panels below minSuccessfulPanels.
     #[error("fusion did not meet the minimum successful panel count")]
     MinPanelsNotMet,
@@ -1327,6 +1377,13 @@ mod tests {
             }
             .label(),
             "Running panels 2/3"
+        );
+        assert_eq!(
+            FusionStage::PanelsDispatched { total: 3 }.label(),
+            "Running panels 0/3",
+            "PanelsDispatched is a distinct SIGNAL, not a distinct \
+user-visible progress state — it must render the same words as \
+RunningPanels{{completed:0,..}}"
         );
         assert_eq!(FusionStage::Analyzing.label(), "Analyzing reports");
         assert_eq!(FusionStage::Selecting.label(), "Selecting answer");

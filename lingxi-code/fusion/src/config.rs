@@ -221,6 +221,35 @@ impl FusionRuntimeConfig {
             )));
         }
 
+        // Round-3 review finding [24] (rework, then reworked again after the
+        // reviewer rejected the first rework): `FusionSettingsJson::validate`
+        // only checks `panelIdleTimeoutMs` against `panelTotalTimeoutMs`
+        // same-file (core/src/settings/schema.rs has the full rationale), so
+        // a tier that sets only `panelIdleTimeoutMs` can still merge, here,
+        // above the effective `panel_total_timeout_ms` — whether that came
+        // from another tier or from the DEFAULT. The first rework compared
+        // `cfg.panel_idle_timeout_ms` (the merged, defaulted value —
+        // 180_000 whenever no tier set it) against `cfg.panel_total_timeout_ms`
+        // unconditionally, which rejects any settings file that lowers
+        // `panelTotalTimeoutMs` below 180_000 without also lowering
+        // `panelIdleTimeoutMs`, even though that operator never touched the
+        // idle field at all — the exact false-rejection class this check
+        // exists to avoid. Gate it on `settings.panel_idle_timeout_ms`
+        // (the pre-default, merged-across-tiers Option: `Some` only when
+        // some tier actually set the field) so a merged DEFAULT idle can
+        // never trigger this rejection — only a value an operator actually
+        // wrote. `panel::panel_stall_timeout_ms` still clamps at the spawn
+        // use site as defense in depth (a config built directly in-process,
+        // bypassing `from_settings`, still gets a usable watchdog deadline).
+        if let Some(idle) = settings.panel_idle_timeout_ms {
+            if idle > cfg.panel_total_timeout_ms {
+                return Err(FusionError::InvalidConfiguration(format!(
+                    "fusion.panelIdleTimeoutMs ({idle}) must not exceed fusion.panelTotalTimeoutMs ({panel_total})",
+                    panel_total = cfg.panel_total_timeout_ms
+                )));
+            }
+        }
+
         Ok(cfg)
     }
 }
@@ -357,5 +386,60 @@ mod tests {
             }
             other => panic!("expected InvalidConfiguration, got {other:?}"),
         }
+    }
+
+    /// Round-3 review finding [24] (rework): the finding's own reproducer —
+    /// a tier that sets only `panelIdleTimeoutMs`, with no
+    /// `panelTotalTimeoutMs` in the same file — passes
+    /// `FusionSettingsJson::validate`'s same-file-only check (that check
+    /// deliberately stays silent when the counterpart field isn't in this
+    /// file) but must still be rejected by `from_settings` once merged
+    /// against the concrete `panel_total_timeout_ms` default (600_000),
+    /// otherwise the stall watchdog is handed a deadline it can never reach.
+    #[test]
+    fn from_settings_rejects_a_merged_panel_idle_timeout_above_the_default_panel_total() {
+        let settings = FusionSettingsJson {
+            panel_idle_timeout_ms: Some(5_000_000),
+            ..FusionSettingsJson::default()
+        };
+        settings.validate().expect("single-field file stays valid");
+        let err = FusionRuntimeConfig::from_settings(&settings).expect_err(
+            "merged panel_idle_timeout_ms (5_000_000) exceeds the default panel_total_timeout_ms (600_000)",
+        );
+        match err {
+            FusionError::InvalidConfiguration(msg) => {
+                assert!(
+                    msg.contains("panelIdleTimeoutMs") && msg.contains("panelTotalTimeoutMs"),
+                    "error must name the offending fields, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidConfiguration, got {other:?}"),
+        }
+    }
+
+    /// Round-3 review finding [24], rework-rejection regression: a valid
+    /// short-deadline config that never mentions `panelIdleTimeoutMs`
+    /// anywhere must not be rejected just because the merged view's DEFAULT
+    /// `panel_idle_timeout_ms` (180_000) exceeds this file's own, smaller
+    /// `panelTotalTimeoutMs`. This is exactly the reviewer's counter-example
+    /// config for the first rework, which compared the merged/defaulted
+    /// `cfg.panel_idle_timeout_ms` unconditionally instead of gating on
+    /// whether the operator actually set the field.
+    #[test]
+    fn from_settings_accepts_short_deadline_config_that_never_sets_panel_idle_timeout() {
+        let settings = FusionSettingsJson {
+            total_timeout_ms: Some(100_000),
+            panel_total_timeout_ms: Some(60_000),
+            analyst_timeout_ms: Some(10_000),
+            synthesizer_timeout_ms: Some(10_000),
+            analysis_protocol_retries: Some(0),
+            ..FusionSettingsJson::default()
+        };
+        settings.validate().expect("single-field file stays valid");
+        FusionRuntimeConfig::from_settings(&settings).expect(
+            "a config that never sets panelIdleTimeoutMs must not be rejected because the \
+             merged DEFAULT panel_idle_timeout_ms (180_000) exceeds this file's own smaller \
+             panelTotalTimeoutMs (60_000)",
+        );
     }
 }

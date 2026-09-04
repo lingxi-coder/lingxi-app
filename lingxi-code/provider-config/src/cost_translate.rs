@@ -51,16 +51,29 @@ fn model_pricing_from_token_pricing(mr: &ModelRef, tp: &TokenPricing) -> ModelPr
             nano_usd_per_token: nano_per_token(tp.cache_read_per_million),
         },
     );
-    // Only meter a separate reasoning bucket when the model actually prices one
-    // (most bill reasoning at the output rate → field is 0.0 → omitted).
-    if tp.reasoning_per_million > 0.0 {
-        rates.insert(
-            TokenClass::ReasoningOutput,
-            MoneyPerToken {
-                nano_usd_per_token: nano_per_token(tp.reasoning_per_million),
-            },
-        );
-    }
+    // [Finding 1] Always meter a `ReasoningOutput` bucket. Most models bill
+    // reasoning tokens at the plain output rate (field is 0.0 in models.dev),
+    // rather than truly for free — the provider decoders (openai.rs,
+    // gemini.rs, …) already split reasoning tokens out of `output` into this
+    // bucket, so leaving the class absent here means `CostCalculator`
+    // (`cost/src/calculator.rs`, which iterates only the classes present in
+    // `token_rates`) and Fusion's `DesktopFusionPriceBook::rates_for`
+    // (`apps/engine-desktop/src/lib.rs`) both silently bill those tokens at
+    // $0 while still reporting the total as exact. Only the minority of
+    // models that publish a real, separate reasoning price (DeepSeek,
+    // OpenRouter, …) get their own rate; everyone else falls back to the
+    // output rate they are actually billed at.
+    let reasoning_nano_usd_per_token = if tp.reasoning_per_million > 0.0 {
+        nano_per_token(tp.reasoning_per_million)
+    } else {
+        nano_per_token(tp.output_per_million)
+    };
+    rates.insert(
+        TokenClass::ReasoningOutput,
+        MoneyPerToken {
+            nano_usd_per_token: reasoning_nano_usd_per_token,
+        },
+    );
     ModelPricing {
         model_ref: mr.clone(),
         token_rates: rates,
@@ -267,6 +280,122 @@ mod tests {
             cat.resolve(&mr),
             Err(cost::pricing::CostError::UnpricedModel(_))
         ));
+    }
+
+    /// [Finding 1] `gpt-5.6-sol` is reasoning-capable (`reasoning: true`) but
+    /// its bundled models.dev row carries no `cost.reasoning` price — the
+    /// common case (573 priced rows in the bundled slices, only 33 with a
+    /// separate reasoning price). Before this fix `ReasoningOutput` was
+    /// simply omitted from the catalog entry, which both
+    /// `cost::CostCalculator` (iterates only present classes) and Fusion's
+    /// `DesktopFusionPriceBook::rates_for` (defaults an absent class to 0)
+    /// read as "reasoning tokens are free" — even though the OpenAI decoder
+    /// (`llm_client::providers::openai`) splits real, billed reasoning
+    /// tokens out of `output` into exactly this bucket. It must instead
+    /// fall back to the model's real output rate, since that is what OpenAI
+    /// actually bills those tokens at.
+    #[test]
+    fn reasoning_capable_model_with_no_separate_price_bills_at_the_output_rate() {
+        let providers = llm_client::builtin_presets().providers;
+        let cat = pricing_for(&providers);
+        let mr = ModelRef {
+            provider: CostProviderId::OpenAI,
+            model: "gpt-5.6-sol".to_string(),
+        };
+        let (p, _res) = cat.resolve(&mr).expect("priced");
+        let output = p.token_rates[&cost::pricing::TokenClass::Output].nano_usd_per_token;
+        assert_eq!(output, 20_000, "sanity: gpt-5.6-sol bills output at $20/Mtok");
+        let reasoning = p
+            .token_rates
+            .get(&cost::pricing::TokenClass::ReasoningOutput)
+            .map(|r| r.nano_usd_per_token);
+        assert_eq!(
+            reasoning,
+            Some(output),
+            "a reasoning-capable model with no separate cost.reasoning price \
+             must bill ReasoningOutput at the OUTPUT rate, not be silently \
+             omitted (which both CostCalculator and Fusion's rates_for read \
+             as a $0 rate)"
+        );
+    }
+
+    /// Sibling of the above: a model that DOES publish a genuine separate
+    /// reasoning price must keep using ITS OWN rate, not fall back to the
+    /// output rate. Uses an explicit override (like
+    /// `explicit_override_prices_a_subscription_profile` above) rather than
+    /// a bundled models.dev row, since real rows can coincidentally price
+    /// reasoning == output (e.g. deepseek-v4-flash: both $0.28/Mtok) which
+    /// would make this assertion pass either way and prove nothing.
+    #[test]
+    fn model_with_a_real_reasoning_price_keeps_its_own_rate() {
+        let mut profile = user_profile("openrouter", "sonar-deep-research");
+        profile.pricing.overrides.push((
+            "sonar-deep-research".to_string(),
+            TokenPricing {
+                input_per_million: 2.0,
+                output_per_million: 8.0,
+                cache_write_per_million: 0.0,
+                cache_read_per_million: 0.0,
+                reasoning_per_million: 3.0,
+            },
+        ));
+        let cat = pricing_for(&[profile]);
+        let mr = ModelRef {
+            provider: CostProviderId::OpenAICompatible {
+                name: "openrouter".to_string(),
+            },
+            model: "sonar-deep-research".to_string(),
+        };
+        let (p, _res) = cat.resolve(&mr).expect("priced");
+        let output = p.token_rates[&cost::pricing::TokenClass::Output].nano_usd_per_token;
+        let reasoning = p.token_rates[&cost::pricing::TokenClass::ReasoningOutput].nano_usd_per_token;
+        assert_eq!(output, 8_000);
+        assert_eq!(
+            reasoning, 3_000,
+            "a model with its own published reasoning price must use it, \
+             not the output-rate fallback"
+        );
+    }
+
+    /// [Finding 1] main-loop proof: the SAME catalog this module builds feeds
+    /// `cost::CostCalculator`, which the main (non-Fusion) turn loop bills
+    /// from. Before this fix, 30,000 reasoning tokens on `gpt-5.6-sol`
+    /// contributed exactly 0 nano-USD to a turn's total — this pins that the
+    /// main turn loop's billing is fixed by the same catalog-layer change,
+    /// not just Fusion's adapter.
+    #[test]
+    fn main_loop_cost_calculator_bills_reasoning_tokens_through_the_same_catalog() {
+        let providers = llm_client::builtin_presets().providers;
+        let cat = pricing_for(&providers);
+        let mr = ModelRef {
+            provider: CostProviderId::OpenAI,
+            model: "gpt-5.6-sol".to_string(),
+        };
+        let (pricing, _res) = cat.resolve(&mr).expect("priced");
+
+        let usage = cost::Usage {
+            tokens: cost::TokenUsage {
+                input: 0,
+                output: 10_000,
+                cache_write: 0,
+                cache_read: 0,
+                reasoning_output: 30_000,
+                cache_write_1h: 0,
+            },
+            server_tool_use: None,
+            speed: None,
+        };
+        let total = cost::CostCalculator::calculate_nano_usd(&usage, &pricing);
+        // 10_000 output tokens @ 20_000 nano-USD/tok + 30_000 reasoning
+        // tokens @ 20_000 nano-USD/tok (output-rate fallback) = 800_000_000
+        // nano-USD ($0.80) — matches what OpenAI actually bills for 40,000
+        // completion tokens of which 30,000 are reasoning. Before this fix
+        // the reasoning term was 0 and the total was only $0.20.
+        assert_eq!(
+            total, 800_000_000,
+            "the main turn loop's CostCalculator must bill reasoning tokens \
+             at the output rate when no separate reasoning price exists"
+        );
     }
 
     #[test]

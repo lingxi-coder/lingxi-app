@@ -241,8 +241,9 @@ impl FusionExecutor for ProgressEmittingExecutor {
                         message: stage.label(),
                         stage,
                         panel_id: None,
-                    realized_output_tokens: None,
-                })
+                        realized_output_tokens: None,
+                        egress_profiles: None,
+                    })
                     .await;
             }
         }
@@ -530,6 +531,16 @@ impl RecordingStatusSink {
     fn errors(&self) -> Vec<(String, String)> {
         self.errors.lock().unwrap().clone()
     }
+
+    fn egress_and_usage(
+        &self,
+    ) -> Vec<(
+        String,
+        Vec<String>,
+        Option<platform_api::task_registry::AgentRunUsage>,
+    )> {
+        self.egress_and_usage.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
@@ -604,6 +615,168 @@ struct PublishOrderCompletionSink(Arc<StdMutex<Vec<String>>>);
 impl FusionCompletionSink for PublishOrderCompletionSink {
     async fn publish(&self, _conversation_id: &str, _result: &FusionResult) {
         self.0.lock().unwrap().push("publish".to_string());
+    }
+}
+
+/// Sends exactly one progress event, then completes successfully. The lone
+/// buffered event is what makes `run_fusion_worker`'s progress forwarder
+/// (F005) actually do something on `forwarder.await` — required to land
+/// [Finding 18]'s window.
+struct SingleProgressExecutor {
+    runs: AtomicUsize,
+}
+
+impl SingleProgressExecutor {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            runs: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl FusionExecutor for SingleProgressExecutor {
+    async fn run(
+        &self,
+        _request: FusionRequest,
+        _inherit: FusionInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        if let Some(tx) = progress {
+            let stage = platform_api::FusionStage::ResolvingModels;
+            let _ = tx
+                .send(platform_api::FusionProgress {
+                    message: stage.label(),
+                    stage,
+                    panel_id: None,
+                    realized_output_tokens: None,
+                    egress_profiles: None,
+                })
+                .await;
+        }
+        Ok(dummy_result())
+    }
+}
+
+/// [Finding 14; round-3 review B2 extends this with `egress_profiles`]:
+/// emits one progress event carrying `realized_output_tokens: Some(N)` —
+/// the shape the orchestrator sends when `check_panel_bar` fails after real
+/// panel spend — and, when `egress_profiles` is non-empty, the resolved
+/// egress profile list the orchestrator latches at the same seam (see
+/// `platform_api::FusionProgress::egress_profiles`) — then fails with the
+/// given error. Used to prove the Err arm discloses both the realized
+/// tokens AND the egress profiles it already has access to via the
+/// progress forwarder.
+struct PartialSpendThenFailExecutor {
+    error: FusionError,
+    realized_output_tokens: u64,
+    egress_profiles: Vec<String>,
+}
+
+#[async_trait]
+impl FusionExecutor for PartialSpendThenFailExecutor {
+    async fn run(
+        &self,
+        _request: FusionRequest,
+        _inherit: FusionInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        if let Some(tx) = progress {
+            let stage = platform_api::FusionStage::Failed;
+            let egress_profiles = if self.egress_profiles.is_empty() {
+                None
+            } else {
+                Some(self.egress_profiles.clone())
+            };
+            let _ = tx
+                .send(platform_api::FusionProgress {
+                    message: stage.label(),
+                    stage,
+                    panel_id: None,
+                    realized_output_tokens: Some(self.realized_output_tokens),
+                    egress_profiles,
+                })
+                .await;
+        }
+        Err(self.error.clone())
+    }
+}
+
+/// [Finding 18]: blocks the progress forwarder's very first
+/// `set_fusion_stage` call (signalling `started` once inside it) until
+/// released, so a test can land `kill` precisely inside `run_fusion_worker`'s
+/// `forwarder.await` window — after `executor.run` has already returned
+/// `Ok(..)`, but (pre-fix) before the `finalizing` claim.
+struct BlockingStageSink {
+    inner: RecordingStatusSink,
+    started_tx: StdMutex<Option<oneshot::Sender<()>>>,
+    release_rx: TokioMutex<Option<oneshot::Receiver<()>>>,
+}
+
+impl BlockingStageSink {
+    fn new(started_tx: oneshot::Sender<()>, release_rx: oneshot::Receiver<()>) -> Self {
+        Self {
+            inner: RecordingStatusSink::default(),
+            started_tx: StdMutex::new(Some(started_tx)),
+            release_rx: TokioMutex::new(Some(release_rx)),
+        }
+    }
+
+    fn last_status(&self) -> Option<TaskStatus> {
+        self.inner.last_status()
+    }
+}
+
+#[async_trait]
+impl TaskStatusSink for BlockingStageSink {
+    async fn set_status(&self, task_id: &str, status: TaskStatus) {
+        self.inner.set_status(task_id, status).await;
+    }
+
+    async fn set_fusion_error(&self, task_id: &str, error: String) {
+        self.inner.set_fusion_error(task_id, error).await;
+    }
+
+    async fn set_fusion_egress_and_usage(
+        &self,
+        task_id: &str,
+        egress_profiles: Vec<String>,
+        usage: Option<platform_api::task_registry::AgentRunUsage>,
+    ) {
+        self.inner
+            .set_fusion_egress_and_usage(task_id, egress_profiles, usage)
+            .await;
+    }
+
+    async fn set_fusion_stage(&self, _task_id: &str, stage: String) {
+        self.inner.events.lock().unwrap().push(format!("stage:{stage}"));
+        if let Some(tx) = self.started_tx.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        if let Some(rx) = self.release_rx.lock().await.take() {
+            let _ = rx.await;
+        }
+    }
+
+    async fn finish_fusion_terminal(
+        &self,
+        task_id: &str,
+        run_id: String,
+        final_text: String,
+        status: TaskStatus,
+    ) {
+        self.inner
+            .finish_fusion_terminal(task_id, run_id, final_text, status)
+            .await;
+    }
+
+    async fn mark_fusion_result_published(&self, task_id: &str) {
+        self.inner.mark_fusion_result_published(task_id).await;
+    }
+
+    async fn is_terminal(&self, task_id: &str) -> bool {
+        self.inner.is_terminal(task_id).await
     }
 }
 
@@ -924,6 +1097,82 @@ async fn drain_pending_kills_preserves_terminalizing_fusion_window() {
     assert_eq!(status_sink.calls(), vec!["status", "outcome", "status"]);
 }
 
+/// [Finding 18]: the branch inserted a genuine suspension point —
+/// `forwarder.await` — between `executor.run` returning `Ok(..)` and the
+/// `finalizing` claim (contrast `kill_preserves_terminalizing_fusion_window`
+/// above, which blocks strictly AFTER that claim). A `kill` landing while
+/// the worker is parked on `forwarder.await` must see the same
+/// "already finalizing" short-circuit as one landing after it — an
+/// already-successful run's terminal side effects (egress+usage, the
+/// `Completed` status, the published result) must survive, never end up as
+/// a bare `Killed` with none of them run.
+#[tokio::test]
+async fn kill_landing_during_the_progress_forwarder_await_does_not_discard_a_successful_run() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let status_sink = Arc::new(BlockingStageSink::new(started_tx, release_rx));
+    let completion_sink = Arc::new(CountingCompletionSink::default());
+    let executor = SingleProgressExecutor::new();
+    let handler = make_handler(
+        executor.clone(),
+        output_manager,
+        status_sink.clone(),
+        completion_sink.clone(),
+    );
+    let ctx = make_ctx(fs);
+
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: "conv".into(),
+            },
+            ctx.clone(),
+        )
+        .await
+        .expect("spawn succeeds");
+
+    // The worker is now inside `forwarder.await`, blocked on the
+    // forwarder's very first `set_fusion_stage` call for the lone buffered
+    // progress event — i.e. AFTER `executor.run` already returned
+    // `Ok(FusionResult)`.
+    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+        .await
+        .expect("worker should reach the forwarder's stage call")
+        .expect("stage-call signal");
+
+    handler
+        .kill(&handle.task_id, ctx)
+        .await
+        .expect("kill must not error");
+
+    let _ = release_tx.send(());
+    for _ in 0..200 {
+        if status_sink
+            .last_status()
+            .is_some_and(TaskStatus::is_terminal)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(
+        status_sink.last_status(),
+        Some(TaskStatus::Completed),
+        "a kill landing while the worker awaits the progress forwarder must \
+         not discard an already-successful Ok(FusionResult) as Killed"
+    );
+    assert_eq!(
+        completion_sink.0.load(Ordering::SeqCst),
+        1,
+        "the completed result must still be published even when kill lands \
+         inside the forwarder-await window"
+    );
+}
+
 /// F012: `kill` on a run that is genuinely still executing (not already in
 /// the terminalizing window) must let the executor observe cooperative
 /// cancellation through its own inherited token before falling back to a
@@ -1066,6 +1315,158 @@ async fn failing_executor_records_error_before_failed_status_and_spools_it() {
         .await
         .expect("spool readable");
     assert_eq!(spooled.content, error.to_string());
+}
+
+/// [Finding 14]: a post-fan-out failure (`AllPanelsFailed`,
+/// `MinPanelsNotMet`, `PanelSetIncomplete`, `TimedOutEmpty`) can follow real
+/// panel spend — the orchestrator reports that spend on the progress
+/// channel's `realized_output_tokens` field even as it returns `Err`. The
+/// Err arm must disclose that best-effort usage (via
+/// `set_fusion_egress_and_usage`) BEFORE the terminal `Failed` transition,
+/// not leave the task's usage permanently `None` for a run that really
+/// burned tokens.
+#[tokio::test]
+async fn failing_executor_that_already_spent_tokens_discloses_partial_usage_before_failed_status()
+{
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let status_sink = Arc::new(RecordingStatusSink::default());
+    let completion_sink = Arc::new(CountingCompletionSink::default());
+    let error = FusionError::AllPanelsFailed;
+    let executor = Arc::new(PartialSpendThenFailExecutor {
+        error: error.clone(),
+        realized_output_tokens: 4_200,
+        egress_profiles: Vec::new(),
+    });
+    let handler = make_handler(
+        executor,
+        output_manager,
+        status_sink.clone(),
+        completion_sink.clone(),
+    );
+
+    handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: "conv".into(),
+            },
+            make_ctx(fs),
+        )
+        .await
+        .expect("spawn succeeds");
+
+    for _ in 0..200 {
+        if status_sink
+            .last_status()
+            .is_some_and(TaskStatus::is_terminal)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(status_sink.last_status(), Some(TaskStatus::Failed));
+    let egress_and_usage = status_sink.egress_and_usage();
+    assert_eq!(
+        egress_and_usage.len(),
+        1,
+        "exactly one usage disclosure recorded on the failure path: {egress_and_usage:?}"
+    );
+    let usage = egress_and_usage[0]
+        .2
+        .clone()
+        .expect("usage must be Some when tokens were realized before the failure");
+    assert_eq!(
+        usage.subagent_tokens, 4_200,
+        "the realized output tokens the orchestrator reported before failing \
+         must reach the task's disclosed usage"
+    );
+    // Ordering: the usage disclosure must land BEFORE the terminal status
+    // flip, same rule as the error and the Ok-path egress/usage write.
+    assert_eq!(
+        status_sink.events(),
+        vec![
+            "status:Running".to_string(),
+            "egress_and_usage:0:true".to_string(),
+            format!("error:{error}"),
+            "status:Failed".to_string(),
+        ]
+    );
+}
+
+/// [Round-3 review B2 / item 14 residual]: item 14's fix only filled in
+/// `<usage>` on the failure path — `disclose_partial_usage` hardcoded
+/// `Vec::new()` for the egress profiles, so a failing cross-provider run
+/// (P1/P2 completed, P3 failed, `partial_ok: false`) still under-reported
+/// the exact providers that received the user's prompt. This is the
+/// privacy-relevant half: the grading bar is that a FAILING run's
+/// `set_fusion_egress_and_usage` call carries the NON-EMPTY resolved
+/// profile list, not just usage. `PartialSpendThenFailExecutor` here mirrors
+/// the real orchestrator shape — a `Failed`-stage progress event carrying
+/// both `realized_output_tokens` and `egress_profiles` right before the
+/// `Err` return (see `fusion::orchestrator::run_inner`'s `check_panel_bar`
+/// arm).
+#[tokio::test]
+async fn failing_executor_that_already_egressed_discloses_nonempty_egress_profiles() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let status_sink = Arc::new(RecordingStatusSink::default());
+    let completion_sink = Arc::new(CountingCompletionSink::default());
+    let error = FusionError::PanelSetIncomplete;
+    let executor = Arc::new(PartialSpendThenFailExecutor {
+        error: error.clone(),
+        realized_output_tokens: 4_200,
+        egress_profiles: vec!["openai".to_string(), "google".to_string()],
+    });
+    let handler = make_handler(
+        executor,
+        output_manager,
+        status_sink.clone(),
+        completion_sink.clone(),
+    );
+
+    handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: "conv".into(),
+            },
+            make_ctx(fs),
+        )
+        .await
+        .expect("spawn succeeds");
+
+    for _ in 0..200 {
+        if status_sink
+            .last_status()
+            .is_some_and(TaskStatus::is_terminal)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(status_sink.last_status(), Some(TaskStatus::Failed));
+    let egress_and_usage = status_sink.egress_and_usage();
+    assert_eq!(
+        egress_and_usage.len(),
+        1,
+        "exactly one usage disclosure recorded on the failure path: {egress_and_usage:?}"
+    );
+    // The defect this pins: item 14's fix left this a hardcoded
+    // `Vec::new()` regardless of what the run actually egressed to.
+    assert_eq!(
+        egress_and_usage[0].1,
+        vec!["openai".to_string(), "google".to_string()],
+        "a failing run that really dispatched to openai and google must \
+         disclose those profiles, not an empty list: {egress_and_usage:?}"
+    );
+    let usage = egress_and_usage[0]
+        .2
+        .clone()
+        .expect("usage must still be Some when tokens were realized before the failure");
+    assert_eq!(usage.subagent_tokens, 4_200);
 }
 
 #[tokio::test]

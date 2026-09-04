@@ -241,6 +241,26 @@ enum FakePanel {
     /// `content: {"reason": "max_turns_exhausted", "max_turns": N}` — a
     /// shape `PanelReport` can never parse.
     MaxTurnsExhausted,
+    /// [Finding 11] A `SubagentResult::Failed` that carries real, non-zero
+    /// `usage` — mirrors a provider error / idle-timeout after turns that
+    /// already billed successfully. `finish_panel` must still price this,
+    /// not settle it at $0 the way a spawn-time `Fail` (all-zero usage)
+    /// correctly does.
+    FailedWithUsage { input: u64, output: u64 },
+    /// [Finding 9] A `Completed` result with `usage_complete: false` —
+    /// mirrors the runner's `api_error_partial` salvage arm, whose
+    /// `usage`/`cumulative_usage` are stale (the last turn that completed
+    /// BEFORE the unrecovered mid-stream error). The panel still reports a
+    /// (short) usage figure, but the run must be marked `estimated`.
+    SalvagedIncomplete(PanelReport),
+    /// [Finding 1, rework round 1] Same as `Report`, but with a caller-chosen
+    /// non-zero `reasoning_output_tokens` — the ONLY fixture shape that can
+    /// distinguish "reasoning is billed" from "reasoning is silently
+    /// dropped" at `price_realized_usage`'s panel call site
+    /// (orchestrator.rs:~1282). Every other `FakePanel` variant hardcodes
+    /// `reasoning_output_tokens: 0`, so a mutation zeroing that argument
+    /// stays green against them.
+    ReportWithReasoning(PanelReport, u64),
 }
 
 impl FakeSpawner {
@@ -291,8 +311,50 @@ impl SubagentSpawner for FakeSpawner {
             Some(FakePanel::Fail) | None => Ok(SubagentResult::Failed {
                 agent_id: AgentId::new(),
                 reason: "panel failed".into(),
+                usage: SubagentUsage::default(),
             }),
             Some(FakePanel::SpawnErr) => Err(SubagentSpawnError::PoolFull),
+            Some(FakePanel::FailedWithUsage { input, output }) => Ok(SubagentResult::Failed {
+                agent_id: AgentId::new(),
+                reason: "provider error after billed turns".into(),
+                usage: SubagentUsage {
+                    total_tokens: input + output,
+                    input_tokens: input,
+                    output_tokens: output,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    reasoning_output_tokens: 0,
+                },
+            }),
+            Some(FakePanel::SalvagedIncomplete(report)) => Ok(SubagentResult::Completed {
+                agent_id: AgentId::new(),
+                content: serde_json::to_value(&report).unwrap(),
+                usage: SubagentUsage {
+                    total_tokens: 12,
+                    input_tokens: 8,
+                    output_tokens: 4,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    reasoning_output_tokens: 0,
+                },
+                total_tool_use_count: 0,
+                total_duration_ms: 1,
+                total_tokens: 12,
+                assistant_message_count: 1,
+                response_char_count: 1,
+                last_request_id: None,
+                cumulative_usage: SubagentUsage {
+                    total_tokens: 12,
+                    input_tokens: 8,
+                    output_tokens: 4,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    reasoning_output_tokens: 0,
+                },
+                // The defect under test: a salvage still reports SOME
+                // usage, but it is known-stale/short.
+                usage_complete: false,
+            }),
             Some(FakePanel::MaxTurnsExhausted) => Ok(SubagentResult::Completed {
                 agent_id: AgentId::new(),
                 content: serde_json::json!({
@@ -307,7 +369,8 @@ impl SubagentSpawner for FakeSpawner {
                 response_char_count: 1,
                 last_request_id: None,
                 cumulative_usage: SubagentUsage::default(),
-            }),
+                        usage_complete: true,
+}),
             Some(FakePanel::Report(report)) => Ok(SubagentResult::Completed {
                 agent_id: AgentId::new(),
                 content: serde_json::to_value(&report).unwrap(),
@@ -317,6 +380,7 @@ impl SubagentSpawner for FakeSpawner {
                     output_tokens: 4,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
+                    reasoning_output_tokens: 0,
                 },
                 total_tool_use_count: 0,
                 total_duration_ms: 1,
@@ -330,7 +394,36 @@ impl SubagentSpawner for FakeSpawner {
                     output_tokens: 4,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
+                    reasoning_output_tokens: 0,
                 },
+                        usage_complete: true,
+}),
+            Some(FakePanel::ReportWithReasoning(report, reasoning)) => Ok(SubagentResult::Completed {
+                agent_id: AgentId::new(),
+                content: serde_json::to_value(&report).unwrap(),
+                usage: SubagentUsage {
+                    total_tokens: 12 + reasoning,
+                    input_tokens: 8,
+                    output_tokens: 4,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    reasoning_output_tokens: reasoning,
+                },
+                total_tool_use_count: 0,
+                total_duration_ms: 1,
+                total_tokens: 12 + reasoning,
+                assistant_message_count: 1,
+                response_char_count: 1,
+                last_request_id: None,
+                cumulative_usage: SubagentUsage {
+                    total_tokens: 12 + reasoning,
+                    input_tokens: 8,
+                    output_tokens: 4,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    reasoning_output_tokens: reasoning,
+                },
+                usage_complete: true,
             }),
             Some(FakePanel::MalformedReport) => Ok(SubagentResult::Completed {
                 agent_id: AgentId::new(),
@@ -341,6 +434,7 @@ impl SubagentSpawner for FakeSpawner {
                     output_tokens: 4,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
+                    reasoning_output_tokens: 0,
                 },
                 total_tool_use_count: 0,
                 total_duration_ms: 1,
@@ -354,8 +448,10 @@ impl SubagentSpawner for FakeSpawner {
                     output_tokens: 4,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
+                    reasoning_output_tokens: 0,
                 },
-            }),
+                        usage_complete: true,
+}),
         }
     }
 }
@@ -512,6 +608,14 @@ struct ScriptedAnalyst {
     last_synth: Mutex<Option<(String, Option<String>)>>,
     last_synth_user: Mutex<Option<String>>,
     last_analyst_user: Mutex<Option<String>>,
+    /// [Finding 1, rework round 1] Caller-set `reasoning_output` token count
+    /// echoed into the analyst's `query_json_schema` response usage — 0 by
+    /// default, matching every existing fixture. Lets a test distinguish
+    /// "reasoning is billed at `price_realized_usage`'s analyst call site"
+    /// from "reasoning is silently dropped".
+    analyst_reasoning_output: AtomicU64,
+    /// Same, but for the synthesizer's `query` response usage.
+    synth_reasoning_output: AtomicU64,
 }
 
 impl ScriptedAnalyst {
@@ -530,6 +634,8 @@ impl ScriptedAnalyst {
             last_synth: Mutex::new(None),
             last_synth_user: Mutex::new(None),
             last_analyst_user: Mutex::new(None),
+            analyst_reasoning_output: AtomicU64::new(0),
+            synth_reasoning_output: AtomicU64::new(0),
         })
     }
 }
@@ -596,7 +702,13 @@ impl SideQueryClient for ScriptedAnalyst {
                 text: Some(text),
                 structured: None,
                 tool_calls: Vec::new(),
-                usage: cost::Usage::default(),
+                usage: cost::Usage {
+                    tokens: cost::TokenUsage {
+                        reasoning_output: self.synth_reasoning_output.load(Ordering::SeqCst),
+                        ..cost::TokenUsage::default()
+                    },
+                    ..cost::Usage::default()
+                },
                 stop_reason: Some("end_turn".into()),
                 retry_count: 0,
             }),
@@ -650,6 +762,7 @@ impl SideQueryClient for ScriptedAnalyst {
                 tokens: cost::TokenUsage {
                     input: 5,
                     output: 3,
+                    reasoning_output: self.analyst_reasoning_output.load(Ordering::SeqCst),
                     ..cost::TokenUsage::default()
                 },
                 ..cost::Usage::default()
@@ -1081,6 +1194,48 @@ usage-less panel already does"
     );
 }
 
+/// Finding [11]: a panel that terminates via `SubagentResult::Failed` still
+/// carries whatever it billed on turns that completed successfully BEFORE
+/// the failure — `finish_panel` must price that, not silently settle it at
+/// $0 the way a spawn-time failure (genuinely zero usage) correctly does.
+/// One of three panels fails with 500 input + 300 output tokens already
+/// billed; the other two succeed normally (12 tokens each under
+/// `priced_book()`'s $1/token unit rate). `min_successful_panels: 2` in
+/// `test_config()` lets the run clear the bar and reach settlement.
+#[tokio::test]
+async fn a_failed_panel_with_billed_usage_is_priced_not_settled_at_zero() {
+    let mut panels = three_ok();
+    panels.insert(
+        "deepseek-v4-pro".into(),
+        FakePanel::FailedWithUsage {
+            input: 500,
+            output: 300,
+        },
+    );
+    let spawner = FakeSpawner::new(panels);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(spawner, side).with_price_book(Arc::new(priced_book()));
+    let result = orch.run(request("task"), inherit(), None).await.unwrap();
+    assert!(matches!(result.decision, FusionDecision::Picked { .. }));
+    // 2 successful panels * 12 tokens = 24, + the failed panel's 800 real
+    // billed tokens (500 + 300), + the analyst's fixed 8 = 832. Before the
+    // fix, the failed panel contributed 0 (its `internal.usage` was `None`)
+    // and this would be 24 + 8 = 32 — the 500+300 tokens the fake provider
+    // "billed" before erroring would vanish from `realized_nano_usd`
+    // entirely.
+    assert_eq!(
+        result.usage.realized_nano_usd,
+        24 + 800 + 8,
+        "a failed panel's pre-failure billed usage (500 input + 300 output) \
+must reach realized_nano_usd, not settle at $0"
+    );
+    assert!(
+        result.usage.estimated,
+        "a failed panel's usage excludes the failing turn's own cost, so the \
+run must be marked estimated, not report an exact figure"
+    );
+}
+
 #[tokio::test]
 async fn synth_failure_needs_parent_with_summary() {
     let spawner = FakeSpawner::new(three_ok());
@@ -1276,6 +1431,7 @@ impl SubagentSpawner for WatchdogSpawner {
                     platform_api::subagent_spawn::SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX,
                     watchdog.stall_timeout_ms
                 ),
+                usage: SubagentUsage::default(),
             });
         }
         // The production watchdog resets on every provider stream event. A
@@ -1292,7 +1448,8 @@ impl SubagentSpawner for WatchdogSpawner {
             response_char_count: 1,
             last_request_id: None,
             cumulative_usage: SubagentUsage::default(),
-        })
+                usage_complete: true,
+})
     }
 }
 
@@ -1695,6 +1852,7 @@ fn priced_book() -> MapPrices {
         per_request_nano_usd: 0,
         cache_read_nano_usd_per_token: 1,
         cache_write_nano_usd_per_token: 1,
+        reasoning_nano_usd_per_token: 1,
     };
     let mut map = HashMap::new();
     for (p, m) in [
@@ -1905,6 +2063,90 @@ fn assert_reservation_settled_exactly_once(budget: &RecordingBudget) {
 /// `ScriptedAnalyst` usage (5 input + 3 output) = 8. `per_request_nano_usd`
 /// is 0 in `priced_book()`, so call counts don't move this total.
 const THREE_PANEL_PICK_PRICED_NANO_USD: u64 = 36 + 8;
+
+/// Finding [9]: a panel salvaged from a mid-stream provider error
+/// (`usage_complete: false`, mirroring the runner's `api_error_partial`
+/// path) carries the SAME token counts as an ordinary `three_ok()` panel —
+/// so `realized_nano_usd` comes out identical to the fully-clean baseline
+/// (`THREE_PANEL_PICK_PRICED_NANO_USD`) — but the run must be marked
+/// `estimated`, because that count is known to omit the failed turn. Before
+/// the fix, `panel.usage.is_some()` was the ONLY signal `price_realized_usage`
+/// used, so this run reported the exact same numbers with `estimated: false`
+/// as a run where every panel completed cleanly — indistinguishable to a
+/// caller reading `<estimated>false</estimated>`.
+#[tokio::test]
+async fn a_salvaged_panel_marks_the_run_estimated_at_the_same_priced_total() {
+    let mut panels = three_ok();
+    panels.insert(
+        "deepseek-v4-pro".into(),
+        FakePanel::SalvagedIncomplete(report("ANSWER_C")),
+    );
+    let spawner = FakeSpawner::new(panels);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(spawner, side).with_price_book(Arc::new(priced_book()));
+    let result = orch.run(request("task"), inherit(), None).await.unwrap();
+    assert!(matches!(result.decision, FusionDecision::Picked { .. }));
+    assert_eq!(
+        result.usage.realized_nano_usd, THREE_PANEL_PICK_PRICED_NANO_USD,
+        "the salvaged panel's reported token counts are identical to a clean \
+completion, so the priced total is unchanged"
+    );
+    assert!(
+        result.usage.estimated,
+        "a salvaged (usage_complete: false) panel must mark the run \
+estimated even though every component priced successfully — the reported \
+figure is known to omit the failed turn's real cost"
+    );
+}
+
+/// [Finding 1, rework round 1] `price_realized_usage` must actually PRICE
+/// `reasoning_output` tokens at all three call sites — a panel
+/// (orchestrator.rs:~1282), the analyst (orchestrator.rs:~1299), and the
+/// synthesizer/parent (orchestrator.rs:~1327) — not just carry the count
+/// through into `FusionUsage.reasoning_tokens`. Every other fixture in this
+/// file hardcodes `reasoning_output(_tokens): 0`, so a mutation that
+/// replaces any of the three `price_component` reasoning arguments with a
+/// literal `0` leaves the rest of the suite green; only a test that gives
+/// a non-zero reasoning count to all three components at once can catch it.
+///
+/// One `deepseek-v4-pro` panel reports 100 reasoning tokens, the analyst
+/// 40, and the (Merge-mode) synthesizer 20 — all under `priced_book()`'s
+/// `reasoning_nano_usd_per_token: 1` — so the priced total must be exactly
+/// `THREE_PANEL_PICK_PRICED_NANO_USD` (the panels'+analyst's non-reasoning
+/// baseline) plus the full 160 reasoning tokens, and the reported
+/// `reasoning_tokens` must equal 160.
+#[tokio::test]
+async fn merge_run_prices_reasoning_output_tokens_from_panel_analyst_and_synthesizer() {
+    let mut panels = three_ok();
+    panels.insert(
+        "deepseek-v4-pro".into(),
+        FakePanel::ReportWithReasoning(report("ANSWER_C"), 100),
+    );
+    let spawner = FakeSpawner::new(panels);
+    let side = ScriptedAnalyst::new(AnalystMode::Merge, vec![Ok("MERGED".into())]);
+    side.analyst_reasoning_output.store(40, Ordering::SeqCst);
+    side.synth_reasoning_output.store(20, Ordering::SeqCst);
+    let orch = orch_scripted(spawner, side).with_price_book(Arc::new(priced_book()));
+    let result = orch.run(request("task"), inherit(), None).await.unwrap();
+    assert!(matches!(result.decision, FusionDecision::Merged));
+    assert_eq!(
+        result.usage.reasoning_tokens, 160,
+        "1 panel (100) + analyst (40) + synthesizer (20) reasoning tokens must all reach FusionUsage.reasoning_tokens"
+    );
+    assert_eq!(
+        result.usage.realized_nano_usd,
+        THREE_PANEL_PICK_PRICED_NANO_USD + 160,
+        "at reasoning_nano_usd_per_token: 1, the 160 reasoning tokens across \
+the panel, analyst, and synthesizer must be billed on top of the \
+non-reasoning baseline — a price_component call site that drops its \
+reasoning argument would silently under-price this by exactly the amount \
+that call site owns"
+    );
+    assert!(
+        !result.usage.estimated,
+        "every priced component (3 panels + analyst + synthesizer) has a rate in priced_book()"
+    );
+}
 
 #[tokio::test]
 async fn budget_reservation_settles_on_pick() {
@@ -2621,7 +2863,8 @@ impl SubagentSpawner for MessageCountSpawner {
             response_char_count: 1,
             last_request_id: None,
             cumulative_usage: SubagentUsage::default(),
-        })
+                usage_complete: true,
+})
     }
 }
 

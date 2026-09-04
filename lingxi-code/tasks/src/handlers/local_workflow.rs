@@ -2634,17 +2634,32 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                                 platform_api::FusionProgress,
                             >(32);
                             let forward_progress_tx = worker_progress_tx.clone();
+                            // [Finding 12] Track the LAST `realized_output_tokens`
+                            // seen on the progress channel — the orchestrator
+                            // emits one when `check_panel_bar` fails after real
+                            // panel spend (`fusion::orchestrator::run_inner`) so
+                            // this bridge can charge that spend against the
+                            // workflow's own token budget (`spent`) even when
+                            // the overall call ends in `Err` below, instead of
+                            // leaving `spent` unmoved for a call that already
+                            // burned a real panel fan-out.
                             let progress_forwarder = tokio::spawn(async move {
+                                let mut last_realized_output_tokens: Option<u64> = None;
                                 while let Some(event) = fusion_prog_rx.recv().await {
+                                    if let Some(tokens) = event.realized_output_tokens {
+                                        last_realized_output_tokens = Some(tokens);
+                                    }
                                     if let Some(tx) = &forward_progress_tx {
                                         let _ = tx
                                             .send(format!("[workflow_fusion] {}", event.stage.label()));
                                     }
                                 }
+                                last_realized_output_tokens
                             });
                             let run_result =
                                 executor.run(request, inherit, Some(fusion_prog_tx)).await;
-                            let _ = progress_forwarder.await;
+                            let last_realized_output_tokens =
+                                progress_forwarder.await.unwrap_or(None);
                             match run_result {
                                 Ok(result) => {
                                     spent.fetch_add(result.usage.output_tokens, Ordering::Relaxed);
@@ -2663,7 +2678,12 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                                         ),
                                     }
                                 }
-                                Err(error) => wf_throw(&error.to_string()),
+                                Err(error) => {
+                                    if let Some(tokens) = last_realized_output_tokens {
+                                        spent.fetch_add(tokens, Ordering::Relaxed);
+                                    }
+                                    wf_throw(&error.to_string())
+                                }
                             }
                         }
                     }

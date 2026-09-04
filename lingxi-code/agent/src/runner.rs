@@ -69,6 +69,17 @@ pub enum SubagentEvent {
         /// Cross-turn summed usage. Distinct from [`Self::Completed::usage`].
         #[serde(default)]
         cumulative_usage: llm_client::Usage,
+        /// `false` only on the CC 2.1.207 `api_error_partial` SALVAGE path
+        /// (Finding [9]): a mid-stream provider error whose already-produced
+        /// text is recovered as a `Completed` result instead of discarding
+        /// it. On that path `usage`/`cumulative_usage` above are the STALE
+        /// values from the last turn that completed successfully BEFORE the
+        /// error — the failing turn's own (real, provider-billed) tokens are
+        /// not included, because they were never captured. `true` on every
+        /// other path (clean stop, max-turns exhaustion, stub) where the
+        /// usage fields are the real, complete totals.
+        #[serde(default = "usage_complete_default")]
+        usage_complete: bool,
     },
     /// Agent terminated due to an error.
     Failed {
@@ -76,6 +87,17 @@ pub enum SubagentEvent {
         agent_id: AgentId,
         /// Human-readable error message.
         error: String,
+        /// Cross-turn summed usage from every SUCCESSFUL turn before the one
+        /// that failed (same accumulation [`Self::Completed::cumulative_usage`]
+        /// carries). Finding [9]/[11]: a `Failed` termination (provider
+        /// error, idle-timeout watchdog, max-turns/structured-output
+        /// exhaustion) still reflects real, already-billed provider spend
+        /// from any turn that succeeded before it — this lets a caller price
+        /// that spend instead of settling it at $0. `Usage::default()` on
+        /// every path that made no real round-trip (spawn-time failure, the
+        /// legacy stub).
+        #[serde(default)]
+        cumulative_usage: llm_client::Usage,
     },
     /// Agent was cancelled by the host.
     Killed {
@@ -89,6 +111,14 @@ pub enum SubagentEvent {
         /// Free-form message payload (full schema lands in Plan 09+).
         message: serde_json::Value,
     },
+}
+
+/// `#[serde(default = ...)]` for [`SubagentEvent::Completed::usage_complete`]
+/// / [`platform_api::subagent_spawn::SubagentResult::Completed::usage_complete`]
+/// — an older wire payload with no such field must decode as `true` (a
+/// normal complete usage rollup), not `bool::default()`'s `false`.
+fn usage_complete_default() -> bool {
+    true
 }
 
 fn completed_result_text(result: &serde_json::Value) -> Option<String> {
@@ -973,12 +1003,19 @@ async fn emit_failed(
     written: &mut usize,
     agent_id: AgentId,
     error: String,
+    cumulative_usage: llm_client::Usage,
 ) {
     flush_transcript(transcript, history, written).await;
     if let Some(writer) = transcript {
         let _ = writer.record_terminal("failed", Some(&error)).await;
     }
-    let _ = out_tx.send(SubagentEvent::Failed { agent_id, error }).await;
+    let _ = out_tx
+        .send(SubagentEvent::Failed {
+            agent_id,
+            error,
+            cumulative_usage,
+        })
+        .await;
 }
 
 async fn emit_killed(
@@ -1315,6 +1352,7 @@ async fn run_subagent_loop(
                         &mut transcript_written,
                         agent_id,
                         error,
+                    cumulative_usage.clone(),
                     )
                     .await;
                     return;
@@ -1551,6 +1589,7 @@ async fn run_subagent_loop(
                                 "{} {e}",
                                 platform_api::subagent_spawn::SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX
                             ),
+                        cumulative_usage.clone(),
                         )
                         .await;
                         return;
@@ -1605,6 +1644,11 @@ async fn run_subagent_loop(
                                     assistant_message_count,
                                     last_request_id: last_request_id.clone(),
                                     cumulative_usage: cumulative_usage.clone(),
+                                    // Finding [9]: this is the api_error_partial
+                                    // salvage — `usage`/`cumulative_usage` above
+                                    // are stale (last SUCCESSFUL turn), the
+                                    // failed turn's real spend is not captured.
+                                    usage_complete: false,
                                 })
                                 .await;
                             return;
@@ -1617,6 +1661,7 @@ async fn run_subagent_loop(
                                 &mut transcript_written,
                                 agent_id,
                                 format!("subagent api error: {e}"),
+                            cumulative_usage.clone(),
                             )
                             .await;
                             return;
@@ -1727,6 +1772,7 @@ async fn run_subagent_loop(
                         &mut transcript_written,
                         agent_id,
                         "subagent requested a tool but no tool_invoker was inherited".to_string(),
+                    cumulative_usage.clone(),
                     )
                     .await;
                     return;
@@ -1909,6 +1955,7 @@ async fn run_subagent_loop(
                                 &mut transcript_written,
                                 agent_id,
                                 error,
+                            cumulative_usage.clone(),
                             )
                             .await;
                             return;
@@ -1977,6 +2024,7 @@ async fn run_subagent_loop(
                     format!(
                         "agent({{schema}}): StructuredOutput retry cap ({structured_retry_cap}) exceeded \u{2014} {structured_failed_count} failed {calls} with no valid output"
                     ),
+                cumulative_usage.clone(),
                 )
                 .await;
                 return;
@@ -2057,6 +2105,7 @@ async fn run_subagent_loop(
                         // nudge count are not discoverable static strings in the binary,
                         // so the port's nudge text + 2× retry are left as-is.)
                         "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)".to_string(),
+                    cumulative_usage.clone(),
                     )
                     .await;
                     return;
@@ -2094,6 +2143,7 @@ async fn run_subagent_loop(
                         assistant_message_count,
                         last_request_id: last_request_id.clone(),
                         cumulative_usage: cumulative_usage.clone(),
+                        usage_complete: true,
                     })
                     .await;
                 // Terminal stop for this turn-set: leave the inner turn loop and
@@ -2128,6 +2178,7 @@ async fn run_subagent_loop(
                     assistant_message_count,
                     last_request_id: last_request_id.clone(),
                     cumulative_usage: cumulative_usage.clone(),
+                    usage_complete: true,
                 })
                 .await;
         }
@@ -2292,6 +2343,7 @@ async fn run_subagent_stub(
                             assistant_message_count: 0,
                             last_request_id: None,
                             cumulative_usage: llm_client::Usage::default(),
+                            usage_complete: true,
                         })
                         .await;
                 }
@@ -2316,6 +2368,7 @@ async fn run_subagent_stub(
                 assistant_message_count: 0,
                 last_request_id: None,
                 cumulative_usage: llm_client::Usage::default(),
+                usage_complete: true,
             })
             .await;
     } else {
@@ -2323,6 +2376,7 @@ async fn run_subagent_stub(
             .send(SubagentEvent::Failed {
                 agent_id,
                 error: "run_subagent: event channel closed without terminal state".into(),
+                cumulative_usage: llm_client::Usage::default(),
             })
             .await;
     }

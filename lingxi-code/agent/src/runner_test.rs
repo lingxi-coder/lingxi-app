@@ -1181,6 +1181,7 @@ async fn run_subagent_emits_failed_on_eof_before_any_work() {
         SubagentEvent::Failed {
             agent_id: aid,
             error,
+            ..
         } => Some((*aid, error.clone())),
         _ => None,
     });

@@ -2606,14 +2606,37 @@ impl tool_api::WorktreeStatePersister for JsonlWorktreeStatePersister {
     }
 }
 
+/// `billing_mode` is the OWNING profile's `PricingConfig.billing_mode` (the
+/// same bit `provider-config::cost_translate` keys `mark_unpriced` on).
+///
+/// Finding [2]: the checked-in `llm_client::fusion_hints` table only carries
+/// a handful of rows per subscription-billed profile (e.g. 8 of
+/// `github-copilot`'s 36 slice models). Every row that table has no entry
+/// for defaults to `FusionModelHints::default()` (`cost_class: Medium`), so
+/// without this override such a model is priced through
+/// `DesktopFusionPriceBook::rates_for`, which the composition root has
+/// deliberately marked `explicitly_unpriced` for every Subscription-mode
+/// profile — `budget::model_peak` then hard-rejects any capped session that
+/// selects it (`"token-billed model \`.../...\` has no price"`), even though
+/// the model is subscription-billed and would reserve/settle at $0. Forcing
+/// `cost_class: Subscription` here whenever the owning profile is
+/// subscription-billed is inert for the rows the hint table already lists
+/// for such a profile — every one of them already hand-codes
+/// `FusionCostClass::Subscription` — so this only changes the
+/// previously-unhinted rows that were wrongly defaulting to `Medium`.
 fn desktop_fusion_catalog_row(
     profile: &str,
     model: &llm_client::ModelProfile,
+    billing_mode: platform_api::ModelBillingMode,
 ) -> fusion::CatalogModel {
+    let mut hints = llm_client::hints_for(profile, &model.request_model).unwrap_or_default();
+    if billing_mode == platform_api::ModelBillingMode::Subscription {
+        hints.cost_class = platform_api::FusionCostClass::Subscription;
+    }
     fusion::CatalogModel {
         profile: profile.to_string(),
         model: model.request_model.clone(),
-        hints: llm_client::hints_for(profile, &model.request_model).unwrap_or_default(),
+        hints,
         structured_output: model.capabilities.structured_output,
     }
 }
@@ -2713,6 +2736,19 @@ impl fusion::FusionPriceBook for DesktopFusionPriceBook {
             .token_rates
             .get(&cost::pricing::TokenClass::CacheWrite)
             .map_or(0, |rate| rate.nano_usd_per_token);
+        // Finding [1]: same `0`-default rule as cache-read/cache-write — a
+        // model with real Input/Output rates but no separate
+        // `ReasoningOutput` catalog entry (the common case: only DeepSeek /
+        // Gemini / a handful of OpenRouter rows price reasoning separately
+        // in models.dev) must stay token-priced, never flip to fully
+        // unpriced. When the class IS present (`provider-config::cost_translate`
+        // inserts it from the models.dev `reasoning_per_million` slice), the
+        // real rate is read here so `price_component` bills it instead of
+        // silently dropping the reasoning-heavy panel's largest cost bucket.
+        let reasoning = pricing
+            .token_rates
+            .get(&cost::pricing::TokenClass::ReasoningOutput)
+            .map_or(0, |rate| rate.nano_usd_per_token);
         Some(fusion::ModelRates {
             input_nano_usd_per_token: input,
             output_nano_usd_per_token: output,
@@ -2724,6 +2760,7 @@ impl fusion::FusionPriceBook for DesktopFusionPriceBook {
             per_request_nano_usd: 0,
             cache_read_nano_usd_per_token: cache_read,
             cache_write_nano_usd_per_token: cache_write,
+            reasoning_nano_usd_per_token: reasoning,
         })
     }
 }
@@ -2751,6 +2788,52 @@ mod desktop_fusion_price_book_test {
         // catalog the main turn loop bills the identical usage from in full.
         assert_eq!(rates.cache_write_nano_usd_per_token, 6_250);
         assert_eq!(rates.cache_read_nano_usd_per_token, 500);
+    }
+
+    /// Finding [1]: a catalog entry that prices `TokenClass::ReasoningOutput`
+    /// separately (the shape `provider-config::cost_translate` produces for
+    /// a models.dev row with `reasoning_per_million > 0`, e.g. DeepSeek /
+    /// Gemini / OpenRouter) must reach `ModelRates.reasoning_nano_usd_per_token`
+    /// — before this fix `rates_for` never read `TokenClass::ReasoningOutput`
+    /// at all, so this rate was silently dropped and `price_component` billed
+    /// reasoning tokens at 0 regardless of what the catalog priced them at.
+    #[test]
+    fn rates_for_reads_the_reasoning_output_rate() {
+        let mr = cost::ModelRef {
+            provider: cost::pricing::ProviderId::OpenAICompatible {
+                name: "deepseek".to_string(),
+            },
+            model: "deepseek-v4-pro".to_string(),
+        };
+        let mut rates = std::collections::HashMap::new();
+        rates.insert(
+            cost::pricing::TokenClass::Input,
+            cost::pricing::MoneyPerToken { nano_usd_per_token: 435 },
+        );
+        rates.insert(
+            cost::pricing::TokenClass::Output,
+            cost::pricing::MoneyPerToken { nano_usd_per_token: 870 },
+        );
+        rates.insert(
+            cost::pricing::TokenClass::ReasoningOutput,
+            cost::pricing::MoneyPerToken { nano_usd_per_token: 870 },
+        );
+        let catalog = Arc::new(cost::PricingCatalog::builtin_reference().with_entry(
+            cost::pricing::ModelPricing {
+                model_ref: mr.clone(),
+                token_rates: rates,
+                non_token_rates_nano_usd: std::collections::HashMap::new(),
+                effective_from: None,
+                source: cost::pricing::PricingSource::RemoteManagedSettings,
+            },
+        ));
+        let book = DesktopFusionPriceBook { catalog };
+        let priced = fusion::FusionPriceBook::rates_for(&book, "deepseek", "deepseek-v4-pro")
+            .expect("deepseek-v4-pro has token rates");
+        assert_eq!(
+            priced.reasoning_nano_usd_per_token, 870,
+            "the catalog's ReasoningOutput rate must reach ModelRates, not default to 0"
+        );
     }
 
     #[test]
@@ -2787,13 +2870,71 @@ mod desktop_fusion_catalog_row_test {
             .iter()
             .find(|m| m.request_model == "claude-opus-5")
             .expect("claude-opus-5 present in anthropic_model_profiles()");
-        let row = desktop_fusion_catalog_row("anthropic", opus);
+        let row = desktop_fusion_catalog_row(
+            "anthropic",
+            opus,
+            platform_api::ModelBillingMode::PerToken,
+        );
         assert_eq!(row.profile, "anthropic");
         assert_eq!(row.model, "claude-opus-5");
         assert!(
             row.structured_output,
             "an Anthropic catalog row must carry structured_output: true"
         );
+    }
+
+    /// Finding [2]: a model that is absent from the checked-in
+    /// `llm_client::fusion_hints` table (so `hints_for` returns `None` and
+    /// `unwrap_or_default()` yields `cost_class: Medium`) must still be
+    /// classified `Subscription` when its OWNING profile bills by
+    /// subscription — otherwise `budget::model_peak` hard-rejects it as
+    /// "token-billed ... has no price" under a session `--max-budget`, even
+    /// though the model is free at the point of use.
+    #[test]
+    fn unhinted_model_on_a_subscription_profile_is_classified_subscription() {
+        let unhinted = llm_client::ModelProfile {
+            display_model: "claude-sonnet-4.6".to_string(),
+            request_model: "claude-sonnet-4.6".to_string(),
+            billing_model: "claude-sonnet-4.6".to_string(),
+            aliases: Vec::new(),
+            description: None,
+            metadata: platform_api::ModelMetadata::default(),
+            capabilities: llm_client::Capabilities::default(),
+        };
+        let row = desktop_fusion_catalog_row(
+            "github-copilot",
+            &unhinted,
+            platform_api::ModelBillingMode::Subscription,
+        );
+        assert_eq!(
+            row.hints.cost_class,
+            platform_api::FusionCostClass::Subscription,
+            "a model unlisted in fusion_hints must inherit its profile's Subscription billing, \
+not fall back to FusionModelHints::default()'s cost_class: Medium"
+        );
+    }
+
+    /// The override must not fire for a `PerToken` profile absent from the
+    /// hint table — that model genuinely has no Fusion-known cost class and
+    /// must stay at the `Medium` default (unpriced-under-cap rejection is
+    /// the CORRECT behavior there, not a bug this finding touches).
+    #[test]
+    fn unhinted_model_on_a_per_token_profile_keeps_the_default_cost_class() {
+        let unhinted = llm_client::ModelProfile {
+            display_model: "some-new-model".to_string(),
+            request_model: "some-new-model".to_string(),
+            billing_model: "some-new-model".to_string(),
+            aliases: Vec::new(),
+            description: None,
+            metadata: platform_api::ModelMetadata::default(),
+            capabilities: llm_client::Capabilities::default(),
+        };
+        let row = desktop_fusion_catalog_row(
+            "openai",
+            &unhinted,
+            platform_api::ModelBillingMode::PerToken,
+        );
+        assert_eq!(row.hints.cost_class, platform_api::FusionCostClass::Medium);
     }
 }
 
@@ -7360,10 +7501,10 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         .providers
         .iter()
         .flat_map(|provider| {
-            provider
-                .models
-                .iter()
-                .map(move |model| desktop_fusion_catalog_row(&provider.profile_name, model))
+            let billing_mode = provider.pricing.billing_mode;
+            provider.models.iter().map(move |model| {
+                desktop_fusion_catalog_row(&provider.profile_name, model, billing_mode)
+            })
         })
         .collect::<Vec<_>>();
 

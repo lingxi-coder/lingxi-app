@@ -358,6 +358,13 @@ impl Default for WorkflowQueryWatchdog {
     }
 }
 
+/// `#[serde(default = ...)]` for [`SubagentResult::Completed::usage_complete`]
+/// — a wire payload with no such field must decode as `true` (a normal,
+/// complete usage rollup), not `bool::default()`'s `false`.
+fn usage_complete_default() -> bool {
+    true
+}
+
 /// Token-usage rollup returned at the end of a successful spawn.
 ///
 /// Mirrors the primary numeric buckets of claude-code's AgentTool result `usage`
@@ -390,6 +397,13 @@ pub struct SubagentUsage {
     pub cache_creation_input_tokens: u64,
     /// Cache-read input tokens (claude `usage.cache_read_input_tokens`).
     pub cache_read_input_tokens: u64,
+    /// Reasoning/thinking output tokens (`llm_client::Usage.billable_tokens
+    /// .reasoning_output`) — a bucket some providers (OpenAI, Gemini,
+    /// DeepSeek, several OpenRouter routes) bill separately from visible
+    /// output tokens. Finding [1]: before this field existed, a subagent's
+    /// (including a Fusion panel's) reasoning spend was dropped at this seam
+    /// and never reached the caller's usage/pricing at all.
+    pub reasoning_output_tokens: u64,
 }
 
 /// Typed lifecycle/event stream for a spawned subagent.
@@ -540,6 +554,15 @@ pub enum SubagentResult {
         /// (claude-compatible).
         #[serde(default)]
         cumulative_usage: SubagentUsage,
+        /// `false` when `usage`/`cumulative_usage` above are known-STALE —
+        /// carried over from a turn that completed successfully before a
+        /// later, unrecovered provider error truncated the run (the runner's
+        /// `api_error_partial` salvage path). Finding [9]: a caller that
+        /// prices spend off this usage should mark the result an estimate
+        /// rather than reporting an exact figure when this is `false`.
+        /// `true` (the `#[serde(default)]` value) on every clean completion.
+        #[serde(default = "usage_complete_default")]
+        usage_complete: bool,
     },
     /// The subagent terminated with an error.
     Failed {
@@ -547,6 +570,15 @@ pub enum SubagentResult {
         agent_id: protocol::AgentId,
         /// Human-readable reason.
         reason: String,
+        /// Cross-turn summed usage from every turn that completed
+        /// successfully BEFORE the one that failed (Finding [9]/[11]):
+        /// a `Failed` result — provider error, idle-timeout watchdog,
+        /// max-turns/structured-output exhaustion — still reflects real,
+        /// already-billed provider spend when at least one turn succeeded
+        /// first. `SubagentUsage::default()` (all zero) when nothing was
+        /// ever billed (a spawn-time failure, before any provider call).
+        #[serde(default)]
+        usage: SubagentUsage,
     },
     /// The subagent was cancelled by the host.
     Killed {

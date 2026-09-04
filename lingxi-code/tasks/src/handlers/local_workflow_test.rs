@@ -70,7 +70,8 @@ fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
             response_char_count: 0,
             last_request_id: None,
             cumulative_usage: SubagentUsage::default(),
-        }),
+                usage_complete: true,
+}),
     );
     metrics.record_result(
         2,
@@ -79,6 +80,7 @@ fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
         &Ok(SubagentResult::Failed {
             agent_id: protocol::AgentId::new(),
             reason: "boom".into(),
+            usage: SubagentUsage::default(),
         }),
     );
     metrics.record_result(
@@ -88,6 +90,7 @@ fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
         &Ok(SubagentResult::Failed {
             agent_id: protocol::AgentId::new(),
             reason: "skipped by user".into(),
+            usage: SubagentUsage::default(),
         }),
     );
 
@@ -220,7 +223,8 @@ fn completed_probe_result(agent_id: protocol::AgentId) -> SubagentResult {
         response_char_count: 0,
         last_request_id: None,
         cumulative_usage: SubagentUsage::default(),
-    }
+        usage_complete: true,
+}
 }
 
 #[async_trait]
@@ -318,6 +322,46 @@ impl FusionExecutor for ImmediateFusionExecutor {
         explicit_profile
             .map(str::to_string)
             .or_else(|| (parent_model == "gpt-5.4").then(|| "openai".into()))
+    }
+}
+
+/// Finding [12]: mirrors `fusion::orchestrator::run_inner`'s
+/// `check_panel_bar`-failure path — sends ONE `FusionProgress` event
+/// carrying `realized_output_tokens` (the real, already-billed panel spend)
+/// on the progress channel, THEN returns `Err`. Used to prove the
+/// `local_workflow` `fusion()` bridge arm charges that spend against the
+/// workflow's token budget even though the overall call errors.
+struct FailingAfterRealSpendFusionExecutor {
+    realized_output_tokens: u64,
+}
+
+#[async_trait]
+impl FusionExecutor for FailingAfterRealSpendFusionExecutor {
+    async fn run(
+        &self,
+        _request: FusionRequest,
+        _inherit: FusionInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        if let Some(tx) = &progress {
+            let _ = tx
+                .send(platform_api::FusionProgress {
+                    stage: platform_api::FusionStage::Failed,
+                    panel_id: None,
+                    message: "panel bar failed after real provider spend".into(),
+                    realized_output_tokens: Some(self.realized_output_tokens),
+                })
+                .await;
+        }
+        Err(FusionError::MinPanelsNotMet)
+    }
+
+    fn agent_surface(&self) -> FusionAgentSurface {
+        FusionAgentSurface {
+            enabled: true,
+            default_partial_ok: true,
+            ..FusionAgentSurface::default()
+        }
     }
 }
 
@@ -580,6 +624,7 @@ impl SubagentSpawner for EchoSpawner {
             return Ok(SubagentResult::Failed {
                 agent_id: protocol::AgentId::new(),
                 reason: "boom".into(),
+                usage: SubagentUsage::default(),
             });
         }
         Ok(SubagentResult::Completed {
@@ -596,7 +641,8 @@ impl SubagentSpawner for EchoSpawner {
             response_char_count: 0,
             last_request_id: None,
             cumulative_usage: SubagentUsage::default(),
-        })
+                usage_complete: true,
+})
     }
 }
 
@@ -1003,7 +1049,8 @@ impl SubagentSpawner for TranscriptOverrideSpawner {
             response_char_count: 0,
             last_request_id: None,
             cumulative_usage: SubagentUsage::default(),
-        })
+                usage_complete: true,
+})
     }
 }
 
@@ -1126,7 +1173,8 @@ async fn run_with_progress_drain_completes_and_does_not_hang() {
                 response_char_count: 0,
                 last_request_id: None,
                 cumulative_usage: SubagentUsage::default(),
-            })
+                        usage_complete: true,
+})
         }
     }
 
@@ -3486,6 +3534,83 @@ async fn budget_total_and_own_spend_drive_the_budget_global() {
         .unwrap();
     // total=500, spent=2×100, remaining=300.
     assert!(read.content.contains("B:500/200/300"), "{}", read.content);
+}
+
+/// Finding [12]: a `fusion()` call that ends in `Err` after the orchestrator
+/// already priced and billed real panel spend must still advance the
+/// workflow's own token budget (`spent`) by that amount — otherwise the
+/// `:2535`-area gate and a script's own `budget.remaining()` under-report,
+/// letting a `while (budget.remaining() > N) { try fusion() catch {} }` loop
+/// run far more real, billed panel fan-outs than the budget was meant to
+/// allow.
+#[tokio::test]
+async fn a_failed_fusion_call_still_charges_its_realized_output_tokens_to_the_workflow_budget() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let spawner = Arc::new(EchoSpawner::default());
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let sink = Arc::new(RecordingSink::default());
+    let executor = Arc::new(FailingAfterRealSpendFusionExecutor {
+        realized_output_tokens: 250,
+    });
+    let handler = LocalWorkflowHandler::new(
+        spawner,
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        mgr.clone(),
+    )
+    .with_status_sink(sink.clone())
+    .with_fusion(executor)
+    .with_token_budget(Some(1_000));
+
+    let script = r#"
+        let caught = false;
+        try {
+            await fusion('review this');
+        } catch (e) {
+            caught = true;
+        }
+        log('caught:' + caught + ' spent:' + budget.spent() + ' remaining:' + budget.remaining());
+        return {};
+    "#;
+    let mut input = workflow_input(script);
+    if let TaskSpawnInput::LocalWorkflow {
+        parent_model,
+        parent_model_profile,
+        ..
+    } = &mut input
+    {
+        *parent_model = Some("gpt-5.4".into());
+        *parent_model_profile = Some("openai".into());
+    }
+    let handle = handler.spawn(input, make_ctx(fs.clone())).await.unwrap();
+    assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+
+    let spool = dir.path().join(format!("{}.output", handle.task_id));
+    let read = mgr
+        .read(&spool, crate::output_manager::OutputOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        read.content.contains("caught:true"),
+        "the fusion() call must have thrown: {}",
+        read.content
+    );
+    assert!(
+        read.content.contains("spent:250"),
+        "the failed fusion() call's realized_output_tokens (250) must reach \
+budget.spent() even though the call ended in Err: {}",
+        read.content
+    );
+    assert!(
+        read.content.contains("remaining:750"),
+        "budget.remaining() (1000 total) must drop by the realized spend even on \
+a failed fusion() call: {}",
+        read.content
+    );
 }
 
 #[tokio::test]

@@ -841,7 +841,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                             message: stage.label(),
                             stage,
                             panel_id: None,
-                        })
+                        realized_output_tokens: None,
+                    })
                         .await;
                 }
             }
@@ -1279,7 +1280,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                         message: stage.label(),
                         stage,
                         panel_id: None,
-                    })
+                    realized_output_tokens: None,
+                })
                     .await;
             }
             Err(platform_api::FusionError::Cancelled)
@@ -3971,6 +3973,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 output_tokens: 5,
                 cache_creation_input_tokens: 7,
                 cache_read_input_tokens: 20,
+                reasoning_output_tokens: 0,
             },
             3,    // total_tool_use_count
             1234, // total_duration_ms

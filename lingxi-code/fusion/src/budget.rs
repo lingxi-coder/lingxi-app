@@ -40,6 +40,13 @@ pub struct ModelRates {
     /// Nano-USD per prompt-cache-WRITE token. Same `0`-default rule as
     /// [`Self::cache_read_nano_usd_per_token`].
     pub cache_write_nano_usd_per_token: u64,
+    /// Nano-USD per reasoning-output token. Same `0`-default rule as
+    /// [`Self::cache_read_nano_usd_per_token`]: a model with real
+    /// input/output rates but no separate `ReasoningOutput` catalog entry
+    /// (the common case — only a minority of models.dev rows price
+    /// reasoning separately) must stay token-priced, never flip to fully
+    /// unpriced over a missing reasoning rate.
+    pub reasoning_nano_usd_per_token: u64,
 }
 
 /// Injected price table. Production wraps [`cost::PricingCatalog`].
@@ -183,6 +190,7 @@ pub(crate) fn price_component(
     output_tokens: u64,
     cache_read_tokens: u64,
     cache_write_tokens: u64,
+    reasoning_tokens: u64,
     calls: u64,
 ) -> Option<u64> {
     let hints = catalog
@@ -202,6 +210,9 @@ pub(crate) fn price_component(
             )
             .saturating_add(
                 cache_write_tokens.saturating_mul(rates.cache_write_nano_usd_per_token),
+            )
+            .saturating_add(
+                reasoning_tokens.saturating_mul(rates.reasoning_nano_usd_per_token),
             )
             .saturating_add(calls.saturating_mul(rates.per_request_nano_usd))
     })
@@ -229,6 +240,7 @@ fn model_peak(
         prices,
         input_tokens,
         output_tokens,
+        0,
         0,
         0,
         calls,
@@ -427,6 +439,7 @@ mod tests {
             per_request_nano_usd: 0,
             cache_read_nano_usd_per_token: 1,
             cache_write_nano_usd_per_token: 1,
+            reasoning_nano_usd_per_token: 1,
         };
         let mut map = HashMap::new();
         for (p, m) in [
@@ -510,6 +523,7 @@ mod tests {
         let priced = price_component(
             "anthropic", "sonnet", &catalog, &rates, 5, 8, // input, output
             200, 40, // cache_read, cache_write
+            0,  // reasoning
             0,
         )
         .expect("anthropic/sonnet has a unit rate");
@@ -518,6 +532,30 @@ mod tests {
             5 + 8 + 200 + 40,
             "cache-read and cache-write tokens must be priced, not silently dropped \
 (200 cache-read + 40 cache-write tokens went unbilled before this fix)"
+        );
+    }
+
+    /// Finding [1]: reasoning-output tokens must be priced the same way
+    /// input/output/cache tokens are — a reasoning-heavy panel's largest
+    /// cost bucket (e.g. `gemini-3.1-pro-preview` at $12/Mtok reasoning)
+    /// otherwise reaches neither `realized_nano_usd` nor the session budget,
+    /// even though the provider bills it in full.
+    #[test]
+    fn price_component_bills_reasoning_output_tokens() {
+        let catalog = vec![hinted("anthropic", "sonnet", false)];
+        let rates = unit_prices(); // 1 nano-USD/token on every class
+        let priced = price_component(
+            "anthropic", "sonnet", &catalog, &rates, 5, 8, // input, output
+            0, 0, // cache_read, cache_write
+            50_000, // reasoning
+            0,
+        )
+        .expect("anthropic/sonnet has a unit rate");
+        assert_eq!(
+            priced,
+            5 + 8 + 50_000,
+            "reasoning-output tokens must be priced, not silently dropped \
+(50,000 reasoning tokens went unbilled before this fix)"
         );
     }
 

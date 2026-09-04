@@ -412,6 +412,20 @@ impl FusionOrchestrator {
             );
             let _ = lease.commit(priced_nano_usd).await;
 
+            // [Finding 12] The dollar side is now accounted for (the commit
+            // above), but a caller tracking a SEPARATE token budget (e.g.
+            // `local_workflow`'s `fusion()` bridge arm, whose shared `spent`
+            // pool only advances on `Ok`) has no way to learn what this
+            // errored run already billed — emit it on the progress channel
+            // so such a caller can charge it before propagating the error.
+            let realized_usage = aggregate_panel_usage(&panels);
+            progress::emit_with_realized_tokens(
+                &progress,
+                FusionStage::Failed,
+                "panel bar failed after real provider spend",
+                realized_usage.output_tokens,
+            );
+
             let mut md = fusion_event_metadata(&request);
             md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
             add_panel_counts(&mut md, &panels);
@@ -1248,6 +1262,14 @@ fn price_realized_usage(
             estimated = true;
             continue;
         };
+        // Finding [9]: `usage.estimated` is set when the panel's own count is
+        // known-incomplete (the runner's `api_error_partial` salvage, or a
+        // `SubagentResult::Failed` usage that excludes the failing turn) —
+        // OR it into the run-level flag so the exact-figure claim
+        // (`estimated: false`) is never made over a short number.
+        if usage.estimated {
+            estimated = true;
+        }
         match budget::price_component(
             &panel.profile,
             &panel.model,
@@ -1257,6 +1279,7 @@ fn price_realized_usage(
             usage.output_tokens,
             usage.cache_read_tokens,
             usage.cache_write_tokens,
+            usage.reasoning_tokens,
             u64::from(usage.provider_requests),
         ) {
             Some(nano_usd) => total_nano_usd = total_nano_usd.saturating_add(nano_usd),
@@ -1273,6 +1296,7 @@ fn price_realized_usage(
             usage.tokens.output,
             usage.tokens.cache_read,
             usage.tokens.cache_write,
+            usage.tokens.reasoning_output,
             u64::from(calls),
         ) {
             Some(nano_usd) => total_nano_usd = total_nano_usd.saturating_add(nano_usd),
@@ -1300,6 +1324,7 @@ fn price_realized_usage(
             usage.tokens.output,
             usage.tokens.cache_read,
             usage.tokens.cache_write,
+            usage.tokens.reasoning_output,
             1,
         ) {
             Some(nano_usd) => total_nano_usd = total_nano_usd.saturating_add(nano_usd),

@@ -622,6 +622,16 @@ pub struct FusionProgress {
     pub panel_id: Option<String>,
     /// Short human line.
     pub message: String,
+    /// Finding [12]: this run's realized output-token spend so far, when
+    /// this event is emitted at a point the orchestrator has already priced
+    /// and committed real usage (today: only the `check_panel_bar` failure
+    /// path in `run_inner`, right before it returns `Err`). `None` on every
+    /// other progress event — a caller that tracks a running token budget
+    /// (e.g. `tasks::handlers::local_workflow`'s `fusion()` bridge arm) can
+    /// charge this amount even when the overall call ends in `Err`, instead
+    /// of treating an errored call as having spent nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realized_output_tokens: Option<u64>,
 }
 
 /// Fusion failure. Preflight variants guarantee zero provider calls.

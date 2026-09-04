@@ -469,28 +469,49 @@ fn finish_panel(
             internal.error_category = Some(category);
             internal.error_detail = detail;
         }
-        PanelFinish::Done(SubagentResult::Failed { reason, .. })
+        PanelFinish::Done(SubagentResult::Failed { reason, usage, .. })
             if is_query_watchdog_timeout(&reason) =>
         {
             internal.status = PanelRunStatus::TimedOut;
             internal.error_category = Some("idle_timeout".into());
+            // Finding [11]: an idle-timeout still reflects real, already-billed
+            // spend from every turn that completed before the watchdog fired —
+            // settling it at $0 (the old `internal.usage` stays `None` shape)
+            // silently ate that spend instead of pricing it.
+            internal.usage = Some(usage_from_failed_subagent(&usage));
         }
-        PanelFinish::Done(SubagentResult::Failed { reason, .. }) => {
+        PanelFinish::Done(SubagentResult::Failed { reason, usage, .. }) => {
             internal.error_category = Some("provider".into());
             internal.error_detail = Some(sanitize_detail(&reason));
+            // Finding [11]: same reasoning as the idle-timeout arm above — a
+            // provider-error termination (including the runner's max-turns /
+            // structured-output-retry give-up, which also routes through
+            // `SubagentResult::Failed`) still carries whatever billed spend
+            // happened on turns before the one that failed.
+            internal.usage = Some(usage_from_failed_subagent(&usage));
         }
         PanelFinish::Done(SubagentResult::Completed {
             content,
             usage,
             cumulative_usage,
             assistant_message_count,
+            usage_complete,
             ..
         }) => {
-            internal.usage = Some(usage_from_subagent(
+            let mut panel_usage = usage_from_subagent(
                 &cumulative_usage,
                 &usage,
                 assistant_message_count,
-            ));
+            );
+            // Finding [9]: the runner's `api_error_partial` salvage path
+            // emits `Completed` with STALE usage (the last turn that
+            // completed successfully before the unrecovered mid-stream
+            // error) — `usage_complete: false` says so. Mark the run
+            // `estimated` rather than reporting the short figure as exact.
+            if !usage_complete {
+                panel_usage.estimated = true;
+            }
+            internal.usage = Some(panel_usage);
             if let Some(detail) = max_turns_exhausted_detail(&content) {
                 // [Finding 25] The runner's `!terminated_cleanly` arm reports
                 // turn-budget exhaustion as a normal `Completed` event, not a
@@ -551,6 +572,11 @@ fn usage_from_subagent(
     FusionUsage {
         input_tokens: src.input_tokens,
         output_tokens: src.output_tokens,
+        // Finding [1]: this used to fall to `FusionUsage::default()`'s `0`
+        // via the struct-update below — a panel's reasoning tokens never
+        // reached `FusionUsage.reasoning_tokens` (the field is reported to
+        // the user AND fed into pricing at `orchestrator::price_realized_usage`).
+        reasoning_tokens: src.reasoning_output_tokens,
         cache_read_tokens: src.cache_read_input_tokens,
         cache_write_tokens: src.cache_creation_input_tokens,
         // The real assistant-turn count (G011) — the runner's per-turn round
@@ -558,6 +584,29 @@ fn usage_from_subagent(
         // to `panelMaxTurns`x in the result/spool/telemetry and the
         // per-request fee quote.
         provider_requests: u32::try_from(assistant_message_count).unwrap_or(u32::MAX),
+        ..FusionUsage::default()
+    }
+}
+
+/// Finding [11]: build a [`FusionUsage`] from the bare [`SubagentUsage`]
+/// carried by a `SubagentResult::Failed` — every turn that completed
+/// successfully BEFORE the terminating failure (provider error, idle-timeout
+/// watchdog, max-turns / structured-output-retry give-up). Unlike
+/// [`usage_from_subagent`] there is no per-turn `assistant_message_count`
+/// available on this path, so `provider_requests` stays `0` (a known,
+/// bounded under-count of the flat per-request fee only — the token counts,
+/// the dominant cost component, are real). Always `estimated: true`: the
+/// failing turn's own cost (if the provider billed it at all before erroring)
+/// is never captured here, so this is a floor on real spend, not the exact
+/// total.
+fn usage_from_failed_subagent(usage: &SubagentUsage) -> FusionUsage {
+    FusionUsage {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        reasoning_tokens: usage.reasoning_output_tokens,
+        cache_read_tokens: usage.cache_read_input_tokens,
+        cache_write_tokens: usage.cache_creation_input_tokens,
+        estimated: true,
         ..FusionUsage::default()
     }
 }
@@ -700,5 +749,53 @@ fn shuffle(items: &mut [usize], mut state: u64) {
         // target and skew the distribution before the modulo ever ran.
         let j = usize::try_from(state % (i as u64 + 1)).unwrap_or(0);
         items.swap(i, j);
+    }
+}
+
+#[cfg(test)]
+mod usage_from_subagent_tests {
+    use super::*;
+
+    /// Finding [1] (panel half): a panel's reasoning-output tokens must
+    /// survive into `FusionUsage.reasoning_tokens` — before this fix the
+    /// field was left at `FusionUsage::default()`'s `0` regardless of what
+    /// the subagent actually reported, so `orchestrator::price_realized_usage`
+    /// (which prices straight off this field) could never bill them and
+    /// `aggregate_panel_usage`'s reported total was wrong too.
+    #[test]
+    fn carries_reasoning_tokens_from_cumulative_usage() {
+        let cumulative = SubagentUsage {
+            total_tokens: 500,
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            reasoning_output_tokens: 350,
+        };
+        let final_turn = SubagentUsage::default();
+        let usage = usage_from_subagent(&cumulative, &final_turn, 1);
+        assert_eq!(
+            usage.reasoning_tokens, 350,
+            "cumulative reasoning tokens must reach FusionUsage.reasoning_tokens"
+        );
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+    }
+
+    /// The `final_turn` fallback path (single-turn panel, `cumulative` still
+    /// zeroed) must carry reasoning tokens too.
+    #[test]
+    fn carries_reasoning_tokens_from_final_turn_fallback() {
+        let cumulative = SubagentUsage::default();
+        let final_turn = SubagentUsage {
+            total_tokens: 80,
+            input_tokens: 20,
+            output_tokens: 10,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            reasoning_output_tokens: 50,
+        };
+        let usage = usage_from_subagent(&cumulative, &final_turn, 1);
+        assert_eq!(usage.reasoning_tokens, 50);
     }
 }

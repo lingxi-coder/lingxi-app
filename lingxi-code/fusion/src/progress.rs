@@ -19,6 +19,27 @@ pub fn emit(
             stage,
             panel_id,
             message: message.into(),
+            realized_output_tokens: None,
+        });
+    }
+}
+
+/// [Finding 12] Same as [`emit`], but carries this run's realized
+/// output-token spend so far — for the one caller (`local_workflow`'s
+/// `fusion()` bridge arm) that needs to charge already-billed spend even
+/// when the overall call ends in `Err`.
+pub fn emit_with_realized_tokens(
+    progress: &Option<Sender<FusionProgress>>,
+    stage: FusionStage,
+    message: impl Into<String>,
+    realized_output_tokens: u64,
+) {
+    if let Some(tx) = progress {
+        let _ = tx.try_send(FusionProgress {
+            stage,
+            panel_id: None,
+            message: message.into(),
+            realized_output_tokens: Some(realized_output_tokens),
         });
     }
 }

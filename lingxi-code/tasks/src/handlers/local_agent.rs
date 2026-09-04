@@ -1175,11 +1175,13 @@ mod tests {
                         response_char_count: 0,
                         last_request_id: None,
                         cumulative_usage: SubagentUsage::default(),
-                    })
+                                        usage_complete: true,
+})
                 }
                 Some(CannedResult::Failed(reason)) => Ok(SubagentResult::Failed {
                     agent_id: protocol::AgentId::new(),
                     reason,
+                    usage: platform_api::subagent_spawn::SubagentUsage::default(),
                 }),
                 Some(CannedResult::Killed) => Ok(SubagentResult::Killed {
                     agent_id: protocol::AgentId::new(),
@@ -1585,6 +1587,7 @@ mod tests {
             assistant_message_count: 0,
             last_request_id: None,
             cumulative_usage: llm_client::Usage::default(),
+            usage_complete: true,
         }
     }
 
@@ -2499,6 +2502,7 @@ mod tests {
             assistant_message_count: 0,
             last_request_id: None,
             cumulative_usage: llm_client::Usage::default(),
+            usage_complete: true,
         })
         .await
         .unwrap();

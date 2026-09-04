@@ -74,6 +74,10 @@ fn subagent_usage_from_llm_usage(usage: &llm_client::Usage) -> SubagentUsage {
         output_tokens: bt.output,
         cache_creation_input_tokens: bt.cache_write,
         cache_read_input_tokens: bt.cache_read,
+        // Finding [1]: without this, a subagent's (including a Fusion
+        // panel's) reasoning tokens were dropped at this seam — the caller
+        // never saw them, no matter how the provider billed them.
+        reasoning_output_tokens: bt.reasoning_output,
     }
 }
 
@@ -2324,6 +2328,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
                     assistant_message_count,
                     last_request_id,
                     cumulative_usage,
+                    usage_complete,
                 }) => {
                     // Translate the wire usage into the trait rollup. claude
                     // `getTokenCountFromUsage` = input + cache_creation + cache_read
@@ -2361,15 +2366,25 @@ impl SubagentSpawner for PoolSubagentSpawner {
                         response_char_count,
                         last_request_id,
                         cumulative_usage: cumulative_usage_rollup,
+                        usage_complete,
                     };
                 }
                 Some(SubagentEvent::Failed {
                     agent_id: child_id,
                     error,
+                    cumulative_usage,
                 }) => {
+                    // Finding [9]/[11]: carry whatever the run already
+                    // billed (every turn that succeeded before the one that
+                    // failed) instead of discarding it — a `Failed` result
+                    // used to always translate to `SubagentUsage::default()`
+                    // here, so a panel/subagent that made several real,
+                    // billed provider round-trips before failing settled at
+                    // $0 no matter how much it actually spent.
                     break SubagentResult::Failed {
                         agent_id: child_id,
                         reason: error,
+                        usage: subagent_usage_from_llm_usage(&cumulative_usage),
                     };
                 }
                 Some(SubagentEvent::Killed { agent_id: child_id }) => {
@@ -2427,9 +2442,13 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 None => {
                     // No terminal event ever arrived; fall back to the bound
                     // ctx agent_id (still the REAL child id, never a fresh one).
+                    // No `cumulative_usage` is available on this path — the
+                    // channel closed without ever telling us what (if
+                    // anything) the subagent billed.
                     break SubagentResult::Failed {
                         agent_id,
                         reason: "subagent channel closed unexpectedly".into(),
+                        usage: SubagentUsage::default(),
                     };
                 }
             }
@@ -2551,7 +2570,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
                         "agentId": agent_id.to_string(),
                         "content": content,
                     }),
-                    Ok(SubagentResult::Failed { agent_id, reason }) => serde_json::json!({
+                    Ok(SubagentResult::Failed { agent_id, reason, .. }) => serde_json::json!({
                         "status": "failed",
                         "agentId": agent_id.to_string(),
                         "reason": reason,
@@ -2966,6 +2985,11 @@ mod tests {
                 output_tokens: 7,
                 cache_creation_input_tokens: 5,
                 cache_read_input_tokens: 3,
+                // Finding [1]: before this field existed, the source usage's
+                // `reasoning_output: 55` above was silently dropped at this
+                // seam — a subagent's (including a Fusion panel's)
+                // reasoning spend never reached the caller at all.
+                reasoning_output_tokens: 55,
             }
         );
     }

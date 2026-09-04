@@ -241,7 +241,8 @@ impl FusionExecutor for ProgressEmittingExecutor {
                         message: stage.label(),
                         stage,
                         panel_id: None,
-                    })
+                    realized_output_tokens: None,
+                })
                     .await;
             }
         }

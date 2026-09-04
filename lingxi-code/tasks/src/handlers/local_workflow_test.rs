@@ -4303,6 +4303,35 @@ fn agent_chain_key_bytes_are_unchanged_by_the_fusion_discriminator_fix() {
     );
 }
 
+/// [Finding 19] `chain_key_with_discriminator`'s doc comment claims the
+/// `\x1d`-wrapped discriminator makes the two key spaces disjoint "BY
+/// CONSTRUCTION" because `\x1d` "never appears in `prev`/`prompt`/
+/// `opts_json` text" — but `\x1d` (U+001D, GROUP SEPARATOR) is a valid
+/// single-byte UTF-8 character, so an `agent()` prompt that happens to
+/// SPELL the exact framing bytes (`\x1d` + tag + `\x1d`) reproduces a
+/// `fusion()` key byte-for-byte at the same chain position with matching
+/// opts. Independently verified via a standalone FNV-1a-64 fold: both
+/// `fold("" | \x1e | \x1dfusion\x1d | "pick the best plan" | \x1f | "{}")`
+/// and `fold("" | \x1e | \x1d | "fusion" | \x1d | "pick the best plan" |
+/// \x1f | "{}")` hash to `5fdcc3407edae3a1`. This must go RED on the
+/// original `\x1d`-wrapped fold and GREEN once the discriminator framing
+/// uses a byte that can never occur in a valid Rust `&str` (guaranteed
+/// UTF-8), such as `0xFF`.
+#[test]
+fn fusion_chain_key_never_collides_with_an_agent_prompt_spelling_the_discriminator_framing() {
+    let opts = normalize_fusion_opts_for_chain_key("{}");
+    let fusion_key = fusion_chain_key("", "pick the best plan", &opts);
+    // An agent() prompt that spells the discriminator's OWN framing bytes
+    // around the tag text, rather than a human-typed "fusion:" prefix.
+    let crafted_agent_prompt = "\u{1d}fusion\u{1d}pick the best plan";
+    let agent_key = chain_key("", crafted_agent_prompt, &opts);
+    assert_ne!(
+        fusion_key, agent_key,
+        "an agent() prompt spelling the discriminator's own \\x1d-framing \
+         bytes must not reproduce a fusion() key -- got {fusion_key} for both"
+    );
+}
+
 /// Verify the concurrency cap formula: Math.min(16, Math.max(2, cpus-2)).
 /// At 1–3 cores the floor is 2; at 5 cores it's 3; at 18 cores it's capped at 16.
 #[test]

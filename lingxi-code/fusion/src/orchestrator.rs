@@ -1474,6 +1474,30 @@ fn add_cost_usage(acc: &mut FusionUsage, usage: &cost::Usage, calls: u32) {
 /// summary itself bounded when panels wrote long patches.
 const NEEDS_PARENT_CANDIDATE_BYTE_CAP: usize = 4096;
 
+/// [Finding 10] Same bound as [`NEEDS_PARENT_CANDIDATE_BYTE_CAP`], applied to
+/// `report.summary` — the schema places no `maxLength` on `summary`
+/// (`panel_report_json_schema`) and the only ceiling upstream is the
+/// panel's whole-turn output budget (tens of KB), so leaving this field
+/// unbounded let a verbose or injection-steered panel bypass the adjacent
+/// cap entirely and push unbounded panel-authored text into the parent's
+/// context via `final_text`.
+const NEEDS_PARENT_SUMMARY_BYTE_CAP: usize = 4096;
+
+/// [Finding 10, rework round 2] The per-field caps above bound `summary` and
+/// `candidate_answer`, but `needs_parent_text` also renders the
+/// analyst-authored `analysis.consensus`, `contradictions[].topic`/
+/// `positions[].position` and `coverage_gaps` with no cap of their own —
+/// none of those pass through `truncate_bytes`, so a verbose or
+/// injection-steered analyst call could still push the assembled string
+/// arbitrarily large even with every panel field capped. This is a final
+/// backstop on the WHOLE joined string, applied once at the end of
+/// `needs_parent_text`, so no sink inside it (present or added later) can
+/// bypass it. 32 KiB comfortably holds the header line, every panel's
+/// (capped) summary + candidate for a realistic panel count, and the
+/// analyst sections, while still being far below what a parent model's
+/// context should absorb from one tool result.
+const NEEDS_PARENT_TEXT_BYTE_CAP: usize = 32 * 1024;
+
 /// Render the `NeedsParent` summary (F004): unlike a bare status list, this
 /// carries the actual paid deliberation material — consensus, contradictions,
 /// coverage gaps, per-panel scores, and each successful panel's (already
@@ -1482,7 +1506,10 @@ const NEEDS_PARENT_CANDIDATE_BYTE_CAP: usize = 4096;
 /// work from a bare "Fusion failed" line. `analysis` is `None` when the
 /// analyst never returned a usable payload (parse failure, transport
 /// failure, or a pre-analysis abort).
-fn needs_parent_text(
+///
+/// `pub(crate)` so `orchestrator_test` can exercise [Finding 10]'s
+/// bounded-size regression directly instead of driving a full `run()`.
+pub(crate) fn needs_parent_text(
     panels: &[PanelInternal],
     reason: &str,
     analysis: Option<&FusionAnalysis>,
@@ -1544,7 +1571,10 @@ fn needs_parent_text(
         }
         lines.push(row);
         if let Some(report) = &panel.report {
-            lines.push(format!("  summary: {}", report.summary));
+            lines.push(format!(
+                "  summary: {}",
+                truncate_bytes(&report.summary, NEEDS_PARENT_SUMMARY_BYTE_CAP)
+            ));
             lines.push(format!(
                 "  candidate: {}",
                 truncate_bytes(&report.candidate_answer, NEEDS_PARENT_CANDIDATE_BYTE_CAP)
@@ -1556,7 +1586,10 @@ fn needs_parent_text(
     lines.push(
         "Next: review the panel material above and provide the final answer yourself.".into(),
     );
-    lines.join("\n")
+    // [Finding 10, rework round 2] Backstop the WHOLE assembled string, not
+    // just the two per-field caps above — see NEEDS_PARENT_TEXT_BYTE_CAP's
+    // doc comment.
+    truncate_bytes(&lines.join("\n"), NEEDS_PARENT_TEXT_BYTE_CAP)
 }
 
 /// Truncate `s` to at most `cap` bytes on a UTF-8 char boundary, marking a cut

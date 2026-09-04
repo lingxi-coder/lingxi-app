@@ -292,7 +292,7 @@ export interface UseBridge {
   logout(): Promise<void>;
   forceCompact(): Promise<void>;
   clearSession(): Promise<void>;
-  refreshTasks(): Promise<void>;
+  refreshTasks(options?: { preserve?: boolean }): Promise<void>;
   refreshAuth(): Promise<void>;
   refreshHooks(): Promise<void>;
   refreshAgents(): Promise<void>;
@@ -1114,12 +1114,26 @@ export function useBridge(): UseBridge {
     catalogRefreshTimers.current.set(projectPath, timer);
   }, [host, listProjectSessions]);
 
-  const requestTaskList = useCallback(async (sessionId = activeSessionIdRef.current) => {
+  const requestTaskList = useCallback(async (
+    sessionId = activeSessionIdRef.current,
+    options?: { preserve?: boolean },
+  ) => {
     if (sessionLoadingRef.current || !host || !sessionId) return;
-    updateRuntime(sessionId, (state) => {
-      const desktopState = beginTaskRefresh(state.desktop);
-      return desktopState === state.desktop ? state : { ...state, desktop: desktopState };
-    });
+    // [Finding 5, rework round 2] A background poll (fired every 1.5s while
+    // a task is in flight) must NOT wipe `tasks`/`taskOutput` before the
+    // fresh `task_row` lands -- clearing here made `orderedTasks(...)` (and
+    // therefore `hasActiveTask`/`hasInFlightTask`) flip false for the one
+    // render between the wipe and the reply, which re-triggered any effect
+    // keyed on that flag and produced a self-amplifying task_list storm.
+    // Only the user-initiated, one-shot refreshes (session connect, the
+    // manual refresh button, opening the Tasks pane) still wipe first, the
+    // way every other `refresh_listings` call in this file already does.
+    if (!options?.preserve) {
+      updateRuntime(sessionId, (state) => {
+        const desktopState = beginTaskRefresh(state.desktop);
+        return desktopState === state.desktop ? state : { ...state, desktop: desktopState };
+      });
+    }
     try {
       await host.command(sessionId, { type: 'task_list' });
     } catch (cause) {
@@ -2011,7 +2025,10 @@ export function useBridge(): UseBridge {
       capture(cause);
     }
   }, [applyBootstrap, capture, host]);
-  const refreshTasks = useCallback(() => requestTaskList(), [requestTaskList]);
+  const refreshTasks = useCallback(
+    (options?: { preserve?: boolean }) => requestTaskList(activeSessionIdRef.current, options),
+    [requestTaskList],
+  );
   const refreshAuth = useCallback(
     () => command({ type: 'refresh_listings', which: [{ type: 'auth' }] }),
     [command],

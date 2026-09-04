@@ -2644,6 +2644,87 @@ async fn needs_parent_text_carries_panel_summaries_and_a_contradiction_topic() {
     );
 }
 
+/// [Finding 10]: `needs_parent_text` capped `candidate_answer` at 4096 bytes
+/// (`NEEDS_PARENT_CANDIDATE_BYTE_CAP`) but rendered `report.summary` in
+/// full, so the cap was bypassed and unbounded panel-authored text reached
+/// the parent model via `final_text`. Assert the WHOLE rendered text stays
+/// under a fixed ceiling even when one panel's `summary` alone is 100 KB —
+/// before the fix this fails while the identical assertion on
+/// `candidate_answer` passes.
+#[test]
+fn needs_parent_text_bounds_a_panel_authored_summary() {
+    let mut oversized = report("short-candidate");
+    oversized.summary = "S".repeat(100_000);
+    let panels = vec![crate::panel::PanelInternal {
+        index: 0,
+        profile: String::new(),
+        model: String::new(),
+        anonymous_id: "P1".into(),
+        status: PanelRunStatus::Completed,
+        report: Some(oversized),
+        duration_ms: 0,
+        error_category: None,
+        error_detail: None,
+        usage: None,
+        spawn_prompt: String::new(),
+    }];
+    let text = crate::orchestrator::needs_parent_text(&panels, "test reason", None);
+    assert!(
+        text.len() < 20_000,
+        "a single panel's 100 KB summary must not reach the parent \
+         uncapped -- needs_parent_text rendered {} bytes (candidate_answer's \
+         own cap is 4096 bytes; summary has no cap at all before the fix)",
+        text.len()
+    );
+}
+
+/// [Finding 10, rework round 2, non-blocking note]: the per-field caps on
+/// `summary`/`candidate_answer` don't bound the ANALYST-authored sections --
+/// `analysis.consensus`, `contradictions[].topic`/`positions[].position` and
+/// `coverage_gaps` were rendered with no truncation at all, so those four
+/// sinks stayed open even after Finding 10's first pass. Inflate
+/// `consensus` alone (every panel field left small) and assert the WHOLE
+/// rendered text still stays under a fixed ceiling -- this must go RED
+/// under a mutation that removes the final `truncate_bytes` backstop, even
+/// though `needs_parent_text_bounds_a_panel_authored_summary` above (which
+/// passes `analysis: None`) cannot see this at all.
+#[test]
+fn needs_parent_text_bounds_an_analyst_authored_consensus_section() {
+    let panels = vec![crate::panel::PanelInternal {
+        index: 0,
+        profile: String::new(),
+        model: String::new(),
+        anonymous_id: "P1".into(),
+        status: PanelRunStatus::Completed,
+        report: Some(report("short-candidate")),
+        duration_ms: 0,
+        error_category: None,
+        error_detail: None,
+        usage: None,
+        spawn_prompt: String::new(),
+    }];
+    let analysis = FusionAnalysis {
+        schema_version: 1,
+        consensus: vec!["C".repeat(100_000)],
+        contradictions: vec![],
+        unique_insights: vec![],
+        coverage_gaps: vec![],
+        scores: Default::default(),
+        confidence: 50,
+        recommendation: FusionRecommendation::NeedsParent {
+            reason: "test reason".into(),
+        },
+    };
+    let text =
+        crate::orchestrator::needs_parent_text(&panels, "test reason", Some(&analysis));
+    assert!(
+        text.len() < 40_000,
+        "a single 100 KB consensus item must not reach the parent uncapped -- \
+         needs_parent_text rendered {} bytes",
+        text.len()
+    );
+}
+
 /// F004: the total deadline is now enforced INSIDE each stage (bounded by
 /// what remains of `total_timeout_ms`), not just by wrapping the whole
 /// `run_inner` — so panels that all completed, followed by a hanging analyst,
@@ -3006,10 +3087,94 @@ async fn panel_spawn_requests_are_when_done_capped_and_named() {
             Some(expected_cap),
             "panel {index} must cap per-turn input bytes from the reserved-token budget"
         );
+        // [Finding 16, rework round 2 note] This does NOT discriminate
+        // pre- from post-shuffle naming: run_id "fu_named" over exactly 2
+        // panels happens to permute to the identity, so `index` and
+        // `anon_rank_by_spawn_index(run_id, 2)[index]` coincide here. The
+        // property that the spawn name tracks the POST-shuffle anonymous
+        // id (not the raw spawn slot) is pinned by
+        // `panel_spawn_name_matches_the_post_shuffle_anonymous_id` below,
+        // which uses a run_id/panel-count that actually shuffles.
         assert_eq!(
             request.name,
             Some(format!("Fusion P{}", index + 1)),
             "panel {index} must be named for host-side observability"
+        );
+    }
+}
+
+/// [Finding 16]: the host-side spawn `name` must identify the SAME panel
+/// the run reports under `anonymous_id` — the run_id-seeded shuffle
+/// `panel::anonymize` applies AFTER collection, not the pre-shuffle spawn
+/// slot. run_id "fu_named" over THREE panels shuffles spawn order to
+/// `[1, 0, 2]` (verified independently: spawn slot 1 -> `P1`, slot 0 ->
+/// `P2`, slot 2 -> `P3`), so a name keyed on the raw spawn index swaps the
+/// first two panels' labels relative to what the run later reports.
+#[tokio::test]
+async fn panel_spawn_name_matches_the_post_shuffle_anonymous_id() {
+    let spawner = FakeSpawner::new(three_ok());
+    let config = test_config();
+    let panels_in = vec![
+        ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        },
+        ResolvedPanel {
+            profile: "openai".into(),
+            model: "gpt-5.6-terra".into(),
+        },
+        ResolvedPanel {
+            profile: "google".into(),
+            model: "gemini-3.1-pro-preview".into(),
+        },
+    ];
+    let mut panels = crate::panel::run_panels(
+        spawner.clone(),
+        &inherit(),
+        &config,
+        config.partial_ok,
+        "task",
+        &panels_in,
+        "fu_named",
+        std::time::Duration::from_millis(config.panel_total_timeout_ms),
+        &None,
+    )
+    .await
+    .expect("panel collection");
+    assert_eq!(panels.len(), 3);
+
+    // Assign `anonymous_id` the exact same way the real run does after
+    // collection, with the SAME run_id, so this test derives its
+    // expectation from the production shuffle rather than a hand-picked
+    // permutation.
+    crate::panel::anonymize(&mut panels, "fu_named");
+    let anon_by_spawn_index: std::collections::HashMap<usize, String> = panels
+        .iter()
+        .map(|p| (p.index, p.anonymous_id.clone()))
+        .collect();
+
+    // Sanity: this run_id/panel-count must actually shuffle (order !=
+    // identity) or the assertion below would be vacuously true.
+    assert_eq!(
+        anon_by_spawn_index.get(&0).map(String::as_str),
+        Some("P2"),
+        "fixture run_id must produce the known non-identity shuffle [1,0,2] \
+         or this test proves nothing"
+    );
+
+    let requests = spawner.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3);
+    for (spawn_index, request) in requests.iter().enumerate() {
+        let expected_anon = anon_by_spawn_index
+            .get(&spawn_index)
+            .expect("every spawn index has a post-shuffle anonymous_id");
+        assert_eq!(
+            request.name,
+            Some(format!("Fusion {expected_anon}")),
+            "spawn slot {spawn_index}'s host-side name must equal the panel's \
+             post-shuffle anonymous_id ({expected_anon}), matching what the \
+             run reports for the same panel in FusionResult.panels[] and the \
+             NeedsParent text — not the pre-shuffle spawn slot"
         );
     }
 }

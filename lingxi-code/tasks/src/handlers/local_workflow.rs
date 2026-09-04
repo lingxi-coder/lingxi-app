@@ -823,16 +823,27 @@ fn chain_key(prev: &str, prompt: &str, opts_json: &str) -> String {
 /// Shared FNV-1a-64 fold behind [`chain_key`] (agent()) and
 /// [`fusion_chain_key`] (fusion()). `discriminator`, when present, is folded
 /// as its own out-of-band field — between `prev` and `prompt`, wrapped in a
-/// reserved `\x1d` separator byte that never appears in `prev`/`prompt`/
-/// `opts_json` text — rather than being prepended as plain text into the
-/// `prompt` slot both call kinds hash over. That is what makes the two key
-/// spaces disjoint BY CONSTRUCTION: an agent() prompt that happens to be
-/// spelled `"fusion:X"` folds `\x1e` immediately before its prompt bytes,
-/// never `\x1d fusion \x1d`, so it can no longer reproduce a fusion() key by
-/// accident. Passing `discriminator: None` reproduces the pre-existing
-/// `chain_key` byte sequence exactly, so agent()'s own keys — and every
-/// journal entry a prior release already wrote to disk — are unchanged by
-/// this split.
+/// `0xFF` sentinel byte — rather than being prepended as plain text into the
+/// `prompt` slot both call kinds hash over.
+///
+/// [Finding 19] `0xFF` is not a plain "reserved" convention; it is a byte
+/// value that can **never** occur anywhere in the byte representation of a
+/// valid Rust `&str` — `prev`, `prompt`, `discriminator` and `opts_json` are
+/// all `&str`, and the Rust compiler guarantees `&str` is well-formed UTF-8,
+/// whose encoding never emits 0xFF (nor 0xC0/0xC1/0xF5-0xFE) as a byte,
+/// under RFC 3629. An earlier version of this fold used `\x1d` (U+001D,
+/// GROUP SEPARATOR) as the sentinel instead: `\x1d` IS a valid single-byte
+/// UTF-8 character, so a `prompt` that happened to SPELL the exact framing
+/// bytes (`\x1d` + tag + `\x1d`) could reproduce a `fusion()` key
+/// byte-for-byte — the "disjoint BY CONSTRUCTION" claim did not actually
+/// hold for that choice of sentinel. `0xFF` closes that hole for real: no
+/// `&str` content can ever fold to the same bytes as the discriminator
+/// frame, so the two key spaces are disjoint whenever `discriminator` is
+/// `Some` for one call and `None` (or a different tag) for the other, with
+/// no dependence on what text the prompt spells. Passing
+/// `discriminator: None` reproduces the pre-existing `chain_key` byte
+/// sequence exactly, so agent()'s own keys — and every journal entry a
+/// prior release already wrote to disk — are unchanged by this split.
 fn chain_key_with_discriminator(
     prev: &str,
     discriminator: Option<&str>,
@@ -849,9 +860,9 @@ fn chain_key_with_discriminator(
     fold(prev.as_bytes());
     fold(b"\x1e");
     if let Some(tag) = discriminator {
-        fold(b"\x1d");
+        fold(b"\xff");
         fold(tag.as_bytes());
-        fold(b"\x1d");
+        fold(b"\xff");
     }
     fold(prompt.as_bytes());
     fold(b"\x1f");

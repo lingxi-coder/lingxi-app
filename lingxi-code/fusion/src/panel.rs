@@ -149,6 +149,14 @@ fn spawn_panel_tasks(
 ) -> (JoinSet<PanelTaskOutput>, HashMap<tokio::task::Id, usize>) {
     let mut join_set = JoinSet::new();
     let mut task_index: HashMap<tokio::task::Id, usize> = HashMap::with_capacity(panels.len());
+    // [Finding 16] The host-side spawn `name` must identify the same panel
+    // the run reports under `anonymous_id` (assigned later, after
+    // collection, by `anonymize`'s run_id-seeded shuffle) — not the
+    // pre-shuffle spawn slot. Compute each spawn index's POST-shuffle anon
+    // rank here, up front, from the same `(run_id, panel count)` inputs
+    // `anonymize` will use, so `Fusion P{n}` in the Runtime Center and
+    // `P{n}` in the reported outcome always name the same panel.
+    let anon_rank = anon_rank_by_spawn_index(run_id, panels.len());
     for (index, panel) in panels.iter().cloned().enumerate() {
         let spawner = Arc::clone(spawner);
         let subagent = inherit.subagent.clone();
@@ -165,6 +173,7 @@ fn spawn_panel_tasks(
             stall_timeout_ms: config.panel_idle_timeout_ms,
             max_retries: 0,
         };
+        let name_index = anon_rank[index];
         let abort_handle = join_set.spawn(async move {
             let started = Instant::now();
             let request = spawn_request(
@@ -176,6 +185,7 @@ fn spawn_panel_tasks(
                 max_input_bytes,
                 &run_id,
                 index,
+                name_index,
             );
             let inherit = platform_api::subagent_spawn::SubagentInheritance {
                 tool_invoker: subagent.tool_invoker,
@@ -418,6 +428,7 @@ fn spawn_request(
     max_input_bytes: u64,
     run_id: &str,
     index: usize,
+    name_index: usize,
 ) -> SubagentSpawnRequest {
     SubagentSpawnRequest {
         subagent_type: FUSION_PANEL_TYPE.to_string(),
@@ -441,7 +452,10 @@ fn spawn_request(
         // Host-side observability name (F005 prerequisite) — without this a
         // spawn observer falls back to the bare agent_type and every panel
         // in a run renders as an indistinguishable "fusion-panel" row.
-        name: Some(format!("Fusion P{}", index + 1)),
+        // [Finding 16] Named by `name_index` — the POST-shuffle anon rank —
+        // not the raw pre-shuffle `index`, so this label always matches the
+        // `P{n}` the run later reports as `anonymous_id` for the same panel.
+        name: Some(format!("Fusion P{}", name_index + 1)),
         ..SubagentSpawnRequest::default()
     }
 }
@@ -777,13 +791,38 @@ fn sanitize_text(input: &str) -> String {
 
 /// Assign anonymous `P1..Pn` with a `run_id`-derived shuffle.
 pub fn anonymize(panels: &mut [PanelInternal], run_id: &str) {
-    let mut order: Vec<usize> = (0..panels.len()).collect();
-    shuffle(&mut order, seed_from(run_id));
+    let order = anon_order(run_id, panels.len());
     for (anon, original) in order.into_iter().enumerate() {
         if let Some(panel) = panels.get_mut(original) {
             panel.anonymous_id = format!("P{}", anon + 1);
         }
     }
+}
+
+/// The `run_id`-derived shuffle `anonymize` applies: `order[anon] ==
+/// original_spawn_index`. Factored out so the host-side spawn name (assigned
+/// BEFORE collection) and the reported `anonymous_id` (assigned AFTER
+/// collection) are computed from the exact same permutation — see
+/// [`anon_rank_by_spawn_index`] and [Finding 16].
+fn anon_order(run_id: &str, len: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..len).collect();
+    shuffle(&mut order, seed_from(run_id));
+    order
+}
+
+/// Inverse of [`anon_order`]: for each pre-shuffle spawn index, the
+/// zero-based rank (`0` == `P1`) it will be assigned as `anonymous_id` once
+/// `anonymize` runs after collection. Lets the spawn-time host name agree
+/// with the post-collection reported id without waiting for collection.
+fn anon_rank_by_spawn_index(run_id: &str, len: usize) -> Vec<usize> {
+    let order = anon_order(run_id, len);
+    let mut rank = vec![0usize; len];
+    for (anon, original) in order.into_iter().enumerate() {
+        if let Some(slot) = rank.get_mut(original) {
+            *slot = anon;
+        }
+    }
+    rank
 }
 
 fn seed_from(s: &str) -> u64 {

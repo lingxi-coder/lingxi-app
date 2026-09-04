@@ -103,6 +103,17 @@ pub fn approximate_tokens(request: &LlmRequest) -> u64 {
         byte_len = byte_len.saturating_add(serialized_len(response_format));
     }
 
+    approximate_tokens_for_bytes(byte_len)
+}
+
+/// The byte-length-divisor half of [`approximate_tokens`], exposed so a
+/// caller estimating from a bare text/prompt string it already has in hand
+/// (not a full [`LlmRequest`] it would have to fabricate just to feed this
+/// function) still uses the SAME formula — never a second, divergent
+/// bytes-per-token constant. `approximate_tokens` itself is defined in terms
+/// of this function, so the two can never drift apart.
+#[must_use]
+pub fn approximate_tokens_for_bytes(byte_len: u64) -> u64 {
     byte_len.div_ceil(REQUEST_BYTES_PER_TOKEN).max(1)
 }
 
@@ -152,6 +163,28 @@ mod tests {
     fn approximate_tokens_empty_request_returns_one() {
         let req = LlmRequest::new("model");
         assert_eq!(approximate_tokens(&req), 1);
+    }
+
+    #[test]
+    fn approximate_tokens_for_bytes_shares_the_request_divisor() {
+        // The accessor must be the exact same ceiling-division formula
+        // `approximate_tokens` folds its own byte_len through — not a
+        // separately-hand-rolled divisor that could silently drift from it.
+        assert_eq!(approximate_tokens_for_bytes(0), 1, "empty input floors to 1");
+        assert_eq!(
+            approximate_tokens_for_bytes(REQUEST_BYTES_PER_TOKEN),
+            1,
+            "exactly one token's worth of bytes is 1 token"
+        );
+        assert_eq!(
+            approximate_tokens_for_bytes(REQUEST_BYTES_PER_TOKEN + 1),
+            2,
+            "one byte past a token boundary must round UP, not down"
+        );
+        assert_eq!(
+            approximate_tokens_for_bytes(9),
+            9_u64.div_ceil(REQUEST_BYTES_PER_TOKEN)
+        );
     }
 
     #[test]

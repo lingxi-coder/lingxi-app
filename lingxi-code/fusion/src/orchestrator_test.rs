@@ -2157,6 +2157,151 @@ that call site owns"
     );
 }
 
+/// The exact three reports `three_ok()`'s panels settle on, reconstructed so
+/// a test can compute `judge_input_token_estimate`'s expected value the same
+/// way `price_realized_usage` does internally — plain ASCII fixture data, so
+/// sanitization is a no-op and the serialized bytes match exactly what the
+/// real run priced.
+fn three_ok_completed_panels() -> Vec<crate::panel::PanelInternal> {
+    ["ANSWER_A", "ANSWER_B", "ANSWER_C"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, answer)| crate::panel::PanelInternal {
+            index,
+            profile: String::new(),
+            model: String::new(),
+            anonymous_id: format!("P{}", index + 1),
+            status: PanelRunStatus::Completed,
+            report: Some(report(answer)),
+            duration_ms: 0,
+            error_category: None,
+            error_detail: None,
+            usage: None,
+            spawn_prompt: String::new(),
+        })
+        .collect()
+}
+
+/// T1 item 1 (analyst half, user-directed policy): "token counting takes the
+/// count the LLM provider returns, and only falls back to computing it
+/// ourselves when none is found." An analyst call that was ATTEMPTED but
+/// failed with no usage at all (`AnalystMode::ApiError` — a transport/4xx
+/// error, never a decode failure, so `analyze()` never accumulates any
+/// `cost::Usage`) must not silently settle for exact $0: it estimates the
+/// attempted call's input from the task prompt plus every successful panel's
+/// report (what `analyst_user_message` really serializes) using main's
+/// shared byte-length approximation, and keeps `estimated: true` so the
+/// figure is never passed off as an exact provider count.
+#[tokio::test]
+async fn analyst_failure_estimates_and_prices_its_attempted_call() {
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(AnalystMode::ApiError, vec![]);
+    let orch = orch_scripted(spawner, side).with_price_book(Arc::new(priced_book()));
+    let result = orch.run(request("task"), inherit(), None).await.unwrap();
+    assert!(
+        matches!(
+            result.decision,
+            FusionDecision::NeedsParent {
+                reason: FusionNeedsParentReason::AnalysisFailed { .. }
+            }
+        ),
+        "got {:?}",
+        result.decision
+    );
+    assert!(
+        result.usage.estimated,
+        "a real, attempted-but-unrecovered analyst call must flag the run estimated"
+    );
+    let panels = three_ok_completed_panels();
+    let estimated_analyst_tokens =
+        crate::orchestrator::judge_input_token_estimate("task", &panels);
+    // 3 panels (8 input + 4 output = 36) priced normally; the analyst term
+    // adds ONLY the estimate above (at priced_book()'s 1 nano-USD/token unit
+    // rate) — no per-request fee (0 in priced_book()).
+    let expected = 36 + estimated_analyst_tokens;
+    assert_eq!(
+        result.usage.realized_nano_usd, expected,
+        "the analyst's attempted-but-lost usage must be estimated and priced on top of the \
+3 panels' real usage, not reported as $0"
+    );
+}
+
+/// T1 item 1 (synth half, user-directed policy): same fallback for a
+/// synthesizer call that was attempted (`HostDecision::Merge` was reached)
+/// but failed with no usage (`SideQueryError::Api` — `SynthError::Failed`).
+/// Before this fix this case was indistinguishable from "the synthesizer
+/// never ran" at `price_realized_usage` — real, already-billed spend was
+/// silently $0 and `estimated` was never even flagged.
+#[tokio::test]
+async fn synth_failure_estimates_and_prices_its_attempted_call() {
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(
+        AnalystMode::Merge,
+        vec![Err(SideQueryError::Api(llm_client::LlmError::InvalidRequest {
+            message: "synthetic 4xx".into(),
+        }))],
+    );
+    let orch = orch_scripted(spawner, side.clone()).with_price_book(Arc::new(priced_book()));
+    let result = orch.run(request("task"), inherit(), None).await.unwrap();
+    assert_eq!(side.synth_calls.load(Ordering::SeqCst), 1, "the synthesizer must be called");
+    assert!(
+        matches!(
+            result.decision,
+            FusionDecision::NeedsParent {
+                reason: FusionNeedsParentReason::SynthesisFailed
+            }
+        ),
+        "got {:?}",
+        result.decision
+    );
+    assert!(
+        result.usage.estimated,
+        "a real, attempted-but-unrecovered synthesizer call must flag the run estimated"
+    );
+    let panels = three_ok_completed_panels();
+    let estimated_synth_tokens = crate::orchestrator::judge_input_token_estimate("task", &panels);
+    // 3 panels (36) + the analyst's fixed usage (8, see
+    // THREE_PANEL_PICK_PRICED_NANO_USD) priced normally; the synthesizer term
+    // adds ONLY the estimate above.
+    let expected = THREE_PANEL_PICK_PRICED_NANO_USD + estimated_synth_tokens;
+    assert_eq!(
+        result.usage.realized_nano_usd, expected,
+        "the synthesizer's attempted-but-lost usage must be estimated and priced on top of \
+the panels' and analyst's real usage, not reported as $0"
+    );
+}
+
+/// Negative guard for the two fixes above: when the panel bar fails, the
+/// analyst and synthesizer never run at all — `price_realized_usage` must
+/// NOT invent spend for either one. A regression here would over-bill a
+/// session for calls that provably never happened.
+#[tokio::test]
+async fn panel_bar_failure_never_estimates_the_uncalled_analyst_or_synth() {
+    // `min_successful_panels` is 2 (`test_config()`); leave every panel
+    // failing so the bar cannot be met and `check_panel_bar` fails before
+    // `analyze_and_decide` (and therefore the analyst/synthesizer) ever run.
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Fail),
+        ("gpt-5.6-terra".into(), FakePanel::Fail),
+        ("deepseek-v4-pro".into(), FakePanel::Fail),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(spawner, side.clone()).with_price_book(Arc::new(priced_book()));
+    let err = orch.run(request("task"), inherit(), None).await.unwrap_err();
+    assert_eq!(err, platform_api::FusionError::AllPanelsFailed);
+    assert_eq!(
+        side.analyst_calls.load(Ordering::SeqCst),
+        0,
+        "the analyst must never be called when the panel bar fails"
+    );
+    assert_eq!(
+        side.synth_calls.load(Ordering::SeqCst),
+        0,
+        "the synthesizer must never be called when the panel bar fails"
+    );
+}
+
 #[tokio::test]
 async fn budget_reservation_settles_on_pick() {
     let budget = RecordingBudget::new();
@@ -2389,17 +2534,32 @@ async fn budget_reservation_releases_on_total_timeout() {
         .unwrap_err();
     assert_eq!(err, platform_api::FusionError::TimedOutEmpty);
     settle_spawned_drops().await;
-    // Every panel `Hang`s (no `SubagentResult` is ever produced), so there is
-    // no usage to recover and the committed amount is 0 — but the
-    // `check_panel_bar` error path now always settles through
-    // `price_realized_usage` + `lease.commit` rather than branching on
-    // whether that total happens to be zero (see
-    // `budget_reservation_releases_on_min_panels_not_met` for the case where
-    // it is not). `commit_reservation(id, 0)` is exactly equivalent to a
-    // bare release (`record_external_cost` no-ops on 0, then releases the
-    // hold) — this only changes which counter the mock records.
+    // Every panel `Hang`s (no `SubagentResult` is ever produced) and each
+    // hits `PanelFinish::TotalTimedOut` — real spend of unknown size that
+    // T1's missing-usage settlement fallback now estimates from the prompt
+    // each panel is KNOWN to have been sent (`panel::estimate_in_flight_usage`),
+    // instead of silently under-billing it as exact $0. The `check_panel_bar`
+    // error path always settles through `price_realized_usage` +
+    // `lease.commit` rather than branching on whether that total happens to
+    // be zero (see `budget_reservation_releases_on_min_panels_not_met` for a
+    // genuinely-zero case).
+    let per_panel_input_tokens = llm_client::model::count_tokens::approximate_tokens_for_bytes(
+        crate::panel::panel_prompt("task").len() as u64,
+    );
+    // `priced_book()`'s rate is 1 nano-USD/token; 3 panels, all sharing the
+    // identical generic prompt text (panels are anonymized to each other).
+    let expected_committed = 3 * per_panel_input_tokens;
+    assert!(
+        expected_committed > 0,
+        "the estimate must be non-zero — this test's whole point is that in-flight spend is \
+no longer silently reported as exact $0"
+    );
     assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(budget.committed.lock().unwrap().clone(), vec![0]);
+    assert_eq!(
+        budget.committed.lock().unwrap().clone(),
+        vec![expected_committed],
+        "3 timed-out-in-flight panels must each be priced from their estimated usage, not $0"
+    );
     assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
     assert_reservation_settled_exactly_once(&budget);
 }
@@ -2830,7 +2990,11 @@ async fn panel_spawn_requests_are_when_done_capped_and_named() {
 
     let requests = spawner.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 2);
-    let expected_cap = u64::from(config.panel_reserved_input_tokens_per_turn) * 4;
+    // T1 item 2: the cap must be derived from `count_tokens`'s shared
+    // `APPROX_CHARS_PER_TOKEN` constant, not a hardcoded literal that could
+    // silently drift from it.
+    let expected_cap = u64::from(config.panel_reserved_input_tokens_per_turn)
+        * llm_client::model::count_tokens::APPROX_CHARS_PER_TOKEN;
     for (index, request) in requests.iter().enumerate() {
         assert_eq!(
             request.structured_output_mode,

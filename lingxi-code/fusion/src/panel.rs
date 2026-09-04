@@ -267,7 +267,26 @@ pub async fn run_panels(
     // other, so the task text never varies by identity) — built once and
     // reused both for spawning and for synthesizing a panicked/aborted slot.
     let generic_prompt = panel_prompt(task_prompt);
-    let max_input_bytes = u64::from(config.panel_reserved_input_tokens_per_turn) * 4;
+    // T1 item 2 (user-directed policy): this is the one bytes-per-token
+    // conversion that runs BEFORE any provider call (`budget::quote`'s own
+    // peak stays pure config-derived token counts — see its module doc,
+    // "never 1 byte = 1 token" — so it has no text-based estimate of its own
+    // to align). It used to hardcode a bare `4` here; now it reads
+    // `llm_client::model::count_tokens::APPROX_CHARS_PER_TOKEN`, the SAME
+    // named constant `count_tokens`'s own coarse transcript-size estimates
+    // are built from, instead of a silently-duplicated magic number that
+    // could drift from it. The missing-usage SETTLEMENT fallback
+    // (`estimate_in_flight_usage` above, `judge_input_token_estimate` in
+    // `orchestrator.rs`) instead calls
+    // `count_tokens::approximate_tokens_for_bytes`, the request-fit formula
+    // `count_tokens::approximate_tokens` itself is defined in terms of — a
+    // deliberately MORE conservative (denser) divisor than this cap's, since
+    // the two serve different purposes: this is a generous ceiling on bytes
+    // actually sent (permissive is safe — panels have their own real
+    // `max_input_bytes_per_turn` enforcement), while the settlement fallback
+    // prices real dollars and must not UNDER-count.
+    let max_input_bytes = u64::from(config.panel_reserved_input_tokens_per_turn)
+        * llm_client::model::count_tokens::APPROX_CHARS_PER_TOKEN;
 
     let (mut join_set, task_index) = spawn_panel_tasks(
         &spawner,
@@ -427,7 +446,10 @@ fn spawn_request(
     }
 }
 
-fn panel_prompt(task: &str) -> String {
+// `pub(crate)`, not private: `orchestrator_test` reconstructs the exact
+// spawn prompt to compute the expected value of the missing-usage estimate
+// fallback (`estimate_in_flight_usage`) instead of duplicating this literal.
+pub(crate) fn panel_prompt(task: &str) -> String {
     format!(
         "You are one independent Fusion panel. You cannot see other panels and \
 must not mention providers, model names, or that you are part of an ensemble.\n\n\
@@ -460,10 +482,20 @@ fn finish_panel(
         PanelFinish::TotalTimedOut => {
             internal.status = PanelRunStatus::TimedOut;
             internal.error_category = Some("timeout".into());
+            // T1 item 1 (user-directed policy): the panel's future was
+            // racing `timeout()` and lost, so no terminal `SubagentResult`
+            // was ever produced — there is no real usage to report. It was
+            // genuinely in flight, though (unlike a pre-flight spawn
+            // failure), so settle for an estimate of what we DO know was
+            // sent rather than reporting exact $0 for real, already-billed
+            // spend.
+            internal.usage = Some(estimate_in_flight_usage(&internal.spawn_prompt));
         }
         PanelFinish::Cancelled | PanelFinish::Done(SubagentResult::Killed { .. }) => {
             internal.status = PanelRunStatus::Cancelled;
             internal.error_category = Some("cancelled".into());
+            // Same reasoning as the timeout arm above.
+            internal.usage = Some(estimate_in_flight_usage(&internal.spawn_prompt));
         }
         PanelFinish::Failed { category, detail } => {
             internal.error_category = Some(category);
@@ -599,6 +631,29 @@ fn usage_from_subagent(
 /// failing turn's own cost (if the provider billed it at all before erroring)
 /// is never captured here, so this is a floor on real spend, not the exact
 /// total.
+/// T1 item 1 (user-directed policy): "token counting takes the count the LLM
+/// provider returns, and only falls back to computing it ourselves when none
+/// is found." A panel that was genuinely in flight (its future raced
+/// `timeout()`/cancellation and lost, so no `SubagentResult` — success or
+/// `Failed` — was ever produced) has no provider-reported usage at all. It
+/// still very likely spent real, already-billed tokens on at least the
+/// prompt we know we sent, so estimate from that using the SAME
+/// character-based approximation `count_tokens::approximate_tokens` uses for
+/// its own documented fallback (`llm_client::model::count_tokens`), rather
+/// than inventing a second, divergent formula. Output stays `0`: unlike the
+/// input prompt, no response text is known to exist for an in-flight panel.
+/// `estimated: true` always, so this is never mistaken for an exact
+/// provider count (mirrors [`usage_from_failed_subagent`]'s same rule).
+fn estimate_in_flight_usage(spawn_prompt: &str) -> FusionUsage {
+    FusionUsage {
+        input_tokens: llm_client::model::count_tokens::approximate_tokens_for_bytes(
+            spawn_prompt.len() as u64,
+        ),
+        estimated: true,
+        ..FusionUsage::default()
+    }
+}
+
 fn usage_from_failed_subagent(usage: &SubagentUsage) -> FusionUsage {
     FusionUsage {
         input_tokens: usage.input_tokens,
@@ -797,5 +852,104 @@ mod usage_from_subagent_tests {
         };
         let usage = usage_from_subagent(&cumulative, &final_turn, 1);
         assert_eq!(usage.reasoning_tokens, 50);
+    }
+}
+
+#[cfg(test)]
+mod missing_usage_settlement_fallback_tests {
+    use super::*;
+    use platform_api::PanelRunStatus;
+
+    fn panel() -> ResolvedPanel {
+        ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "sonnet".into(),
+        }
+    }
+
+    /// T1 item 1 (panel half, user-directed policy): a panel that was
+    /// genuinely IN FLIGHT when the whole-run timeout fired carries no
+    /// `SubagentUsage` at all (its future was raced against `timeout()` and
+    /// lost, so no terminal `SubagentResult` — successful or `Failed` — was
+    /// ever produced). Before this fix `finish_panel` left `internal.usage`
+    /// at `None`, so `price_realized_usage` silently contributed $0 for real,
+    /// already-billed spend. It must instead estimate from the prompt we DO
+    /// know was sent, using main's shared byte-length approximation
+    /// (`llm_client::model::count_tokens::approximate_tokens_for_bytes`), and
+    /// keep `estimated: true` so the figure is never passed off as exact.
+    #[test]
+    fn total_timed_out_estimates_usage_from_the_sent_prompt() {
+        let prompt = "x".repeat(300);
+        let internal = finish_panel(
+            0,
+            panel(),
+            prompt.clone(),
+            Duration::from_secs(1),
+            PanelFinish::TotalTimedOut,
+        );
+        assert_eq!(internal.status, PanelRunStatus::TimedOut);
+        let usage = internal.usage.expect(
+            "a panel that was in flight when the total timeout fired must carry an \
+estimated usage, not None (silently under-billing real, already-spent tokens)",
+        );
+        assert!(
+            usage.estimated,
+            "the estimate must be flagged, never passed off as an exact provider count"
+        );
+        let expected =
+            llm_client::model::count_tokens::approximate_tokens_for_bytes(prompt.len() as u64);
+        assert_eq!(
+            usage.input_tokens, expected,
+            "input estimate must equal main's shared byte-length approximation over the sent \
+prompt, not a second, divergent formula"
+        );
+    }
+
+    /// Same policy, the `Cancelled` terminal shape (host cancel raced the
+    /// same way as the total-timeout case above).
+    #[test]
+    fn cancelled_estimates_usage_from_the_sent_prompt() {
+        let prompt = "y".repeat(75);
+        let internal = finish_panel(
+            0,
+            panel(),
+            prompt.clone(),
+            Duration::from_millis(1),
+            PanelFinish::Cancelled,
+        );
+        assert_eq!(internal.status, PanelRunStatus::Cancelled);
+        let usage = internal
+            .usage
+            .expect("a cancelled in-flight panel must carry an estimated usage, not None");
+        assert!(usage.estimated);
+        assert_eq!(
+            usage.input_tokens,
+            llm_client::model::count_tokens::approximate_tokens_for_bytes(prompt.len() as u64)
+        );
+    }
+
+    /// A genuine PRE-FLIGHT spawn failure (the spawner's `Result::Err`
+    /// returned before any provider call could possibly have happened) must
+    /// NOT invent spend: $0 / `usage: None`, unchanged. Estimating here would
+    /// over-bill a call that provably never reached a provider — the exact
+    /// failure mode the "only estimate when a call could plausibly have
+    /// happened" half of the policy exists to prevent.
+    #[test]
+    fn spawn_failure_still_reports_no_usage_at_all() {
+        let internal = finish_panel(
+            0,
+            panel(),
+            "prompt that was never sent to any provider".into(),
+            Duration::from_millis(1),
+            PanelFinish::Failed {
+                category: "spawn".into(),
+                detail: None,
+            },
+        );
+        assert!(
+            internal.usage.is_none(),
+            "a pre-flight spawn failure never reached a provider — inventing an estimated \
+usage here would over-bill a call that never happened"
+        );
     }
 }

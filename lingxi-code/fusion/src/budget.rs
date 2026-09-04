@@ -3,9 +3,23 @@
 //! Peak dollars are quoted from token *rates* and
 //! `panelReservedInputTokensPerTurn` — never 1 byte = 1 token. Settlement
 //! (`orchestrator::price_realized_usage`) prices each component's own actual
-//! usage through the same [`FusionPriceBook`]; a component with no rate marks
-//! the run `estimated = true` rather than guessing a dollar figure — §4
-//! forbids a conservative fallback estimate.
+//! usage through the same [`FusionPriceBook`]. Two DIFFERENT kinds of
+//! "missing" can happen there, handled differently (T1, user-directed
+//! policy): a component with real usage but no PRICE (no rate in
+//! [`FusionPriceBook`], and not a `Subscription`-class hint) marks the run
+//! `estimated = true` and contributes $0 — no rate exists to guess a dollar
+//! figure from. A component with no USAGE at all — an attempted call whose
+//! real, already-billed token counts were lost (an in-flight panel cut off
+//! by a timeout/cancel, or an analyst/synthesizer call that failed before
+//! returning any usage) — is estimated from what IS known (the prompt sent,
+//! or the task + successful panel reports a judge call read) using main's
+//! real character-based approximation
+//! (`llm_client::model::count_tokens::approximate_tokens_for_bytes`, the
+//! same formula `count_tokens::approximate_tokens`'s documented fallback
+//! uses), then priced through the SAME [`FusionPriceBook`] as real usage —
+//! `estimated = true` either way, so neither case is ever passed off as
+//! exact. See `panel::estimate_in_flight_usage` and
+//! `orchestrator::judge_input_token_estimate`.
 
 use crate::config::FusionRuntimeConfig;
 use crate::model_resolver::{ModelSource, ResolvedPanel, ResolvedSet};
@@ -15,11 +29,20 @@ use platform_api::{
 };
 use std::sync::Arc;
 
-/// 1 byte = 1 token is ONLY the missing-usage settlement fallback, never the
-/// reservation quote. Codex's original peak used 256 KiB for that mistake.
+/// Codex's original peak used 256 KiB per turn as a stand-in for "one
+/// token" — a mistake this crate never makes anywhere: not in the
+/// reservation quote (`quote()`'s peak is pure configured token counts, see
+/// the module doc above) and not in the settlement fallback either (T1,
+/// user-directed policy: a component with genuinely no usage is estimated
+/// via `llm_client::model::count_tokens::approximate_tokens_for_bytes`,
+/// main's real character-based approximation — see
+/// `panel::estimate_in_flight_usage` / `orchestrator::judge_input_token_estimate`
+/// — never 1-byte-equals-1-token).
 // `budget` is a private module (see `fusion/src/lib.rs`), so this `pub` item
-// is unreachable outside the crate; it exists as a named regression
-// comparator for `mistaken_byte_input_tokens`'s tests, not dead API surface.
+// is unreachable outside the crate. It is test-only: a named regression
+// comparator `mistaken_byte_input_tokens`'s tests use to pin how far below
+// Codex's mistaken peak the corrected `quote()` formula lands — not dead API
+// surface, and NOT a production fallback path (past or present).
 #[allow(dead_code)]
 pub const CODEX_MISTAKEN_INPUT_BYTES_PER_TURN: u64 = 256 * 1024;
 
@@ -76,8 +99,11 @@ pub struct FusionQuote {
 
 /// Token counts the mistaken 1-byte-1-token formula would have reserved.
 // `budget` is a private module (see `fusion/src/lib.rs`), so this `pub` item
-// is unreachable outside the crate; it exists as a named regression
-// comparator for the corrected-quote tests below, not dead API surface.
+// is unreachable outside the crate. Test-only: it exists as a named
+// regression comparator for the corrected-quote tests below (proving how far
+// under Codex's mistaken peak the real formula lands), not dead API surface
+// and not a production fallback of any kind — see
+// `CODEX_MISTAKEN_INPUT_BYTES_PER_TURN`'s doc comment above.
 #[allow(dead_code)]
 #[must_use]
 pub fn mistaken_byte_input_tokens(panel_count: u8, panel_max_turns: u32) -> u64 {
@@ -359,6 +385,41 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::sync::Mutex;
+
+    /// T1 item 3 (user-directed policy): `mistaken_byte_input_tokens` has
+    /// ZERO production callers — it exists purely as a named regression
+    /// comparator in `corrected_formula_fits_where_byte_equals_token_would_not`
+    /// below, pinning Codex's original 1-byte-1-token mistake so the
+    /// corrected `quote()` formula can be shown to stay well under it. Its
+    /// doc comment used to describe this formula as (a restricted case of)
+    /// an actual settlement path for missing usage — a production role it
+    /// has never had. This must not be resurrected as one: the REAL
+    /// missing-usage settlement fallback (T1 item 1) is
+    /// `panel::estimate_in_flight_usage` /
+    /// `orchestrator::judge_input_token_estimate`, and it uses main's real
+    /// character-based approximation
+    /// (`llm_client::model::count_tokens::approximate_tokens_for_bytes`),
+    /// never this byte-equals-token formula. `include_str!` self-reads this
+    /// very file below, so the banned phrase is split across two literals
+    /// here (never joined in the SOURCE TEXT) to avoid this doc comment
+    /// itself tripping the check it documents.
+    #[test]
+    fn mistaken_byte_input_tokens_doc_does_not_claim_a_production_settlement_path() {
+        let src = include_str!("budget.rs");
+        let banned_claim: String = ["is ONLY the missing", "-usage settlement fallback"].concat();
+        assert!(
+            !src.contains(&banned_claim),
+            "the doc comment must not describe this formula as a (even restricted) \
+production settlement path — it has zero production callers"
+        );
+        assert!(
+            src.contains("CODEX_MISTAKEN_INPUT_BYTES_PER_TURN")
+                && src.contains("test-only")
+                && src.contains("regression comparator"),
+            "the doc comment must instead say plainly that this is a test-only regression \
+comparator, not dead API surface and not a production fallback"
+        );
+    }
 
     struct MapPrices(HashMap<(String, String), ModelRates>);
     impl FusionPriceBook for MapPrices {

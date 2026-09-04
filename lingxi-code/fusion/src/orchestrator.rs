@@ -72,6 +72,16 @@ struct AnalysisOutcome {
     usage: FusionUsage,
     priced_analyst: Option<(cost::Usage, u32)>,
     priced_synth: Option<cost::Usage>,
+    /// T1 item 1 (analyst/synth half): `true` once the synthesizer was
+    /// actually CALLED (`run_synthesis` sets this unconditionally at its own
+    /// start, before racing its timeout), `false` when the `Merge` branch was
+    /// never reached (a `Pick`/`NeedsParent` analyst decision). Distinguishes
+    /// "the synthesizer never ran — $0 is the exact truth" from "the
+    /// synthesizer ran and lost its usage to a failure/timeout — real,
+    /// already-billed spend the settlement fallback must estimate" at
+    /// `price_realized_usage`, which otherwise cannot tell the two apart from
+    /// `priced_synth: None` alone.
+    synth_attempted: bool,
 }
 
 impl FusionOrchestrator {
@@ -406,9 +416,16 @@ impl FusionOrchestrator {
                 &panels,
                 &resolved.analyst,
                 None,
+                // The panel bar failed before `analyze_and_decide` ever ran
+                // — the analyst and synthesizer are both genuinely un-called
+                // here, so their missing usage must stay exact $0, never a
+                // fabricated estimate.
+                false,
                 &request.parent_profile,
                 &request.parent_model,
                 None,
+                false,
+                &request.prompt,
             );
             let _ = lease.commit(priced_nano_usd).await;
 
@@ -481,6 +498,7 @@ impl FusionOrchestrator {
             mut usage,
             priced_analyst,
             priced_synth,
+            synth_attempted,
         } = outcome;
 
         let status = match &decision {
@@ -528,9 +546,15 @@ impl FusionOrchestrator {
             panels,
             &resolved.analyst,
             priced_analyst.as_ref().map(|(u, calls)| (u, *calls)),
+            // Reaching `finalize_result` means `analyze_and_decide` ran,
+            // which always attempts the analyst (see the comment on
+            // `price_realized_usage`'s `analyst_attempted` parameter).
+            true,
             &request.parent_profile,
             &request.parent_model,
             priced_synth.as_ref(),
+            synth_attempted,
+            &request.prompt,
         );
         usage.realized_nano_usd = priced_nano_usd;
         usage.estimated = usage.estimated || priced_estimated;
@@ -658,6 +682,7 @@ impl FusionOrchestrator {
         // cannot tell Fusion's spend apart from a concurrent parent turn's.
         let mut priced_analyst: Option<(cost::Usage, u32)> = None;
         let mut priced_synth: Option<cost::Usage> = None;
+        let mut synth_attempted = false;
         let (decision, final_text, analysis, synthesizer_ms) = match analysis_outcome {
             Err(AnalystError::ParseFailed) => {
                 self.analysis_failed_outcome(
@@ -720,6 +745,7 @@ impl FusionOrchestrator {
                     &mut usage,
                     &mut priced_analyst,
                     &mut priced_synth,
+                    &mut synth_attempted,
                 )
                 .await
             }
@@ -734,6 +760,7 @@ impl FusionOrchestrator {
             usage,
             priced_analyst,
             priced_synth,
+            synth_attempted,
         }
     }
 
@@ -758,6 +785,7 @@ impl FusionOrchestrator {
         usage: &mut FusionUsage,
         priced_analyst: &mut Option<(cost::Usage, u32)>,
         priced_synth: &mut Option<cost::Usage>,
+        synth_attempted: &mut bool,
     ) -> (FusionDecision, String, Option<FusionAnalysis>, u64) {
         add_cost_usage(usage, &analyst_usage, analyst_calls);
         *priced_analyst = Some((analyst_usage, analyst_calls));
@@ -795,7 +823,7 @@ impl FusionOrchestrator {
             HostDecision::Merge => {
                 self.run_synthesis(
                     config, request, analysis, panels, progress, run_id, started, usage,
-                    priced_synth,
+                    priced_synth, synth_attempted,
                 )
                 .await
             }
@@ -896,7 +924,16 @@ impl FusionOrchestrator {
         started: Instant,
         usage: &mut FusionUsage,
         priced_synth: &mut Option<cost::Usage>,
+        synth_attempted: &mut bool,
     ) -> (FusionDecision, String, Option<FusionAnalysis>, u64) {
+        // T1 item 1: set unconditionally, before the call and its own
+        // timeout race — every path below (success, timeout, failure) is a
+        // genuine ATTEMPT that may have reached and been billed by the
+        // parent provider, unlike the `Pick`/`NeedsParent` analyst branches
+        // that never call this function at all. This is the only signal
+        // `price_realized_usage` has to tell "never ran, $0 is exact" apart
+        // from "ran and lost its usage, needs the settlement estimate".
+        *synth_attempted = true;
         progress::emit(
             progress,
             FusionStage::Synthesizing,
@@ -1241,9 +1278,25 @@ fn price_realized_usage(
     panels: &[PanelInternal],
     analyst: &ResolvedPanel,
     analyst_usage: Option<(&cost::Usage, u32)>,
+    // T1 item 1 (user-directed policy): `true` when the analyst was actually
+    // CALLED (every path through `analyze_and_decide` attempts it), `false`
+    // at the `check_panel_bar`-failure call site in `run_inner`, where the
+    // analyst never runs at all. Required to tell "attempted, usage lost"
+    // (estimate + price it) apart from "never ran" (real, exact $0) — the
+    // two collapse to the same `analyst_usage: None` otherwise.
+    analyst_attempted: bool,
     parent_profile: &str,
     parent_model: &str,
     synth_usage: Option<&cost::Usage>,
+    // Same distinction as `analyst_attempted`, for the synthesizer — which,
+    // unlike the analyst, legitimately has NO attempt on most decisions (it
+    // only runs on the `Merge` branch). See `AnalysisOutcome::synth_attempted`.
+    synth_attempted: bool,
+    // The original task prompt, shared by both the analyst's and the
+    // synthesizer's real request payloads (`analyst_user_message` /
+    // `synthesize`'s `user` JSON) — the basis for the missing-usage estimate
+    // below, alongside each successful panel's own report.
+    request_prompt: &str,
 ) -> (u64, bool) {
     let mut total_nano_usd = 0_u64;
     let mut estimated = false;
@@ -1303,16 +1356,37 @@ fn price_realized_usage(
             None => estimated = true,
         }
     } else {
-        // `analyst_usage` is `None` only after an ATTEMPTED analyst call
-        // failed (`analyze_and_decide` always runs the analyst; every
-        // `AnalystError` arm leaves `priced_analyst` at its `None`
-        // initialization) — never "the analyst never ran". Unlike the
-        // synthesizer, which legitimately has no attempt on most decisions
-        // (it only runs on the `Merge` branch), a `None` here always means
-        // real, already-billed analyst spend is missing from
-        // `total_nano_usd` below, so the run must not report that total as
-        // exact.
+        // `analyst_usage` is `None` either because the analyst was never
+        // called (the early `check_panel_bar`-failure settlement in
+        // `run_inner`, `analyst_attempted: false` — real, exact $0, nothing
+        // to estimate) or because an ATTEMPTED call failed
+        // (`analyst_attempted: true` — every `AnalystError` arm leaves
+        // `priced_analyst` at its `None` initialization). Either way the run
+        // cannot claim an exact total, so `estimated` is set unconditionally
+        // (unchanged from before this fix) — but a dollar figure is only
+        // ever invented for the SECOND case: T1 item 1 (user-directed
+        // policy) estimates the attempted call's usage from what we know it
+        // read (the task prompt + every successful panel's report) using
+        // main's shared byte-length approximation, rather than reporting
+        // real, already-billed spend as exact $0.
         estimated = true;
+        if analyst_attempted {
+            let estimated_input = judge_input_token_estimate(request_prompt, panels);
+            if let Some(nano_usd) = budget::price_component(
+                &analyst.profile,
+                &analyst.model,
+                catalog,
+                prices,
+                estimated_input,
+                0,
+                0,
+                0,
+                0,
+                1,
+            ) {
+                total_nano_usd = total_nano_usd.saturating_add(nano_usd);
+            }
+        }
     }
     if let Some(usage) = synth_usage {
         match budget::price_component(
@@ -1330,8 +1404,53 @@ fn price_realized_usage(
             Some(nano_usd) => total_nano_usd = total_nano_usd.saturating_add(nano_usd),
             None => estimated = true,
         }
+    } else if synth_attempted {
+        // T1 item 1: previously a synthesizer call that was attempted and
+        // lost its usage to a failure/timeout (`SynthError::Failed` /
+        // `TimedOut`) was treated exactly like "never ran" — real,
+        // already-billed spend silently reported as exact $0, without even
+        // flagging `estimated`. Same estimate-and-flag policy as the
+        // analyst branch above.
+        estimated = true;
+        let estimated_input = judge_input_token_estimate(request_prompt, panels);
+        if let Some(nano_usd) = budget::price_component(
+            parent_profile,
+            parent_model,
+            catalog,
+            prices,
+            estimated_input,
+            0,
+            0,
+            0,
+            0,
+            1,
+        ) {
+            total_nano_usd = total_nano_usd.saturating_add(nano_usd);
+        }
     }
     (total_nano_usd, estimated)
+}
+
+/// T1 item 1 (analyst/synth half, user-directed policy): approximate the
+/// input a JUDGE call (analyst or synthesizer) is known to have read —
+/// the task prompt plus every successful panel's own report, which is what
+/// `analyst_user_message` / `synthesize`'s real payload both serialize —
+/// using the SAME character-based approximation the panel-side settlement
+/// fallback uses (`llm_client::model::count_tokens::approximate_tokens_for_bytes`),
+/// never a second, divergent formula. `pub(crate)` so `orchestrator_test`
+/// can compute the exact expected value instead of duplicating this math.
+pub(crate) fn judge_input_token_estimate(prompt: &str, panels: &[PanelInternal]) -> u64 {
+    let mut bytes = prompt.len() as u64;
+    for panel in panels {
+        if let Some(report) = &panel.report {
+            bytes = bytes.saturating_add(
+                serde_json::to_vec(report)
+                    .map(|body| body.len() as u64)
+                    .unwrap_or(0),
+            );
+        }
+    }
+    llm_client::model::count_tokens::approximate_tokens_for_bytes(bytes)
 }
 
 fn add_cost_usage(acc: &mut FusionUsage, usage: &cost::Usage, calls: u32) {

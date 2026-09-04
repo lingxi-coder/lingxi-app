@@ -92,10 +92,15 @@ final class CredentialStore {
         let providerService = manifest.channel == "production"
             ? "com.lingxi.provider-credentials.v1"
             : "com.lingxi.provider-credentials.v1.development"
+        let pluginSecretService = manifest.channel == "production"
+            ? "com.lingxi.plugin-secrets.v1"
+            : "com.lingxi.plugin-secrets.v1.development"
         let secureStoragePrefix = manifest.channel == "production"
             ? "com.lingxi.secure-storage.v1.production."
             : "com.lingxi.secure-storage.v1.development."
-        guard service == providerService || service.hasPrefix(secureStoragePrefix) else {
+        guard service == providerService
+                || service == pluginSecretService
+                || service.hasPrefix(secureStoragePrefix) else {
             throw BrokerFailure.permission("credential service is outside the \(manifest.channel) channel")
         }
         return service

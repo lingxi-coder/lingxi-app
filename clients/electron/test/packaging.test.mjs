@@ -212,6 +212,17 @@ test('credential broker manifest stays metadata-only and caller allowlist stays 
   });
 });
 
+test('credential broker admits only the plugin-secret service in its matching channel', () => {
+  const source = readFileSync(join(
+    repoRoot,
+    'lingxi-code/platforms/macos-credential-broker/CredentialBrokerMain.swift',
+  ), 'utf8');
+  assert.match(source, /"com\.lingxi\.plugin-secrets\.v1"/);
+  assert.match(source, /"com\.lingxi\.plugin-secrets\.v1\.development"/);
+  assert.match(source, /service == pluginSecretService/);
+  assert.doesNotMatch(source, /service\.hasPrefix\([^\n]*plugin/i);
+});
+
 test('audio helper identifiers follow the desktop packaging channel split', () => {
   assert.deepEqual(audioHelperIdentifiers('production'), {
     bundleId: 'com.lingxi.code.audio-helper',

@@ -249,6 +249,38 @@ pub fn tool_default_row(name: &str) -> Option<PromptDefault> {
     TOOL_DEFAULTS.get_or_init(init_defaults).get(name).copied()
 }
 
+/// Every tool name that has a row in this table, sorted.
+///
+/// r2-tests-honesty-012: this is the REVERSE direction of
+/// [`tool_default_row`]. That answers "does THIS tool have a row"; nothing
+/// could answer "does this ROW name a tool that still exists", because
+/// `TOOL_DEFAULTS` is a private `static` and only single-key lookups were
+/// exported. THREE guards do constrain this table's composition, not one:
+/// `init_defaults`'s own `debug_assert_eq!(m.len(), 79, "tool defaults table
+/// must list all 79 tools")`, the test
+/// `table_splits_into_the_parity_set_and_the_mobile_divergence`'s
+/// `oracle == 44` / `divergence == 35`, and the test
+/// `the_counts_in_this_module_doc_are_the_counts_in_the_table`'s four
+/// hand-bumped bucket counts (23/21/14/21). NONE of those seven numbers moves
+/// for the orphan this function exists for, because every one of them counts
+/// `TOOL_DEFAULTS` alone: delete a tool from a CONSUMER crate's table, leave
+/// its row here, and all seven still hold. They also fail by naming a NUMBER
+/// rather than the orphaned row, and they cannot see a consumer crate's tool
+/// table in any case, since `permission` depends on none of them.
+///
+/// The consumer-side guard this exists for is
+/// `engine_mobile::local_apps_tools::tests::every_local_app_permission_row_names_a_real_tool`.
+#[must_use]
+pub fn tool_default_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = TOOL_DEFAULTS
+        .get_or_init(init_defaults)
+        .keys()
+        .copied()
+        .collect();
+    names.sort_unstable();
+    names
+}
+
 /// Look up the default Y/N decision for a tool name. Unknown tools → Deny.
 #[must_use]
 pub fn tool_default(name: &str) -> PromptDefault {

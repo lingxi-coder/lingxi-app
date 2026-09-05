@@ -1220,6 +1220,54 @@ async fn unknown_agent_type_throws_not_found() {
         "non-plugin (no ':' in workflow id) error must not gain the plugin-namespace \
          'also tried' clause: {msg}"
     );
+
+    // r4-tests-honesty-07: the doc comment's second half -- "a known one runs
+    // fine" -- was never exercised. Every assertion above is equally
+    // satisfied by a resolver that rejects EVERY agent type, so on its own
+    // this test cannot tell "unknown types are refused" from "nothing
+    // resolves at all". Same workflow id, same spawner, same call shape;
+    // only the agentType differs.
+    let known_spawner = Arc::new(EchoSpawner::default());
+    let outcome = run_workflow_script(
+        "return await agent('p', { agentType: 'Explore' });",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        "local-app-build",
+        known_spawner.clone(),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    )
+    .await
+    .expect("a KNOWN agentType on the same workflow id must resolve, not throw");
+    let reqs = known_spawner.seen_reqs.lock().unwrap();
+    assert_eq!(
+        reqs.len(),
+        1,
+        "the known agentType must actually reach the spawner -- asserting only on the returned \
+         value would still pass if the call never dispatched"
+    );
+    assert_eq!(
+        reqs[0].subagent_type, "Explore",
+        "the resolved agent type must be the one the script asked for"
+    );
+    drop(reqs);
+    assert!(
+        outcome
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains("echo:p")),
+        "the known agent's result must come back to the script, got {:?}",
+        outcome.result
+    );
 }
 
 /// A minimal spawner whose agent listing is fully caller-controlled, so a test
@@ -1268,10 +1316,10 @@ impl SubagentSpawner for NamespacedListingSpawner {
 /// P0-2 positive case: the plugin loader registers agents as
 /// `<plugin>:<agent>` (`plugin/src/manager.rs:1052-1055`), but a plugin's own
 /// workflow script authors a BARE `agentType` -- it must not need to know
-/// what namespace it was installed under. When the exact bare name is not in
-/// the listing and the running workflow's own id is plugin-qualified
-/// (`lingxi-local-app:local-app-build`), the dispatch must retry under that
-/// plugin's namespace and spawn with the QUALIFIED subagent_type.
+/// what namespace it was installed under. When the running workflow's own id
+/// is plugin-qualified (`lingxi-local-app:local-app-build`), the dispatch
+/// must resolve under that plugin's namespace and spawn with the QUALIFIED
+/// subagent_type.
 #[tokio::test]
 async fn plugin_workflow_resolves_bare_agent_type_under_its_namespace() {
     let spawner = Arc::new(NamespacedListingSpawner {
@@ -1308,20 +1356,25 @@ async fn plugin_workflow_resolves_bare_agent_type_under_its_namespace() {
     );
 }
 
-/// r1-workflow-runtime-15 / r3-tests-honesty-13: the bare-name check runs
-/// FIRST and the namespaced retry only fires when the bare name is absent
-/// (local_workflow.rs:2766) -- deliberately, on the same "closer scope wins"
-/// precedence `resolve_script_at` documents for workflow name resolution
-/// itself (`tools/workflow/src/lib.rs:320-331`, "project/user file always
-/// wins a name collision" over a plugin). A project/user agent named
-/// `builder` is therefore meant to shadow the plugin's own
-/// `lingxi-local-app:builder` when both are registered, exactly like a
-/// project workflow file shadows a plugin workflow of the same name. This
-/// pins that contract so a later flip to namespace-first is caught here
-/// instead of silently changing which agent definition a plugin workflow
-/// runs under.
+/// r1-workflow-runtime-15, REVERSED. This test used to assert the opposite,
+/// on the "closer scope wins" precedence `resolve_script_at` documents for
+/// workflow NAME resolution (`tools/workflow/src/lib.rs:320-331`). That
+/// precedent does not transfer: there the USER names the workflow, so their
+/// own file winning is their intent. Here the name is written inside the
+/// PLUGIN's own script, about the plugin's own component -- the user never
+/// asked for a substitution. `builder`, `designer`, `operator`, `tester` and
+/// `verifier` are all names a person plausibly gives a project agent, and
+/// under bare-first any one of them silently replaced the corresponding
+/// `lingxi-local-app:` agent for an entire local-app build, with no
+/// diagnostic on any surface.
+///
+/// So: when the running workflow belongs to a plugin AND that plugin
+/// registered `<plugin>:<agentType>`, the plugin's own agent is what runs.
+/// The `agent_shadow` case below pins the other half -- a bare name the
+/// plugin did NOT register still resolves normally, so this is a preference,
+/// not a restriction to namespaced agents.
 #[tokio::test]
-async fn bare_agent_type_shadows_the_plugin_namespaced_agent_when_both_are_registered() {
+async fn plugin_namespaced_agent_wins_over_a_bare_shadow_when_both_are_registered() {
     let spawner = Arc::new(NamespacedListingSpawner {
         listing: vec![
             "builder".to_string(),
@@ -1348,19 +1401,63 @@ async fn bare_agent_type_shadows_the_plugin_namespaced_agent_when_both_are_regis
         None,
     )
     .await
-    .expect("a bare agentType present in the listing must resolve without the namespaced retry");
+    .expect("the call must resolve, not throw");
     assert_eq!(outcome.result.as_deref(), Some("\"echo:p\""));
     let reqs = spawner.seen_reqs.lock().unwrap();
     assert_eq!(reqs.len(), 1, "exactly one agent() call must have spawned");
     assert_eq!(
-        reqs[0].subagent_type, "builder",
-        "a project/user agent registered under the bare name must shadow the plugin's own \
-         namespaced agent of the same name, the same precedence workflow name resolution uses"
+        reqs[0].subagent_type, "lingxi-local-app:builder",
+        "a project/user agent registered under the bare name must NOT shadow the plugin's own \
+         namespaced agent of the same name inside that plugin's own workflow"
+    );
+}
+
+/// The other half of the preference above, and the reason it is safe: a bare
+/// agentType the plugin did NOT register still resolves to the bare listing
+/// entry. Without this, "prefer the namespaced spelling" could have been
+/// implemented as "require it", which would break every plugin script call to
+/// a built-in agent such as `general-purpose`.
+#[tokio::test]
+async fn a_bare_agent_type_the_plugin_did_not_register_still_resolves() {
+    let spawner = Arc::new(NamespacedListingSpawner {
+        listing: vec![
+            "general-purpose".to_string(),
+            "lingxi-local-app:builder".to_string(),
+        ],
+        ..Default::default()
+    });
+    let outcome = run_workflow_script(
+        "const r = await agent('p', { agentType: 'general-purpose' }); return r;",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        "lingxi-local-app:local-app-build",
+        spawner.clone(),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    )
+    .await
+    .expect("a bare agentType with no namespaced sibling must still resolve");
+    assert_eq!(outcome.result.as_deref(), Some("\"echo:p\""));
+    let reqs = spawner.seen_reqs.lock().unwrap();
+    assert_eq!(reqs.len(), 1, "exactly one agent() call must have spawned");
+    assert_eq!(
+        reqs[0].subagent_type, "general-purpose",
+        "the bare spelling must survive when the plugin registered no \
+         `lingxi-local-app:general-purpose`"
     );
 }
 
 /// P0-2 negative case: even under a plugin-qualified workflow id, a name that
-/// matches NEITHER the bare spelling NOR `<plugin>:<name>` still throws --
+/// matches NEITHER `<plugin>:<name>` NOR the bare spelling still throws --
 /// and the error must name BOTH spellings it tried, so a user debugging a
 /// typo sees the actual namespace resolution that happened.
 #[tokio::test]
@@ -1392,11 +1489,11 @@ async fn unknown_agent_type_under_plugin_workflow_names_both_spellings() {
     let msg = format!("{err}");
     assert!(
         msg.contains("'nope'"),
-        "error must name the bare spelling that was tried first: {msg}"
+        "error must name the bare spelling the script asked for: {msg}"
     );
     assert!(
         msg.contains("lingxi-local-app:nope"),
-        "error must ALSO name the namespace-qualified spelling that was tried: {msg}"
+        "error must ALSO name the namespace-qualified spelling that was tried first: {msg}"
     );
 }
 

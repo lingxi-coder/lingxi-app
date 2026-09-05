@@ -169,9 +169,18 @@ impl MobileWorkflowCheckpointStore {
             .cloned()
     }
 
-    /// Return host-owned provenance for a Local App plugin build resume in the
-    /// current session. All launch coordinates must match: workflow run id,
-    /// persisted script path, session, and recorded script hash.
+    /// Return host-owned provenance for a Local App plugin workflow resume
+    /// (build, use-test or MCP-authoring) in the current session. All launch
+    /// coordinates must match: workflow run id, persisted script path,
+    /// session, and recorded script hash.
+    ///
+    /// Recognising the id here is NOT authority on its own: this legacy
+    /// checkpoint row is written for every launch, so a custom script whose
+    /// `meta.name` merely copies a plugin-qualified id lands here too. The
+    /// `script_is_verbatim_builtin` marker checked by
+    /// [`local_app_resume_resolution_for_record`] is what separates the two,
+    /// and it is set only when the launch resolved to the Plugin registry's
+    /// own bytes.
     fn local_app_resume_record(
         &self,
         session_uuid: &str,
@@ -196,9 +205,9 @@ impl MobileWorkflowCheckpointStore {
                 {
                     return None;
                 }
-                if !(checkpoint.workflow_id
-                    == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID
-                    && checkpoint.workflow_run_id == run_id
+                if !(crate::local_app_plugin_binding::is_plugin_workflow_id(
+                    &checkpoint.workflow_id,
+                ) && checkpoint.workflow_run_id == run_id
                     && paths_equivalent(script_path, std::path::Path::new(&checkpoint.script_path)))
                 {
                     return None;
@@ -1125,6 +1134,32 @@ fn is_verified_plugin_workflow(
         .is_some_and(|resolved| resolved == script)
 }
 
+/// Does this launch earn `LocalAppWorkflowTaskScope::for_mcp_authoring`?
+///
+/// Exactly two provenances, mirroring the build path's pair:
+///   * a BY-NAME launch of the MCP-authoring plugin workflow whose script
+///     bytes still match the Plugin registry (`verified_plugin_workflow`), or
+///   * a `scriptPath` resume whose host-owned checkpoint provenance
+///     (`expected_workflow_id`) says MCP authoring.
+///
+/// The `verified_plugin_workflow &&` on the first arm is load-bearing and is
+/// the narrowing this function was extracted to pin: without it a project
+/// workflow that merely takes the name in [`PLUGIN_MCP_AUTHORING_WORKFLOW_ID`]
+/// in the saved-workflow precedence chain borrowed MCP-authoring scope, which
+/// this call site is the only production grant of. Name is not authority; the
+/// registry byte match, or the host's own resume record, is.
+fn is_mcp_authoring_launch(
+    spec_name: Option<&str>,
+    verified_plugin_workflow: bool,
+    expected_workflow_id: Option<&str>,
+) -> bool {
+    (verified_plugin_workflow
+        && spec_name
+            == Some(crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID))
+        || expected_workflow_id
+            == Some(crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID)
+}
+
 /// External (model-supplied) argument keys the Host launch boundary accepts
 /// for the plugin build workflow.
 ///
@@ -1208,25 +1243,45 @@ fn validate_namespaced_local_app_external_args(
     Ok(())
 }
 
+/// Resolve which Plugin-owned Local App workflow a `scriptPath` resume is
+/// really re-entering, from host-recorded provenance only.
+///
+/// r4-workflow-runtime-05: this used to answer for
+/// `PLUGIN_BUILD_WORKFLOW_ID` alone, which left the use-test and
+/// MCP-authoring workflows with NO host-owned identity on the one launch
+/// shape the Workflow tool's own resume hint produces (`{scriptPath,
+/// resumeFromRunId}`, no `name`). Both their arg sanitizer and their
+/// `host_context` enrichment key off that identity, so a resume of either
+/// script reached QuickJS with no `host_context` at all and threw on its
+/// first context statement.
+///
+/// The marker is what carries the trust, not the id: `script_is_verbatim_builtin`
+/// is recorded `true` only when the launch resolved to the Plugin registry's
+/// own bytes (`verified_plugin_workflow`), and the hash must still match the
+/// script this launch resolved. A custom script that merely copies a
+/// plugin-qualified `meta.name` records `false` and resolves to `None` here.
 fn local_app_resume_resolution_for_record(
     record: &WorkflowProvenanceRecord,
     script: &str,
 ) -> Option<LocalAppResumeResolution> {
     let exact_hash = record.script_sha256 == sha256_hex(script.as_bytes());
-    if record.workflow_id == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID {
-        if record.script_is_verbatim_builtin == Some(true) && exact_hash {
-            return Some(LocalAppResumeResolution {
-                provenance: LocalAppResumeProvenance::TrustedPlugin,
-                workflow_id: Some(record.workflow_id.clone()),
-            });
-        }
-        if record.script_is_verbatim_builtin == Some(false) && exact_hash {
-            return Some(LocalAppResumeResolution {
-                provenance: LocalAppResumeProvenance::Custom,
-                workflow_id: None,
-            });
-        }
+    if !crate::local_app_plugin_binding::is_plugin_workflow_id(&record.workflow_id) {
         return None;
+    }
+    if record.script_is_verbatim_builtin == Some(true) && exact_hash {
+        return Some(LocalAppResumeResolution {
+            provenance: LocalAppResumeProvenance::TrustedPlugin,
+            workflow_id: Some(record.workflow_id.clone()),
+        });
+    }
+    if record.workflow_id == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID
+        && record.script_is_verbatim_builtin == Some(false)
+        && exact_hash
+    {
+        return Some(LocalAppResumeResolution {
+            provenance: LocalAppResumeProvenance::Custom,
+            workflow_id: None,
+        });
     }
     None
 }
@@ -1843,15 +1898,31 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             ),
             _ => None,
         };
+        // The host-owned answer to "WHICH plugin workflow is this resume
+        // re-entering", now resolvable for all three plugin workflows rather
+        // than only the build one (r4-workflow-runtime-05). Only ever `Some`
+        // for a `TrustedPlugin` resolution.
+        let expected_workflow_id = resume_resolution
+            .as_ref()
+            .and_then(|resolution| resolution.workflow_id.as_deref());
+        // `trusted_local_app_resume` is BUILD-specific: it feeds
+        // `is_mobile_local_app_builtin`, which grants the build path's
+        // args rewrite and `LocalAppWorkflowTaskScope::for_build`. A use-test
+        // or MCP-authoring resume must NOT flip it on -- that would hand the
+        // build workflow's authority to a different script.
         let trusted_local_app_resume = matches!(
             resume_resolution
                 .as_ref()
                 .map(|resolution| resolution.provenance),
             Some(LocalAppResumeProvenance::TrustedPlugin)
-        );
-        let expected_workflow_id = resume_resolution
-            .as_ref()
-            .and_then(|resolution| resolution.workflow_id.as_deref());
+        ) && expected_workflow_id
+            == Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID);
+        // What the build-path seam is allowed to see: it refuses any expected
+        // id other than the build one by design, so a use-test/MCP-authoring
+        // resume reaches it as "not a build launch" (`None`) instead of as a
+        // launch error.
+        let expected_build_workflow_id = expected_workflow_id
+            .filter(|id| *id == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID);
         // Mint the run id before enrichment so create's candidate journal is
         // bound to the same id the task receives. Host context is injected
         // before the args are serialized into TaskRegistry.
@@ -1881,7 +1952,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             &mut spec,
             &script,
             trusted_local_app_resume,
-            expected_workflow_id,
+            expected_build_workflow_id,
             verified_plugin_workflow,
         )?;
         // The create path receives the run id as a Host-injected field only;
@@ -1897,16 +1968,24 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 context.insert("workflow_run_id".into(), Value::String(run_id.clone()));
             }
         }
+        // A by-name launch proves the plugin identity through
+        // `verified_plugin_workflow` (registry bytes re-read and compared); a
+        // `scriptPath` resume proves it through `expected_workflow_id`, the
+        // host-owned checkpoint provenance. Both must reach the enrichment,
+        // or the resumed script runs with no `host_context` at all.
         enrich_persisted_plugin_workflow_context(
             &self.app_data_root,
             &mut spec,
             &run_id,
             verified_plugin_workflow,
+            expected_workflow_id,
         )?;
-        if local_app_scope.is_none()
-            && spec.name.as_deref()
-                == Some(crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID)
-        {
+        let is_mcp_authoring_launch = is_mcp_authoring_launch(
+            spec.name.as_deref(),
+            verified_plugin_workflow,
+            expected_workflow_id,
+        );
+        if local_app_scope.is_none() && is_mcp_authoring_launch {
             if let Some(app_id) = spec
                 .args
                 .as_ref()
@@ -2023,11 +2102,20 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                         Some(self.plugin_workflows.as_ref()),
                     )
                 });
+            // "This launch ran the Plugin's OWN bytes." For the build
+            // workflow that is `is_mobile_local_app_builtin`; for the
+            // use-test and MCP-authoring workflows it is
+            // `verified_plugin_workflow`, which is the same registry-bytes
+            // comparison for the other two ids (r4-workflow-runtime-05).
+            // Recording it for all three is what lets a later `scriptPath`
+            // resume of use-test/mcp-authoring be told apart from a custom
+            // script that merely copied a plugin-qualified `meta.name` --
+            // see `local_app_resume_resolution_for_record`.
             let script_is_verbatim_builtin = is_mobile_local_app_builtin(
                 &spec,
                 trusted_local_app_resume,
                 verified_plugin_workflow,
-            );
+            ) || verified_plugin_workflow;
             let (invocation_mode, workflow_source) = if has_script_path {
                 ("scriptPath".to_string(), "scriptPath".to_string())
             } else if has_name {
@@ -2182,19 +2270,42 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
 }
 
 /// Add the same Host-owned identity envelope to the Plugin's standalone
-/// use-test workflow. Unlike create, use-test is only valid for an already
-/// scaffolded app, so the persisted manifest/profile and dependency snapshot
-/// are fail-closed prerequisites.
+/// use-test and MCP-authoring workflows. Unlike create, both are only valid
+/// for an already scaffolded app, so the persisted manifest/profile and
+/// dependency snapshot are fail-closed prerequisites.
+///
+/// r4-workflow-runtime-05: identity comes from EITHER of the two host-owned
+/// proofs, never from `spec.name` alone.
+///
+/// * a fresh or by-name-resumed launch proves it with
+///   `verified_plugin_workflow` — `is_verified_plugin_workflow` re-reads the
+///   Plugin registry's current bytes and compares them to the script this
+///   launch resolved;
+/// * a `scriptPath` resume — the shape the Workflow tool's own resume hint
+///   produces, `{scriptPath, resumeFromRunId}` with NO `name` — proves it with
+///   `resumed_workflow_id`, the checkpoint-provenance answer from
+///   [`local_app_resume_resolution_for_record`] (host-written sidecar, verbatim
+///   marker, exact script hash).
+///
+/// Gating on `spec.name` alone is what made a `scriptPath` resume of either
+/// script return here at the first line: no `host_context`, no
+/// `workflow_run_id`, no `runtime_profile`, so the script threw on its first
+/// context statement. Note the consequence of fixing it: a resume whose args
+/// no longer carry `app_id` now fails at the launch boundary with a message
+/// naming what is missing, exactly as the sibling build path already does,
+/// instead of failing inside QuickJS.
 fn enrich_persisted_plugin_workflow_context(
     app_data_root: &std::path::Path,
     spec: &mut tool_workflow::WorkflowLaunchSpec,
     run_id: &str,
     verified_plugin_workflow: bool,
+    resumed_workflow_id: Option<&str>,
 ) -> Result<(), tool_workflow::WorkflowLaunchError> {
-    if !verified_plugin_workflow {
-        return Ok(());
-    }
-    let Some(name) = spec.name.as_deref() else {
+    let name = verified_plugin_workflow
+        .then(|| spec.name.as_deref())
+        .flatten()
+        .or(resumed_workflow_id);
+    let Some(name) = name else {
         return Ok(());
     };
     if !matches!(
@@ -2204,6 +2315,9 @@ fn enrich_persisted_plugin_workflow_context(
     ) {
         return Ok(());
     }
+    // Own the id: it may borrow `spec.name`, and the rest of this function
+    // takes `spec.args` mutably.
+    let name = name.to_string();
     let args = spec.args.as_mut().ok_or_else(|| {
         tool_workflow::WorkflowLaunchError(format!("{name} requires Host-enriched args"))
     })?;
@@ -2318,15 +2432,17 @@ fn enrich_persisted_plugin_workflow_context(
 /// `spec.name` proves this on a fresh launch, but a `scriptPath` resume --
 /// the shape the Workflow tool's own resume hint produces -- carries no
 /// `name` at all. `expected_workflow_id` is the launcher's host-owned
-/// checkpoint-provenance answer for that case, but
-/// `local_app_resume_resolution_for_record` only ever resolves it to
-/// `PLUGIN_BUILD_WORKFLOW_ID`; a `scriptPath` resume of the use-test or
-/// mcp-authoring workflows produces neither signal, so this sanitizer is
-/// currently a NO-OP on those two resume shapes (`validate_namespaced_local_app_external_args`
-/// also early-returns there, since it too keys off `spec.name`). Narrowing
-/// this gap requires extending `local_app_resume_resolution_for_record` to
-/// resolve those workflow ids from checkpoint provenance the same way it
-/// does for the build workflow.
+/// checkpoint-provenance answer for that case. r4-workflow-runtime-05
+/// extended `local_app_resume_resolution_for_record` to resolve all three
+/// plugin workflow ids, so this sanitizer now fires on a `scriptPath` resume
+/// of the use-test and mcp-authoring workflows too, not only the build one.
+///
+/// `validate_namespaced_local_app_external_args` still keys off `spec.name`
+/// and therefore still does not run on ANY `scriptPath` resume (build
+/// included) -- that is the pre-existing shape, not a use-test-specific gap:
+/// it rejects UNKNOWN caller keys, whereas the authority-bearing keys it
+/// would care about are unconditionally stripped here and re-injected by the
+/// Host below.
 fn sanitize_namespaced_local_app_args(
     spec: &mut tool_workflow::WorkflowLaunchSpec,
     expected_workflow_id: Option<&str>,
@@ -2335,7 +2451,8 @@ fn sanitize_namespaced_local_app_args(
         .name
         .as_deref()
         .is_some_and(crate::local_app_plugin_binding::is_plugin_workflow_id)
-        || expected_workflow_id == Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID);
+        || expected_workflow_id
+            .is_some_and(crate::local_app_plugin_binding::is_plugin_workflow_id);
     if !is_local_app_workflow {
         return;
     }
@@ -2412,6 +2529,44 @@ mod plugin_args_tests {
             &registry,
         ));
         assert!(!is_mobile_local_app_builtin(&spec, false, false,));
+    }
+
+    /// Pins BOTH halves of `is_mcp_authoring_launch`, the sole production
+    /// grant of `LocalAppWorkflowTaskScope::for_mcp_authoring`. The second
+    /// case is the narrowing that previously shipped unpinned: before it, a
+    /// by-name launch of a project workflow that had simply taken the name
+    /// `lingxi-local-app:local-app-mcp-authoring` in the saved-workflow
+    /// precedence chain — bytes not matching the Plugin registry, so
+    /// `verified_plugin_workflow = false` — still received MCP-authoring
+    /// scope. If that `&&` is deleted, case 2 goes red.
+    #[test]
+    fn mcp_authoring_scope_needs_verified_bytes_or_host_owned_resume() {
+        let mcp = crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID;
+        let build = crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID;
+        // 1. by-name launch, registry bytes matched -> granted.
+        assert!(
+            is_mcp_authoring_launch(Some(mcp), true, None),
+            "a by-name MCP-authoring launch whose script matched the plugin registry bytes \
+             must receive MCP-authoring scope"
+        );
+        // 2. THE NARROWING: same name, bytes did NOT match -> refused.
+        assert!(
+            !is_mcp_authoring_launch(Some(mcp), false, None),
+            "a project workflow shadowing the MCP-authoring plugin name must NOT borrow \
+             MCP-authoring scope on the strength of its name alone"
+        );
+        // 3. scriptPath resume: no name at all, host-owned checkpoint
+        //    provenance says MCP authoring -> granted.
+        assert!(
+            is_mcp_authoring_launch(None, false, Some(mcp)),
+            "a scriptPath resume whose host-owned checkpoint records the MCP-authoring \
+             workflow must still receive MCP-authoring scope"
+        );
+        // 4. the sibling plugin workflows must not leak into this scope, by
+        //    either route.
+        assert!(!is_mcp_authoring_launch(Some(build), true, None));
+        assert!(!is_mcp_authoring_launch(None, false, Some(build)));
+        assert!(!is_mcp_authoring_launch(None, true, None));
     }
 
     /// r4-workflow-runtime-02: a resume BY NAME (`resumeFromRunId` set,
@@ -3397,6 +3552,20 @@ mod run_id_tests {
             .as_mut()
             .expect("dependency snapshot")
             .verified_profile_contract_sha256 = "0".repeat(64);
+        // `AppManifest::validate` now requires
+        // `templateOrigin.templateSha256 == runtimeProfile.contractSha256`
+        // (local-apps/src/manifest.rs), so corrupting only the binding no
+        // longer produces a manifest that can be written OR read back. Corrupt
+        // both to the same value: that is still a manifest whose pinned
+        // contract digest is not one this host publishes, which is exactly the
+        // state this test exists to prove the launch boundary refuses --
+        // `contract_for_binding` compares the binding against the PUBLISHED
+        // contract, which neither of these two fields can satisfy.
+        manifest
+            .template_origin
+            .as_mut()
+            .expect("template origin")
+            .template_sha256 = "0".repeat(64);
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
         stamp_record_mirror(&layout, true);
 
@@ -4815,6 +4984,226 @@ mod run_id_tests {
              resume (persisted host_context: {:?})",
             after_object.get("host_context")
         );
+    }
+
+    /// r4-workflow-runtime-05: the SAME resume shape, for the OTHER two
+    /// plugin workflows.
+    ///
+    /// `enrich_persisted_plugin_workflow_context` was gated twice on a
+    /// by-name launch -- on `verified_plugin_workflow` (which
+    /// `is_verified_plugin_workflow` returns `false` for whenever
+    /// `spec.script_path` is non-empty) AND on `spec.name` -- while
+    /// `local_app_resume_resolution_for_record` only ever resolved
+    /// `PLUGIN_BUILD_WORKFLOW_ID`. Neither gate can be true on the resume
+    /// shape the tool's own hint produces, so a `scriptPath` resume of
+    /// use-test or mcp-authoring reached QuickJS with NO `host_context`, no
+    /// `workflow_run_id` and no `runtime_profile`, and both scripts throw on
+    /// their first context statement.
+    ///
+    /// The trust half is asserted in the same test, because it is what makes
+    /// this safe: the workflow id in the checkpoint is NOT what grants the
+    /// envelope. A row whose `script_is_verbatim_builtin` is `false` -- what
+    /// a custom script that merely copied the plugin-qualified `meta.name`
+    /// records -- must still resume with no `host_context`.
+    #[tokio::test]
+    async fn scriptpath_resume_of_use_test_and_mcp_authoring_gets_host_context() {
+        use tool_workflow::WorkflowLauncher as _;
+
+        for (workflow_id, app_id, run_id, meta_name, expected_operation) in [
+            (
+                crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID,
+                "usetest1",
+                "wf_usetestres1",
+                "local-app-use-test",
+                "verify",
+            ),
+            (
+                crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID,
+                "mcpauth1",
+                "wf_mcpauthres1",
+                "local-app-mcp-authoring",
+                "initial",
+            ),
+        ] {
+            let root = tempfile::tempdir().expect("tempdir");
+            let layout = local_apps::AppLayout::new(root.path(), app_id).expect("layout");
+            let mut manifest = local_apps::AppManifest::for_new_app(app_id, "Resume Fixture");
+            stamp_profile(&mut manifest, local_apps::AppRuntimeProfile::ReactDom);
+            manifest.collections.push(local_apps::DataCollectionSchema {
+                id: "progress".into(),
+                name: "Progress".into(),
+                fields: Vec::new(),
+            });
+            local_apps::save_manifest(&layout, &manifest).expect("manifest");
+            stamp_record_mirror(&layout, true);
+
+            let registry = scope_test_registry();
+            let launcher = scope_test_launcher(root.path(), registry.clone());
+            let session = "session-scope";
+            let script = format!(
+                "export const meta = {{ name: '{meta_name}', description: 'Plugin {meta_name}' \
+                 }};\nreturn 1;\n"
+            );
+            let script_path = root.path().join(format!("resumed-{meta_name}.js"));
+            std::fs::write(&script_path, &script).expect("resumed script file");
+
+            // The host-owned provenance a PRIOR by-name launch of this plugin
+            // workflow left behind: the plugin-qualified id plus the verbatim
+            // marker plus the exact bytes.
+            let trusted_checkpoint = |verbatim: bool| super::WorkflowCheckpoint {
+                task_id: "tresume02".into(),
+                workflow_run_id: run_id.into(),
+                workflow_id: workflow_id.into(),
+                script_path: script_path.to_string_lossy().into_owned(),
+                script_sha256: Some(super::sha256_hex(script.as_bytes())),
+                script_is_verbatim_builtin: Some(verbatim),
+                args_json: Some(serde_json::json!({"app_id": app_id}).to_string()),
+                description: "Resumed plugin workflow".into(),
+                start_time: None,
+                transcript_dir: root
+                    .path()
+                    .join("transcript")
+                    .to_string_lossy()
+                    .into_owned(),
+            };
+            launcher
+                .checkpoints
+                .upsert(session, trusted_checkpoint(true))
+                .expect("checkpoint upsert");
+
+            let resume_spec = || tool_workflow::WorkflowLaunchSpec {
+                // Exactly the tool's own resume hint: no `name`.
+                name: None,
+                script_path: Some(script_path.to_string_lossy().into_owned()),
+                resume_from_run_id: Some(run_id.into()),
+                session_uuid: Some(session.into()),
+                args: Some(serde_json::json!({ "app_id": app_id })),
+                ..Default::default()
+            };
+            let launched = launcher.launch(resume_spec()).await.unwrap_or_else(|error| {
+                panic!("{workflow_id}: a scriptPath resume shaped like the tool's own hint must launch: {error}")
+            });
+            let row = registry
+                .get(&launched.task_id)
+                .await
+                .expect("the resume really did create a task row");
+            let tasks::state::TaskState::LocalWorkflow(state) = row else {
+                panic!("expected a LocalWorkflow task row")
+            };
+            let after: serde_json::Value = serde_json::from_str(
+                state
+                    .args
+                    .as_deref()
+                    .expect("the launcher must persist args onto the task row"),
+            )
+            .expect("persisted args are valid json");
+            let context = after.get("host_context").unwrap_or_else(|| {
+                panic!(
+                    "{workflow_id}: a scriptPath resume must receive the Host-owned \
+                     `host_context` envelope -- without it the script throws on its first \
+                     context statement (persisted args: {after:?})"
+                )
+            });
+            assert_eq!(
+                context.get("source").and_then(serde_json::Value::as_str),
+                Some("verified_host"),
+                "{workflow_id}: the envelope must be the Host's own, got {context:?}"
+            );
+            assert_eq!(
+                context.get("operation").and_then(serde_json::Value::as_str),
+                Some(expected_operation),
+                "{workflow_id}: got {context:?}"
+            );
+            assert_eq!(
+                context.get("app_id").and_then(serde_json::Value::as_str),
+                Some(app_id),
+                "{workflow_id}: got {context:?}"
+            );
+            assert_eq!(
+                context
+                    .get("workflow_run_id")
+                    .and_then(serde_json::Value::as_str),
+                launched.run_id.as_deref(),
+                "{workflow_id}: the envelope must carry the run id this launch actually ran \
+                 under, got {context:?}"
+            );
+            assert_eq!(
+                context
+                    .get("runtime_profile")
+                    .and_then(|profile| profile.get("family"))
+                    .and_then(serde_json::Value::as_str),
+                Some("react_dom"),
+                "{workflow_id}: the persisted profile must reach the resumed script, got \
+                 {context:?}"
+            );
+            assert_eq!(
+                after.get("expected_writable_collections"),
+                Some(&serde_json::json!(["progress"])),
+                "{workflow_id}: the manifest's collection ids must reach the resumed script, \
+                 got {after:?}"
+            );
+
+            // The negative half: same id, same bytes, same run id -- only the
+            // verbatim marker flipped, which is what a custom script that
+            // copied the plugin-qualified name records. No envelope.
+            let forged_root = tempfile::tempdir().expect("tempdir");
+            let forged_layout =
+                local_apps::AppLayout::new(forged_root.path(), app_id).expect("layout");
+            let mut forged_manifest = local_apps::AppManifest::for_new_app(app_id, "Forged");
+            stamp_profile(&mut forged_manifest, local_apps::AppRuntimeProfile::ReactDom);
+            local_apps::save_manifest(&forged_layout, &forged_manifest).expect("manifest");
+            stamp_record_mirror(&forged_layout, true);
+            let forged_registry = scope_test_registry();
+            let forged_launcher = scope_test_launcher(forged_root.path(), forged_registry.clone());
+            let forged_script_path = forged_root.path().join(format!("forged-{meta_name}.js"));
+            std::fs::write(&forged_script_path, &script).expect("forged script file");
+            forged_launcher
+                .checkpoints
+                .upsert(
+                    session,
+                    super::WorkflowCheckpoint {
+                        script_path: forged_script_path.to_string_lossy().into_owned(),
+                        transcript_dir: forged_root
+                            .path()
+                            .join("transcript")
+                            .to_string_lossy()
+                            .into_owned(),
+                        ..trusted_checkpoint(false)
+                    },
+                )
+                .expect("checkpoint upsert");
+            let forged = forged_launcher
+                .launch(tool_workflow::WorkflowLaunchSpec {
+                    name: None,
+                    script_path: Some(forged_script_path.to_string_lossy().into_owned()),
+                    resume_from_run_id: Some(run_id.into()),
+                    session_uuid: Some(session.into()),
+                    args: Some(serde_json::json!({ "app_id": app_id })),
+                    ..Default::default()
+                })
+                .await
+                .expect("a custom workflow still launches; it just gets no authority");
+            let forged_row = forged_registry
+                .get(&forged.task_id)
+                .await
+                .expect("the forged resume really did create a live task row");
+            let tasks::state::TaskState::LocalWorkflow(forged_state) = forged_row else {
+                panic!("expected a LocalWorkflow task row")
+            };
+            let forged_args: serde_json::Value = serde_json::from_str(
+                forged_state
+                    .args
+                    .as_deref()
+                    .expect("the launcher must persist args onto the task row"),
+            )
+            .expect("persisted args are valid json");
+            assert!(
+                forged_args.get("host_context").is_none(),
+                "{workflow_id}: a checkpoint whose script_is_verbatim_builtin is false is what a \
+                 custom script copying the plugin-qualified meta.name records -- it must NOT \
+                 receive the Host envelope, got {forged_args:?}"
+            );
+        }
     }
 
     /// §8.1's other half, which the fix above must not trade away: a CUSTOM

@@ -11,17 +11,27 @@
 //!
 //! - skill basenames come from the build-time verified Plugin inventory exposed
 //!   by [`engine_mobile::mobile_plugin_skill_names`];
-//! - Local App workflow basenames come from
-//!   `tool_workflow::BUILTIN_WORKFLOWS.local_app_build_workflow_names()`, which
-//!   answers "what are the Local App build workflow names" from a typed field
-//!   on each built-in's own descriptor (`is_local_app_build`,
-//!   `tools/workflow/src/builtins.rs`) — NOT a copy this file keeps, and (as of
-//!   P-1.9) not a second hand-maintained array anywhere else either: the two
-//!   arrays that used to answer this question
-//!   (`tasks::LOCAL_APP_BUILD_WORKFLOWS`, `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS`)
-//!   are both deleted. `scanner_workflow_needles_survive_the_name_list_deletion`
-//!   below pins that this file's own needle derivation still works now that
-//!   they are gone.
+//! - Local App workflow basenames come from [`local_app_workflow_basenames`],
+//!   which lists the three plugin-owned workflow IDENTITIES
+//!   (`lingxi-local-app:local-app-build`, `:local-app-use-test`,
+//!   `:local-app-mcp-authoring`) and strips the namespace off each.
+//!
+//!   ⚠️ Read that literally: for WORKFLOWS this file does keep a list, and the
+//!   "no hardcoded name array" rule below is satisfied only in the narrow sense
+//!   that no OTHER copy is being twinned. Phase 9 moved the Local App workflows
+//!   out of the binary — `tools/workflow/src/builtins.rs` now ships
+//!   `deep-research` alone, and its `BuiltinWorkflowDescriptor` has exactly four
+//!   fields (`name`, `description`, `script`, `manual_only`) — so no live
+//!   in-process registry can answer "which workflows build a Local App" any
+//!   more. `scanner_workflow_needles_survive_the_name_list_deletion` pins the
+//!   list to exactly those three basenames and proves the derived needles still
+//!   catch a planted name, which is the only guard this shape can carry.
+//!
+//!   An earlier revision of this paragraph claimed the source was
+//!   `tool_workflow::BUILTIN_WORKFLOWS.local_app_build_workflow_names()` reading
+//!   a typed `is_local_app_build` field. NEITHER symbol exists anywhere in this
+//!   tree, and neither ever did — `git grep -P` finds them only in prose like
+//!   this. Grep before restating any version of that claim.
 //!
 //! Design doc `docs/local-apps/LOCAL-APP-PLUGIN-DESIGN-V2.md` §8.5/§19.3:
 //! "Phase -1 尚无 Plugin inventory，scanner 暂时读取现有 live builtin

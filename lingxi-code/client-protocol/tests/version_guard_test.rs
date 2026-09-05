@@ -2164,18 +2164,6 @@ fn current_contract_index() -> ContractIndex {
     );
     put("LocalAppMcpToolSurfaceDto.semantic_flow_json", "String");
     put("LocalAppMcpToolSurfaceDto.permission_ceiling", "String");
-    put("LocalAppReceiptStatusDto.receipt_id", "String");
-    put("LocalAppReceiptStatusDto.app_id", "String");
-    put("LocalAppReceiptStatusDto.workflow_run_id", "String");
-    put(
-        "LocalAppReceiptStatusDto.approval_contract_sha256",
-        "String",
-    );
-    put("LocalAppReceiptStatusDto.candidate_digest", "String");
-    put("LocalAppReceiptStatusDto.issued_at_ms", "u64");
-    put("LocalAppReceiptStatusDto.expires_at_ms", "u64");
-    put("LocalAppReceiptStatusDto.consumed", "bool");
-    put("LocalAppReceiptStatusDto.superseded", "bool");
     put("LocalAppCreateConfirmationRequestDto.request_id", "String");
     put("LocalAppCreateConfirmationRequestDto.app_id", "String");
     put("LocalAppCreateConfirmationRequestDto.name", "String");
@@ -2200,10 +2188,6 @@ fn current_contract_index() -> ContractIndex {
     put(
         "LocalAppCreateConfirmationRequestDto.required_gates",
         "Vec<LocalAppGateStatusDto>",
-    );
-    put(
-        "LocalAppCreateConfirmationRequestDto.receipt",
-        "Option<LocalAppReceiptStatusDto>",
     );
     put("LocalAppMcpToolFieldDto::Name", "name");
     put("LocalAppMcpToolFieldDto::Title", "title");
@@ -2272,10 +2256,6 @@ fn current_contract_index() -> ContractIndex {
     put(
         "LocalAppMcpProposalApprovalRequestDto.pending_gates",
         "Vec<LocalAppGateStatusDto>",
-    );
-    put(
-        "LocalAppMcpProposalApprovalRequestDto.receipt",
-        "Option<LocalAppReceiptStatusDto>",
     );
     put("McpAppWidgetDto.resource_uri", "String");
     put("McpAppWidgetDto.mime_type", "String");

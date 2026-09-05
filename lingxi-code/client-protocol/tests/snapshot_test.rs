@@ -79,7 +79,7 @@ use client_protocol::local_apps::{
     LocalAppCreateConfirmationRequestDto, LocalAppGateStatusDto,
     LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto, LocalAppMcpToolDiffDto,
     LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto, LocalAppPluginComponentCountsDto,
-    LocalAppPluginErrorCodeDto, LocalAppPluginInventoryDto, LocalAppReceiptStatusDto,
+    LocalAppPluginErrorCodeDto, LocalAppPluginInventoryDto,
     LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto, LocalAppVerificationStatusDto,
     LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto, ManagedLocalAppMcpStatusDto,
     McpAppWidgetDto, PluginActivationStateDto, PluginCommandDto, PluginStatusDto,
@@ -1065,7 +1065,6 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                         }],
                         initial_tools: vec![canonical_local_app_tool("save_habit")],
                         required_gates: vec![canonical_local_app_gate()],
-                        receipt: Some(canonical_local_app_receipt()),
                     },
                 },
             },
@@ -1110,10 +1109,6 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                         required_flow_changes: vec!["Add a save step for notes.".to_string()],
                         excluded_capabilities: vec!["calendar".to_string()],
                         pending_gates: vec![canonical_local_app_gate()],
-                        receipt: Some(LocalAppReceiptStatusDto {
-                            superseded: true,
-                            ..canonical_local_app_receipt()
-                        }),
                     },
                 },
             },
@@ -2432,20 +2427,6 @@ fn canonical_local_app_tool(name: &str) -> LocalAppMcpToolSurfaceDto {
         visible_meta_json: Some(r#"{"anthropic/requiresUserInteraction":true}"#.to_string()),
         semantic_flow_json: r#"{"flowId":"local-app-save","source":"active"}"#.to_string(),
         permission_ceiling: "ask".to_string(),
-    }
-}
-
-fn canonical_local_app_receipt() -> LocalAppReceiptStatusDto {
-    LocalAppReceiptStatusDto {
-        receipt_id: "receipt-0001".to_string(),
-        app_id: "habits-1a2b".to_string(),
-        workflow_run_id: "wf-0001".to_string(),
-        approval_contract_sha256: "1".repeat(64),
-        candidate_digest: "2".repeat(64),
-        issued_at_ms: 1_750_000_000_000,
-        expires_at_ms: 1_750_000_030_000,
-        consumed: false,
-        superseded: false,
     }
 }
 

@@ -3132,6 +3132,45 @@ final class LocalAppsStoreTests: XCTestCase {
                     + "the queue, not dropped — the engine still holds its token")
         }
 
+        /// A `Rejected` is NOT a failed send, and must NOT restore the sheet.
+        ///
+        /// The restore above exists because a transport failure leaves the
+        /// engine still holding the approval token. A `Rejected` is the
+        /// opposite state: `host.rs`'s two resolve arms throw it on exactly
+        /// one condition — the engine no longer holds this request ("unknown
+        /// or expired"). Restoring there re-presents a sheet whose every
+        /// button takes the identical path again, next to an alert saying the
+        /// interaction is no longer pending.
+        func testAnExpiredCreateConfirmationIsDroppedRatherThanRePresented() async throws {
+            let store = LocalAppsStore()
+            var sendAttempts = 0
+            store.configure { _ in
+                sendAttempts += 1
+                throw ClientError.Rejected(
+                    message: "unknown or expired Local App create confirmation")
+            }
+
+            store.handle(event: .appEvent(event: .createConfirmationRequested(
+                request: createConfirmationRequest(requestId: "create-1", appId: "tracker", name: "Tracker")
+            )))
+            store.handle(event: .appEvent(event: .createConfirmationRequested(
+                request: createConfirmationRequest(requestId: "create-2", appId: "notes", name: "Notes")
+            )))
+            XCTAssertEqual(store.pendingCreateConfirmation?.requestID, "create-1")
+
+            await store.resolvePendingCreateConfirmation(true)
+
+            XCTAssertEqual(sendAttempts, 1)
+            XCTAssertEqual(
+                store.pendingCreateConfirmation?.requestID, "create-2",
+                "an expired confirmation must be dropped and the queue left "
+                    + "advanced — restoring it hands the user a sheet that can "
+                    + "never be answered successfully")
+            XCTAssertEqual(
+                store.errorMessage,
+                String(localized: "local_apps_error_operation_interaction_invalid"))
+        }
+
         /// The next queued confirmation must not be withheld for the whole
         /// duration of THIS resolve's engine round-trip — it is very likely a
         /// DIFFERENT app's create, unrelated to whatever is slow about this
@@ -3392,10 +3431,15 @@ final class LocalAppsStoreTests: XCTestCase {
         /// deleting the key later fails this test instead of silently
         /// rendering `local_apps_draft_card_title` to the user.
         func testAShellRendersTheDraftCopyAndHidesItsNameAndBrief() {
+            // Both stamps are "now": this test is about the draft COPY, and a
+            // shell has to be genuinely fresh to render the non-stalled line.
+            // `createdAtMs` is what the staleness window measures — it used to
+            // measure `updatedAtMs`, and the fixture set only that.
+            let nowMs = UInt64(Date().timeIntervalSince1970 * 1_000)
             let shell = LocalAppsProtocolAdapter.app(
                 shellRecord(
                     id: "shell", name: "untitled",
-                    updatedAtMs: UInt64(Date().timeIntervalSince1970 * 1_000)))
+                    createdAtMs: nowMs, updatedAtMs: nowMs))
 
             XCTAssertFalse(shell.scaffolded, "the flag must come off the wire")
             XCTAssertTrue(shell.isDraftShell)
@@ -3422,15 +3466,15 @@ final class LocalAppsStoreTests: XCTestCase {
         /// Every terminal create failure used to leave a card that read
         /// "Creating…" forever: `draftStatusLine` was a pure function of
         /// `isDraftShell` alone, with no notion of how long it had been
-        /// stuck. A shell whose `updatedAt` is far in the past has not
-        /// scaffolded in any bounded window the create flow itself waits on,
-        /// so its card must say so instead of still claiming to be in
-        /// progress.
+        /// stuck. A shell CREATED far enough in the past has not scaffolded in
+        /// any bounded window the create flow itself waits on, so its card
+        /// must say so instead of still claiming to be in progress.
         func testAStalledShellRendersAFailedCopyInsteadOfCreatingForever() {
             let now = Date().timeIntervalSince1970
             let freshShell = LocalAppsProtocolAdapter.app(
                 shellRecord(
                     id: "fresh", name: "untitled",
+                    createdAtMs: UInt64(now * 1_000),
                     updatedAtMs: UInt64(now * 1_000)))
             XCTAssertFalse(freshShell.isDraftStalled, "just created — still within the create flow's own window")
             XCTAssertEqual(
@@ -3441,9 +3485,12 @@ final class LocalAppsStoreTests: XCTestCase {
             // `commit_scaffold` — the entire interview with the user happens
             // between those two writes with the timestamp frozen — so a shell
             // half an hour old is routinely a create that is still going.
+            // Both stamps move together here: this is a shell that really was
+            // created 30 minutes ago and has been interviewed since.
             let midInterview = LocalAppsProtocolAdapter.app(
                 shellRecord(
                     id: "interviewing", name: "untitled",
+                    createdAtMs: UInt64((now - 30 * 60) * 1_000),
                     updatedAtMs: UInt64((now - 30 * 60) * 1_000)))
             XCTAssertFalse(
                 midInterview.isDraftStalled,
@@ -3451,7 +3498,7 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(
                 midInterview.draftStatusLine, String(localized: "local_apps_draft_card_subtitle"))
 
-            // `shellRecord`'s default `updatedAtMs` (2ms past epoch) is, by
+            // `shellRecord`'s default `createdAtMs` (1ms past epoch) is, by
             // construction, always past the staleness window.
             let stalledShell = LocalAppsProtocolAdapter.app(
                 shellRecord(id: "stuck", name: "untitled"))
@@ -3597,6 +3644,196 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(store.pendingWidgetSetup?.appID, "notes")
         }
 
+        // ── r3-never-wired-09: the engine's verification `code` ───────────
+
+        /// Every value `LocalAppVerificationSummaryDto.code` can carry maps to
+        /// the client's own catalog, INCLUDING `nil`.
+        ///
+        /// The four production emitters are in `local_apps_host.rs`:
+        /// `needs_setup`, `needs_revalidation`, `verification_unavailable`,
+        /// and no code at all for a clean MCP pass. The `nil` case is the one
+        /// that matters most — it is the state that otherwise still renders
+        /// the engine's English.
+        ///
+        /// Each key is asserted to differ BOTH from the raw key (so deleting
+        /// the key from the catalog fails here instead of putting
+        /// `local_apps_verification_summary_passed` on screen) and from the
+        /// engine sentence it replaces (so a mapping that quietly falls
+        /// through to `summary` cannot pass).
+        func testVerificationSummaryLocalizesEveryEngineCodeIncludingTheNilPass() {
+            let cases: [(code: String?, status: LocalAppVerificationStatus, key: String)] = [
+                ("needs_setup", .unverified, "local_apps_verification_summary_needs_setup"),
+                (
+                    "needs_revalidation", .unverified,
+                    "local_apps_verification_summary_needs_revalidation"
+                ),
+                (
+                    "verification_unavailable", .unavailable,
+                    "local_apps_verification_summary_verification_unavailable"
+                ),
+                (nil, .passed, "local_apps_verification_summary_passed"),
+            ]
+            for (code, status, key) in cases {
+                let engineEnglish = "ENGINE SENTENCE for \(code ?? "nil")"
+                let summary = LocalAppVerificationSummary(
+                    status: status, summary: engineEnglish, code: code)
+                let localized = String(localized: String.LocalizationValue(stringLiteral: key))
+                XCTAssertEqual(
+                    summary.localizedSummary, localized,
+                    "code \(code ?? "nil") must render the client catalog's sentence")
+                XCTAssertNotEqual(
+                    summary.localizedSummary, key,
+                    "\(key) must resolve in the catalog, not fall through as its own name")
+                XCTAssertNotEqual(
+                    summary.localizedSummary, engineEnglish,
+                    "code \(code ?? "nil") must NOT fall through to the engine's English")
+            }
+        }
+
+        /// An unrecognized future code keeps the engine's sentence rather than
+        /// showing nothing — the same rule `localizedGateLabel` follows for
+        /// gate ids. `active_state_corrupt` is a real one: the engine emits it
+        /// (`local_apps_host.rs`, the catalog-identity mismatch) and no key
+        /// exists for it yet.
+        func testAnUnknownVerificationCodeFallsBackToTheEngineSentence() {
+            let summary = LocalAppVerificationSummary(
+                status: .failed,
+                summary: "The approved MCP catalog does not match this app and build.",
+                code: "active_state_corrupt")
+
+            XCTAssertEqual(
+                summary.localizedSummary,
+                "The approved MCP catalog does not match this app and build.")
+        }
+
+        /// A summary this CLIENT built has no wire code, so "no code" must not
+        /// be read as the engine's one no-code state.
+        ///
+        /// `LocalAppManagedMcpInventoryReader` builds a `passed` UI
+        /// verification off the on-disk manifest with no code; without the
+        /// `isHostSourced` guard its "Published UI verification passed."
+        /// rendered as the MCP pass sentence.
+        func testAClientBuiltPassedSummaryKeepsItsOwnSentence() {
+            let clientBuilt = LocalAppVerificationSummary(
+                status: .passed,
+                summary: "Published UI verification passed.",
+                code: nil,
+                isHostSourced: false)
+
+            XCTAssertEqual(clientBuilt.localizedSummary, "Published UI verification passed.")
+            XCTAssertNotEqual(
+                clientBuilt.localizedSummary,
+                String(localized: "local_apps_verification_summary_passed"))
+        }
+
+        // ── r4-never-wired-07: `AppRecordDto.created_at_ms` ────────────────
+
+        /// The shell staleness window runs from CREATION, not from the last
+        /// mutation.
+        ///
+        /// `set_init_session` is set-once (only its `None` arm writes
+        /// `updated_at_ms`; a pinned record is refused) and the boot sweep
+        /// skips already-pinned records, so the re-stamp below is not a
+        /// once-per-launch event. It is the one case that survives both
+        /// guards: a shell whose create died BEFORE it could pin. The next
+        /// launch's backfill pins it and `updated_at_ms` jumps to now — so a
+        /// window anchored on `updated_at_ms` restarts on a create that has
+        /// been dead for days, and the card claims it is still in flight.
+        /// `created_at_ms` is immune, which is what this pins.
+        func testAShellStalenessIsMeasuredFromCreationNotLastUpdate() {
+            let nowMs = UInt64(Date().timeIntervalSince1970 * 1_000)
+            let threeDaysAgoMs = nowMs - UInt64(3 * 24 * 60 * 60 * 1_000)
+
+            let backfilled = LocalAppsProtocolAdapter.app(
+                shellRecord(
+                    id: "abandoned", name: "untitled",
+                    createdAtMs: threeDaysAgoMs, updatedAtMs: nowMs))
+
+            XCTAssertEqual(
+                backfilled.createdAt,
+                Date(timeIntervalSince1970: TimeInterval(threeDaysAgoMs) / 1_000),
+                "created_at_ms must be decoded off the wire, not dropped")
+            XCTAssertTrue(
+                backfilled.isDraftStalled,
+                "a shell created three days ago is stalled however recently the "
+                    + "boot backfill touched its record")
+            XCTAssertEqual(
+                backfilled.draftStatusLine,
+                String(localized: "local_apps_draft_card_subtitle_stalled"))
+
+            let fresh = LocalAppsProtocolAdapter.app(
+                shellRecord(
+                    id: "creating", name: "untitled",
+                    createdAtMs: nowMs, updatedAtMs: nowMs))
+            XCTAssertFalse(fresh.isDraftStalled, "a shell created seconds ago is still creating")
+        }
+
+        // ── r1-backlog-native-confirmation-15: the expired rejection ───────
+
+        /// The engine's "unknown or expired" rejection must not reach the user
+        /// as raw English.
+        ///
+        /// `ClientError` is flat by design, so there is no code to switch on;
+        /// what makes this localizable is the CALL SITE — `host.rs`'s
+        /// `ResolveCreateConfirmation` arm has exactly one `Err` path.
+        func testAnExpiredCreateConfirmationRejectionIsLocalized() async throws {
+            let store = LocalAppsStore()
+            let engineEnglish = "unknown or expired Local App create confirmation"
+            store.configure { _ in throw ClientError.Rejected(message: engineEnglish) }
+
+            store.handle(event: .appEvent(event: .createConfirmationRequested(
+                request: createConfirmationRequest(
+                    requestId: "create-1", appId: "tracker", name: "Tracker")
+            )))
+            await store.resolvePendingCreateConfirmation(true)
+
+            XCTAssertEqual(
+                store.errorMessage,
+                String(localized: "local_apps_error_operation_interaction_invalid"))
+            XCTAssertNotEqual(
+                store.errorMessage, engineEnglish,
+                "the engine's English must not reach the alert")
+            XCTAssertFalse(
+                store.errorMessage?.contains("ClientError") ?? false,
+                "UniFFI's errorDescription is String(reflecting:) — the Swift debug "
+                    + "dump must not reach the alert either")
+        }
+
+        /// The MCP proposal answer takes the same path, and a NON-rejection
+        /// failure keeps its own description rather than being relabelled
+        /// "no longer pending".
+        func testANonRejectionApprovalFailureIsNotRelabelled() async throws {
+            struct Offline: LocalizedError {
+                var errorDescription: String? { "the socket dropped" }
+            }
+            let store = LocalAppsStore()
+            store.configure { _ in throw Offline() }
+
+            // A NON-empty diff: an empty-diff proposal is auto-declined by the
+            // store, so the sheet would never be pending for this test to answer.
+            store.handle(event: .appEvent(event: .mcpProposalApprovalRequested(
+                request: mcpProposalRequest(
+                    requestId: "mcp-1", appId: "tracker",
+                    diffs: [
+                        .init(
+                            kind: .added,
+                            name: "added_tool",
+                            before: nil,
+                            after: toolSurface(name: "added_tool", title: "Added"),
+                            changedFields: []
+                        )
+                    ])
+            )))
+            XCTAssertEqual(store.pendingMcpProposalApproval?.requestID, "mcp-1")
+            await store.resolvePendingMcpProposalApproval(true)
+
+            XCTAssertEqual(store.errorMessage, "the socket dropped")
+            XCTAssertNotEqual(
+                store.errorMessage,
+                String(localized: "local_apps_error_operation_interaction_invalid"),
+                "only a Rejected means 'no longer pending'")
+        }
+
         // ── Fixtures ──────────────────────────────────────────────────────
 
         /// The `request_id` the store actually put on the wire.
@@ -3623,11 +3860,13 @@ final class LocalAppsStoreTests: XCTestCase {
             brief: String,
             scaffolded: Bool,
             initSessionId: String? = nil,
-            // `2`ms-past-epoch by default, same fixed placeholder every one of
-            // these fixtures used before `LocalAppSummary.isDraftStalled`
-            // existed. A caller exercising that staleness window passes an
-            // explicit value instead — everyone else keeps the old constant,
-            // so this default changes NOTHING for the tests that predate it.
+            // `1`/`2`ms-past-epoch by default, the same fixed placeholders
+            // every one of these fixtures used before
+            // `LocalAppSummary.isDraftStalled` existed. A caller exercising
+            // that staleness window passes explicit values instead —
+            // everyone else keeps the old constants, so these defaults change
+            // NOTHING for the tests that predate them.
+            createdAtMs: UInt64 = 1,
             updatedAtMs: UInt64 = 2
         ) -> AppRecordDto {
             AppRecordDto(
@@ -3635,7 +3874,7 @@ final class LocalAppsStoreTests: XCTestCase {
                 name: name,
                 brief: brief,
                 gitEnabled: true,
-                createdAtMs: 1,
+                createdAtMs: createdAtMs,
                 updatedAtMs: updatedAtMs,
                 workflowState: .draft,
                 conversationId: nil,
@@ -3651,11 +3890,13 @@ final class LocalAppsStoreTests: XCTestCase {
             id: String,
             name: String,
             initSessionId: String? = nil,
+            createdAtMs: UInt64 = 1,
             updatedAtMs: UInt64 = 2
         ) -> AppRecordDto {
             wireRecord(
                 id: id, name: name, brief: "", scaffolded: false,
-                initSessionId: initSessionId, updatedAtMs: updatedAtMs)
+                initSessionId: initSessionId,
+                createdAtMs: createdAtMs, updatedAtMs: updatedAtMs)
         }
 
         /// An app whose scaffold has landed.
@@ -3701,8 +3942,7 @@ final class LocalAppsStoreTests: XCTestCase {
                 reason: "Best match for the requested workflow",
                 rejected: [.init(templateId: "template.canvas", reason: "Needs multiple panes")],
                 initialTools: [toolSurface(name: "read_value", title: "Read Value")],
-                requiredGates: [gateStatus(id: "runner", status: .pending, available: false)],
-                receipt: receiptStatus(appId: appId)
+                requiredGates: [gateStatus(id: "runner", status: .pending, available: false)]
             )
         }
 
@@ -3725,8 +3965,7 @@ final class LocalAppsStoreTests: XCTestCase {
                 toolDiffs: diffs,
                 requiredFlowChanges: requiredFlowChanges,
                 excludedCapabilities: excludedCapabilities,
-                pendingGates: pendingGates,
-                receipt: receiptStatus(appId: appId)
+                pendingGates: pendingGates
             )
         }
 
@@ -3741,20 +3980,6 @@ final class LocalAppsStoreTests: XCTestCase {
                 downloadStatus: "ready",
                 available: true,
                 reason: nil
-            )
-        }
-
-        private func receiptStatus(appId: String) -> LocalAppReceiptStatusDto {
-            LocalAppReceiptStatusDto(
-                receiptId: "receipt-\(appId)",
-                appId: appId,
-                workflowRunId: "workflow-\(appId)",
-                approvalContractSha256: String(repeating: "c", count: 64),
-                candidateDigest: String(repeating: "d", count: 64),
-                issuedAtMs: 1,
-                expiresAtMs: 2,
-                consumed: false,
-                superseded: false
             )
         }
 

@@ -5,12 +5,6 @@ private func approvalDigestSummary(_ value: String) -> String {
   return String(value.prefix(12))
 }
 
-private func approvalReceiptExpiryText(_ key: String, _ date: Date) -> String {
-  String(
-    format: NSLocalizedString(key, comment: ""),
-    date.formatted(date: .abbreviated, time: .shortened))
-}
-
 private func approvalSurfaceTitle(_ surface: LocalAppRuntimeProfileSurface) -> String {
   switch surface {
   case .dom:
@@ -149,27 +143,6 @@ struct LocalAppCreateConfirmationSheet: View {
                   isLast: index == prompt.requiredGates.count - 1
                 )
               }
-            }
-          }
-
-          if let receipt = prompt.receipt {
-            SettingsSection(label: String(localized: "local_apps_create_confirm_receipt")) {
-              SettingsRow(
-                label: String(localized: "local_apps_create_confirm_approval"),
-                value: approvalDigestSummary(receipt.approvalContractSHA256),
-                chevron: false)
-              SettingsRow(
-                label: String(localized: "local_apps_create_confirm_candidate"),
-                value: approvalDigestSummary(receipt.candidateDigest),
-                chevron: false)
-              SettingsRow(
-                label: approvalReceiptExpiryText(
-                  "local_apps_create_confirm_receipt_expires_fmt", receipt.expiresAt),
-                value: receipt.superseded
-                  ? String(localized: "local_apps_mcp_proposal_receipt_superseded") : nil,
-                chevron: false,
-                isLast: true
-              )
             }
           }
         }
@@ -324,26 +297,6 @@ struct LocalAppMcpProposalApprovalSheet: View {
                   isLast: index == prompt.pendingGates.count - 1
                 )
               }
-            }
-          }
-
-          if let receipt = prompt.receipt {
-            SettingsSection(label: String(localized: "local_apps_create_confirm_receipt")) {
-              SettingsRow(
-                label: String(localized: "local_apps_mcp_proposal_field_workflow"),
-                value: receipt.workflowRunID, chevron: false)
-              SettingsRow(
-                label: String(localized: "local_apps_create_confirm_candidate"),
-                value: approvalDigestSummary(receipt.candidateDigest),
-                chevron: false)
-              SettingsRow(
-                label: approvalReceiptExpiryText(
-                  "local_apps_mcp_proposal_receipt_expires_fmt", receipt.expiresAt),
-                sub: receipt.superseded
-                  ? String(localized: "local_apps_mcp_proposal_receipt_superseded") : nil,
-                chevron: false,
-                isLast: true
-              )
             }
           }
         }

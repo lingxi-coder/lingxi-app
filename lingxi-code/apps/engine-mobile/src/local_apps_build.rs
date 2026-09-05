@@ -1484,13 +1484,35 @@ fn validate_dependency_snapshot_files(
     if root_package != effective || root_lock != lock {
         // WP8: this copy is reachable from the MODEL-callable `LocalAppBuild`
         // (`local_apps_host.rs`'s `build_app` -> `build_workspace` ->
-        // `build_workspace_locked` -> here), unlike the two sibling copies. It
-        // used to name `LocalAppConfirmDependencyChange` /
-        // `LocalAppUpdateDependencies` as something the caller could "use";
-        // neither is in `LOCAL_APP_TOOLS` and the MCP transport refuses their
-        // static spelling outright, so that sent the agent to retry a call that
-        // fails closed forever. Tell it to report the drift instead — same
-        // wording as `ensure_dependency_install`'s copy.
+        // `build_workspace_locked` -> here), unlike the two sibling copies.
+        //
+        // Why the message says "report the drift" and NOT "go change the
+        // dependency": reaching here means the workspace package.json /
+        // pnpm-lock.yaml have ALREADY diverged from the host-owned snapshot.
+        // The supported way to change a dependency is the confirm/update
+        // receipt pair, and it starts from a clean baseline —
+        // `confirm_dependency_change` mints a receipt against the trusted
+        // baseline and `update_dependencies` refuses a receipt whose baseline
+        // moved (`dependencies_dirty: dependency confirmation became stale
+        // before update`, in `update_dependencies`). From a
+        // workspace that is already dirty there is nothing for the agent to
+        // retry, so the finding is the terminal move; same wording as
+        // `ensure_dependency_install`'s copy.
+        //
+        // An earlier revision of this comment justified the same wording by
+        // asserting that `LocalAppConfirmDependencyChange` /
+        // `LocalAppUpdateDependencies` were on NEITHER the builtin tool table
+        // nor the MCP surface. Exactly one half of that was false: both DO
+        // have rows in `LOCAL_APP_TOOLS` (local_apps_tools.rs:111-116, pinned
+        // by `dependency_review_operations_are_wired_as_builtin_tools`), so
+        // they are model-callable under their builtin `LocalApp*` names. The
+        // MCP half was correct and stays correct — `call_tool` refuses every
+        // static host operation before dispatch (local_apps_mcp.rs:3156-3162,
+        // pinned by `the_mcp_surface_no_longer_serves_the_static_host_operations`);
+        // `host_tool_catalog()` is the shared SCHEMA source the builtins are
+        // built from, not a served surface. Either way the reason this message
+        // says report-the-drift is the workspace's dirty state, not the tool
+        // wiring.
         return Err(AppError::InvalidRequest(
             "dependencies_dirty: workspace package.json or pnpm-lock.yaml differs from the host-owned dependency snapshot; this cannot be repaired by re-editing package.json/lockfile — report the drift to the user/workflow as a finding instead of retrying"
                 .into(),
@@ -3143,7 +3165,14 @@ mod tests {
             .as_mut()
             .expect("snapshot")
             .verified_profile_contract_sha256 = "0".repeat(64);
-        local_apps::save_manifest(&layout, &manifest).expect("tamper profile hash");
+        // Must bypass `save_manifest`: it now REFUSES to write a manifest whose
+        // `templateOrigin.templateSha256` disagrees with `runtimeProfile
+        // .contractSha256` (local-apps/src/manifest.rs). This fixture is
+        // deliberately manufacturing exactly that on-disk corruption — which
+        // still reaches `derive_runtime_profile_status` via external tampering
+        // or bit rot — so it writes the bytes directly, the same way the
+        // `RuntimeContractCorrupt` fixture above it does.
+        write_manifest_unchecked(&layout, &manifest);
         assert_eq!(
             derive_runtime_profile_status(root.path(), &record),
             Some(AppRuntimeProfileStatus::RuntimeContractCorrupt)
@@ -3161,6 +3190,16 @@ mod tests {
             .expect("snapshot")
             .verified_profile_contract_sha256 = "a".repeat(64);
         manifest.surface = Some(local_apps::AppSurface::Canvas);
+        // `templateOrigin.templateSha256` must track `contractSha256` (enforced
+        // in local-apps/src/manifest.rs), so move it with the binding. This
+        // fixture is probing the UNAVAILABLE-PROFILE edge, not contract
+        // corruption: the manifest stays internally consistent so the only
+        // defect left for the classifier to find is the missing Babylon bundle.
+        manifest
+            .template_origin
+            .as_mut()
+            .expect("template origin")
+            .template_sha256 = "a".repeat(64);
         local_apps::save_manifest(&layout, &manifest).expect("gate unavailable profile");
         assert_eq!(
             derive_runtime_profile_status(root.path(), &record),
@@ -4826,13 +4865,27 @@ mod tests {
     // `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` byte-for-byte equal because
     // the two crates each kept an independent hand-typed copy of "which
     // workflows build a local app" and shared no natural home to hold ONE
-    // copy. P-1.9 deleted both arrays: `tasks`'s own guards read a task's
-    // typed `scope::LocalAppWorkflowTaskScope` and never needed a name list
-    // at all (this test was the array's only reader in that crate), and
-    // `tool_workflow` now answers the same question from a typed field on
-    // its own `BuiltinWorkflowDescriptor` (`is_local_app_build`) -- see
-    // `tools/workflow/src/builtins.rs`'s
-    // `local_app_build_is_the_exact_two_build_workflows` for the
-    // single-source-of-truth test this one is replaced by. There is no
-    // second list left anywhere to twin against.
+    // copy. P-1.9 deleted both arrays, but NOT symmetrically:
+    //
+    //  * `tasks` genuinely stopped needing a name list -- its lease and
+    //    delete guards read a task's typed `scope::LocalAppWorkflowTaskScope`
+    //    (`tasks/src/scope.rs`), and this test was the array's only other
+    //    reader in that crate.
+    //  * `tool_workflow` does not answer the question at all any more. Phase 9
+    //    moved the Local App workflows into the plugin bundle;
+    //    `tools/workflow/src/builtins.rs` ships `deep-research` alone and its
+    //    `BuiltinWorkflowDescriptor` has exactly four fields
+    //    (`name`, `description`, `script`, `manual_only`).
+    //
+    // The only place that still enumerates the Local App workflow basenames is
+    // the scanner's own `local_app_workflow_basenames()`
+    // (`apps/engine-mobile/tests/component_literal_scan.rs`), pinned by
+    // `scanner_workflow_needles_survive_the_name_list_deletion`.
+    //
+    // An earlier revision of this comment claimed `tool_workflow` answers from
+    // a typed `BuiltinWorkflowDescriptor` field `is_local_app_build` and
+    // pointed at a replacement test
+    // `local_app_build_is_the_exact_two_build_workflows`. Neither the field nor
+    // that test exists anywhere in this tree; `git grep -P` finds both names
+    // only inside prose like this one. Grep before restating it.
 }

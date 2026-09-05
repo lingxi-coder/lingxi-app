@@ -40,6 +40,10 @@ enum LocalAppsProtocolAdapter {
             name: dto.name,
             brief: dto.brief,
             gitEnabled: dto.gitEnabled,
+            // Carried so `isDraftStalled` can measure a shell's real age.
+            // `updatedAt` moves under a shell (the boot backfill's
+            // `set_init_session`); the creation instant does not.
+            createdAt: Date(timeIntervalSince1970: TimeInterval(dto.createdAtMs) / 1_000),
             updatedAt: Date(timeIntervalSince1970: TimeInterval(dto.updatedAtMs) / 1_000),
             workflow: workflow(dto.workflowState),
             workspaceRelativePath: dto.workspaceRel,
@@ -322,20 +326,6 @@ enum LocalAppsProtocolAdapter {
         )
     }
 
-    static func receiptStatus(_ dto: LocalAppReceiptStatusDto) -> LocalAppReceiptStatus {
-        LocalAppReceiptStatus(
-            receiptID: dto.receiptId,
-            appID: dto.appId,
-            workflowRunID: dto.workflowRunId,
-            approvalContractSHA256: dto.approvalContractSha256,
-            candidateDigest: dto.candidateDigest,
-            issuedAt: Date(timeIntervalSince1970: TimeInterval(dto.issuedAtMs) / 1_000),
-            expiresAt: Date(timeIntervalSince1970: TimeInterval(dto.expiresAtMs) / 1_000),
-            consumed: dto.consumed,
-            superseded: dto.superseded
-        )
-    }
-
     static func mcpToolSurface(_ dto: LocalAppMcpToolSurfaceDto) -> LocalAppMcpToolSurface {
         LocalAppMcpToolSurface(
             name: dto.name,
@@ -374,8 +364,7 @@ enum LocalAppsProtocolAdapter {
             reason: dto.reason,
             rejected: dto.rejected.map(rejectedCandidate),
             initialTools: dto.initialTools.map(mcpToolSurface),
-            requiredGates: dto.requiredGates.map(gateStatus),
-            receipt: dto.receipt.map(receiptStatus)
+            requiredGates: dto.requiredGates.map(gateStatus)
         )
     }
 
@@ -439,8 +428,7 @@ enum LocalAppsProtocolAdapter {
             toolDiffs: dto.toolDiffs.map(mcpToolDiff),
             requiredFlowChanges: dto.requiredFlowChanges,
             excludedCapabilities: dto.excludedCapabilities,
-            pendingGates: dto.pendingGates.map(gateStatus),
-            receipt: dto.receipt.map(receiptStatus)
+            pendingGates: dto.pendingGates.map(gateStatus)
         )
     }
 

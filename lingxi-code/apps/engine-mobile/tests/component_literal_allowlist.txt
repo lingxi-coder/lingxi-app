@@ -134,9 +134,15 @@ apps/engine-mobile/src/local_apps_build.rs:lingxi-local-app:create-local-app:1
 # (both read a task's typed `LocalAppWorkflowTaskScope` instead — see
 # `tasks/src/scope.rs`) and survived only for a twin-agreement test in
 # `engine-mobile` (`local_app_build_workflow_sets_agree`), which is also
-# deleted now that there is no second list left to twin against —
-# `tool_workflow` answers the same question from a typed field
-# (`BuiltinWorkflowDescriptor::is_local_app_build`) instead of its own array.
+# deleted now that there is no second list left to twin against. Note what
+# replaced it and what did NOT: `tool_workflow` answers NOTHING about Local App
+# workflows any more (Phase 9 moved them into the plugin bundle;
+# `tools/workflow/src/builtins.rs` ships only `deep-research` and its
+# `BuiltinWorkflowDescriptor` has just `name`/`description`/`script`/
+# `manual_only`). An earlier revision of this note claimed a typed
+# `BuiltinWorkflowDescriptor::is_local_app_build` field took over — that symbol
+# does not exist and never did. The scanner's own workflow needles now come
+# from `component_literal_scan.rs`'s `local_app_workflow_basenames()`.
 
 # --- tools/workflow/src ----------------------------------------------------
 

@@ -36,7 +36,6 @@ import com.lingxi.code.bindings.LocalAppMcpToolChangeKindDto
 import com.lingxi.code.bindings.LocalAppMcpToolDiffDto
 import com.lingxi.code.bindings.LocalAppMcpToolFieldDto
 import com.lingxi.code.bindings.LocalAppMcpToolSurfaceDto
-import com.lingxi.code.bindings.LocalAppReceiptStatusDto
 import com.lingxi.code.bindings.LocalAppRejectedCandidateDto
 import com.lingxi.code.bindings.LocalAppTemplateSummaryDto
 import com.lingxi.code.bindings.LocalAppVerificationStatusDto
@@ -126,19 +125,40 @@ class LocalAppsViewModelTest {
          */
         var gate: CompletableDeferred<Unit>? = null
 
+        /**
+         * How many collectors [clientEvents] had at the moment the command at
+         * the SAME INDEX in [commands] was submitted. Sampled here because it
+         * cannot be recovered afterwards: by the time a test body runs, every
+         * coroutine has been dispatched and the count is trivially non-zero.
+         *
+         * This is the only honest way to assert that the view model was already
+         * listening when it asked the engine to re-emit — [emit]'s `tryEmit`
+         * canNOT stand in for it, because `events` is buffered
+         * (`extraBufferCapacity = 32`) and `tryEmit` returns true with zero
+         * subscribers.
+         */
+        val subscribersAtSubmit = mutableListOf<Int>()
+
         override val clientEvents: Flow<ClientEvent> = events.asSharedFlow()
         override val modelState = models
 
         override suspend fun submitClientCommand(command: ClientCommand) {
             gate?.await()
             commandFailure?.let { throw it }
+            subscribersAtSubmit += events.subscriptionCount.value
             commands += command
         }
 
         override fun submit(text: String): Flow<ReplyEvent> = emptyFlow()
 
+        /**
+         * `events` is buffered, so `tryEmit` succeeds whether or not anyone is
+         * listening; the returned flag is asserted only to catch a test that
+         * overruns the 32-event buffer, NOT to prove subscription. Use
+         * [subscribersAtSubmit] for that.
+         */
         fun emit(event: ClientEvent) {
-            assertTrue("LocalAppsViewModel must subscribe before test events", events.tryEmit(event))
+            assertTrue("RecordingSource event buffer overflowed", events.tryEmit(event))
         }
     }
 
@@ -1294,7 +1314,6 @@ class LocalAppsViewModelTest {
                                     detail = "queued",
                                 ),
                             ),
-                            receipt = receiptStatus("receipt-create", "create-run"),
                         ),
                     ),
                 ),
@@ -1304,7 +1323,9 @@ class LocalAppsViewModelTest {
             val pending = viewModel.uiState.value.pendingApprovalSheet as? LocalAppCreateApprovalSheet
                 ?: throw AssertionError("create confirmation must surface as the pending approval sheet")
             assertEquals("create-1", pending.requestId)
-            assertEquals("receipt-create", pending.receiptId)
+            // r1-backlog-native-confirmation-13: the wire `receipt` is gone, so the
+            // sheet's receiptId is now the requestId rather than a minted receipt id.
+            assertEquals("create-1", pending.receiptId)
             assertEquals("CRM board", pending.templateName)
             assertEquals(LocalAppRuntimeProfileFamily.ReactDom, pending.runtimeProfile.family)
             assertEquals(
@@ -1406,7 +1427,6 @@ class LocalAppsViewModelTest {
                                     detail = "waiting",
                                 ),
                             ),
-                            receipt = receiptStatus("receipt-mcp", "mcp-run"),
                         ),
                     ),
                 ),
@@ -2882,6 +2902,414 @@ class LocalAppsViewModelTest {
         kind = kind,
     )
 
+    /// `createInFlight` must cover the WHOLE create, not the round trip that
+    /// starts it.
+    ///
+    /// The `submit` call returns as soon as the engine has taken the command;
+    /// the outcome arrives out of band on `AppCreated` / `AppOperationFailed`
+    /// tens of seconds later. A flag scoped to the call would re-enable the
+    /// 「+」 button for that entire window, and the user's second tap would be
+    /// answered with `local_apps_error_create_in_progress` instead of being
+    /// prevented. iOS pins the same window on `isCreateInFlight`.
+    @Test
+    fun `createInFlight spans the whole create and is released by the result`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            assertFalse("nothing has started yet", viewModel.uiState.value.createInFlight)
+
+            viewModel.onAction(LocalAppsAction.Create)
+            runCurrent()
+            val requestId = source.commands.filterIsInstance<ClientCommand.CreateApp>()
+                .single().requestId
+            assertTrue(
+                "the command reached the engine but the create has NOT resolved: " +
+                    "the create entry points must stay disabled for this whole window",
+                viewModel.uiState.value.createInFlight,
+            )
+
+            val created = appRecord(id = "shell", scaffolded = false).copy(initSessionId = null)
+            source.emit(ClientEvent.AppsChanged(listOf(created)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created, requestId)))
+            runCurrent()
+            assertFalse(
+                "AppCreated resolves the create and must release the twin with the latch",
+                viewModel.uiState.value.createInFlight,
+            )
+        } finally {
+            releaseMain()
+        }
+    }
+
+    /// The stop-loss releases `createInFlight` too.
+    ///
+    /// That release is HAND-ROLLED — `armCreateTimeout` cannot call
+    /// `clearPendingCreate()`, which would cancel the job executing it — so it
+    /// is the one release site that can silently fall out of step with the
+    /// latch and leave the 「+」 button dead for the rest of the session.
+    @Test
+    fun `the create stop-loss releases createInFlight`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.Create)
+            runCurrent()
+            assertTrue(
+                "precondition: the create must be in flight before the stop-loss can release it",
+                viewModel.uiState.value.createInFlight,
+            )
+
+            advanceTimeBy(LocalAppsViewModel.CREATE_RESULT_TIMEOUT_MS + 1)
+            runCurrent()
+
+            assertFalse(
+                "the expired claim must not leave the create entry points disabled forever",
+                viewModel.uiState.value.createInFlight,
+            )
+        } finally {
+            releaseMain()
+        }
+    }
+
+    /// A pin that never arrives must not strand the hand-off.
+    ///
+    /// `AppRecordChanged` is the ONLY thing that publishes a held landing, and
+    /// the engine emits it as a best-effort follow-up to the mint. Before the
+    /// stop-loss, a mint that never reported back left the landing held with no
+    /// hand-off and no error: the app the user just created simply never
+    /// opened. Expiring publishes it WITHOUT a session id — the same shape the
+    /// engine's own failed mint produces, which the consumer already handles by
+    /// opening a fresh conversation in the app's scope.
+    @Test
+    fun `a landing whose pin never arrives is handed off without one`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            val landings = mutableListOf<LocalAppsViewModel.CreatedAppLanding>()
+            val job = launch { viewModel.createdAppLandings.collect { landings += it } }
+
+            viewModel.onAction(LocalAppsAction.Create)
+            runCurrent()
+            val requestId = source.commands.filterIsInstance<ClientCommand.CreateApp>()
+                .single().requestId
+            val created = appRecord(id = "shell", scaffolded = false).copy(initSessionId = null)
+            source.emit(ClientEvent.AppsChanged(listOf(created)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created, requestId)))
+            runCurrent()
+            assertTrue("AppCreated alone must not land: the pin is not minted yet", landings.isEmpty())
+
+            advanceTimeBy(LocalAppsViewModel.PIN_WAIT_TIMEOUT_MS - 1)
+            runCurrent()
+            assertTrue(
+                "the record update still has time to arrive right up to the deadline",
+                landings.isEmpty(),
+            )
+
+            advanceTimeBy(2)
+            runCurrent()
+            assertEquals(
+                "past the deadline the held landing must be published anyway — a pin that " +
+                    "never reports back otherwise strands the created app with no hand-off",
+                1,
+                landings.size,
+            )
+            val landing = landings.single()
+            assertEquals("shell", landing.appId)
+            assertNull("the pin never arrived, so the landing carries none", landing.initSessionId)
+            assertNull(
+                "expiring the pin wait is not a failure: the record exists and the scope is " +
+                    "what roots the agent, so nothing may be reported as an error",
+                viewModel.uiState.value.error,
+            )
+            job.cancel()
+        } finally {
+            releaseMain()
+        }
+    }
+
+    /// A landing that DID get its pin must not be published a second time.
+    ///
+    /// The stop-loss is a coroutine armed on `AppCreated`; if the record update
+    /// did not cancel it, every normal create would hand off twice — the second
+    /// time with no session id, which restarts the interview in a fresh
+    /// conversation.
+    @Test
+    fun `a pinned landing is not re-published by the pin stop-loss`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            val landings = mutableListOf<LocalAppsViewModel.CreatedAppLanding>()
+            val job = launch { viewModel.createdAppLandings.collect { landings += it } }
+
+            viewModel.onAction(LocalAppsAction.Create)
+            runCurrent()
+            val requestId = source.commands.filterIsInstance<ClientCommand.CreateApp>()
+                .single().requestId
+            val created = appRecord(id = "shell", scaffolded = false).copy(initSessionId = null)
+            source.emit(ClientEvent.AppsChanged(listOf(created)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created, requestId)))
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppRecordChanged(created.copy(initSessionId = "session-9")),
+                ),
+            )
+            runCurrent()
+            assertEquals(1, landings.size)
+
+            advanceTimeBy(LocalAppsViewModel.PIN_WAIT_TIMEOUT_MS * 2)
+            runCurrent()
+
+            assertEquals(
+                "the pin landed, so the stop-loss must have been cancelled — not left to " +
+                    "publish a second, pin-less hand-off for the same app",
+                1,
+                landings.size,
+            )
+            assertEquals("session-9", landings.single().initSessionId)
+            job.cancel()
+        } finally {
+            releaseMain()
+        }
+    }
+
+    /// The gate's stable `gate_id` must reach the sheet.
+    ///
+    /// `label` and `detail` arrive as fixed English from the host's
+    /// `pending_verification_gates` — it has no notion of the client's locale —
+    /// so the id is the ONLY thing the sheet can localize on. Dropping it in
+    /// the DTO mapping is what made the create sheet render English gate rows
+    /// while the translated copy sat unused in the catalog.
+    @Test
+    fun `approval gates carry the engine gate id`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.CreateConfirmationRequested(
+                        createConfirmation(
+                            requestId = "create-gates",
+                            gates = listOf(
+                                LocalAppGateStatusDto(
+                                    gateId = "mcp_qa",
+                                    label = "MCP schema, Flow, call and isolation QA",
+                                    status = LocalAppVerificationStatusDto.PENDING,
+                                    available = true,
+                                    detail = null,
+                                ),
+                                LocalAppGateStatusDto(
+                                    gateId = "ui_runner",
+                                    label = "UI verification runner",
+                                    status = LocalAppVerificationStatusDto.UNAVAILABLE,
+                                    available = false,
+                                    detail = "UI verification evidence is unavailable on this host.",
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            val sheet = viewModel.uiState.value.pendingApprovalSheet as? LocalAppCreateApprovalSheet
+                ?: throw AssertionError("create confirmation must surface as the pending sheet")
+            assertEquals(listOf("mcp_qa", "ui_runner"), sheet.gates.map { it.gateId })
+            assertEquals(
+                "the engine's English label must still be carried as the fallback for an id " +
+                    "this client does not know",
+                listOf("MCP schema, Flow, call and isolation QA", "UI verification runner"),
+                sheet.gates.map { it.name },
+            )
+            assertFalse("the UI runner gate reports itself unavailable", sheet.gates[1].available)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    /// REATTACH. A client that lost a native approval sheet must get it back.
+    ///
+    /// This ViewModel is Activity-scoped (`RootScreen.kt` builds it with
+    /// `viewModel(key = "local-apps")`), so an Activity destroyed while the
+    /// engine stays alive headlessly takes the pending create-confirmation
+    /// sheet with it. Nothing re-emitted it and nothing could query it, so the
+    /// engine blocked for its whole five-minute approval timeout and then
+    /// failed the workflow with the user never seeing a prompt.
+    ///
+    /// The engine's half re-announces every approval it is still blocked on
+    /// from `GetManagedMcpInventory` (`local_apps_host.rs`
+    /// `reemit_pending_native_approvals`, wired at `host.rs`'s
+    /// `PluginCommandDto::GetManagedMcpInventory` arm) — the snapshot command
+    /// this client already sends on every bind. The client's half is that this
+    /// bind KEEPS sending it, with the event collector subscribed FIRST, or the
+    /// re-emitted events land with nothing listening.
+    @Test
+    fun `binding asks for the snapshot that re-emits pending approval sheets`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            val plugins = source.commands.filterIsInstance<ClientCommand.PluginCommand>()
+                .map { it.command }
+            assertTrue(
+                "binding must request the managed MCP inventory: it is the ONLY command the " +
+                    "engine re-emits pending native approvals from, so an Activity that was " +
+                    "destroyed while the engine stayed alive gets its create-confirmation sheet " +
+                    "back through this and nothing else",
+                plugins.any { it is PluginCommandDto.GetManagedMcpInventory },
+            )
+
+            // The collector must already be subscribed when that command goes
+            // out, or the re-emission it asks for answers into nothing.
+            // Sampled at submit time, because after the fact every coroutine
+            // has been dispatched and the count is non-zero for free.
+            //
+            // WHAT THIS DOES AND DOES NOT CATCH — measured, not reasoned:
+            // deleting `start = CoroutineStart.UNDISPATCHED` from the collector
+            // launch on its own leaves this GREEN, because the two `launch`es
+            // are dispatched FIFO and the collector is first either way. So is
+            // swapping the two launches while KEEPING undispatched: the
+            // collector then subscribes at construction, before the queued
+            // submit runs. It goes RED on the naive shape that has neither
+            // precaution (submit launched first, collector plain-dispatched),
+            // naming this assertion. UNDISPATCHED is therefore the belt to
+            // launch order's braces: it is what makes the ordering hold
+            // independently of which launch comes first.
+            val inventoryAt = source.commands.indexOfFirst {
+                it is ClientCommand.PluginCommand &&
+                    it.command is PluginCommandDto.GetManagedMcpInventory
+            }
+            assertTrue(
+                "the event collector must already be subscribed when GetManagedMcpInventory " +
+                    "goes out, or the re-emitted approval lands with nobody listening",
+                source.subscribersAtSubmit[inventoryAt] > 0,
+            )
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.CreateConfirmationRequested(
+                        createConfirmation(requestId = "create-reattached", gates = emptyList()),
+                    ),
+                ),
+            )
+            runCurrent()
+            val sheet = viewModel.uiState.value.pendingApprovalSheet
+                ?: throw AssertionError("a re-emitted create confirmation must be rendered")
+            assertEquals("create-reattached", sheet.requestId)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    /// A re-emission of a sheet this client ALREADY holds must be inert.
+    ///
+    /// The engine re-announces with the ORIGINAL `request_id`, and a client
+    /// that never lost the sheet sees the same request twice. Treating the
+    /// second one as a supersession would reject the request the user is
+    /// looking at — declining their own create behind their back — so the
+    /// duplicate must be dropped and nothing resolved.
+    @Test
+    fun `a re-emitted approval sheet is not treated as a supersession`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            val request = ClientEvent.AppEvent(
+                AppEventDto.CreateConfirmationRequested(
+                    createConfirmation(requestId = "create-dup", gates = emptyList()),
+                ),
+            )
+            source.emit(request)
+            runCurrent()
+            source.emit(request)
+            runCurrent()
+
+            val sheet = viewModel.uiState.value.pendingApprovalSheet
+                ?: throw AssertionError("the sheet must survive its own re-emission")
+            assertEquals("create-dup", sheet.requestId)
+            assertTrue(
+                "a re-emission carries the SAME request id and must resolve NOTHING: rejecting " +
+                    "it would decline the create the user is still being asked about",
+                source.commands.filterIsInstance<ClientCommand.PluginCommand>()
+                    .map { it.command }
+                    .none { it is PluginCommandDto.ResolveCreateConfirmation },
+            )
+        } finally {
+            releaseMain()
+        }
+    }
+
+    /**
+     * A minimal create-confirmation request whose only interesting axis is its
+     * gate list — everything else is the same shape the fuller fixture above
+     * uses.
+     */
+    private fun createConfirmation(
+        requestId: String,
+        gates: List<LocalAppGateStatusDto>,
+    ) = LocalAppCreateConfirmationRequestDto(
+        requestId = requestId,
+        appId = APP_ID,
+        name = "客户跟进",
+        brief = "记录客户跟进情况",
+        selectedTemplate = LocalAppTemplateSummaryDto(
+            templateId = "template.crm",
+            surface = AppSurfaceDto.DOM,
+            summary = "CRM board",
+        ),
+        runtimeProfile = AppRuntimeProfileOptionDto(
+            family = AppRuntimeProfileDto.REACT_DOM,
+            revision = 2u,
+            contractSha256 = "contract-1",
+            surface = AppSurfaceDto.DOM,
+            corePackages = listOf(AppRuntimeProfilePackageDto("react", "19.1.1")),
+            cacheStatus = "bundled",
+            downloadStatus = "bundled",
+            available = true,
+            reason = null,
+        ),
+        reason = "Best match for CRM workflows",
+        rejected = emptyList(),
+        initialTools = emptyList(),
+        requiredGates = gates,
+    )
+
     private fun appRecord(
         id: String = APP_ID,
         name: String = "客户跟进",
@@ -2951,21 +3379,6 @@ class LocalAppsViewModelTest {
                 permissionCeiling = "allow_session",
             )
         },
-    )
-
-    private fun receiptStatus(
-        receiptId: String,
-        workflowRunId: String,
-    ) = LocalAppReceiptStatusDto(
-        receiptId = receiptId,
-        appId = APP_ID,
-        workflowRunId = workflowRunId,
-        approvalContractSha256 = "approval-contract",
-        candidateDigest = "candidate-digest",
-        issuedAtMs = 1u,
-        expiresAtMs = ULong.MAX_VALUE,
-        consumed = false,
-        superseded = false,
     )
 
     private companion object {

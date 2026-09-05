@@ -3050,6 +3050,7 @@ async fn build_mobile_inner_with_ask(
     // v3 Phase 4: the connection-scoped init-session minter — forks the
     // origin chat (this connection's cwd catalog) into the new app's
     // workspace catalog, or anchors an empty session.
+    let _ = local_apps_mcp.attach_origin_cwd(cwd.to_string_lossy().to_string());
     {
         let minter_home = cfg.lingxi_home.clone();
         let minter_source_cwd = cwd.to_string_lossy().to_string();
@@ -7807,6 +7808,14 @@ impl MobileEngineHandle {
                         name,
                         brief,
                         conversation_id,
+                        // r1-backlog-engine-create-10: the app's ORIGIN scope,
+                        // remembered once at create time. `mint_app_init_session`
+                        // forks the origin chat out of the catalog this cwd names,
+                        // and the boot backfill sweep runs long after this
+                        // connection is gone — with only the sweep's own cwd to go
+                        // on it forked a repaired pin from the wrong catalog. This
+                        // is the one place that knows the right answer.
+                        Some(self.session_cwd.as_str()),
                         git_enabled,
                         workflow_model.as_deref(),
                         local_apps::CreateMode::Shell,
@@ -9180,6 +9189,42 @@ impl MobileEngineHandle {
                 PluginCommandDto::GetInventory { plugin_id } => {
                     self.emit_builtin_plugin_inventory(&plugin_id).await
                 }
+                // r1-backlog-native-confirmation-15, ACCEPTED DIVERGENCE —
+                // ANDROID ONLY as of this round. Both rejection messages below
+                // are raw English on the wire, and there is no channel to fix
+                // that from here, but the two clients no longer degrade the
+                // same way:
+                //   * iOS localizes at the CALL SITE — `LocalAppsStore`'s
+                //     `sendApprovalResolution` catches `ClientError.Rejected`
+                //     from a resolve command and substitutes
+                //     `local_apps_error_operation_interaction_invalid`
+                //     (LocalAppsStore.swift:2252-2255).
+                //   * Android still shows the English, because
+                //     `LocalAppsViewModel.localizedPluginError` covers
+                //     `LocalAppOperationFailed`, not `ClientError`.
+                // Do not read this note as "the iOS fix does not exist"; the
+                // remaining work is the Android half and the typed channel.
+                // `ClientError` is flat by documented design —
+                // every variant is a bare `message: String`, ~250 call sites,
+                // and adding a code field is settled as out of bounds — and
+                // the one typed local-app channel, `AppEventDto::
+                // LocalAppOperationFailed`'s `LocalAppPluginErrorCodeDto`, has
+                // no member that means "unknown or expired approval"; reusing
+                // a wrong one is strictly worse, because Android DOES render
+                // it (`LocalAppsViewModel.localizedPluginError`) and would
+                // show confidently wrong copy. See the same four-file recipe
+                // written out at `local_apps_host.rs`'s
+                // `wait_for_native_approval_with_timeout`: append (never
+                // insert — UniFFI encodes by declaration ordinal) a member,
+                // add its string to the five `clients/translations/*.json`
+                // sources, regenerate both catalogs, add the Android arm, then
+                // emit it here. Until that lands this stays English.
+                //
+                // What DID change: `reemit_pending_native_approvals` (wired
+                // into `GetManagedMcpInventory` above) removes the common way
+                // a client ends up answering a request the engine no longer
+                // holds — a reattaching client is now handed the LIVE
+                // `request_id` instead of answering with a stale one.
                 PluginCommandDto::ResolveCreateConfirmation {
                     request_id,
                     approved,
@@ -9212,11 +9257,22 @@ impl MobileEngineHandle {
                         })
                     }
                 }
-                PluginCommandDto::GetManagedMcpInventory => self
-                    .local_apps_host
-                    .emit_managed_mcp_inventory()
-                    .await
-                    .map_err(|message| ClientError::Rejected { message }),
+                PluginCommandDto::GetManagedMcpInventory => {
+                    let inventory = self.local_apps_host.emit_managed_mcp_inventory().await;
+                    // r3-failure-paths-02: this is the snapshot command both
+                    // clients send when they (re)bind, so it is where a client
+                    // that lost a native approval sheet — an Android Activity
+                    // destroyed while the engine stayed alive headlessly — gets
+                    // it back. Without this the engine simply blocked for the
+                    // whole five-minute `APPROVAL_TIMEOUT` and then failed the
+                    // workflow, with no way for the user to answer.
+                    //
+                    // Runs even when the inventory listing failed: the pending
+                    // sheet is independent state, and the failure the client is
+                    // about to be told about is exactly when it most needs it.
+                    self.local_apps_host.reemit_pending_native_approvals().await;
+                    inventory.map_err(|message| ClientError::Rejected { message })
+                }
                 PluginCommandDto::StartLocalAppMcpAuthoring { app_id, user_goal } => {
                     let user_goal = user_goal.trim();
                     if user_goal.is_empty() || user_goal.len() > 4_096 {
@@ -11852,6 +11908,16 @@ pub(crate) async fn mint_app_init_session(
     record: &local_apps::AppRecord,
 ) -> Result<String, String> {
     let workspace_cwd = canonical_cwd_string(&data_root.join(&record.workspace_rel));
+    // r1-backlog-engine-create-10: fork from the cwd the app was CREATED from
+    // when the record remembers it, and fall back to the caller's own cwd when
+    // it does not. `None` means "origin scope unknown" (a record written before
+    // the field, or a create with no chat behind it) — never an empty path, so
+    // this is the only fallback trigger and it reproduces exactly the previous
+    // behaviour. The stored string is a REMEMBERED path, not a validated live
+    // directory: it is used only to name a transcript catalog, and a fork
+    // against a catalog that no longer exists degrades to an empty anchor
+    // through the `Err` arm below rather than failing the create.
+    let source_cwd = record.origin_cwd.as_deref().unwrap_or(source_cwd);
     if let Some(source) = record.conversation_id.as_deref() {
         if let Ok(source_uuid) = uuid::Uuid::parse_str(source) {
             match session::branch::create_branch_to_cwd(
@@ -11891,13 +11957,13 @@ pub(crate) async fn mint_app_init_session(
                     // r1-backlog-engine-create-10: `warn!`, not `debug!` — a
                     // record here always claims a `conversation_id`, so this
                     // is never the ordinary no-source-to-fork case; it is
-                    // either a genuinely vanished source session or (for a
-                    // boot-repaired pin, whose `source_cwd` is the
-                    // CONNECTION's cwd rather than the app's actual origin
-                    // scope) a fork attempted against the wrong catalog. A
-                    // silent degrade to an empty anchor here has swallowed
-                    // the user's real transcript before; it must be visible
-                    // by default.
+                    // either a genuinely vanished source session, or a fork
+                    // against the wrong catalog — which now happens only when
+                    // the record remembered NO `origin_cwd` and the caller's
+                    // own cwd (for the boot sweep, the connection's) had to
+                    // stand in for it. A silent degrade to an empty anchor
+                    // here has swallowed the user's real transcript before; it
+                    // must be visible by default.
                     tracing::warn!(
                         app_id = %record.id,
                         %error,
@@ -19651,6 +19717,84 @@ mod tests {
         });
     }
 
+    /// r1-backlog-engine-create-10: an app remembers the cwd it was created
+    /// from, and the fork must use THAT catalog — not whatever cwd the caller
+    /// happens to be anchored to now.
+    ///
+    /// This is the boot-repair case made concrete: the backfill sweep calls
+    /// `mint_app_init_session` with the CONNECTION's cwd, which for an app
+    /// created from a different scope names a catalog the source conversation
+    /// was never in. The fork then found nothing and silently degraded to an
+    /// empty anchor, losing the user's real transcript.
+    #[tokio::test]
+    async fn mint_forks_from_the_recorded_origin_cwd_not_the_callers_cwd() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let lingxi_home = tmp.path().join(".claude");
+        let origin_cwd = tmp.path().join("origin").to_string_lossy().to_string();
+        let other_cwd = tmp.path().join("somewhere-else").to_string_lossy().to_string();
+        std::fs::create_dir_all(&origin_cwd).unwrap();
+        std::fs::create_dir_all(&other_cwd).unwrap();
+        let data_root = tmp.path().to_path_buf();
+
+        // The source conversation exists ONLY in the origin cwd's catalog.
+        let source_uuid = uuid::Uuid::new_v4();
+        let src_path = orchestrator::transcript_paths::main_transcript_path(
+            &lingxi_home,
+            &origin_cwd,
+            &source_uuid.to_string(),
+        );
+        std::fs::create_dir_all(src_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &src_path,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "uuid": "33333333-3333-3333-3333-333333333333",
+                    "parentUuid": None::<String>,
+                    "sessionId": source_uuid.to_string(),
+                    "timestamp": "2026-09-04T12:00:00.000Z",
+                    "cwd": origin_cwd,
+                    "version": "0.0.0",
+                    "message": { "role": "user", "content": "remember where I came from" },
+                })
+            ),
+        )
+        .unwrap();
+
+        let mut record = local_apps::AppState::create(
+            "zz9origin".into(),
+            "来源".into(),
+            "forks from its origin scope".into(),
+            Some(source_uuid.to_string()),
+            1,
+        )
+        .record;
+        record.origin_cwd = Some(origin_cwd.clone());
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+            platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
+        );
+        // The caller is anchored somewhere else entirely — the sweep's case.
+        let init_id =
+            super::mint_app_init_session(&lingxi_home, &other_cwd, &data_root, fs, &record)
+                .await
+                .expect("mint");
+
+        let workspace_cwd =
+            crate::local_apps_host::canonical_cwd_string(&data_root.join(&record.workspace_rel));
+        let forked = std::fs::read_to_string(orchestrator::transcript_paths::main_transcript_path(
+            &lingxi_home,
+            &workspace_cwd,
+            &init_id,
+        ))
+        .expect("the minted session lives in the app catalog");
+        assert!(
+            forked.contains("remember where I came from"),
+            "the fork must follow the app's RECORDED origin catalog, not the caller's cwd; \
+             an empty anchor here is the silent transcript loss this fixes: {forked}"
+        );
+    }
+
     /// v3 Phase 4: a chat-origin create FORKS the source conversation into
     /// the app workspace catalog — history follows, entries re-root on the
     /// workspace cwd, and the source session file is untouched. Direct test
@@ -20878,6 +21022,7 @@ mod tests {
             id: "app00001".into(),
             name: "Habits".into(),
             brief: "a habit tracker".into(),
+            origin_cwd: None,
             mcp_intent: None,
             workflow_model: None,
             git_enabled: true,

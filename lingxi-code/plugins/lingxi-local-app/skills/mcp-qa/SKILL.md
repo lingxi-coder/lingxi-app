@@ -16,10 +16,13 @@ design doc. Fixing a dimension that fails is `$mcp-tool-design`'s or
 
 This is the honest state of the repo today, not a gap to route around: the
 per-App MCP authoring workflow, the logical per-App server, the catalog
-store, and every digest §12/§15/§16 describe are all design-only (see
-`$expose-as-mcp` for the full non-existence list). Because none of them
-exist, there is currently **no generated per-App tool to call**, so there
-is nothing for a QA pass to point at. When asked to QA a per-App MCP tool
+store, and every digest §12/§15/§16 describe are all design-only. The list
+below is self-contained on purpose: the only agent this skill is preloaded
+into is `tester`, which holds no `Skill` tool and does not preload
+`expose-as-mcp`, so do not route yourself to that skill for the authority
+list — read "What already exists" at the bottom of this file instead.
+Because none of them exist, there is currently **no generated per-App tool
+to call**, so there is nothing for a QA pass to point at. When asked to QA a per-App MCP tool
 today, the correct answer is that the mechanism this skill depends on
 doesn't exist yet — not a fabricated "passed" and not a workaround that
 tests something else and calls it equivalent.
@@ -40,11 +43,18 @@ tests something else and calls it equivalent.
   validated against it (§13.1).
 - **Permission** — the two independent pipelines from §14.1 both apply, and
   neither ever loosens the other: the rule-walk result from
-  `PermissionRuleSource::McpServerPolicy` (BUILT —
-  `permission/src/rule.rs:190,208,240`, wired into the deny→ask→allow walk
-  at `permission/src/policy.rs:53`, already real for any MCP server today)
-  is still clamped by the Host-derived `McpPermissionCeiling`
-  (Allow/Ask/Deny, design-only, §14.1); `requiresUserInteraction=true`
+  `PermissionRuleSource::McpServerPolicy` — the variant exists and holds the
+  last slot of the deny→ask→allow walk (`permission/src/rule.rs:190,208,240`;
+  `permission/src/policy.rs:53`). Its enum doc comment still reads "No
+  producer yet — latent" (`permission/src/rule.rs:188-190`), and that comment
+  is itself stale: the producer IS written — `mcp_server_policy_rules` in
+  `permission/src/mcp_policy.rs`, whose own header says "NOTHING IN THE TREE
+  CALLS THIS TODAY" — and what is missing is the composition root that would
+  call it (outside that module the only reference in the tree is the
+  re-export at `permission/src/lib.rs:126`). So no rule is ever filed
+  under this source today and the walk contributes nothing from it. Whatever
+  it eventually contributes is still clamped by the Host-derived
+  `McpPermissionCeiling` (Allow/Ask/Deny, design-only, §14.1); `requiresUserInteraction=true`
   forces Ask regardless of ceiling; a call over ceiling fails with
   `permission_ceiling`, never a silent downgrade.
 - **Side effects** — a mutating tool's derived `destructiveHint` /
@@ -57,7 +67,7 @@ tests something else and calls it equivalent.
 - **Result shape** — `CallToolResult` carries `content` /
   `structuredContent` / `isError` / `_meta` byte for byte (§13.1). This
   part already has a real wire type: `McpToolResultDto`
-  (`platform-api/src/mcp.rs:285-302`, BUILT — `content`, `is_error`, `meta`,
+  (`platform-api/src/mcp.rs:793-809`, BUILT — `content`, `is_error`, `meta`,
   `structured_content` all present today), though nothing populates it from
   a generated per-App catalog yet. List/search results are bounded with
   `cursor`/`has_more`; an error names a specific, actionable recovery.
@@ -72,10 +82,14 @@ tests something else and calls it equivalent.
 ## What already exists that a future QA pass will actually ride on
 
 So the next author doesn't reinvent these: the generic `tools/list` /
-`tools/call` round trip (`mcp/src/client.rs:500,571` — BUILT, already used
-for any configured MCP server, just not yet pointed at a per-App logical
-server, because none exists); the `McpToolResultDto` result shape (BUILT,
-above); the `McpServerPolicy` permission rule source (BUILT, above).
+`tools/call` round trip (`McpClient::list_tools`, `mcp/src/client.rs:924`,
+and `McpClient::call_tool`, `:1097` — BUILT, already used for any configured
+MCP server, just not yet pointed at a per-App logical server, because none
+exists); the `McpToolResultDto` result shape (BUILT, above); and the
+`McpServerPolicy` rule source's enum slot and walk position, which are wired
+and whose producer is written but never called (above) — that one is a hook
+to fill, not a mechanism to ride.
+
 Everything specific to a *generated* catalog — the logical server itself,
 the three-layer digest (`approval_contract_sha256` / `tool_surface_sha256`
 / `catalog_sha256`, §16.1), the rate-limit/timeout enforcement, the

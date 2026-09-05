@@ -75,6 +75,9 @@ pub const MAX_BRIEF_BYTES: usize = 4_000;
 pub const MAX_WORKFLOW_MODEL_BYTES: usize = 512;
 /// Maximum `conversation_id` length in bytes.
 pub const MAX_CONVERSATION_ID_BYTES: usize = 128;
+/// Maximum `AppRecord::origin_cwd` length in bytes. A remembered filesystem
+/// path, so it is sized like one rather than like an identifier.
+pub const MAX_ORIGIN_CWD_BYTES: usize = 4_096;
 /// Maximum number of MCP services an `AppMcpIntent::Requested` may name.
 pub const MAX_MCP_INTENT_SERVICES: usize = 16;
 /// Maximum length in bytes of one named MCP service in an `AppMcpIntent`.
@@ -1064,6 +1067,7 @@ impl AppService {
             name,
             brief,
             conversation_id,
+            None,
             crate::types::DEFAULT_GIT_VERSION_CONTROL,
             None,
             mode,
@@ -1091,6 +1095,7 @@ impl AppService {
             name,
             brief,
             conversation_id,
+            None,
             crate::types::DEFAULT_GIT_VERSION_CONTROL,
             None,
             CreateMode::Shell,
@@ -1112,6 +1117,7 @@ impl AppService {
             name,
             brief,
             conversation_id,
+            None,
             git_enabled,
             None,
             CreateMode::Shell,
@@ -1134,6 +1140,7 @@ impl AppService {
             name,
             brief,
             conversation_id,
+            None,
             git_enabled,
             workflow_model,
             CreateMode::Shell,
@@ -1146,11 +1153,29 @@ impl AppService {
     /// Create a new app with explicit Git/model choices and a pre-commit
     /// initializer that can materialize host-owned scaffold before the app
     /// becomes visible to reloads, snapshots, or observers.
+    ///
+    /// `origin_cwd` is the catalog the creating connection was anchored to —
+    /// see [`AppRecord::origin_cwd`]. This is the ONLY entry point that takes
+    /// it, deliberately: the shorter wrappers are test conveniences, while the
+    /// engine's two real create paths (the client command's `handle_create_app`
+    /// and the agent's `LocalAppCreate` tool) both come through here, so the
+    /// parameter is at least IMPOSSIBLE TO SKIP on a real create path.
+    /// Passing `None` means "no origin scope", NOT "use the current one".
+    ///
+    /// Being impossible to skip is not the same as being supplied, and today
+    /// it is supplied on one of those two paths: `handle_create_app` passes
+    /// its connection cwd, while the agent's `LocalAppCreate` tool
+    /// (`apps/engine-mobile/src/local_apps_mcp.rs`) passes `None` even though
+    /// it binds a `conversation_id`. An app created that way still records
+    /// `None` and still degrades on the boot pin repair — the connection
+    /// layer is the only place that knows that conversation's cwd, so closing
+    /// it is a change there, not here.
     pub async fn create_app_with_git_and_workflow_model_and_initializer<F, Fut>(
         &self,
         name: Option<&str>,
         brief: &str,
         conversation_id: Option<String>,
+        origin_cwd: Option<&str>,
         git_enabled: bool,
         workflow_model: Option<&str>,
         mode: CreateMode,
@@ -1195,6 +1220,24 @@ impl AppService {
                 Ok::<_, AppError>(model.to_string())
             })
             .transpose()?;
+        // Same shape as `workflow_model` above, with ONE deliberate
+        // difference. A blank origin is stored as absent rather than as an
+        // empty string, so the "origin scope unknown" fallback documented on
+        // `AppRecord::origin_cwd` has exactly one spelling — but a NON-blank
+        // origin is stored EXACTLY as given, never trimmed. A cwd is an opaque
+        // filesystem path: on POSIX `"/srv/data "` and `"/srv/data"` are two
+        // different, both legal, directory names, so trimming the stored value
+        // would silently re-point the remembered catalog at a directory the
+        // creator never named — and this field's whole job is to be forked
+        // from later, by code that cannot ask what was meant. Whitespace
+        // decides present-vs-absent here and nothing else.
+        let origin_cwd = origin_cwd
+            .filter(|cwd| !cwd.trim().is_empty())
+            .map(|cwd| {
+                ensure_within("origin cwd", cwd.len(), MAX_ORIGIN_CWD_BYTES)?;
+                Ok::<_, AppError>(cwd.to_string())
+            })
+            .transpose()?;
         let brief = trimmed_brief.to_string();
         let order = self.acquire_emit_order().await;
         // After the queue join, for commit-order-monotonic timestamps (see
@@ -1224,6 +1267,7 @@ impl AppService {
                     );
                     let app_id = app.record.id.clone();
                     app.record.workflow_model = workflow_model;
+                    app.record.origin_cwd = origin_cwd;
                     // Exhaustive on purpose: a second `CreateMode` would be
                     // a compile error here rather than a silently `false`
                     // flag. Only `commit_scaffold` ever writes `true`.
@@ -1232,6 +1276,16 @@ impl AppService {
                     };
                     let layout = AppLayout::new(root.clone(), app.record.id.clone())?;
                     let prepared: Result<AppState, AppError> = (|| {
+                        // r1-failure-paths-007: the marker goes down BEFORE
+                        // the first skeleton byte and comes up only after the
+                        // index commit below. A crash anywhere between those
+                        // two points strands `apps/<id>` where index-driven
+                        // enumeration can never see it again — and burns the
+                        // id, since `storage::app_id_present_on_disk` counts
+                        // any live directory as a collision. The marker is
+                        // what lets `load_all`'s sweep tell that leftover
+                        // apart from a directory it must not touch.
+                        storage::mark_app_creating(&root, &app.record.id)?;
                         // Per-app files first; the index entry is the commit
                         // point, and the initializer must run on the pinned
                         // scaffold before that point.
@@ -1285,7 +1339,23 @@ impl AppService {
                 let root = root.clone();
                 let records = records.clone();
                 let known = known.clone();
-                move || storage::save_index_preserving(&root, &records, &known)
+                let committed_app_id = record.id.clone();
+                move || {
+                    storage::save_index_preserving(&root, &records, &known)?;
+                    // The app is committed as of the line above, so clearing
+                    // the in-flight marker must never be able to fail the
+                    // create. A marker left behind here is removed by the next
+                    // load's sweep, which leaves an INDEXED app's directory
+                    // alone.
+                    if let Err(error) = storage::clear_app_creating(&root, &committed_app_id) {
+                        tracing::warn!(
+                            app_id = %committed_app_id,
+                            error = %error,
+                            "create marker could not be cleared after commit; the next load will reclaim it"
+                        );
+                    }
+                    Ok(())
+                }
             })
             .await
             {
@@ -1701,6 +1771,108 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_remembers_the_origin_cwd_and_leaves_no_in_flight_marker() {
+        // r1-backlog-engine-create-10: the origin scope has to SURVIVE the
+        // create, because the consumer (`mint_app_init_session`'s boot-time
+        // pin repair) runs on a later connection whose own cwd is the wrong
+        // catalog to fork from.
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app_with_git_and_workflow_model_and_initializer(
+                Some("Origin"),
+                "an app created from a chat",
+                Some("conv-origin".into()),
+                Some("/home/dev/projects/atlas"),
+                crate::types::DEFAULT_GIT_VERSION_CONTROL,
+                None,
+                CreateMode::Shell,
+                None,
+                |_| async { Ok(()) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            record.origin_cwd.as_deref(),
+            Some("/home/dev/projects/atlas"),
+            "the origin catalog is stored on the record"
+        );
+        // r1-failure-paths-007: a create that reached its commit point must
+        // not leave the in-flight marker behind.
+        assert!(
+            !dir.path()
+                .join(storage::APPS_DIR)
+                .join(&record.id)
+                .join(storage::CREATING_MARKER_FILE)
+                .exists(),
+            "a committed create clears its own marker"
+        );
+        // And it has to be DURABLE, not just in the returned value.
+        let reloaded = harness(dir.path()).await;
+        let apps = reloaded.service.list_apps().await;
+        assert_eq!(apps.len(), 1);
+        assert_eq!(
+            apps[0].origin_cwd.as_deref(),
+            Some("/home/dev/projects/atlas"),
+            "the origin catalog round-trips through apps/index.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_without_an_origin_cwd_stores_absence_not_an_empty_string() {
+        let service = test_service().await;
+        let blank = service
+            .create_app_with_git_and_workflow_model_and_initializer(
+                Some("Blank"),
+                "no origin scope",
+                None,
+                Some("   "),
+                crate::types::DEFAULT_GIT_VERSION_CONTROL,
+                None,
+                CreateMode::Shell,
+                None,
+                |_| async { Ok(()) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            blank.origin_cwd, None,
+            "a blank origin is absence — callers must fall back to their own cwd, \
+             and `Some(\"\")` would defeat that"
+        );
+        let plain = service
+            .create_app(Some("Plain"), "created without an origin", None)
+            .await
+            .unwrap();
+        assert_eq!(plain.origin_cwd, None);
+        // A path is opaque bytes, and trailing whitespace is legal in a POSIX
+        // directory name: only the blank-vs-present decision above may look at
+        // whitespace. Storing a trimmed copy would remember a DIFFERENT
+        // directory than the creator named, on a field whose only consumer
+        // forks from it much later and cannot ask.
+        let padded = service
+            .create_app_with_git_and_workflow_model_and_initializer(
+                Some("Padded"),
+                "an origin whose directory name really ends in a space",
+                None,
+                Some("/srv/data "),
+                crate::types::DEFAULT_GIT_VERSION_CONTROL,
+                None,
+                CreateMode::Shell,
+                None,
+                |_| async { Ok(()) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            padded.origin_cwd.as_deref(),
+            Some("/srv/data "),
+            "a non-blank origin is remembered verbatim, never trimmed"
+        );
     }
 
     #[tokio::test]
@@ -2425,6 +2597,7 @@ mod tests {
             .create_app_with_git_and_workflow_model_and_initializer(
                 None,
                 "",
+                None,
                 None,
                 false,
                 Some("openai/gpt-5"),

@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '12.0.0';
+export const CLIENT_PROTOCOL_VERSION = '13.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -1686,18 +1686,6 @@ export interface LocalAppMcpToolSurfaceDto {
   permissionCeiling: string;
 }
 
-export interface LocalAppReceiptStatusDto {
-  receiptId: string;
-  appId: string;
-  workflowRunId: string;
-  approvalContractSha256: string;
-  candidateDigest: string;
-  issuedAtMs: number;
-  expiresAtMs: number;
-  consumed: boolean;
-  superseded: boolean;
-}
-
 export type ManagedLocalAppMcpStatusDto =
   | 'disabled'
   | 'needs_setup'
@@ -1717,7 +1705,6 @@ export interface LocalAppCreateConfirmationRequestDto {
   rejected?: LocalAppRejectedCandidateDto[];
   initialTools?: LocalAppMcpToolSurfaceDto[];
   requiredGates?: LocalAppGateStatusDto[];
-  receipt?: LocalAppReceiptStatusDto;
 }
 
 export type LocalAppMcpToolFieldDto =
@@ -1754,7 +1741,6 @@ export interface LocalAppMcpProposalApprovalRequestDto {
   requiredFlowChanges?: string[];
   excludedCapabilities?: string[];
   pendingGates?: LocalAppGateStatusDto[];
-  receipt?: LocalAppReceiptStatusDto;
 }
 
 export interface McpAppWidgetDto {

@@ -2764,53 +2764,69 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                             .map(str::to_string)
                         {
                             let listing = spawner.agent_listing().await;
-                            if !listing.iter().any(|e| e.agent_type == at) {
-                                // Not found under its bare name. The plugin loader
-                                // registers agents as `<plugin>:<agent>`
-                                // (manager.rs:1052-1055), but a plugin's own workflow
-                                // scripts author bare agentType names -- they must not
-                                // have to know what namespace they were installed
-                                // under. When the running workflow belongs to a plugin,
-                                // retry once under that plugin's namespace before
-                                // giving up. The namespace comes from
-                                // `plugin_namespace_for_workflow`, which handles both
-                                // the qualified id of a by-name launch and the bare
-                                // `meta.name` the resume and desktop paths hand us.
-                                let namespaced = plugin_namespace_for_workflow(
-                                    &workflow_id,
-                                    nested_plugin_workflows.as_deref(),
-                                )
-                                .map(|namespace| format!("{namespace}:{at}"));
-                                let qualified = namespaced
-                                    .as_deref()
-                                    .filter(|q| listing.iter().any(|e| e.agent_type == *q));
-                                match qualified {
-                                    Some(qualified) => {
-                                        if let Some(obj) = opts.as_object_mut() {
-                                            obj.insert(
-                                                "agentType".to_string(),
-                                                Value::String(qualified.to_string()),
-                                            );
-                                        }
-                                        opts_json =
-                                            serde_json::to_string(&opts).unwrap_or(opts_json);
+                            // The plugin loader registers agents as
+                            // `<plugin>:<agent>` (manager.rs:1052-1055), but a
+                            // plugin's own workflow scripts author BARE agentType
+                            // names -- they must not have to know what namespace
+                            // they were installed under. The namespace comes from
+                            // `plugin_namespace_for_workflow`, which handles both
+                            // the qualified id of a by-name launch and the bare
+                            // `meta.name` the resume and desktop paths hand us,
+                            // and is `None` for any workflow that is not
+                            // plugin-owned.
+                            //
+                            // r1-workflow-runtime-15: the plugin's OWN agent wins.
+                            // This used to check the bare name FIRST and only fall
+                            // back to `<plugin>:<agent>` when it was absent, on the
+                            // "closer scope wins" precedence `resolve_script_at`
+                            // uses for workflow NAME resolution. That precedent
+                            // does not transfer: there the user names the workflow,
+                            // so their own file winning is their intent, whereas
+                            // here the name is written INSIDE the plugin's script
+                            // about the plugin's own component. Under bare-first, a
+                            // user or project agent called `builder`, `designer`,
+                            // `operator`, `tester` or `verifier` -- all names a
+                            // person plausibly picks -- silently replaced the
+                            // corresponding `lingxi-local-app:` agent for the whole
+                            // local-app build, with no diagnostic anywhere. Bare
+                            // names still resolve normally: the namespaced spelling
+                            // is only preferred when the plugin actually registered
+                            // one, so `general-purpose`/`Explore` and every
+                            // non-plugin workflow are unaffected.
+                            let namespaced = plugin_namespace_for_workflow(
+                                &workflow_id,
+                                nested_plugin_workflows.as_deref(),
+                            )
+                            .map(|namespace| format!("{namespace}:{at}"));
+                            let qualified = namespaced
+                                .as_deref()
+                                .filter(|q| listing.iter().any(|e| e.agent_type == *q));
+                            match qualified {
+                                Some(qualified) => {
+                                    if let Some(obj) = opts.as_object_mut() {
+                                        obj.insert(
+                                            "agentType".to_string(),
+                                            Value::String(qualified.to_string()),
+                                        );
                                     }
-                                    None => {
-                                        let available = listing
-                                            .iter()
-                                            .map(|e| e.agent_type.clone())
-                                            .collect::<Vec<_>>()
-                                            .join(", ");
-                                        return wf_throw(&match namespaced {
-                                            Some(namespaced) => format!(
-                                                "agent({{agentType}}): agent type '{at}' not found (also tried '{namespaced}'). Available agents: {available}"
-                                            ),
-                                            None => format!(
-                                                "agent({{agentType}}): agent type '{at}' not found. Available agents: {available}"
-                                            ),
-                                        });
-                                    }
+                                    opts_json = serde_json::to_string(&opts).unwrap_or(opts_json);
                                 }
+                                None if !listing.iter().any(|e| e.agent_type == at) => {
+                                    let available = listing
+                                        .iter()
+                                        .map(|e| e.agent_type.clone())
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    return wf_throw(&match namespaced {
+                                        Some(namespaced) => format!(
+                                            "agent({{agentType}}): agent type '{at}' not found (also tried '{namespaced}'). Available agents: {available}"
+                                        ),
+                                        None => format!(
+                                            "agent({{agentType}}): agent type '{at}' not found. Available agents: {available}"
+                                        ),
+                                    });
+                                }
+                                None => {}
                             }
                         }
                         let inherit = SubagentInheritance {

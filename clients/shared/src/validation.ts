@@ -7,7 +7,6 @@ import type {
   LocalAppMcpProposalApprovalRequestDto,
   LocalAppMcpToolSurfaceDto,
   LocalAppPluginInventoryDto,
-  LocalAppReceiptStatusDto,
   LocalAppVerificationStatusDto,
   ManagedLocalAppMcpServerDto,
   PluginStatusDto,
@@ -81,26 +80,6 @@ function validatePluginStatus(value: unknown): PluginStatusDto {
     plugin_id: string(input['plugin_id'], 'plugin status plugin_id'),
     state: input['state'],
     manifest_default_enabled: boolean(input['manifest_default_enabled'], 'plugin status manifest_default_enabled'),
-  };
-}
-
-function validateReceipt(value: unknown): LocalAppReceiptStatusDto {
-  const input = object(value, 'local app receipt');
-  exactKeys(
-    input,
-    ['receiptId', 'appId', 'workflowRunId', 'approvalContractSha256', 'candidateDigest', 'issuedAtMs', 'expiresAtMs', 'consumed', 'superseded'],
-    'local app receipt',
-  );
-  return {
-    receiptId: string(input['receiptId'], 'receiptId'),
-    appId: string(input['appId'], 'appId'),
-    workflowRunId: string(input['workflowRunId'], 'workflowRunId'),
-    approvalContractSha256: string(input['approvalContractSha256'], 'approvalContractSha256'),
-    candidateDigest: string(input['candidateDigest'], 'candidateDigest'),
-    issuedAtMs: integer(input['issuedAtMs'], 'issuedAtMs'),
-    expiresAtMs: integer(input['expiresAtMs'], 'expiresAtMs'),
-    consumed: boolean(input['consumed'], 'consumed'),
-    superseded: boolean(input['superseded'], 'superseded'),
   };
 }
 
@@ -187,7 +166,7 @@ function validateCreateConfirmationRequest(value: unknown): LocalAppCreateConfir
   const input = object(value, 'create confirmation request');
   exactKeys(
     input,
-    ['requestId', 'appId', 'name', 'brief', 'selectedTemplate', 'runtimeProfile', 'reason', 'rejected', 'initialTools', 'requiredGates', 'receipt'],
+    ['requestId', 'appId', 'name', 'brief', 'selectedTemplate', 'runtimeProfile', 'reason', 'rejected', 'initialTools', 'requiredGates'],
     'create confirmation request',
   );
   const template = object(input['selectedTemplate'], 'selected template');
@@ -234,7 +213,6 @@ function validateCreateConfirmationRequest(value: unknown): LocalAppCreateConfir
     ...(input['requiredGates'] === undefined ? {} : {
       requiredGates: (Array.isArray(input['requiredGates']) ? input['requiredGates'] : (() => { throw new Error('invalid requiredGates'); })()).map(validateGate),
     }),
-    ...(input['receipt'] === undefined ? {} : { receipt: validateReceipt(input['receipt']) }),
   };
 }
 
@@ -242,7 +220,7 @@ function validateProposalApprovalRequest(value: unknown): LocalAppMcpProposalApp
   const input = object(value, 'proposal approval request');
   exactKeys(
     input,
-    ['requestId', 'appId', 'workflowRunId', 'summary', 'proposalSha256', 'approvalContractSha256', 'toolSurfaceSha256', 'toolDiffs', 'requiredFlowChanges', 'excludedCapabilities', 'pendingGates', 'receipt'],
+    ['requestId', 'appId', 'workflowRunId', 'summary', 'proposalSha256', 'approvalContractSha256', 'toolSurfaceSha256', 'toolDiffs', 'requiredFlowChanges', 'excludedCapabilities', 'pendingGates'],
     'proposal approval request',
   );
   return {
@@ -273,7 +251,6 @@ function validateProposalApprovalRequest(value: unknown): LocalAppMcpProposalApp
     ...(input['pendingGates'] === undefined ? {} : {
       pendingGates: (Array.isArray(input['pendingGates']) ? input['pendingGates'] : (() => { throw new Error('invalid pendingGates'); })()).map(validateGate),
     }),
-    ...(input['receipt'] === undefined ? {} : { receipt: validateReceipt(input['receipt']) }),
   };
 }
 

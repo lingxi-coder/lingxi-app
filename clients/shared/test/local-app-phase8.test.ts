@@ -24,7 +24,7 @@ test('ServerHello validation is exact and fail-closed', () => {
   } satisfies ServerHello;
 
   assert.deepEqual(validateServerHello(hello), hello);
-  assert.equal(hello.capabilities.client_protocol_version, '12.0.0');
+  assert.equal(hello.capabilities.client_protocol_version, '13.0.0');
   assert.throws(
     () => validateServerHello({ ...hello, capabilities: { ...hello.capabilities, extra: true } }),
     /unsupported fields/,
@@ -84,17 +84,6 @@ test('Phase8 Local App app_event payloads validate and reject unknown or incompl
           status: 'pending',
           available: true,
         }],
-        receipt: {
-          receiptId: 'receipt-0001',
-          appId: 'habits-1a2b',
-          workflowRunId: 'wf-0002',
-          approvalContractSha256: '1'.repeat(64),
-          candidateDigest: '2'.repeat(64),
-          issuedAtMs: 1_750_000_000_000,
-          expiresAtMs: 1_750_000_030_000,
-          consumed: false,
-          superseded: true,
-        },
       },
     } satisfies AppEventDto,
   } satisfies ClientEvent;

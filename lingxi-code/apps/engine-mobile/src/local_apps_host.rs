@@ -152,6 +152,17 @@ struct UiResolution {
 struct PendingNativeApproval {
     app_id: String,
     sender: oneshot::Sender<bool>,
+    /// The exact request event this approval was announced with.
+    ///
+    /// r3-failure-paths-02: the sheet was announced ONCE. An Android client
+    /// whose Activity is destroyed while the engine is retained headlessly
+    /// (rotation, a low-memory kill, the user leaving the app during the five
+    /// minutes `APPROVAL_TIMEOUT` allows) lost the sheet with no way to get it
+    /// back: nothing re-emitted it and nothing could be asked for it, so the
+    /// engine blocked until it timed out and failed the whole workflow. Keep
+    /// the request so a reattaching client can be handed it again, unchanged
+    /// and with the same `request_id` its answer must carry.
+    event: AppEventDto,
 }
 
 #[derive(Clone, Debug)]
@@ -1989,56 +2000,88 @@ impl LocalAppsHostBroker {
             if let Some(active) = manifest.active_mcp_catalog.as_ref() {
                 let catalog = local_apps::load_mcp_catalog(&layout, &active.catalog_sha256)
                     .map_err(|error| error.to_string())?;
-                if catalog.get("appId").and_then(Value::as_str) != Some(record.id.as_str())
-                    || catalog.get("buildId").and_then(Value::as_str)
-                        != Some(active.build_id.as_str())
-                {
-                    return Err("active_state_corrupt: active MCP catalog identity mismatch".into());
+                // r3-never-wired-05: a catalog whose recorded identity does not
+                // match this app and build used to `return Err(...)` from here,
+                // which aborted the WHOLE managed-MCP inventory listing — every
+                // other app vanished from both clients because ONE app's state
+                // was corrupt. Mark this one app `Failed` and keep listing.
+                // This is also the production producer for
+                // `LocalAppVerificationStatusDto::Failed`, which both clients
+                // already render (`local_apps_verification_status_failed`) and
+                // which had none.
+                let identity_matches = catalog.get("appId").and_then(Value::as_str)
+                    == Some(record.id.as_str())
+                    && catalog.get("buildId").and_then(Value::as_str)
+                        == Some(active.build_id.as_str());
+                if !identity_matches {
+                    status = AppMcpStatus::Error;
+                    // `tools`, `catalog_sha256` and `tool_surface_sha256` keep
+                    // their pre-catalog defaults, so nothing derived from the
+                    // untrusted catalog is presented as a callable surface.
+                    // (`enabled`/`enabled_tools` may still be overwritten below
+                    // from the live registry — that reflects what is actually
+                    // registered, which is a fact about the process, not a claim
+                    // about this catalog.)
+                    mcp_verification = LocalAppVerificationSummaryDto {
+                        status: LocalAppVerificationStatusDto::Failed,
+                        summary:
+                            "The approved MCP catalog does not match this app and build, so it \
+                             cannot be trusted. Re-run MCP authoring to rebuild it."
+                                .into(),
+                        // No `clients/translations/` key exists for this code yet,
+                        // so both clients fall back to `summary` verbatim (their
+                        // `default:`/`else ->` arm) while the STATUS badge beside
+                        // it is localized. Naming it anyway keeps the `code == nil`
+                        // arm — which both clients map to "verification passed" —
+                        // from ever being reached by a failure.
+                        code: Some("active_state_corrupt".into()),
+                    };
+                } else {
+                    settings = settings
+                        .reconcile_with_catalog(&catalog, false)
+                        .map_err(|error| error.to_string())?;
+                    enabled_tools = settings.enabled_tools.clone();
+                    let needs_revalidation =
+                        active_build_id.as_deref() != Some(active.build_id.as_str());
+                    enabled = settings.enabled && !enabled_tools.is_empty() && !needs_revalidation;
+                    status = derive_mcp_status(
+                        &manifest,
+                        &AppMcpSettings {
+                            enabled,
+                            enabled_tools: enabled_tools.clone(),
+                            ..settings.clone()
+                        },
+                        authoring_in_progress,
+                        needs_revalidation,
+                        false,
+                    );
+                    build_id = active.build_id.clone();
+                    catalog_sha256 = active.catalog_sha256.clone();
+                    tool_surface_sha256 = if enabled {
+                        effective_tool_surface_sha256(&active.tool_surface_sha256, &enabled_tools)
+                            .map_err(|error| error.to_string())?
+                    } else {
+                        active.tool_surface_sha256.clone()
+                    };
+                    authoring_revision = active.authoring_revision;
+                    tools = mcp_tool_surfaces_from_catalog(&catalog)?;
+                    tool_count = u32::try_from(tools.len()).unwrap_or(u32::MAX);
+                    widget = managed_mcp_widget_resource(&layout, &record.name, &catalog)?
+                        .map(|(widget, _)| widget);
+                    mcp_verification = if needs_revalidation {
+                        LocalAppVerificationSummaryDto {
+                            status: LocalAppVerificationStatusDto::Unverified,
+                            summary: "The approved MCP catalog no longer matches the active build and must be revalidated.".into(),
+                            code: Some("needs_revalidation".into()),
+                        }
+                    } else {
+                        LocalAppVerificationSummaryDto {
+                            status: LocalAppVerificationStatusDto::Passed,
+                            summary: "MCP schema, Flow, call and isolation verification passed.".into(),
+                            code: None,
+                        }
+                    };
                 }
-                settings = settings
-                    .reconcile_with_catalog(&catalog, false)
-                    .map_err(|error| error.to_string())?;
-                enabled_tools = settings.enabled_tools.clone();
-                let needs_revalidation =
-                    active_build_id.as_deref() != Some(active.build_id.as_str());
-                enabled = settings.enabled && !enabled_tools.is_empty() && !needs_revalidation;
-                status = derive_mcp_status(
-                    &manifest,
-                    &AppMcpSettings {
-                        enabled,
-                        enabled_tools: enabled_tools.clone(),
-                        ..settings.clone()
-                    },
-                    authoring_in_progress,
-                    needs_revalidation,
-                    false,
-                );
-                build_id = active.build_id.clone();
-                catalog_sha256 = active.catalog_sha256.clone();
-                tool_surface_sha256 = if enabled {
-                    effective_tool_surface_sha256(&active.tool_surface_sha256, &enabled_tools)
-                        .map_err(|error| error.to_string())?
-                } else {
-                    active.tool_surface_sha256.clone()
-                };
-                authoring_revision = active.authoring_revision;
-                tools = mcp_tool_surfaces_from_catalog(&catalog)?;
-                tool_count = u32::try_from(tools.len()).unwrap_or(u32::MAX);
-                widget = managed_mcp_widget_resource(&layout, &record.name, &catalog)?
-                    .map(|(widget, _)| widget);
-                mcp_verification = if needs_revalidation {
-                    LocalAppVerificationSummaryDto {
-                        status: LocalAppVerificationStatusDto::Unverified,
-                        summary: "The approved MCP catalog no longer matches the active build and must be revalidated.".into(),
-                        code: Some("needs_revalidation".into()),
-                    }
-                } else {
-                    LocalAppVerificationSummaryDto {
-                        status: LocalAppVerificationStatusDto::Passed,
-                        summary: "MCP schema, Flow, call and isolation verification passed.".into(),
-                        code: None,
-                    }
-                };
             }
 
             if let Some(registry) = registry.as_ref() {
@@ -2454,6 +2497,7 @@ impl LocalAppsHostBroker {
                 PendingNativeApproval {
                     app_id: app_id.to_string(),
                     sender,
+                    event: event.clone(),
                 },
             );
         }
@@ -2523,23 +2567,41 @@ impl LocalAppsHostBroker {
         }
     }
 
-    fn pending_verification_gates() -> Vec<LocalAppGateStatusDto> {
-        vec![
-            LocalAppGateStatusDto {
+    /// The gates the user is being told still have to pass, rendered inside
+    /// both native approval sheets.
+    ///
+    /// r1-never-wired-06: this used to be a hardcoded two-row constant, so a
+    /// `create_without_mcp` confirmation — an app that will have no MCP surface
+    /// at all — still promised the user an "MCP schema, Flow, call and
+    /// isolation QA" gate that nothing would ever run for it. Derive the MCP
+    /// row from the tool surface actually being approved instead; `ui_runner`
+    /// stays unconditional because it is TRUE unconditionally (this Host has no
+    /// UI verification runner, which is the same fact `ui_verification` reports
+    /// as `Unavailable` in `emit_managed_mcp_inventory`).
+    ///
+    /// Both `gate_id`s are consumed: iOS localizes them by id in
+    /// `LocalAppApprovalSheets.swift`'s `localizedGateLabel` /
+    /// `localizedGateDetail`, and an unknown future id falls back to the
+    /// `label`/`detail` sent from here.
+    fn pending_verification_gates(proposed_tools: usize) -> Vec<LocalAppGateStatusDto> {
+        let mut gates = Vec::new();
+        if proposed_tools > 0 {
+            gates.push(LocalAppGateStatusDto {
                 gate_id: "mcp_qa".into(),
                 label: "MCP schema, Flow, call and isolation QA".into(),
                 status: LocalAppVerificationStatusDto::Pending,
                 available: true,
                 detail: None,
-            },
-            LocalAppGateStatusDto {
-                gate_id: "ui_runner".into(),
-                label: "UI verification runner".into(),
-                status: LocalAppVerificationStatusDto::Unavailable,
-                available: false,
-                detail: Some("UI evidence is unavailable on this host.".into()),
-            },
-        ]
+            });
+        }
+        gates.push(LocalAppGateStatusDto {
+            gate_id: "ui_runner".into(),
+            label: "UI verification runner".into(),
+            status: LocalAppVerificationStatusDto::Unavailable,
+            available: false,
+            detail: Some("UI evidence is unavailable on this host.".into()),
+        });
+        gates
     }
 
     fn create_selection_for_run(
@@ -2844,6 +2906,8 @@ impl LocalAppsHostBroker {
         candidate: &PersistedMcpCandidate,
     ) -> Result<bool, String> {
         let proposed = mcp_tool_surfaces_from_candidate(candidate)?;
+        // Read before `proposed` is moved into either request DTO below.
+        let proposed_tool_count = proposed.len();
         if !record.scaffolded {
             // WP5: render the name/brief the user confirmed through
             // `LocalAppStageCreate`, never `record.name`/`record.brief` — the
@@ -2882,8 +2946,7 @@ impl LocalAppsHostBroker {
                         })
                         .collect(),
                     initial_tools: proposed,
-                    required_gates: Self::pending_verification_gates(),
-                    receipt: None,
+                    required_gates: Self::pending_verification_gates(proposed_tool_count),
                 },
             };
             self.wait_for_native_approval(
@@ -2923,8 +2986,7 @@ impl LocalAppsHostBroker {
                         .proposal
                         .excluded_capabilities
                         .clone(),
-                    pending_gates: Self::pending_verification_gates(),
-                    receipt: None,
+                    pending_gates: Self::pending_verification_gates(proposed_tool_count),
                 },
             };
             self.wait_for_native_approval(
@@ -4027,13 +4089,21 @@ impl LocalAppsHostBroker {
                 .runtime_profile
                 .is_some()
             {
-                // `LocalAppConfirmDependencyChange`/`LocalAppUpdateDependencies` are Host
-                // operations, not model-callable tools: they are not in `LOCAL_APP_TOOLS`
-                // and the MCP transport refuses their static spelling outright (see
-                // `local_apps_mcp.rs`'s `the_mcp_surface_no_longer_serves_the_static_host_
-                // operations`). Naming them here as something the caller can "use" sends
-                // an agent to retry a call that fails closed forever; tell it to report the
-                // drift instead.
+                // The message must not name
+                // `LocalAppConfirmDependencyChange`/`LocalAppUpdateDependencies`, but NOT
+                // because they are uncallable — an earlier revision of this comment said
+                // they "are not in `LOCAL_APP_TOOLS`", which is false: both have rows
+                // (`local_apps_tools.rs:112`/`:116`) pinned by
+                // `dependency_review_operations_are_wired_as_builtin_tools`. Only their old
+                // `mcp__local_apps__*` spelling is refused, and the builtin path is the
+                // supported one (`local_apps_mcp.rs`'s
+                // `the_mcp_surface_no_longer_serves_the_static_host_operations`).
+                //
+                // The real reason: neither can repair THIS failure. `update_dependencies`
+                // requires a `receipt_id` and claims a host-minted dependency-change
+                // receipt (:10087-10107); the drift here is a hand-edited workspace
+                // package.json/lockfile that no receipt describes. Naming them would send
+                // the agent to a call that cannot fix it, so tell it to report the drift.
                 return Err(
                     "dependencies_dirty: workspace package.json or pnpm-lock.yaml differs from the host-owned dependency snapshot; this cannot be repaired by re-editing package.json/lockfile — report the drift to the user/workflow as a finding instead of retrying"
                         .into(),
@@ -5329,6 +5399,40 @@ impl LocalAppsHostBroker {
     ) -> bool {
         Self::resolve_native_approval(&self.pending_mcp_proposal_approvals, request_id, approved)
             .await
+    }
+
+    /// Re-announce every native approval this broker is still blocked on.
+    ///
+    /// r3-failure-paths-02: the reattach path. `PluginCommandDto::
+    /// GetManagedMcpInventory` is the snapshot command both clients already
+    /// send when they (re)bind — Android's `LocalAppsViewModel.
+    /// requestSnapshots`, iOS's `refreshManagedMcpInventory` — so the pending
+    /// sheets ride the channel that already exists rather than a new command
+    /// this lane cannot add to the wire.
+    ///
+    /// Every event carries the SAME `request_id` as the original emission, so a
+    /// client that never lost the sheet just re-renders the one it has (both
+    /// clients key their pending approval on `request_id`), and a client that
+    /// did lose it gets it back and can still answer it.
+    ///
+    /// Dead entries are pruned first for the same reason
+    /// `wait_for_native_approval_with_timeout` prunes them: a waiter whose
+    /// future was dropped leaves a closed sender behind, and re-emitting a
+    /// sheet nobody is listening for would strand the user in front of a
+    /// prompt whose answer goes nowhere.
+    pub(crate) async fn reemit_pending_native_approvals(&self) {
+        let mut events = Vec::new();
+        for pending in [
+            &self.pending_create_confirmations,
+            &self.pending_mcp_proposal_approvals,
+        ] {
+            let mut requests = pending.lock().await;
+            requests.retain(|_, request| !request.sender.is_closed());
+            events.extend(requests.values().map(|request| request.event.clone()));
+        }
+        for event in events {
+            self.event_sink.emit(ClientEvent::AppEvent { event }).await;
+        }
     }
 
     async fn resolve_native_approval(
@@ -7009,10 +7113,6 @@ impl LocalAppsHostBroker {
                 let layout = self.layout(&app_id)?;
                 let create_only = candidate.validated.tools.is_empty();
                 if create_only {
-                    // The candidate journal is about to be deleted outright;
-                    // stamping `consumed_receipt_sha256` into it first would
-                    // only be a write immediately followed by its own
-                    // deletion.
                     if let Err(error) =
                         self.delete_mcp_candidate_state(&layout, &app_id, &workflow_run_id)
                     {
@@ -7042,29 +7142,18 @@ impl LocalAppsHostBroker {
                             "scaffold committed but create staging reclaim failed"
                         );
                     }
-                    match local_apps::load_candidate_journal(&layout)
-                        .map_err(|error| error.to_string())
-                        .and_then(|mut journal| {
-                            if journal.workflow_run_id != workflow_run_id {
-                                return Err(
-                                    "journal_invalid: create receipt workflow run changed before scaffold commit"
-                                        .to_string(),
-                                );
-                            }
-                            journal.consumed_receipt_sha256 =
-                                Some(format!("{:x}", Sha256::digest(receipt_id.as_bytes())));
-                            journal = journal.seal().map_err(|issue| issue.message)?;
-                            local_apps::save_candidate_journal(&layout, &journal)
-                                .map_err(|error| error.to_string())
-                        }) {
-                        Ok(()) => {}
-                        Err(error) => tracing::warn!(
-                            app_id = %app_id,
-                            workflow_run_id = %workflow_run_id,
-                            %error,
-                            "create scaffold committed and receipt consumed, but the candidate journal did not record the consumed receipt"
-                        ),
-                    }
+                    // r2-never-wired-07: this arm used to stamp a
+                    // `consumed_receipt_sha256` into the journal and re-seal
+                    // it. NOTHING ever read that digest, and nothing could
+                    // usefully read it: replay is refused in-process by
+                    // `McpReceiptBook` (`commit_claimed_candidate` above, and
+                    // `consume_candidate` in `promote_mcp_candidate`), and the
+                    // book is memory-only — after a process restart EVERY
+                    // receipt id is already refused as `receipt_missing`, so a
+                    // journal reader could not add a refusal the restart had
+                    // not already made. The in-process book is the whole
+                    // replay defence; the write was a re-seal of the same
+                    // journal with a field no code path consulted.
                 }
                 committed
             }
@@ -9059,7 +9148,6 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             approval_contract_sha256: approval_contract_sha256.clone(),
             tool_surface_sha256: validated.tool_surface_sha256.clone(),
             catalog_sha256: None,
-            consumed_receipt_sha256: None,
             integrity_sha256: String::new(),
         }
         .seal()
@@ -9221,8 +9309,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 approval_contract_sha256: approval_contract_sha256.clone(),
                 tool_surface_sha256: validated.tool_surface_sha256.clone(),
                 catalog_sha256: None,
-                consumed_receipt_sha256: None,
-                integrity_sha256: String::new(),
+                    integrity_sha256: String::new(),
             }
             .seal()
             .map_err(|issue| issue.message)?;
@@ -9700,9 +9787,11 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                     now_ms(),
                 )
                 .map_err(|issue| issue.message)?;
-            journal.consumed_receipt_sha256 =
-                Some(format!("{:x}", Sha256::digest(receipt_id.as_bytes())));
-            journal = journal.seal().map_err(|issue| issue.message)?;
+            // r2-never-wired-07: no consumed-receipt stamp here
+            // either. `consume_candidate` above is the replay refusal, it is
+            // in-process, and `McpReceiptBook` is memory-only — a restart
+            // makes every receipt id `receipt_missing` before a journal reader
+            // could get a word in. See `commit_scaffold`'s note.
         }
         let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
         let catalog_body = json!({
@@ -9792,9 +9881,6 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             journal = journal
                 .advance(local_apps::McpAuthoringStage::Promoted)
                 .map_err(|issue| issue.message)?;
-            local_apps::save_candidate_journal(&layout, &journal)
-                .map_err(|error| error.to_string())?;
-        } else if receipt_id.is_some() {
             local_apps::save_candidate_journal(&layout, &journal)
                 .map_err(|error| error.to_string())?;
         }
@@ -13609,6 +13695,431 @@ mod tests {
         record.id
     }
 
+    /// Give an app an immutable v3 active-build receipt.
+    ///
+    /// Without one `derive_publication_state` answers `Draft` and
+    /// `emit_managed_mcp_inventory` skips the app entirely, so a fixture that
+    /// forgets this reports "all clear" over an EMPTY listing.
+    fn publish_fixture_build(root: &TempDir, app_id: &str, build_id: &str) -> AppLayout {
+        let layout = AppLayout::new(root.path().to_path_buf(), app_id.to_string()).expect("layout");
+        fs::write(
+            root.path().join(layout.build_rel(false)).join("build.json"),
+            serde_json::to_vec_pretty(&json!({
+                "version": 3,
+                "buildId": build_id,
+                "buildKey": build_id,
+                "runtimeContractSha256": "0".repeat(64),
+                "dependencySnapshotSha256": "0".repeat(64),
+                "outputSha256": "0".repeat(64),
+            }))
+            .expect("serialize build receipt"),
+        )
+        .expect("write build receipt");
+        layout
+    }
+
+    /// r3-never-wired-05: `LocalAppVerificationStatusDto::Failed` had zero
+    /// producers while both clients carried localized copy for it, and the
+    /// condition that should have produced it — an active MCP catalog whose
+    /// recorded identity does not match the app and build pointing at it —
+    /// instead did `return Err(...)` out of `emit_managed_mcp_inventory`.
+    /// That aborted the WHOLE listing: one corrupt app made every other app
+    /// disappear from both clients' Apps surfaces.
+    #[tokio::test]
+    async fn a_corrupt_active_mcp_catalog_fails_only_that_app_and_still_lists_the_others() {
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sink = MockSink::arc();
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            sink.clone(),
+            None,
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let healthy = create_app_fixture(&root, &service, "Healthy").await;
+        let corrupt = create_app_fixture(&root, &service, "Corrupt").await;
+        publish_fixture_build(&root, &healthy, "healthy-build");
+        let layout = publish_fixture_build(&root, &corrupt, "corrupt-build");
+
+        // The plant: a catalog that records SOMEBODY ELSE's app id, published
+        // as this app's active catalog.
+        let catalog = json!({
+            "appId": "not-this-app",
+            "buildId": "corrupt-build",
+            "tools": [],
+            "execution": [],
+        });
+        let catalog_sha256 =
+            local_apps::approval_contract_sha256(catalog.clone()).expect("catalog digest");
+        local_apps::save_mcp_catalog(&layout, &catalog_sha256, &catalog).expect("save catalog");
+        let mut manifest = load_manifest(&layout).expect("fixture manifest");
+        if manifest.revision == 0 {
+            manifest.revision = 1;
+        }
+        manifest.active_mcp_catalog = Some(local_apps::AppMcpCatalogRef {
+            build_id: "corrupt-build".into(),
+            manifest_revision: manifest.revision,
+            authoring_revision: 1,
+            user_goal_sha256: "0".repeat(64),
+            proposal_sha256: "0".repeat(64),
+            approval_contract_sha256: "0".repeat(64),
+            tool_surface_sha256: "0".repeat(64),
+            catalog_sha256: catalog_sha256.clone(),
+            mcp_verification_sha256: "0".repeat(64),
+        });
+        local_apps::save_manifest(&layout, &manifest).expect("publish the corrupt catalog pointer");
+
+        broker
+            .emit_managed_mcp_inventory()
+            .await
+            .expect("one app's corrupt catalog must not fail the whole inventory listing");
+
+        let servers = sink
+            .events()
+            .await
+            .into_iter()
+            .rev()
+            .find_map(|event| match event {
+                ClientEvent::AppEvent {
+                    event: AppEventDto::ManagedMcpInventoryChanged { servers },
+                } => Some(servers),
+                _ => None,
+            })
+            .expect("a managed MCP inventory event");
+        assert_eq!(
+            servers.len(),
+            2,
+            "both apps must still be listed; the corrupt one must not take the healthy one \
+             down with it: {servers:?}"
+        );
+        let corrupt_row = servers
+            .iter()
+            .find(|server| server.app_id == corrupt)
+            .expect("the corrupt app is listed");
+        assert_eq!(
+            corrupt_row.mcp_verification.status,
+            LocalAppVerificationStatusDto::Failed,
+            "the corrupt app must be reported Failed -- this is the production producer for a \
+             variant both clients render: {:?}",
+            corrupt_row.mcp_verification
+        );
+        assert_eq!(
+            corrupt_row.mcp_verification.code.as_deref(),
+            Some("active_state_corrupt"),
+            "a Failed summary must carry a code: `code == None` is the arm both clients map to \
+             'verification passed', so a failure must never reach it: {:?}",
+            corrupt_row.mcp_verification
+        );
+        assert!(
+            corrupt_row.tools.is_empty() && corrupt_row.catalog_sha256.is_empty(),
+            "nothing derived from an untrusted catalog may be presented: {corrupt_row:?}"
+        );
+        assert_eq!(
+            corrupt_row.status,
+            ManagedLocalAppMcpStatusDto::Error,
+            "the corrupt app's MCP status: {corrupt_row:?}"
+        );
+        let healthy_row = servers
+            .iter()
+            .find(|server| server.app_id == healthy)
+            .expect("the healthy app is listed");
+        assert_eq!(
+            healthy_row.mcp_verification.status,
+            LocalAppVerificationStatusDto::Unverified,
+            "the healthy app keeps its own (no-catalog) summary: {healthy_row:?}"
+        );
+    }
+
+    /// r1-never-wired-06: `pending_verification_gates` was a hardcoded pair,
+    /// so a `create_without_mcp` confirmation — an app that will have no MCP
+    /// surface at all — still promised the user an MCP QA gate that nothing
+    /// would ever run for it. The `ui_runner` row stays unconditional because
+    /// it is unconditionally true on this Host.
+    ///
+    /// Both ids are live client contracts: iOS switches on them in
+    /// `LocalAppApprovalSheets.swift`'s `localizedGateLabel` /
+    /// `localizedGateDetail` to render localized copy in place of the English
+    /// `label`/`detail` sent from here.
+    #[test]
+    fn pending_verification_gates_promises_mcp_qa_only_when_mcp_tools_are_being_approved() {
+        let without_mcp = LocalAppsHostBroker::pending_verification_gates(0);
+        assert!(
+            without_mcp.iter().all(|gate| gate.gate_id != "mcp_qa"),
+            "an approval with no proposed tool must not promise an MCP QA gate: {without_mcp:?}"
+        );
+        assert_eq!(
+            without_mcp
+                .iter()
+                .filter(|gate| gate.gate_id == "ui_runner")
+                .count(),
+            1,
+            "the ui_runner row is unconditional: {without_mcp:?}"
+        );
+        let with_mcp = LocalAppsHostBroker::pending_verification_gates(2);
+        assert!(
+            with_mcp.iter().any(|gate| gate.gate_id == "mcp_qa"),
+            "an approval that IS granting tools must still promise MCP QA: {with_mcp:?}"
+        );
+        for gate in &with_mcp {
+            assert!(
+                matches!(gate.gate_id.as_str(), "mcp_qa" | "ui_runner"),
+                "`{}` is a gate_id no client localizes; add it to iOS's localizedGateLabel (and \
+                 the Android equivalent) in the same change: {gate:?}",
+                gate.gate_id
+            );
+        }
+    }
+
+    /// r3-failure-paths-02: a native approval was announced exactly once, so
+    /// an Android client whose Activity was destroyed while the engine stayed
+    /// alive headlessly lost the sheet with no way to get it back — the engine
+    /// then blocked for the whole five-minute `APPROVAL_TIMEOUT` and failed
+    /// the workflow. `reemit_pending_native_approvals` is the reattach path,
+    /// wired into `PluginCommandDto::GetManagedMcpInventory` (the snapshot
+    /// command both clients already send when they bind).
+    #[tokio::test]
+    async fn a_pending_native_approval_is_re_announced_verbatim_to_a_reattaching_client() {
+        let root = TempDir::new().expect("tempdir");
+        let sink = MockSink::arc();
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            sink.clone(),
+            None,
+            false,
+            None,
+        );
+        // The fixture event carries the request id, so "the same sheet came
+        // back" is checked on the wire content, not on a count alone.
+        let event = |request_id: &str| AppEventDto::LocalAppOperationFailed {
+            app_id: Some("app-reattach".into()),
+            code: client_protocol::local_apps::LocalAppPluginErrorCodeDto::PluginDisabled,
+            message: "r3-failure-paths-02 fixture event; only its request_id is under test".into(),
+            request_id: Some(request_id.to_string()),
+        };
+        let announcements = |events: Vec<ClientEvent>| {
+            events
+                .into_iter()
+                .filter(|emitted| {
+                    matches!(
+                        emitted,
+                        ClientEvent::AppEvent {
+                            event: AppEventDto::LocalAppOperationFailed {
+                                request_id: Some(request_id),
+                                ..
+                            },
+                        } if request_id == "req-reattach"
+                    )
+                })
+                .count()
+        };
+
+        let wait = broker.wait_for_native_approval_with_timeout(
+            &broker.pending_create_confirmations,
+            "req-reattach".into(),
+            "app-reattach",
+            event("req-reattach"),
+            Duration::from_secs(30),
+        );
+        tokio::pin!(wait);
+        // Park the wait past its insert-and-emit, short of its deadline.
+        assert!(
+            timeout(Duration::from_millis(50), &mut wait).await.is_err(),
+            "the approval must still be pending for the reattach path to have anything to re-emit"
+        );
+        assert_eq!(
+            announcements(sink.events().await),
+            1,
+            "the original announcement"
+        );
+
+        broker.reemit_pending_native_approvals().await;
+        assert_eq!(
+            announcements(sink.events().await),
+            2,
+            "a reattaching client must be handed the pending sheet again, with the SAME \
+             request_id its answer has to carry"
+        );
+
+        assert!(
+            broker
+                .resolve_create_confirmation("req-reattach", true)
+                .await,
+            "the re-announced request id must still resolve the wait it names"
+        );
+        assert_eq!(wait.await, Ok(true), "the parked wait settles");
+        broker.reemit_pending_native_approvals().await;
+        assert_eq!(
+            announcements(sink.events().await),
+            2,
+            "an approval that has been answered must NOT be re-announced -- a resolved sheet \
+             coming back is a phantom prompt whose answer goes nowhere"
+        );
+    }
+
+    /// HAND-scanner-residue: the tool-name scanners covered the workspace
+    /// contracts, the shipped prompt files and the next-step guidance, but two
+    /// model-facing sources the Host authors were never fed to them — the
+    /// shell gate's refusal, which is the text that tells an agent how to get
+    /// an unformed app moving, and the descriptions in the static host tool
+    /// catalog, which is what the model reads when deciding what to call.
+    ///
+    /// Both are read from the RUNNING code (the refusal through a real gated
+    /// call, the descriptions through `host_tool_catalog`), not copied, so a
+    /// reworded literal cannot leave this gate scanning a stale copy.
+    #[tokio::test]
+    async fn host_authored_model_facing_text_names_no_tool_outside_local_app_tools() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let transport =
+            crate::local_apps_mcp::LocalAppsMcpTransport::new(root.path().to_path_buf());
+        assert!(transport.attach_service(Arc::clone(&service)).is_ok());
+        let refused = transport
+            .call_host_operation("build", json!({ "app_id": shell.id }))
+            .await
+            .expect("a domain refusal is a tool result, not a transport error");
+        assert!(refused.is_error, "the shell gate must refuse: {refused:?}");
+        let refusal = refused
+            .content
+            .get(0)
+            .and_then(|block| block.get("text"))
+            .and_then(Value::as_str)
+            .expect("the refusal carries text")
+            .to_string();
+        // Vacuity guards: prove this is the SHELL GATE's refusal and that it
+        // actually carries both shapes the two scanners look for, so a
+        // reworded or re-routed refusal fails loudly instead of being scanned
+        // for nothing.
+        assert!(
+            refusal.contains("app_not_scaffolded"),
+            "read something other than the shell gate's refusal: {refusal}"
+        );
+        assert!(
+            refusal.matches('`').count() >= 2 && refusal.contains("LocalAppScaffold"),
+            "the shell-gate refusal no longer carries a backticked span and a bare LocalApp* \
+             token, so neither scanner below has anything to check: {refusal}"
+        );
+        assert_only_real_tool_names(&refusal, "the shell gate refusal");
+        assert_only_real_local_app_tool_tokens(&refusal, "the shell gate refusal");
+
+        // The static host-operation catalog: this is the description text the
+        // model is shown for every builtin LocalApp* tool.
+        let catalog = crate::local_apps_mcp::LocalAppsMcpTransport::host_tool_catalog();
+        assert!(
+            !catalog.is_empty(),
+            "read an empty host tool catalog, so nothing below was scanned"
+        );
+        let mut token_scanned = 0usize;
+        let mut backtick_scanned = 0usize;
+        for tool in &catalog {
+            let label = format!("the `{}` tool description", tool.tool_name);
+            if tool.description.contains("LocalApp") {
+                assert_only_real_local_app_tool_tokens(&tool.description, &label);
+                token_scanned += 1;
+            }
+            if tool.description.contains('`') {
+                assert_only_real_tool_names(&tool.description, &label);
+                backtick_scanned += 1;
+            }
+        }
+        assert!(
+            token_scanned > 0 && backtick_scanned > 0,
+            "no tool description names a LocalApp* token ({token_scanned}) or carries a \
+             backticked span ({backtick_scanned}), so this half of the gate scanned nothing"
+        );
+    }
+
+    /// The gate for the two sources above: both scanners are NEGATIVE, so
+    /// nothing else proves they can fire on this text at all. Plant a dead
+    /// tool name in a copy of each real source and require the scan to reject
+    /// it BY NAME.
+    #[tokio::test]
+    async fn the_scanners_reject_a_dead_tool_name_planted_in_each_new_source() {
+        fn rejection(scan: impl FnOnce() + std::panic::UnwindSafe, what: &str) -> String {
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let outcome = std::panic::catch_unwind(scan);
+            std::panic::set_hook(previous);
+            let payload = outcome
+                .err()
+                .unwrap_or_else(|| panic!("the scanner accepted a planted dead tool name in {what}"));
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_string()))
+                .unwrap_or_else(|| panic!("the scanner's panic carried no message for {what}"))
+        }
+
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let transport =
+            crate::local_apps_mcp::LocalAppsMcpTransport::new(root.path().to_path_buf());
+        assert!(transport.attach_service(Arc::clone(&service)).is_ok());
+        let refusal = transport
+            .call_host_operation("build", json!({ "app_id": shell.id }))
+            .await
+            .expect("a domain refusal is a tool result")
+            .content
+            .get(0)
+            .and_then(|block| block.get("text"))
+            .and_then(Value::as_str)
+            .expect("the refusal carries text")
+            .to_string();
+        // The plant: the retired runtime-confirmation tool, in the same two
+        // shapes the real refusal already uses.
+        let planted_refusal = refusal.replace("LocalAppScaffold", "LocalAppConfirmRuntime");
+        assert_ne!(
+            planted_refusal, refusal,
+            "the plant did not apply, so the assertions below would pass on unplanted text"
+        );
+        let message = rejection(
+            {
+                let planted = planted_refusal.clone();
+                move || assert_only_real_local_app_tool_tokens(&planted, "the planted refusal")
+            },
+            "the shell gate refusal",
+        );
+        assert!(
+            message.contains("LocalAppConfirmRuntime"),
+            "the token scan of the refusal rejected the plant without naming it: {message}"
+        );
+        let message = rejection(
+            move || assert_only_real_tool_names(&planted_refusal, "the planted refusal"),
+            "the shell gate refusal",
+        );
+        assert!(
+            message.contains("LocalAppConfirmRuntime"),
+            "the backtick scan of the refusal rejected the plant without naming it: {message}"
+        );
+
+        let catalog = crate::local_apps_mcp::LocalAppsMcpTransport::host_tool_catalog();
+        let described = catalog
+            .iter()
+            .find(|tool| tool.description.contains("LocalAppStageCreate"))
+            .expect("a host tool description names LocalAppStageCreate");
+        let planted_description = described
+            .description
+            .replace("LocalAppStageCreate", "LocalAppConfirmRuntime");
+        assert_ne!(
+            planted_description, described.description,
+            "the plant did not apply to the description"
+        );
+        let message = rejection(
+            move || {
+                assert_only_real_local_app_tool_tokens(
+                    &planted_description,
+                    "the planted description",
+                )
+            },
+            "a host tool description",
+        );
+        assert!(
+            message.contains("LocalAppConfirmRuntime"),
+            "the token scan of a tool description rejected the plant without naming it: {message}"
+        );
+    }
+
     #[tokio::test]
     async fn execute_mcp_flow_runs_the_host_reloaded_typed_binding() {
         let (root, service, broker) = create_broker(false, None).await;
@@ -14586,7 +15097,6 @@ mod tests {
             approval_contract_sha256: approval_contract_sha256.clone(),
             tool_surface_sha256: validated.tool_surface_sha256.clone(),
             catalog_sha256: None,
-            consumed_receipt_sha256: None,
             integrity_sha256: String::new(),
         }
         .seal()
@@ -15952,6 +16462,71 @@ mod tests {
             "create_without_mcp must not surface any initial_tools: {:?}",
             request.initial_tools
         );
+        // r1-never-wired-06, at the PRODUCTION call site: the sheet for a
+        // create that grants no MCP tools must not promise an MCP QA gate.
+        // The unit test above pins the function; this pins that the real
+        // create branch passes it the real count.
+        assert!(
+            request
+                .required_gates
+                .iter()
+                .all(|gate| gate.gate_id != "mcp_qa"),
+            "a create_without_mcp sheet must not promise an MCP QA gate: {:?}",
+            request.required_gates
+        );
+        assert!(
+            request
+                .required_gates
+                .iter()
+                .any(|gate| gate.gate_id == "ui_runner"),
+            "the ui_runner gate is unconditional: {:?}",
+            request.required_gates
+        );
+
+        // r3-failure-paths-02, on the real event: a client that lost this
+        // sheet (Android Activity destroyed while the engine stayed alive)
+        // gets it back, byte-for-byte, with the same request_id.
+        let confirmations_named = |events: Vec<ClientEvent>, request_id: &str| {
+            events
+                .into_iter()
+                .filter(|emitted| {
+                    matches!(
+                        emitted,
+                        ClientEvent::AppEvent {
+                            event: AppEventDto::CreateConfirmationRequested { request },
+                        } if request.request_id == request_id
+                    )
+                })
+                .count()
+        };
+        assert_eq!(
+            confirmations_named(sink.events().await, &request.request_id),
+            1,
+            "the original announcement"
+        );
+        broker.reemit_pending_native_approvals().await;
+        let reannounced = sink
+            .events()
+            .await
+            .into_iter()
+            .rev()
+            .find_map(|event| match event {
+                ClientEvent::AppEvent {
+                    event: AppEventDto::CreateConfirmationRequested { request },
+                } => Some(request),
+                _ => None,
+            })
+            .expect("a re-announced create confirmation");
+        assert_eq!(
+            confirmations_named(sink.events().await, &request.request_id),
+            2,
+            "a reattaching client must be handed the pending create sheet again"
+        );
+        assert_eq!(
+            reannounced, request,
+            "the re-announced sheet must be the SAME request, unchanged"
+        );
+
         assert!(broker.resolve_create_confirmation(&request.request_id, true).await);
         let approved = approval
             .await
@@ -17366,9 +17941,10 @@ mod tests {
             .expect_err("runtime-profile apps must not auto-repair dependency drift");
         assert!(error.contains("dependencies_dirty"), "{error}");
         // WP8: the drift error must not send the agent to retry
-        // `LocalAppConfirmDependencyChange`/`LocalAppUpdateDependencies` — neither is a
-        // model-callable tool (absent from `LOCAL_APP_TOOLS`, refused by name on the MCP
-        // transport) — it must tell the agent to report the drift instead.
+        // `LocalAppConfirmDependencyChange`/`LocalAppUpdateDependencies`. Both ARE
+        // model-callable builtins; what they cannot do is repair snapshot drift, because
+        // `update_dependencies` applies a host-minted receipt rather than re-deriving
+        // the snapshot. See the reason recorded at the emit site.
         assert!(
             !error.contains("LocalAppConfirmDependencyChange")
                 && !error.contains("LocalAppUpdateDependencies"),
@@ -19800,6 +20376,7 @@ mod tests {
             .create_app_with_git_and_workflow_model_and_initializer(
                 None,
                 "",
+                None,
                 None,
                 false,
                 Some("openai/gpt-5"),

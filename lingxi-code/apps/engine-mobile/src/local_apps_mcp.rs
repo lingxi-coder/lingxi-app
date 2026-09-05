@@ -487,6 +487,15 @@ pub struct LocalAppsMcpTransport {
     host: OnceLock<Arc<dyn LocalAppsMcpHost>>,
     registry: OnceLock<std::sync::Weak<mcp::McpRegistry>>,
     session_id: OnceLock<Arc<SessionIdProvider>>,
+    /// The connection's working directory, remembered at boot. Unlike
+    /// [`SessionIdProvider`] this needs no closure: a connection's cwd is fixed
+    /// for its whole life. r1-backlog-engine-create-10 — an app the AGENT
+    /// creates through `LocalAppCreate` must record the same ORIGIN scope the
+    /// library's create path records (`host.rs`'s `Some(self.session_cwd)`),
+    /// or a boot-repaired pin forks from whatever cwd the sweep happens to
+    /// have. Absent (tests, or a transport built before boot attaches it)
+    /// means "origin unknown", which `AppRecord::origin_cwd` spells `None`.
+    origin_cwd: OnceLock<String>,
     init_session_minter: OnceLock<Arc<InitSessionMinter>>,
     /// See [`PluginAvailabilityProbe`]: absent means "refuse `create`".
     plugin_available: OnceLock<Arc<PluginAvailabilityProbe>>,
@@ -611,6 +620,9 @@ impl LocalAppsMcpTransport {
         if let Some(value) = self.session_id.get() {
             let _ = scoped.session_id.set(value.clone());
         }
+        if let Some(value) = self.origin_cwd.get() {
+            let _ = scoped.origin_cwd.set(value.clone());
+        }
         if let Some(value) = self.init_session_minter.get() {
             let _ = scoped.init_session_minter.set(value.clone());
         }
@@ -633,6 +645,7 @@ impl LocalAppsMcpTransport {
             host: OnceLock::new(),
             registry: OnceLock::new(),
             session_id: OnceLock::new(),
+            origin_cwd: OnceLock::new(),
             init_session_minter: OnceLock::new(),
             plugin_available: OnceLock::new(),
             agent_session_id: None,
@@ -732,6 +745,9 @@ impl LocalAppsMcpTransport {
         if let Some(value) = self.session_id.get() {
             let _ = scoped.session_id.set(value.clone());
         }
+        if let Some(value) = self.origin_cwd.get() {
+            let _ = scoped.origin_cwd.set(value.clone());
+        }
         if let Some(value) = self.init_session_minter.get() {
             let _ = scoped.init_session_minter.set(value.clone());
         }
@@ -782,6 +798,14 @@ impl LocalAppsMcpTransport {
         provider: Arc<SessionIdProvider>,
     ) -> Result<(), Arc<SessionIdProvider>> {
         self.session_id.set(provider)
+    }
+
+    /// Attach the connection's working directory (engine host boot), so an
+    /// agent-created app records the same origin scope the library's create
+    /// path records. See the `origin_cwd` field for why this is a plain
+    /// `OnceLock<String>` rather than a provider closure.
+    pub fn attach_origin_cwd(&self, cwd: String) -> Result<(), String> {
+        self.origin_cwd.set(cwd)
     }
 
     /// Attach the built-in Local App plugin availability probe (engine host
@@ -2561,6 +2585,11 @@ impl LocalAppsMcpTransport {
                         name,
                         brief,
                         conversation_id,
+                        // r1-backlog-engine-create-10: the app's ORIGIN scope.
+                        // `None` here (no cwd attached) means "unknown", and
+                        // the caller falls back to its own cwd — today's
+                        // behaviour — rather than to an empty path.
+                        self.origin_cwd.get().map(String::as_str),
                         git_enabled,
                         workflow_model.as_deref(),
                         local_apps::CreateMode::Shell,

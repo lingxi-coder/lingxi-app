@@ -266,4 +266,101 @@ class LocalAppsScreenTest {
         messageCount = 2,
         isInit = isInit,
     )
+
+    /**
+     * Both create entry points must be GATED on the in-flight twin, not merely
+     * able to read it.
+     *
+     * `createInFlight` is computed in the view model and published on the ui
+     * state; a screen that never reads it leaves the finding exactly where it
+     * was — named, computed, and never wired. Source-level for the same reason
+     * as the dialog test above: `androidx.compose.ui.test` is instrumented-only
+     * in this module, so there is no runtime way here to observe a disabled
+     * button.
+     */
+    @Test
+    fun `both create entry points are disabled while a create is in flight`() {
+        val source = File("src/main/java/com/lingxi/code/localapps/LocalAppsScreen.kt").readText()
+
+        val start = source.indexOf("IconButton(\n                        onClick = { onAction(LocalAppsAction.Create) },")
+        assertTrue(
+            "read the wrong file, or the top bar's create button was rewritten: " +
+                "the multi-line IconButton call was not found",
+            start >= 0,
+        )
+        val toolbar = source.substring(start, start + 400)
+        assertTrue(
+            "the library top bar's 「+」 must be disabled while a create is unresolved — " +
+                "the create resolves out of band up to CREATE_RESULT_TIMEOUT_MS later, " +
+                "and a second tap is otherwise answered with an error toast",
+            "enabled = !state.createInFlight," in toolbar,
+        )
+
+        val emptyStart = source.indexOf("private fun EmptyApps(")
+        assertTrue("read the wrong file: EmptyApps not found", emptyStart >= 0)
+        val emptyEnd = source.indexOf("\nprivate fun ", emptyStart + 1)
+        assertTrue("read the wrong file: the function after EmptyApps was not found", emptyEnd > emptyStart)
+        val empty = source.substring(emptyStart, emptyEnd)
+        assertTrue(
+            "vacuity guard: the sliced region must still contain the create button",
+            "Button(onClick = onCreate" in empty,
+        )
+        assertTrue(
+            "the empty state's create button is the OTHER way into a create and must be " +
+                "gated on the same latch",
+            "enabled = !createInFlight" in empty,
+        )
+        assertTrue(
+            "EmptyApps must be handed the flag by its caller",
+            "createInFlight = state.createInFlight," in source,
+        )
+    }
+
+    /**
+     * The localized copy must actually be RENDERED.
+     *
+     * `localAppVerificationSummaryRes` / `localAppGateLabelRes` are pure and
+     * unit-tested next door, which proves they map correctly and proves
+     * nothing about whether any screen calls them. These three call sites are
+     * the whole point of the mapping: the verification row, and the two
+     * approval-sheet gate lists.
+     */
+    @Test
+    fun `the screen renders localized verification summaries and gate labels`() {
+        val source = File("src/main/java/com/lingxi/code/localapps/LocalAppsScreen.kt").readText()
+
+        val rowStart = source.indexOf("private fun VerificationSummaryRow(")
+        assertTrue("read the wrong file: VerificationSummaryRow not found", rowStart >= 0)
+        val rowEnd = source.indexOf("\n@Composable", rowStart + 1)
+        assertTrue("read the wrong file: the composable after the row was not found", rowEnd > rowStart)
+        val row = source.substring(rowStart, rowEnd)
+        assertTrue(
+            "vacuity guard: the sliced region must still be the row's Text call",
+            "Text(" in row,
+        )
+        assertTrue(
+            "the engine sends `summary` as fixed English and `code` as the key for it: " +
+                "the row must render the mapped copy, not the raw sentence",
+            "localAppVerificationSummaryRes(summary.status, summary.code)" in row,
+        )
+        assertTrue(
+            "an unrecognized (or absent) code must still render the engine's sentence",
+            "else summary.summary" in row,
+        )
+
+        assertEquals(
+            "both approval sheets' gate lists must render the localized label",
+            2,
+            Regex("append\\(localAppGateLabel\\(gate, context\\)\\)").findAll(source).count(),
+        )
+        assertEquals(
+            "and the localized detail",
+            2,
+            Regex("localAppGateDetail\\(gate, context\\)").findAll(source).count(),
+        )
+        assertTrue(
+            "the raw English label must no longer be appended directly",
+            "append(gate.name)" !in source,
+        )
+    }
 }

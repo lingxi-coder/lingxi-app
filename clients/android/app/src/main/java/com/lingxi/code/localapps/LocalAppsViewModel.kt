@@ -39,7 +39,6 @@ import com.lingxi.code.bindings.LocalAppMcpToolDiffDto
 import com.lingxi.code.bindings.LocalAppMcpToolFieldDto
 import com.lingxi.code.bindings.LocalAppMcpToolSurfaceDto
 import com.lingxi.code.bindings.LocalAppPluginErrorCodeDto
-import com.lingxi.code.bindings.LocalAppReceiptStatusDto
 import com.lingxi.code.bindings.LocalAppVerificationStatusDto
 import com.lingxi.code.bindings.LocalAppVerificationSummaryDto
 import com.lingxi.code.bindings.PluginCommandDto
@@ -243,6 +242,23 @@ class LocalAppsViewModel(
     private var landingAwaitingPin: CreatedAppLanding? = null
 
     /**
+     * Stop-loss for [landingAwaitingPin]; see [PIN_WAIT_TIMEOUT_MS].
+     *
+     * `AppRecordChanged` is the ONLY thing that publishes a held landing, and
+     * the engine emits it as a best-effort follow-up to the mint — so a mint
+     * that never reports back (a crash between the two events, a source
+     * dropped mid-handshake) left the landing held forever: no hand-off, no
+     * error, the freshly created app simply never opened. Expiring publishes
+     * the held landing WITH A NULL SESSION ID rather than raising an error:
+     * the app record is not in question (`AppCreated` already committed it),
+     * only the pin is, and a landing with no pin is an outcome the consumer
+     * already handles — it opens a fresh conversation in the app's scope,
+     * exactly the fallback a mint that failed outright produces. iOS spells
+     * the same pair `armPinWaitTimeout` / `reportPinWaitTimedOut`.
+     */
+    private var pinWaitTimeout: Job? = null
+
+    /**
      * Where tapping a DRAFT card in the library lands: the shell's own pinned
      * init conversation — the interview that is going to define it.
      *
@@ -386,6 +402,7 @@ class LocalAppsViewModel(
                     queuedApprovalSheets.isNotEmpty()
                 clearPendingCreate()
                 landingAwaitingPin = null
+                clearPinWaitTimeout()
                 // A pending (or queued) approval sheet is a promise to resolve
                 // ITS request against the source that raised it. That source is
                 // gone the instant `collectLatest` moves past this point — a
@@ -495,6 +512,21 @@ class LocalAppsViewModel(
         }
     }
 
+    /**
+     * The two snapshot commands a freshly bound source is asked for.
+     *
+     * `GetManagedMcpInventory` also carries the REATTACH half of the native
+     * approval flow: the engine re-announces every approval it is still
+     * blocked on from this command's handler (`host.rs`'s
+     * `PluginCommandDto::GetManagedMcpInventory` arm ->
+     * `reemit_pending_native_approvals`). This ViewModel is Activity-scoped,
+     * so an Activity destroyed while the engine stays alive headlessly loses
+     * the pending create-confirmation sheet outright; this is the only channel
+     * that brings it back. Dropping the command here — or sending it before
+     * the event collector is subscribed — silently restores the old failure,
+     * where the engine blocked for its whole approval timeout with the user
+     * never seeing a prompt.
+     */
     private suspend fun requestSnapshots(bound: ConversationSource) {
         runCatching {
             bound.submitClientCommand(ClientCommand.ListApps)
@@ -567,6 +599,11 @@ class LocalAppsViewModel(
         val requestId = UUID.randomUUID().toString()
         pendingCreateRequestId = requestId
         pendingCreateArmsLibraryFallback = armLibraryFallback
+        // Armed BEFORE `submit`, alongside the key it mirrors: `submit`
+        // launches into `viewModelScope` and the engine can answer from inside
+        // that call, so publishing the flag afterwards would leave the button
+        // live across the window this exists to cover.
+        publishCreateInFlight(true)
         armCreateTimeout(requestId)
         submit(
             ClientCommand.CreateApp(
@@ -658,6 +695,7 @@ class LocalAppsViewModel(
             pendingCreateRequestId = null
             pendingCreateArmsLibraryFallback = false
             pendingCreateTimeout = null
+            publishCreateInFlight(false)
             error(
                 strings.resolve(
                     R.string.local_apps_creation_result_unknown,
@@ -665,6 +703,42 @@ class LocalAppsViewModel(
                 ),
             )
         }
+    }
+
+    /**
+     * Arm the stop-loss for one landing still waiting on its init-session pin.
+     *
+     * Keyed by [appId] for the same reason [armCreateTimeout] re-checks its
+     * request id: a second create can arm its own landing before this job
+     * wakes, and timing THAT one out would publish a hand-off the engine is
+     * still about to complete.
+     */
+    private fun armPinWaitTimeout(appId: String) {
+        pinWaitTimeout?.cancel()
+        pinWaitTimeout = viewModelScope.launch {
+            delay(PIN_WAIT_TIMEOUT_MS)
+            val armed = landingAwaitingPin?.takeIf { it.appId == appId } ?: return@launch
+            landingAwaitingPin = null
+            // Cleared by hand rather than through `clearPinWaitTimeout()`:
+            // this coroutine IS the stop-loss, and that helper would cancel
+            // the job currently executing this line.
+            pinWaitTimeout = null
+            // No error. The record exists and the SCOPE is what roots the
+            // agent in the workspace; a landing with no pin opens a fresh
+            // conversation there, which is the same fallback the engine's own
+            // failed mint produces.
+            createdAppLandingChannel.trySend(armed.copy(initSessionId = null))
+        }
+    }
+
+    /**
+     * Disarm the pin-wait stop-loss WITHOUT touching [landingAwaitingPin] --
+     * every caller already knows how it is resolving the latch (a matching
+     * `AppRecordChanged`, a rebind) and only needs the timer to stop.
+     */
+    private fun clearPinWaitTimeout() {
+        pinWaitTimeout?.cancel()
+        pinWaitTimeout = null
     }
 
     /**
@@ -708,6 +782,30 @@ class LocalAppsViewModel(
         pendingCreateArmsLibraryFallback = false
         pendingCreateTimeout?.cancel()
         pendingCreateTimeout = null
+        publishCreateInFlight(false)
+    }
+
+    /**
+     * Publish [LocalAppsUiState.createInFlight] — the OBSERVED twin of
+     * [pendingCreateRequestId].
+     *
+     * The latch itself is a plain field, so no composition ever recomposes on
+     * it. Without this twin the 「+」 button could only fake an in-flight window
+     * around its own `submit` call, which spans the round trip to the engine
+     * and NOT the ~30s until `AppCreated` / `AppOperationFailed` / the
+     * stop-loss actually resolves the create — so the button re-enabled
+     * immediately and the user's second tap was answered with
+     * `local_apps_error_create_in_progress` instead of being prevented. iOS
+     * spells the same twin `LocalAppsStore.isCreateInFlight`.
+     *
+     * Written ONLY beside a write to [pendingCreateRequestId] — the arm in
+     * [createShellApp], [clearPendingCreate], and the hand-rolled release
+     * inside [armCreateTimeout] (which must not call [clearPendingCreate]
+     * because that cancels the very job executing it) — so it cannot drift
+     * from the latch it mirrors.
+     */
+    private fun publishCreateInFlight(value: Boolean) {
+        _uiState.update { it.copy(createInFlight = value) }
     }
 
     /**
@@ -1310,6 +1408,14 @@ class LocalAppsViewModel(
                 // both cases rather than waiting for something that never comes.
                 landingAwaitingPin?.takeIf { it.appId == event.record.id }?.let { armed ->
                     landingAwaitingPin = null
+                    // Hygiene, not the guarantee: the stop-loss re-checks the
+                    // latch by app id before it publishes anything, so clearing
+                    // the latch above is already what makes a second, pin-less
+                    // hand-off impossible. This stops the job from sitting in
+                    // the scheduler for the rest of its ten seconds. Break BOTH
+                    // and `a pinned landing is not re-published by the pin
+                    // stop-loss` goes red at two landings for one create.
+                    clearPinWaitTimeout()
                     createdAppLandingChannel.trySend(
                         armed.copy(initSessionId = event.record.initSessionId),
                     )
@@ -1482,6 +1588,7 @@ class LocalAppsViewModel(
                         appId = event.record.id,
                         initSessionId = event.record.initSessionId,
                     )
+                    armPinWaitTimeout(event.record.id)
                 }
             }
             is AppEventDto.PluginStatusChanged -> Unit
@@ -1526,6 +1633,11 @@ class LocalAppsViewModel(
             _uiState.update { it.copy(pendingApprovalSheet = sheet) }
             return
         }
+        // A RE-EMISSION, not a supersession. The engine re-announces a pending
+        // approval with its ORIGINAL request id (see `requestSnapshots`), so
+        // the sheet the user is looking at can arrive a second time; falling
+        // through to the supersede branch below would reject the very request
+        // they are being asked about.
         if (current.requestId == sheet.requestId || current.receiptId == sheet.receiptId) return
         if (current.appId == sheet.appId) {
             rejectSupersededApprovalSheet(current)
@@ -1943,6 +2055,17 @@ class LocalAppsViewModel(
          * instead of asking them to retry.
          */
         internal const val CREATE_RESULT_TIMEOUT_MS = 30_000L
+
+        /**
+         * How long a created app's landing waits for the engine's init-session
+         * pin to arrive on `AppRecordChanged` before handing off without one
+         * (iOS's `pinWaitTimeout`).
+         *
+         * Much shorter than [CREATE_RESULT_TIMEOUT_MS]: by this point the
+         * record already exists and this is one local follow-up on it, not the
+         * create itself. Expiring is not a failure — see [armPinWaitTimeout].
+         */
+        internal const val PIN_WAIT_TIMEOUT_MS = 10_000L
         private const val MAX_QUEUED_AUTHORIZATIONS = 8
 
         fun factory(
@@ -2204,12 +2327,6 @@ private fun LocalAppRuntimeProfileFamily.toBindingRuntimeProfileFamily(): AppRun
     LocalAppRuntimeProfileFamily.Babylon3d -> AppRuntimeProfileDto.BABYLON3D
 }
 
-private fun LocalAppReceiptStatusDto.toUiApprovalState(): LocalAppApprovalReceiptState = when {
-    superseded -> LocalAppApprovalReceiptState.Superseded
-    expiresAtMs.toLong() <= System.currentTimeMillis() -> LocalAppApprovalReceiptState.Expired
-    else -> LocalAppApprovalReceiptState.Pending
-}
-
 private fun LocalAppVerificationStatusDto.toUiVerificationStatus(): LocalAppVerificationStatus = when (this) {
     LocalAppVerificationStatusDto.PENDING -> LocalAppVerificationStatus.Pending
     LocalAppVerificationStatusDto.PASSED -> LocalAppVerificationStatus.Passed
@@ -2319,6 +2436,10 @@ private fun Any.reflectWidget(methodName: String): LocalAppManagedMcpWidget? =
 
 private fun LocalAppGateStatusDto.toUiApprovalGate(): LocalAppApprovalGate =
     LocalAppApprovalGate(
+        // Carried, not dropped. `label` and `detail` arrive as fixed English
+        // from `pending_verification_gates`, so `gateId` is the only field the
+        // sheet can localize on — see `localAppGateLabelRes`.
+        gateId = gateId,
         name = label,
         status = status.toUiVerificationStatus(),
         available = available,
@@ -2372,9 +2493,14 @@ private fun LocalAppCreateConfirmationRequestDto.toUiCreateApprovalSheet(): Loca
     return LocalAppCreateApprovalSheet(
         appId = appId,
         requestId = requestId,
-        receiptId = receipt?.receiptId ?: requestId,
-        state = receipt?.toUiApprovalState() ?: LocalAppApprovalReceiptState.Pending,
-        expiresAtMs = receipt?.expiresAtMs?.toLong(),
+        // r1-backlog-native-confirmation-13 removed the wire `receipt`: it never
+        // had a producer, so these three were ALWAYS the `?:` fallback arm.
+        // `receiptId` is a non-defaulted member of `LocalAppApprovalSheet` and is
+        // read live (sheet de-duplication, and `approvalToken = sheet.receiptId`),
+        // so it is replaced, not dropped.
+        receiptId = requestId,
+        state = LocalAppApprovalReceiptState.Pending,
+        expiresAtMs = null,
         appName = name,
         brief = brief,
         templateName = selectedTemplate.summary,
@@ -2404,9 +2530,14 @@ private fun LocalAppMcpProposalApprovalRequestDto.toUiMcpProposalApprovalSheet()
     LocalAppMcpProposalApprovalSheet(
         appId = appId,
         requestId = requestId,
-        receiptId = receipt?.receiptId ?: requestId,
-        state = receipt?.toUiApprovalState() ?: LocalAppApprovalReceiptState.Pending,
-        expiresAtMs = receipt?.expiresAtMs?.toLong(),
+        // r1-backlog-native-confirmation-13 removed the wire `receipt`: it never
+        // had a producer, so these three were ALWAYS the `?:` fallback arm.
+        // `receiptId` is a non-defaulted member of `LocalAppApprovalSheet` and is
+        // read live (sheet de-duplication, and `approvalToken = sheet.receiptId`),
+        // so it is replaced, not dropped.
+        receiptId = requestId,
+        state = LocalAppApprovalReceiptState.Pending,
+        expiresAtMs = null,
         summary = summary,
         toolDiffs = toolDiffs.map(LocalAppMcpToolDiffDto::toUiApprovalToolDiff),
         requiredChanges = requiredFlowChanges,

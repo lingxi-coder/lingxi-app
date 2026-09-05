@@ -710,6 +710,46 @@ impl AppManifest {
             (Some(surface), Some(binding), snapshot, Some(template_origin)) => {
                 binding.validate()?;
                 template_origin.validate()?;
+                // r2-never-wired-08: `templateOrigin` was WRITE-ONLY — stamped
+                // at scaffold time and never read back — so a manifest whose
+                // provenance stamp disagreed with the runtime binding it was
+                // derived from opened without a word.
+                //
+                // Both writers derive the two from ONE catalog row:
+                // `builtin_template_origin` copies `binding.contract_sha256`
+                // verbatim, and the create-seed path takes
+                // `selection.template_sha256` and `selection.runtime_profile`,
+                // which `local_app_template_catalog` fills from the same
+                // `template.contract_sha256`. So the equality below holds for
+                // every honestly stamped app and fires only on drift or
+                // tampering — which is the whole point of the field's doc
+                // comment ("generated source never gets to change the plugin
+                // identity").
+                //
+                // Two deliberate placement decisions:
+                //   * HERE, not in the host: `load_manifest` is the single
+                //     door every open path goes through and it calls
+                //     `validate()`, so no entry point is left unguarded. A
+                //     comparison wired into one caller is the shape of defect
+                //     this backlog keeps finding.
+                //   * Against `binding`, not against a catalog handle plumbed
+                //     down into this crate. The template catalog lives in the
+                //     host (`apps/engine-mobile`), which DEPENDS on this
+                //     crate, so a live-catalog lookup here would have to be a
+                //     registry the host pushes into — dormant, and silently
+                //     unenforced, on any path that forgot to populate it. The
+                //     binding is the honest proxy: the host resolves it
+                //     through `local_app_runtime_profiles::contract_for_binding`,
+                //     which recomputes the published contract digest and
+                //     refuses a binding that does not match, so pinning the
+                //     stamp to the binding pins it transitively to the digest
+                //     the running build actually publishes.
+                if template_origin.template_sha256 != binding.contract_sha256 {
+                    return Err(AppError::InvalidRequest(
+                        "templateOrigin templateSha256 must match runtimeProfile contractSha256"
+                            .into(),
+                    ));
+                }
                 if binding.family.surface() != *surface {
                     return Err(AppError::InvalidRequest(format!(
                         "runtimeProfile family {} does not match manifest surface {}",
@@ -1351,6 +1391,42 @@ mod tests {
         let mut invalid = manifest();
         invalid.surface = Some(AppSurface::Dom);
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn template_origin_must_match_the_runtime_profile_contract_digest() {
+        // r2-never-wired-08. A scaffolded manifest whose provenance stamp and
+        // runtime binding come from the same catalog row validates; drifting
+        // ONLY the stamp must be rejected on every open path (`load_manifest`
+        // routes all of them through `validate`).
+        let mut scaffolded = manifest();
+        scaffolded.surface = Some(AppSurface::Dom);
+        scaffolded.runtime_profile = Some(AppRuntimeProfileBinding {
+            family: AppRuntimeProfile::ReactDom,
+            revision: 1,
+            contract_sha256: "a".repeat(64),
+        });
+        scaffolded.template_origin = Some(AppTemplateOrigin {
+            plugin_id: AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+            plugin_version: "builtin".into(),
+            template_id: "react-dom-r1".into(),
+            template_sha256: "a".repeat(64),
+        });
+        scaffolded.validate().expect("a consistent stamp validates");
+
+        scaffolded
+            .template_origin
+            .as_mut()
+            .expect("stamp")
+            .template_sha256 = "b".repeat(64);
+        let error = scaffolded
+            .validate()
+            .expect_err("a stamp that disagrees with the binding must be refused")
+            .to_string();
+        assert!(
+            error.contains("templateOrigin templateSha256"),
+            "the error must name the field that drifted, got {error:?}"
+        );
     }
 
     #[test]

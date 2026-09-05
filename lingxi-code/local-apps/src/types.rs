@@ -210,6 +210,49 @@ pub struct AppRecord {
     /// workspace-scoped session catalog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    /// The catalog/scope the app was created FROM — the working directory the
+    /// creating connection was anchored to, captured ONCE at create time.
+    ///
+    /// Why it is stored instead of re-derived: the engine mints the app's
+    /// pinned init session by forking the origin conversation, and that fork
+    /// needs the SOURCE catalog to resolve. At create time the caller's cwd
+    /// is that catalog, but the boot-time repair that backfills a missing pin
+    /// runs much later, on whatever connection happens to be open — its cwd
+    /// is the scope the engine was built in, not the app's. Forking from the
+    /// wrong scope finds no source and silently degrades the pin to an empty
+    /// anchor (`mint_app_init_session` in engine-mobile `host.rs`). This field
+    /// is what lets that repair fork from the app's real origin.
+    ///
+    /// `None` is the honest "origin scope unknown" — the app was not created
+    /// from a chat, or it is a dev-store record written before this field
+    /// existed. It is NOT a compatibility shim: `Option` is the field's real
+    /// domain, the same as `conversation_id` right above. Callers MUST fall
+    /// back to their own cwd on `None` (the pre-existing behaviour), and the
+    /// create path stores absence rather than `Some("")` so that fallback has
+    /// exactly one trigger.
+    ///
+    /// Set only by the create path; never rewritten afterwards (the origin
+    /// scope of an app cannot change), and never used as a filesystem path
+    /// without the caller's own containment check — it is a remembered
+    /// string, not a validated live directory. Stored verbatim: only the
+    /// present-vs-absent decision looks at whitespace (see
+    /// `AppService::create_app_with_git_and_workflow_model_and_initializer`).
+    ///
+    /// EXPOSURE — weigh this before adding another host-scoped field to this
+    /// struct. `AppRecord` is serialized WHOLE into two places: the
+    /// host-private `apps/index.json`, and the mirror at
+    /// `apps/<id>/workspace/.lingxi/app.json`, which sits INSIDE the app
+    /// workspace that the app's own build tooling — and any agent working in
+    /// that app — can read. `origin_cwd` is the first ABSOLUTE HOST path this
+    /// record puts there (the user's project directory, not an app-scoped
+    /// one). It is not filtered out of the mirror on purpose:
+    /// `storage::repair_torn_commit` compares the mirror against the index
+    /// record for WHOLE equality, so a field written to one and not the other
+    /// would make every load look like a torn commit and rewrite the index.
+    /// If that exposure is judged unacceptable, the fix is a mirror-side
+    /// projection of the record, not a `skip_serializing` here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_cwd: Option<String>,
     /// The app's pinned "init" session (bare uuid) — the conversation the
     /// app was set up in, listed first in the app's session catalog. Minted
     /// by the engine at create time (fork of the origin chat, or an empty
@@ -368,6 +411,7 @@ mod tests {
             created_at_ms: 1_700_000_000_000,
             updated_at_ms: 1_700_000_000_001,
             conversation_id: None,
+            origin_cwd: None,
             init_session_id: None,
             workspace_rel: "apps/abc123/workspace".into(),
         };
@@ -401,6 +445,7 @@ mod tests {
             created_at_ms: 1_700_000_000_000,
             updated_at_ms: 1_700_000_000_001,
             conversation_id: None,
+            origin_cwd: None,
             init_session_id: None,
             workspace_rel: "apps/abc123/workspace".into(),
         };
@@ -408,6 +453,40 @@ mod tests {
         assert!(json.contains(r#""mcpIntent":{"status":"requested","services":["github"]}"#));
         let back: AppRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back, record);
+    }
+
+    #[test]
+    fn origin_cwd_round_trips_and_a_record_without_one_reads_as_unknown() {
+        let mut record = AppRecord {
+            id: "abc123".into(),
+            name: "Habits".into(),
+            brief: "Track daily habits".into(),
+            workflow_model: None,
+            mcp_intent: None,
+            git_enabled: true,
+            scaffolded: true,
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_000_001,
+            conversation_id: Some("conv-1".into()),
+            origin_cwd: None,
+            init_session_id: None,
+            workspace_rel: "apps/abc123/workspace".into(),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(
+            !json.contains("originCwd"),
+            "an unknown origin scope is omitted from the wire, not written as null"
+        );
+        assert_eq!(
+            serde_json::from_str::<AppRecord>(&json).unwrap().origin_cwd,
+            None,
+            "a record written without originCwd reads back as unknown"
+        );
+
+        record.origin_cwd = Some("/home/dev/projects/atlas".into());
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains(r#""originCwd":"/home/dev/projects/atlas""#));
+        assert_eq!(serde_json::from_str::<AppRecord>(&json).unwrap(), record);
     }
 
     #[test]

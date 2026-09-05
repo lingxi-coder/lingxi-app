@@ -4,6 +4,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 TOOL="${SCRIPT_DIR}/verify-local-app-supply-chain.py"
+# The runtime-profile templates live in TWO on-disk copies: this one, which
+# every supply-chain assertion below is written against, and
+# lingxi-code/plugins/lingxi-local-app/assets/templates/, which is what
+# `profile_file!` actually `include_bytes!`es into the engine. They are held
+# byte-identical by `compare_runtime_profile_trees` in the verifier (proved
+# red and green further down), so copying a fixture from here is copying the
+# bytes the product ships.
 PROFILE_ROOT="${REPO_ROOT}/lingxi-code/local-apps/templates/runtime-profiles"
 REACT_PROFILE="${PROFILE_ROOT}/react-dom/r1"
 CANVAS_PROFILE="${PROFILE_ROOT}/canvas-2d/r1"
@@ -303,6 +310,112 @@ printf '\n' >> "${TEMP_ROOT}/react-dom-lock-drift/pnpm-lock.yaml"
 expect_rejection "pnpm-lock byte drift to fail validation" \
   python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
   --template "${TEMP_ROOT}/react-dom-lock-drift"
+
+# r1-backlog-scaffold-build-13. Everything above validates the copy under
+# lingxi-code/local-apps/templates/runtime-profiles, but the bytes the engine
+# SHIPS come from a SECOND on-disk copy: `profile_file!` in
+# lingxi-code/apps/engine-mobile/src/local_app_runtime_profiles.rs
+# `include_bytes!`es lingxi-code/plugins/lingxi-local-app/assets/templates/.
+# `compare_runtime_profile_trees` is what makes the attestation cover the
+# shipped bytes, so it gets its own red-and-green proof: exercised directly on
+# temp trees, because the only other way to make it go red is to corrupt the
+# real repository.
+python3 - "${TOOL}" "${REPO_ROOT}" <<'PY'
+import contextlib
+import importlib.util
+import io
+import pathlib
+import shutil
+import sys
+import tempfile
+
+tool_path = pathlib.Path(sys.argv[1])
+repo = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("verify_local_app_supply_chain", tool_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+
+def expect_fail(label, fn):
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            fn()
+    except SystemExit as exc:
+        if exc.code != 1:
+            raise SystemExit(f"{label}: expected exit 1, got {exc.code}")
+        return buf.getvalue()
+    raise SystemExit(f"{label}: expected a rejection, but it passed")
+
+
+# The compiled file list must come out of the macro call sites, and must be
+# big enough that a broken regex cannot masquerade as an all-clear.
+entries = mod.compiled_runtime_profile_files(repo)
+if len(entries) < mod.MIN_COMPILED_PROFILE_FILES:
+    raise SystemExit(f"expected >= {mod.MIN_COMPILED_PROFILE_FILES} profile_file! entries, got {len(entries)}")
+families = {family for family, _ in entries}
+if families != {"babylon-3d", "canvas-2d", "phaser-2d", "react-dom", "three-3d"}:
+    raise SystemExit(f"unexpected compiled runtime-profile families: {sorted(families)}")
+
+compiled_root = mod.compiled_runtime_profile_template_root(repo)
+sample_family, sample_rel = next((f, r) for f, r in entries if f == "react-dom")
+
+with tempfile.TemporaryDirectory() as tmp:
+    tmp = pathlib.Path(tmp)
+    attested = tmp / "attested"
+    for family in sorted(families):
+        shutil.copytree(compiled_root / family, attested / family)
+
+    # GREEN: an identical copy compares clean, and compares every entry.
+    compared = mod.compare_runtime_profile_trees(attested, compiled_root, entries)
+    if compared != len(entries):
+        raise SystemExit(f"expected {len(entries)} files compared, got {compared}")
+
+    # RED 1: one byte of drift is named by path.
+    drifted = attested / sample_family / "r1" / sample_rel
+    drifted.write_bytes(drifted.read_bytes() + b"\n")
+    message = expect_fail(
+        "byte drift between the attested and compiled template trees",
+        lambda: mod.compare_runtime_profile_trees(attested, compiled_root, entries),
+    )
+    if str(drifted) not in message or "diverged from the bytes the engine compiles" not in message:
+        raise SystemExit(f"drift rejection did not name the file: {message!r}")
+
+    # RED 2: a file the engine compiles that the attested tree does not have.
+    drifted.unlink()
+    message = expect_fail(
+        "a compiled template file missing from the attested tree",
+        lambda: mod.compare_runtime_profile_trees(attested, compiled_root, entries),
+    )
+    if str(drifted) not in message:
+        raise SystemExit(f"missing-file rejection did not name the file: {message!r}")
+
+    # RED 3: an empty comparison is not an all-clear.
+    expect_fail(
+        "an empty runtime-profile comparison",
+        lambda: mod.compare_runtime_profile_trees(attested, compiled_root, entries, "no-such-family"),
+    )
+
+    # RED 4: the macro no longer builds its paths from the plugin tree, so this
+    # verifier's idea of which bytes ship is stale.
+    fake_repo = tmp / "fake-repo"
+    macro_source = fake_repo.joinpath(*mod.COMPILED_PROFILE_MACRO_SOURCE)
+    macro_source.parent.mkdir(parents=True)
+    macro_source.write_text(
+        (repo.joinpath(*mod.COMPILED_PROFILE_MACRO_SOURCE)).read_text(encoding="utf-8").replace(
+            mod.COMPILED_PROFILE_ROOT_LITERAL, "/../../somewhere-else/"
+        ),
+        encoding="utf-8",
+    )
+    message = expect_fail(
+        "a moved include_bytes! root",
+        lambda: mod.compiled_runtime_profile_files(fake_repo),
+    )
+    if mod.COMPILED_PROFILE_ROOT_LITERAL not in message:
+        raise SystemExit(f"moved-root rejection did not name the literal: {message!r}")
+
+print("compiled runtime-profile tree comparison: green and red both proven")
+PY
 
 python3 - "${REACT_PROFILE}" "${CANVAS_PROFILE}" "${PROFILE_ROOT}/three-3d/r1" "${PROFILE_ROOT}/phaser-2d/r1" "${PROFILE_ROOT}/babylon-3d/r1" <<'PY'
 import hashlib

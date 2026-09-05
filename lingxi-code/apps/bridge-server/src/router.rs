@@ -3053,6 +3053,28 @@ impl CommandRouter for EngineCommandRouter {
                     Some("provider credential storage is unavailable".to_string())
                 };
                 let applied = error.is_none();
+                if applied {
+                    // Round-9 review finding [2]: this is the ONLY
+                    // credential-add path the Electron desktop has (Settings ->
+                    // Provider Credentials), in BOTH the brokered/ephemeral and
+                    // the persistent mode, and neither branch above told
+                    // Fusion's catalog filter about the write. `/model` and the
+                    // ordinary turn loop route the new key on the very next
+                    // request (`MultiCredentialProvider` reads
+                    // `CredentialManager` per call), while
+                    // `FusionCatalogModelSource::list()` kept re-filtering
+                    // against the BOOT availability map — so every row of the
+                    // just-added provider stayed dropped for the rest of the
+                    // engine process (`TooFewModels{eligible:0}` under
+                    // `fusion.allowedProfiles`). Same call the TUI key view
+                    // makes (`apps/cli/src/mode.rs`'s `run_connect_action`);
+                    // `refresh_after_credential_write` force-marks the named
+                    // profile available, so it is correct for the ephemeral
+                    // branch too, where the re-probe cannot see a key that was
+                    // never persisted.
+                    engine_desktop::refresh_fusion_catalog_after_credential_write(&provider_id)
+                        .await;
+                }
                 let credential_previews = applied
                     .then(|| HashMap::from([(provider_id.clone(), credential_preview)]))
                     .unwrap_or_default();
@@ -3964,6 +3986,184 @@ mod mcp_config_json_parsing_tests {
         assert!(
             err.contains("JSON"),
             "error must say the config is not valid JSON, got: {err}"
+        );
+    }
+}
+
+/// Round-9 review finding [2]: the Electron desktop's ONLY credential-add path
+/// is [`ClientCommand::SetProviderCredential`] (Settings -> Provider
+/// Credentials). It must tell Fusion's process-wide catalog refresher about the
+/// write, exactly the way the TUI key view does
+/// (`apps/cli/src/mode.rs`'s `run_connect_action`); without it a key added in
+/// Settings routes on the next ordinary turn but stays invisible to `/fusion`
+/// for the rest of the engine process.
+#[cfg(test)]
+mod fusion_catalog_refresh_tests {
+    use super::{CommandRouter, EngineCommandRouter};
+    use client_adapter::ClientEventSink;
+    use client_protocol::commands::{ClientCommand, ProviderCredentialSecretDto};
+    use client_protocol::events::ClientEvent;
+    use platform_api::task_registry::{
+        TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
+        TaskRegistryHandle, TaskUpdatePatch,
+    };
+    use platform_api::{AuthError, AuthHandle, LoginInfo};
+    use platform_posix::{PlainTextSecureStorage, PosixClock, PosixHttp};
+    use std::sync::Arc;
+
+    struct SilentSink;
+    #[async_trait::async_trait]
+    impl ClientEventSink for SilentSink {
+        async fn emit(&self, _event: ClientEvent) {}
+    }
+
+    struct MockAuth;
+    #[async_trait::async_trait]
+    impl AuthHandle for MockAuth {
+        async fn login(&self) -> Result<LoginInfo, AuthError> {
+            Ok(LoginInfo {
+                email: "u@x.com".into(),
+                org_id: "org_1".into(),
+            })
+        }
+        async fn logout(&self) -> Result<(), AuthError> {
+            Ok(())
+        }
+        async fn current_user(&self) -> Option<LoginInfo> {
+            None
+        }
+    }
+
+    struct MockTaskRegistry;
+    #[async_trait::async_trait]
+    impl TaskRegistryHandle for MockTaskRegistry {
+        async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
+            Err(TaskRegistryError::Internal("unused".into()))
+        }
+        async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+            Ok(None)
+        }
+        async fn list(&self, _filter: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+            Ok(Vec::new())
+        }
+        async fn update(
+            &self,
+            _id: &str,
+            _patch: TaskUpdatePatch,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            Err(TaskRegistryError::Internal("unused".into()))
+        }
+        async fn set_status(
+            &self,
+            _id: &str,
+            _status: &str,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            Err(TaskRegistryError::Internal("unused".into()))
+        }
+        async fn kill(&self, _id: &str) -> Result<TaskRecord, TaskRegistryError> {
+            Err(TaskRegistryError::Internal("unused".into()))
+        }
+        async fn output(
+            &self,
+            _id: &str,
+            _offset: Option<u64>,
+        ) -> Result<TaskOutputChunk, TaskRegistryError> {
+            Err(TaskRegistryError::Internal("unused".into()))
+        }
+    }
+
+    async fn router_with_credentials(
+        credentials: Arc<secret::CredentialManager>,
+        ephemeral: bool,
+    ) -> EngineCommandRouter {
+        EngineCommandRouter::new(
+            Arc::new(orchestrator::test_support::MockOrchestratorHandle::new())
+                as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
+            Arc::new(MockAuth) as Arc<dyn AuthHandle>,
+            Arc::new(MockTaskRegistry) as Arc<dyn TaskRegistryHandle>,
+            None,
+            None,
+        )
+        .with_credentials(credentials)
+        .with_ephemeral_provider_credentials(ephemeral)
+    }
+
+    /// Both branches of the arm — the persistent keychain write and the
+    /// packaged/brokered ephemeral one — must reach the refresher. Asserting on
+    /// the SHARED availability map a registered `FusionCatalogRefresher` owns
+    /// (the very map `FusionCatalogModelSource::list()` re-filters against)
+    /// pins the wiring end to end, not just that some function was called.
+    #[tokio::test]
+    async fn setting_a_provider_credential_refreshes_the_fusion_catalog() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(
+            PlainTextSecureStorage::new(temp.path().join("credentials"))
+                .await
+                .expect("storage"),
+        );
+        let credentials = Arc::new(secret::CredentialManager::new(
+            storage,
+            Arc::new(PosixClock::new()),
+            Arc::new(PosixHttp::new()),
+        ));
+
+        // The boot availability map of a session that had neither provider
+        // credentialed — what Fusion's catalog filter enforces until a
+        // credential write refreshes it.
+        let availability = Arc::new(std::sync::RwLock::new(
+            [
+                ("openrouter".to_string(), false),
+                ("deepseek".to_string(), false),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        engine_desktop::register_fusion_catalog_refresher(
+            engine_desktop::FusionCatalogRefresher::for_keychain_profiles(
+                availability.clone(),
+                credentials.clone(),
+                &["openrouter", "deepseek"],
+            ),
+        );
+
+        let sink: Arc<dyn ClientEventSink> = Arc::new(SilentSink);
+        router_with_credentials(credentials.clone(), false)
+            .await
+            .route(
+                ClientCommand::SetProviderCredential {
+                    operation_id: 1,
+                    provider_id: "openrouter".into(),
+                    credential: ProviderCredentialSecretDto::new("sk-or-round9".into()),
+                },
+                sink.clone(),
+            )
+            .await;
+        router_with_credentials(credentials, true)
+            .await
+            .route(
+                ClientCommand::SetProviderCredential {
+                    operation_id: 2,
+                    provider_id: "deepseek".into(),
+                    credential: ProviderCredentialSecretDto::new("sk-ds-round9".into()),
+                },
+                sink,
+            )
+            .await;
+
+        let published = availability.read().expect("availability lock").clone();
+        assert_eq!(
+            published.get("openrouter"),
+            Some(&true),
+            "the persistent Settings credential write must reach Fusion's \
+catalog refresher; a stale `false` here is what silently drops every \
+OpenRouter row from /fusion for the rest of the process: {published:?}"
+        );
+        assert_eq!(
+            published.get("deepseek"),
+            Some(&true),
+            "the packaged/brokered EPHEMERAL branch of the same arm must \
+refresh too — its key is never persisted, so only the write-side \
+notification can make it visible to Fusion: {published:?}"
         );
     }
 }

@@ -711,7 +711,48 @@ pub async fn run_panels(
             biased;
             () = inherit.cancel.cancelled() => {
                 join_set.abort_all();
-                while join_set.join_next().await.is_some() {}
+                // [Round-9 review item 1] The drain here used to be
+                // `while join_set.join_next().await.is_some() {}` — every
+                // task output bound to nothing. This arm is polled BEFORE
+                // `join_next_with_id()` below, so a panel that had already
+                // finished with real, provider-reported usage but had not
+                // yet been pulled into `collected` loses that race and was
+                // thrown away; the `sink.update` at the end of this arm then
+                // re-synthesized it through `in_flight_panels` at
+                // `estimate_in_flight_usage`'s prompt-length floor
+                // (`approximate_tokens_for_bytes(prompt.len())` input tokens
+                // and ZERO output tokens) instead of the tokens the provider
+                // had already billed — and that is the figure `run()`'s
+                // outer `Err` arm commits through `lease.commit`. Collect
+                // each drained payload exactly the way the completed arm
+                // below does instead.
+                //
+                // The refresh is INSIDE the loop, not once after it: if any
+                // remaining task is not already finished, this drain yields,
+                // and `run()`'s outer biased cancel arm (waiting on the SAME
+                // token) then drops `run_inner` — with this whole `select!`
+                // — before the `sink.update` at the end of this arm can run.
+                // Latching each real completion as it is drained is what
+                // survives that drop; the trailing update still covers the
+                // panels that are genuinely still in flight.
+                //
+                // `JoinError` slots stay discarded: they carry no usage, and
+                // synthesizing one here would REPLACE the in-flight floor a
+                // reached-but-never-allocated slot legitimately holds with
+                // an exact $0 that the abort itself does not prove (see
+                // `panel_from_join_error`'s `"not_dispatched"` arm and
+                // `in_flight_panels`' deliberate `reached_spawner`
+                // predicate).
+                while let Some(joined) = join_set.join_next_with_id().await {
+                    if let Ok((_id, (index, panel, spawn_prompt, elapsed, outcome))) = joined {
+                        let internal =
+                            finish_panel(index, panel, spawn_prompt, elapsed, outcome);
+                        collected.push((index, internal));
+                        if let Some(sink) = sink {
+                            sink.update(&collected, panels, &generic_prompt, &dispatch);
+                        }
+                    }
+                }
                 // [Round-5 rework of item 12] This arm is BIASED ABOVE the
                 // `dispatch.notified()` arm below, so when a panel task
                 // really reached the spawner (`dispatch.mark` ran, a
@@ -2577,6 +2618,238 @@ exists for panel 1"
             !dispatch.reached_spawner(1),
             "the allocation flag is separate from the reached-spawner flag; \
 mark_allocated must not silently set both"
+        );
+    }
+}
+
+/// [Round-9 review item 1] `run_panels`' biased `cancel.cancelled()` arm
+/// drains the `JoinSet` after `abort_all()`. That drain used to be
+/// `while join_set.join_next().await.is_some() {}` — every task output bound
+/// to nothing — so a panel that had ALREADY finished with real,
+/// provider-reported usage but had not yet been pulled into `collected` (the
+/// cancel arm is polled BEFORE `join_next_with_id()`, so a ready completion
+/// loses that race) was thrown away. The `sink.update` at the end of the same
+/// arm then re-synthesized it through [`in_flight_panels`] at the
+/// prompt-length floor — `approximate_tokens_for_bytes(prompt.len())` input
+/// tokens and ZERO output tokens — instead of the tokens the provider had
+/// already billed, and that is the figure the outer `run()` `Err` arm commits
+/// through `lease.commit`.
+///
+/// REACHABILITY (the narrowed claim these tests pin, not the wider one the
+/// finding opened with): `run()`'s own outer `select!` is `biased` on the
+/// SAME `CancellationToken` and, while `finalizing` is false — which it is
+/// for the whole panel stage — returns `Err(FusionError::Cancelled)` without
+/// awaiting the pinned `run_future`, dropping `run_inner` and this `select!`
+/// with it. So an ordinary Ctrl-C never reaches this arm at all. The arm runs
+/// only when the token flips while `run_inner` is being polled, and its
+/// `sink.update` is reached only when the drain finds every remaining task
+/// already finished, so it runs to `None` without yielding back to that outer
+/// select. That conjunction is exactly what the test below constructs, and it
+/// is the only state in which this discard changes the committed settlement.
+#[cfg(test)]
+mod cancel_drain_settlement_tests {
+    use super::*;
+    use crate::budget::ModelRates;
+    use crate::model_resolver::CatalogModel;
+    use async_trait::async_trait;
+    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
+    use platform_api::subagent_spawn::{SubagentInheritance, SubagentSpawnError};
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use tokio_util::sync::CancellationToken;
+
+    struct InertInvoker;
+    #[async_trait]
+    impl ToolInvoker for InertInvoker {
+        async fn invoke(
+            &self,
+            _name: &str,
+            _input: Value,
+            _ctx: SubagentInvocationContext,
+        ) -> Result<Value, ToolInvokerError> {
+            Ok(Value::Null)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    struct InertBudget;
+    #[async_trait]
+    impl BudgetEnforcerHandle for InertBudget {
+        async fn check_and_charge(&self, _nano_usd: u64) -> Result<(), BudgetError> {
+            Ok(())
+        }
+        async fn snapshot_total_nano_usd(&self) -> u64 {
+            0
+        }
+    }
+
+    /// 1 nano-USD per input and per output token, nothing else — so the
+    /// settlement figure below IS the token count, and a mis-priced panel is
+    /// readable directly off the assertion.
+    struct UnitPrices;
+    impl FusionPriceBook for UnitPrices {
+        fn rates_for(&self, _profile: &str, _model: &str) -> Option<ModelRates> {
+            Some(ModelRates {
+                input_nano_usd_per_token: 1,
+                output_nano_usd_per_token: 1,
+                per_request_nano_usd: 0,
+                cache_read_nano_usd_per_token: 0,
+                cache_write_nano_usd_per_token: 0,
+                reasoning_nano_usd_per_token: 0,
+                cache_write_rate_is_ttl_approximated: false,
+            })
+        }
+    }
+
+    const REAL_INPUT_TOKENS: u64 = 180_000;
+    const REAL_OUTPUT_TOKENS: u64 = 24_000;
+
+    /// The first panel to reach the spawner finishes with real,
+    /// provider-reported usage AND cancels the run from inside that same
+    /// call. On a current-thread runtime the collection loop is therefore
+    /// next polled with (a) the token already set and (b) that panel's
+    /// finished `PanelTaskOutput` sitting un-collected in the `JoinSet` —
+    /// the exact state in which the biased cancel arm wins the race against
+    /// `join_next_with_id()`. Every sibling is left to its own biased cancel
+    /// arm, so it too is finished by then and the drain never yields.
+    struct CompleteThenCancelSpawner {
+        cancel: CancellationToken,
+    }
+    #[async_trait]
+    impl SubagentSpawner for CompleteThenCancelSpawner {
+        async fn spawn(
+            &self,
+            _request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            self.cancel.cancel();
+            let usage = SubagentUsage {
+                total_tokens: REAL_INPUT_TOKENS + REAL_OUTPUT_TOKENS,
+                input_tokens: REAL_INPUT_TOKENS,
+                output_tokens: REAL_OUTPUT_TOKENS,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                reasoning_output_tokens: 0,
+            };
+            Ok(SubagentResult::Completed {
+                agent_id: protocol::AgentId::new(),
+                content: serde_json::json!({
+                    "schema_version": 1,
+                    "summary": "s",
+                    "candidate_answer": "a",
+                }),
+                usage: usage.clone(),
+                total_tool_use_count: 0,
+                total_duration_ms: 1,
+                total_tokens: REAL_INPUT_TOKENS + REAL_OUTPUT_TOKENS,
+                assistant_message_count: 3,
+                response_char_count: 1,
+                last_request_id: None,
+                cumulative_usage: usage,
+                usage_complete: true,
+            })
+        }
+    }
+
+    fn two_panels() -> Vec<ResolvedPanel> {
+        vec![
+            ResolvedPanel {
+                profile: "anthropic".into(),
+                model: "claude-sonnet-5".into(),
+            },
+            ResolvedPanel {
+                profile: "openai".into(),
+                model: "gpt-5.6-terra".into(),
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn cancel_drain_settles_a_finished_panel_from_its_real_usage_not_the_prompt_floor() {
+        let config = FusionRuntimeConfig {
+            panel_total_timeout_ms: 60_000,
+            ..FusionRuntimeConfig::defaults()
+        };
+        let cancel = CancellationToken::new();
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                tool_invoker: Arc::new(InertInvoker),
+                budget: Arc::new(InertBudget),
+            },
+            cancel.clone(),
+        );
+
+        let realized_tokens: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+        let resolved_egress: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
+        let settlement: Arc<Mutex<Option<(u64, bool)>>> = Arc::new(Mutex::new(None));
+        let catalog: Vec<CatalogModel> = Vec::new();
+        let prices = UnitPrices;
+        let analyst = ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        };
+        let sink = RealizedSpendSink {
+            realized_tokens: &realized_tokens,
+            resolved_egress: &resolved_egress,
+            settlement: &settlement,
+            catalog: &catalog,
+            prices: &prices,
+            analyst: &analyst,
+            parent_profile: "anthropic",
+            parent_model: "claude-sonnet-5",
+            request_prompt: "task",
+        };
+
+        let panels = two_panels();
+        let err = run_panels(
+            Arc::new(CompleteThenCancelSpawner {
+                cancel: cancel.clone(),
+            }),
+            &inherit,
+            &config,
+            true,
+            "task",
+            &panels,
+            "run-id",
+            Duration::from_secs(60),
+            &None,
+            Some(&sink),
+        )
+        .await
+        .expect_err("the spawner cancels the run from inside, so this must be Cancelled");
+        assert_eq!(err, FusionError::Cancelled);
+
+        // What the discard used to leave behind, spelled out so the red run
+        // names it: the finished panel re-synthesized at the in-flight floor.
+        let floor_input_tokens = llm_client::model::count_tokens::approximate_tokens_for_bytes(
+            panel_prompt("task").len() as u64,
+        );
+
+        let observed_output = *realized_tokens
+            .lock()
+            .expect("realized_tokens cell must not be poisoned");
+        assert_eq!(
+            observed_output,
+            Some(REAL_OUTPUT_TOKENS),
+            "the cancel arm drained a panel that had already finished with \
+{REAL_OUTPUT_TOKENS} provider-reported output tokens; discarding that payload leaves the \
+realized-token cell at the in-flight floor's 0 output tokens, so the workflow token charge \
+under-counts real, already-billed spend"
+        );
+
+        let observed_settlement = *settlement
+            .lock()
+            .expect("settlement cell must not be poisoned");
+        let (priced_nano_usd, _estimated) =
+            observed_settlement.expect("the cancel arm must leave a settlement figure");
+        assert_eq!(
+            priced_nano_usd,
+            REAL_INPUT_TOKENS + REAL_OUTPUT_TOKENS,
+            "at 1 nano-USD/token the committed settlement must be the finished panel's real \
+{REAL_INPUT_TOKENS} input + {REAL_OUTPUT_TOKENS} output tokens; the discarded drain instead \
+prices it through in_flight_panels at estimate_in_flight_usage's {floor_input_tokens} input \
+tokens and 0 output tokens"
         );
     }
 }

@@ -1090,6 +1090,16 @@ pub async fn assemble_with_provider_keys(
             .credentials
             .set_provider_key_ephemeral(provider_id, secret)
             .await;
+        // Round 9, item 2's class sweep: these parent-supplied keys are seeded
+        // AFTER `build` already computed the boot `provider_availability` map
+        // and registered the process-wide `FusionCatalogRefresher`, so without
+        // this call Fusion's `FusionCatalogModelSource::list()` keeps filtering
+        // against a map in which the parent-supplied profile is absent/false --
+        // its rows are dropped for the whole engine process even though `/model`
+        // and the turn loop route it. An ephemeral key is never persisted and so
+        // can never be re-probed; `refresh_after_credential_write` force-marks
+        // the named profile available, which is the only correct answer here.
+        engine_desktop::refresh_fusion_catalog_after_credential_write(provider_id).await;
     }
 
     // The parent-source fact is authoritative for packaged Electron sessions.

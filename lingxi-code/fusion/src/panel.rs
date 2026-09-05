@@ -297,6 +297,20 @@ impl PanelDispatch {
             .is_some_and(|flag| flag.load(Ordering::SeqCst))
     }
 
+    /// [Round-12 finding [3]] How many panels the spawner has provably
+    /// allocated a child for so far — the count published on the progress
+    /// channel as `FusionProgress::panels_allocated`.
+    ///
+    /// Monotonically non-decreasing within a run (`mark_allocated` only ever
+    /// sets flags), which is what lets a consumer take the max over the
+    /// events it happens to see rather than needing the last one.
+    fn allocated_count(&self) -> usize {
+        self.allocated
+            .iter()
+            .filter(|flag| flag.load(Ordering::SeqCst))
+            .count()
+    }
+
     fn any_reached_spawner(&self) -> bool {
         self.reached.iter().any(|flag| flag.load(Ordering::SeqCst))
     }
@@ -824,7 +838,7 @@ pub async fn run_panels(
                         // before the stage starts) so the longest stage of a
                         // run — up to `panel_total_timeout_ms` per panel — has
                         // visible progress instead of a single stalled event.
-                        emit_running_panels(progress, index, collected.len(), total);
+                        emit_running_panels(progress, index, collected.len(), total, dispatch.allocated_count());
                     }
                     Some(Err(join_err)) => {
                         if let Some((index, internal)) = panel_from_join_error(
@@ -843,7 +857,7 @@ pub async fn run_panels(
                             if let Some(sink) = sink {
                                 sink.update(&collected, panels, &generic_prompt, &dispatch);
                             }
-                            emit_running_panels(progress, index, collected.len(), total);
+                            emit_running_panels(progress, index, collected.len(), total, dispatch.allocated_count());
                         }
                     }
                     None => break,
@@ -929,11 +943,21 @@ fn panel_from_join_error(
 /// call site in [`run_panels`] for why this must be distinct from both the
 /// pre-spawn `RunningPanels{completed:0,..}` event and the post-completion
 /// `RunningPanels{completed>0,..}` events [`emit_running_panels`] sends).
-fn emit_panels_dispatched(progress: &Option<Sender<FusionProgress>>, total: usize) {
+fn emit_panels_dispatched(
+    progress: &Option<Sender<FusionProgress>>,
+    total: usize,
+    allocated: usize,
+) {
     let stage = FusionStage::PanelsDispatched {
         total: u8::try_from(total).unwrap_or(u8::MAX),
     };
-    progress::emit(progress, stage.clone(), None, stage.label());
+    progress::emit_with_allocated(
+        progress,
+        stage.clone(),
+        None,
+        stage.label(),
+        u8::try_from(allocated).unwrap_or(u8::MAX),
+    );
 }
 
 /// [Round-5 rework of item 12] The one-shot `PanelsDispatched` emit shared
@@ -968,7 +992,7 @@ fn emit_panels_dispatched_once(
         return;
     }
     *emitted = true;
-    emit_panels_dispatched(progress, total);
+    emit_panels_dispatched(progress, total, dispatch.allocated_count());
 }
 
 fn emit_running_panels(
@@ -976,16 +1000,23 @@ fn emit_running_panels(
     finished_index: usize,
     completed: usize,
     total: usize,
+    // [Round-12 finding [3]] Threaded in rather than recomputed here so both
+    // panel-stage emitters publish the SAME allocation truth from the SAME
+    // cell; the last of these events (`completed == total`) is emitted after
+    // every panel has finished, hence after every allocation, so a consumer
+    // taking the max over the run ends up with the final allocated count.
+    allocated: usize,
 ) {
     let stage = FusionStage::RunningPanels {
         completed: u8::try_from(completed).unwrap_or(u8::MAX),
         total: u8::try_from(total).unwrap_or(u8::MAX),
     };
-    progress::emit(
+    progress::emit_with_allocated(
         progress,
         stage.clone(),
         Some(format!("p{}", finished_index + 1)),
         stage.label(),
+        u8::try_from(allocated).unwrap_or(u8::MAX),
     );
 }
 
@@ -2385,6 +2416,124 @@ emitted — got {stages:?}"
         ) -> Result<SubagentResult, SubagentSpawnError> {
             Err(SubagentSpawnError::Runtime("probe".into()))
         }
+    }
+
+    /// [Round-12 finding [3]] The panel stage must PUBLISH how many panels
+    /// the spawner allocated a child for, not only how many were resolved.
+    ///
+    /// Both numbers exist inside `PanelDispatch` and only one of them used
+    /// to cross the progress channel, so `tools/agent`'s `Err`/drop spawn
+    /// accounting had nothing but the resolved `total` to charge by — and
+    /// charged panels the spawner had rejected pre-allocation, which its
+    /// `Ok` arm filters out. Here panel 0 is allocated and panel 1 is
+    /// rejected before allocation, so every event must carry
+    /// `panels_allocated: Some(1)` against `total: 2`.
+    #[tokio::test]
+    async fn panel_progress_publishes_the_allocated_count_not_just_the_resolved_total() {
+        /// Allocates a child for panel index 0 only (it is the panel whose
+        /// request carries the `anthropic` profile — panels are spawned in
+        /// order, so the FIRST call is index 0), and rejects the second.
+        struct AllocatesOnlyTheFirstPanelSpawner {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait]
+        impl SubagentSpawner for AllocatesOnlyTheFirstPanelSpawner {
+            async fn spawn(
+                &self,
+                _request: SubagentSpawnRequest,
+                _inherit: SubagentInheritance,
+            ) -> Result<SubagentResult, SubagentSpawnError> {
+                unreachable!("run_panels always goes through spawn_workflow_with_observer")
+            }
+
+            async fn spawn_with_observer(
+                &self,
+                _request: SubagentSpawnRequest,
+                _inherit: SubagentInheritance,
+                _progress: Option<tokio::sync::mpsc::Sender<String>>,
+                observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+            ) -> Result<SubagentResult, SubagentSpawnError> {
+                let nth = self
+                    .calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if nth == 0 {
+                    if let Some(observer) = observer {
+                        observer
+                            .on_event(
+                                platform_api::subagent_spawn::SubagentObservation::Allocated {
+                                    agent_id: protocol::AgentId::new(),
+                                    agent_type: FUSION_PANEL_TYPE.to_string(),
+                                    name: None,
+                                    model: "claude-sonnet-5".into(),
+                                    model_profile: Some("anthropic".into()),
+                                    persistent: false,
+                                    initial_message_index: 0,
+                                },
+                            )
+                            .await;
+                    }
+                }
+                Err(SubagentSpawnError::Runtime("probe".into()))
+            }
+        }
+
+        let config = FusionRuntimeConfig {
+            panel_total_timeout_ms: 60_000,
+            ..FusionRuntimeConfig::defaults()
+        };
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                tool_invoker: Arc::new(InertInvoker),
+                budget: Arc::new(InertBudget),
+            },
+            CancellationToken::new(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<FusionProgress>(16);
+        let progress = Some(tx);
+        let _ = run_panels(
+            Arc::new(AllocatesOnlyTheFirstPanelSpawner {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            &inherit,
+            &config,
+            true,
+            "task",
+            &two_panels(),
+            "run-id",
+            Duration::from_secs(60),
+            &progress,
+            None,
+        )
+        .await;
+        drop(progress);
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        let dispatched = events
+            .iter()
+            .find(|event| matches!(event.stage, FusionStage::PanelsDispatched { total: 2 }))
+            .expect("both panels reached the spawner, so PanelsDispatched{total:2} must be emitted");
+        assert_eq!(
+            dispatched.panels_allocated,
+            Some(1),
+            "PanelsDispatched must publish the SPAWNER-allocated count (1), not the resolved \
+total (2) and not None — None is read downstream as \"no figure published\" and falls back \
+to charging the resolved total: {:?}",
+            dispatched
+        );
+        let last_running = events
+            .iter()
+            .rev()
+            .find(|event| matches!(event.stage, FusionStage::RunningPanels { .. }))
+            .expect("each finished panel emits a RunningPanels event");
+        assert_eq!(
+            last_running.panels_allocated,
+            Some(1),
+            "the per-completion RunningPanels events must carry the same allocation truth — \
+the consumer takes a max over every event it sees: {last_running:?}"
+        );
     }
 
     /// [Round-5 rework of item 12, class sweep] The other two exits of the

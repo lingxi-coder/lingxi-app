@@ -3107,6 +3107,28 @@ impl CommandRouter for EngineCommandRouter {
                 })
                 .await;
             }
+            // Round-12 finding [2]: a credential DELETE must tell Fusion's
+            // catalog filter, and it must NOT do so through the sibling `Set`
+            // arm's `crate::boot::refresh_fusion_catalog_bounded` one screen
+            // up — that routes to
+            // `FusionCatalogRefresher::refresh_after_credential_write`, whose
+            // `forced` loop publishes `true` for the named profile, i.e. the
+            // exact opposite of what a delete means. The refresher's merge
+            // rule is additive by design and can never lower a `true`
+            // (`refresh_inner`: `if row.available { insert(true) } else {
+            // entry(..).or_insert(false) }`), so a re-probe cannot close this
+            // either. Hence the dedicated removal fan-out
+            // `engine_desktop::refresh_fusion_catalog_after_credential_delete`
+            // below. Without it a provider whose key was deleted mid-session
+            // survived `filter_fusion_catalog`, could be auto-selected as a
+            // `/fusion` panel, had budget reserved for it, and died on
+            // `LlmError::Authentication` at request time instead of being
+            // excluded by the §4 preflight. BOTH branches need it — the
+            // persistent keychain delete and the packaged/brokered ephemeral
+            // one, whose key never touched the keychain at all and so could
+            // never be re-probed away even in principle. Unlike the write
+            // path this needs no budget wrapper: `mark_credential_removed` is
+            // a lock-and-set with no credential-backend I/O.
             ClientCommand::DeleteProviderCredential {
                 operation_id,
                 provider_id,
@@ -3132,6 +3154,10 @@ impl CommandRouter for EngineCommandRouter {
                     Some("provider credential storage is unavailable".to_string())
                 };
                 let applied = error.is_none();
+                if applied {
+                    engine_desktop::refresh_fusion_catalog_after_credential_delete(&provider_id)
+                        .await;
+                }
                 sink.emit(ClientEvent::ProviderCredentialStatus {
                     operation_id,
                     configured_provider_ids: Vec::new(),
@@ -3446,6 +3472,18 @@ impl CommandRouter for EngineCommandRouter {
                 };
                 sink.emit(ClientEvent::AuthState { state }).await;
             }
+            // Round-12 finding [2], class member the finding itself did not
+            // name: signing OUT is a credential removal too, and
+            // `refresh_inner`'s closing `guard.entry("anthropic")
+            // .or_insert(..)` is an `or_insert`, so an `anthropic: true` that
+            // a sign-in published survives a sign-out for the life of the
+            // process. Deliberately NOT fixed with a call here: `self.auth`
+            // is the SAME `Arc<dyn AuthHandle>` the TUI's `/logout`
+            // (`command_core::LogoutHandler`) drives, so the clearing lives
+            // in `engine_desktop::FusionCatalogClearingAuth`, which wraps
+            // that one handle for every sign-out surface in the process at
+            // once. Adding a second call here would double-fire the same
+            // fan-out and let the two mechanisms drift.
             ClientCommand::Logout => {
                 if let Err(e) = self.auth.logout().await {
                     sink.emit(ClientEvent::Error {
@@ -4253,6 +4291,122 @@ here stops the client's interrupts and permission replies from being read"
             reads.load(std::sync::atomic::Ordering::SeqCst) >= 1,
             "the refresh must actually have reached the credential backend — with \
 zero reads this test would pass without exercising the stall at all"
+        );
+    }
+
+    /// Round-12 finding [2]: the DELETE half of the same Settings surface.
+    ///
+    /// `MultiCredentialProvider` reads `CredentialManager` per call, so the
+    /// ordinary turn loop stops routing a deleted provider immediately — but
+    /// `FusionCatalogModelSource::list()` keeps re-filtering against the
+    /// shared availability map, which nothing ever LOWERS. A provider whose
+    /// key was deleted mid-session therefore keeps every one of its catalog
+    /// rows, gets auto-selected as a `/fusion` panel, has budget reserved for
+    /// it, and dies on `LlmError::Authentication` at request time instead of
+    /// being excluded by the §4 preflight.
+    ///
+    /// Both branches of the arm — persistent keychain delete and the
+    /// packaged/brokered ephemeral one — must clear the entry.
+    #[tokio::test]
+    async fn deleting_a_provider_credential_clears_it_from_the_fusion_catalog() {
+        let _registry = crate::boot::fusion_refresh_test_support::REGISTRY_LOCK
+            .lock()
+            .await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(
+            PlainTextSecureStorage::new(temp.path().join("credentials"))
+                .await
+                .expect("storage"),
+        );
+        let credentials = Arc::new(secret::CredentialManager::new(
+            storage,
+            Arc::new(PosixClock::new()),
+            Arc::new(PosixHttp::new()),
+        ));
+
+        let availability = Arc::new(std::sync::RwLock::new(
+            [
+                ("openrouter".to_string(), false),
+                ("deepseek".to_string(), false),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        engine_desktop::register_fusion_catalog_refresher(
+            engine_desktop::FusionCatalogRefresher::for_keychain_profiles(
+                availability.clone(),
+                credentials.clone(),
+                &["openrouter", "deepseek"],
+            ),
+        );
+
+        let sink: Arc<dyn ClientEventSink> = Arc::new(SilentSink);
+        // Boot state: both providers credentialed and published as available.
+        router_with_credentials(credentials.clone(), false)
+            .await
+            .route(
+                ClientCommand::SetProviderCredential {
+                    operation_id: 1,
+                    provider_id: "openrouter".into(),
+                    credential: ProviderCredentialSecretDto::new("sk-or-round12".into()),
+                },
+                sink.clone(),
+            )
+            .await;
+        router_with_credentials(credentials.clone(), true)
+            .await
+            .route(
+                ClientCommand::SetProviderCredential {
+                    operation_id: 2,
+                    provider_id: "deepseek".into(),
+                    credential: ProviderCredentialSecretDto::new("sk-ds-round12".into()),
+                },
+                sink.clone(),
+            )
+            .await;
+        let seeded = availability.read().expect("availability lock").clone();
+        assert_eq!(
+            (seeded.get("openrouter"), seeded.get("deepseek")),
+            (Some(&true), Some(&true)),
+            "precondition: both writes must have published `true`, otherwise the \
+delete assertions below would pass without exercising anything: {seeded:?}"
+        );
+
+        router_with_credentials(credentials.clone(), false)
+            .await
+            .route(
+                ClientCommand::DeleteProviderCredential {
+                    operation_id: 3,
+                    provider_id: "openrouter".into(),
+                },
+                sink.clone(),
+            )
+            .await;
+        router_with_credentials(credentials, true)
+            .await
+            .route(
+                ClientCommand::DeleteProviderCredential {
+                    operation_id: 4,
+                    provider_id: "deepseek".into(),
+                },
+                sink,
+            )
+            .await;
+
+        let published = availability.read().expect("availability lock").clone();
+        assert_eq!(
+            published.get("openrouter"),
+            Some(&false),
+            "the persistent Settings credential DELETE must clear Fusion's \
+availability entry; a stale `true` here is what lets /fusion auto-select \
+openrouter and burn a panel slot on LlmError::Authentication: {published:?}"
+        );
+        assert_eq!(
+            published.get("deepseek"),
+            Some(&false),
+            "the packaged/brokered EPHEMERAL branch of the same arm must clear \
+too — its key never touched the keychain, so only the delete-side \
+notification can lower the entry: {published:?}"
         );
     }
 }

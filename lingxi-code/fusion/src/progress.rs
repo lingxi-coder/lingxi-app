@@ -21,6 +21,35 @@ pub fn emit(
             message: message.into(),
             realized_output_tokens: None,
             egress_profiles: None,
+            panels_allocated: None,
+        });
+    }
+}
+
+/// [Round-12 finding [3]] Same as [`emit`], but publishes how many panels the
+/// SPAWNER has provably allocated a child for so far.
+///
+/// Only the two panel-stage emitters have that number
+/// (`panel::PanelDispatch::allocated_count`), and only they may send it: on
+/// every other event `panels_allocated` stays `None`, which consumers read as
+/// "no figure published" rather than "zero allocated". See
+/// [`platform_api::FusionProgress::panels_allocated`] for why the resolved
+/// `total` on the stage cannot answer the same question.
+pub fn emit_with_allocated(
+    progress: &Option<Sender<FusionProgress>>,
+    stage: FusionStage,
+    panel_id: Option<String>,
+    message: impl Into<String>,
+    panels_allocated: u8,
+) {
+    if let Some(tx) = progress {
+        let _ = tx.try_send(FusionProgress {
+            stage,
+            panel_id,
+            message: message.into(),
+            realized_output_tokens: None,
+            egress_profiles: None,
+            panels_allocated: Some(panels_allocated),
         });
     }
 }
@@ -47,6 +76,7 @@ pub fn emit_with_realized_tokens(
             message: message.into(),
             realized_output_tokens: Some(realized_output_tokens),
             egress_profiles,
+            panels_allocated: None,
         });
     }
 }

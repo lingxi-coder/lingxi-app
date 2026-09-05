@@ -3130,6 +3130,227 @@ fn needs_parent_text_bounds_an_analyst_authored_consensus_section() {
     );
 }
 
+/// [Round 12 finding 1] The 32 KiB whole-string backstop was a TAIL cut
+/// applied AFTER the closing directive was pushed, so the two things it
+/// dropped first were (a) the `"Next: ..."` instruction, always, and (b) the
+/// tail of the paid panel material. `PanelOutcome` (platform-api/src/fusion.rs
+/// :471-490) carries no report text, so material evicted here has no other
+/// route to the parent.
+///
+/// Deterministic trigger the config supports: `FUSION_MAX_PANEL = 8` panels
+/// each pushing `summary` and `candidate_answer` past their 4096-byte
+/// per-field caps. The panel block alone renders ~66 KB, so a single tail cut
+/// at 32 KiB drops roughly half the panels outright plus the directive.
+/// Assert the composition, not just the size: every panel's `anonymous_id`
+/// row must survive, and the text must END with the closing directive.
+#[test]
+fn needs_parent_text_keeps_every_panel_row_and_the_closing_line_at_max_panels() {
+    let panels: Vec<crate::panel::PanelInternal> = (0..8)
+        .map(|i| {
+            let mut oversized = report("x");
+            oversized.summary = "S".repeat(20_000);
+            oversized.candidate_answer = "A".repeat(20_000);
+            crate::panel::PanelInternal {
+                index: i,
+                profile: String::new(),
+                model: String::new(),
+                anonymous_id: format!("P{}", i + 1),
+                status: PanelRunStatus::Completed,
+                report: Some(oversized),
+                duration_ms: 0,
+                error_category: None,
+                error_detail: None,
+                usage: None,
+                spawn_prompt: String::new(),
+            }
+        })
+        .collect();
+    let text = crate::orchestrator::needs_parent_text(&panels, "test reason", None);
+    for i in 0..8 {
+        let id = format!("P{}", i + 1);
+        assert!(
+            text.contains(&format!("- {id}: ")),
+            "panel {id}'s row was evicted by the whole-string tail cut -- \
+             8 panels at the per-field caps render ~66 KB and the single \
+             32 KiB tail cut drops the later panels entirely. Rendered {} \
+             bytes:\n{}",
+            text.len(),
+            text
+        );
+    }
+    assert!(
+        text.ends_with("Next: review the panel material above and provide the final answer yourself."),
+        "the closing directive was pushed BEFORE the whole-string tail cut, \
+         so it is the first casualty -- rendered text ends with: {:?}",
+        &text[text.len().saturating_sub(120)..]
+    );
+    assert!(
+        text.len() <= 33_024,
+        "the split budgets must still keep the whole render bounded -- \
+         rendered {} bytes",
+        text.len()
+    );
+}
+
+/// [Round 12 finding 1, composition half] The analyst-authored sections
+/// (`consensus` / `contradictions` / `coverage_gaps`, rendered ahead of the
+/// panel loop with no cap of their own) consumed the ENTIRE 32 KiB budget
+/// before any panel material, so one large analyst section evicted 100% of
+/// the paid panel rows plus the closing directive, leaving the parent a blob
+/// of analyst prose with neither. Sibling of
+/// `needs_parent_text_bounds_an_analyst_authored_consensus_section`, which
+/// asserts only `text.len() < 40_000` and is BLIND to this: in that very
+/// scenario the panel row and the "Next:" line are both already gone.
+#[test]
+fn needs_parent_text_keeps_panel_rows_and_the_closing_line_under_a_huge_analyst_section() {
+    let panels = vec![crate::panel::PanelInternal {
+        index: 0,
+        profile: String::new(),
+        model: String::new(),
+        anonymous_id: "P1".into(),
+        status: PanelRunStatus::Completed,
+        report: Some(report("short-candidate")),
+        duration_ms: 0,
+        error_category: None,
+        error_detail: None,
+        usage: None,
+        spawn_prompt: String::new(),
+    }];
+    let analysis = FusionAnalysis {
+        schema_version: 1,
+        consensus: vec!["C".repeat(100_000)],
+        contradictions: vec![],
+        unique_insights: vec![],
+        coverage_gaps: vec![],
+        scores: Default::default(),
+        confidence: 50,
+        recommendation: FusionRecommendation::NeedsParent {
+            reason: "test reason".into(),
+        },
+    };
+    let text = crate::orchestrator::needs_parent_text(&panels, "test reason", Some(&analysis));
+    assert!(
+        text.contains("- P1: "),
+        "a 100 KB analyst consensus item evicted the paid panel material \
+         entirely -- the analyst block is rendered ahead of the panel loop \
+         and the two shared one tail-cut budget. Rendered {} bytes",
+        text.len()
+    );
+    assert!(
+        text.contains("short-candidate"),
+        "P1's candidate answer was evicted by the analyst prose -- \
+         PanelOutcome carries no report text, so this material has no other \
+         route to the parent. Rendered {} bytes",
+        text.len()
+    );
+    assert!(
+        text.ends_with("Next: review the panel material above and provide the final answer yourself."),
+        "the closing directive was cut away by the whole-string tail cut -- \
+         rendered text ends with: {:?}",
+        &text[text.len().saturating_sub(120)..]
+    );
+}
+
+/// [Round 12 finding 1, class sweep] The THIRD uncapped model-authored sink
+/// in this renderer, and the one rendered FIRST: the `reason` string.
+/// `FusionNeedsParentReason::AnalystRequested { reason }` carries the
+/// analyst's own prose (`orchestrator::reason_line`), which
+/// `analyst::sanitize_analysis` guards for control tags but never
+/// length-caps, and `orchestrator.rs:1156` feeds it straight into the header
+/// line. Being first, an oversized reason starves everything after it: the
+/// analyst block, every paid panel row, and the closing directive.
+#[test]
+fn needs_parent_text_keeps_panel_material_under_an_uncapped_analyst_authored_reason() {
+    let panels = vec![crate::panel::PanelInternal {
+        index: 0,
+        profile: String::new(),
+        model: String::new(),
+        anonymous_id: "P1".into(),
+        status: PanelRunStatus::Completed,
+        report: Some(report("short-candidate")),
+        duration_ms: 0,
+        error_category: None,
+        error_detail: None,
+        usage: None,
+        spawn_prompt: String::new(),
+    }];
+    let text = crate::orchestrator::needs_parent_text(&panels, &"R".repeat(100_000), None);
+    assert!(
+        text.contains("- P1: "),
+        "a 100 KB analyst-authored reason evicted the paid panel row -- the \
+         header is rendered before everything else and the reason inside it \
+         has no cap of its own. Rendered {} bytes",
+        text.len()
+    );
+    assert!(
+        text.contains("short-candidate"),
+        "P1's candidate answer was evicted by the oversized reason -- \
+         PanelOutcome carries no report text, so it has no other route to \
+         the parent. Rendered {} bytes",
+        text.len()
+    );
+    assert!(
+        text.ends_with(
+            "Next: review the panel material above and provide the final answer yourself."
+        ),
+        "the closing directive did not survive an oversized reason -- \
+         rendered text ends with: {:?}",
+        &text[text.len().saturating_sub(120)..]
+    );
+    assert!(
+        text.len() <= 33_024,
+        "the reason cap must still keep the whole render bounded -- rendered \
+         {} bytes",
+        text.len()
+    );
+}
+
+/// [Round 12 finding 1, ordering invariant] Pins the ORDER, independently of
+/// any one section's budget: the closing directive is appended AFTER the
+/// whole-body backstop, so NO body overflow can drop it. Exercised through
+/// the one sink the split budgets deliberately leave unbudgeted — the panel
+/// `anonymous_id` rows, which are emitted unconditionally because a row is
+/// the identity of a panel the run already paid for. Enough rows overflow
+/// `NEEDS_PARENT_TEXT_BYTE_CAP` on their own and make the backstop fire.
+///
+/// This is the assertion that goes RED under the pre-fix shape (push the
+/// directive into `lines`, then tail-cut the join): the text then ends in
+/// `…` mid-row.
+#[test]
+fn needs_parent_text_appends_the_closing_line_after_the_whole_body_backstop() {
+    let panels: Vec<crate::panel::PanelInternal> = (0..3_000)
+        .map(|i| crate::panel::PanelInternal {
+            index: i,
+            profile: String::new(),
+            model: String::new(),
+            anonymous_id: format!("P{i:05}"),
+            status: PanelRunStatus::Completed,
+            report: None,
+            duration_ms: 0,
+            error_category: None,
+            error_detail: None,
+            usage: None,
+            spawn_prompt: String::new(),
+        })
+        .collect();
+    let text = crate::orchestrator::needs_parent_text(&panels, "test reason", None);
+    assert!(
+        text.len() > 32 * 1024,
+        "the fixture must actually cross the whole-body backstop for this \
+         test to mean anything -- rendered only {} bytes",
+        text.len()
+    );
+    assert!(
+        text.ends_with(
+            "Next: review the panel material above and provide the final answer yourself."
+        ),
+        "the closing directive must be appended AFTER the whole-body \
+         backstop, so a body that overflows cannot cut it -- rendered text \
+         ends with: {:?}",
+        &text[text.len().saturating_sub(120)..]
+    );
+}
+
 /// F004: the total deadline is now enforced INSIDE each stage (bounded by
 /// what remains of `total_timeout_ms`), not just by wrapping the whole
 /// `run_inner` — so panels that all completed, followed by a hanging analyst,

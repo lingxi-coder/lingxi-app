@@ -405,13 +405,63 @@ pub const APPEND_SUBAGENT_PROMPT_VALUE_ENV: &str = "LINGXI_APPEND_SUBAGENT_SYSTE
 /// (`tools/agent/src/agent.rs`'s private `FUSION_AGENT_TYPE`, `"fusion"`).
 /// That crate's `call` intercepts any `subagent_type` normalizing to this
 /// name into a multi-model panel BEFORE its catalog lookup ever runs, so a
-/// disk agent claiming the literal name `fusion` can never be dispatched by
+/// disk agent whose name normalizes to `fusion` can never be dispatched by
 /// any spelling. Kept as a plain literal here (rather than importing the
-/// constant) because `tools/agent` depends on this crate, not the other way
-/// around. [Finding 25]: `lookup_definition` and `agent_listing_entries`
+/// constant) because the two crates are siblings — neither depends on the
+/// other. [Finding 25]: `lookup_definition` and `agent_listing_entries`
 /// both drop a catalog entry under this name so it is neither resolvable
 /// nor advertised as if it were.
 const FUSION_RESERVED_AGENT_TYPE: &str = "fusion";
+
+/// Unicode `Pd` (dash punctuation) — the exact set `tools/agent`'s
+/// `is_pd_dash` (agent.rs) enumerates, mirrored here because the two crates
+/// are siblings with no dependency edge between them. Keep the two lists
+/// byte-identical: they define which spellings the reserved-name guard and
+/// the Fusion intercept agree on.
+fn is_reserved_name_pd_dash(c: char) -> bool {
+    matches!(
+        c,
+        '-' | '\u{058A}' | '\u{05BE}' | '\u{1400}' | '\u{1806}' | '\u{2010}'
+            ..='\u{2015}'
+                | '\u{2E17}'
+                | '\u{2E1A}'
+                | '\u{2E3A}'
+                | '\u{2E3B}'
+                | '\u{2E40}'
+                | '\u{301C}'
+                | '\u{3030}'
+                | '\u{30A0}'
+                | '\u{FE31}'
+                | '\u{FE32}'
+                | '\u{FE58}'
+                | '\u{FE63}'
+                | '\u{FF0D}'
+    )
+}
+
+/// [Round-12 finding 6] Whether `agent_type` names the reserved Fusion
+/// surface — under the SAME normalization `tools/agent`'s `call` intercept
+/// applies (`normalize_agent_type`: lowercase, then strip every whitespace
+/// char, `_`, and Unicode-Pd dash), not a byte-for-byte compare against the
+/// literal.
+///
+/// The intercept fires for `Fusion`, `FUSION`, `fu-sion`, `fu_sion`,
+/// `fusion-`, … so the reserved-name guards in this crate must cover exactly
+/// that set: a literal-only compare let a disk agent named `Fusion` stay in
+/// the Agent listing and stay resolvable here, while every dispatch of that
+/// name was silently turned into a Fusion panel run — one name meaning two
+/// different agents depending on the entry point.
+///
+/// Names that merely CONTAIN `fusion` are unaffected: `fusion-agent`
+/// normalizes to `fusionagent`, `confusion` to `confusion`.
+#[must_use]
+pub fn normalizes_to_fusion(agent_type: &str) -> bool {
+    agent_type
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|c| !(c.is_whitespace() || *c == '_' || is_reserved_name_pd_dash(*c)))
+        .eq(FUSION_RESERVED_AGENT_TYPE.chars())
+}
 
 /// (CLI-15) The operator-supplied suffix appended to every Task-tool subagent's
 /// system prompt, or `None` when the flag was not passed or its gate is off.
@@ -1147,23 +1197,28 @@ impl PoolSubagentSpawner {
         // 0c. [Finding 25] `fusion` is reserved for the Fusion Agent surface:
         // tools/agent's `call` intercepts any subagent_type normalizing to
         // `fusion` into a multi-model panel BEFORE the catalog lookup, so a
-        // disk agent claiming this literal name can never be dispatched by
+        // disk agent whose name normalizes to it can never be dispatched by
         // any spelling. Drop it here too — for any caller that resolves a
         // definition directly instead of going through that intercept — by
         // falling through past the catalog to the same general-purpose
         // fallback a wholly unknown type gets, matching the fork /
         // fusion-panel precedent of never letting a user file shadow the
-        // reserved name.
-        if subagent_type == FUSION_RESERVED_AGENT_TYPE {
+        // reserved name. [Round-12 finding 6] The predicate is the shared
+        // NORMALIZED one, not a literal compare: the intercept covers
+        // `Fusion` / `fu-sion` / `fusion-` too, and a narrower guard here
+        // made one name resolve to two different agents.
+        if normalizes_to_fusion(subagent_type) {
             if let Some(catalog) = self.agent_catalog.get() {
-                if catalog
+                if let Some(shadow) = catalog
                     .read()
                     .await
                     .iter()
-                    .any(|d| d.agent_type == subagent_type)
+                    .find(|d| normalizes_to_fusion(&d.agent_type))
                 {
                     tracing::warn!(
-                        "a disk agent is named `fusion`, which is reserved for \
+                        agent_type = %shadow.agent_type,
+                        "a disk agent is named `fusion` (under the Fusion \
+                         intercept's normalization), which is reserved for \
                          the Fusion Agent surface and can never be dispatched; \
                          rename it so it is not silently unreachable"
                     );
@@ -2086,8 +2141,13 @@ pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEnt
         // `call` intercepts the name into the multi-model panel before any
         // catalog lookup runs. Drop it from the listing rather than show the
         // model an entry point that always resolves to something else.
-        if def.agent_type == FUSION_RESERVED_AGENT_TYPE {
+        // [Round-12 finding 6] Same NORMALIZED predicate the intercept uses,
+        // so `Fusion` / `fu-sion` / `fusion-` are dropped as well — a
+        // literal-only compare advertised those with the user's own
+        // `when_to_use` while every dispatch became a Fusion run.
+        if normalizes_to_fusion(&def.agent_type) {
             tracing::warn!(
+                agent_type = %def.agent_type,
                 "dropping a disk agent named `fusion` from the Agent listing: \
                  the name is reserved for the Fusion Agent surface"
             );
@@ -6208,6 +6268,69 @@ mod tests {
         assert_eq!(def.agent_type, "general-purpose");
     }
 
+    /// [Round-12 finding 6] The reserved-name guard must cover the SAME set of
+    /// spellings `tools/agent`'s `call` intercept covers. That intercept fires
+    /// on `normalize_agent_type(subagent_type) == "fusion"` (lowercase, then
+    /// strip whitespace / `_` / Unicode-Pd dashes), so `Fusion`, `FUSION`,
+    /// `fu-sion`, `fu_sion` and `fusion-` are ALL routed to the Fusion panel.
+    /// A catalog shadow under any of those names must therefore be dropped
+    /// here too — otherwise one name resolves to the disk agent on the direct
+    /// path and to a Fusion run through the Agent tool.
+    #[tokio::test]
+    async fn lookup_definition_drops_catalog_shadow_in_every_fusion_spelling() {
+        for spelling in [
+            "Fusion",
+            "FUSION",
+            "fu-sion",
+            "fu_sion",
+            "fusion-",
+            "Fu\u{2010}sion",
+        ] {
+            let runtime = Arc::new(MockRuntimeSpawner::default());
+            let pool = Arc::new(StateMachinePool::new(runtime, 4));
+            let shadow = AgentDefinition {
+                agent_type: spelling.to_string(),
+                when_to_use: "user shadow".to_string(),
+                ..agent_def(AgentToolPolicy::Explicit(vec!["Write".to_string()]))
+            };
+            let catalog = Arc::new(RwLock::new(vec![shadow]));
+            let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);
+            let def = spawner.lookup_definition(spelling).await;
+            assert_eq!(
+                def.agent_type, "general-purpose",
+                "`{spelling}` normalizes to the reserved `fusion` name and is \
+                 intercepted into a Fusion run, so lookup_definition must fall \
+                 through to general-purpose instead of the disk agent"
+            );
+            assert_ne!(def.when_to_use, "user shadow");
+        }
+    }
+
+    /// The negative half of the same rule: a name that merely CONTAINS
+    /// `fusion` does not normalize to it (`fusion-agent` → `fusionagent`,
+    /// `confusion` → `confusion`), so the intercept never fires for it and
+    /// `lookup_definition` must still resolve the real disk agent.
+    #[tokio::test]
+    async fn lookup_definition_keeps_catalog_agents_that_only_contain_fusion() {
+        for spelling in ["fusion-agent", "confusion", "fusions"] {
+            let runtime = Arc::new(MockRuntimeSpawner::default());
+            let pool = Arc::new(StateMachinePool::new(runtime, 4));
+            let shadow = AgentDefinition {
+                agent_type: spelling.to_string(),
+                when_to_use: "user shadow".to_string(),
+                ..agent_def(AgentToolPolicy::Explicit(vec!["Write".to_string()]))
+            };
+            let catalog = Arc::new(RwLock::new(vec![shadow]));
+            let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);
+            let def = spawner.lookup_definition(spelling).await;
+            assert_eq!(
+                def.when_to_use, "user shadow",
+                "`{spelling}` does not normalize to `fusion` and must still \
+                 resolve to the user's own disk agent"
+            );
+        }
+    }
+
     #[test]
     fn make_subagent_context_fork_parent_prompt_skips_notes_trailer() {
         // fork_parent_system_prompt → rendered_system_prompt is the parent's
@@ -6478,6 +6601,62 @@ mod tests {
         let entries = crate::agent_listing_entries(&defs);
         assert_eq!(entries.len(), n_builtins);
         assert!(!entries.iter().any(|e| e.agent_type == "fusion"));
+    }
+
+    /// [Round-12 finding 6] The listing drop must cover the same spellings the
+    /// `tools/agent` intercept does (`normalize_agent_type` = lowercase +
+    /// strip whitespace / `_` / Unicode-Pd dash), or the Agent tool advertises
+    /// e.g. `Fusion` with the user's own `when_to_use` while every dispatch of
+    /// that name is silently turned into a Fusion panel run.
+    #[test]
+    fn agent_listing_entries_drops_every_spelling_normalizing_to_fusion() {
+        for spelling in [
+            "Fusion",
+            "FUSION",
+            "fu-sion",
+            "fu_sion",
+            "fusion-",
+            "Fu\u{2010}sion",
+        ] {
+            let mut defs = builtin_agent_definitions();
+            let n_builtins = defs.len();
+            defs.push(AgentDefinition {
+                agent_type: spelling.to_string(),
+                when_to_use: "a user's own fusion agent".to_string(),
+                ..agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()]))
+            });
+            let entries = crate::agent_listing_entries(&defs);
+            assert!(
+                !entries.iter().any(|e| e.agent_type == spelling),
+                "`{spelling}` normalizes to the reserved `fusion` name, so the \
+                 Agent listing must not advertise it"
+            );
+            assert_eq!(entries.len(), n_builtins, "for spelling `{spelling}`");
+        }
+    }
+
+    /// The negative half: names that merely contain `fusion` do NOT normalize
+    /// to it and must stay in the listing.
+    #[test]
+    fn agent_listing_entries_keeps_agents_that_only_contain_fusion() {
+        let mut defs = builtin_agent_definitions();
+        let n_builtins = defs.len();
+        for spelling in ["fusion-agent", "confusion", "fusions"] {
+            defs.push(AgentDefinition {
+                agent_type: spelling.to_string(),
+                when_to_use: "a user's own agent".to_string(),
+                ..agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()]))
+            });
+        }
+        let entries = crate::agent_listing_entries(&defs);
+        assert_eq!(entries.len(), n_builtins + 3);
+        for spelling in ["fusion-agent", "confusion", "fusions"] {
+            assert!(
+                entries.iter().any(|e| e.agent_type == spelling),
+                "`{spelling}` does not normalize to `fusion` and must stay in \
+                 the listing"
+            );
+        }
     }
 
     #[tokio::test]

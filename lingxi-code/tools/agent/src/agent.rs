@@ -973,6 +973,36 @@ struct FusionSpawnReservationGuard {
     /// old `AtomicBool`; the value is what lets the drop path refund the
     /// reserved-but-never-resolved surplus instead of keeping it charged.
     resolved_panels: Arc<std::sync::atomic::AtomicU64>,
+    /// [round-12 review, finding 3] The largest
+    /// `FusionProgress::panels_allocated` any event carried, or 0 when the
+    /// executor published no allocation figure at all.
+    ///
+    /// `resolved_panels` above is the count the model resolver settled on —
+    /// it INCLUDES panels the spawner then rejected pre-allocation
+    /// (`error_category: "spawn"`), which the `Ok` arm filters out of the
+    /// charge via `fusion_panels_that_reached_the_spawner`. Charging the
+    /// resolved count here made an identical 3-panel dispatch bill 3 slots on
+    /// a failure and 2 on a success. See [`allocation_capped_charge`].
+    allocated_panels: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// [round-12 review, finding 3] The number of `panel_n` reservation slots a
+/// non-preflight termination may keep charged, given the resolved panel count
+/// the progress events carried and the largest allocation figure they
+/// carried.
+///
+/// `allocated == 0` is ambiguous — it is what an executor that publishes no
+/// allocation figure looks like, and also what a run where nothing was
+/// allocated looks like — so it falls back to `resolved`, i.e. exactly the
+/// pre-round-12 behaviour. Any published figure is a count of panels a
+/// subagent PROVABLY exists for, and can only ever lower the charge, which is
+/// the same direction (and the same basis) as the `Ok` arm's filter.
+fn allocation_capped_charge(resolved: u64, allocated: u64) -> u64 {
+    if allocated == 0 {
+        resolved
+    } else {
+        resolved.min(allocated)
+    }
 }
 
 impl FusionSpawnReservationGuard {
@@ -980,11 +1010,13 @@ impl FusionSpawnReservationGuard {
         registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
         panel_n: u64,
         resolved_panels: Arc<std::sync::atomic::AtomicU64>,
+        allocated_panels: Arc<std::sync::atomic::AtomicU64>,
     ) -> Self {
         Self {
             registry,
             outstanding: panel_n,
             resolved_panels,
+            allocated_panels,
         }
     }
 
@@ -1024,11 +1056,19 @@ impl Drop for FusionSpawnReservationGuard {
         // reservation was taken at the WANTED count before resolution ran,
         // so `outstanding - resolved` slots belong to panels that never
         // existed. Same surplus trim the `Ok` and `Err` arms perform.
+        //
+        // [round-12 review, finding 3] The charge is additionally capped at
+        // the panels the SPAWNER provably allocated a child for, when the
+        // executor published that figure — the resolved count includes
+        // panels the spawner rejected pre-allocation, which the `Ok` arm has
+        // always filtered out. See [`allocation_capped_charge`].
         let resolved = self.resolved_panels.load(std::sync::atomic::Ordering::Relaxed);
+        let allocated = self.allocated_panels.load(std::sync::atomic::Ordering::Relaxed);
+        let charge = allocation_capped_charge(resolved, allocated);
         let release = if resolved == 0 {
             self.outstanding
         } else {
-            self.outstanding.saturating_sub(resolved)
+            self.outstanding.saturating_sub(charge)
         };
         if release > 0 {
             self.registry
@@ -1411,6 +1451,10 @@ impl AgentTool {
         // comment for why the release has to survive `call_fusion`'s own
         // future being dropped, not just an `Ok`/`Err` return.
         let panel_stage_observed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // [round-12 review, finding 3] Same lifetime requirement as
+        // `panel_stage_observed`, for the allocation figure that tells the
+        // resolved panel count from the panels a subagent provably exists for.
+        let panels_allocated_observed = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mut reservation_guard: Option<FusionSpawnReservationGuard> = None;
         if let Some(registry) = &self.ctx.task_registry {
             if let Err(spawned) = registry.try_reserve_total_agent_spawns(panel_n, cap) {
@@ -1431,6 +1475,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 Arc::clone(registry),
                 panel_n,
                 Arc::clone(&panel_stage_observed),
+                Arc::clone(&panels_allocated_observed),
             ));
         }
 
@@ -1492,6 +1537,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // completion) and `RunningPanels` with `completed > 0` (a panel
         // could only complete after spawning).
         let panel_stage_observed_writer = panel_stage_observed.clone();
+        let panels_allocated_writer = panels_allocated_observed.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = prog_rx.recv().await {
                 // [round-5 review, finding 10] Keep the LARGEST resolved
@@ -1505,6 +1551,17 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 if let Some(resolved) = panels_proven_spawned(&event.stage) {
                     panel_stage_observed_writer
                         .fetch_max(resolved, std::sync::atomic::Ordering::Relaxed);
+                }
+                // [round-12 review, finding 3] Same max-latch, for the
+                // strictly different question of how many panels the SPAWNER
+                // allocated a child for. `panels_allocated` is monotonically
+                // non-decreasing within a run, and the last
+                // `RunningPanels{completed == total}` event is emitted after
+                // every panel finished — hence after every allocation — so
+                // the max equals the run's final allocated count.
+                if let Some(allocated) = event.panels_allocated {
+                    panels_allocated_writer
+                        .fetch_max(u64::from(allocated), std::sync::atomic::Ordering::Relaxed);
                 }
                 let _ = forward_progress
                     .send(tool_api::progress::ToolProgress {
@@ -1596,6 +1653,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 // apart.
                 let resolved_panels =
                     panel_stage_observed.load(std::sync::atomic::Ordering::Relaxed);
+                let allocated_panels =
+                    panels_allocated_observed.load(std::sync::atomic::Ordering::Relaxed);
                 let releases_full_reservation = fusion_error_is_preflight(&err)
                     || (matches!(err, platform_api::FusionError::Cancelled)
                         && resolved_panels == 0);
@@ -1616,7 +1675,22 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                         // and every runtime failure permanently narrowed
                         // `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` by the
                         // surplus.
-                        guard.release(panel_n.saturating_sub(resolved_panels));
+                        //
+                        // [round-12 review, finding 3] …and only for the
+                        // panels a subagent PROVABLY exists for. The
+                        // resolved count includes panels the spawner
+                        // rejected pre-allocation, which the `Ok` arm above
+                        // filters out with
+                        // `fusion_panels_that_reached_the_spawner`; charging
+                        // them here made an identical 3-panel dispatch bill
+                        // 3 slots on a failure and 2 on a success. See
+                        // [`allocation_capped_charge`] for why a published
+                        // figure of 0 falls back to the resolved count
+                        // instead of refunding everything.
+                        guard.release(panel_n.saturating_sub(allocation_capped_charge(
+                            resolved_panels,
+                            allocated_panels,
+                        )));
                     }
                     // Either a release above just settled it, or the
                     // reservation stays deliberately charged — disarm so a

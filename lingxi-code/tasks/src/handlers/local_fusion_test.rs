@@ -243,6 +243,7 @@ impl FusionExecutor for ProgressEmittingExecutor {
                         panel_id: None,
                         realized_output_tokens: None,
                         egress_profiles: None,
+                        panels_allocated: None,
                     })
                     .await;
             }
@@ -326,6 +327,7 @@ impl FusionExecutor for RealizedProgressBlockingExecutor {
                     panel_id: None,
                     realized_output_tokens: Some(12),
                     egress_profiles: Some(vec!["anthropic".into(), "openai".into()]),
+                    panels_allocated: None,
                 })
                 .await;
         }
@@ -702,6 +704,7 @@ impl FusionExecutor for SingleProgressExecutor {
                     panel_id: None,
                     realized_output_tokens: None,
                     egress_profiles: None,
+                    panels_allocated: None,
                 })
                 .await;
         }
@@ -746,6 +749,7 @@ impl FusionExecutor for PartialSpendThenFailExecutor {
                     panel_id: None,
                     realized_output_tokens: Some(self.realized_output_tokens),
                     egress_profiles,
+                    panels_allocated: None,
                 })
                 .await;
         }

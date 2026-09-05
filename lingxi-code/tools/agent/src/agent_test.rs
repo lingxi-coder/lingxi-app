@@ -843,6 +843,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                             panel_id: None,
                         realized_output_tokens: None,
                         egress_profiles: None,
+                        panels_allocated: None,
                     })
                         .await;
                 }
@@ -1601,6 +1602,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                         panel_id: Some("p1".to_string()),
                     realized_output_tokens: None,
                     egress_profiles: None,
+                    panels_allocated: None,
                 })
                     .await;
             }
@@ -1659,6 +1661,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                         panel_id: None,
                         realized_output_tokens: None,
                         egress_profiles: None,
+                        panels_allocated: None,
                     })
                     .await;
             }
@@ -1921,7 +1924,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// `PanelsDispatched { total: 2 }` and then never resolves, so the
     /// dropped future must leave exactly the 2 resolved panels charged out
     /// of the 3 reserved.
-    struct DispatchesFewerPanelsThenHangsFusion;
+    struct DispatchesFewerPanelsThenHangsFusion {
+        /// [round-12 review, finding 3] `None` keeps the pre-round-12
+        /// fixture shape (no allocation figure published); `Some(n)` makes
+        /// the drop path see the same "a subagent provably exists" basis the
+        /// `Ok` arm reads.
+        panels_allocated: Option<u8>,
+    }
 
     #[async_trait::async_trait]
     impl platform_api::FusionExecutor for DispatchesFewerPanelsThenHangsFusion {
@@ -1940,6 +1949,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                         panel_id: None,
                         realized_output_tokens: None,
                         egress_profiles: None,
+                        panels_allocated: self.panels_allocated,
                     })
                     .await;
             }
@@ -1977,7 +1987,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(DispatchesFewerPanelsThenHangsFusion));
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(
+            DispatchesFewerPanelsThenHangsFusion {
+                panels_allocated: None,
+            },
+        ));
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
@@ -2022,6 +2036,72 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
     }
 
+
+    /// [round-12 review, finding 3] The drop path is the THIRD member of the
+    /// charge-decision class (`Ok` arm / `Err` arm /
+    /// `FusionSpawnReservationGuard::drop`) and reads the same
+    /// `resolved_panels` cell the `Err` arm does, so it carried the same
+    /// defect: a user interrupt after a 2-panel resolution in which the
+    /// spawner allocated only 1 child kept 2 slots charged forever. With the
+    /// allocation figure published, exactly 1 stays charged.
+    #[tokio::test]
+    async fn fusion_dropped_future_charges_only_the_panels_the_spawner_allocated() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            arc_mock_spawner(),
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(
+            DispatchesFewerPanelsThenHangsFusion {
+                panels_allocated: Some(1),
+            },
+        ));
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.cancel = Some(cancel.clone());
+        let cancel_for_task = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel_for_task.cancel();
+        });
+        let completed = {
+            let call_future = tool.call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                ctx,
+                fresh_tx(),
+            );
+            tokio::pin!(call_future);
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => false,
+                _ = &mut call_future => true,
+            }
+        };
+        assert!(!completed, "fusion call must not complete on its own");
+
+        for _ in 0..2000 {
+            if registry.get_total_agent_spawns() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            1,
+            "3 slots were reserved, 2 panels resolved but the spawner allocated a child for \
+             only 1 of them, and the future was then dropped — only the 1 subagent that \
+             provably exists may stay charged, exactly as the Ok arm's \
+             fusion_panels_that_reached_the_spawner filter would decide"
+        );
+    }
 
     /// F008: an explicit `run_in_background: true` must be rejected rather
     /// than silently ignored — Fusion has no background LocalFusion route
@@ -2095,6 +2175,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// spawner) and then fails with a scripted terminal error.
     struct DispatchesFewerPanelsThenFailsFusion {
         dispatched_total: u8,
+        /// [round-12 review, finding 3] What the executor publishes as
+        /// `FusionProgress::panels_allocated` — how many panels the SPAWNER
+        /// provably allocated a child for, which is NOT the resolved
+        /// `dispatched_total` whenever the spawner rejected a panel
+        /// pre-allocation. `None` reproduces an executor that publishes no
+        /// allocation figure at all (every fixture that predates this field).
+        panels_allocated: Option<u8>,
         error: platform_api::FusionError,
     }
 
@@ -2117,6 +2204,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                         panel_id: None,
                         realized_output_tokens: None,
                         egress_profiles: None,
+                        panels_allocated: self.panels_allocated,
                     })
                     .await;
             }
@@ -2148,6 +2236,14 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         dispatched_total: u8,
         error: platform_api::FusionError,
     ) -> u64 {
+        run_fusion_with_dispatch(dispatched_total, None, error).await
+    }
+
+    async fn run_fusion_with_dispatch(
+        dispatched_total: u8,
+        panels_allocated: Option<u8>,
+        error: platform_api::FusionError,
+    ) -> u64 {
         use platform_api::task_registry::TaskRegistryHandle;
         let registry = arc_mock_task_registry();
         let bctx = wired_ctx(
@@ -2158,6 +2254,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         let tool = AgentTool::new(bctx).with_fusion(Arc::new(DispatchesFewerPanelsThenFailsFusion {
             dispatched_total,
+            panels_allocated,
             error,
         }));
         let _ = tool
@@ -2216,6 +2313,100 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert_eq!(
             charged, 3,
             "all 3 reserved panels were dispatched — none of the reservation may be refunded"
+        );
+    }
+
+    /// [round-12 review, finding 3] ONE dispatch, TWO terminations, ONE
+    /// charge against `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`.
+    ///
+    /// The `Ok` arm has charged "panels that provably reached the spawner"
+    /// since round 4 — it filters `error_category: "spawn"` /
+    /// `"not_dispatched"` slots out of `result.panels` with
+    /// `fusion_panels_that_reached_the_spawner`. The `Err` arm and the drop
+    /// path had no equivalent input and charged the RESOLVED panel count
+    /// instead, so the identical 3-panel dispatch (2 allocated, 1 rejected
+    /// pre-allocation) billed 3 slots when it ended in `Err` and 2 when it
+    /// ended in `Ok`. `FusionProgress::panels_allocated` is the missing
+    /// input; this pins the two terminations to the same number, and to the
+    /// number the allocation truth says.
+    #[tokio::test]
+    async fn fusion_ok_and_err_charge_the_same_quota_for_the_same_dispatch() {
+        use platform_api::task_registry::TaskRegistryHandle;
+
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            arc_mock_spawner(),
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let mut result = sample_fusion_result(platform_api::FusionStatus::Completed);
+        // The third of the three resolved panels was REJECTED by the spawner
+        // before any child existed — the exact shape `panel.rs` finishes as
+        // `error_category: "spawn"`.
+        result.panels[2].status = platform_api::PanelRunStatus::Failed;
+        result.panels[2].error_category = Some("spawn".into());
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ScriptedFusion {
+            enabled: true,
+            result,
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        tool.call(
+            serde_json::json!({
+                "description": "deliberate",
+                "prompt": "review this",
+                "subagent_type": "fusion"
+            }),
+            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_tx(),
+        )
+        .await
+        .expect("scripted Ok result");
+        let ok_charged = registry.get_total_agent_spawns();
+        assert_eq!(
+            ok_charged, 2,
+            "precondition: the Ok arm must already charge only the 2 panels a subagent \
+             provably exists for — if this is 3 the fixture is not exercising the \
+             pre-allocation rejection at all"
+        );
+
+        let err_charged = run_fusion_with_dispatch(
+            3,
+            Some(2),
+            platform_api::FusionError::PanelSetIncomplete,
+        )
+        .await;
+
+        assert_eq!(
+            err_charged, ok_charged,
+            "the SAME 3-panel dispatch (2 allocated, 1 rejected pre-allocation) must charge \
+             the session's lifetime spawn quota identically on both terminations: Ok charged \
+             {ok_charged}, Err charged {err_charged}"
+        );
+        assert_eq!(
+            err_charged, 2,
+            "and both must charge the ALLOCATION truth (2), not the resolved panel count (3)"
+        );
+    }
+
+    /// [round-12 review, finding 3] The allocation cap may only ever LOWER
+    /// the charge, and a published figure of 0 is not evidence — an executor
+    /// that publishes no `panels_allocated` at all must keep the exact
+    /// pre-round-12 behaviour (charge the resolved count), or every fixture
+    /// and every older executor would silently start refunding panels that
+    /// really ran.
+    #[tokio::test]
+    async fn fusion_err_without_an_allocation_figure_still_charges_the_resolved_count() {
+        let charged = run_fusion_with_dispatch(
+            3,
+            None,
+            platform_api::FusionError::PanelSetIncomplete,
+        )
+        .await;
+        assert_eq!(
+            charged, 3,
+            "an executor that publishes no allocation figure must not be read as \
+             \"zero allocated\": all 3 resolved panels stay charged"
         );
     }
 

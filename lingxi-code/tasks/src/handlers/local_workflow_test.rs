@@ -351,6 +351,7 @@ impl FusionExecutor for FailingAfterRealSpendFusionExecutor {
                     message: "panel bar failed after real provider spend".into(),
                     realized_output_tokens: Some(self.realized_output_tokens),
                     egress_profiles: None,
+                    panels_allocated: None,
                 })
                 .await;
         }

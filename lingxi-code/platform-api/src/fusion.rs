@@ -699,6 +699,28 @@ pub struct FusionProgress {
     /// to a provider the run never actually reached.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress_profiles: Option<Vec<String>>,
+    /// [Round-12 finding [3]] How many panels the SPAWNER has provably
+    /// allocated a child for so far — `fusion::panel::PanelDispatch`'s
+    /// `allocated` flags, set from `SubagentObservation::Allocated`.
+    ///
+    /// This is a strictly different question from every `total` on
+    /// [`FusionStage`], which is the RESOLVED panel count: a panel the
+    /// spawner rejects pre-allocation (`error_category: "spawn"`) is counted
+    /// in `total` and is not counted here. The distinction is what
+    /// `tools/agent`'s spawn-reservation accounting needs — its `Ok` arm
+    /// filters those panels out of the charge via
+    /// `fusion_panels_that_reached_the_spawner`, and without this field its
+    /// `Err`/drop paths had no way to apply the same filter, so two
+    /// terminations of an identical dispatch charged
+    /// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` differently.
+    ///
+    /// Monotonically non-decreasing across a run's events, so a consumer may
+    /// take the max over everything it sees. `None` means "this emitter
+    /// publishes no allocation figure" — never "zero allocated" — so a
+    /// consumer must fall back to the resolved total rather than treat it as
+    /// evidence of nothing spawning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panels_allocated: Option<u8>,
 }
 
 /// Fusion failure. Preflight variants guarantee zero provider calls.

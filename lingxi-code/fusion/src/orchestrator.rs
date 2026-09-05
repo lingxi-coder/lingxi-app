@@ -2261,9 +2261,17 @@ fn add_cost_usage(acc: &mut FusionUsage, usage: &cost::Usage, calls: u32) {
 }
 
 /// Byte cap on each panel's rendered `candidate_answer` inside
-/// [`needs_parent_text`] — the full text is still in `FusionResult.panels`
-/// material via the Agent `analysis`/panel path; this keeps the `NeedsParent`
-/// summary itself bounded when panels wrote long patches.
+/// [`needs_parent_text`], keeping the `NeedsParent` summary bounded when
+/// panels wrote long patches.
+///
+/// [Round 12 finding 1] This cap's earlier doc claimed "the full text is
+/// still in `FusionResult.panels`" — that is FALSE and the correction is
+/// load-bearing for the budget split below: `PanelOutcome`
+/// (platform-api/src/fusion.rs:471-490) carries only `panel_id` / `status` /
+/// `duration_ms` / `error_category` / `error_detail` / `usage`, no report
+/// text at all. Whatever this renderer drops is gone for good, which is why
+/// the budgets below are split per-section instead of letting one tail cut
+/// decide who survives.
 const NEEDS_PARENT_CANDIDATE_BYTE_CAP: usize = 4096;
 
 /// [Finding 10] Same bound as [`NEEDS_PARENT_CANDIDATE_BYTE_CAP`], applied to
@@ -2281,14 +2289,58 @@ const NEEDS_PARENT_SUMMARY_BYTE_CAP: usize = 4096;
 /// `positions[].position` and `coverage_gaps` with no cap of their own —
 /// none of those pass through `truncate_bytes`, so a verbose or
 /// injection-steered analyst call could still push the assembled string
-/// arbitrarily large even with every panel field capped. This is a final
-/// backstop on the WHOLE joined string, applied once at the end of
-/// `needs_parent_text`, so no sink inside it (present or added later) can
-/// bypass it. 32 KiB comfortably holds the header line, every panel's
-/// (capped) summary + candidate for a realistic panel count, and the
-/// analyst sections, while still being far below what a parent model's
-/// context should absorb from one tool result.
+/// arbitrarily large even with every panel field capped. This is the final
+/// backstop on the whole assembled body, so no sink inside it (present or
+/// added later) can bypass it.
+///
+/// [Round 12 finding 1] It is no longer the ONLY bound, because as a lone
+/// bound it was a tail cut over one concatenation: the sections are rendered
+/// header → analyst → panels → closing directive, so overflow was paid for
+/// entirely by whoever came last. That made the always-dropped casualty the
+/// `"Next: ..."` directive, and the next-dropped the PAID panel material —
+/// exactly inverting what this renderer exists to hand over (and see
+/// [`NEEDS_PARENT_CANDIDATE_BYTE_CAP`]: dropped panel material has no other
+/// route to the parent). Two shapes the config supports reached it:
+/// `FUSION_MAX_PANEL = 8` panels at the per-field caps render ~66 KB, so
+/// half the panels were cut outright; and one large analyst section, rendered
+/// AHEAD of the panel loop with no cap of its own, could consume the entire
+/// budget and evict 100% of the panel rows. So now
+/// [`NEEDS_PARENT_ANALYST_BYTE_CAP`] bounds the analyst block on its own, the
+/// panel block gets the remainder divided evenly per panel (so every panel
+/// keeps its row), this backstop guards the assembled body, and the closing
+/// directive is appended AFTER truncation so it can never be cut.
 const NEEDS_PARENT_TEXT_BYTE_CAP: usize = 32 * 1024;
+
+/// [Round 12 finding 1] The analyst block's own share of
+/// [`NEEDS_PARENT_TEXT_BYTE_CAP`]. The analyst-authored sections are rendered
+/// before the panel block and have no per-item cap, so without an independent
+/// budget one verbose or injection-steered `consensus` item evicts every
+/// paid panel report. 8 KiB holds a realistic consensus / contradictions /
+/// coverage-gaps set while leaving 24 KiB for the panels.
+const NEEDS_PARENT_ANALYST_BYTE_CAP: usize = 8 * 1024;
+
+/// [Round 12 finding 1] Byte cap on the `reason` interpolated into
+/// [`needs_parent_text`]'s header — the THIRD uncapped model-authored sink in
+/// this renderer, and the one rendered FIRST, so an oversized one starves
+/// every section after it. `FusionNeedsParentReason::AnalystRequested`'s
+/// `reason` is the analyst's own prose (see `reason_line`), which
+/// `analyst::sanitize_analysis` guards for control tags but never
+/// length-caps. Every host-authored reason this renderer is called with is a
+/// short one-liner, so 1 KiB is far above any legitimate value.
+const NEEDS_PARENT_REASON_BYTE_CAP: usize = 1024;
+
+/// [Round 12 finding 1] Per-panel fixed overhead charged against a panel's
+/// share of the panel budget: the two field labels (`"  summary: "` = 11,
+/// `"  candidate: "` = 13), the three joining newlines, and the two `…`
+/// markers `truncate_bytes` may append (3 bytes each), rounded up.
+const NEEDS_PARENT_PANEL_ROW_OVERHEAD: usize = 40;
+
+/// [Round 12 finding 1] The closing directive, appended AFTER every
+/// truncation so no budget overrun can drop it. It is the one line that tells
+/// the parent what to DO with the material above, and under the old
+/// single-tail-cut backstop it was the first thing lost.
+const NEEDS_PARENT_CLOSING_LINE: &str =
+    "Next: review the panel material above and provide the final answer yourself.";
 
 /// Render the `NeedsParent` summary (F004): unlike a bare status list, this
 /// carries the actual paid deliberation material — consensus, contradictions,
@@ -2306,28 +2358,40 @@ pub(crate) fn needs_parent_text(
     reason: &str,
     analysis: Option<&FusionAnalysis>,
 ) -> String {
-    let mut lines = vec![format!(
-        "Fusion did not produce a conclusive answer ({reason})."
-    )];
+    // [Round 12 finding 1] Three independently budgeted sections, assembled
+    // in this order so that overflow is paid for by the section that caused
+    // it rather than by whatever happens to be rendered last:
+    //   1. the header, whose only variable part (`reason`) is capped at
+    //      NEEDS_PARENT_REASON_BYTE_CAP,
+    //   2. the analyst block, capped at NEEDS_PARENT_ANALYST_BYTE_CAP,
+    //   3. the panel block, given the remainder of NEEDS_PARENT_TEXT_BYTE_CAP
+    //      divided EVENLY per panel so every panel keeps its `anonymous_id`
+    //      row even at FUSION_MAX_PANEL with both fields at their caps,
+    // and then NEEDS_PARENT_CLOSING_LINE appended after the final backstop.
+    let header = format!(
+        "Fusion did not produce a conclusive answer ({}).",
+        truncate_bytes(reason, NEEDS_PARENT_REASON_BYTE_CAP)
+    );
 
+    let mut analyst_lines: Vec<String> = Vec::new();
     if let Some(analysis) = analysis {
         if !analysis.consensus.is_empty() {
-            lines.push(String::new());
-            lines.push("Consensus:".into());
+            analyst_lines.push(String::new());
+            analyst_lines.push("Consensus:".into());
             for item in &analysis.consensus {
-                lines.push(format!("- {item}"));
+                analyst_lines.push(format!("- {item}"));
             }
         }
         if !analysis.contradictions.is_empty() {
-            lines.push(String::new());
-            lines.push("Contradictions:".into());
+            analyst_lines.push(String::new());
+            analyst_lines.push("Contradictions:".into());
             for contradiction in &analysis.contradictions {
-                lines.push(format!(
+                analyst_lines.push(format!(
                     "- [{:?}] {}",
                     contradiction.severity, contradiction.topic
                 ));
                 for position in &contradiction.positions {
-                    lines.push(format!(
+                    analyst_lines.push(format!(
                         "  - {}: {}",
                         position.panel_id, position.position
                     ));
@@ -2335,16 +2399,31 @@ pub(crate) fn needs_parent_text(
             }
         }
         if !analysis.coverage_gaps.is_empty() {
-            lines.push(String::new());
-            lines.push("Coverage gaps:".into());
+            analyst_lines.push(String::new());
+            analyst_lines.push("Coverage gaps:".into());
             for gap in &analysis.coverage_gaps {
-                lines.push(format!("- {gap}"));
+                analyst_lines.push(format!("- {gap}"));
             }
         }
     }
 
-    lines.push(String::new());
-    lines.push("Panels:".into());
+    let mut head = header;
+    if !analyst_lines.is_empty() {
+        head.push('\n');
+        // The analyst sections have no per-item cap of their own, so this is
+        // the bound that stops one verbose item from evicting the panels.
+        head.push_str(&truncate_bytes(
+            &analyst_lines.join("\n"),
+            NEEDS_PARENT_ANALYST_BYTE_CAP,
+        ));
+    }
+
+    let mut lines = vec![head, String::new(), "Panels:".into()];
+    // Whatever the header + analyst block did not use is the panel block's,
+    // split evenly so a late panel is never starved by an early one.
+    let panel_budget = NEEDS_PARENT_TEXT_BYTE_CAP
+        .saturating_sub(lines.iter().map(|line| line.len() + 1).sum::<usize>());
+    let per_panel = panel_budget / panels.len().max(1);
     let mut ordered = panels.to_vec();
     ordered.sort_by(|a, b| a.anonymous_id.cmp(&b.anonymous_id));
     for panel in &ordered {
@@ -2361,27 +2440,39 @@ pub(crate) fn needs_parent_text(
                 row.push_str(&format!(" ({rendered})"));
             }
         }
+        // The row goes in unconditionally: it is the identity of a panel the
+        // run already paid for, and it is what the parent needs to reason
+        // about coverage even when this panel's fields had to be trimmed.
+        let field_budget = per_panel
+            .saturating_sub(row.len())
+            .saturating_sub(NEEDS_PARENT_PANEL_ROW_OVERHEAD);
         lines.push(row);
         if let Some(report) = &panel.report {
+            // Never ABOVE the per-field caps; only further down when the
+            // panel count makes this panel's share the tighter constraint.
+            let summary_cap = NEEDS_PARENT_SUMMARY_BYTE_CAP.min(field_budget / 2);
+            let candidate_cap =
+                NEEDS_PARENT_CANDIDATE_BYTE_CAP.min(field_budget.saturating_sub(summary_cap));
             lines.push(format!(
                 "  summary: {}",
-                truncate_bytes(&report.summary, NEEDS_PARENT_SUMMARY_BYTE_CAP)
+                truncate_bytes(&report.summary, summary_cap)
             ));
             lines.push(format!(
                 "  candidate: {}",
-                truncate_bytes(&report.candidate_answer, NEEDS_PARENT_CANDIDATE_BYTE_CAP)
+                truncate_bytes(&report.candidate_answer, candidate_cap)
             ));
         }
     }
 
-    lines.push(String::new());
-    lines.push(
-        "Next: review the panel material above and provide the final answer yourself.".into(),
-    );
-    // [Finding 10, rework round 2] Backstop the WHOLE assembled string, not
-    // just the two per-field caps above — see NEEDS_PARENT_TEXT_BYTE_CAP's
-    // doc comment.
-    truncate_bytes(&lines.join("\n"), NEEDS_PARENT_TEXT_BYTE_CAP)
+    // Final backstop on the whole assembled BODY — see
+    // NEEDS_PARENT_TEXT_BYTE_CAP's doc comment. It runs before the closing
+    // directive is appended, so no sink inside the body (present or added
+    // later) can bypass the bound AND the directive can never be the casualty
+    // of one.
+    let mut text = truncate_bytes(&lines.join("\n"), NEEDS_PARENT_TEXT_BYTE_CAP);
+    text.push_str("\n\n");
+    text.push_str(NEEDS_PARENT_CLOSING_LINE);
+    text
 }
 
 /// Truncate `s` to at most `cap` bytes on a UTF-8 char boundary, marking a cut

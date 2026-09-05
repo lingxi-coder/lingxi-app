@@ -114,27 +114,45 @@ globalThis.__wf_pump = () => {
     const item = fq[i];
     const r = globalThis.__wf_dispatch_fusion(item.prompt, JSON.stringify(item.opts || {}));
     if (typeof r === "string" && r.startsWith(globalThis.__WF_THROW_PREFIX)) {
-      // Same four host-side refusal shapes `tasks::handlers::local_workflow`
-      // can send back before ever calling the executor (`err.name` mirrors
-      // the agent() throw channel's WorkflowBudgetExceededError /
+      // The host-side refusal shapes `tasks::handlers::local_workflow` can
+      // send back before ever calling the executor (`err.name` mirrors the
+      // agent() throw channel's WorkflowBudgetExceededError /
       // WorkflowAgentCapError above so a script can branch on `e.name`
-      // instead of string-matching `e.message`).
+      // instead of string-matching `e.message`). The full table is pinned by
+      // the `fusion_rejection_name` tests at the bottom of this file.
       const msg = r.slice(globalThis.__WF_THROW_PREFIX.length);
       const err = new Error(msg);
       if (msg.startsWith("Workflow token budget exceeded")) err.name = "WorkflowBudgetExceededError";
       else if (msg.startsWith("Workflow fusion() call cap reached")) err.name = "WorkflowFusionCapError";
       else if (msg === "fusion is disabled") err.name = "WorkflowFusionDisabledError";
-      // Two more shapes reach this same channel with no host-side refusal
+      // THREE more shapes reach this same channel with no host-side refusal
       // recognized above: `FusionError::UnavailableOnPlatform`'s Display
-      // (mobile hosts build the workflow handler without a Fusion executor)
-      // and `WORKFLOW_FUSION_UNAVAILABLE_MESSAGE` (the fusion dispatch
-      // channel closed). From a script's point of view both are the same
-      // "not available, fall back" condition as the disabled case above, so
-      // they carry the same documented `err.name` rather than leaving
-      // `err.name` at the JS default "Error" — which the fusion() bullet in
-      // workflow_description.txt never distinguishes from the others.
+      // (mobile hosts build the workflow handler without a Fusion executor),
+      // `WORKFLOW_FUSION_UNAVAILABLE_MESSAGE` (the fusion dispatch channel
+      // closed), and `FusionError::InvalidConfiguration`'s Display — which
+      // `parse_workflow_fusion_request` surfaces verbatim from
+      // `executor.preflight_error()` AHEAD of the `enabled` gate
+      // (tasks/src/handlers/local_workflow.rs), so an operator-side `fusion.*`
+      // config the merged re-check rejects arrives here too. From a script's
+      // point of view all three are the same "not available, fall back"
+      // condition as the disabled case above — every one of them is preflight
+      // (`fusion_error_is_preflight`, tools/agent/src/agent.rs: zero provider
+      // calls) and permanent for the run — so they carry the same documented
+      // `err.name` rather than leaving `err.name` at the JS default "Error",
+      // which the fusion() bullet in workflow_description.txt never
+      // distinguishes from the others.
       else if (msg === "fusion is unavailable on this platform") err.name = "WorkflowFusionDisabledError";
       else if (msg === "fusion() is unavailable in this workflow runtime") err.name = "WorkflowFusionDisabledError";
+      // Prefix rather than equality: `InvalidConfiguration` carries a detail
+      // string ("invalid fusion configuration: fusion.maxPanel must be in
+      // 2..=8"). F008's intent is preserved — the MESSAGE still names the real
+      // configuration problem instead of being collapsed into "fusion is
+      // disabled"; only the `err.name` classification is shared. This one
+      // branch also covers the quote-time
+      // `InvalidConfiguration("token-billed model `p/m` has no price")`
+      // (fusion/src/budget.rs), which is likewise preflight and likewise
+      // unfixable by retrying the same fusion() call.
+      else if (msg.startsWith("invalid fusion configuration: ")) err.name = "WorkflowFusionDisabledError";
       // Unlike the three checks above, this one goes through
       // `FusionError::InvalidRequest`'s Display, which prepends "invalid
       // fusion request: " — search rather than anchor at the start.
@@ -2668,9 +2686,12 @@ try {
 
     #[test]
     fn fusion_rejection_with_no_recognized_prefix_keeps_the_plain_error_name() {
-        // `new Error(msg)` already carries `.name === "Error"` — the four
-        // recognized prefixes (cap / disabled / budget / unknown option)
-        // OVERRIDE it; anything else is left as a plain `Error`, not
+        // `new Error(msg)` already carries `.name === "Error"` — the
+        // recognized shapes (budget / cap / disabled / unavailable-on-platform
+        // / unavailable-in-runtime / invalid configuration / unknown option)
+        // OVERRIDE it; anything else — every `executor.run` outcome, and the
+        // two `InvalidRequest` parent-model refusals in
+        // `parse_workflow_fusion_request` — is left as a plain `Error`, not
         // re-labeled or stripped of a name entirely.
         assert_eq!(
             fusion_rejection_name(
@@ -2704,5 +2725,43 @@ try {
             fusion_rejection_name(WORKFLOW_FUSION_UNAVAILABLE_MESSAGE),
             format!("WorkflowFusionDisabledError:{WORKFLOW_FUSION_UNAVAILABLE_MESSAGE}")
         );
+    }
+
+    #[test]
+    fn fusion_invalid_configuration_rejection_is_named_workflow_fusion_disabled_error() {
+        // The THIRD host-side refusal shape the earlier sweeps missed:
+        // `parse_workflow_fusion_request` surfaces `executor.preflight_error()`
+        // verbatim, BEFORE the `enabled` gate (tasks/src/handlers/local_workflow.rs),
+        // and the desktop executor's `preflight_error()` returns
+        // `FusionError::InvalidConfiguration` — Display "invalid fusion
+        // configuration: {0}" (platform-api/src/fusion.rs). Every one of these
+        // is as permanent for the run, and as recoverable by falling back to
+        // `agent()`, as the disabled / unavailable cases above, so they must
+        // carry the same documented `err.name` rather than the JS default.
+        for msg in [
+            // A merged cross-tier invariant that the deliberately-relaxed
+            // per-file `FusionSettingsJson::validate` lets through and only
+            // `FusionRuntimeConfig::from_settings` rejects (fusion/src/config.rs).
+            "invalid fusion configuration: fusion.minSuccessfulPanels (4) must not exceed min(fusion.qualityPanelCount, fusion.fastPanelCount) (2)",
+            // A managed-policy / `--settings` tier, merged with no per-file
+            // `validate()` call at all (apps/engine-desktop/src/lib.rs), so
+            // `from_settings`'s own `settings.validate()` (fusion/src/config.rs)
+            // rejects it — that inner error is `SettingsError::SchemaViolation`,
+            // whose Display adds the second "schema validation failed: " layer.
+            "invalid fusion configuration: schema validation failed: fusion.maxPanel must be in 2..=8",
+            // The loader-level Err that `load_effective_settings_for_config`
+            // swallows with `.ok()` (apps/engine-desktop/src/lib.rs).
+            "invalid fusion configuration: settings failed to load",
+            // The quote-time shape from `fusion::budget` — also a preflight
+            // variant (`fusion_error_is_preflight`, tools/agent/src/agent.rs),
+            // so zero provider calls were made and falling back is right.
+            "invalid fusion configuration: token-billed model `openai/gpt-5.4` has no price",
+        ] {
+            assert_eq!(
+                fusion_rejection_name(msg),
+                format!("WorkflowFusionDisabledError:{msg}"),
+                "invalid-configuration rejection must carry the documented err.name"
+            );
+        }
     }
 }

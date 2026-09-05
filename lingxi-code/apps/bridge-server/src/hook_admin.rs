@@ -172,9 +172,24 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn context() -> (SettingsContext, std::path::PathBuf) {
+        // The per-test root must be unique WITHIN this binary, not merely
+        // per-process: `saving_an_empty_document_removes_only_the_hooks_key`
+        // and `document_and_revision_are_scoped_to_the_layer_hooks_object`
+        // run on different threads of the SAME process, so `process::id()`
+        // is identical for both and `SystemTime::now()` can return the same
+        // value to both when they start inside one clock tick. On that
+        // collision the second test's closing `remove_dir_all(root)` deletes
+        // the first test's `settings.json` mid-test, and the save fails with
+        // `revision conflict: … found <sha256 of "">` — the empty-document
+        // hash — for a document the test had just written. Observed once in
+        // a full parallel run (round 12) and never in four reruns of this
+        // binary alone, which is exactly the shape of a start-time collision.
+        // The counter makes the root unique by construction.
+        static NEXT_ROOT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
-            "lingxi-hook-admin-{}-{}",
+            "lingxi-hook-admin-{}-{}-{}",
             std::process::id(),
+            NEXT_ROOT.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()

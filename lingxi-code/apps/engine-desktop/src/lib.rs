@@ -3265,6 +3265,13 @@ impl fusion::ModelSource for FusionCatalogModelSource {
     }
 }
 
+/// One shared, mutable route flag for [`FusionCatalogRefresher`] — see the
+/// doc comment on its `anthropic_has_api_key` field for why the three
+/// special-cased credential slots stopped being construction-time booleans.
+fn fusion_route_flag(initial: bool) -> Arc<std::sync::atomic::AtomicBool> {
+    Arc::new(std::sync::atomic::AtomicBool::new(initial))
+}
+
 /// Handle a credential-write path (`/connect` completion, a finished
 /// `/login`) calls after persisting a new credential, so Fusion's catalog
 /// filter (`FusionCatalogModelSource`) sees it within the same process —
@@ -3280,9 +3287,32 @@ pub struct FusionCatalogRefresher {
     availability_probe_completed: Arc<std::sync::atomic::AtomicBool>,
     credentials: Arc<CredentialManager>,
     credential_sources: Vec<provider_config::CredentialSource>,
-    anthropic_has_api_key: bool,
-    anthropic_has_oauth: bool,
-    openai_chatgpt_available: bool,
+    /// Round-12 rework: the three route flags `compute_availability_with_isolation`
+    /// special-cases (`anthropic-api-key` / `anthropic-oauth` / `openai-chatgpt`)
+    /// are LIVE cells, not booleans frozen at construction.
+    ///
+    /// They used to be plain `bool`s captured at boot, which made two things
+    /// wrong at once. (i) [`Self::mark_credential_removed`]'s per-route
+    /// fallback answered from the BOOT state: an OAuth-only boot that gained
+    /// an API key mid-session (Settings -> "add key", i.e.
+    /// `refresh_after_credential_write("anthropic")`) still read
+    /// `anthropic_has_api_key == false`, so `/logout` published
+    /// `anthropic: false` while the API key was live and dropped every
+    /// Anthropic row from `filter_fusion_catalog` for the rest of the
+    /// process. (ii) A removal was not DURABLE: [`Self::refresh_inner`]
+    /// re-derives those three rows from these very fields and publishes
+    /// `true` unconditionally for an available row, so the next unrelated
+    /// credential write resurrected the entry a delete had just cleared.
+    ///
+    /// Every seam that establishes or removes one of the three routes now
+    /// notes it here ([`Self::note_route_credential_written`] /
+    /// [`Self::note_route_credential_removed`]), so both readers see the live
+    /// state. Shared (`Arc`) because `FusionCatalogRefresher` is `Clone` and
+    /// the registry, the `/connect` wrappers and the composition root all
+    /// hold clones of the SAME refresher.
+    anthropic_has_api_key: Arc<std::sync::atomic::AtomicBool>,
+    anthropic_has_oauth: Arc<std::sync::atomic::AtomicBool>,
+    openai_chatgpt_available: Arc<std::sync::atomic::AtomicBool>,
     // Round-4 review finding (isolation boundary): mirrors the boot probe's
     // `cfg.isolated_credential_storage` (see `resolve_llm_stack`'s call to
     // `compute_availability_with_isolation` above) so a mid-session refresh
@@ -3322,9 +3352,9 @@ impl FusionCatalogRefresher {
                     kind: provider_config::CredentialKind::Keychain,
                 })
                 .collect(),
-            anthropic_has_api_key: false,
-            anthropic_has_oauth: false,
-            openai_chatgpt_available: false,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
             isolated: true,
             // This constructor is for callers OUTSIDE the composition root,
             // which hold the shared availability map but not the model
@@ -3375,7 +3405,351 @@ impl FusionCatalogRefresher {
     /// this the refresh triggered BY that write can conclude the provider is
     /// unavailable, which is the exact opposite of what it was called to do.
     pub async fn refresh_after_credential_write(&self, credential_id: &str) {
+        // Round-12 rework: record the route BEFORE the re-probe, so the probe
+        // resolves the three special-cased rows from the live state rather
+        // than the boot snapshot — and so a later
+        // `mark_credential_removed` of the OTHER Anthropic route can fall
+        // back to this one instead of over-clearing the profile.
+        self.note_route_credential_written(credential_id).await;
         self.refresh_inner(Some(credential_id)).await;
+    }
+
+    /// Round-12 finding [2]: the "this profile LOST its credential" call that
+    /// [`Self::refresh_inner`]'s merge rule explicitly refuses to be.
+    ///
+    /// A re-probe can never lower an existing `true` — that is deliberate (a
+    /// degraded credential broker answers `Ok(false)`, not `Err`, so the
+    /// merge only ever raises), which means a credential DELETE has no way to
+    /// reach the availability map through the write path. Reusing
+    /// [`Self::refresh_after_credential_write`] here would be strictly worse
+    /// than doing nothing: its `forced` loop publishes `true` for exactly the
+    /// profile whose credential was just removed.
+    ///
+    /// # It re-derives, it does not assert `false`
+    ///
+    /// Round-12 REWORK. The first version of this method published a hard
+    /// `false` for every profile the removed credential backed. That is the
+    /// mirror-image defect of the stale `true` it replaced, and a worse one:
+    /// a stale `true` costs one panel that fails loudly on
+    /// `LlmError::Authentication`, while a wrong `false` removes EVERY row of
+    /// that provider from `filter_fusion_catalog` for the rest of the process
+    /// (`TooFewModels{eligible:0}` on a small install). Two production shapes
+    /// hit it — a generic profile whose `env_var` is still exported, and
+    /// Anthropic's two independent routes read from boot-frozen booleans — so
+    /// this now recomputes each affected profile with
+    /// `compute_availability_with_isolation`'s OWN formula
+    /// (provider-config/src/availability.rs:53-70) and the one fact the
+    /// caller actually established: the removed credential's KEYCHAIN entry
+    /// is gone.
+    ///
+    /// * a GENERIC profile is `keychain_has || env_set`, so with
+    ///   `keychain_has` now `false` it is exactly `env_set` — `!isolated &&
+    ///   std::env::var(source.env_var)`. Production boots non-isolated
+    ///   (`isolated_credential_storage: false`, apps/bridge-server/src/boot.rs
+    ///   and apps/cli/src/init.rs), so a user with `DEEPSEEK_API_KEY`
+    ///   exported who deletes the stored deepseek key keeps routing deepseek
+    ///   in the ordinary turn loop and must keep it in Fusion's catalog too;
+    /// * a profile backed by a DIFFERENT credential id as well contributes
+    ///   `true`, because the caller asserted nothing about that credential;
+    /// * the three special-cased slots (`anthropic-api-key` /
+    ///   `anthropic-oauth` / `openai-chatgpt`) answer from the shared route
+    ///   flags, which [`Self::note_route_credential_removed`] has already
+    ///   lowered for the route that actually went away — see the field doc on
+    ///   `anthropic_has_api_key`.
+    ///
+    /// Note that this is still a pure lock-and-set plus a `std::env::var`
+    /// read: NO keychain I/O (an ephemeral key never touched the keychain in
+    /// the first place, and a persistent delete has already happened by the
+    /// time we are called), so unlike the write path it needs no
+    /// `refresh_fusion_catalog_bounded` budget wrapper.
+    ///
+    /// It deliberately does NOT touch `availability_probe_completed`: a
+    /// removal is an assertion by the caller, not an observation of the
+    /// backend, and so proves nothing about whether the backend answers.
+    ///
+    /// The match is `credential_id == id || profile_name == id` — the same
+    /// defensive pair `refresh_inner`'s `forced` loop uses — because the
+    /// delete seams are keyed by `provider_id`, which is the PROFILE name on
+    /// the [`Self::for_keychain_profiles`] shape and the CREDENTIAL id on the
+    /// composition root's.
+    /// The RAISING counterpart of [`Self::mark_credential_removed`].
+    ///
+    /// [Round-12 review, blocking issue 1] The removal fan-out shipped without
+    /// this, so `/logout` published `anthropic: false` and the following
+    /// `/login` only flipped the route FLAG — nothing republished the map
+    /// entry. `filter_fusion_catalog` then dropped every anthropic row for the
+    /// rest of the process, i.e. `/fusion` on an Anthropic-only install failed
+    /// `TooFewModels{eligible:0}` after a sign-out/sign-in. That is strictly
+    /// worse than the stale `true` the removal path exists to clear: a stale
+    /// `true` costs one panel that fails loudly on `LlmError::Authentication`,
+    /// while a wrong `false` removes EVERY row of that provider.
+    ///
+    /// It also cannot be left to `refresh_inner`: that method's closing
+    /// `entry("anthropic").or_insert(..)` cannot RAISE an entry that already
+    /// exists, so once a delete has written `false` no later credential write
+    /// recovers it.
+    ///
+    /// Deliberately a pure flag-then-lock-and-set, mirroring the removal arms
+    /// in the opposite direction: it must stay cheap enough for the sign-in
+    /// seam, which is why it does not go through
+    /// `refresh_fusion_catalog_bounded`'s re-probe.
+    pub async fn mark_credential_established(&self, credential_id: &str) {
+        // Raise the ROUTE flag first, so the re-derivation below — and every
+        // later `refresh_inner`, which recomputes the three special-cased rows
+        // from these same flags — sees the new credential.
+        self.note_route_credential_written(credential_id).await;
+
+        if let Ok(mut guard) = self.availability.write() {
+            match credential_id {
+                // Same one-slot-two-spellings grouping as the removal arm, and
+                // the same two-route fallback: `anthropic_route_available()`
+                // is `api_key || oauth`, so signing in on either route
+                // republishes `true` without needing to know which one the
+                // delete had cleared.
+                "anthropic" | "anthropic-api-key" | "anthropic-oauth" => {
+                    guard.insert("anthropic".to_string(), self.anthropic_route_available());
+                }
+                "chatgpt" | "openai-chatgpt" => {
+                    guard.insert(
+                        "openai-chatgpt".to_string(),
+                        self.openai_chatgpt_available
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub async fn mark_credential_removed(&self, credential_id: &str) {
+        // (1) Lower the ROUTE flag first, so the re-derivation below — and
+        //     every later `refresh_inner`, which recomputes the three
+        //     special-cased rows from these same flags — sees the removal.
+        //     Without this the next unrelated credential write republishes
+        //     the boot value and resurrects the entry the delete cleared.
+        self.note_route_credential_removed(credential_id);
+
+        let affected: std::collections::BTreeSet<String> = self
+            .credential_sources
+            .iter()
+            .filter(|source| {
+                source.credential_id == credential_id || source.profile_name == credential_id
+            })
+            .map(|source| source.profile_name.clone())
+            .collect();
+        let rederived: Vec<(String, bool)> = affected
+            .into_iter()
+            .map(|profile| {
+                let available = self
+                    .credential_sources
+                    .iter()
+                    .filter(|source| source.profile_name == profile)
+                    .any(|source| self.route_survives_removal(source, credential_id));
+                (profile, available)
+            })
+            .collect();
+
+        if let Ok(mut guard) = self.availability.write() {
+            for (profile, available) in rederived {
+                guard.insert(profile, available);
+            }
+            // The three ids `compute_availability_with_isolation` special-cases
+            // (`anthropic-api-key` / `anthropic-oauth` / `openai-chatgpt`) are
+            // resolved from the route flags, not from `credential_sources`, so
+            // the loop above cannot reach them on a boot whose
+            // `credential_sources` never carried them (an Anthropic-less boot,
+            // or the [`Self::for_keychain_profiles`] shape): name them
+            // explicitly, or signing out leaves the `true` the sign-IN wrapper
+            // force-marked.
+            //
+            // `anthropic` is the one profile with TWO independent routes, so
+            // removing one of them must fall back to the other rather than
+            // blanket-clear: dropping OAuth while an API key is still
+            // configured would empty Fusion's catalog of a provider the turn
+            // loop routes perfectly well, which is the mirror-image defect of
+            // the stale `true` this method exists to fix.
+            //
+            // `"anthropic"` and `"anthropic-api-key"` are ONE slot under two
+            // spellings, so they MUST share an arm: `secret`'s
+            // `is_anthropic_api_key_id` is
+            // `matches!(id, "anthropic" | "anthropic-api-key")`
+            // (secret/src/credential.rs), which is what makes
+            // `delete_provider_key("anthropic")` route to
+            // `delete_anthropic_api_key()` — removing the API key and NOTHING
+            // else; the OAuth session survives. And the bare spelling is the
+            // one production sends: Electron declares the provider as
+            // `id: 'anthropic'` (clients/electron/src/shared/providers.ts) and
+            // passes it through `DeleteProviderCredential` to
+            // `refresh_fusion_catalog_after_credential_delete`. Giving the two
+            // spellings two different semantics let the Settings "delete key"
+            // button clear an Anthropic the turn loop still routes over OAuth.
+            //
+            // All three anthropic spellings share ONE arm because the answer
+            // is the same for each: the profile is available while EITHER
+            // route is live, and step (1) has already lowered whichever route
+            // this call removed.
+            //
+            // These arms must stay AFTER the loop above: for the bare id that
+            // loop already republished the `anthropic` profile from the single
+            // source `assemble` emitted (which names only ONE of the two
+            // routes), and the OR here is what restores the other.
+            match credential_id {
+                "anthropic" | "anthropic-api-key" | "anthropic-oauth" => {
+                    guard.insert("anthropic".to_string(), self.anthropic_route_available());
+                }
+                // ChatGPT gets no per-route OR because there is nothing to OR
+                // WITH: `openai_chatgpt_available` is a single flag the engine
+                // ORed over PAT-env / external-tokens-env / OAuth-session (see
+                // `compute_availability_with_isolation`), and step (1) cleared
+                // it. Both spellings of the slot share this arm — the OpenAI
+                // OAuth handle deletes the minted key under `"chatgpt"`
+                // (llm-client/src/oauth/openai/handle.rs), while the catalog
+                // and `/connect` spell the same slot `"openai-chatgpt"`.
+                "chatgpt" | "openai-chatgpt" => {
+                    guard.insert(
+                        "openai-chatgpt".to_string(),
+                        self.openai_chatgpt_available
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Is `source` still backed by something, given that `removed`'s KEYCHAIN
+    /// entry has just been deleted?
+    ///
+    /// This is `compute_availability_with_isolation`'s per-source formula
+    /// (provider-config/src/availability.rs:53-70) with the one substitution
+    /// the caller established — `has_provider_key(removed) == false` — and no
+    /// keychain read of its own.
+    fn route_survives_removal(
+        &self,
+        source: &provider_config::CredentialSource,
+        removed: &str,
+    ) -> bool {
+        match source.credential_id.as_str() {
+            "anthropic-api-key" => self
+                .anthropic_has_api_key
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "anthropic-oauth" => self
+                .anthropic_has_oauth
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "openai-chatgpt" => self
+                .openai_chatgpt_available
+                .load(std::sync::atomic::Ordering::Relaxed),
+            _ if source.credential_id == removed || source.profile_name == removed => {
+                // `keychain_has || env_set` with `keychain_has` now false.
+                self.env_var_still_set(source.env_var.as_deref())
+            }
+            // A different credential id backs this profile as well and the
+            // caller asserted nothing about it — assuming it is gone too is
+            // exactly the over-clearing this rework exists to remove.
+            _ => true,
+        }
+    }
+
+    /// `!isolated && the variable exists` — the ambient half of
+    /// `compute_availability_with_isolation`'s generic arm, honouring the same
+    /// isolation boundary the boot probe used (round-4 finding).
+    fn env_var_still_set(&self, env_var: Option<&str>) -> bool {
+        !self.isolated && env_var.is_some_and(|var| std::env::var(var).is_ok())
+    }
+
+    /// Anthropic is available while EITHER of its two independent routes is.
+    fn anthropic_route_available(&self) -> bool {
+        self.anthropic_has_api_key
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || self
+                .anthropic_has_oauth
+                .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record that `credential_id`'s route was just ESTABLISHED, for the three
+    /// slots `compute_availability_with_isolation` resolves from flags rather
+    /// than from a keychain read. See the `anthropic_has_api_key` field doc.
+    ///
+    /// # The bare `"anthropic"` spelling is ambiguous, so it is PROBED
+    ///
+    /// `secret::is_anthropic_api_key_id` is
+    /// `matches!(id, "anthropic" | "anthropic-api-key")`, so a bare
+    /// `"anthropic"` from a credential WRITE normally means an API key was
+    /// stored (the bridge-server's `SetProviderCredential` arm, the TUI
+    /// `/connect` key view). But it is not universal: the TUI's OAuth arm
+    /// (`apps/cli/src/mode.rs`) calls
+    /// `refresh_fusion_catalog_after_credential_write(&provider_id)` with the
+    /// picker's `"anthropic"` after an OAUTH sign-in, and
+    /// `EngineOAuthConnect::login("anthropic")` is likewise a sign-in, not a
+    /// key write. Believing the bare spelling there would raise the API-KEY
+    /// route on a session that has none, and a later `/logout` would then
+    /// leave Anthropic in Fusion's catalog on the strength of a route that
+    /// never existed — the very stale `true` this class of change removes.
+    ///
+    /// So the bare spelling is resolved against the store instead:
+    /// `has_provider_key("anthropic")` is the attribute-only presence check
+    /// (`secret/src/credential.rs`, `storage.contains("lingxi",
+    /// "anthropic-api-key")`), plus the ambient `ANTHROPIC_API_KEY` that
+    /// outranks it (`DesktopConfig::api_key`, apps/cli/src/init.rs). A write
+    /// can only ADD a credential, so this only ever RAISES the flag: a
+    /// degraded broker answering `Ok(false)` — the same lie
+    /// `refresh_inner`'s `forced` list exists to survive — leaves the flag
+    /// exactly as it was rather than lowering it.
+    ///
+    /// [`FusionCatalogRefreshingOAuthConnect`] additionally notifies under the
+    /// unambiguous `anthropic-oauth` spelling so the OAuth route is recorded
+    /// even when no API key is present to probe for.
+    async fn note_route_credential_written(&self, credential_id: &str) {
+        match credential_id {
+            "anthropic-api-key" => self
+                .anthropic_has_api_key
+                .store(true, std::sync::atomic::Ordering::Relaxed),
+            "anthropic" => {
+                let key_present = self
+                    .credentials
+                    .has_provider_key("anthropic")
+                    .await
+                    .unwrap_or(false)
+                    || self.env_var_still_set(Some("ANTHROPIC_API_KEY"));
+                if key_present {
+                    self.anthropic_has_api_key
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            "anthropic-oauth" => self
+                .anthropic_has_oauth
+                .store(true, std::sync::atomic::Ordering::Relaxed),
+            "chatgpt" | "openai-chatgpt" => self
+                .openai_chatgpt_available
+                .store(true, std::sync::atomic::Ordering::Relaxed),
+            _ => {}
+        }
+    }
+
+    /// The removal twin of [`Self::note_route_credential_written`].
+    ///
+    /// Deleting the Anthropic API key does not necessarily END the API-key
+    /// route: `DesktopConfig::api_key` is read from the `ANTHROPIC_API_KEY`
+    /// environment variable (apps/cli/src/init.rs) and OUTRANKS the stored
+    /// key, so on a non-isolated boot with that variable exported the route
+    /// survives the delete. That is the same `keychain_has || env_set` rule
+    /// [`Self::route_survives_removal`] applies to a generic profile, at the
+    /// variable `provider_config::assemble` records for the Anthropic
+    /// API-key source.
+    fn note_route_credential_removed(&self, credential_id: &str) {
+        match credential_id {
+            "anthropic" | "anthropic-api-key" => self.anthropic_has_api_key.store(
+                self.env_var_still_set(Some("ANTHROPIC_API_KEY")),
+                std::sync::atomic::Ordering::Relaxed,
+            ),
+            "anthropic-oauth" => self
+                .anthropic_has_oauth
+                .store(false, std::sync::atomic::Ordering::Relaxed),
+            "chatgpt" | "openai-chatgpt" => self
+                .openai_chatgpt_available
+                .store(false, std::sync::atomic::Ordering::Relaxed),
+            _ => {}
+        }
     }
 
     /// Round-9 finding [3]: does this row's `available` verdict PROVE the
@@ -3449,17 +3823,22 @@ impl FusionCatalogRefresher {
     /// map already held and is only inserted as `false` when the map had no
     /// entry for it at all. That is sound because a refresh is only ever
     /// triggered by a credential WRITE — no caller adds availability by
-    /// deleting a credential, so a refresh has no business REMOVING any. If a
-    /// credential-REMOVAL path is ever wired here it must not reuse this
-    /// method; it needs an explicit "this profile lost its credential" call
-    /// that clears exactly that entry.
+    /// deleting a credential, so a refresh has no business REMOVING any. A
+    /// credential-REMOVAL path must NOT reuse this method — its `forced` loop
+    /// would publish `true` for the very profile that just lost its
+    /// credential. Removals go through [`Self::mark_credential_removed`]
+    /// instead (round-12 finding [2]), which clears exactly the entries the
+    /// removed credential backed and touches nothing else.
     async fn refresh_inner(&self, just_written: Option<&str>) {
         let rows = provider_config::compute_availability_with_isolation(
             &self.credentials,
             &self.credential_sources,
-            self.anthropic_has_api_key,
-            self.anthropic_has_oauth,
-            self.openai_chatgpt_available,
+            self.anthropic_has_api_key
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.anthropic_has_oauth
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.openai_chatgpt_available
+                .load(std::sync::atomic::Ordering::Relaxed),
             self.isolated,
         )
         .await;
@@ -3538,7 +3917,7 @@ impl FusionCatalogRefresher {
             }
             guard
                 .entry("anthropic".to_string())
-                .or_insert(self.anthropic_has_api_key || self.anthropic_has_oauth);
+                .or_insert(self.anthropic_route_available());
         }
     }
 }
@@ -3595,6 +3974,73 @@ pub async fn refresh_fusion_catalog_after_credential_write(credential_id: &str) 
         refresher
             .refresh_after_credential_write(credential_id)
             .await;
+    }
+}
+
+/// The removal twin of [`refresh_fusion_catalog_after_credential_write`]:
+/// tell every live Fusion catalog filter in this process that
+/// `credential_id`'s credential is GONE, so the next
+/// `FusionCatalogModelSource::list()` stops offering the models it backed.
+///
+/// Round-12 finding [2]: without this, deleting a provider key (or signing
+/// out) mid-session left `availability[profile] = true` for the rest of the
+/// process — a re-probe cannot lower it by design — so a `/fusion` preset
+/// could auto-select the provider, reserve budget for it, and only discover
+/// the credential was gone as an `LlmError::Authentication` at request time,
+/// instead of the §4 preflight excluding it.
+///
+/// Unlike the write twin this does no keychain I/O — it re-derives the
+/// affected profiles from the credential sources, the shared route flags and
+/// `std::env::var` (see [`FusionCatalogRefresher::mark_credential_removed`])
+/// — so callers do not need to bound it with
+/// `crate::boot::refresh_fusion_catalog_bounded`. A no-op in a process with
+/// no desktop runtime.
+pub async fn refresh_fusion_catalog_after_credential_delete(credential_id: &str) {
+    let refreshers: Vec<FusionCatalogRefresher> = FUSION_CATALOG_REFRESHERS
+        .get()
+        .and_then(|cell| cell.lock().ok())
+        .map(|mut guard| {
+            guard.retain(|entry| Arc::strong_count(&entry.availability) > 1);
+            guard.clone()
+        })
+        .unwrap_or_default();
+    for refresher in refreshers {
+        refresher.mark_credential_removed(credential_id).await;
+    }
+}
+
+/// Tell every live Fusion catalog filter that `credential_id`'s ROUTE now
+/// exists, without re-probing every credential source and without touching
+/// the availability map.
+///
+/// Round-12 rework: the three slots `compute_availability_with_isolation`
+/// special-cases resolve from flags rather than from a keychain read, and a
+/// removal of one Anthropic route falls back to the other — so a sign-in that
+/// never publishes its route leaves that fallback answering from the boot
+/// snapshot. This is the cheap half of
+/// [`refresh_fusion_catalog_after_credential_write`] for seams (`/login`)
+/// that must not pay for the full re-probe. Its only caller passes the
+/// unambiguous `anthropic-oauth`, for which
+/// [`FusionCatalogRefresher::mark_credential_established`] raises the route
+/// flag and republishes just that one map entry — a lock-and-set, not a
+/// re-probe; only the ambiguous bare `anthropic` spelling costs one
+/// attribute-only presence check there. Publishing the entry (rather than only
+/// noting the flag) is load-bearing: without it a preceding `/logout` leaves
+/// `anthropic: false` in the map, and `refresh_inner`'s closing `or_insert`
+/// cannot raise an entry that already exists — see
+/// [`FusionCatalogRefresher::mark_credential_established`]. A no-op in a
+/// process with no desktop runtime.
+async fn note_fusion_catalog_credential_route(credential_id: &str) {
+    let refreshers: Vec<FusionCatalogRefresher> = FUSION_CATALOG_REFRESHERS
+        .get()
+        .and_then(|cell| cell.lock().ok())
+        .map(|mut guard| {
+            guard.retain(|entry| Arc::strong_count(&entry.availability) > 1);
+            guard.clone()
+        })
+        .unwrap_or_default();
+    for refresher in refreshers {
+        refresher.mark_credential_established(credential_id).await;
     }
 }
 
@@ -3689,6 +4135,52 @@ impl command_core::ChatGptConnectDriver for FusionCatalogRefreshingChatGptConnec
     }
 }
 
+/// Round-12 finding [2], class sweep: the same wrapping for the SIGN-OUT
+/// direction, which had no wrapper at all.
+///
+/// Every sign-IN seam refreshes Fusion's availability map, and
+/// `FusionCatalogRefresher`'s merge rule can never lower a `true` (see
+/// [`FusionCatalogRefresher::refresh_inner`]) — so once a process published
+/// `anthropic: true`, `/logout` (`command_core::LogoutHandler`, the TUI) and
+/// the bridge-server's `ClientCommand::Logout` both left Fusion offering
+/// Anthropic models the session could no longer authenticate, for the rest of
+/// the process. Wrapping the ONE `Arc<dyn AuthHandle>` the whole desktop
+/// runtime shares covers every consumer of it at once rather than asking each
+/// surface to remember the call.
+///
+/// `login` notes the OAUTH route it just established (round-12 rework) and
+/// otherwise delegates untouched. `FusionCatalogRefreshingOAuthConnect` only
+/// covers the `/connect` picker; `/login` (`command_core::LoginHandler`) and
+/// the bridge-server's `ClientCommand::Login` drive this handle directly, and
+/// if their sign-in went unrecorded a later "delete the Anthropic API key"
+/// would fall back to a stale `anthropic_has_oauth == false` and clear a
+/// profile the OAuth session still routes. The note is a single atomic store
+/// — no keychain I/O — so the login path keeps its current cost; publishing
+/// the map entry stays the job of the write fan-out, and a rollback inside a
+/// failed login goes through `logout` below.
+struct FusionCatalogClearingAuth {
+    inner: Arc<dyn AuthHandle>,
+}
+
+#[async_trait::async_trait]
+impl AuthHandle for FusionCatalogClearingAuth {
+    async fn login(&self) -> Result<platform_api::auth::LoginInfo, platform_api::auth::AuthError> {
+        let info = self.inner.login().await?;
+        note_fusion_catalog_credential_route("anthropic-oauth").await;
+        Ok(info)
+    }
+
+    async fn logout(&self) -> Result<(), platform_api::auth::AuthError> {
+        self.inner.logout().await?;
+        refresh_fusion_catalog_after_credential_delete("anthropic-oauth").await;
+        Ok(())
+    }
+
+    async fn current_user(&self) -> Option<platform_api::auth::LoginInfo> {
+        self.inner.current_user().await
+    }
+}
+
 /// See [`FusionCatalogRefreshingCredentialWriter`] — the same wrapping for
 /// the unified OAuth sign-in seam the TUI `/connect` picker uses (Anthropic
 /// Pro/Max, OpenAI ChatGPT). Round-5 review finding [15] class sweep: an
@@ -3703,8 +4195,23 @@ struct FusionCatalogRefreshingOAuthConnect {
 impl command_core::OAuthConnectDriver for FusionCatalogRefreshingOAuthConnect {
     async fn login(&self, provider_id: &str) -> Result<String, command_core::ConnectError> {
         let message = self.inner.login(provider_id).await?;
+        // Round-12 rework: this is the ONE seam where a bare `"anthropic"`
+        // means the OAUTH route — `EngineOAuthConnect::login` maps it to
+        // `AuthHandle::login` (connect.rs), not to a stored API key. Every
+        // other write seam that says `"anthropic"` stored an API key
+        // (`secret::is_anthropic_api_key_id` matches the bare spelling), so
+        // notify under the unambiguous credential id here and let
+        // `note_route_credential_written` keep the bare spelling meaning
+        // "API key" everywhere else. Without this, signing in with OAuth
+        // would raise the API-KEY flag and a later "delete the API key" would
+        // leave Anthropic in Fusion's catalog on the strength of a route that
+        // never existed.
+        let credential_id = match provider_id {
+            "anthropic" => "anthropic-oauth",
+            other => other,
+        };
         self.refresher
-            .refresh_after_credential_write(provider_id)
+            .refresh_after_credential_write(credential_id)
             .await;
         Ok(message)
     }
@@ -9614,9 +10121,9 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         availability_probe_completed: fusion_probe_completed,
         credentials: credentials.clone(),
         credential_sources: assembled.credential_sources.clone(),
-        anthropic_has_api_key: has_api_key,
-        anthropic_has_oauth: has_oauth,
-        openai_chatgpt_available: has_openai_chatgpt,
+        anthropic_has_api_key: fusion_route_flag(has_api_key),
+        anthropic_has_oauth: fusion_route_flag(has_oauth),
+        openai_chatgpt_available: fusion_route_flag(has_openai_chatgpt),
         // Round-4 review finding: a refresh must reproduce the boot probe
         // exactly, including the isolation boundary — otherwise an isolated
         // boot's first `/connect` replaces the whole availability map with
@@ -9638,6 +10145,13 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         availability_probe_completed,
         session_model_restriction.as_ref(),
     );
+
+    // Round-12 finding [2], class sweep: `/logout` and the bridge-server's
+    // `ClientCommand::Logout` are credential REMOVALS, and the availability
+    // map's merge rule can never lower the `true` a sign-in published. Wrap
+    // the one shared handle here, after the refresher is registered, so every
+    // sign-out surface in this process clears Fusion's entry.
+    let auth: Arc<dyn AuthHandle> = Arc::new(FusionCatalogClearingAuth { inner: auth });
 
     Ok(LlmStack {
         http,
@@ -14380,9 +14894,11 @@ pub async fn build(
 mod tests {
     use super::{
         build, build_shared_credential_stack_for_config, desktop_fusion_runtime_config,
-        desktop_tool_registry, filter_fusion_catalog, model_deprecation_warning,
+        desktop_tool_registry, filter_fusion_catalog, fusion_route_flag,
+        model_deprecation_warning,
+        refresh_fusion_catalog_after_credential_delete,
         refresh_fusion_catalog_after_credential_write, register_fusion_catalog_refresher,
-        FusionCatalogModelSource, FusionCatalogRefresher,
+        FusionCatalogClearingAuth, FusionCatalogModelSource, FusionCatalogRefresher,
         parse_worktree_slash_action, resolve_memory_feature_gates,
         resolve_workflow_session_enabled, resolve_workflow_size_guideline,
         sandbox_network_ask_callback, CoordinatorWiring, DesktopConfig,
@@ -15166,9 +15682,9 @@ mod tests {
             availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             credentials: credentials.clone(),
             credential_sources,
-            anthropic_has_api_key: false,
-            anthropic_has_oauth: false,
-            openai_chatgpt_available: false,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
             isolated: false,
         };
         let inner: Arc<dyn ConnectCredentialWriter> = Arc::new(EngineCredentialWriter::new(
@@ -15288,9 +15804,9 @@ with no restart and no ModelSource reconstruction"
             availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             credentials,
             credential_sources: sources,
-            anthropic_has_api_key: true,
-            anthropic_has_oauth: false,
-            openai_chatgpt_available: false,
+            anthropic_has_api_key: fusion_route_flag(true),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
             isolated: true,
         };
 
@@ -15329,8 +15845,17 @@ when the degraded backend cannot read it back; map after refresh was {map:?}"
     /// process-wide notifier both halves of that seam use
     /// (`apps/cli/src/mode.rs`'s `run_connect_action` calls it; the assertion
     /// that IT does lives in that crate's own test).
+    /// `FUSION_CATALOG_REFRESHERS` is a PROCESS-WIDE registry and
+    /// `note_fusion_catalog_credential_route` / `refresh_fusion_catalog_after_credential_write`
+    /// fan out to every entry in it, so two tests that each register a
+    /// refresher will mutate each other's availability map. Every test that
+    /// registers one must hold this lock — the same one-lock-per-shared-global
+    /// rule the prompt-builder tests learned the hard way.
+    static FUSION_REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn the_process_wide_notifier_reaches_a_registered_refresher() {
+        let _registry_guard = FUSION_REGISTRY_LOCK.lock().await;
         use async_trait::async_trait;
         use platform_api::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
@@ -15426,6 +15951,593 @@ when the degraded backend cannot read it back; map after refresh was {map:?}"
         );
     }
 
+    /// Round-12 finding [2]: the removal half of the fan-out above.
+    ///
+    /// `refresh_inner`'s merge rule can never lower a `true` (deliberately —
+    /// a degraded credential broker answers `Ok(false)`, not `Err`), so a
+    /// credential DELETE has no path to the availability map through the
+    /// write notifier, and `refresh_after_credential_write` would publish the
+    /// exact opposite of the truth if it were reused. This pins the dedicated
+    /// removal fan-out: it lowers exactly the deleted profile, and lowers
+    /// nothing else.
+    #[tokio::test]
+    async fn deleting_a_credential_lowers_only_that_profiles_availability_entry() {
+        let _registry_guard = FUSION_REGISTRY_LOCK.lock().await;
+        let boot: std::collections::BTreeMap<String, bool> = [
+            ("openrouter".to_string(), true),
+            ("deepseek".to_string(), true),
+        ]
+        .into_iter()
+        .collect();
+        let availability = Arc::new(std::sync::RwLock::new(boot));
+        register_fusion_catalog_refresher(FusionCatalogRefresher::for_keychain_profiles(
+            availability.clone(),
+            fusion_delete_test_credentials(),
+            &["openrouter", "deepseek"],
+        ));
+
+        refresh_fusion_catalog_after_credential_delete("openrouter").await;
+
+        let published = availability.read().unwrap().clone();
+        assert_eq!(
+            published.get("openrouter").copied(),
+            Some(false),
+            "the deleted profile must be lowered — a stale `true` is what lets /fusion \
+auto-select a provider the session can no longer authenticate: {published:?}"
+        );
+        assert_eq!(
+            published.get("deepseek").copied(),
+            Some(true),
+            "a sibling profile that still has its credential must be untouched — clearing \
+too much empties Fusion's catalog, the mirror-image defect: {published:?}"
+        );
+    }
+
+    /// Round-12 finding [2], class member: signing OUT is a credential
+    /// removal too. `refresh_inner`'s closing
+    /// `guard.entry("anthropic").or_insert(..)` is an `or_insert`, so the
+    /// `true` a sign-in published survives a sign-out for the life of the
+    /// process. `FusionCatalogClearingAuth` wraps the ONE shared
+    /// `Arc<dyn AuthHandle>` so `/logout` and the bridge-server's
+    /// `ClientCommand::Logout` are both covered by one seam.
+    #[tokio::test]
+    async fn signing_out_clears_the_anthropic_entry_a_sign_in_published() {
+        let _registry_guard = FUSION_REGISTRY_LOCK.lock().await;
+        use async_trait::async_trait;
+        use platform_api::auth::{AuthError, LoginInfo};
+
+        struct OkLogout;
+        #[async_trait]
+        impl platform_api::AuthHandle for OkLogout {
+            async fn login(&self) -> Result<LoginInfo, AuthError> {
+                Err(AuthError::Cancelled)
+            }
+            async fn logout(&self) -> Result<(), AuthError> {
+                Ok(())
+            }
+            async fn current_user(&self) -> Option<LoginInfo> {
+                None
+            }
+        }
+
+        let availability = Arc::new(std::sync::RwLock::new(
+            [("anthropic".to_string(), true)]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        register_fusion_catalog_refresher(FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: fusion_delete_test_credentials(),
+            credential_sources: Vec::new(),
+            // OAuth was the ONLY Anthropic route this session had.
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(true),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        });
+
+        let auth: Arc<dyn platform_api::AuthHandle> =
+            Arc::new(FusionCatalogClearingAuth { inner: Arc::new(OkLogout) });
+        auth.logout().await.expect("logout ok");
+
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(false),
+            "after /logout Fusion must stop offering Anthropic models — nothing else in the \
+process can lower this entry"
+        );
+    }
+
+    /// Round-12 review, BLOCKING issue 1: the removal fan-out shipped without a
+    /// raising counterpart, so `/logout` then `/login` left Fusion permanently
+    /// blind to Anthropic. `filter_fusion_catalog` drops every row of a
+    /// provider whose availability entry is `false`, so on an Anthropic-only
+    /// install `/fusion` failed `TooFewModels{eligible:0}` for the rest of the
+    /// process — strictly worse than the stale `true` the removal path exists
+    /// to clear.
+    #[tokio::test]
+    async fn signing_back_in_after_a_logout_restores_anthropic_for_fusion() {
+        let availability = Arc::new(std::sync::RwLock::new(
+            [("anthropic".to_string(), true)]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: fusion_delete_test_credentials(),
+            credential_sources: Vec::new(),
+            // OAuth is the ONLY route: no API key to fall back on, which is the
+            // Anthropic-only install the finding names.
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(true),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+
+        refresher.mark_credential_removed("anthropic-oauth").await;
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(false),
+            "precondition: signing out of the only route must lower the entry"
+        );
+
+        refresher.mark_credential_established("anthropic-oauth").await;
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(true),
+            "after signing back in Fusion must offer Anthropic again; leaving the entry \
+`false` hides EVERY anthropic row and fails an Anthropic-only /fusion with \
+TooFewModels{{eligible:0}}"
+        );
+    }
+
+    /// The same recovery, but reached through the seam `/login` actually calls
+    /// (`note_fusion_catalog_credential_route`), so the test fails if that
+    /// helper is ever pointed back at the flag-only `note_route_credential_written`.
+    #[tokio::test]
+    async fn the_login_seam_republishes_the_availability_entry_not_just_the_flag() {
+        let _registry_guard = FUSION_REGISTRY_LOCK.lock().await;
+        let availability = Arc::new(std::sync::RwLock::new(
+            [("anthropic".to_string(), false)]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: fusion_delete_test_credentials(),
+            credential_sources: Vec::new(),
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+        register_fusion_catalog_refresher(refresher);
+
+        super::note_fusion_catalog_credential_route("anthropic-oauth").await;
+
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(true),
+            "the /login seam must republish the map entry, not only raise the route flag: \
+`refresh_inner`'s closing `or_insert` cannot RAISE an entry that already exists, so a \
+flag-only login never recovers from a preceding logout"
+        );
+    }
+
+    /// Round-12 finding [2], the over-clearing direction: `anthropic` is the
+    /// one profile with TWO independent routes. Dropping OAuth while an API
+    /// key is still configured must NOT empty Fusion's catalog of a provider
+    /// the turn loop still routes perfectly well.
+    #[tokio::test]
+    async fn signing_out_of_oauth_keeps_anthropic_when_an_api_key_remains() {
+        let availability = Arc::new(std::sync::RwLock::new(
+            [("anthropic".to_string(), true)]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: fusion_delete_test_credentials(),
+            credential_sources: Vec::new(),
+            anthropic_has_api_key: fusion_route_flag(true),
+            anthropic_has_oauth: fusion_route_flag(true),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+        refresher.mark_credential_removed("anthropic-oauth").await;
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(true),
+            "the API key is still configured, so Anthropic must stay in Fusion's catalog; \
+blanket-clearing here would be the mirror-image defect of the stale `true`"
+        );
+    }
+
+    /// The twin of the test above at the spelling PRODUCTION actually sends.
+    ///
+    /// `clients/electron/src/shared/providers.ts` declares the Anthropic
+    /// provider as `id: 'anthropic'`, and `host.ts`'s credential-clear handler
+    /// passes that id straight through to `ClientCommand::DeleteProviderCredential`
+    /// -> `refresh_fusion_catalog_after_credential_delete(&provider_id)`. Bare
+    /// `"anthropic"` and `"anthropic-api-key"` are ONE credential slot —
+    /// `secret::is_anthropic_api_key_id` is
+    /// `matches!(id, "anthropic" | "anthropic-api-key")`, so
+    /// `delete_provider_key("anthropic")` routes to `delete_anthropic_api_key()`
+    /// and removes the API key only, leaving the OAuth session intact. Handling
+    /// the two spellings with two different semantics let the Settings
+    /// "delete key" button empty Fusion's catalog of an Anthropic the turn loop
+    /// still routes over OAuth.
+    #[tokio::test]
+    async fn deleting_the_bare_anthropic_key_id_keeps_anthropic_when_oauth_remains() {
+        let availability = Arc::new(std::sync::RwLock::new(
+            [("anthropic".to_string(), true)]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: fusion_delete_test_credentials(),
+            // The session booted signed in with OAuth and no API key, so
+            // `assemble` published exactly this source (provider-config/src/
+            // assemble.rs:26-38) — the profile the loop in
+            // `mark_credential_removed` lowers before the match arm runs.
+            credential_sources: vec![provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::AnthropicFirstParty,
+                profile_name: "anthropic".to_string(),
+                credential_id: "anthropic-oauth".to_string(),
+                env_var: None,
+                kind: provider_config::CredentialKind::OAuth,
+            }],
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(true),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+
+        refresher.mark_credential_removed("anthropic").await;
+
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(true),
+            "deleting the Anthropic API KEY (the bare `anthropic` id Electron sends) must \
+leave Anthropic available over its still-valid OAuth session — clearing it here drops every \
+Anthropic row from `filter_fusion_catalog` for the rest of the process, and on a small \
+install /fusion then fails TooFewModels{{eligible:0}} instead of running"
+        );
+    }
+
+    /// Round-12 rework: `mark_credential_removed` must not assert a hard
+    /// `false` for a profile another LIVE route still backs.
+    ///
+    /// `provider_config::compute_availability_with_isolation` resolves a
+    /// GENERIC profile as `keychain_has || env_set`
+    /// (provider-config/src/availability.rs:63-70) and production boots
+    /// NON-isolated (`isolated_credential_storage: false` —
+    /// apps/bridge-server/src/boot.rs:508, apps/cli/src/init.rs:791), so an
+    /// exported `DEEPSEEK_API_KEY` keeps routing deepseek in the ordinary turn
+    /// loop after the STORED deepseek key is deleted from Settings. Publishing
+    /// `false` for it is strictly worse than the stale `true` this method
+    /// replaced: it drops EVERY deepseek row from `filter_fusion_catalog` for
+    /// the rest of the process, and on a small install `/fusion` then fails
+    /// `TooFewModels{eligible:0}`.
+    #[tokio::test]
+    async fn deleting_a_stored_key_keeps_a_profile_its_env_var_still_backs() {
+        const VAR: &str = "LINGXI_TEST_FUSION_DELETE_ENV_ROUTE_VAR";
+        std::env::set_var(VAR, "sk-still-exported");
+
+        let availability = Arc::new(std::sync::RwLock::new(
+            [("deepseek".to_string(), true)]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: fusion_delete_test_credentials(),
+            credential_sources: vec![provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::OpenAICompatible {
+                    name: "deepseek".to_string(),
+                },
+                profile_name: "deepseek".to_string(),
+                credential_id: "deepseek".to_string(),
+                env_var: Some(VAR.to_string()),
+                kind: provider_config::CredentialKind::ApiKey,
+            }],
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: false,
+        };
+
+        refresher.mark_credential_removed("deepseek").await;
+        let published = availability.read().unwrap().get("deepseek").copied();
+        std::env::remove_var(VAR);
+
+        assert_eq!(
+            published,
+            Some(true),
+            "the exported env var still routes deepseek, so Fusion must keep offering it; \
+a hard `false` here removes every deepseek row from filter_fusion_catalog for the rest of \
+the process — the mirror-image defect of the stale `true`"
+        );
+    }
+
+    /// Round-12 rework, case (b): the two Anthropic route booleans must not be
+    /// frozen at boot.
+    ///
+    /// An OAuth-only boot gives `anthropic_has_api_key: false,
+    /// anthropic_has_oauth: true` and the single `anthropic-oauth` credential
+    /// source `provider_config::assemble` emits (assemble.rs:26-38). The user
+    /// then ADDS an Anthropic API key from Settings — router.rs:3086's
+    /// `SetProviderCredential` arm fans out to
+    /// `refresh_after_credential_write("anthropic")` — and afterwards
+    /// `/logout`s, which is `mark_credential_removed("anthropic-oauth")`. The
+    /// API key is live, so Anthropic must stay in Fusion's catalog; answering
+    /// from the frozen boot boolean over-clears it.
+    #[tokio::test]
+    async fn an_api_key_added_mid_session_survives_signing_out_of_oauth() {
+        let availability = Arc::new(std::sync::RwLock::new(
+            std::collections::BTreeMap::<String, bool>::new(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            // The Settings "add key" write really did store an Anthropic API
+            // key, so the presence probe the bare `"anthropic"` spelling is
+            // resolved against answers yes.
+            credentials: fusion_test_credentials_with_stored_anthropic_key(),
+            credential_sources: vec![provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::AnthropicFirstParty,
+                profile_name: "anthropic".to_string(),
+                credential_id: "anthropic-oauth".to_string(),
+                env_var: None,
+                kind: provider_config::CredentialKind::OAuth,
+            }],
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(true),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+
+        refresher.refresh_after_credential_write("anthropic").await;
+        refresher.mark_credential_removed("anthropic-oauth").await;
+
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(true),
+            "the API key added mid-session is still live, so Anthropic must stay in Fusion's \
+catalog; the frozen anthropic_has_api_key=false fallback over-clears it"
+        );
+    }
+
+    /// Round-12 rework, the durability half of the same class: a removal that
+    /// only edits the availability MAP is undone by the next unrelated
+    /// credential write, because `refresh_inner` recomputes the three
+    /// special-cased rows from the boot booleans and its merge rule publishes
+    /// `true` unconditionally (lib.rs `if row.available { guard.insert(.., true) }`).
+    #[tokio::test]
+    async fn a_removed_chatgpt_credential_is_not_resurrected_by_a_later_write() {
+        let availability = Arc::new(std::sync::RwLock::new(
+            [
+                ("openai-chatgpt".to_string(), true),
+                ("openrouter".to_string(), true),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: fusion_delete_test_credentials(),
+            credential_sources: vec![
+                provider_config::CredentialSource {
+                    provider_id: llm_client::ProviderId::OpenAICompatible {
+                        name: "openai-chatgpt".to_string(),
+                    },
+                    profile_name: "openai-chatgpt".to_string(),
+                    credential_id: "openai-chatgpt".to_string(),
+                    env_var: None,
+                    kind: provider_config::CredentialKind::OAuth,
+                },
+                provider_config::CredentialSource {
+                    provider_id: llm_client::ProviderId::OpenAICompatible {
+                        name: "openrouter".to_string(),
+                    },
+                    profile_name: "openrouter".to_string(),
+                    credential_id: "openrouter".to_string(),
+                    env_var: None,
+                    kind: provider_config::CredentialKind::ApiKey,
+                },
+            ],
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(true),
+            isolated: true,
+        };
+
+        refresher.mark_credential_removed("openai-chatgpt").await;
+        assert_eq!(
+            availability.read().unwrap().get("openai-chatgpt").copied(),
+            Some(false),
+            "sanity: the removal itself must lower the entry"
+        );
+
+        refresher.refresh_after_credential_write("openrouter").await;
+
+        assert_eq!(
+            availability.read().unwrap().get("openai-chatgpt").copied(),
+            Some(false),
+            "a credential removal must survive the next unrelated credential write — \
+re-deriving the ChatGPT row from a boot boolean nothing can lower resurrects the entry \
+the delete just cleared"
+        );
+    }
+
+    /// Round-12 rework, the ambiguity the class sweep turned up: a bare
+    /// `"anthropic"` credential-write notification does NOT prove an API key
+    /// exists.
+    ///
+    /// `apps/cli/src/mode.rs`'s `ConnectAction::OAuth` arm calls
+    /// `refresh_fusion_catalog_after_credential_write(&provider_id)` with the
+    /// picker's `"anthropic"` AFTER an OAuth sign-in (on top of the refresh
+    /// `FusionCatalogRefreshingOAuthConnect` already performed). Taking that
+    /// at face value raises the API-KEY route on a session that only ever had
+    /// OAuth, and `/logout` then leaves Anthropic in Fusion's catalog on the
+    /// strength of a route that never existed — the exact stale `true`
+    /// round-12 finding [2] is about. The bare spelling is therefore resolved
+    /// against the credential store, which here holds no Anthropic key.
+    #[tokio::test]
+    async fn an_oauth_sign_in_reported_under_the_bare_anthropic_id_raises_no_api_key_route() {
+        let availability = Arc::new(std::sync::RwLock::new(
+            std::collections::BTreeMap::<String, bool>::new(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            // No Anthropic API key is stored: this session signed in with
+            // OAuth only.
+            credentials: fusion_delete_test_credentials(),
+            credential_sources: vec![provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::AnthropicFirstParty,
+                profile_name: "anthropic".to_string(),
+                credential_id: "anthropic-oauth".to_string(),
+                env_var: None,
+                kind: provider_config::CredentialKind::OAuth,
+            }],
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(true),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+
+        // The TUI OAuth arm's redundant notification, then /logout.
+        refresher.refresh_after_credential_write("anthropic").await;
+        refresher.mark_credential_removed("anthropic-oauth").await;
+
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(false),
+            "no Anthropic API key was ever stored, so signing out must clear Fusion's \
+Anthropic entry; believing the ambiguous bare `anthropic` write id invents an API-key \
+route and resurrects the stale `true`"
+        );
+    }
+
+    /// [`fusion_delete_test_credentials`] with one difference: the store
+    /// reports an Anthropic API key present, which is what
+    /// `has_provider_key("anthropic")` asks for
+    /// (`storage.contains("lingxi", "anthropic-api-key")`,
+    /// secret/src/credential.rs).
+    fn fusion_test_credentials_with_stored_anthropic_key() -> Arc<secret::CredentialManager> {
+        use async_trait::async_trait;
+        use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
+
+        struct AnthropicKeyPresentStorage;
+        #[async_trait]
+        impl SecureStorage for AnthropicKeyPresentStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(None)
+            }
+            async fn delete(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(Vec::new())
+            }
+            async fn contains(
+                &self,
+                _service: &str,
+                account: &str,
+            ) -> Result<bool, SecureStorageError> {
+                Ok(account == "anthropic-api-key")
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        Arc::new(secret::CredentialManager::new(
+            Arc::new(AnthropicKeyPresentStorage),
+            Arc::new(platform_posix::PosixClock::new()),
+            Arc::new(platform_posix::PosixHttp::new()),
+        ))
+    }
+
+    /// A no-op credential backend for the fan-out tests above: the removal
+    /// path is a pure lock-and-set with no keychain I/O, so nothing here is
+    /// ever read — using a real store would only add a way for the test to
+    /// pass for the wrong reason.
+    fn fusion_delete_test_credentials() -> Arc<secret::CredentialManager> {
+        use async_trait::async_trait;
+        use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
+
+        struct InertStorage;
+        #[async_trait]
+        impl SecureStorage for InertStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(None)
+            }
+            async fn delete(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(Vec::new())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        Arc::new(secret::CredentialManager::new(
+            Arc::new(InertStorage),
+            Arc::new(platform_posix::PosixClock::new()),
+            Arc::new(platform_posix::PosixHttp::new()),
+        ))
+    }
+
     /// Round-4 review finding (isolation boundary): `FusionCatalogRefresher`
     /// must reproduce the boot probe's `isolated_credential_storage`
     /// exactly — `resolve_llm_stack` passes `cfg.isolated_credential_storage`
@@ -15507,9 +16619,9 @@ when the degraded backend cannot read it back; map after refresh was {map:?}"
             availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             credentials: credentials.clone(),
             credential_sources: credential_sources.clone(),
-            anthropic_has_api_key: false,
-            anthropic_has_oauth: false,
-            openai_chatgpt_available: false,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
             isolated: true,
         };
         isolated_refresher.refresh().await;
@@ -15536,9 +16648,9 @@ credential — it must reproduce the boot probe's \
             availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             credentials,
             credential_sources,
-            anthropic_has_api_key: false,
-            anthropic_has_oauth: false,
-            openai_chatgpt_available: false,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
             isolated: false,
         };
         non_isolated_refresher.refresh().await;
@@ -18192,9 +19304,9 @@ reconstruction — got: {after:?}"
             availability_probe_completed: probe_completed.clone(),
             credentials: credentials.clone(),
             credential_sources,
-            anthropic_has_api_key: false,
-            anthropic_has_oauth: false,
-            openai_chatgpt_available: false,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
             isolated: false,
         };
         refresher.refresh_after_credential_write("openrouter").await;
@@ -18306,9 +19418,9 @@ providers with no credential: got {after:?}"
             availability_probe_completed: probe_completed.clone(),
             credentials,
             credential_sources,
-            anthropic_has_api_key: false,
-            anthropic_has_oauth: false,
-            openai_chatgpt_available: false,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
             isolated: false,
         };
         refresher.refresh().await;
@@ -18440,9 +19552,9 @@ from a degraded credential broker and must NOT re-arm filtering"
             credentials,
             credential_sources,
             // The install shape that defeated the gate.
-            anthropic_has_api_key: true,
-            anthropic_has_oauth: false,
-            openai_chatgpt_available: false,
+            anthropic_has_api_key: fusion_route_flag(true),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
             isolated: true,
         };
         refresher.refresh().await;
@@ -18563,9 +19675,9 @@ Fusion's catalog for the rest of the process: got {after:?}"
             availability_probe_completed: probe_completed.clone(),
             credentials,
             credential_sources,
-            anthropic_has_api_key: false,
-            anthropic_has_oauth: false,
-            openai_chatgpt_available: false,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
             isolated: false,
         };
         refresher.refresh().await;
@@ -18690,9 +19802,9 @@ env-derived: got {after:?}"
             availability_probe_completed: probe_completed.clone(),
             credentials,
             credential_sources,
-            anthropic_has_api_key: false,
-            anthropic_has_oauth: true,
-            openai_chatgpt_available: false,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(true),
+            openai_chatgpt_available: fusion_route_flag(false),
             isolated: true,
         };
         refresher.refresh_after_credential_write("anthropic-oauth").await;
@@ -18810,9 +19922,9 @@ got {after:?}"
             availability_probe_completed: probe_completed.clone(),
             credentials,
             credential_sources,
-            anthropic_has_api_key: false,
-            anthropic_has_oauth: false,
-            openai_chatgpt_available: false,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
             isolated: false,
         };
         refresher.refresh().await;

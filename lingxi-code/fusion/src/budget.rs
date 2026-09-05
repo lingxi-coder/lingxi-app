@@ -60,8 +60,25 @@ pub struct ModelRates {
     /// missing cache rate must not turn an otherwise-priced, token-billed
     /// model unpriced and hard-reject it under a session `--max-budget`).
     pub cache_read_nano_usd_per_token: u64,
-    /// Nano-USD per prompt-cache-WRITE token. Same `0`-default rule as
-    /// [`Self::cache_read_nano_usd_per_token`].
+    /// Nano-USD per prompt-cache-WRITE (cache-CREATION) token. Same
+    /// `0`-default rule as [`Self::cache_read_nano_usd_per_token`].
+    ///
+    /// This is the EFFECTIVE rate for the TTL the session actually writes
+    /// its cache blocks with, not unconditionally the 5-minute one. Fusion's
+    /// usage carries a single, already-flattened `cache_write_tokens` total
+    /// (both seams that feed it — `agent::handle`'s
+    /// `cache_creation_input_tokens: bt.cache_write` and `sidequery`'s
+    /// `cache_write_1h: 0` — drop the provider's 5m/1h split before it gets
+    /// here), so the price book resolves ONE rate for that bucket: with the
+    /// `ENABLE_PROMPT_CACHING_1H` opt-in armed, every request the session
+    /// assembles stamps `ttl_1h` on its system cache blocks and the
+    /// production book (`DesktopFusionPriceBook::rates_for`) returns the
+    /// catalog's 1-hour rate here; with the gate off — the shipped default —
+    /// it returns the 5-minute rate, which is then exact. Round-7 finding
+    /// [1]: pricing an armed-1h run at the 5-minute rate under-charged it by
+    /// ~37.5% against the SAME catalog the main turn loop bills the identical
+    /// tokens from through `TokenClass::CacheWrite1h`, while
+    /// `orchestrator::price_realized_usage` still reported `estimated: false`.
     pub cache_write_nano_usd_per_token: u64,
     /// Nano-USD per reasoning-output token. Same `0`-default rule as
     /// [`Self::cache_read_nano_usd_per_token`]: a model with real
@@ -70,6 +87,27 @@ pub struct ModelRates {
     /// reasoning separately) must stay token-priced, never flip to fully
     /// unpriced over a missing reasoning rate.
     pub reasoning_nano_usd_per_token: u64,
+    /// Whether [`Self::cache_write_nano_usd_per_token`] is a TTL
+    /// APPROXIMATION rather than the exact rate the provider billed this
+    /// bucket at.
+    ///
+    /// Round-7 finding [1], the half the rate alone cannot express: Fusion
+    /// carries ONE flattened `cache_write_tokens` total, but with the
+    /// `ENABLE_PROMPT_CACHING_1H` opt-in armed a session writes its system
+    /// cache blocks with a 1-hour TTL (`llm_client::service`'s `ttl_1h`)
+    /// while the residual last-message breakpoint stays 5-minute
+    /// (`CacheControl::Ephemeral`). Whichever single rate the price book
+    /// picks is therefore right for most of the bucket and wrong for the
+    /// rest, so a run that priced any cache-write token under that gate must
+    /// not claim `estimated: false` — see
+    /// `orchestrator::price_realized_usage`, which ORs this into the run's
+    /// `estimated` flag exactly when the component actually spent
+    /// cache-write tokens.
+    ///
+    /// `false` is the shipped default (gate off ⇒ every cache block is
+    /// 5-minute and the rate is exact), and it is what a book with no TTL
+    /// notion at all should report.
+    pub cache_write_rate_is_ttl_approximated: bool,
 }
 
 /// Injected price table. Production wraps [`cost::PricingCatalog`].
@@ -205,6 +243,12 @@ pub fn quote(
 /// are — omitting them here would under-bill every Fusion run that uses
 /// prompt caching against the SAME catalog the main turn loop's
 /// `CostCalculator` bills the identical usage from in full.
+///
+/// `cache_write_tokens` is one flattened bucket (see
+/// [`ModelRates::cache_write_nano_usd_per_token`]): the 5m/1h split the
+/// provider reports is gone by the time it reaches here, so the single rate
+/// the price book resolved for the session's configured cache TTL is what
+/// this multiplies by.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn price_component(
@@ -242,6 +286,34 @@ pub(crate) fn price_component(
             )
             .saturating_add(calls.saturating_mul(rates.per_request_nano_usd))
     })
+}
+
+/// Whether the cache-WRITE rate [`price_component`] applies to
+/// `(profile, model)` is a TTL approximation (round-7 finding [1]; see
+/// [`ModelRates::cache_write_rate_is_ttl_approximated`]).
+///
+/// Mirrors [`price_component`]'s own two early exits so the two cannot
+/// disagree: a `Subscription`-class row is billed at a flat $0 and a model
+/// with no rates at all is already handled by that function's `None` arm
+/// (which sets `estimated` on its own) — neither is an approximation this
+/// flag should report.
+pub(crate) fn cache_write_rate_is_ttl_approximated(
+    profile: &str,
+    model: &str,
+    catalog: &dyn ModelSource,
+    prices: &dyn FusionPriceBook,
+) -> bool {
+    let hints = catalog
+        .list()
+        .into_iter()
+        .find(|row| row.profile == profile && row.model == model)
+        .map(|row| row.hints);
+    if hints.is_some_and(|h| h.cost_class == FusionCostClass::Subscription) {
+        return false;
+    }
+    prices
+        .rates_for(profile, model)
+        .is_some_and(|rates| rates.cache_write_rate_is_ttl_approximated)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -501,6 +573,7 @@ comparator, not dead API surface and not a production fallback"
             cache_read_nano_usd_per_token: 1,
             cache_write_nano_usd_per_token: 1,
             reasoning_nano_usd_per_token: 1,
+            cache_write_rate_is_ttl_approximated: false,
         };
         let mut map = HashMap::new();
         for (p, m) in [

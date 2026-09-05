@@ -108,6 +108,16 @@ pub struct AskUserQuestionView {
 impl AskUserQuestionView {
     const OTHER_LABEL: &str = "Other";
 
+    /// Whether the asker that opened this dialog has already unwound (the
+    /// future holding the one-shot receiving half was dropped). Same finding-4
+    /// predicate as [`crate::bottom_pane::permission_view::PermissionView::is_asker_gone`];
+    /// read by [`crate::bottom_pane::ViewStack::drop_abandoned_prompts`] to
+    /// remove a dialog that went ownerless while it was already open.
+    #[must_use]
+    pub fn is_asker_gone(&self) -> bool {
+        self.resp_tx.as_ref().is_some_and(oneshot::Sender::is_closed)
+    }
+
     /// Build the widget for `exchange` (questions + optional timeout + the
     /// answer channel).
     #[must_use]

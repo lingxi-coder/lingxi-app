@@ -2093,6 +2093,21 @@ pub(crate) fn price_realized_usage(
             Some(nano_usd) => total_nano_usd = total_nano_usd.saturating_add(nano_usd),
             None => estimated = true,
         }
+        // Round-7 finding [1] residual, applied at EVERY priced component
+        // (panel / analyst / synthesizer), not just this one: when the price
+        // book had to guess which prompt-cache TTL this flattened
+        // `cache_write_tokens` bucket was written with, a run that actually
+        // spent cache-write tokens cannot claim an exact total.
+        if usage.cache_write_tokens > 0
+            && budget::cache_write_rate_is_ttl_approximated(
+                &panel.profile,
+                &panel.model,
+                catalog,
+                prices,
+            )
+        {
+            estimated = true;
+        }
     }
     if let Some((usage, calls)) = analyst_usage {
         match budget::price_component(
@@ -2109,6 +2124,17 @@ pub(crate) fn price_realized_usage(
         ) {
             Some(nano_usd) => total_nano_usd = total_nano_usd.saturating_add(nano_usd),
             None => estimated = true,
+        }
+        // Same TTL-approximation rule as the panel loop above.
+        if usage.tokens.cache_write > 0
+            && budget::cache_write_rate_is_ttl_approximated(
+                &analyst.profile,
+                &analyst.model,
+                catalog,
+                prices,
+            )
+        {
+            estimated = true;
         }
     } else {
         // `analyst_usage` is `None` either because the analyst was never
@@ -2158,6 +2184,17 @@ pub(crate) fn price_realized_usage(
         ) {
             Some(nano_usd) => total_nano_usd = total_nano_usd.saturating_add(nano_usd),
             None => estimated = true,
+        }
+        // Same TTL-approximation rule as the panel loop and the analyst arm.
+        if usage.tokens.cache_write > 0
+            && budget::cache_write_rate_is_ttl_approximated(
+                parent_profile,
+                parent_model,
+                catalog,
+                prices,
+            )
+        {
+            estimated = true;
         }
     } else if synth_attempted {
         // T1 item 1: previously a synthesizer call that was attempted and

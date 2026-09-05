@@ -1985,6 +1985,7 @@ fn priced_book() -> MapPrices {
         cache_read_nano_usd_per_token: 1,
         cache_write_nano_usd_per_token: 1,
         reasoning_nano_usd_per_token: 1,
+        cache_write_rate_is_ttl_approximated: false,
     };
     let mut map = HashMap::new();
     for (p, m) in [
@@ -4505,5 +4506,218 @@ not replaced by the attempted-call input estimate"
     assert!(
         result.usage.estimated,
         "a failed synthesizer call never claims the run's total is exact"
+    );
+}
+
+/// Round-7 finding [1] RESIDUAL: when the price book had to GUESS which
+/// prompt-cache TTL a flattened `cache_write_tokens` bucket was written with
+/// (the `ENABLE_PROMPT_CACHING_1H` opt-in: the system cache blocks carry
+/// `ttl_1h`, the residual last-message breakpoint stays 5-minute, and Fusion
+/// carries no split), a run that actually spent cache-write tokens must not
+/// report `estimated: false` over that approximation.
+///
+/// The flag is threaded through ALL THREE priced components — panel, analyst,
+/// synthesizer — so each is driven on its own here: a settlement cell wired
+/// into the panel stage but not the analyst or synthesizer stage is exactly
+/// the shape that has come back as three separate money findings before.
+fn ttl_approximated_book() -> MapPrices {
+    let rate = ModelRates {
+        input_nano_usd_per_token: 1,
+        output_nano_usd_per_token: 1,
+        per_request_nano_usd: 0,
+        cache_read_nano_usd_per_token: 1,
+        cache_write_nano_usd_per_token: 1,
+        reasoning_nano_usd_per_token: 1,
+        cache_write_rate_is_ttl_approximated: true,
+    };
+    let mut map = HashMap::new();
+    for (p, m) in [
+        ("anthropic", "claude-sonnet-5"),
+        ("openai", "gpt-5.6-terra"),
+        ("deepseek", "deepseek-v4-pro"),
+    ] {
+        map.insert((p.into(), m.into()), rate);
+    }
+    MapPrices(map)
+}
+
+fn ttl_catalog() -> Vec<CatalogModel> {
+    [
+        ("anthropic", "claude-sonnet-5"),
+        ("openai", "gpt-5.6-terra"),
+        ("deepseek", "deepseek-v4-pro"),
+    ]
+    .into_iter()
+    .map(|(profile, model)| CatalogModel {
+        profile: profile.into(),
+        model: model.into(),
+        hints: FusionModelHints {
+            eligible: true,
+            quality_rank: 90,
+            judge_eligible: true,
+            ..FusionModelHints::default()
+        },
+        structured_output: true,
+    })
+    .collect()
+}
+
+fn panel_with_cache_write(cache_write_tokens: u64) -> Vec<crate::panel::PanelInternal> {
+    vec![crate::panel::PanelInternal {
+        index: 0,
+        profile: "anthropic".into(),
+        model: "claude-sonnet-5".into(),
+        anonymous_id: "P1".into(),
+        status: PanelRunStatus::Completed,
+        report: Some(report("ANSWER_A")),
+        duration_ms: 0,
+        error_category: None,
+        error_detail: None,
+        usage: Some(platform_api::FusionUsage {
+            input_tokens: 8,
+            output_tokens: 4,
+            reasoning_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens,
+            realized_nano_usd: 0,
+            reserved_max_nano_usd: 0,
+            estimated: false,
+            provider_requests: 1,
+        }),
+        spawn_prompt: String::new(),
+    }]
+}
+
+fn usage_with_cache_write(cache_write: u64) -> cost::Usage {
+    let mut usage = cost::Usage::default();
+    usage.tokens.input = 8;
+    usage.tokens.output = 4;
+    usage.tokens.cache_write = cache_write;
+    usage
+}
+
+fn analyst_target() -> ResolvedPanel {
+    ResolvedPanel {
+        profile: "openai".into(),
+        model: "gpt-5.6-terra".into(),
+    }
+}
+
+/// The PANEL arm.
+#[test]
+fn a_ttl_approximated_cache_write_rate_marks_a_panel_run_estimated() {
+    let catalog = ttl_catalog();
+    let panels = panel_with_cache_write(1_000);
+    let (_, estimated) = crate::orchestrator::price_realized_usage(
+        &catalog,
+        &ttl_approximated_book(),
+        &panels,
+        &analyst_target(),
+        Some((&usage_with_cache_write(0), 1)),
+        true,
+        "deepseek",
+        "deepseek-v4-pro",
+        None,
+        false,
+        "task",
+    );
+    assert!(
+        estimated,
+        "a panel that spent cache-write tokens priced through a TTL-approximated rate \
+must not be reported as an exact total"
+    );
+}
+
+/// The ANALYST arm — the stage a panel-only fix would have missed.
+#[test]
+fn a_ttl_approximated_cache_write_rate_marks_an_analyst_run_estimated() {
+    let catalog = ttl_catalog();
+    let panels = panel_with_cache_write(0);
+    let analyst_usage = usage_with_cache_write(1_000);
+    let (_, estimated) = crate::orchestrator::price_realized_usage(
+        &catalog,
+        &ttl_approximated_book(),
+        &panels,
+        &analyst_target(),
+        Some((&analyst_usage, 1)),
+        true,
+        "deepseek",
+        "deepseek-v4-pro",
+        None,
+        false,
+        "task",
+    );
+    assert!(
+        estimated,
+        "the analyst's own cache-write tokens must flag the run estimated too"
+    );
+}
+
+/// The SYNTHESIZER arm — the other stage a panel-only fix would have missed.
+#[test]
+fn a_ttl_approximated_cache_write_rate_marks_a_synth_run_estimated() {
+    let catalog = ttl_catalog();
+    let panels = panel_with_cache_write(0);
+    let synth_usage = usage_with_cache_write(1_000);
+    let (_, estimated) = crate::orchestrator::price_realized_usage(
+        &catalog,
+        &ttl_approximated_book(),
+        &panels,
+        &analyst_target(),
+        Some((&usage_with_cache_write(0), 1)),
+        true,
+        "deepseek",
+        "deepseek-v4-pro",
+        Some(&synth_usage),
+        true,
+        "task",
+    );
+    assert!(
+        estimated,
+        "the synthesizer's own cache-write tokens must flag the run estimated too"
+    );
+}
+
+/// The gate must key on the APPROXIMATION, not on cache-write tokens as such:
+/// the shipped default (gate off ⇒ every cache block is 5-minute) still
+/// reports an exact total, and an approximated book with no cache-write
+/// tokens spent has nothing to approximate.
+#[test]
+fn an_exact_cache_write_rate_still_reports_an_exact_total() {
+    let catalog = ttl_catalog();
+    let (_, estimated_exact_book) = crate::orchestrator::price_realized_usage(
+        &catalog,
+        &priced_book(),
+        &panel_with_cache_write(1_000),
+        &analyst_target(),
+        Some((&usage_with_cache_write(1_000), 1)),
+        true,
+        "deepseek",
+        "deepseek-v4-pro",
+        Some(&usage_with_cache_write(1_000)),
+        true,
+        "task",
+    );
+    assert!(
+        !estimated_exact_book,
+        "with the 1h gate off the 5-minute rate is exact — this must stay byte-identical \
+to the shipped default's behaviour"
+    );
+    let (_, estimated_no_cache_writes) = crate::orchestrator::price_realized_usage(
+        &catalog,
+        &ttl_approximated_book(),
+        &panel_with_cache_write(0),
+        &analyst_target(),
+        Some((&usage_with_cache_write(0), 1)),
+        true,
+        "deepseek",
+        "deepseek-v4-pro",
+        Some(&usage_with_cache_write(0)),
+        true,
+        "task",
+    );
+    assert!(
+        !estimated_no_cache_writes,
+        "a run that spent no cache-write tokens has nothing to approximate"
     );
 }

@@ -106,6 +106,26 @@ impl PermissionView {
         self.background
     }
 
+    /// Whether the asker that opened this dialog has already unwound, i.e.
+    /// the future holding the one-shot receiving half was dropped.
+    ///
+    /// Finding 4 (round 7): every event that unwinds the tool call behind an
+    /// ask — the owning turn's cancellation, a `/fusion` panel's
+    /// `panel_total_timeout_ms`, the orchestrator's early-abort bar, the pool
+    /// runner's deallocation, session teardown — ends the same way, so
+    /// `oneshot::Sender::is_closed` is the single predicate that covers all of
+    /// them. [`crate::bottom_pane::BottomPane::show_permission`] already
+    /// refuses to STACK such an exchange; this accessor is what lets
+    /// [`crate::bottom_pane::ViewStack::drop_abandoned_prompts`] remove one
+    /// that went ownerless while it was ALREADY open — which matters because
+    /// a `background_owned` view survives
+    /// [`crate::bottom_pane::ViewStack::dismiss_turn_prompts`] and owns the
+    /// keyboard, so nothing else would ever clear it.
+    #[must_use]
+    pub fn is_asker_gone(&self) -> bool {
+        self.resp_tx.as_ref().is_some_and(oneshot::Sender::is_closed)
+    }
+
     /// Build the prompt for `exchange` (dialog shape mirrors the request
     /// variant; the response channel is taken from the exchange).
     #[must_use]

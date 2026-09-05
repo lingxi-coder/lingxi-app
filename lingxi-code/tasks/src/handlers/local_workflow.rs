@@ -368,6 +368,43 @@ fn workflow_agent_display_model(opts: &Value) -> Option<String> {
 /// the whole workflow over a fully recoverable mistake. Byte-locked with
 /// the prelude's `indexOf` and with `local_workflow_test::
 /// every_workflow_fusion_option_rejection_carries_the_prelude_option_marker`.
+///
+/// [R7-3/R7-7] The class this marker has to cover is "every rejection a
+/// workflow `fusion(prompt, opts)` call can earn from `opts` alone", and
+/// R5-18 swept only the three sites inside `parse_workflow_fusion_request`.
+/// The rest were raised later, inside `executor.run`, and reached JS
+/// unmarked. The full class, and where each member is now caught:
+///
+/// * unknown option KEY — serde `deny_unknown_fields` (here) — marked
+/// * wrong-typed / out-of-range / unparseable opts — serde (here) — marked
+/// * `preset` — [`parse_workflow_fusion_preset`] (here) — marked
+/// * `models[i]` blank profile/model —
+///   [`validate_workflow_fusion_model_ref`] (here) — marked
+/// * `dimensions` (non-snake_case, reserved, >12) — was
+///   `orchestrator::validate_request`; now also
+///   [`validate_workflow_fusion_dimensions`] (here) — marked
+/// * `models` list shape (<2, over the panel cap, duplicates) — was
+///   `model_resolver::resolve_custom`; now also
+///   [`validate_workflow_fusion_model_list`] (here) — marked
+/// * `models` unknown model / disallowed profile, `crossProvider` denial —
+///   host catalog and host policy, NOT opts alone: deliberately left
+///   unmarked (see [`workflow_fusion_option_error`])
+/// * empty `prompt` (`orchestrator::validate_request`) — the positional
+///   argument, not a member of `opts`; the documented recovery ("retry
+///   without opts") cannot fix it, so it stays unmarked
+///
+/// The two `executor.run` fallbacks stay in place because the parse-time
+/// gates duplicate no rules: both call the shared oracle
+/// (`platform_api::normalize_dimensions`) or mirror `resolve_custom`'s
+/// arithmetic under a test that compares the two.
+///
+/// Accepted consequence: a workflow-origin bad `dimensions`/`models` list
+/// no longer reaches `fusion::orchestrator`, so it no longer emits that
+/// crate's `tengu_fusion_failed` event with `error_category:
+/// "invalid_request"` / `"invalid_custom_models"`. That matches what the
+/// surface already did for every option error R5-18 covered (none of them
+/// ever reached the orchestrator either) and what `/fusion` does, which
+/// likewise normalizes dimensions at parse time.
 const WORKFLOW_FUSION_OPTION_MARKER: &str = "Workflow fusion() received an unknown option";
 
 /// [R5-18] Wraps a malformed option VALUE (wrong type, out-of-range number,
@@ -460,6 +497,118 @@ fn validate_workflow_fusion_model_ref(model_ref: &FusionModelRef) -> Result<(), 
     Ok(())
 }
 
+/// [R7-3/R7-7] `opts.dimensions` is the caller's option, but until now the
+/// ONLY thing that validated it was `fusion::orchestrator::validate_request`
+/// -> [`platform_api::normalize_dimensions`], deep inside `executor.run` —
+/// far past the last site the R5-18 sweep wrapped. Its `InvalidRequest` came
+/// back out through `wf_throw(&error.to_string())` (the `executor.run` Err
+/// arm) carrying no [`WORKFLOW_FUSION_OPTION_MARKER`], so a capitalized
+/// dimension name (`{dimensions: ['Coverage']}` — `workflow_description.txt`
+/// documents `dimensions?: string[]` with no format constraint, so that is
+/// the natural thing for a model to write) reached JS with the default
+/// `err.name = "Error"` and the script's documented recovery branch could
+/// not fire.
+///
+/// Validated HERE, where the marker already lives, by calling the very same
+/// shared function the orchestrator calls — not a re-implementation of its
+/// rules — so the gate cannot drift into rejecting something
+/// `validate_request` would have accepted. Mirrors `/fusion`, which likewise
+/// normalizes at parse time (`commands/core/src/fusion.rs:403`). The
+/// normalized value is deliberately discarded: `FusionRequest.dimensions`
+/// keeps the caller's list and the orchestrator re-normalizes it
+/// (idempotent), so this adds a gate without moving where the canonical
+/// value is produced.
+fn validate_workflow_fusion_dimensions(dimensions: Option<&[String]>) -> Result<(), FusionError> {
+    let Some(dimensions) = dimensions else {
+        return Ok(());
+    };
+    platform_api::normalize_dimensions(dimensions.to_vec())
+        .map(|_| ())
+        .map_err(|error| match error {
+            FusionError::InvalidRequest(detail) => workflow_fusion_option_error(detail),
+            other => other,
+        })
+}
+
+/// [R7-3/R7-7] The effective panel cap `fusion::model_resolver::resolve`
+/// computes (model_resolver.rs:81-84) from the caller's `opts.maxPanel` and
+/// the runtime's `fusion.maxPanel`, re-derived here so
+/// [`validate_workflow_fusion_model_list`] can apply the same cap at parse
+/// time. `FusionAgentSurface::max_panel` IS `FusionRuntimeConfig::max_panel`
+/// (`fusion::orchestrator`'s `agent_surface`), so the two agree.
+///
+/// Written with `min`/`max` rather than `clamp` on purpose: `clamp` panics
+/// when its lower bound exceeds its upper one, which a runtime config with
+/// `maxPanel < 2` would produce — a workflow bridge must not panic over a
+/// settings value.
+fn workflow_fusion_effective_max_panel(
+    surface: &platform_api::FusionAgentSurface,
+    requested: Option<u8>,
+) -> u8 {
+    let ceiling = surface
+        .max_panel
+        .min(platform_api::FUSION_MAX_PANEL)
+        .max(platform_api::FUSION_MIN_PANEL);
+    requested
+        .unwrap_or(ceiling)
+        .max(platform_api::FUSION_MIN_PANEL)
+        .min(ceiling)
+}
+
+/// [R7-3/R7-7] The LIST-shape rules on `opts.models` — the same class the
+/// per-entry [`validate_workflow_fusion_model_ref`] check belongs to, and
+/// the same class R5-18 stopped short of. Until now these three were
+/// enforced only by `fusion::model_resolver::resolve_custom`
+/// (model_resolver.rs:136 / 144 / 179) inside `executor.run`, so
+/// `{models: [{model: 'gpt-5.4'}]}` — one entry — came back to the script as
+/// a plain `Error` while its sibling `{models: [{profile: '', model: 'x'}]}`
+/// (blank profile) was correctly named `WorkflowFusionOptionError`. That
+/// arity split was visible inside the guard test's own table.
+///
+/// `resolve_custom`'s OTHER rejections are deliberately NOT mirrored here:
+/// `profile ... is not in fusion.allowedProfiles` (host policy),
+/// ``unknown model `p/m` `` (the credential-filtered availability catalog)
+/// and `CrossProviderDenied` (host policy) depend on host state, not on the
+/// opts object, and naming them an option error would invite a script to
+/// retry a call that retrying cannot fix — the boundary
+/// [`workflow_fusion_option_error`]'s doc and the guard test's negative case
+/// exist to hold.
+fn validate_workflow_fusion_model_list(
+    models: &[FusionModelRef],
+    parent_profile: &str,
+    max_panel: u8,
+) -> Result<(), FusionError> {
+    if models.len() < usize::from(platform_api::FUSION_MIN_PANEL) {
+        return Err(workflow_fusion_option_error(
+            "explicit models must contain at least 2 entries",
+        ));
+    }
+    if models.len() > usize::from(max_panel) {
+        return Err(workflow_fusion_option_error(format!(
+            "explicit models has {} entries, exceeding the {max_panel} panel cap",
+            models.len()
+        )));
+    }
+    // Distinctness is judged on the RESOLVED (profile, model) pair, exactly
+    // as `resolve_custom` does — an entry that omits `profile` inherits the
+    // parent profile, so `[{model:'a'}, {profile:'<parent>', model:'a'}]` is
+    // a duplicate even though the two JSON objects differ.
+    let mut seen: Vec<(&str, &str)> = Vec::with_capacity(models.len());
+    for model_ref in models {
+        let entry = (
+            model_ref.profile.as_deref().unwrap_or(parent_profile),
+            model_ref.model.as_str(),
+        );
+        if seen.contains(&entry) {
+            return Err(workflow_fusion_option_error(
+                "explicit models must be distinct",
+            ));
+        }
+        seen.push(entry);
+    }
+    Ok(())
+}
+
 fn parse_workflow_fusion_request(
     executor: Option<&Arc<dyn FusionExecutor>>,
     prompt: &str,
@@ -509,6 +658,10 @@ fn parse_workflow_fusion_request(
             validate_workflow_fusion_model_ref(model_ref)?;
         }
     }
+    // [R7-3/R7-7] Ordered AFTER the per-entry check on purpose: a blank
+    // profile/model keeps naming the actual malformed entry rather than
+    // being masked by the list-arity message below.
+    validate_workflow_fusion_dimensions(opts.dimensions.as_deref())?;
     let surface = executor.agent_surface();
     let preset = parse_workflow_fusion_preset(opts.preset.as_deref(), surface.default_preset)?;
     let parent_model = parent_model
@@ -524,6 +677,16 @@ fn parse_workflow_fusion_request(
                 "workflow parent model profile is unavailable for `{parent_model}`"
             ))
         })?;
+    // [R7-3/R7-7] Last, because the distinctness rule needs the resolved
+    // parent profile (an entry that omits `profile` inherits it) and the cap
+    // needs `surface`.
+    if let Some(models) = &opts.models {
+        validate_workflow_fusion_model_list(
+            models,
+            &parent_profile,
+            workflow_fusion_effective_max_panel(&surface, opts.max_panel),
+        )?;
+    }
     Ok(platform_api::FusionRequest {
         schema_version: platform_api::FUSION_SCHEMA_VERSION,
         origin: FusionOrigin::Workflow,

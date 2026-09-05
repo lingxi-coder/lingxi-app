@@ -598,10 +598,21 @@ fn workflow_fusion_rejects_an_empty_profile_or_model_in_the_structured_models_op
     );
 
     // A well-formed entry must still parse through unaffected.
+    //
+    // [R7-3/R7-7] The fixture carries TWO entries now, not one. The
+    // single-entry list this used to assert on could never have run:
+    // `fusion::model_resolver::resolve_custom` rejects any explicit list
+    // below `FUSION_MIN_PANEL` ("explicit models must contain at least 2
+    // entries"), so the old fixture pinned "parse accepts a request the
+    // executor is certain to reject" — precisely the gap that let a
+    // one-entry `models` list reach JS as a plain `Error` instead of
+    // `WorkflowFusionOptionError`. The assertion itself is unchanged in
+    // strength: a well-formed list still parses, and its structured refs
+    // still round-trip verbatim.
     let ok = parse_workflow_fusion_request(
         Some(&executor),
         "pick one",
-        r#"{"models":[{"profile":"openai","model":"gpt-5.4"}]}"#,
+        r#"{"models":[{"profile":"openai","model":"gpt-5.4"},{"model":"o5-pro"}]}"#,
         "wf_fusion",
         Some("gpt-5.4"),
         Some("openai"),
@@ -609,10 +620,16 @@ fn workflow_fusion_rejects_an_empty_profile_or_model_in_the_structured_models_op
     .expect("a well-formed models entry must still parse");
     assert_eq!(
         ok.models,
-        Some(vec![FusionModelRef {
-            profile: Some("openai".into()),
-            model: "gpt-5.4".into(),
-        }])
+        Some(vec![
+            FusionModelRef {
+                profile: Some("openai".into()),
+                model: "gpt-5.4".into(),
+            },
+            FusionModelRef {
+                profile: None,
+                model: "o5-pro".into(),
+            },
+        ])
     );
 }
 
@@ -6023,6 +6040,38 @@ fn every_workflow_fusion_option_rejection_carries_the_prelude_option_marker() {
             "malformed models entry (empty model)",
         ),
         (r#"{"maxPanel":"#, "syntactically broken opts object"),
+        // [R7-3/R7-7] The five rows below are `opts`-derived rejections the
+        // R5-18 sweep MISSED: nothing in `parse_workflow_fusion_request`
+        // looked at them, so they were raised much later inside
+        // `executor.run` (`fusion::orchestrator::validate_request` ->
+        // `platform_api::normalize_dimensions`, and
+        // `fusion::model_resolver::resolve_custom`'s list-shape checks) and
+        // reached the script through `wf_throw(&error.to_string())` with no
+        // marker — `err.name` stayed the JS default "Error".
+        (
+            r#"{"dimensions":["Coverage"]}"#,
+            "dimension that is not lowercase snake_case",
+        ),
+        (
+            r#"{"dimensions":["provider"]}"#,
+            "reserved identity-like dimension",
+        ),
+        (
+            r#"{"dimensions":["d1","d2","d3","d4","d5","d6","d7","d8","d9","d10","d11","d12","d13"]}"#,
+            "more than 12 dimensions",
+        ),
+        (
+            r#"{"models":[{"model":"a"}]}"#,
+            "models list below the 2-entry minimum",
+        ),
+        (
+            r#"{"models":[{"model":"a"},{"profile":"openai","model":"a"}]}"#,
+            "duplicate models entries (one spelling the parent profile explicitly)",
+        ),
+        (
+            r#"{"models":[{"model":"a"},{"model":"b"},{"model":"c"}],"maxPanel":2}"#,
+            "models list longer than the requested panel cap",
+        ),
     ] {
         let Err(err) = parse_workflow_fusion_request(
             Some(&executor),
@@ -6054,5 +6103,160 @@ fn every_workflow_fusion_option_rejection_carries_the_prelude_option_marker() {
     assert!(
         !host_err.to_string().contains(MARKER),
         "a host-state rejection must NOT be labelled an option error, got `{host_err}`"
+    );
+
+    // [R7-3/R7-7] The other half of the new checks: they must not turn a
+    // request the orchestrator would have ACCEPTED into a parse-time
+    // rejection. `{"model":"a"}`/`{"model":"b"}` are not in any catalog —
+    // that lookup is host state and stays `executor.run`'s job.
+    for (opts_json, why) in [
+        ("{}", "no options at all"),
+        (
+            r#"{"models":[{"model":"a"},{"model":"b"}]}"#,
+            "a well-formed 2-entry models list (unknown-model lookup is host state)",
+        ),
+        (
+            r#"{"models":[{"model":"a"},{"model":"b"},{"model":"c"}],"maxPanel":4}"#,
+            "a models list inside the requested panel cap",
+        ),
+        (
+            r#"{"dimensions":["coverage","evidence_quality"]}"#,
+            "well-formed snake_case dimensions",
+        ),
+        (r#"{"dimensions":[]}"#, "an empty dimensions list (defaults)"),
+    ] {
+        parse_workflow_fusion_request(
+            Some(&executor),
+            "review this",
+            opts_json,
+            "wf_fusion",
+            Some("gpt-5.4"),
+            Some("openai"),
+        )
+        .unwrap_or_else(|err| panic!("{why}: `{opts_json}` must be accepted, got `{err}`"));
+    }
+}
+
+/// [R7-3/R7-7] `parse_workflow_fusion_request`'s `opts.dimensions` gate must
+/// accept and reject EXACTLY what the orchestrator's own
+/// `validate_request` -> `platform_api::normalize_dimensions` does — the
+/// oracle here is that shared function itself, not a copied message, so the
+/// two cannot drift into either a rejection the orchestrator would have
+/// allowed or a value that slips past the marker and reaches JS as a plain
+/// `Error`.
+#[test]
+fn workflow_fusion_dimension_gate_matches_the_orchestrators_own_rule() {
+    const MARKER: &str = "Workflow fusion() received an unknown option";
+    let executor: Arc<dyn FusionExecutor> = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        },
+        3,
+        Ok(workflow_fusion_result()),
+    );
+
+    for dimensions in [
+        vec![],
+        vec!["coverage".to_string()],
+        vec!["coverage".to_string(), "evidence_quality".to_string()],
+        vec!["Coverage".to_string()],
+        vec!["evidence-quality".to_string()],
+        vec!["_coverage".to_string()],
+        vec!["provider".to_string()],
+        vec!["model".to_string()],
+        (1..=13).map(|i| format!("d{i}")).collect::<Vec<_>>(),
+    ] {
+        let orchestrator_rejects = platform_api::normalize_dimensions(dimensions.clone()).is_err();
+        let opts_json =
+            serde_json::json!({ "dimensions": dimensions.clone() }).to_string();
+        let parsed = parse_workflow_fusion_request(
+            Some(&executor),
+            "review this",
+            &opts_json,
+            "wf_fusion",
+            Some("gpt-5.4"),
+            Some("openai"),
+        );
+        assert_eq!(
+            parsed.is_err(),
+            orchestrator_rejects,
+            "dimensions {dimensions:?}: `normalize_dimensions` rejects = \
+             {orchestrator_rejects}, but the workflow parse gate rejects = {}",
+            parsed.is_err()
+        );
+        if let Err(err) = parsed {
+            assert!(
+                err.to_string().contains(MARKER),
+                "dimensions {dimensions:?} rejected with `{err}`, which does not carry \
+                 the prelude marker `{MARKER}`"
+            );
+        }
+    }
+}
+
+/// [R7-3/R7-7] End-to-end through the real bridge and the real
+/// `workflow/src/lib.rs` prelude: a script that writes the documented
+/// `e.name === "WorkflowFusionOptionError"` recovery branch must see that
+/// name for an `opts.dimensions` mistake. The stand-in executor is armed
+/// with the ACTUAL error `fusion::orchestrator::validate_request` produces
+/// for this input (sourced from `platform_api::normalize_dimensions`, not a
+/// hand-copied string), so before the parse-time gate existed this test saw
+/// `err.name === "Error"`; with the gate the executor is never reached at
+/// all, which the zero-`seen` assertion pins.
+#[tokio::test]
+async fn workflow_fusion_option_error_name_reaches_a_script_for_a_bad_dimension() {
+    let orchestrator_error = platform_api::normalize_dimensions(vec!["Coverage".to_string()])
+        .expect_err("`Coverage` must be rejected by the shared dimension rule");
+    let executor = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        },
+        3,
+        Err(orchestrator_error),
+    );
+    let outcome = run_workflow_script_with_live_updates_and_fusion(
+        "try { await fusion('review this', { dimensions: ['Coverage'] }); return 'RESOLVED'; } \
+         catch (e) { return e.name; }",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        "",
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        CancellationToken::new(),
+        Some(executor.clone()),
+        Some("wf_fusion".into()),
+        Some("gpt-5.4".into()),
+        Some("openai".into()),
+        None,
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("the script catches the rejection itself");
+
+    let result = outcome.result.as_deref().unwrap_or_default().to_string();
+    assert!(
+        result.contains("WorkflowFusionOptionError"),
+        "a bad `dimensions` option must reach the script as \
+         `e.name === \"WorkflowFusionOptionError\"`, got `{result}`"
+    );
+    assert!(
+        executor.seen.lock().unwrap().is_empty(),
+        "a bad `dimensions` option must be rejected before dispatch, but the executor \
+         saw {} request(s)",
+        executor.seen.lock().unwrap().len()
     );
 }

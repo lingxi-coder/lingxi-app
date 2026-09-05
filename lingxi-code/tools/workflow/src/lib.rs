@@ -1879,13 +1879,23 @@ mod tests {
         // accepted LingXi-only divergence: a `fusion(prompt, opts?)`
         // paragraph (Agent Fusion — commit f5f27c978 — has no claude-code
         // 2.1.245 counterpart, so it cannot be byte-locked against the
-        // binary; 20667 = 19200 (the 2.1.245 byte count) + the fusion()
+        // binary; 20741 = 19200 (the 2.1.245 byte count) + the fusion()
         // bullet's length). A drift in EITHER direction still fails this
         // test — grep the diff against `workflow_description.txt` rather
         // than bumping the number blind.
+        //
+        // WHY THE NUMBER MOVED (round 7, findings [3]/[7]): 20667 -> 20741 is
+        // exactly the 74 bytes of the inline constraint now documented on the
+        // `dimensions?: string[]` option —
+        // `/* lowercase snake_case, at most 12, never a provider/model/panel
+        // name */`. Those are `platform_api::normalize_dimensions`' real rules,
+        // and an undocumented `dimensions: ['Coverage']` is the exact mistake
+        // both findings cite: it is rejected, and until this round the
+        // rejection did not even reach the script as the documented
+        // `WorkflowFusionOptionError`. Nothing else in the description moved.
         assert_eq!(
             DESCRIPTION.len(),
-            20667,
+            20741,
             "description byte length drifted from Claude Code 2.1.245 + the fusion() addition"
         );
         assert!(DESCRIPTION.starts_with(
@@ -1903,6 +1913,11 @@ mod tests {
         // The LingXi-only fusion() addition — see the length comment above.
         assert!(DESCRIPTION.contains("fusion(prompt: string, opts?:"));
         assert!(DESCRIPTION.contains("WorkflowFusionOptionError"));
+        // The documented `dimensions` rule (see the byte-count note above):
+        // pin the prose, not just the length, so a same-length edit that drops
+        // it cannot slip through.
+        assert!(DESCRIPTION
+            .contains("lowercase snake_case, at most 12, never a provider/model/panel name"));
     }
 
     /// Drift gate for the `fusion()` bullet's documented resolved-object shape.

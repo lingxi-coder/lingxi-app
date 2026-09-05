@@ -338,6 +338,35 @@ impl tool_api::Tool for PromptAgentTool {
 /// tail (SP-5), the Fable/Mythos autonomy tail (SP-6), the fork bullet (SP-7),
 /// and dropped Opus 4.7 from the `# Environment` fast-mode line (SP-8).
 ///
+/// SECOND MOVE, 2026-09-02 — the values below are NOT the ones the 2.1.238
+/// pass produced. `main` commit 5689bf092 ("Keep provider choices aligned with
+/// official model catalogs") changed the assembled bytes and did not touch this
+/// manifest, so these three byte locks —
+/// `production_prompt_bodies_match_normalized_2_1_238_manifests`,
+/// `live_orchestrator_prompt_uses_production_context` and
+/// `production_output_style_bodies_match_normalized_2_1_238_manifests` — were
+/// regenerated against that commit's output. Exactly two things moved:
+///
+/// 1. `env_block.rs` renders the `# Environment` model-catalog line as
+///    `Model IDs — Fable 5.1: 'claude-fable-5-1', …` where it used to render
+///    `Model IDs — Fable 5: 'claude-fable-5', …`. That is +4 bytes ("5" ->
+///    "5.1" and `claude-fable-5` -> `claude-fable-5-1`), and it is why EVERY
+///    case here except the two renamed ones, BOTH output styles, and the live
+///    prompt each grew by exactly 4 bytes and got a new digest.
+/// 2. The Fable/Mythos profile ids themselves were renamed
+///    (`claude-fable-5` -> `claude-fable-5-1`, `claude-mythos-5` ->
+///    `claude-mythos-5-1`) in `body_sections::is_communicating_model` /
+///    `post_context_sections`, and `FABLE_IDENTITY_SECTION` was rewritten.
+///    Those two cases therefore changed wholesale (10_449 -> 10_204 and
+///    9_755 -> 10_206), not by 4 bytes.
+///
+/// Nothing outside `main` contributed: the only non-test edit under
+/// `orchestrator/src/prompt/` that is not on `main` is `task_notification.rs`,
+/// a module `assemble_system_prompt` (prompt/mod.rs) never calls. When a future
+/// re-bless is needed, extend this note the same way — a bare number change with
+/// no named cause is indistinguishable from the unintended drift these locks
+/// exist to catch.
+///
 /// Claude emits one extra first block carrying a private
 /// `x-anthropic-billing-header` attestation. LingXi deliberately does not
 /// spoof that private billing identity, so its request contains the remaining
@@ -429,6 +458,10 @@ fn production_prompt_bodies_match_normalized_2_1_238_manifests() {
 /// above intentionally use a synthetic context so dynamic machine fields can be
 /// normalized deterministically; this test prevents that stable fixture from
 /// masking a broken composition path.
+///
+/// Its 14_602/`06da73ad…` byte lock shares the PROVENANCE block above
+/// `production_prompt_bodies_match_normalized_2_1_238_manifests` — read it
+/// before changing either value, and record WHY the number moved.
 #[tokio::test]
 async fn live_orchestrator_prompt_uses_production_context() {
     use std::sync::Arc;
@@ -538,6 +571,10 @@ async fn live_orchestrator_prompt_uses_production_context() {
     );
 }
 
+/// Byte lock for the two builtin output-style bodies. Its lengths and
+/// digests share the PROVENANCE block above
+/// `production_prompt_bodies_match_normalized_2_1_238_manifests` — read it
+/// before changing a number here, and record WHY the number moved.
 #[test]
 fn production_output_style_bodies_match_normalized_2_1_238_manifests() {
     let temp = tempfile::tempdir().expect("temp cwd");

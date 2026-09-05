@@ -133,9 +133,27 @@ async fn finalize_fusion_outcome(
             // reverse order could let a drain observe a completed task whose
             // usage summary hasn't landed yet.
             let usage_summary = platform_api::task_registry::AgentRunUsage {
+                // [Round-7 items 5+6] `AgentRunUsage.subagent_tokens` is
+                // main-owned and documented as claude-code's `totalTokens`
+                // (`platform_api::task_registry::AgentRunUsage`); main's own
+                // producer sums the four BILLABLE buckets —
+                // `local_agent.rs`'s `bt.input + bt.cache_write +
+                // bt.cache_read + bt.output`, mirrored in
+                // `agent::handle::subagent_usage_from_llm_usage`. Summing
+                // only `input + output` here (as this did) dropped the two
+                // cache buckets `FusionUsage` already carries, so a cached
+                // multi-panel run reported a small fraction of the tokens an
+                // equivalent background-agent run reports under the very same
+                // `<subagent_tokens>` tag and the model could not compare the
+                // two. `reasoning_tokens` stays OUT on purpose: `local_agent`
+                // excludes `bt.reasoning_output` too, and the contract here is
+                // to match main's definition of the tag, not to invent a third
+                // one.
                 subagent_tokens: result
                     .usage
                     .input_tokens
+                    .saturating_add(result.usage.cache_write_tokens)
+                    .saturating_add(result.usage.cache_read_tokens)
                     .saturating_add(result.usage.output_tokens),
                 tool_uses: u64::from(result.usage.provider_requests),
                 duration_ms: result.timing.total_ms,
@@ -217,6 +235,19 @@ async fn finalize_fusion_outcome(
 /// than fabricated. A no-op when nothing ever egressed (e.g. a preflight
 /// refusal — both `last_*` arguments are `None`), matching the render arm's
 /// existing `usage: None` omission.
+///
+/// [Round-7 items 5+6] **The `subagent_tokens` written here is deliberately
+/// NOT the same quantity the `Ok` arm writes.** The `Ok` arm has the whole
+/// `FusionUsage` and sums main's four billable buckets (`input +
+/// cache_write + cache_read + output`, matching `local_agent.rs`); this arm
+/// has only `FusionProgress::realized_output_tokens` — OUTPUT tokens alone,
+/// because that is the single figure the progress channel carries (it exists
+/// for the workflow budget bridge, which charges from it). So the value
+/// below is a true LOWER BOUND on the run's total, not the total, and is
+/// reported that way rather than reporting nothing at all. Widening it would
+/// mean widening `fusion::progress::emit_with_realized_tokens` to carry a
+/// full realized total alongside the output-only figure — a producer-side
+/// change, not one this seam can make.
 async fn disclose_partial_usage(
     status_sink: &Arc<dyn TaskStatusSink>,
     worker_task_id: &str,

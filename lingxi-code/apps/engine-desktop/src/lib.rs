@@ -3220,15 +3220,27 @@ fn filter_fusion_catalog(
 /// [`FusionCatalogRefresher::refresh`], which a credential-write path calls
 /// after persisting a new credential.
 ///
-/// `unfiltered`, `anthropic_probe_definitive`, `availability_probe_completed`
-/// and `session_model_restriction` stay fixed for the process — only
-/// per-provider availability can change mid-session through a credential
-/// write, so only that half needs to be mutable.
+/// `unfiltered`, `anthropic_probe_definitive` and `session_model_restriction`
+/// stay fixed for the process — only per-provider availability, and whether
+/// the availability probe has ever COMPLETED, can change mid-session through
+/// a credential write, so only those halves need to be mutable.
+///
+/// Round-7 finding [2]: `availability_probe_completed` used to be a plain
+/// `bool` frozen at construction, and nothing in the process ever set it to
+/// `true`. A single 5s boot-probe stall therefore disabled the availability
+/// half of `filter_fusion_catalog` for the runtime's LIFETIME — including
+/// after [`FusionCatalogRefresher::refresh_inner`] had re-run the same probe
+/// over the full boot credential-source list and published a complete,
+/// authoritative map into the very lock `list()` reads. Every `/fusion` in
+/// that process kept reserving budget for, spawning and failing panels on
+/// providers with no credential. It is now a shared cell the refresher can
+/// re-arm — see `refresh_inner` for why re-arming is gated on a probe that
+/// actually observed an available row.
 struct FusionCatalogModelSource {
     unfiltered: Vec<fusion::CatalogModel>,
     availability: Arc<std::sync::RwLock<std::collections::BTreeMap<String, bool>>>,
     anthropic_probe_definitive: bool,
-    availability_probe_completed: bool,
+    availability_probe_completed: Arc<std::sync::atomic::AtomicBool>,
     session_model_restriction: Option<(
         llm_client::model::allowlist::ModelEnforcement,
         Vec<String>,
@@ -3246,7 +3258,8 @@ impl fusion::ModelSource for FusionCatalogModelSource {
             self.unfiltered.clone(),
             &availability,
             self.anthropic_probe_definitive,
-            self.availability_probe_completed,
+            self.availability_probe_completed
+                .load(std::sync::atomic::Ordering::Relaxed),
             self.session_model_restriction.as_ref(),
         )
     }
@@ -3260,6 +3273,11 @@ impl fusion::ModelSource for FusionCatalogModelSource {
 #[derive(Clone)]
 pub struct FusionCatalogRefresher {
     availability: Arc<std::sync::RwLock<std::collections::BTreeMap<String, bool>>>,
+    /// The SAME cell [`FusionCatalogModelSource`] reads (round-7 finding
+    /// [2]). A re-probe that genuinely completed and observed at least one
+    /// available row re-arms the availability filter a timed-out boot probe
+    /// had disabled; see `refresh_inner`.
+    availability_probe_completed: Arc<std::sync::atomic::AtomicBool>,
     credentials: Arc<CredentialManager>,
     credential_sources: Vec<provider_config::CredentialSource>,
     anthropic_has_api_key: bool,
@@ -3308,6 +3326,16 @@ impl FusionCatalogRefresher {
             anthropic_has_oauth: false,
             openai_chatgpt_available: false,
             isolated: true,
+            // This constructor is for callers OUTSIDE the composition root,
+            // which hold the shared availability map but not the model
+            // source's probe-completion cell, so the refresher it builds
+            // gets a private one. That is inert rather than wrong: nothing
+            // reads it, and re-arming is a pure recovery from a boot-probe
+            // stall the composition root's own refresher (registered by
+            // `resolve_llm_stack`, and invoked by the SAME
+            // `refresh_fusion_catalog_after_credential_write` fan-out) still
+            // performs on the real cell for the same credential write.
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -3394,6 +3422,24 @@ impl FusionCatalogRefresher {
                     .collect()
             })
             .unwrap_or_default();
+        // Round-7 finding [2]: re-arm the availability filter that a
+        // timed-out BOOT probe disabled — but only on a probe that actually
+        // observed an available row. The probe cannot fail: it bottoms out
+        // in `has_provider_key(..).unwrap_or(false)` over a `SecureStorage`
+        // whose runtime fallback already turned `BackendUnavailable` /
+        // `PermissionDenied` / `Io` into `Ok(false)` (round-5 finding [5]),
+        // so an all-`false` result is indistinguishable from a degraded
+        // credential broker. Arming on THAT would publish an all-false map
+        // as authoritative and empty Fusion's catalog for the rest of the
+        // process (`TooFewModels{eligible:0}`) — strictly worse than the
+        // over-broad catalog the fail-open leaves. `just_written`'s forced
+        // entries are deliberately NOT counted here: they are asserted by
+        // the caller, not observed by the probe.
+        let probe_observed_an_available_row = rows.iter().any(|row| row.available);
+        if probe_observed_an_available_row {
+            self.availability_probe_completed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Ok(mut guard) = self.availability.write() {
             for row in rows {
                 if row.available {
@@ -3594,6 +3640,55 @@ impl command_core::OAuthConnectDriver for FusionCatalogRefreshingOAuthConnect {
 /// prices exactly like the corresponding main-loop call would.
 struct DesktopFusionPriceBook {
     catalog: Arc<cost::PricingCatalog>,
+    /// Round-7 finding [1]: whether this process assembles its Anthropic
+    /// requests with 1-HOUR prompt-cache TTLs, so cache-CREATION tokens are
+    /// billed at the catalog's `TokenClass::CacheWrite1h` rate instead of
+    /// the 5-minute `TokenClass::CacheWrite` one. See
+    /// [`prompt_cache_write_ttl_1h_enabled`].
+    cache_write_ttl_1h: bool,
+}
+
+/// The 1-hour prompt-cache TTL gate, read exactly where the money is priced.
+///
+/// `llm_client::service::ApiService::should_1h_cache_ttl`
+/// (llm-client/src/service.rs:1090) reads this same variable through the same
+/// truthy set (`1|true|yes|on`) and, when it is set, stamps `ttl_1h` on the
+/// system cache blocks of EVERY request `build_request` assembles — which
+/// includes Fusion's panel turns (`stream_forced_with_opts`) and its
+/// analyst/synthesizer side queries. Anthropic bills those cache-creation
+/// tokens at its 1-hour rate (~1.6x the 5-minute rate; `cost/src/pricing.rs`
+/// derives the class for every Anthropic tier, e.g. sonnet 3_750 -> 6_000).
+///
+/// `orchestrator::conversation::hooks`'s model-switch cache-write estimator
+/// already consults this same variable to pick between
+/// `TokenClass::CacheWrite1h` and `TokenClass::CacheWrite` for an aggregate
+/// cache-write token count it likewise has no 1h/5m split for — this mirrors
+/// that precedent rather than inventing a second rule.
+fn prompt_cache_write_ttl_1h_enabled() -> bool {
+    platform_api::env::is_env_truthy(std::env::var("ENABLE_PROMPT_CACHING_1H").ok().as_deref())
+}
+
+impl DesktopFusionPriceBook {
+    /// Production constructor: resolve the session's prompt-cache TTL gate
+    /// once, from the same env var `llm_client` reads when it builds the
+    /// requests this book prices.
+    fn new(catalog: Arc<cost::PricingCatalog>) -> Self {
+        Self {
+            catalog,
+            cache_write_ttl_1h: prompt_cache_write_ttl_1h_enabled(),
+        }
+    }
+
+    /// Test constructor with the TTL gate stated explicitly, so a test that
+    /// does not care about the gate never has to touch process env (and can
+    /// run concurrently with the three tests that do).
+    #[cfg(test)]
+    fn with_ttl_gate(catalog: Arc<cost::PricingCatalog>, cache_write_ttl_1h: bool) -> Self {
+        Self {
+            catalog,
+            cache_write_ttl_1h,
+        }
+    }
 }
 
 impl fusion::FusionPriceBook for DesktopFusionPriceBook {
@@ -3621,9 +3716,49 @@ impl fusion::FusionPriceBook for DesktopFusionPriceBook {
             .token_rates
             .get(&cost::pricing::TokenClass::CacheRead)
             .map_or(0, |rate| rate.nano_usd_per_token);
+        // Round-7 finding [1]: pick the cache-WRITE rate that matches the TTL
+        // this process actually stamps on its cache blocks. With
+        // `ENABLE_PROMPT_CACHING_1H` armed, `ApiService::build_request` marks
+        // the system cache blocks of every Fusion request `ttl_1h`, and
+        // Anthropic bills those creation tokens at ~1.6x the 5-minute rate —
+        // a rate the SAME catalog already carries as
+        // `TokenClass::CacheWrite1h` and that the main turn loop bills
+        // through (`orchestrator::cost_wiring` splits
+        // `provider_metadata./cache_creation/ephemeral_1h_input_tokens` into
+        // `TokenUsage::cache_write_1h`, which `CostCalculator` prices through
+        // that class). Fusion has no such split to price from: both seams
+        // that feed it flatten the two buckets into one total
+        // (`agent/src/handle.rs`'s `cache_creation_input_tokens: bt.cache_write`
+        // and `sidequery`'s `cache_write_1h: 0`), so `FusionUsage` carries a
+        // single `cache_write_tokens` figure. Given only that total, billing
+        // it at the 5-minute rate under an armed 1h gate is a SILENT 37.5%
+        // under-charge on the money path (design §4's hard-budget ceiling
+        // then sits below what the provider actually charged); billing it at
+        // the 1h rate is at worst high by the residual 5-minute
+        // message-level breakpoint (service.rs's `CacheControl::Ephemeral`
+        // on the last message block), which errs toward reserving/settling
+        // MORE than was spent — the safe direction for a budget ceiling.
+        // With the gate off (the shipped default — service.rs documents the
+        // feature as deliberately dormant, no settings.json route) this is
+        // byte-identical to the previous behaviour and exactly correct.
+        //
+        // The `.or_else` fallback matters: `provider-config::cost_translate`
+        // never inserts a `CacheWrite1h` class, so every models.dev /
+        // OpenRouter entry keeps its 5-minute rate here instead of dropping
+        // to 0 the moment the gate is armed.
+        let cache_write_class = if self.cache_write_ttl_1h {
+            cost::pricing::TokenClass::CacheWrite1h
+        } else {
+            cost::pricing::TokenClass::CacheWrite
+        };
         let cache_write = pricing
             .token_rates
-            .get(&cost::pricing::TokenClass::CacheWrite)
+            .get(&cache_write_class)
+            .or_else(|| {
+                pricing
+                    .token_rates
+                    .get(&cost::pricing::TokenClass::CacheWrite)
+            })
             .map_or(0, |rate| rate.nano_usd_per_token);
         // Finding [1]: `provider-config::cost_translate::model_pricing_from_token_pricing`
         // now ALWAYS inserts a `ReasoningOutput` rate — a model that publishes
@@ -3654,6 +3789,16 @@ impl fusion::FusionPriceBook for DesktopFusionPriceBook {
             cache_read_nano_usd_per_token: cache_read,
             cache_write_nano_usd_per_token: cache_write,
             reasoning_nano_usd_per_token: reasoning,
+            // Round-7 finding [1] residual: with the gate armed, the single
+            // rate above is right for the system cache blocks
+            // (`service.rs` stamps `ttl_1h` on them) and wrong for the
+            // residual last-message breakpoint, which stays 5-minute
+            // (`CacheControl::Ephemeral`) — and Fusion carries no split to
+            // tell the two apart. Report the rate as approximated so
+            // `price_realized_usage` refuses to claim `estimated: false`
+            // over it. With the gate off (the shipped default) every cache
+            // block is 5-minute and the rate is exact.
+            cache_write_rate_is_ttl_approximated: self.cache_write_ttl_1h,
         })
     }
 }
@@ -3662,6 +3807,13 @@ impl fusion::FusionPriceBook for DesktopFusionPriceBook {
 mod desktop_fusion_price_book_test {
     use super::*;
 
+    /// Serializes the three tests below, which are the ONLY tests in this
+    /// binary that touch `ENABLE_PROMPT_CACHING_1H` (`git grep -n
+    /// ENABLE_PROMPT_CACHING_1H lingxi-code/apps/engine-desktop` matches
+    /// nothing else), so one lock is enough — a second guard over the same
+    /// variable would serialize nothing.
+    static PROMPT_CACHE_1H_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn rates_for_prices_a_known_model_through_the_shared_catalog() {
         // Before this adapter was wired in (F001/G003), `FusionOrchestrator`
@@ -3669,7 +3821,7 @@ mod desktop_fusion_price_book_test {
         // returned `None` for every model and made `budget::quote` reject
         // any token-billed panel under a session `--max-budget`.
         let catalog = Arc::new(cost::PricingCatalog::builtin_reference());
-        let book = DesktopFusionPriceBook { catalog };
+        let book = DesktopFusionPriceBook::with_ttl_gate(catalog, false);
         let rates = fusion::FusionPriceBook::rates_for(&book, "anthropic", "claude-opus-4-6")
             .expect("the builtin reference catalog prices claude-opus-4-6");
         assert_eq!(rates.input_nano_usd_per_token, 5_000);
@@ -3720,12 +3872,133 @@ mod desktop_fusion_price_book_test {
                 source: cost::pricing::PricingSource::RemoteManagedSettings,
             },
         ));
-        let book = DesktopFusionPriceBook { catalog };
+        let book = DesktopFusionPriceBook::with_ttl_gate(catalog, false);
         let priced = fusion::FusionPriceBook::rates_for(&book, "deepseek", "deepseek-v4-pro")
             .expect("deepseek-v4-pro has token rates");
         assert_eq!(
             priced.reasoning_nano_usd_per_token, 870,
             "the catalog's ReasoningOutput rate must reach ModelRates, not default to 0"
+        );
+    }
+
+    /// Round-7 finding [1] (RED): `ENABLE_PROMPT_CACHING_1H` makes
+    /// `ApiService::build_request` stamp `ttl_1h` on the system cache blocks
+    /// of every request it assembles — Fusion panel turns and the
+    /// analyst/synth side queries included (llm-client/src/service.rs:1090,
+    /// :1186). Anthropic then bills those cache-CREATION tokens at the 1-hour
+    /// rate, which the shared catalog carries as
+    /// `TokenClass::CacheWrite1h` (`cost/src/pricing.rs:543-560`; for the
+    /// $5/$25 Opus tier, 6_250 -> 10_000 nano-USD/token) and which the main
+    /// turn loop bills correctly through
+    /// `orchestrator::cost_wiring` -> `CostCalculator`. `rates_for` read only
+    /// `TokenClass::CacheWrite` (the 5-minute rate), so Fusion priced the
+    /// same tokens 37.5% low against the SAME catalog while
+    /// `price_realized_usage` still reported `estimated: false`.
+    #[test]
+    fn rates_for_prices_cache_writes_at_the_one_hour_rate_when_the_1h_gate_is_on() {
+        let _guard = PROMPT_CACHE_1H_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("ENABLE_PROMPT_CACHING_1H", "1");
+        let catalog = Arc::new(cost::PricingCatalog::builtin_reference());
+        let book = DesktopFusionPriceBook::new(catalog);
+        let rates = fusion::FusionPriceBook::rates_for(&book, "anthropic", "claude-opus-4-6")
+            .expect("the builtin reference catalog prices claude-opus-4-6");
+        std::env::remove_var("ENABLE_PROMPT_CACHING_1H");
+        assert_eq!(
+            rates.cache_write_nano_usd_per_token, 10_000,
+            "with the 1h prompt-cache TTL armed, Fusion must price \
+cache-creation tokens through TokenClass::CacheWrite1h (10_000) — pricing \
+them at the 5-minute rate (6_250) under-bills the run 37.5% against the \
+same catalog the main turn loop bills them from"
+        );
+        assert!(
+            rates.cache_write_rate_is_ttl_approximated,
+            "under the gate the single flattened cache_write bucket mixes 1h system \
+blocks with the 5-minute last-message breakpoint, so the rate is an approximation and \
+`price_realized_usage` must refuse to report `estimated: false` over it"
+        );
+    }
+
+    /// The companion negative: with the dormant opt-in OFF (the shipped
+    /// default), the 5-minute rate is the correct and only rate, so this
+    /// fix must be a no-op for every normal session.
+    #[test]
+    fn rates_for_prices_cache_writes_at_the_five_minute_rate_by_default() {
+        let _guard = PROMPT_CACHE_1H_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::remove_var("ENABLE_PROMPT_CACHING_1H");
+        let catalog = Arc::new(cost::PricingCatalog::builtin_reference());
+        let book = DesktopFusionPriceBook::new(catalog);
+        let rates = fusion::FusionPriceBook::rates_for(&book, "anthropic", "claude-opus-4-6")
+            .expect("the builtin reference catalog prices claude-opus-4-6");
+        assert_eq!(
+            rates.cache_write_nano_usd_per_token, 6_250,
+            "without ENABLE_PROMPT_CACHING_1H every cache-creation token is \
+written with the default 5-minute TTL and must stay priced at 6_250"
+        );
+        assert!(
+            !rates.cache_write_rate_is_ttl_approximated,
+            "with the gate off every cache block is 5-minute: the rate is EXACT and the \
+run must keep reporting an exact total"
+        );
+    }
+
+    /// A catalog entry with no `CacheWrite1h` rate at all — the shape
+    /// `provider-config::cost_translate::model_pricing_from_token_pricing`
+    /// produces for every models.dev / OpenRouter row (it inserts Input,
+    /// Output, CacheWrite, CacheRead and ReasoningOutput and never
+    /// CacheWrite1h) — must fall back to its 5-minute rate rather than
+    /// dropping to 0 when the 1h gate is on.
+    #[test]
+    fn rates_for_falls_back_to_the_five_minute_rate_when_no_1h_rate_exists() {
+        let _guard = PROMPT_CACHE_1H_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("ENABLE_PROMPT_CACHING_1H", "1");
+        let mr = cost::ModelRef {
+            provider: cost::pricing::ProviderId::OpenAICompatible {
+                name: "openrouter".to_string(),
+            },
+            model: "some-cached-model".to_string(),
+        };
+        let mut rates = std::collections::HashMap::new();
+        rates.insert(
+            cost::pricing::TokenClass::Input,
+            cost::pricing::MoneyPerToken {
+                nano_usd_per_token: 100,
+            },
+        );
+        rates.insert(
+            cost::pricing::TokenClass::Output,
+            cost::pricing::MoneyPerToken {
+                nano_usd_per_token: 200,
+            },
+        );
+        rates.insert(
+            cost::pricing::TokenClass::CacheWrite,
+            cost::pricing::MoneyPerToken {
+                nano_usd_per_token: 125,
+            },
+        );
+        let catalog = Arc::new(cost::PricingCatalog::builtin_reference().with_entry(
+            cost::pricing::ModelPricing {
+                model_ref: mr,
+                token_rates: rates,
+                non_token_rates_nano_usd: std::collections::HashMap::new(),
+                effective_from: None,
+                source: cost::pricing::PricingSource::RemoteManagedSettings,
+            },
+        ));
+        let book = DesktopFusionPriceBook::new(catalog);
+        let priced = fusion::FusionPriceBook::rates_for(&book, "openrouter", "some-cached-model")
+            .expect("the entry has token rates");
+        std::env::remove_var("ENABLE_PROMPT_CACHING_1H");
+        assert_eq!(
+            priced.cache_write_nano_usd_per_token, 125,
+            "an entry with no CacheWrite1h class must keep its 5-minute \
+rate under the 1h gate, never fall to 0"
         );
     }
 
@@ -3741,7 +4014,7 @@ mod desktop_fusion_price_book_test {
                 model: "claude-opus-4-6".into(),
             },
         ));
-        let book = DesktopFusionPriceBook { catalog };
+        let book = DesktopFusionPriceBook::with_ttl_gate(catalog, false);
         assert!(fusion::FusionPriceBook::rates_for(&book, "anthropic", "claude-opus-4-6").is_none());
     }
 }
@@ -4113,7 +4386,7 @@ fn desktop_fusion_executor(
         });
     let inner = fusion::FusionOrchestrator::new(spawner, side_query, config_source, catalog)
         .with_bus(bus)
-        .with_price_book(Arc::new(DesktopFusionPriceBook { catalog: pricing }));
+        .with_price_book(Arc::new(DesktopFusionPriceBook::new(pricing)));
     Arc::new(DesktopFusionExecutor {
         inner,
         cfg: cfg.clone(),
@@ -9235,15 +9508,25 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     // against the fresh value instead of this boot-time snapshot.
     let fusion_catalog_availability: Arc<std::sync::RwLock<std::collections::BTreeMap<String, bool>>> =
         Arc::new(std::sync::RwLock::new(provider_availability.clone()));
+    // Round-7 finding [2]: the probe-completion flag is shared state, not a
+    // construction-time constant. A boot probe that TIMED OUT leaves it
+    // `false` (the availability half of `filter_fusion_catalog` fails open,
+    // finding [7]); the refresher below re-arms it the first time a
+    // mid-session re-probe genuinely completes, so the fail-open is
+    // transient like the stall that caused it instead of permanent.
+    let fusion_probe_completed = Arc::new(std::sync::atomic::AtomicBool::new(
+        availability_probe_completed,
+    ));
     let fusion_catalog_source: Arc<dyn fusion::ModelSource> = Arc::new(FusionCatalogModelSource {
         unfiltered: fusion_catalog.clone(),
         availability: fusion_catalog_availability.clone(),
         anthropic_probe_definitive,
-        availability_probe_completed,
+        availability_probe_completed: fusion_probe_completed.clone(),
         session_model_restriction: session_model_restriction.clone(),
     });
     let fusion_catalog_refresher = FusionCatalogRefresher {
         availability: fusion_catalog_availability,
+        availability_probe_completed: fusion_probe_completed,
         credentials: credentials.clone(),
         credential_sources: assembled.credential_sources.clone(),
         anthropic_has_api_key: has_api_key,
@@ -14792,6 +15075,10 @@ mod tests {
 
         let refresher = FusionCatalogRefresher {
             availability: availability.clone(),
+            // These tests model a boot whose availability probe COMPLETED
+            // (round-7 finding [2]); the shared cell is already armed, so
+            // `refresh_inner`'s re-arm is a no-op here.
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             credentials: credentials.clone(),
             credential_sources,
             anthropic_has_api_key: false,
@@ -14910,6 +15197,10 @@ with no restart and no ModelSource reconstruction"
 
         let refresher = FusionCatalogRefresher {
             availability: availability.clone(),
+            // These tests model a boot whose availability probe COMPLETED
+            // (round-7 finding [2]); the shared cell is already armed, so
+            // `refresh_inner`'s re-arm is a no-op here.
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             credentials,
             credential_sources: sources,
             anthropic_has_api_key: true,
@@ -15125,6 +15416,10 @@ when the degraded backend cannot read it back; map after refresh was {map:?}"
 
         let isolated_refresher = FusionCatalogRefresher {
             availability: availability.clone(),
+            // These tests model a boot whose availability probe COMPLETED
+            // (round-7 finding [2]); the shared cell is already armed, so
+            // `refresh_inner`'s re-arm is a no-op here.
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             credentials: credentials.clone(),
             credential_sources: credential_sources.clone(),
             anthropic_has_api_key: false,
@@ -15150,6 +15445,10 @@ credential — it must reproduce the boot probe's \
         let availability2 = Arc::new(std::sync::RwLock::new(boot2));
         let non_isolated_refresher = FusionCatalogRefresher {
             availability: availability2.clone(),
+            // These tests model a boot whose availability probe COMPLETED
+            // (round-7 finding [2]); the shared cell is already armed, so
+            // `refresh_inner`'s re-arm is a no-op here.
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             credentials,
             credential_sources,
             anthropic_has_api_key: false,
@@ -17622,7 +17921,7 @@ still flip to available"
             unfiltered,
             availability: availability.clone(),
             anthropic_probe_definitive: true,
-            availability_probe_completed: true,
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             session_model_restriction: None,
         };
 
@@ -17661,6 +17960,283 @@ reconstruction — got: {after:?}"
         assert!(
             after.iter().any(|row| row.profile == "github-copilot"),
             "got: {after:?}"
+        );
+    }
+
+    /// Round-7 finding [2]: the boot availability probe's 5s timeout
+    /// (`resolve_llm_stack`: `Err(_) => (Vec::new(), false)`) makes
+    /// `filter_fusion_catalog` skip its availability half entirely — a
+    /// deliberate fail-open (finding [7]) so a transient/contended keychain
+    /// cannot empty the Fusion catalog for the process. The defect was that
+    /// the state justifying it was FROZEN at construction: nothing anywhere
+    /// ever set `availability_probe_completed` back to `true`, so after one
+    /// boot stall every `/fusion` in that process kept selecting panels on
+    /// providers with no credential at all — even after
+    /// `FusionCatalogRefresher::refresh_inner` had re-run the SAME probe
+    /// (`compute_availability_with_isolation`) over the full boot credential
+    /// source list on a `/connect`/`/login` and published a complete,
+    /// authoritative map into the very lock `list()` reads.
+    ///
+    /// This drives the real refresher (not a hand-written map poke), so it
+    /// pins the WIRING: a re-probe that genuinely completed and observed an
+    /// available row must re-arm filtering, and the uncredentialed row must
+    /// disappear on the next `list()`.
+    #[tokio::test]
+    async fn a_completed_reprobe_re_arms_availability_filtering_after_a_boot_probe_timeout() {
+        use async_trait::async_trait;
+        use fusion::ModelSource as _;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+        use std::collections::HashMap;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct MemStorage {
+            map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+        }
+        #[async_trait]
+        impl SecureStorage for MemStorage {
+            async fn store(
+                &self,
+                service: &str,
+                account: &str,
+                data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .insert((service.into(), account.into()), data);
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .get(&(service.into(), account.into()))
+                    .cloned())
+            }
+            async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .remove(&(service.into(), account.into()));
+                Ok(())
+            }
+            async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .filter(|(s, _)| s == service)
+                    .map(|(_, a)| a.clone())
+                    .collect())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+        // A real, readable credential, so the re-probe below genuinely
+        // OBSERVES an available row — the only condition under which
+        // re-arming is safe (a degraded broker answers `Ok(false)` for
+        // everything; re-arming on that would resurrect the round-5
+        // finding [5] "permanently empty Fusion catalog" failure).
+        credentials
+            .set_provider_key("openrouter", "sk-or-test-round7")
+            .await
+            .expect("store openrouter key");
+
+        let credential_sources: Vec<provider_config::CredentialSource> = ["openrouter", "groq"]
+            .iter()
+            .map(|name| provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::OpenAICompatible {
+                    name: (*name).to_string(),
+                },
+                profile_name: (*name).to_string(),
+                credential_id: (*name).to_string(),
+                env_var: None,
+                kind: provider_config::CredentialKind::Keychain,
+            })
+            .collect();
+
+        // Boot state after a TIMED-OUT probe: no rows at all, and the
+        // completion flag `false`.
+        let availability = Arc::new(std::sync::RwLock::new(
+            std::collections::BTreeMap::<String, bool>::new(),
+        ));
+        let probe_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let unfiltered = vec![
+            fusion_catalog_row("openrouter", "some-model"),
+            fusion_catalog_row("groq", "another-model"),
+        ];
+        let source = FusionCatalogModelSource {
+            unfiltered,
+            availability: availability.clone(),
+            anthropic_probe_definitive: true,
+            availability_probe_completed: probe_completed.clone(),
+            session_model_restriction: None,
+        };
+
+        // Fail-open while the probe is unknown: both rows survive. This half
+        // is the already-adjudicated finding [7] behaviour and must not
+        // change.
+        let before = source.list();
+        assert_eq!(
+            before.len(),
+            2,
+            "a timed-out boot probe must fail OPEN, not empty the catalog: got {before:?}"
+        );
+
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: probe_completed.clone(),
+            credentials: credentials.clone(),
+            credential_sources,
+            anthropic_has_api_key: false,
+            anthropic_has_oauth: false,
+            openai_chatgpt_available: false,
+            isolated: false,
+        };
+        refresher.refresh_after_credential_write("openrouter").await;
+
+        assert!(
+            probe_completed.load(std::sync::atomic::Ordering::Relaxed),
+            "a re-probe that completed and observed an available row must \
+re-arm the availability filter for the rest of the process"
+        );
+        let after = source.list();
+        assert_eq!(
+            after.len(),
+            1,
+            "after an authoritative re-probe the uncredentialed `groq` row \
+must be filtered out — leaving it in is what made every /fusion in a \
+stalled-boot process reserve budget for, spawn, and fail panels on \
+providers with no credential: got {after:?}"
+        );
+        assert_eq!(after[0].profile, "openrouter", "got: {after:?}");
+    }
+
+    /// The negative half of the same class (round-5 finding [5] must not
+    /// regress): a re-probe that completes but observes NOTHING available —
+    /// the shape a degraded macOS credential broker produces, where
+    /// `SecureStorage::contains` answers `Ok(false)` rather than erroring —
+    /// must NOT re-arm the filter. Re-arming there would publish an
+    /// all-`false` map as authoritative and empty the Fusion catalog
+    /// (`TooFewModels{eligible:0}`) for the rest of the process, which is
+    /// strictly worse than the over-broad catalog the fail-open leaves.
+    #[tokio::test]
+    async fn a_degraded_reprobe_must_not_re_arm_availability_filtering() {
+        use async_trait::async_trait;
+        use fusion::ModelSource as _;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+
+        struct DegradedStorage;
+        #[async_trait]
+        impl SecureStorage for DegradedStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(None)
+            }
+            async fn delete(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(Vec::new())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(DegradedStorage);
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        let credential_sources: Vec<provider_config::CredentialSource> = ["openrouter", "groq"]
+            .iter()
+            .map(|name| provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::OpenAICompatible {
+                    name: (*name).to_string(),
+                },
+                profile_name: (*name).to_string(),
+                credential_id: (*name).to_string(),
+                env_var: None,
+                kind: provider_config::CredentialKind::Keychain,
+            })
+            .collect();
+
+        let availability = Arc::new(std::sync::RwLock::new(
+            std::collections::BTreeMap::<String, bool>::new(),
+        ));
+        let probe_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let source = FusionCatalogModelSource {
+            unfiltered: vec![
+                fusion_catalog_row("openrouter", "some-model"),
+                fusion_catalog_row("groq", "another-model"),
+            ],
+            availability: availability.clone(),
+            anthropic_probe_definitive: true,
+            availability_probe_completed: probe_completed.clone(),
+            session_model_restriction: None,
+        };
+
+        let refresher = FusionCatalogRefresher {
+            availability,
+            availability_probe_completed: probe_completed.clone(),
+            credentials,
+            credential_sources,
+            anthropic_has_api_key: false,
+            anthropic_has_oauth: false,
+            openai_chatgpt_available: false,
+            isolated: false,
+        };
+        refresher.refresh().await;
+
+        assert!(
+            !probe_completed.load(std::sync::atomic::Ordering::Relaxed),
+            "a re-probe that observed no available row is indistinguishable \
+from a degraded credential broker and must NOT re-arm filtering"
+        );
+        assert_eq!(
+            source.list().len(),
+            2,
+            "the catalog must stay fail-open after a degraded re-probe"
         );
     }
 

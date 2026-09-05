@@ -1825,3 +1825,102 @@ async fn a_sink_that_never_publishes_does_not_revert_a_completed_run_to_failed()
     // The "failing" sink changed nothing: status stays Completed, not Failed.
     assert_eq!(status_sink.last_status(), Some(TaskStatus::Completed));
 }
+
+// ---- Round-7 items 5 & 6: `<subagent_tokens>` must mean the same thing for
+// a `/fusion` run as it does for a `local_agent` run -------------------------
+
+/// Returns a `FusionResult` whose `usage` has every bucket populated with a
+/// DISTINCT value, so an assertion on the summed total can only pass if the
+/// intended buckets — and only those — were added.
+struct FullUsageExecutor;
+
+#[async_trait]
+impl FusionExecutor for FullUsageExecutor {
+    async fn run(
+        &self,
+        _request: FusionRequest,
+        _inherit: FusionInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        Ok(FusionResult {
+            usage: FusionUsage {
+                input_tokens: 3_000,
+                output_tokens: 8_000,
+                reasoning_tokens: 90_000,
+                cache_read_tokens: 160_000,
+                cache_write_tokens: 40_000,
+                realized_nano_usd: 1,
+                reserved_max_nano_usd: 2,
+                estimated: false,
+                provider_requests: 7,
+            },
+            ..dummy_result()
+        })
+    }
+}
+
+/// Round-7 items 5+6 (one defect): `AgentRunUsage.subagent_tokens` is
+/// main-owned and documented as claude-code's `totalTokens`
+/// (`platform_api::task_registry::AgentRunUsage`), and main's only other
+/// producer — `local_agent.rs`'s `input + cache_write + cache_read + output`
+/// (mirrored in `agent::handle::subagent_usage_from_llm_usage`) — fills it
+/// with all four billable buckets. `finalize_fusion_outcome` filled it with
+/// `input + output` alone, so a cache-heavy `/fusion` run reported a small
+/// fraction of the tokens an equivalent background-agent run reports under
+/// the very same `<subagent_tokens>` tag.
+///
+/// The expected value deliberately EXCLUDES `reasoning_tokens`: `local_agent`
+/// excludes `bt.reasoning_output` too (`cost::usage`'s `total_context_tokens`
+/// mirrors TS's four-term sum), and the point of this fix is to match main's
+/// definition of the tag, not to invent a third one.
+#[tokio::test]
+async fn completed_fusion_reports_subagent_tokens_as_local_agents_four_bucket_total() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let status_sink = Arc::new(RecordingStatusSink::default());
+    let completion_sink = Arc::new(CountingCompletionSink::default());
+    let handler = make_handler(
+        Arc::new(FullUsageExecutor),
+        output_manager,
+        status_sink.clone(),
+        completion_sink,
+    );
+
+    handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: "conv".into(),
+            },
+            make_ctx(fs),
+        )
+        .await
+        .expect("spawn succeeds");
+
+    for _ in 0..200 {
+        if status_sink
+            .last_status()
+            .is_some_and(TaskStatus::is_terminal)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    let egress_and_usage = status_sink.egress_and_usage();
+    let usage = egress_and_usage
+        .first()
+        .and_then(|(_, _, usage)| usage.clone())
+        .expect("the Ok arm must record an AgentRunUsage");
+    assert_eq!(
+        usage.subagent_tokens, 211_000,
+        "<subagent_tokens> must be input(3000) + cache_write(40000) + \
+cache_read(160000) + output(8000) — the same four billable buckets \
+local_agent.rs sums for this exact tag; got a total that drops the cache \
+buckets Fusion already carries"
+    );
+    assert_eq!(
+        usage.tool_uses, 7,
+        "provider_requests must still map to <tool_uses> unchanged"
+    );
+}

@@ -5039,12 +5039,19 @@ impl ChatWidget {
                 // distinguished solely by `background_owned`.
                 // `AskUserQuestion`/`ComputerAccess` exchanges carry no owner
                 // signal today, so they are still cleared unconditionally.
-                self.pending_prompts.retain(|prompt| {
-                    matches!(
-                        prompt,
-                        PendingPrompt::Permission(exchange)
-                            if exchange.background_owned || exchange.worker.is_some()
-                    )
+                // Round-7 finding 4: a preserved background/worker exchange is
+                // still worth keeping ONLY while someone is waiting for it.
+                // `resp_tx.is_closed()` is the one predicate covering every way
+                // the asker can unwind (panel timeout, abort bar, pool
+                // deallocation, session teardown), so a queued ask whose panel
+                // already died is dropped here instead of being kept for a
+                // later drain that would open a born-dead dialog.
+                self.pending_prompts.retain(|prompt| match prompt {
+                    PendingPrompt::Permission(exchange) => {
+                        (exchange.background_owned || exchange.worker.is_some())
+                            && !exchange.resp_tx.is_closed()
+                    }
+                    PendingPrompt::AskUserQuestion(_) | PendingPrompt::ComputerAccess(_) => false,
                 });
                 self.bottom_pane.dismiss_turn_prompts();
                 ChatOutcome::Continue
@@ -5235,18 +5242,29 @@ impl ChatWidget {
     /// (called after every key/paste, i.e. after a resolution could have
     /// happened).
     fn open_next_queued_prompt(&mut self) {
-        if !self.has_open_interactive_prompt() {
-            if let Some(prompt) = self.pending_prompts.pop_front() {
-                match prompt {
-                    PendingPrompt::Permission(exchange) => {
-                        self.bottom_pane.show_permission(exchange);
-                    }
-                    PendingPrompt::AskUserQuestion(exchange) => {
-                        self.bottom_pane.show_ask_user_question(exchange);
-                    }
-                    PendingPrompt::ComputerAccess(exchange) => {
-                        self.bottom_pane.show_computer_access(exchange);
-                    }
+        // Round-7 finding 4, step 1: an already-open dialog whose asker
+        // unwound off-thread (its `/fusion` panel timed out, the pool runner
+        // deallocated it) still owns the keyboard and is preserved by
+        // `dismiss_turn_prompts`, so nothing else would ever clear it. This is
+        // the per-event re-entry where that death first becomes observable.
+        self.bottom_pane.drop_abandoned_prompts();
+        // Step 2: `BottomPane::show_*` silently declines an exchange whose
+        // asker is already gone, so popping exactly one entry could burn this
+        // event on a dead prompt and leave a LIVE one queued until the next
+        // key press. Keep popping until something actually opens.
+        while !self.has_open_interactive_prompt() {
+            let Some(prompt) = self.pending_prompts.pop_front() else {
+                break;
+            };
+            match prompt {
+                PendingPrompt::Permission(exchange) => {
+                    self.bottom_pane.show_permission(exchange);
+                }
+                PendingPrompt::AskUserQuestion(exchange) => {
+                    self.bottom_pane.show_ask_user_question(exchange);
+                }
+                PendingPrompt::ComputerAccess(exchange) => {
+                    self.bottom_pane.show_computer_access(exchange);
                 }
             }
         }
@@ -9430,6 +9448,110 @@ mod tests {
         assert!(
             !matches!(widget.handle_key(chord), ChatOutcome::PasteImage),
             "a modal owns the keyboard: the chord must not paste"
+        );
+    }
+
+    /// Round-7 finding 4, the half the `show_*` entry guard cannot deliver on
+    /// its own: `open_next_queued_prompt` used to pop EXACTLY ONE queued entry
+    /// per event. Now that `show_permission` silently declines an exchange
+    /// whose asker is already gone, popping one would burn the event on the
+    /// dead head and leave the LIVE ask behind it queued until the user
+    /// happened to press another key.
+    #[test]
+    fn a_dead_queued_prompt_does_not_delay_the_live_ask_behind_it() {
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+
+        // The OPEN dialog is the turn's own ask.
+        let (direct, direct_rx) = tool_exchange();
+        widget.open_permission(direct);
+        assert!(widget.has_open_permission());
+
+        // Behind it: a background ask whose panel has ALREADY died (its
+        // receiver is dropped), then a live one.
+        let (dead, dead_rx) = background_owned_tool_exchange();
+        drop(dead_rx);
+        widget.open_permission(dead);
+        let (live, live_rx) = background_owned_tool_exchange();
+        widget.open_permission(live);
+        assert_eq!(widget.pending_prompts.len(), 2);
+
+        // ONE event resolves the open dialog and must surface the live ask.
+        widget.handle_key(press(KeyCode::Char('1')));
+        assert_eq!(
+            direct_rx.blocking_recv().unwrap(),
+            PermissionResponse::AllowOnce
+        );
+        assert!(
+            widget.has_open_permission(),
+            "the live queued ask must open on the SAME event that skipped the dead one"
+        );
+        assert_eq!(
+            widget.pending_prompts.len(),
+            0,
+            "both queued entries are consumed: the dead one dropped, the live one opened"
+        );
+
+        // And it is the LIVE exchange that owns the dialog.
+        widget.handle_key(press(KeyCode::Esc));
+        assert_eq!(live_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
+    }
+
+    /// Round-7 finding 4: a `background_owned` dialog that was live when it
+    /// opened and went ownerless afterwards (its `/fusion` panel hit
+    /// `panel_total_timeout_ms`) owns the keyboard and is deliberately
+    /// PRESERVED by `dismiss_turn_prompts`, so nothing else clears it. The
+    /// per-event re-entry sweeps it.
+    #[test]
+    fn an_open_background_dialog_whose_panel_died_is_swept_on_the_next_event() {
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        let (background, background_rx) = background_owned_tool_exchange();
+        widget.open_permission(background);
+        assert!(widget.has_open_permission(), "the dialog opened while live");
+
+        // The panel dies off-thread.
+        drop(background_rx);
+
+        // A key the dialog itself does not resolve.
+        widget.handle_key(press(KeyCode::Char('z')));
+        assert!(
+            !widget.has_open_permission(),
+            "a dialog whose asker is gone must not keep owning the keyboard"
+        );
+        assert_eq!(
+            widget.bottom_pane().view_stack().len(),
+            0,
+            "and it is removed from the stack, not merely hidden"
+        );
+    }
+
+    /// The interrupt's `retain` preserves a queued background ask — but only
+    /// while someone is still waiting for it. One whose panel already died is
+    /// dropped rather than kept for a later drain.
+    #[test]
+    fn interrupt_drops_a_queued_background_ask_whose_panel_already_died() {
+        let mut widget = widget();
+        typ(&mut widget, "x");
+        let ChatOutcome::Submit(_, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+            panic!("expected submit");
+        };
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+
+        let (direct, _direct_rx) = tool_exchange();
+        widget.open_permission(direct);
+
+        let (dead, dead_rx) = background_owned_tool_exchange();
+        drop(dead_rx);
+        widget.open_permission(dead);
+        assert_eq!(widget.pending_prompts.len(), 1);
+
+        widget.handle_key(ctrl(KeyCode::Char('c')));
+
+        assert_eq!(
+            widget.pending_prompts.len(),
+            0,
+            "a queued background ask with no asker left must not survive the interrupt"
         );
     }
 

@@ -789,7 +789,31 @@ impl BottomPane {
         }
     }
 
+    /// Open the permission dialog for `exchange` — unless its asker is
+    /// already gone (finding 4).
+    ///
+    /// Every event that unwinds the tool call behind an ask — the owning
+    /// turn's cancellation, a `/fusion` panel's `panel_total_timeout_ms`,
+    /// the orchestrator's early-abort bar, the pool runner's deallocation,
+    /// session teardown — ends the same way: the future holding the
+    /// exchange's receiving half is dropped. `oneshot::Sender::is_closed` is
+    /// the one signal that covers all of them (it is the same fact
+    /// `AdapterPermissionGate::resolve` reads through `send(..).is_err()`),
+    /// and it matters most for a queued ask: a `background_owned` prompt sits
+    /// in `ChatWidget::pending_prompts` until the current dialog is
+    /// dismissed, so by the time it drains its panel may be long dead.
+    ///
+    /// Stacking such a dialog is not merely useless: it OWNS the keyboard
+    /// ([`Self::handle_key`] routes to the view stack before the composer),
+    /// every later ask queues invisibly behind it, and
+    /// [`ViewStack::dismiss_turn_prompts`] deliberately preserves a
+    /// `background_owned` [`PermissionView`], so Ctrl-C does not clear it
+    /// either. Dropping `exchange` here closes the channel, which the gate
+    /// already maps to `Deny` — the same resolution a dropped view produces.
     pub fn show_permission(&mut self, exchange: PermissionExchange) {
+        if exchange.resp_tx.is_closed() {
+            return;
+        }
         self.view_stack
             .push(Box::new(PermissionView::new(exchange)));
     }
@@ -809,13 +833,23 @@ impl BottomPane {
     /// keyboard until the user walks every question and submits, delivering the
     /// answer map (question → chosen label(s)) through the exchange's one-shot
     /// channel exactly once (or dropping it on cancel).
+    /// An exchange whose asker has already unwound opens nothing (finding 4,
+    /// same rule as [`Self::show_permission`]).
     pub fn show_ask_user_question(&mut self, exchange: AskUserQuestionExchange) {
+        if exchange.resp_tx.is_closed() {
+            return;
+        }
         self.view_stack
             .push(Box::new(AskUserQuestionView::new(exchange)));
     }
 
     /// Open the `computer` tool's `request_access` approval dialog.
+    /// An exchange whose asker has already unwound opens nothing (finding 4,
+    /// same rule as [`Self::show_permission`]).
     pub fn show_computer_access(&mut self, exchange: ComputerAccessExchange) {
+        if exchange.resp_tx.is_closed() {
+            return;
+        }
         self.view_stack
             .push(Box::new(ComputerAccessView::new(exchange)));
     }
@@ -1254,6 +1288,14 @@ impl BottomPane {
     /// Dismiss permission/question/access prompts owned by the current turn.
     pub fn dismiss_turn_prompts(&mut self) {
         self.view_stack.dismiss_turn_prompts();
+    }
+
+    /// Drop every stacked one-shot prompt whose asker has already unwound —
+    /// see [`ViewStack::drop_abandoned_prompts`]. Called by the chat widget on
+    /// every per-event re-entry (key, paste, view tick), which is where a
+    /// panel death that happened off-thread first becomes observable.
+    pub fn drop_abandoned_prompts(&mut self) {
+        self.view_stack.drop_abandoned_prompts();
     }
 
     /// Apply the `leftArrowOpensAgents` setting (ANDed with the agent-view
@@ -2286,6 +2328,38 @@ impl ViewStack {
                 return permission.is_background();
             }
             !view.as_any().is::<AskUserQuestionView>() && !view.as_any().is::<ComputerAccessView>()
+        });
+    }
+
+    /// Drop every stacked one-shot prompt whose asker has already unwound.
+    ///
+    /// Finding 4 (round 7), the half [`BottomPane::show_permission`]'s entry
+    /// guard cannot reach: a dialog that was LIVE when it opened and went
+    /// ownerless afterwards (its `/fusion` panel hit `panel_total_timeout_ms`,
+    /// the pool runner deallocated it, the session tore down). Such a view
+    /// still owns the keyboard — [`BottomPane::handle_key`] routes to the view
+    /// stack before the composer, and a `background_owned` [`PermissionView`]
+    /// is deliberately PRESERVED by [`Self::dismiss_turn_prompts`], so Ctrl-C
+    /// does not clear it either — and every later ask queues invisibly behind
+    /// it. Dropping the view closes its sender, the same resolution
+    /// (`Deny`) the gate already derives from a dropped view, so no new
+    /// semantics are introduced.
+    ///
+    /// A view whose response was already sent (`resp_tx` taken) is NOT
+    /// abandoned and is left alone; it pops itself through the normal outcome
+    /// path.
+    pub fn drop_abandoned_prompts(&mut self) {
+        self.views.retain(|view| {
+            if let Some(permission) = view.as_any().downcast_ref::<PermissionView>() {
+                return !permission.is_asker_gone();
+            }
+            if let Some(ask) = view.as_any().downcast_ref::<AskUserQuestionView>() {
+                return !ask.is_asker_gone();
+            }
+            if let Some(computer) = view.as_any().downcast_ref::<ComputerAccessView>() {
+                return !computer.is_asker_gone();
+            }
+            true
         });
     }
 
@@ -4295,5 +4369,159 @@ mod tests {
             p.handle_key(k(KeyCode::Left)),
             BottomPaneOutcome::Consumed
         ));
+    }
+
+    // ===== Abandoned one-shot exchanges never stack a ghost modal =====
+
+    /// Build a `background_owned` tool-confirm exchange (the shape a `/fusion`
+    /// panel's ask arrives in) whose requester has ALREADY gone away: the
+    /// receiving half is dropped, exactly as it is when the panel task is
+    /// aborted by cancellation, its `panel_total_timeout_ms`, or the
+    /// early-abort bar.
+    fn dead_permission_exchange() -> PermissionExchange {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        drop(resp_rx);
+        PermissionExchange {
+            request: permission::gate::PermissionRequest::ToolUseConfirm {
+                tool_name: "WebFetch".to_string(),
+                tool_input: serde_json::json!({ "url": "https://example.com" }),
+                default_decision: permission::gate::PromptDefault::DenyByDefault,
+                suppress_always_allow_rule: false,
+            },
+            resp_tx,
+            worker: None,
+            suppress_always_allow_rule: false,
+            permission_persistence: None,
+            auto_mode_prompt: None,
+            background_owned: true,
+        }
+    }
+
+    /// Finding 4: a permission ask whose asker is already gone must never
+    /// become a modal. `dismiss_turn_prompts` deliberately PRESERVES a
+    /// `background_owned` dialog, and `PermissionView` is otherwise popped
+    /// only by its own key handling, so stacking one here strands a dialog
+    /// that owns the keyboard and can never produce a result.
+    #[test]
+    fn a_dead_permission_exchange_is_not_stacked() {
+        let mut p = pane();
+        p.show_permission(dead_permission_exchange());
+        assert!(
+            !p.view_stack().contains::<PermissionView>(),
+            "an ask whose oneshot receiver is gone must not open a dialog"
+        );
+        assert_eq!(p.view_stack().len(), 0, "and nothing is left on the stack");
+    }
+
+    /// The same rule for the other two one-shot exchanges that stack a
+    /// keyboard-owning modal.
+    #[test]
+    fn a_dead_ask_user_question_exchange_is_not_stacked() {
+        let mut p = pane();
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        drop(resp_rx);
+        p.show_ask_user_question(AskUserQuestionExchange {
+            questions: vec![tui_core::ask_user_question_bridge::AskQuestion {
+                question: "Pick one".to_string(),
+                header: "Pick".to_string(),
+                options: Vec::new(),
+                multi_select: false,
+            }],
+            timeout_secs: None,
+            resp_tx,
+        });
+        assert!(
+            !p.view_stack().contains::<AskUserQuestionView>(),
+            "an AskUserQuestion whose asker is gone must not open a dialog"
+        );
+        assert_eq!(p.view_stack().len(), 0, "and nothing is left on the stack");
+    }
+
+    #[test]
+    fn a_dead_computer_access_exchange_is_not_stacked() {
+        let mut p = pane();
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        drop(resp_rx);
+        p.show_computer_access(ComputerAccessExchange {
+            request: tui_core::computer_access_bridge::ComputerAccessRequest {
+                reason: "screenshot".to_string(),
+                apps: Vec::new(),
+                tier: tui_core::computer_access_bridge::AccessTier::Full,
+                clipboard_read: false,
+                clipboard_write: false,
+                system_key_combos: false,
+                tcc_state: None,
+            },
+            resp_tx,
+        });
+        assert!(
+            !p.view_stack().contains::<ComputerAccessView>(),
+            "a computer-access ask whose asker is gone must not open a dialog"
+        );
+        assert_eq!(p.view_stack().len(), 0, "and nothing is left on the stack");
+    }
+
+    /// Finding 4, the other half: a dialog that was LIVE when it opened and
+    /// went ownerless afterwards. `dismiss_turn_prompts` deliberately
+    /// preserves a `background_owned` `PermissionView`, so without this sweep
+    /// nothing ever removes it and it keeps owning the keyboard.
+    #[test]
+    fn an_open_dialog_whose_asker_dies_is_swept_off_the_stack() {
+        let mut p = pane();
+        let mut exchange = dead_permission_exchange();
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        exchange.resp_tx = resp_tx;
+        p.show_permission(exchange);
+        assert_eq!(p.view_stack().len(), 1, "it opened while still live");
+
+        // Ctrl-C is not a way out: the background view survives it.
+        p.dismiss_turn_prompts();
+        assert_eq!(
+            p.view_stack().len(),
+            1,
+            "dismiss_turn_prompts preserves a background_owned dialog by design"
+        );
+
+        drop(resp_rx);
+        p.drop_abandoned_prompts();
+        assert!(
+            !p.view_stack().contains::<PermissionView>(),
+            "a dialog whose asker unwound must be swept off the stack"
+        );
+        assert_eq!(p.view_stack().len(), 0, "nothing is left on the stack");
+    }
+
+    /// The sweep keys on the asker, not on the view type: a live dialog and an
+    /// unrelated screen both survive it.
+    #[test]
+    fn the_abandoned_sweep_leaves_live_and_unrelated_views_alone() {
+        let mut p = pane();
+        let mut exchange = dead_permission_exchange();
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        exchange.resp_tx = resp_tx;
+        p.show_permission(exchange);
+        p.drop_abandoned_prompts();
+        assert_eq!(
+            p.view_stack().len(),
+            1,
+            "a live ask must not be swept: its user is still waiting to answer"
+        );
+        drop(resp_rx);
+    }
+
+    /// The guard must key on the ASKER being gone, not on `background_owned`:
+    /// a live background ask still opens its dialog.
+    #[test]
+    fn a_live_background_permission_exchange_still_opens() {
+        let mut p = pane();
+        let mut exchange = dead_permission_exchange();
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        exchange.resp_tx = resp_tx;
+        p.show_permission(exchange);
+        assert!(
+            p.view_stack().contains::<PermissionView>(),
+            "a live background ask must still open its dialog"
+        );
+        drop(resp_rx);
     }
 }

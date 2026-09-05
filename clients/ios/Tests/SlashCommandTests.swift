@@ -283,7 +283,15 @@ import XCTest
                 messagesAfter: 7,
                 bytesSaved: 4096
             ))
-            XCTAssertFalse(source.model.requiresBackgroundExecution)
+            // The compaction event settles the PROGRESS, not the turn: the
+            // engine still owes a slash result, so the background-execution
+            // lease is still legitimately held here. Asserting `false` at this
+            // point was the original spelling of this check and it hid the real
+            // defect below — the lease was never released at ALL.
+            XCTAssertTrue(
+                source.model.requiresBackgroundExecution,
+                "the turn is still open until its slash result arrives"
+            )
 
             source.applyForTesting(.slashCommandResult(
                 turnId: token.clientTurnId,
@@ -295,6 +303,20 @@ import XCTest
                 messagesAfter: 7,
                 bytesSaved: 4096
             ))
+            // A CLI slash turn gets no TurnEnded, so `.slashCommandResult` is
+            // the only place its run can be settled. Before the fix the run
+            // stayed `.running` forever and the conversation held a background
+            // -execution lease for the rest of the session.
+            XCTAssertFalse(
+                source.model.requiresBackgroundExecution,
+                "a settled /compact turn must release the background-execution lease"
+            )
+            guard case let .run(run)? = source.model.items.first(where: {
+                if case .run = $0 { return true } else { return false }
+            }) else {
+                return XCTFail("expected the /compact turn to have a run card")
+            }
+            XCTAssertEqual(run.status, .completed)
         }
 
         func testCompactSlashFailureSettlesProgressWithoutPretendingSuccess() async throws {

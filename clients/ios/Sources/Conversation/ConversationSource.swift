@@ -4453,6 +4453,24 @@ final class MockConversationSource: ConversationSource {
                     status: isError ? "failed" : "idle",
                     latestActivity: isError ? display : String(localized: "chat_completed")
                 )
+                // A CLI slash turn ends HERE — there is no TurnEnded for it — so
+                // it must settle its run the way `.turnEnded` does. Without this
+                // the run card stays `.running` forever and, because
+                // `clearTurnPointers` drops the active-run pointer on the next
+                // line, nothing can ever settle it again: the conversation keeps
+                // claiming `requiresBackgroundExecution` for the rest of the
+                // session. `/compact` made it visible (the compaction card
+                // finishes while the lease does not), but every CLI slash
+                // command leaked the same way.
+                //
+                // Guarded on an EXISTING run: `finishActiveRun` goes through
+                // `updateActiveRun` -> `ensureActiveRun`, which CREATES a run
+                // when there is none. A locally-handled slash command has no
+                // run, and settling one into existence appended a spurious run
+                // card after the command output.
+                if activeRunItemIndex.map({ model.items.indices.contains($0) }) == true {
+                    finishActiveRun(isError ? .failed : .completed)
+                }
                 publishActiveTurnCompletion(isError ? .failed : .completed)
                 clearTurnPointers(keepEpoch: false)
                 requestSessionCatalogRefreshAfterSettledTurn()

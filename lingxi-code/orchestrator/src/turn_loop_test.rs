@@ -1507,7 +1507,7 @@ mod read_file_state_tests {
     }
 
     #[tokio::test]
-    async fn force_compact_restores_recent_files_and_clears_read_state() {
+    async fn force_compact_restores_recent_files_and_rebuilds_read_state() {
         use platform_api::OrchestratorHandle;
         use protocol::{ConversationMessage, MessageId};
 
@@ -1566,7 +1566,7 @@ mod read_file_state_tests {
             &orch.prompt_runtime.read_state_map,
             new_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
-                content: "fn fresh() {}\n".into(),
+                content: "stale snapshot".into(),
                 mtime_ms: 200,
                 offset: None,
                 limit: None,
@@ -1578,52 +1578,52 @@ mod read_file_state_tests {
 
         orch.force_compact().await.expect("force_compact ok");
 
-        // The read-state registry is cleared post-compact (`readFileState.clear`).
-        assert!(
-            orch.prompt_runtime
-                .read_state_map
-                .lock()
-                .unwrap()
-                .is_empty(),
-            "read_state_map must be cleared after compaction"
+        // Compaction clears the old registry and each successful re-read
+        // repopulates it with fresh disk content and a full-read view.
+        assert_eq!(orch.prompt_runtime.read_state_map.lock().unwrap().len(), 2);
+        let reread = tool_api::read_file_state::get(&orch.prompt_runtime.read_state_map, &new_path)
+            .expect("restored file is recorded in Read state");
+        assert_eq!(reread.content, "fn fresh() {}\n");
+        assert_eq!(
+            reread.mtime_ms,
+            tool_api::read_file_state::mtime_ms_floor(
+                std::fs::metadata(&new_path).unwrap().modified().unwrap()
+            )
         );
+        assert_eq!((reread.offset, reread.limit), (None, None));
+        assert!(reread.from_read);
+        assert!(!reread.seeded_from_context);
+        assert!(!reread.is_partial_view);
 
-        // The restored file attachments ride after the boundary marker + summary.
+        // Each restored file is a pair of native Read call/result reminders,
+        // after the boundary, summary and preserved tail. Selection is MRU.
         let session = orch.session();
         let s = session.lock().await;
-        let restored: Vec<&String> = s
+        let restored: Vec<String> = s
             .history
             .iter()
-            .filter_map(|m| match m {
-                ConversationMessage::User {
-                    content,
-                    is_meta: true,
-                    ..
-                } => content.iter().find_map(|b| match b {
-                    protocol::ContentBlock::Text { text }
-                        if text.contains("restored after compaction") =>
-                    {
-                        Some(text)
-                    }
-                    _ => None,
-                }),
-                _ => None,
+            .filter(|m| matches!(m, ConversationMessage::User { is_meta: true, .. }))
+            .map(ConversationMessage::text_content)
+            .filter(|text| {
+                text.starts_with("<system-reminder>\nCalled the Read tool")
+                    || text.starts_with("<system-reminder>\nResult of calling the Read tool:")
             })
             .collect();
         assert_eq!(
-            restored.len(),
-            2,
-            "both seeded files should be restored as attachments"
-        );
-        // Most-recent file content is present.
-        assert!(
-            restored.iter().any(|t| t.contains("fn fresh() {}")),
-            "the freshest file content must be restored"
-        );
-        let new_disp = new_path.display().to_string();
-        assert!(
-            restored.iter().any(|t| t.contains(&new_disp)),
-            "the restored attachment names the file path"
+            restored,
+            vec![
+                format!(
+                    "<system-reminder>\nCalled the Read tool with the following input: {}\n</system-reminder>",
+                    serde_json::json!({"file_path": new_path})
+                ),
+                "<system-reminder>\nResult of calling the Read tool:\n1\tfn fresh() {}\n2\t\n</system-reminder>".to_string(),
+                format!(
+                    "<system-reminder>\nCalled the Read tool with the following input: {}\n</system-reminder>",
+                    serde_json::json!({"file_path": old_path})
+                ),
+                "<system-reminder>\nResult of calling the Read tool:\n1\tfn old() {}\n2\t\n</system-reminder>".to_string(),
+            ],
+            "restored attachments preserve native Read bytes and MRU ordering"
         );
     }
 
@@ -1719,7 +1719,7 @@ mod read_file_state_tests {
             &shared,
             tool_read_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
-                content: "fn tool_read() {}\n".into(),
+                content: "stale tool snapshot".into(),
                 mtime_ms: 321,
                 offset: None,
                 limit: None,
@@ -1731,39 +1731,45 @@ mod read_file_state_tests {
 
         orch.force_compact().await.expect("force_compact ok");
 
-        // The shared map is drained/cleared post-compact.
-        assert!(
-            orch.prompt_runtime
-                .read_state_map
-                .lock()
-                .unwrap()
-                .is_empty(),
-            "shared read_state_map must be cleared after compaction"
+        // The tool and orchestrator still share one map after it is cleared
+        // and rebuilt from the successful disk re-read.
+        assert!(Arc::ptr_eq(&orch.prompt_runtime.read_state_map, &shared));
+        assert_eq!(shared.lock().unwrap().len(), 1);
+        let reread = tool_api::read_file_state::get(&shared, &tool_read_path)
+            .expect("restored read is visible through the composition-root handle");
+        assert_eq!(reread.content, "fn tool_read() {}\n");
+        assert_eq!(
+            reread.mtime_ms,
+            tool_api::read_file_state::mtime_ms_floor(
+                std::fs::metadata(&tool_read_path)
+                    .unwrap()
+                    .modified()
+                    .unwrap()
+            )
         );
+        assert_eq!(orch.files_in_context().await, vec![tool_read_path.clone()]);
 
-        // The tool's read was restored as a post-compact attachment — proving the
-        // share, not the orchestrator's own now-removed default, fed the restore.
+        // Both native reminder messages reach model history, proving that the
+        // shared tool registry fed the restore and the stale bytes were replaced.
         let session = orch.session();
         let s = session.lock().await;
-        let restored = s.history.iter().any(|m| match m {
-            ConversationMessage::User {
-                content,
-                is_meta: true,
-                ..
-            } => content.iter().any(|b| match b {
-                protocol::ContentBlock::Text { text } => {
-                    text.contains("restored after compaction")
-                        && text.contains(&tool_read_path.display().to_string())
-                        && text.contains("fn tool_read() {}")
-                }
-                _ => false,
-            }),
-            _ => false,
-        });
-        assert!(
-            restored,
-            "a tool's read through the shared map must feed post-compact restore"
-        );
+        let restored: Vec<String> = s
+            .history
+            .iter()
+            .filter(|m| matches!(m, ConversationMessage::User { is_meta: true, .. }))
+            .map(ConversationMessage::text_content)
+            .filter(|text| {
+                text.starts_with("<system-reminder>\nCalled the Read tool")
+                    || text.starts_with("<system-reminder>\nResult of calling the Read tool:")
+            })
+            .collect();
+        assert_eq!(restored, vec![
+            format!(
+                "<system-reminder>\nCalled the Read tool with the following input: {}\n</system-reminder>",
+                serde_json::json!({"file_path": tool_read_path})
+            ),
+            "<system-reminder>\nResult of calling the Read tool:\n1\tfn tool_read() {}\n2\t\n</system-reminder>".to_string(),
+        ]);
     }
 
     #[tokio::test]

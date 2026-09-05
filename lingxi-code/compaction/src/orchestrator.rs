@@ -61,6 +61,8 @@ fn media_analysis_messages(messages: &[ConversationMessage]) -> Vec<Conversation
 pub struct IterationCompactionResult {
     /// Compacted message list.
     pub messages: Vec<ConversationMessage>,
+    /// Trimmed original model summary for the `PostCompact` hook payload.
+    pub raw_summary_text: String,
     /// Layers that actually fired this iteration, in order.
     pub layers_applied: Vec<CompactionLayer>,
     /// Approximate tokens freed across all layers.
@@ -228,6 +230,7 @@ impl CompactionOrchestrator {
 
         Ok(IterationCompactionResult {
             messages: result.summary_messages,
+            raw_summary_text: result.raw_summary_text,
             layers_applied: vec![CompactionLayer::Autocompact],
             total_tokens_freed,
             cache_hit: false,
@@ -235,6 +238,68 @@ impl CompactionOrchestrator {
             was_compacted: true,
             rapid_refill_breaker_tripped: false,
             consecutive_rapid_refills: 0,
+            messages_to_preserve: result.messages_to_preserve,
+            media_analysis_to_preserve,
+            compaction_usage: result.compaction_usage,
+            compaction_model: Some(result.summary_model),
+        })
+    }
+
+    /// Rescue an actual provider overflow even when the local estimate is
+    /// below the automatic threshold. Failed attempts leave input history intact.
+    pub async fn process_reactive_tracked(
+        &self,
+        messages: Vec<ConversationMessage>,
+        tracking: &mut AutoCompactTrackingState,
+        custom_instructions: Option<&str>,
+        initial_token_gap: Option<u64>,
+    ) -> Result<IterationCompactionResult, CompactionError> {
+        let rapid_refill = rapid_refill_count(tracking);
+        if rapid_refill >= MAX_CONSECUTIVE_RAPID_REFILLS {
+            return Ok(IterationCompactionResult {
+                messages,
+                raw_summary_text: String::new(),
+                layers_applied: Vec::new(),
+                total_tokens_freed: 0,
+                cache_hit: false,
+                consecutive_failures: tracking.consecutive_failures,
+                was_compacted: false,
+                rapid_refill_breaker_tripped: true,
+                consecutive_rapid_refills: rapid_refill,
+                messages_to_preserve: Vec::new(),
+                media_analysis_to_preserve: Vec::new(),
+                compaction_usage: None,
+                compaction_model: None,
+            });
+        }
+        let media_analysis_to_preserve = media_analysis_messages(&messages);
+        let result = self
+            .auto
+            .compact_reactive_with_instructions(messages, custom_instructions, initial_token_gap)
+            .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                tracking.consecutive_failures = tracking.consecutive_failures.saturating_add(1);
+                return Err(error);
+            }
+        };
+        tracking.consecutive_failures = 0;
+        tracking.compacted = true;
+        tracking.turn_counter = 0;
+        tracking.consecutive_rapid_refills = rapid_refill;
+        Ok(IterationCompactionResult {
+            total_tokens_freed: result
+                .pre_compact_token_count
+                .saturating_sub(result.post_compact_token_count),
+            messages: result.summary_messages,
+            raw_summary_text: result.raw_summary_text,
+            layers_applied: vec![CompactionLayer::Autocompact],
+            cache_hit: false,
+            consecutive_failures: 0,
+            was_compacted: true,
+            rapid_refill_breaker_tripped: false,
+            consecutive_rapid_refills: rapid_refill,
             messages_to_preserve: result.messages_to_preserve,
             media_analysis_to_preserve,
             compaction_usage: result.compaction_usage,
@@ -402,6 +467,7 @@ impl CompactionOrchestrator {
         let mut was_compacted = false;
         let mut compaction_usage = None;
         let mut compaction_model = None;
+        let mut raw_summary_text = String::new();
         // #58: the preserved tail the autocompact layer carries out, if any.
         // Empty unless autocompact fires AND `DRn` selected a preservable tail.
         let mut messages_to_preserve: Vec<ConversationMessage> = Vec::new();
@@ -445,6 +511,7 @@ impl CompactionOrchestrator {
                 .await
             {
                 Ok(result) => {
+                    raw_summary_text = result.raw_summary_text;
                     compaction_usage = result.compaction_usage;
                     compaction_model = Some(result.summary_model.clone());
                     messages.clone_from(&result.summary_messages);
@@ -479,6 +546,7 @@ impl CompactionOrchestrator {
 
         Ok(IterationCompactionResult {
             messages,
+            raw_summary_text,
             layers_applied: layers,
             total_tokens_freed: freed,
             cache_hit,
@@ -606,6 +674,8 @@ mod tests {
             fork_context_messages: Vec::new(),
             transcript_path: None,
             generation: 0,
+            tools: Vec::new(),
+            effort: None,
         })
         .await;
         let runner = Arc::new(

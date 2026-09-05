@@ -1,17 +1,10 @@
-//! P1-05 (parity 2.1.207) — post-compact JSONL persistence + cold-resume
-//! reconstruction.
+//! Claude Code 2.1.261 post-compact JSONL persistence and cold-resume parity.
 //!
-//! claude 2.1.207 persists the FULL compaction transition: the
-//! `subtype:"compact_boundary"` system line with `parentUuid: null` (chain
-//! reset; real parent in `logicalParentUuid`) + camelCase `compactMetadata`,
-//! the summary user line(s) flagged `isCompactSummary` /
-//! `isVisibleInTranscriptOnly`, and the loader re-splices the preserved
-//! verbatim tail from `compactMetadata.preservedMessages` at cold load. A cold
-//! `--resume` therefore reconstructs exactly the post-compact in-memory state.
-//!
-//! This suite drives a REAL compaction through `run_turn` with a `JsonlWriter`
-//! attached, then cold-reloads the file through the loader chain walk and
-//! asserts hot-state parity plus the on-disk line shapes.
+//! Both full automatic compaction and tail-preserving manual compaction persist
+//! a chain-reset boundary and a typed summary. Only the manual path records
+//! preservedMessages for the loader to splice back into the resumed history.
+//! These tests drive the actual compaction and writer, then compare loaded
+//! history with the live session and verify the next persisted parent UUID.
 
 use llm_client::ContentBlock as LlmContentBlock;
 
@@ -21,7 +14,7 @@ use orchestrator::test_support::{
     StaticMemoryProvider,
 };
 use orchestrator::{state_from_messages, ConversationOrchestrator, OrchestratorConfig};
-use platform_api::FileSystem;
+use platform_api::{FileSystem, OrchestratorHandle};
 use platform_posix::fs::PosixFileSystem;
 use protocol::ConversationMessage;
 use serde_json::Value;
@@ -31,6 +24,25 @@ use session::jsonl::writer::JsonlWriter;
 use session::jsonl::JsonlMessage;
 use std::sync::Arc;
 use tempfile::tempdir;
+
+struct SummaryClient;
+
+#[async_trait::async_trait]
+impl sidequery::SideQueryClient for SummaryClient {
+    async fn query(
+        &self,
+        _request: sidequery::SideQueryRequest,
+    ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+        Ok(sidequery::SideQueryResponse {
+            text: Some("<summary>Earlier turns summarized.</summary>".into()),
+            structured: None,
+            tool_calls: Vec::new(),
+            usage: cost::Usage::default(),
+            stop_reason: Some("end_turn".into()),
+            retry_count: 0,
+        })
+    }
+}
 
 /// The (kind, text) shape used to compare hot vs cold history — message ids
 /// differ across a persist/reload cycle (assistant turns are persisted
@@ -64,45 +76,68 @@ fn inner_text(line: &JsonlMessage) -> String {
 }
 
 #[test]
-fn cold_resume_reconstructs_post_compact_state() {
+fn cold_resume_reconstructs_full_auto_compact_state() {
+    assert_cold_resume_reconstructs_post_compact_state(false);
+}
+
+#[test]
+fn cold_resume_reconstructs_manual_compact_state_with_preserved_tail() {
+    assert_cold_resume_reconstructs_post_compact_state(true);
+}
+
+fn assert_cold_resume_reconstructs_post_compact_state(manual: bool) {
     std::thread::Builder::new()
         .name("compact-persistence".to_string())
         .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
+        .spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("compact persistence runtime")
-                .block_on(cold_resume_reconstructs_post_compact_state_inner());
+                .block_on(cold_resume_reconstructs_post_compact_state_inner(manual));
         })
         .expect("spawn compact persistence test thread")
         .join()
         .expect("compact persistence test thread");
 }
 
-async fn cold_resume_reconstructs_post_compact_state_inner() {
+async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
     let dir = tempdir().expect("tempdir");
     let session_path = dir.path().join("session.jsonl");
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
     let writer = Arc::new(JsonlWriter::new(session_path.clone(), fs.clone()));
 
-    // Four scripted end_turn replies: three small turns (under the autocompact
-    // threshold), then one whose big prompt trips the proactive pre-call
-    // compaction.
-    let responses: Vec<_> = ["ok one", "ok two", "ok three", "final reply"]
-        .iter()
-        .map(|t| {
-            mock_message_response(
-                vec![LlmContentBlock::Text {
-                    text: (*t).to_string(),
-                    cache_control: None,
-                }],
-                Some("end_turn"),
-            )
-        })
-        .collect();
+    // The fourth prompt trips automatic compaction. The manual case uses a
+    // high threshold, compacts explicitly after that reply, then continues.
+    let responses: Vec<_> = [
+        "ok one",
+        "ok two",
+        "ok three",
+        "final reply",
+        "continued reply",
+    ]
+    .iter()
+    .map(|t| {
+        mock_message_response(
+            vec![LlmContentBlock::Text {
+                text: (*t).to_string(),
+                cache_control: None,
+            }],
+            Some("end_turn"),
+        )
+    })
+    .collect();
     let api = Arc::new(MockApiClient::new(responses));
     let output = Arc::new(MockOutputStream::new());
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let runner = Arc::new(
+        sidequery::ForkedAgentRunner::new()
+            .with_side_query_client(Arc::new(SummaryClient), "test-compact-model".into()),
+    );
+    let compactor = CompactionOrchestrator::with_autocompactor(
+        compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+        if manual { u64::MAX } else { 200 },
+    );
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         api.clone(),
@@ -114,16 +149,23 @@ async fn cold_resume_reconstructs_post_compact_state_inner() {
         dir.path().to_path_buf(),
     )
     .with_jsonl_writer(writer)
-    .with_compaction(Arc::new(CompactionOrchestrator::new(200)));
+    .with_cache_safe_slot(slot)
+    .with_compaction(Arc::new(compactor));
 
     // Three small persisted turns...
     orch.run_turn("small one").await.expect("turn 1");
     orch.run_turn("small two").await.expect("turn 2");
     orch.run_turn("small three").await.expect("turn 3");
-    // ...then a big prompt: the proactive trigger compacts BEFORE the model
-    // call, so the boundary + summary land on disk mid-turn.
+    // Automatic compaction persists the boundary and summary before the call;
+    // manual compaction persists them between turns and retains the last round.
     let big_prompt = format!("analyze this: {}", "x".repeat(8000));
     orch.run_turn(&big_prompt).await.expect("turn 4");
+    if manual {
+        orch.force_compact().await.expect("manual compact");
+        orch.run_turn("continue after compact")
+            .await
+            .expect("turn 5");
+    }
 
     // Hot post-compact state.
     let hot_history = {
@@ -157,7 +199,7 @@ async fn cold_resume_reconstructs_post_compact_state_inner() {
         "hot history carries the typed compact-summary flag"
     );
 
-    // ---- On-disk shape (claude 2.1.207) ---------------------------------- //
+    // ---- On-disk shape (Claude Code 2.1.261) ---------------------------------- //
     let reader = JsonlReader::new(session_path.clone(), fs.clone());
     let lines: Vec<JsonlMessage> = reader.read_all().await.expect("read_all");
 
@@ -200,7 +242,10 @@ async fn cold_resume_reconstructs_post_compact_state_inner() {
         cm, &expected_cm,
         "hot typed metadata and persisted compactMetadata stay identical"
     );
-    assert_eq!(cm.get("trigger").and_then(Value::as_str), Some("auto"));
+    assert_eq!(
+        cm.get("trigger").and_then(Value::as_str),
+        Some(if manual { "manual" } else { "auto" })
+    );
     assert!(
         cm.get("postTokens").and_then(Value::as_u64).is_some(),
         "successful compaction records the rebuilt context size"
@@ -233,42 +278,64 @@ async fn cold_resume_reconstructs_post_compact_state_inner() {
         Some(&Value::Bool(true))
     );
 
-    // Suffix-preserving compaction kept the in-flight big prompt verbatim: the
-    // boundary's preservedMessages lists it, anchored on the summary, and the
-    // NEXT persisted line (the turn's assistant reply) physically parents off
-    // the tail's last on-disk line — claude's exact chain shape.
-    let pm = cm
-        .get("preservedMessages")
-        .expect("preserved tail metadata persisted");
-    assert_eq!(
-        pm.get("anchorUuid").and_then(Value::as_str),
-        Some(summary.uuid.as_str()),
-        "tail anchors on the summary line"
+    // Full auto replaces all pre-compact history. Manual compact preserves
+    // the final API-round group, which here is the last assistant reply.
+    let next_line = &lines[boundary_idx + 2];
+    if manual {
+        let pm = cm
+            .get("preservedMessages")
+            .expect("manual tail metadata persisted");
+        assert_eq!(
+            pm.get("anchorUuid").and_then(Value::as_str),
+            Some(summary.uuid.as_str()),
+            "preserved tail anchors on the summary"
+        );
+        let tail = &lines[boundary_idx - 1];
+        assert_eq!(tail.message_type, "assistant");
+        assert_eq!(inner_text(tail), "final reply");
+        assert_eq!(
+            pm.get("uuids"),
+            Some(&serde_json::json!([tail.uuid])),
+            "manual compaction preserves exactly the last API-round group"
+        );
+        assert_eq!(next_line.message_type, "user");
+        assert_eq!(inner_text(next_line), "continue after compact");
+        assert_eq!(
+            next_line.parent_uuid.as_deref(),
+            Some(tail.uuid.as_str()),
+            "continued history chains off the original persisted tail"
+        );
+        let reply = lines.last().expect("continuation reply persisted");
+        assert_eq!(inner_text(reply), "continued reply");
+        assert_eq!(reply.parent_uuid.as_deref(), Some(next_line.uuid.as_str()));
+        assert!(hot_history.iter().any(|message| {
+            matches!(message, ConversationMessage::Assistant { .. })
+                && message.text_content() == "final reply"
+        }));
+    } else {
+        assert!(
+            cm.get("preservedMessages").is_none(),
+            "full automatic compaction does not preserve a verbatim tail"
+        );
+        assert_eq!(next_line.message_type, "assistant");
+        assert_eq!(inner_text(next_line), "final reply");
+        assert_eq!(
+            next_line.parent_uuid.as_deref(),
+            Some(summary.uuid.as_str()),
+            "full automatic compaction chains the reply off the summary"
+        );
+    }
+    assert!(
+        lines[..boundary_idx]
+            .iter()
+            .any(|line| { line.message_type == "user" && inner_text(line) == big_prompt }),
+        "the full original prompt remains in the persisted pre-compact transcript"
     );
-    let preserved_uuids: Vec<&str> = pm
-        .get("uuids")
-        .and_then(Value::as_array)
-        .expect("uuids array")
-        .iter()
-        .filter_map(Value::as_str)
-        .collect();
-    let big_prompt_line = lines
-        .iter()
-        .find(|l| l.message_type == "user" && inner_text(l).starts_with("analyze this:"))
-        .expect("big prompt line persisted pre-compact");
-    // The tail is round-grouped, so it may carry more than the prompt; the
-    // in-flight big prompt is always its LAST member (the newest message).
-    assert_eq!(
-        preserved_uuids.last().copied(),
-        Some(big_prompt_line.uuid.as_str()),
-        "preserved tail ends with the in-flight prompt"
-    );
-    let reply_line = lines.last().expect("assistant reply is the last line");
-    assert_eq!(reply_line.message_type, "assistant");
-    assert_eq!(
-        reply_line.parent_uuid.as_deref(),
-        Some(big_prompt_line.uuid.as_str()),
-        "post-compact line chains off the preserved tail's last on-disk line"
+    assert!(
+        !hot_history
+            .iter()
+            .any(|message| message.text_content() == big_prompt),
+        "a summarized prompt is not retained as a standalone context message"
     );
 
     // ---- Cold reload == hot state ---------------------------------------- //

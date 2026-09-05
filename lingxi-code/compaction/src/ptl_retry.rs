@@ -70,14 +70,14 @@ pub fn truncate_head_for_ptl_retry(
     messages: Vec<ConversationMessage>,
     token_gap: u64,
 ) -> Option<Vec<ConversationMessage>> {
-    // (1) Strip a leading synthetic marker from a previous retry. The Rust
-    // `ConversationMessage` has no `isMeta` flag, so we identify the marker by
-    // its content: a `User` message whose text is exactly `PTL_RETRY_MARKER`
-    // (TS `compact.ts:250-255`).
+    // 2.1.261 `B0e` strips only its own meta marker. User-authored text with
+    // identical bytes remains part of the first API-round group.
     let input: &[ConversationMessage] = match messages.first() {
-        Some(ConversationMessage::User { .. })
-            if messages[0].text_content() == PTL_RETRY_MARKER =>
-        {
+        Some(ConversationMessage::User {
+            is_meta: true,
+            content,
+            ..
+        }) if matches!(content.as_slice(), [protocol::ContentBlock::Text { text }] if text == PTL_RETRY_MARKER) => {
             &messages[1..]
         }
         _ => &messages[..],
@@ -125,7 +125,7 @@ pub fn truncate_head_for_ptl_retry(
     if matches!(sliced.first(), Some(ConversationMessage::Assistant { .. })) {
         sliced.insert(
             0,
-            ConversationMessage::user(MessageId::new(), PTL_RETRY_MARKER.to_string()),
+            ConversationMessage::user_meta(MessageId::new(), PTL_RETRY_MARKER.to_string()),
         );
     }
     Some(sliced)
@@ -291,11 +291,29 @@ mod tests {
             Some(ConversationMessage::User { .. })
         ));
         assert_eq!(out.first().unwrap().text_content(), PTL_RETRY_MARKER);
+        assert!(
+            out.first().unwrap().is_meta(),
+            "2.1.261 B0e creates isMeta:true"
+        );
         // The message right after the marker is the assistant that began group 1.
         assert!(matches!(
             out.get(1),
             Some(ConversationMessage::Assistant { .. })
         ));
+    }
+
+    #[test]
+    fn oracle_261_does_not_strip_user_authored_marker_text() {
+        let first = assistant("Read");
+        let second = assistant("Bash");
+        let messages = vec![
+            ConversationMessage::user(MessageId::new(), PTL_RETRY_MARKER.into()),
+            first.clone(),
+            second,
+        ];
+        let out = truncate_head_for_ptl_retry(messages, 0).expect("drop preamble only");
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[1], first);
     }
 
     /// A second call on an already-marked history strips the prior marker before

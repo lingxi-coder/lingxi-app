@@ -308,7 +308,10 @@ async fn cancel_during_compaction_leaves_history_unchanged() {
         .force_compact_with_cancel(token)
         .await
         .expect_err("cancelled must error");
-    assert!(err.to_string().contains("cancelled"), "got: {err}");
+    assert!(
+        err.to_string().contains("Compaction canceled."),
+        "got: {err}"
+    );
 
     let len_after = history_len(&orch).await;
     assert_eq!(len_before, len_after);
@@ -392,7 +395,10 @@ async fn failure_leaves_history_unchanged() {
 
     let err = orch.force_compact().await.expect_err("must fail");
     let s = err.to_string();
-    assert!(s.contains("compaction failed"), "got: {s}");
+    assert!(
+        s.contains("Error during compaction: no forked summarizer wired"),
+        "got: {s}"
+    );
 
     let len_after = {
         let session = orch.session();
@@ -567,4 +573,122 @@ async fn compaction_safety_gate() {
         matches!(outcome, ConversationOutcome::EndTurn { .. }),
         "GATE#3 FAIL: expected EndTurn after compaction; got {outcome:?}"
     );
+}
+
+#[derive(Default)]
+struct CompactLifecycleOutput(std::sync::Mutex<Vec<String>>);
+
+#[async_trait::async_trait]
+impl platform_api::OutputStream for CompactLifecycleOutput {
+    async fn emit_text(&self, _text: &str) {}
+    async fn emit_tool_call(
+        &self,
+        _id: &protocol::ToolUseId,
+        _tool: &str,
+        _input: &serde_json::Value,
+    ) {
+    }
+    async fn emit_tool_result(
+        &self,
+        _id: &protocol::ToolUseId,
+        _tool: &str,
+        _model_text: &str,
+        _result: &serde_json::Value,
+    ) {
+    }
+    async fn emit_end_turn(&self, _reason: &str, _cost: &platform_api::CostSnapshot) {}
+    async fn emit_compaction_started(&self) {
+        self.0.lock().unwrap().push("started".into());
+    }
+    async fn emit_compaction_finished(&self, error: Option<&str>) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(error.map_or_else(|| "success".into(), |error| format!("failed:{error}")));
+    }
+    async fn emit_compact_boundary(
+        &self,
+        _uuid: &str,
+        _metadata: &protocol::CompactBoundaryMetadata,
+    ) {
+        self.0.lock().unwrap().push("boundary".into());
+    }
+}
+
+struct LifecycleSummaryClient(&'static str);
+
+#[async_trait::async_trait]
+impl sidequery::SideQueryClient for LifecycleSummaryClient {
+    async fn query(
+        &self,
+        _request: sidequery::SideQueryRequest,
+    ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+        Ok(sidequery::SideQueryResponse {
+            text: Some(self.0.into()),
+            structured: None,
+            tool_calls: Vec::new(),
+            usage: cost::Usage::default(),
+            stop_reason: Some("end_turn".into()),
+            retry_count: 0,
+        })
+    }
+}
+
+#[tokio::test]
+async fn manual_status_lifecycle_matches_success_empty_and_too_short_oracles() {
+    for (count, summary, expected) in [
+        (0, "ok", Vec::<&str>::new()),
+        (
+            2,
+            "ok",
+            vec!["started", "failed:Not enough messages to compact."],
+        ),
+        (
+            4,
+            "\u{feff} \n\t",
+            vec![
+                "started",
+                "failed:Error during compaction: summarization produced empty response",
+            ],
+        ),
+        (
+            4,
+            "<summary>ok</summary>",
+            vec!["started", "success", "boundary"],
+        ),
+    ] {
+        let output = Arc::new(CompactLifecycleOutput::default());
+        let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+        let runner = Arc::new(
+            sidequery::ForkedAgentRunner::new()
+                .with_side_query_client(Arc::new(LifecycleSummaryClient(summary)), "test".into()),
+        );
+        let compact = Arc::new(CompactionOrchestrator::with_autocompactor(
+            compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+            u64::MAX,
+        ));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_cache_safe_slot(slot)
+        .with_compaction(compact);
+        seed_history(&orch, count).await;
+        let before = orch.session().lock().await.history.clone();
+        let result = orch.force_compact().await;
+        assert_eq!(
+            *output.0.lock().unwrap(),
+            expected,
+            "history length {count}, response {summary:?}"
+        );
+        if result.is_err() {
+            assert_eq!(orch.session().lock().await.history, before);
+        }
+    }
 }

@@ -228,7 +228,8 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
 
 /// Decode an [`llm_client::LlmResponse`] into the side-query response shape.
 ///
-/// * `Text` blocks are concatenated into the flattened `text`.
+/// * `Text` blocks are concatenated into the flattened `text`, except compact
+///   responses, where cc 2.1.261 N0e selects the first text block only.
 /// * `ToolCall` blocks become `{"id", "name", "input"}` JSON in `tool_calls`.
 /// * Other block kinds (reasoning, server tool use, connector text, advisor
 ///   tool result, redacted thinking) are ignored for side queries.
@@ -240,7 +241,11 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
 /// * `usage` maps `llm_client::Usage.billable_tokens` → `cost::Usage` with the
 ///   same cross-naming the provider's own cost path uses: API `cache_write` →
 ///   cost `cache_write`, API `cache_read` → cost `cache_read`.
-fn decode_response(resp: llm_client::LlmResponse, want_structured: bool) -> SideQueryResponse {
+fn decode_response(
+    resp: llm_client::LlmResponse,
+    want_structured: bool,
+    first_text_only: bool,
+) -> SideQueryResponse {
     let retry_count = resp
         .provider_metadata
         .get("_lingxi_retry_count")
@@ -248,12 +253,18 @@ fn decode_response(resp: llm_client::LlmResponse, want_structured: bool) -> Side
         .and_then(|value| u32::try_from(value).ok())
         .unwrap_or(0);
     let mut text_acc = String::new();
+    let mut saw_text = false;
     let mut tool_calls: Vec<serde_json::Value> = Vec::new();
 
     for block in resp.content {
         match block {
             llm_client::ContentBlock::Text { text, .. }
-            | llm_client::ContentBlock::TextJsUtf16 { text, .. } => text_acc.push_str(&text),
+            | llm_client::ContentBlock::TextJsUtf16 { text, .. } => {
+                if !first_text_only || !saw_text {
+                    text_acc.push_str(&text);
+                }
+                saw_text = true;
+            }
             llm_client::ContentBlock::ToolCall { id, name, input } => {
                 tool_calls.push(serde_json::json!({
                     "id": id,
@@ -311,6 +322,7 @@ fn decode_response(resp: llm_client::LlmResponse, want_structured: bool) -> Side
 #[async_trait]
 impl SideQueryClient for ProviderSideQueryClient {
     async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
+        let first_text_only = request.query_source == crate::purposes::QuerySource::Compaction;
         if let ProviderSideQueryBackend::Session(service) = &self.backend {
             let wants_structured = request.output_format.is_some();
             let query_source = request.query_source.as_str();
@@ -321,19 +333,18 @@ impl SideQueryClient for ProviderSideQueryClient {
                     request.system_prompt.as_deref(),
                     request.messages,
                     request.tools,
-                    // `SideQueryRequest` carries its own ceiling, so this
-                    // backend keeps sending it. Unlike the local-app stages it
-                    // is not an invented number: compaction/recap size their
-                    // budget from the summary they are asking for.
+                    // Fork compaction resolves the parent's ordinary output
+                    // budget; other side queries carry their explicit cap.
                     Some(request.max_tokens),
                     convert_tool_choice(request.tool_choice.as_ref()),
                     request.stop_sequences,
                     request.thinking,
+                    request.effort,
                     request.temperature,
                     Some(query_source),
                 )
                 .await?;
-            return Ok(decode_response(resp, wants_structured));
+            return Ok(decode_response(resp, wants_structured, first_text_only));
         }
 
         let ProviderSideQueryBackend::Direct { client, transport } = &self.backend else {
@@ -384,6 +395,7 @@ impl SideQueryClient for ProviderSideQueryClient {
             max_tokens: Some(request.max_tokens),
             temperature: request.temperature.map(f64::from),
             reasoning,
+            effort: request.effort,
             capture_retry_count: true,
             query_source: Some(query_source),
             ..LlmRequest::default()
@@ -396,7 +408,11 @@ impl SideQueryClient for ProviderSideQueryClient {
 
         let resp = client.execute(&llm_req, &bridge).await?;
 
-        Ok(decode_response(resp, request.output_format.is_some()))
+        Ok(decode_response(
+            resp,
+            request.output_format.is_some(),
+            first_text_only,
+        ))
     }
 
     async fn query_json_schema(
@@ -452,7 +468,7 @@ impl SideQueryClient for ProviderSideQueryClient {
             }
         };
         let request_id = (!resp.id.is_empty()).then(|| resp.id.clone());
-        let decoded = decode_response(resp, true);
+        let decoded = decode_response(resp, true, false);
         let Some(value) = decoded.structured else {
             return Err(SideQueryError::InvalidResponse(
                 "structured output was not valid JSON".into(),
@@ -783,6 +799,7 @@ mod tests {
             max_retries: 2,
             temperature: Some(0.0),
             thinking: None,
+            effort: None,
             stop_sequences: vec![],
             query_source: QuerySource::MemorySelector,
             skip_system_prompt_prefix: false,
@@ -874,6 +891,35 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn compaction_selects_first_text_block_even_when_a_later_block_has_summary_tags() {
+        for first_text in ["  first text  ", ""] {
+            let body = serde_json::json!({
+                "id": "msg_compact_first_text",
+                "model": "claude-haiku-4-5",
+                "content": [
+                    { "type": "thinking", "thinking": "reasoning", "signature": "sig" },
+                    { "type": "text", "text": first_text },
+                    { "type": "text", "text": "<summary>later text</summary>" }
+                ],
+                "stop_reason": "end_turn",
+                "usage": { "input_tokens": 4, "output_tokens": 2 }
+            })
+            .to_string();
+            let transport = Arc::new(StubTransport::new(body));
+            let client = ProviderSideQueryClient::new("sk-test", None, transport);
+            let mut request = req(None);
+            request.query_source = QuerySource::Compaction;
+
+            let response = client.query(request).await.expect("compaction response");
+
+            assert_eq!(
+                response.text.as_deref(),
+                (!first_text.is_empty()).then_some(first_text)
+            );
+        }
+    }
+
     /// `/compact` must not build a second static-key Anthropic client. The
     /// session backend reuses the parent's provider service, which also runs
     /// Claude Code's pre-wire normalization: transcript-only compact markers
@@ -882,8 +928,11 @@ mod tests {
     async fn session_backend_reuses_parent_route_auth_and_message_pipeline() {
         let response = serde_json::json!({
             "id": "msg_compact",
-            "model": "claude-sonnet-4-20250514",
-            "content": [{ "type": "text", "text": "<summary>ok</summary>" }],
+            "model": "claude-sonnet-4-6",
+            "content": [
+                { "type": "text", "text": "<summary>ok</summary>" },
+                { "type": "text", "text": "later text must not join compact summary" }
+            ],
             "stop_reason": "end_turn",
             "usage": { "input_tokens": 3, "output_tokens": 2 }
         })
@@ -901,9 +950,9 @@ mod tests {
                     id: "parent-session-key".to_string(),
                 },
                 models: vec![ModelProfile {
-                    display_model: "claude-sonnet-4-20250514".to_string(),
-                    request_model: "claude-sonnet-4-20250514".to_string(),
-                    billing_model: "claude-sonnet-4".to_string(),
+                    display_model: "claude-sonnet-4-6".to_string(),
+                    request_model: "claude-sonnet-4-6".to_string(),
+                    billing_model: "claude-sonnet-4-6".to_string(),
                     aliases: vec![],
                     description: None,
                     metadata: Default::default(),
@@ -952,9 +1001,18 @@ mod tests {
         );
         let client = ProviderSideQueryClient::from_service(parent_service);
         let mut request = req(None);
-        request.model = "claude-sonnet-4-20250514".to_string();
+        request.model = "claude-sonnet-4-6".to_string();
+        request.query_source = QuerySource::Compaction;
         request.profile = Some("parent-profile".to_string());
         request.temperature = None;
+        request.thinking = Some(llm_client::model::thinking::ThinkingConfig::Adaptive);
+        request.effort = Some(serde_json::json!("high"));
+        let parent_tools = vec![serde_json::json!({
+            "name": "Read",
+            "description": "Read a file from the parent session.",
+            "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}}}
+        })];
+        request.tools = parent_tools.clone();
         request.messages = vec![
             ConversationMessage::System {
                 id: MessageId::new(),
@@ -980,7 +1038,10 @@ mod tests {
         }));
         let body: serde_json::Value =
             serde_json::from_str(sent.body.as_deref().expect("request body")).unwrap();
-        assert_eq!(body["model"], "claude-sonnet-4-20250514");
+        assert_eq!(body["model"], "claude-sonnet-4-6");
+        assert_eq!(body["tools"], serde_json::json!(parent_tools));
+        assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
+        assert_eq!(body["output_config"]["effort"], "high");
         assert!(
             body.get("tool_choice").is_none(),
             "main-turn forced tool choice leaked into compact: {body}"
@@ -1168,7 +1229,9 @@ mod tests {
         // opus-4-6 is in the adaptive-thinking set → the session Adaptive
         // intent renders exactly like a main-loop turn: {"type":"adaptive"}.
         r.model = "claude-opus-4-6".into();
+        r.query_source = QuerySource::Compaction;
         r.thinking = Some(llm_client::model::thinking::ThinkingConfig::default());
+        r.effort = Some(serde_json::json!("high"));
         client.query(r).await.expect("query ok");
         let received = transport.received.lock().unwrap();
         let body: serde_json::Value =
@@ -1178,6 +1241,7 @@ mod tests {
             serde_json::json!({ "type": "adaptive" }),
             "the inherited session config renders like a main-loop request"
         );
+        assert_eq!(body["output_config"]["effort"], "high");
     }
 
     /// `thinking: None` (every utility caller) keeps the wire byte-identical

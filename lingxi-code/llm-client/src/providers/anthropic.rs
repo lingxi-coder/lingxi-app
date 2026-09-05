@@ -247,7 +247,35 @@ fn base_body(
             .collect();
         body.insert("system".to_string(), Value::Array(system));
     }
-    match request_reasoning_intent(request) {
+    let reasoning_intent = request_reasoning_intent(request);
+    // Compact forks replay the parent's thinking and output effort together
+    // (Claude Code 2.1.261). Other requests retain effort's existing precedence.
+    if request.query_source.as_deref() == Some("compaction")
+        && matches!(
+            reasoning_intent,
+            RequestReasoningIntent::Level(_) | RequestReasoningIntent::EffortBudget(_)
+        )
+        && crate::model::thinking::model_supports_thinking(&request.model)
+    {
+        match request.reasoning {
+            Some(crate::ReasoningConfig::Adaptive)
+                if crate::model::thinking::model_supports_adaptive_thinking(&request.model) =>
+            {
+                body.insert(
+                    "thinking".to_string(),
+                    serde_json::json!({"type": "adaptive"}),
+                );
+            }
+            Some(crate::ReasoningConfig::Enabled { budget_tokens }) => {
+                body.insert(
+                    "thinking".to_string(),
+                    serde_json::json!({"type": "enabled", "budget_tokens": budget_tokens}),
+                );
+            }
+            _ => {}
+        }
+    }
+    match reasoning_intent {
         RequestReasoningIntent::LegacyAdaptive => {
             body.insert(
                 "thinking".to_string(),
@@ -957,6 +985,48 @@ mod effort_codec_tests {
         let (body, overrides) = base_body(&req_with_effort(None)).unwrap();
         assert!(overrides.is_empty());
         assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn compaction_preserves_inherited_thinking_alongside_effort() {
+        let mut request = req_with_effort(Some(json!("high")));
+        request.model = "claude-sonnet-4-6".into();
+        request.reasoning = Some(crate::ReasoningConfig::Adaptive);
+        request.query_source = Some("compaction".into());
+        let (body, _) = base_body(&request).unwrap();
+        assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(body["output_config"]["effort"], "high");
+
+        request.model = "claude-sonnet-4-5".into();
+        request.reasoning = Some(crate::ReasoningConfig::Enabled {
+            budget_tokens: 8192,
+        });
+        let (body, _) = base_body(&request).unwrap();
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "budget_tokens": 8192})
+        );
+        assert_eq!(body["output_config"]["effort"], "high");
+
+        request.query_source = None;
+        let (body, _) = base_body(&request).unwrap();
+        assert!(
+            body.get("thinking").is_none(),
+            "other callers retain effort precedence"
+        );
+
+        request.query_source = Some("compaction".into());
+        request.effort = Some(json!("disabled"));
+        let (body, _) = base_body(&request).unwrap();
+        assert!(body.get("thinking").is_none(), "explicit disable wins");
+
+        request.effort = Some(json!("high"));
+        request.model = "claude-3-opus-20240229".into();
+        let (body, _) = base_body(&request).unwrap();
+        assert!(
+            body.get("thinking").is_none(),
+            "unsupported models omit thinking"
+        );
     }
 
     #[test]

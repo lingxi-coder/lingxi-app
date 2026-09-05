@@ -292,7 +292,7 @@ export interface UseBridge {
   setPermissionMode(mode: PermissionModeId): Promise<void>;
   login(): Promise<void>;
   logout(): Promise<void>;
-  forceCompact(): Promise<void>;
+  forceCompact(instructions?: string): Promise<void>;
   clearSession(): Promise<void>;
   refreshTasks(): Promise<void>;
   refreshAuth(): Promise<void>;
@@ -1983,7 +1983,7 @@ export function useBridge(): UseBridge {
   const setPermissionMode = useCallback((mode: PermissionModeId) => command({ type: 'set_permission_mode', mode }), [command]);
   const login = useCallback(() => command({ type: 'login' }), [command]);
   const logout = useCallback(() => command({ type: 'logout' }), [command]);
-  const forceCompact = useCallback(async () => {
+  const forceCompact = useCallback(async (instructions?: string) => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) return;
     setError(null);
@@ -1993,7 +1993,9 @@ export function useBridge(): UseBridge {
       conversation: beginCompaction(state.conversation),
     }));
     try {
-      await host.command(sessionId, { type: 'force_compact' });
+      await host.command(sessionId, instructions?.trim()
+        ? { type: 'run_slash_command', raw: `/compact ${instructions.trim()}` }
+        : { type: 'force_compact' });
     } catch (cause) {
       updateRuntime(sessionId, (state) => ({
         ...state,

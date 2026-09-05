@@ -26,7 +26,7 @@ pub const SKILL_TRUNCATION_MARKER: &str =
 /// 1:1 with claude-code's `$f(e, t=4) = Math.round(e.length / 4)`
 /// (`bin/claude.exe` offset 197027314) — the estimator the post-compact
 /// restoration budgets against (`$f(Le(l))` / `$f(o.content)`). This rounds
-/// (`(len + 2) / 4`) rather than the floor used by
+/// (`(len + 2) / 4`), like
 /// [`crate::grouping::estimate_tokens_for_range`], matching the binary's
 /// `Math.round` for the per-file / per-skill / running-budget comparisons.
 #[must_use]
@@ -255,11 +255,11 @@ fn lqn(already_attached: &[AttachedSkillContent], content: &str) -> SkillDedup {
 /// attachment body.
 ///
 /// Byte-exact with the `case"invoked_skills"` attachment renderer
-/// (`bin/claude.exe` v2.1.207): the `$r({content:…, isMeta:!0})` header, with
+/// (native Claude Code v2.1.261, byte 166321293): the `Re({content:…, isMeta:!0})` header, with
 /// the per-skill blocks (`### Skill: …`) appended after a blank line (`\n\n`) by
 /// [`render_invoked_skills_attachment`]. Its own internal `guidelines.\n\nIMPORTANT`
 /// separator is a blank line too.
-pub const INVOKED_SKILLS_ATTACHMENT_PREAMBLE: &str = "The following skills were invoked EARLIER in this session (before the conversation was compacted), not on the current turn. They are shown here for context only so you remain aware of their guidelines.\n\nIMPORTANT: Do NOT re-execute these skills or perform their one-time setup actions (e.g., scheduling, creating files) again. The \"## Input\" sections below reflect the original arguments from when each skill was first invoked — they are NOT the user's current message. Only continue to apply ongoing behavioral guidelines from these skills where still relevant.";
+pub const INVOKED_SKILLS_ATTACHMENT_PREAMBLE: &str = "The following skills were invoked EARLIER in this session (before the conversation was compacted), not on the current turn. They are shown here for context only so you remain aware of their guidelines.\n\nIMPORTANT: Do NOT re-execute these skills or perform their one-time setup actions (e.g., scheduling, creating files) again. Any request or argument text embedded in the skill bodies below — for example under a \"## User Request\" or \"## Input\" heading — was captured when that skill was first invoked. It is NOT the user's current message and NOT a new request: do not act on it as if it were live. Only continue to apply ongoing behavioral guidelines from these skills where still relevant.";
 
 /// Render restored skills into the model-visible `invoked_skills` attachment
 /// body, or `None` when there is nothing to restore.
@@ -267,7 +267,8 @@ pub const INVOKED_SKILLS_ATTACHMENT_PREAMBLE: &str = "The following skills were 
 /// 1:1 with the `case"invoked_skills"` renderer (`bin/claude.exe` v2.1.207 offset
 /// 226440880 / v2.1.208 offset 225821608, byte-verified via `od -c`):
 /// `e.skills.map((n)=>`### Skill: ${n.name}\nPath: ${n.path}\n\n${n.content}`).join(`\n\n---\n\n`)`
-/// wrapped as `${PREAMBLE}\n\n${joined}` — the per-skill blocks are separated by a
+/// wrapped as `${PREAMBLE}\n\n${joined}` and then inside `<system-reminder>`
+/// by v2.1.261 `nu` / `Na` — the per-skill blocks are separated by a
 /// `\n\n---\n\n` delimiter, each block puts a blank line before its content, and
 /// the preamble is joined to the blocks by a blank line. Emitted as a single
 /// `isMeta` user message (the caller wraps it in
@@ -309,6 +310,7 @@ pub fn render_invoked_skills_attachment_with_sidecar(
     let mut display_parts = Vec::with_capacity(skills.len());
     let mut exact_utf16 = Vec::new();
     let mut has_exact = false;
+    exact_utf16.extend("<system-reminder>\n".encode_utf16());
     exact_utf16.extend(INVOKED_SKILLS_ATTACHMENT_PREAMBLE.encode_utf16());
     exact_utf16.extend("\n\n".encode_utf16());
 
@@ -333,9 +335,10 @@ pub fn render_invoked_skills_attachment_with_sidecar(
     }
 
     let display_text = format!(
-        "{INVOKED_SKILLS_ATTACHMENT_PREAMBLE}\n\n{}",
+        "<system-reminder>\n{INVOKED_SKILLS_ATTACHMENT_PREAMBLE}\n\n{}\n</system-reminder>",
         display_parts.join("\n\n")
     );
+    exact_utf16.extend("\n</system-reminder>".encode_utf16());
 
     Some(RenderedInvokedSkillsAttachment {
         display_text,
@@ -1059,6 +1062,18 @@ mod tests {
     }
 
     #[test]
+    fn invoked_skills_preamble_matches_claude_code_2_1_261_bytes() {
+        // Native oracle SHA256 5efecaff231b798be3c66def9be54183623b328b80eaef17f93c43987024e82a,
+        // case "invoked_skills" template at byte 166321293. JS \u2014 decodes
+        // to U+2014 on the provider wire.
+        let expected = "The following skills were invoked EARLIER in this session (before the conversation was compacted), not on the current turn. They are shown here for context only so you remain aware of their guidelines.\n\nIMPORTANT: Do NOT re-execute these skills or perform their one-time setup actions (e.g., scheduling, creating files) again. Any request or argument text embedded in the skill bodies below — for example under a \"## User Request\" or \"## Input\" heading — was captured when that skill was first invoked. It is NOT the user's current message and NOT a new request: do not act on it as if it were live. Only continue to apply ongoing behavioral guidelines from these skills where still relevant.";
+        assert_eq!(
+            INVOKED_SKILLS_ATTACHMENT_PREAMBLE.as_bytes(),
+            expected.as_bytes()
+        );
+    }
+
+    #[test]
     fn render_invoked_skills_attachment_shape_is_byte_faithful() {
         let restored = vec![
             RestoredSkill {
@@ -1081,7 +1096,7 @@ mod tests {
         //   join: `\n\n---\n\n`
         //   body: `${PREAMBLE}\n\n${joined}`  (preamble internal `\n\n`)
         let expected = format!(
-            "{INVOKED_SKILLS_ATTACHMENT_PREAMBLE}\n\n### Skill: deploy\nPath: /skills/deploy\n\nDeploy guidelines\n\n---\n\n### Skill: build\nPath: /skills/build\n\nBuild guidelines"
+            "<system-reminder>\n{INVOKED_SKILLS_ATTACHMENT_PREAMBLE}\n\n### Skill: deploy\nPath: /skills/deploy\n\nDeploy guidelines\n\n---\n\n### Skill: build\nPath: /skills/build\n\nBuild guidelines\n</system-reminder>"
         );
         assert_eq!(body, expected);
         // Preamble internal separator is a blank line (`guidelines.\n\nIMPORTANT`).

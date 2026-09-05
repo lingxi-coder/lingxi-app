@@ -1,16 +1,4 @@
-//! reactive recovery on the BATCHED path.
-//!
-//! Verifies the `execute_one_turn` PTL recovery loop (TS `compact.ts:450-491`,
-//! `query.ts:1070-1183`):
-//!
-//! - `ApiError::PromptTooLong` returned twice then a success → the loop
-//!   truncates the head twice (`truncateHeadForPTLRetry`) and the third call
-//!   succeeds. We assert the API saw 3 calls with strictly-shrinking message
-//!   counts, and the turn ended normally with the model's text.
-//! - `ApiError::PromptTooLong` returned `MAX_PTL_RETRIES`+1 times → after the
-//!   retry budget the loop attempts ONE reactive full compact and retries; when
-//!   that STILL 413s, the turn ends with the byte-exact
-//!   `PROMPT_TOO_LONG_ERROR_MESSAGE` assistant message (no hard error bubbled).
+//! Provider overflow recovery preserves original history until a real summary succeeds.
 use async_trait::async_trait;
 use compaction::CompactionOrchestrator;
 use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
@@ -82,32 +70,61 @@ fn ok_text(text: &str) -> Result<LlmResponse, LlmError> {
     ))
 }
 
-/// Build an orchestrator over the given scripted `PtlMockApi`. Threshold is
-/// high so the proactive Batch-4 trigger never fires (it would otherwise shrink
-/// the prompt before the call and mask the reactive path). The PTL reactive
-/// fallback in Batch 5 deliberately uses a LOW-threshold compactor only in the
-/// exhaustion test.
+struct SummaryClient {
+    result: Result<&'static str, LlmError>,
+    requests: std::sync::Mutex<Vec<sidequery::SideQueryRequest>>,
+}
+
+#[async_trait]
+impl sidequery::SideQueryClient for SummaryClient {
+    async fn query(
+        &self,
+        request: sidequery::SideQueryRequest,
+    ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(sidequery::SideQueryResponse {
+            text: Some(
+                self.result
+                    .clone()
+                    .map_err(sidequery::SideQueryError::Api)?
+                    .into(),
+            ),
+            structured: None,
+            tool_calls: Vec::new(),
+            usage: cost::Usage::default(),
+            stop_reason: Some("end_turn".into()),
+            retry_count: 0,
+        })
+    }
+}
+
 fn make_orch(
     api: Arc<PtlMockApi>,
-    compactor_threshold: Option<u64>,
+    summary: Option<Arc<SummaryClient>>,
 ) -> (Arc<ConversationOrchestrator>, Arc<MockOutputStream>) {
-    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
-    let hooks = noop_hook_executor();
-    let perms = Arc::new(NoOpPermissionGate);
     let output = Arc::new(MockOutputStream::new());
-    let memory = Arc::new(StaticMemoryProvider::empty());
     let mut orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         api,
-        tools,
-        hooks,
-        perms,
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
         output.clone(),
-        memory,
+        Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
     );
-    if let Some(t) = compactor_threshold {
-        orch = orch.with_compaction(Arc::new(CompactionOrchestrator::new(t)));
+    if let Some(summary) = summary {
+        let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+        let runner = Arc::new(
+            sidequery::ForkedAgentRunner::new()
+                .with_side_query_client(summary, "test-model".into()),
+        );
+        orch = orch
+            .with_cache_safe_slot(slot.clone())
+            .with_compaction(Arc::new(CompactionOrchestrator::with_autocompactor(
+                compaction::Autocompactor::with_forked_runner(runner, slot),
+                u64::MAX,
+            )));
     }
     (Arc::new(orch), output)
 }
@@ -137,140 +154,72 @@ async fn seed_rounds(orch: &ConversationOrchestrator, rounds: usize) {
     }
 }
 
-async fn history_len(orch: &ConversationOrchestrator) -> usize {
-    let session = orch.session();
-    let s = session.lock().await;
-    s.history.len()
-}
-
 #[tokio::test]
-async fn ptl_twice_then_success_truncates_twice() {
-    // Script: PTL, PTL, then a successful response. A SMALL token_gap (30) so
-    // each `truncateHeadForPTLRetry` drops only ~1 oldest round (the gap-driven
-    // accumulation stops at the first group whose estimate clears 30 tokens),
-    // letting us observe two distinct shrinks before the success.
-    let api = Arc::new(PtlMockApi::new(vec![
-        ptl_err(30),
-        ptl_err(30),
-        ok_text("recovered"),
-    ]));
-    // No compactor needed — truncation alone recovers before exhaustion.
+async fn unwired_ptl_does_not_truncate_or_retry_the_main_request() {
+    let api = Arc::new(PtlMockApi::new(vec![ptl_err(30)]));
     let (orch, output) = make_orch(api.clone(), None);
-    // Use 20 rounds so the 20% fallback (used with ContextOverflow, gap=0)
-    // drops 4+ groups — producing a strictly shorter message list on each retry.
     seed_rounds(&orch, 20).await;
-
-    let outcome = orch.run_turn("trigger").await.expect("turn ends ok");
-    let _ = outcome;
-
-    // Exactly 3 batched calls: initial + 2 retries-after-truncation.
-    let lens = api.call_lens().await;
-    assert_eq!(
-        lens.len(),
-        3,
-        "expected initial call + 2 truncation retries; got {lens:?}"
-    );
-    // Each truncation retry must carry STRICTLY fewer messages than the prior
-    // call (head dropped at least one round). Two truncations => two shrinks.
-    assert!(
-        lens[1] < lens[0],
-        "first retry must carry fewer messages ({} < {})",
-        lens[1],
-        lens[0]
-    );
-    assert!(
-        lens[2] < lens[1],
-        "second retry must carry fewer messages ({} < {})",
-        lens[2],
-        lens[1]
-    );
-
-    // The turn ended on the model's recovered text, not a PTL error.
-    let events = output.snapshot().await;
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, OutputEvent::Text { text } if text == "recovered")),
-        "recovered assistant text must be emitted; events = {events:#?}"
-    );
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, OutputEvent::Text { text } if text == "Prompt is too long")),
-        "no prompt-too-long error message on the successful-recovery path"
-    );
+    let before = orch.session().lock().await.history.clone();
+    orch.run_turn("trigger").await.unwrap();
+    assert_eq!(api.call_lens().await.len(), 1);
+    assert_eq!(orch.session().lock().await.history[..before.len()], before);
+    assert!(output
+        .snapshot()
+        .await
+        .iter()
+        .any(|event| matches!(event, OutputEvent::Text { text } if text == "Prompt is too long")));
 }
 
 #[tokio::test]
-async fn ptl_exhausted_attempts_reactive_compact_then_surfaces_error() {
-    // Script: PTL on every call (more than MAX_PTL_RETRIES + the one
-    // reactive-compact retry), so recovery exhausts and the turn ends with the
-    // byte-exact error message.
-    let script: Vec<Result<LlmResponse, LlmError>> = (0..12).map(|_| ptl_err(500)).collect();
-    let api = Arc::new(PtlMockApi::new(script));
-    // Low-threshold compactor so the reactive full-compact fallback actually
-    // fires (autocompact > snip-alone) and we exercise the apply_post_compact
-    // tail before surfacing the error.
-    let (orch, output) = make_orch(api.clone(), Some(100));
-    seed_rounds(&orch, 12).await;
-    let before = history_len(&orch).await;
-
-    // The turn must NOT bubble a hard error — it ends normally with the
-    // prompt-too-long assistant message.
-    orch.run_turn("trigger")
-        .await
-        .expect("turn ends without bubbling a hard error");
-
-    // A compaction must have been attempted during recovery. We assert this via
-    // the `CompactionCompleted` output event rather than a surviving boundary
-    // marker in history: with #58 the (proactive/reactive) compaction now
-    // preserves a verbatim recent-message tail, so the post-compact history is
-    // larger and the SUBSEQUENT prompt-too-long retry can head-truncate the
-    // boundary marker away (`truncateHeadForPTLRetry` drops oldest groups). The
-    // `CompactionCompleted` event is emitted by `apply_post_compact` the instant
-    // a compaction lands and is not subject to that later truncation — so it is
-    // the robust signal that a compact ran. (Before #58 the compact output was
-    // 2 messages, too small to truncate, so the marker happened to survive.)
-    let _before = before;
-    let session = orch.session();
-    let after = {
-        let s = session.lock().await;
-        s.history.clone()
-    };
-    let events = output.snapshot().await;
-    let compacted = events
-        .iter()
-        .any(|e| matches!(e, OutputEvent::CompactionCompleted { .. }));
-    assert!(
-        compacted,
-        "a compaction must have run during PTL recovery (CompactionCompleted emitted); history len before={before}"
-    );
-
-    // The turn ended with the byte-exact PROMPT_TOO_LONG_ERROR_MESSAGE assistant
-    // text and an EndTurn event.
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, OutputEvent::Text { text } if text == "Prompt is too long")),
-        "byte-exact prompt-too-long message must be surfaced; events = {events:#?}"
-    );
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, OutputEvent::EndTurn { .. })),
-        "the turn must end (EndTurn emitted)"
-    );
-    // The last assistant message in history is the prompt-too-long error.
-    let last_assistant_text = after.iter().rev().find_map(|m| match m {
-        ConversationMessage::Assistant { content, .. } => content.iter().find_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.clone()),
-            _ => None,
-        }),
-        _ => None,
+async fn reactive_summary_success_retries_once_below_the_local_auto_threshold() {
+    let api = Arc::new(PtlMockApi::new(vec![ptl_err(1), ok_text("recovered")]));
+    let summary = Arc::new(SummaryClient {
+        result: Ok("<summary>preserved work</summary>"),
+        requests: std::sync::Mutex::new(Vec::new()),
     });
+    let (orch, output) = make_orch(api.clone(), Some(summary.clone()));
+    seed_rounds(&orch, 8).await;
+    let oldest = orch.session().lock().await.history[0].clone();
+    orch.run_turn("trigger").await.unwrap();
     assert_eq!(
-        last_assistant_text.as_deref(),
-        Some("Prompt is too long"),
-        "the final assistant message must be the prompt-too-long error"
+        api.call_lens().await.len(),
+        2,
+        "one request after a successful summary"
     );
+    {
+        let requests = summary.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].messages[0], oldest,
+            "the summary includes the oldest request"
+        );
+    }
+    assert!(output
+        .snapshot()
+        .await
+        .iter()
+        .any(|event| matches!(event, OutputEvent::Text { text } if text == "recovered")));
+    assert!(orch.session().lock().await.history.iter().any(|message| matches!(message, ConversationMessage::System { content, .. } if content == "Conversation compacted")));
+}
+
+#[tokio::test]
+async fn failed_reactive_summary_keeps_all_original_messages_and_does_not_retry() {
+    let api = Arc::new(PtlMockApi::new(vec![ptl_err(1)]));
+    let summary = Arc::new(SummaryClient {
+        result: Ok(" \n\t"),
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let (orch, output) = make_orch(api.clone(), Some(summary.clone()));
+    seed_rounds(&orch, 8).await;
+    let before = orch.session().lock().await.history.clone();
+    orch.run_turn("trigger").await.unwrap();
+    assert_eq!(summary.requests.lock().unwrap().len(), 1);
+    assert_eq!(api.call_lens().await.len(), 1);
+    assert_eq!(orch.session().lock().await.history[..before.len()], before);
+    assert!(output.snapshot().await.iter().any(|event| matches!(event, OutputEvent::Text { text } if text == "Prompt is too long · automatic compaction failed: summarization produced empty response")));
+    assert!(!output
+        .snapshot()
+        .await
+        .iter()
+        .any(|event| matches!(event, OutputEvent::CompactionCompleted { .. })));
 }

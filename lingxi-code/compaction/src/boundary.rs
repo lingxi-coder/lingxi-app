@@ -86,6 +86,7 @@ pub fn create_compact_boundary(
         post_tokens: None,
         cumulative_dropped_tokens: None,
         duration_ms: None,
+        precomputed: None,
         user_context,
         messages_summarized,
         pre_compact_discovered_tools: tools,

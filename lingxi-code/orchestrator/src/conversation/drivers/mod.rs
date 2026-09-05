@@ -419,6 +419,8 @@ impl StreamingTurnDriver<'_> {
         //
         // The connect-phase streaming 413 path below reuses the same
         // reactive truncate/compact recovery loop as the batched path.
+        orch.seed_compact_cache_safe_params(system_prompt.as_deref())
+            .await;
         orch.maybe_compact_before_call().await;
         // 2.1.232: accepted peer inbox → user-role `<cross-session-message>`
         // before the outgoing snapshot is cloned from history.
@@ -1444,7 +1446,7 @@ impl StreamingTurnDriver<'_> {
         // `session.history` here equals the streamed snapshot — the streaming
         // path does not mutate history mid-call — taken before the assistant
         // reply is appended below. Strict no-op when no slot is wired.
-        orch.save_cache_safe_params(system_prompt.as_deref(), &model)
+        orch.save_cache_safe_params(system_prompt.as_deref(), &model, &wire_tools)
             .await;
 
         // Task 8 (llm-client future-work batch 3): the streamed call (or

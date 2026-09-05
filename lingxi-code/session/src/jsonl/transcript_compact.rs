@@ -161,10 +161,13 @@ pub fn compact_persistence(record_type: &str) -> CompactPersistence {
         | "file-history-snapshot"
         | "file-history-delta"
         | "last-prompt"
+        | "continued-in"
         | "marble-origami-commit"
         | "marble-origami-snapshot"
         | "marble-origami-reset" => CompactPersistence::BoundaryCleared,
-        "content-replacement" | "fork-context-ref" | "frame-link" => CompactPersistence::Accumulate,
+        "content-replacement" | "fork-context-ref" | "frame-link" | "artifact-comment-monitor" => {
+            CompactPersistence::Accumulate
+        }
         "summary"
         | "custom-title"
         | "ended-by-model"
@@ -175,7 +178,6 @@ pub fn compact_persistence(record_type: &str) -> CompactPersistence {
         | "agent-color"
         | "agent-setting"
         | "pr-link"
-        | "artifact-comment-monitor"
         | "artifact-autoreact-ledger"
         | "bridge-session"
         | "history-suppression"
@@ -185,6 +187,7 @@ pub fn compact_persistence(record_type: &str) -> CompactPersistence {
         | "isolation-latch"
         | "atis-latch"
         | "worktree-state"
+        | "cost-state"
         | "queue-operation"
         | "observer-ref" => CompactPersistence::LastWins,
         _ => CompactPersistence::Accumulate,
@@ -940,6 +943,32 @@ mod tests {
         out
     }
 
+    #[test]
+    fn latest_policy_keeps_all_monitors_and_last_cost_but_clears_continuation() {
+        // Claude Code 2.1.261 wys @166365512: monitors accumulate;
+        // continued-in is boundary-cleared; cost-state is last-wins.
+        let monitor1 =
+            r#"{"type":"artifact-comment-monitor","sessionId":"s","cursor":1}"#.to_string();
+        let monitor2 =
+            r#"{"type":"artifact-comment-monitor","sessionId":"s","cursor":2}"#.to_string();
+        let old_cost = r#"{"type":"cost-state","sessionId":"s","total":1}"#.to_string();
+        let cost = r#"{"type":"cost-state","sessionId":"s","total":2}"#.to_string();
+        let continuation =
+            r#"{"type":"continued-in","sessionId":"s","nextSessionId":"next"}"#.to_string();
+        let marker = boundary("b", "{}");
+        assert_eq!(
+            rewrite(&[
+                monitor1.clone(),
+                old_cost,
+                continuation,
+                monitor2.clone(),
+                cost.clone(),
+                marker.clone()
+            ]),
+            vec![monitor1, monitor2, marker, cost]
+        );
+    }
+
     /// `aqT` transcription check, including the DEFAULT arm — the one that
     /// keeps a record type this build has never seen (`?? "accumulate"`).
     #[test]
@@ -953,13 +982,19 @@ mod tests {
             "file-history-snapshot",
             "file-history-delta",
             "last-prompt",
+            "continued-in",
             "marble-origami-commit",
             "marble-origami-snapshot",
             "marble-origami-reset",
         ] {
             assert_eq!(compact_persistence(t), BoundaryCleared, "{t}");
         }
-        for t in ["content-replacement", "fork-context-ref", "frame-link"] {
+        for t in [
+            "content-replacement",
+            "fork-context-ref",
+            "frame-link",
+            "artifact-comment-monitor",
+        ] {
             assert_eq!(compact_persistence(t), Accumulate, "{t}");
         }
         for t in [
@@ -973,7 +1008,6 @@ mod tests {
             "agent-color",
             "agent-setting",
             "pr-link",
-            "artifact-comment-monitor",
             "artifact-autoreact-ledger",
             "bridge-session",
             "history-suppression",
@@ -983,6 +1017,7 @@ mod tests {
             "isolation-latch",
             "atis-latch",
             "worktree-state",
+            "cost-state",
             "queue-operation",
             "observer-ref",
         ] {

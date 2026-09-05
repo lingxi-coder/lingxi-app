@@ -1,7 +1,7 @@
 //! In-Loop Compaction Batch 6 — cache-safe prompt-prefix snapshotting.
 //!
 //! Verifies the PRODUCER side of the forked-summarizer cache-sharing contract:
-//! after a successful model call the turn loop writes a
+//! before compaction and the API call, and again after success, the turn loop writes a
 //! `sidequery::CacheSafeParams` into the shared slot whose `fork_context_messages`
 //! is exactly the message set the model saw, so the forked autocompact
 //! summarizer (wired at the composition root via
@@ -75,8 +75,12 @@ async fn turn_populates_slot_with_exact_sent_prefix() {
         .await
         .expect("a cache-safe snapshot must be saved after a successful call");
 
-    // The slot assigns generation = 1 on the first save.
-    assert_eq!(saved.generation, 1, "first save gets generation 1");
+    // Proactive and reactive compaction each receive a pre-call snapshot;
+    // the successful response refreshes the same prefix before reply insertion.
+    assert_eq!(
+        saved.generation, 3,
+        "two pre-call saves plus the success save"
+    );
 
     // `fork_context_messages` is the cache-safe fork prefix — claude-code's
     // `cacheSafeParams.forkContextMessages = re` (`session.history`), captured
@@ -100,6 +104,42 @@ async fn turn_populates_slot_with_exact_sent_prefix() {
     assert_eq!(
         saved.tool_use_options.main_loop_model,
         OrchestratorConfig::default().model,
+    );
+}
+
+#[tokio::test]
+async fn failed_first_call_keeps_the_pre_call_snapshot_without_a_success_save() {
+    let slot = Arc::new(CacheSafeParamsSlot::new());
+    let (orch, api) = make_orch(Some(slot.clone()));
+    seed_history(&orch, 3).await;
+    api.set_fail_with(Some(llm_client::LlmError::RateLimited {
+        retry_after: None,
+        scope: None,
+    }));
+
+    orch.run_turn("hello")
+        .await
+        .expect_err("terminal rate limit");
+
+    let saved = slot
+        .get_last()
+        .await
+        .expect("the first call must seed the compact fork even if no API call has succeeded");
+    assert_eq!(
+        saved.generation, 2,
+        "failed calls do not perform a success save"
+    );
+    let calls = api.captured_msgs().await;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        saved.fork_context_messages,
+        calls[0][1..calls[0].len() - 1],
+        "pre-call snapshot excludes the same transient reminders as the success snapshot"
+    );
+    assert_eq!(
+        saved.tools,
+        api.captured_tools().await[0],
+        "a first-call recovery fork has the parent tool definitions available"
     );
 }
 

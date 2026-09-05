@@ -180,8 +180,23 @@ async fn reread_restores_fresh_content_not_stale_snapshot() {
     let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
 
     let restored = orch.restore_post_compact_attachments().await;
-    assert_eq!(restored.len(), 1, "the live file is restored");
-    let body = restored[0].text_content();
+    assert_eq!(
+        restored.len(),
+        2,
+        "native file attachments render call and result separately"
+    );
+    assert_eq!(
+        restored[0].text_content(),
+        format!(
+        "<system-reminder>\nCalled the Read tool with the following input: {}\n</system-reminder>",
+        serde_json::json!({"file_path": path})
+    )
+    );
+    let body = restored[1].text_content();
+    assert_eq!(
+        body,
+        "<system-reminder>\nResult of calling the Read tool:\n1\tNEW CONTENT\n</system-reminder>"
+    );
     assert!(
         body.contains("NEW CONTENT"),
         "must restore FRESH disk content; got: {body}"
@@ -203,7 +218,7 @@ async fn oversized_reread_uses_exact_compact_file_reference_attachment() {
     let _rg = registry_guard();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("large.txt");
-    std::fs::write(&path, "x".repeat(20_001)).expect("write file");
+    std::fs::write(&path, "x".repeat(20_002)).expect("write file");
     let map = tool_api::read_file_state::new_read_file_state_map();
     set(&map, path.clone(), stale_entry("stale"));
 
@@ -219,14 +234,14 @@ async fn oversized_reread_uses_exact_compact_file_reference_attachment() {
             path.display()
         )
     );
-    assert_eq!(
-        restore_names(&sink.events().await),
-        vec!["tengu_post_compact_file_restore_success".to_string()]
+    assert!(
+        restore_names(&sink.events().await).is_empty(),
+        "the native compact-reference fallback returns before success telemetry"
     );
 }
 
 #[tokio::test]
-async fn preserved_file_attachment_is_not_restored_twice() {
+async fn preserved_read_tool_use_prevents_file_restore() {
     let _rg = registry_guard();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("already.txt");
@@ -235,13 +250,16 @@ async fn preserved_file_attachment_is_not_restored_twice() {
     set(&map, path.clone(), stale_entry("stale"));
     let sink = Arc::new(telemetry::InMemorySink::new());
     let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
-    let boundary = protocol::ConversationMessage::user_meta(
-        protocol::MessageId::new(),
-        format!(
-            "<system-reminder>\nReferenced file {} (restored after compaction):\ncurrent\n</system-reminder>",
-            path.display()
-        ),
-    );
+    let boundary = protocol::ConversationMessage::Assistant {
+        id: protocol::MessageId::new(),
+        content: vec![protocol::ContentBlock::ToolUse {
+            id: protocol::ToolUseId::new(),
+            name: "Read".to_string(),
+            input: serde_json::json!({"file_path": path}),
+            provider_id: None,
+        }],
+        stop_reason: None,
+    };
 
     let restored = orch
         .restore_post_compact_attachments_against(&[boundary])
@@ -251,7 +269,7 @@ async fn preserved_file_attachment_is_not_restored_twice() {
 }
 
 #[tokio::test]
-async fn preserved_oversized_reference_and_escaped_path_are_not_restored_twice() {
+async fn textual_file_reference_does_not_suppress_a_fresh_restore() {
     let _rg = registry_guard();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("already<&>.txt");
@@ -271,8 +289,176 @@ async fn preserved_oversized_reference_and_escaped_path_are_not_restored_twice()
     let restored = orch
         .restore_post_compact_attachments_against(&[boundary])
         .await;
-    assert!(restored.is_empty());
-    assert!(restore_names(&sink.events().await).is_empty());
+    assert_eq!(
+        restored.len(),
+        2,
+        "kXo dedups actual Read calls, not text that resembles an attachment"
+    );
+    assert_eq!(restore_names(&sink.events().await).len(), 1);
+}
+
+#[tokio::test]
+async fn preserved_unchanged_read_stub_does_not_hide_the_missing_file_content() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("live.txt");
+    std::fs::write(&path, "fresh").unwrap();
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    set(&map, path.clone(), stale_entry("stale"));
+    let orch = orch_with_bus(
+        dir.path().to_path_buf(),
+        map,
+        Arc::new(telemetry::InMemorySink::new()),
+    )
+    .await;
+    let id = protocol::ToolUseId::new();
+    let call = protocol::ConversationMessage::Assistant {
+        id: protocol::MessageId::new(),
+        stop_reason: None,
+        content: vec![protocol::ContentBlock::ToolUse {
+            id: id.clone(),
+            name: "Read".into(),
+            input: serde_json::json!({"file_path": path}),
+            provider_id: Some("toolu-native-id".into()),
+        }],
+    };
+    let result = protocol::ConversationMessage::User {
+        id: protocol::MessageId::new(),
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+        content: vec![protocol::ContentBlock::ToolResult {
+            tool_use_id: id,
+            content: tool_file::read::FILE_UNCHANGED_SHORT.into(),
+            is_error: false,
+            provider_tool_use_id: Some("toolu-native-id".into()),
+            content_blocks: None,
+        }],
+    };
+    let restored = orch
+        .restore_post_compact_attachments_against(&[call, result])
+        .await;
+    assert_eq!(restored.len(), 2);
+    assert!(restored[1].text_content().contains("1\tfresh"));
+}
+
+#[tokio::test]
+async fn file_restore_uses_utf16_rounding_and_dense_json_token_limits() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (name, content, reference) in [
+        ("edge.txt", "x".repeat(20_001), false),
+        ("cjk.txt", "你".repeat(20_001), false),
+        ("dense.json", "x".repeat(10_001), true),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, content).unwrap();
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        set(&map, path.clone(), stale_entry("stale"));
+        let orch = orch_with_bus(
+            dir.path().to_path_buf(),
+            map.clone(),
+            Arc::new(telemetry::InMemorySink::new()),
+        )
+        .await;
+        let restored = orch.restore_post_compact_attachments().await;
+        assert_eq!(restored.len(), if reference { 1 } else { 2 }, "{name}");
+        if !reference {
+            assert!(
+                tool_api::read_file_state::get(&map, &path).is_some(),
+                "a fresh restoration must repopulate Read state"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn file_restore_budgets_json_escapes_and_continues_after_overflow() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    for (name, content, timestamp) in [
+        ("first.txt", "\u{0001}".repeat(20_000), 3),
+        ("overflow.txt", "\u{0001}".repeat(20_000), 2),
+        ("small.txt", "small".to_string(), 1),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, content).unwrap();
+        let mut entry = stale_entry("stale");
+        entry.mtime_ms = timestamp;
+        set(&map, path, entry);
+    }
+    let orch = orch_with_bus(
+        dir.path().to_path_buf(),
+        map,
+        Arc::new(telemetry::InMemorySink::new()),
+    )
+    .await;
+    let restored = orch.restore_post_compact_attachments().await;
+    assert_eq!(
+        restored.len(),
+        4,
+        "30k + 30k serialized tokens overflow, but a later small file fits"
+    );
+    let all = restored
+        .iter()
+        .map(protocol::ConversationMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(all.contains("first.txt"));
+    assert!(!all.contains("overflow.txt"));
+    assert!(all.contains("small.txt"));
+}
+
+#[tokio::test]
+async fn only_meta_text_bodies_suppress_skill_registry_truncation() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let first = "a".repeat(20_000);
+    let second = "b".repeat(20_000);
+    let body = format!("{first}\n\n{second}");
+    for is_meta in [false, true] {
+        let orch = orch_with_bus(
+            dir.path().to_path_buf(),
+            tool_api::read_file_state::new_read_file_state_map(),
+            Arc::new(telemetry::InMemorySink::new()),
+        )
+        .await;
+        register_invoked_skill(&orch, "large", std::path::Path::new("/skill"), &body, None).await;
+        let message = protocol::ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            is_meta,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            content: if is_meta {
+                vec![
+                    protocol::ContentBlock::Text {
+                        text: first.clone(),
+                    },
+                    protocol::ContentBlock::Text {
+                        text: second.clone(),
+                    },
+                ]
+            } else {
+                vec![protocol::ContentBlock::Text { text: body.clone() }]
+            },
+        };
+        assert_eq!(
+            orch.restore_post_compact_attachments_against(&[message])
+                .await
+                .len(),
+            1
+        );
+        let session_id = orch.session.lock().await.session_id.to_string();
+        let rows = compaction::invoked_skills::filter_for_scope(
+            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None),
+        );
+        assert_eq!(
+            rows[0].content == body,
+            is_meta,
+            "only meta-user text joined with a blank line matches the native Lle body"
+        );
+    }
 }
 
 #[tokio::test]
@@ -295,6 +481,31 @@ async fn plan_file_is_excluded_from_post_compact_restore() {
     let restored = orch.restore_post_compact_attachments().await;
     assert!(restored.is_empty());
     assert!(restore_names(&sink.events().await).is_empty());
+}
+
+#[tokio::test]
+async fn memory_entrypoints_are_excluded_but_nested_memory_files_can_restore() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    for name in [
+        branding::MEMORY_FILE.to_string(),
+        branding::MEMORY_LOCAL_FILE.to_string(),
+        format!("nested/{}", branding::MEMORY_FILE),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "instructions").unwrap();
+        set(&map, path, stale_entry("stale"));
+    }
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+    let restored = orch.restore_post_compact_attachments().await;
+    assert_eq!(restored.len(), 2);
+    assert!(restored[0]
+        .text_content()
+        .contains(&format!("nested/{}", branding::MEMORY_FILE)));
+    assert_eq!(restore_names(&sink.events().await).len(), 1);
 }
 
 #[tokio::test]
@@ -385,6 +596,7 @@ async fn cancelled_compact_keeps_model_visible_read_state_untouched() {
         media_analysis_to_preserve: Vec::new(),
         compaction_usage: None,
         compaction_model: None,
+        raw_summary_text: "test summary".to_string(),
     };
 
     let applied = orch
@@ -471,8 +683,12 @@ async fn success_and_error_events_fire_per_file() {
     let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
 
     let restored = orch.restore_post_compact_attachments().await;
-    assert_eq!(restored.len(), 1, "only the live file survives");
-    assert!(restored[0].text_content().contains("alive"));
+    assert_eq!(
+        restored.len(),
+        2,
+        "only the live file's call and result survive"
+    );
+    assert!(restored[1].text_content().contains("alive"));
 
     let mut names = restore_names(&sink.events().await);
     names.sort();

@@ -3073,11 +3073,13 @@ impl ApiService {
         tool_choice: Option<crate::ToolChoice>,
         stop_sequences: Vec<String>,
         thinking: Option<crate::model::thinking::ThinkingConfig>,
+        effort: Option<serde_json::Value>,
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<LlmResponse, LlmError> {
         let mut req =
             self.build_request(model, profile, system, messages, tools, false, max_tokens)?;
+        req.effort = effort;
         req.tool_choice = tool_choice;
         req.stop_sequences = stop_sequences;
         req.capture_retry_count = true;

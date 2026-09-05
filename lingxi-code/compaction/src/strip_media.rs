@@ -1,13 +1,9 @@
 //! Pre-summarization media stripping — port of `stripImagesFromMessages`
 //! (`compact.ts:145-200`).
 //!
-//! Before the auto-compact summary request, image and document content blocks
-//! in USER messages are replaced with a text placeholder (`[image]` /
-//! `[document]`) so the text summarizer never receives raw media data.
-//! claude-code also strips media nested inside `tool_result` content arrays, but
-//! the Rust `protocol`'s `ToolResult.content` is a flat `String` — so that case
-//! has no representation here (a documented divergence: nothing to strip). Only
-//! `user` messages are touched, matching `compact.ts:147`.
+//! Media recovery replaces images and documents in user messages, including
+//! nested tool-result blocks, with `[image]` / `[document]`. Cache-sharing
+//! summary requests preserve the original media until this recovery is needed.
 
 use protocol::{ContentBlock, ConversationMessage};
 
@@ -47,6 +43,23 @@ fn strip_one(message: ConversationMessage) -> ConversationMessage {
             },
             ContentBlock::Document { .. } => ContentBlock::Text {
                 text: STRIPPED_DOCUMENT_PLACEHOLDER.to_string(),
+            },
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                provider_tool_use_id,
+                content_blocks: Some(blocks),
+            } => ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                provider_tool_use_id,
+                content_blocks: Some(blocks.into_iter().map(|block| match block.get("type").and_then(serde_json::Value::as_str) {
+                    Some("image") => serde_json::json!({"type": "text", "text": STRIPPED_IMAGE_PLACEHOLDER}),
+                    Some("document") => serde_json::json!({"type": "text", "text": STRIPPED_DOCUMENT_PLACEHOLDER}),
+                    _ => block,
+                }).collect()),
             },
             other => other,
         })
@@ -120,5 +133,52 @@ mod tests {
         };
         let out = strip_images_from_messages(vec![assistant.clone()]);
         assert_eq!(out[0], assistant);
+    }
+
+    #[test]
+    fn strips_nested_media_without_changing_tool_result_identity_or_text() {
+        let id = protocol::ToolUseId::new();
+        let input = ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: "read result".into(),
+                is_error: false,
+                provider_tool_use_id: Some("provider-read".into()),
+                content_blocks: Some(vec![
+                    serde_json::json!({"type":"text", "text":"page 1"}),
+                    serde_json::json!({"type":"image", "source":{"data":"large image"}}),
+                    serde_json::json!({"type":"document", "source":{"data":"large document"}}),
+                ]),
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        let output = strip_images_from_messages(vec![input]);
+        let ConversationMessage::User { content, .. } = &output[0] else {
+            panic!("user");
+        };
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            content_blocks,
+            provider_tool_use_id,
+            ..
+        } = &content[0]
+        else {
+            panic!("tool result");
+        };
+        assert_eq!(tool_use_id, &id);
+        assert_eq!(content, "read result");
+        assert_eq!(provider_tool_use_id.as_deref(), Some("provider-read"));
+        assert_eq!(
+            content_blocks.as_ref().unwrap(),
+            &vec![
+                serde_json::json!({"type":"text", "text":"page 1"}),
+                serde_json::json!({"type":"text", "text":"[image]"}),
+                serde_json::json!({"type":"text", "text":"[document]"}),
+            ]
+        );
     }
 }

@@ -734,6 +734,265 @@ impl StreamJsonStream {
         self.enqueue(&frame);
     }
 
+    /// Claude Code 2.1.261 `$Ke` maps this explicit SDK subset in order.
+    /// Engine-only metadata (for example activeGoal) stays out of the SDK frame.
+    fn build_compact_boundary_frame(
+        session_id: &str,
+        boundary_uuid: &str,
+        metadata: &protocol::CompactBoundaryMetadata,
+    ) -> Value {
+        let source = serde_json::to_value(metadata).expect("compact metadata serializes");
+        let mut compact = serde_json::Map::new();
+        for (camel, snake) in [
+            ("trigger", "trigger"),
+            ("preTokens", "pre_tokens"),
+            ("postTokens", "post_tokens"),
+            ("cumulativeDroppedTokens", "cumulative_dropped_tokens"),
+            ("durationMs", "duration_ms"),
+            ("userContext", "user_context"),
+            ("messagesSummarized", "messages_summarized"),
+            ("precomputed", "precomputed"),
+            ("preCompactDiscoveredTools", "pre_compact_discovered_tools"),
+        ] {
+            if let Some(value) = source.get(camel) {
+                compact.insert(snake.into(), value.clone());
+            }
+        }
+        for (camel, snake, fields) in [
+            (
+                "preservedSegment",
+                "preserved_segment",
+                &[
+                    ("headUuid", "head_uuid"),
+                    ("anchorUuid", "anchor_uuid"),
+                    ("tailUuid", "tail_uuid"),
+                ][..],
+            ),
+            (
+                "preservedMessages",
+                "preserved_messages",
+                &[
+                    ("anchorUuid", "anchor_uuid"),
+                    ("uuids", "uuids"),
+                    ("allUuids", "all_uuids"),
+                ][..],
+            ),
+        ] {
+            if let Some(value) = source.get(camel) {
+                let mut nested = serde_json::Map::new();
+                for (from, to) in fields {
+                    if let Some(value) = value.get(*from) {
+                        nested.insert((*to).into(), value.clone());
+                    }
+                }
+                compact.insert(snake.into(), Value::Object(nested));
+            }
+        }
+        let mut frame = serde_json::Map::new();
+        frame.insert("type".into(), json!("system"));
+        frame.insert("subtype".into(), json!("compact_boundary"));
+        // Manual /compact returns through the local-command serializer;
+        // automatic boundaries stream directly through the engine envelope.
+        // Their insertion order differs in 2.1.261 (also verified live).
+        if metadata.trigger == protocol::CompactTrigger::Manual {
+            frame.insert("session_id".into(), json!(session_id));
+        }
+        frame.insert("uuid".into(), json!(boundary_uuid));
+        frame.insert("compact_metadata".into(), Value::Object(compact));
+        if let Some(parent) = metadata.logical_parent_uuid.as_deref() {
+            frame.insert("logical_parent_uuid".into(), json!(parent));
+        }
+        if metadata.trigger != protocol::CompactTrigger::Manual {
+            frame.insert("session_id".into(), json!(session_id));
+        }
+        Value::Object(frame)
+    }
+
+    /// `None` starts compaction; `Some(error)` completes it. The terminal
+    /// metadata follows 2.1.261's `sdk_status` event and `It` envelope order.
+    #[allow(clippy::option_option)] // None=start, Some(None)=success, Some(Some)=failure.
+    fn build_compact_status_frame(
+        session_id: &str,
+        uuid: &str,
+        finished: Option<Option<&str>>,
+    ) -> Value {
+        let mut frame = serde_json::Map::new();
+        frame.insert("type".into(), json!("system"));
+        frame.insert("subtype".into(), json!("status"));
+        frame.insert(
+            "status".into(),
+            if finished.is_some() {
+                Value::Null
+            } else {
+                json!("compacting")
+            },
+        );
+        if let Some(error) = finished {
+            frame.insert(
+                "compact_result".into(),
+                json!(if error.is_some() { "failed" } else { "success" }),
+            );
+            if let Some(error) = error {
+                frame.insert("compact_error".into(), json!(error));
+            }
+        }
+        frame.insert("session_id".into(), json!(session_id));
+        frame.insert("uuid".into(), json!(uuid));
+        Value::Object(frame)
+    }
+
+    fn build_compact_user_frame(
+        session_id: &str,
+        uuid: &str,
+        timestamp: &str,
+        content: &str,
+        synthetic: bool,
+    ) -> Value {
+        let mut frame = json!({
+            "type":"user", "message":{"role":"user","content":content},
+            "session_id":session_id, "parent_tool_use_id":null,
+            "uuid":uuid, "timestamp":timestamp, "isReplay":!synthetic
+        });
+        if synthetic {
+            frame["isSynthetic"] = json!(true);
+        }
+        frame
+    }
+
+    fn build_compact_error_frame(
+        session_id: &str,
+        uuid: &str,
+        message_id: &str,
+        timestamp: &str,
+        display: &str,
+        is_error: bool,
+    ) -> Value {
+        let stream = if is_error { "stderr" } else { "stdout" };
+        json!({
+            "type":"assistant",
+            "message":{
+                "diagnostics":null,"id":message_id,"container":null,"model":"<synthetic>",
+                "role":"assistant","stop_details":null,"stop_reason":"end_turn","stop_sequence":null,
+                "type":"message","usage":{
+                    "output_tokens_details":null,"input_tokens":0,"output_tokens":0,
+                    "cache_creation_input_tokens":0,"cache_read_input_tokens":0,
+                    "server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},
+                    "service_tier":null,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},
+                    "inference_geo":null,"iterations":null,"speed":null
+                },
+                "content":[{"type":"text","text":display}],"context_management":null
+            },
+            "parent_tool_use_id":null,"is_meta":true,
+            "local_command_source":format!("<local-command-{stream}>{display}</local-command-{stream}>"),
+            "session_id":session_id,"uuid":uuid,"timestamp":timestamp
+        })
+    }
+
+    /// Emit only /compact's local command transcript. Failed compaction is a
+    /// completed command with a synthetic notice, not a failed provider turn.
+    pub async fn emit_compact_command_output(
+        &self,
+        instructions: &str,
+        command_uuid: &str,
+        command_timestamp: &str,
+        failure: Option<(&str, bool)>,
+        verbose: bool,
+        replay_user_messages: bool,
+    ) {
+        if self.suppress_frames {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        if let Some((display, is_error)) = failure {
+            self.enqueue(&Self::build_compact_error_frame(
+                &session_id,
+                &uuid::Uuid::new_v4().to_string(),
+                &uuid::Uuid::new_v4().to_string(),
+                &timestamp,
+                display,
+                is_error,
+            ));
+        } else {
+            let display = if verbose {
+                "Compacted "
+            } else {
+                "Compacted (ctrl+o to see full summary)"
+            };
+            self.enqueue(&Self::build_compact_user_frame(
+                &session_id,
+                &uuid::Uuid::new_v4().to_string(),
+                &timestamp,
+                &format!("<local-command-stdout>{display}</local-command-stdout>"),
+                false,
+            ));
+        }
+        if replay_user_messages {
+            let markup = format!("<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args>{instructions}</command-args>");
+            self.enqueue(&Self::build_compact_user_frame(
+                &session_id,
+                command_uuid,
+                command_timestamp,
+                &markup,
+                false,
+            ));
+        }
+    }
+
+    /// Complete a local compact command without borrowing the previous model turn.
+    pub async fn emit_compact_command_result(
+        &self,
+        cost: &CostSnapshot,
+        duration_ms: u64,
+        failure: Option<&str>,
+    ) {
+        let params = self.init_params.lock().await.clone();
+        let Some(params) = params else {
+            return;
+        };
+        let mut usage = Self::build_usage_block(&CostSnapshot::default());
+        usage["inference_geo"] = json!("");
+        let frame = self
+            .build_result_success_frame(
+                "",
+                "",
+                cost,
+                &params.model,
+                &params.fast_mode_state,
+                params.fast_mode_disabled_reason.as_deref(),
+                &[],
+            )
+            .await;
+        let mut result = serde_json::Map::new();
+        // 2.1.261's no-model-turn local-command result has its own envelope.
+        result.insert("is_error".into(), json!(false));
+        result.insert("duration_api_ms".into(), json!(0));
+        result.insert("num_turns".into(), json!(0));
+        result.insert("stop_reason".into(), Value::Null);
+        result.insert("session_id".into(), json!(params.session_id));
+        result.insert("total_cost_usd".into(), json!(cost.total_usd));
+        result.insert("usage".into(), usage);
+        result.insert("modelUsage".into(), frame["modelUsage"].clone());
+        result.insert("permission_denials".into(), json!([]));
+        result.insert("fast_mode_state".into(), json!(params.fast_mode_state));
+        if let Some(reason) = params.fast_mode_disabled_reason {
+            result.insert("fast_mode_disabled_reason".into(), json!(reason));
+        }
+        result.insert("subtype".into(), json!("success"));
+        // An empty session is rejected before compaction starts and leaves
+        // result empty. Attempted compaction failures expose their notice to
+        // SDK callers even though the local command itself completed.
+        let result_text = failure
+            .filter(|display| *display != "Error: No messages to compact")
+            .unwrap_or_default();
+        result.insert("result".into(), json!(result_text));
+        result.insert("type".into(), json!("result"));
+        result.insert("duration_ms".into(), json!(duration_ms));
+        result.insert("uuid".into(), frame["uuid"].clone());
+        result.insert("queued_turn_count".into(), json!(0));
+        self.enqueue(&Value::Object(result));
+    }
+
     /// Build the `user` tool_result frame Value.
     ///
     /// claude-code's stream-json (SDK V2) tool_result block carries the
@@ -1245,6 +1504,64 @@ impl StreamJsonStream {
 
 #[async_trait]
 impl OutputStream for StreamJsonStream {
+    async fn emit_compaction_started(&self) {
+        if self.suppress_frames {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        self.enqueue(&Self::build_compact_status_frame(
+            &session_id,
+            &uuid::Uuid::new_v4().to_string(),
+            None,
+        ));
+    }
+
+    async fn emit_compact_boundary(
+        &self,
+        boundary_uuid: &str,
+        metadata: &protocol::CompactBoundaryMetadata,
+    ) {
+        if self.suppress_frames {
+            return;
+        }
+        if metadata.trigger == protocol::CompactTrigger::Manual {
+            self.emit_init().await;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        self.enqueue(&Self::build_compact_boundary_frame(
+            &session_id,
+            boundary_uuid,
+            metadata,
+        ));
+    }
+
+    async fn emit_compaction_finished(&self, error: Option<&str>) {
+        if self.suppress_frames {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        self.enqueue(&Self::build_compact_status_frame(
+            &session_id,
+            &uuid::Uuid::new_v4().to_string(),
+            Some(error),
+        ));
+    }
+
+    async fn emit_compact_summary(&self, summary_uuid: &str, summary: &str) {
+        if self.suppress_frames {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        self.enqueue(&Self::build_compact_user_frame(
+            &session_id,
+            summary_uuid,
+            &timestamp,
+            summary,
+            true,
+        ));
+    }
+
     /// Emit a forwarded subagent assistant message (`--forward-subagent-text`).
     ///
     /// `message` is the serialized subagent `protocol::ConversationMessage`
@@ -2044,6 +2361,208 @@ fn build_tool_result_meta(
 mod tests {
     use super::*;
 
+    // Claude Code 2.1.261: $Ke @164270142 and live manual /compact boundary.
+    // Fixed UUIDs make field order, omission, and Unicode escaping byte-testable.
+    #[test]
+    fn compact_boundary_matches_261_sdk_bytes() {
+        let metadata: protocol::CompactBoundaryMetadata = serde_json::from_value(json!({
+            "trigger":"manual", "preTokens":42000, "postTokens":12000,
+            "cumulativeDroppedTokens":31000, "durationMs":987, "userContext":"keep API details",
+            "messagesSummarized":10, "precomputed":true, "preCompactDiscoveredTools":["Read"],
+            "preservedSegment":{"headUuid":"head","anchorUuid":"summary","tailUuid":"tail"},
+            "preservedMessages":{"anchorUuid":"summary","uuids":["head","tail"],"allUuids":["head","attachment","tail"]},
+            "logicalParentUuid":"parent"
+        })).unwrap();
+        let frame =
+            StreamJsonStream::build_compact_boundary_frame("session", "boundary", &metadata);
+        assert_eq!(
+            serialize_ndjson_line(&frame),
+            concat!(
+                r#"{"type":"system","subtype":"compact_boundary","session_id":"session","uuid":"boundary","compact_metadata":{"trigger":"manual","pre_tokens":42000,"post_tokens":12000,"cumulative_dropped_tokens":31000,"duration_ms":987,"user_context":"keep API details","messages_summarized":10,"precomputed":true,"pre_compact_discovered_tools":["Read"],"preserved_segment":{"head_uuid":"head","anchor_uuid":"summary","tail_uuid":"tail"},"preserved_messages":{"anchor_uuid":"summary","uuids":["head","tail"],"all_uuids":["head","attachment","tail"]}},"logical_parent_uuid":"parent"}"#,
+                "\n"
+            )
+        );
+        let minimal = StreamJsonStream::build_compact_boundary_frame(
+            "s",
+            "b",
+            &protocol::CompactBoundaryMetadata::default(),
+        );
+        assert_eq!(
+            serialize_ndjson_line(&minimal),
+            concat!(
+                r#"{"type":"system","subtype":"compact_boundary","uuid":"b","compact_metadata":{"trigger":"auto","pre_tokens":0},"session_id":"s"}"#,
+                "\n"
+            )
+        );
+    }
+
+    #[test]
+    fn compact_status_matches_261_sdk_bytes() {
+        assert_eq!(
+            serialize_ndjson_line(&StreamJsonStream::build_compact_status_frame(
+                "s", "start", None
+            )),
+            concat!(
+                r#"{"type":"system","subtype":"status","status":"compacting","session_id":"s","uuid":"start"}"#,
+                "\n"
+            )
+        );
+        assert_eq!(
+            serialize_ndjson_line(&StreamJsonStream::build_compact_status_frame(
+                "s",
+                "end",
+                Some(None)
+            )),
+            concat!(
+                r#"{"type":"system","subtype":"status","status":null,"compact_result":"success","session_id":"s","uuid":"end"}"#,
+                "\n"
+            )
+        );
+        assert_eq!(
+            serialize_ndjson_line(&StreamJsonStream::build_compact_status_frame(
+                "s",
+                "end",
+                Some(Some("Compaction canceled."))
+            )),
+            concat!(
+                r#"{"type":"system","subtype":"status","status":null,"compact_result":"failed","compact_error":"Compaction canceled.","session_id":"s","uuid":"end"}"#,
+                "\n"
+            )
+        );
+    }
+
+    #[test]
+    fn compact_summary_matches_261_synthetic_user_bytes() {
+        let frame = StreamJsonStream::build_compact_user_frame(
+            "s",
+            "summary",
+            "timestamp",
+            "summary\ntext",
+            true,
+        );
+        assert_eq!(
+            serialize_ndjson_line(&frame),
+            concat!(
+                r#"{"type":"user","message":{"role":"user","content":"summary\ntext"},"session_id":"s","parent_tool_use_id":null,"uuid":"summary","timestamp":"timestamp","isReplay":false,"isSynthetic":true}"#,
+                "\n"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_command_output_replay_gate_and_failure_severity_match_live_oracle() {
+        for replay in [false, true] {
+            for failure in [
+                None,
+                Some(("Not enough messages to compact.", false)),
+                Some((
+                    "Error during compaction: summarization produced empty response",
+                    true,
+                )),
+            ] {
+                let stream = StreamJsonStream::new(make_params("s"));
+                let mut receiver = stream.drain_rx.lock().await.take().unwrap();
+                stream
+                    .emit_compact_command_output(
+                        "keep APIs",
+                        "command",
+                        "before",
+                        failure,
+                        true,
+                        replay,
+                    )
+                    .await;
+                let mut frames = Vec::new();
+                while let Ok(OutboundMsg::Line(line)) = receiver.try_recv() {
+                    frames.push(serde_json::from_str::<Value>(&line).unwrap());
+                }
+                assert_eq!(frames.len(), if replay { 2 } else { 1 });
+                if let Some((display, error)) = failure {
+                    assert_eq!(frames[0]["type"], "assistant");
+                    assert_eq!(frames[0]["message"]["model"], "<synthetic>");
+                    assert_eq!(frames[0]["message"]["content"][0]["text"], display);
+                    assert_eq!(frames[0]["is_meta"], true);
+                    let pipe = if error { "stderr" } else { "stdout" };
+                    assert_eq!(
+                        frames[0]["local_command_source"],
+                        format!("<local-command-{pipe}>{display}</local-command-{pipe}>")
+                    );
+                } else {
+                    assert_eq!(
+                        frames[0]["message"]["content"],
+                        "<local-command-stdout>Compacted </local-command-stdout>"
+                    );
+                    assert_eq!(frames[0]["isReplay"], true);
+                }
+                if replay {
+                    assert_eq!(frames[1]["uuid"], "command");
+                    assert_eq!(frames[1]["timestamp"], "before");
+                    assert_eq!(frames[1]["message"]["content"], "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args>keep APIs</command-args>");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_command_result_does_not_reuse_the_previous_model_turn() {
+        let stream = StreamJsonStream::new(make_params("s"));
+        let mut receiver = stream.drain_rx.lock().await.take().unwrap();
+        let cost = CostSnapshot {
+            input_tokens: 200,
+            output_tokens: 10,
+            api_calls: 4,
+            total_usd: 0.2,
+            ..Default::default()
+        };
+        stream.emit_compact_command_result(&cost, 123, None).await;
+        let OutboundMsg::Line(line) = receiver.try_recv().unwrap() else {
+            panic!("result frame");
+        };
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["subtype"], "success");
+        assert_eq!(frame["is_error"], false);
+        assert_eq!(frame["result"], "");
+        assert_eq!(frame["duration_ms"], 123);
+        assert_eq!(frame["duration_api_ms"], 0);
+        assert_eq!(frame["num_turns"], 0);
+        assert_eq!(frame["stop_reason"], Value::Null);
+        assert_eq!(frame["usage"]["input_tokens"], 0);
+        assert_eq!(frame["usage"]["output_tokens"], 0);
+        assert_eq!(frame["total_cost_usd"], 0.2);
+    }
+
+    #[tokio::test]
+    async fn compact_command_failure_result_matches_live_261_oracle() {
+        // Local-mock captures of Claude Code 2.1.261: failures after the
+        // compaction attempt return the notice as result text; rejecting an
+        // empty session only emits the synthetic notice and an empty result.
+        for (failure, expected) in [
+            ("Error: No messages to compact", ""),
+            (
+                "Not enough messages to compact.",
+                "Not enough messages to compact.",
+            ),
+            (
+                "Error during compaction: summarization produced empty response",
+                "Error during compaction: summarization produced empty response",
+            ),
+        ] {
+            let stream = StreamJsonStream::new(make_params("s"));
+            let mut receiver = stream.drain_rx.lock().await.take().unwrap();
+            stream
+                .emit_compact_command_result(&CostSnapshot::default(), 123, Some(failure))
+                .await;
+            let OutboundMsg::Line(line) = receiver.try_recv().unwrap() else {
+                panic!("result frame");
+            };
+            let frame: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(frame["result"], expected);
+            assert_eq!(frame["subtype"], "success");
+            assert_eq!(frame["is_error"], false);
+            assert_eq!(frame["num_turns"], 0);
+        }
+    }
+
     fn make_params(session_id: &str) -> StreamJsonInitParams {
         build_init_params(
             session_id,
@@ -2075,6 +2594,34 @@ mod tests {
             stream.accum.lock().await.blocks.as_slice(),
             [AccBlock::Thinking { thinking, .. }] if thinking == "visible"
         ));
+    }
+
+    #[tokio::test]
+    async fn compact_events_reach_the_stream_and_json_mode_suppresses_them() {
+        for suppressed in [false, true] {
+            let stream =
+                StreamJsonStream::new_inner(Some(make_params("compact-session")), suppressed);
+            let mut receiver = stream.drain_rx.lock().await.take().unwrap();
+            let metadata = protocol::CompactBoundaryMetadata::default();
+            stream.emit_compaction_started().await;
+            stream.emit_compaction_finished(None).await;
+            stream
+                .emit_compact_boundary("persisted-boundary", &metadata)
+                .await;
+            if suppressed {
+                assert!(receiver.try_recv().is_err());
+                continue;
+            }
+            let mut frames = Vec::new();
+            while let Ok(OutboundMsg::Line(line)) = receiver.try_recv() {
+                frames.push(serde_json::from_str::<Value>(&line).unwrap());
+            }
+            assert_eq!(frames.len(), 3);
+            assert_eq!(frames[0]["status"], "compacting");
+            assert_eq!(frames[1]["compact_result"], "success");
+            assert_eq!(frames[2]["subtype"], "compact_boundary");
+            assert_eq!(frames[2]["uuid"], "persisted-boundary");
+        }
     }
 
     /// Verify that the init frame includes the 20 mandatory keys in the correct

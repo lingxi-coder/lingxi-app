@@ -1210,7 +1210,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     clearSession: async () => {
       if (window.confirm('Clear the current session and start a new draft?')) await bridge.clearSession();
     },
-    forceCompact: () => bridge.forceCompact(),
+    forceCompact: (instructions) => bridge.forceCompact(instructions),
     copyLastResponse: async () => {
       const item = [...bridge.conversation.items].reverse().find((entry) => (
         entry.type === 'narration' && entry.role === 'assistant' && entry.text.trim().length > 0

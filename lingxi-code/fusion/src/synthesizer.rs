@@ -60,6 +60,7 @@ pub async fn synthesize(
         max_retries: 0,
         temperature: None,
         thinking: None,
+        effort: None,
         stop_sequences: Vec::new(),
         query_source: QuerySource::FusionSynthesizer,
         skip_system_prompt_prefix: true,

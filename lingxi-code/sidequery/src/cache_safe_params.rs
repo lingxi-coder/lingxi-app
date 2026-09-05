@@ -33,6 +33,11 @@ pub struct CacheSafeParams {
     pub system_context: HashMap<String, String>,
     /// Tool-set options the parent rendered in this turn.
     pub tool_use_options: tool_api::ToolUseOptions,
+    /// Tool schemas sent with the parent's prompt, in their original order.
+    /// Compaction replays these even though it never executes tool calls.
+    pub tools: Vec<serde_json::Value>,
+    /// Effective output effort used by the parent's model request.
+    pub effort: Option<serde_json::Value>,
     /// Conversation prefix forks must replay verbatim.
     pub fork_context_messages: Vec<ConversationMessage>,
     /// Main-session transcript used by compact continuation messages to point

@@ -393,6 +393,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // no-op when no compactor is wired or the history is under threshold, so the
     // locked turn-loop fixtures are unaffected. After a proactive compact, the
     // snapshot below reads the NEW, compacted history.
+    orch.seed_compact_cache_safe_params(system).await;
     orch.maybe_compact_before_call().await;
     // 2.1.232: accepted peer inbox → user-role `<cross-session-message>`
     // before the outgoing snapshot is cloned from history.
@@ -801,7 +802,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // the exact message set the model saw (post any PTL truncation / reactive
     // compaction inside `call_api_with_ptl_recovery`), BEFORE the assistant reply
     // is appended below. Strict no-op when no cache-safe slot is wired.
-    orch.save_cache_safe_params(system, &model).await;
+    orch.save_cache_safe_params(system, &model, &tools).await;
     // FORK (codex #5 follow-up): record the rendered system prompt this turn
     // handed the model, so a fork-subagent spawn dispatched below in this same
     // turn can thread the exact bytes onto its child (cache-identical prefix).
@@ -1312,36 +1313,11 @@ pub(crate) enum PtlCallOutcome {
 /// recovery loop (In-Loop Compaction Batch 5, BATCHED path only).
 ///
 /// TS refs: `query.ts:628-648` (blocking-limit preempt),
-/// `compact.ts:227-291` (`truncateHeadForPTLRetry`, `MAX_PTL_RETRIES`),
-/// `compact.ts:450-491` (the PTL retry loop), `query.ts:1070-1183` (the
-/// reactive recovery after 413 — feature-gated, treated as fallback semantics).
-///
-/// Flow:
-/// 1. **Blocking-limit preempt**: estimate tokens on the pre-call history; if
-///    the prompt is already at the hard blocking limit
-///    ([`compaction::calculate_token_warning_state`]`.is_at_blocking_limit`,
-///    i.e. `effective_window − MANUAL_COMPACT_BUFFER_TOKENS`), surface
-///    `PromptTooLong` WITHOUT calling the API.
-/// 2. Call the API. On `Ok` → `Response`. On a non-PTL `Err` → bubble.
-/// 3. On `Err(LlmError::ContextOverflow)` run a PTL retry loop
-///    (≤ [`compaction::MAX_PTL_RETRIES`]):
-///    [`compaction::ptl_retry::truncate_head_for_ptl_retry`]`(history, gap)` →
-///    if `Some`, swap `session.history`, retry; if `None`, break (nothing safe
-///    to drop).
-/// 4. On loop exhaustion, attempt ONE reactive full compact
-///    (`process_iteration_tracked` + [`ConversationOrchestrator::apply_post_compact`])
-///    and retry once more. If that STILL returns `PromptTooLong`, return
-///    `PromptTooLong` (the caller ends the turn).
-///
-/// NOT A PARITY GAP (codex finding #4 REFUTED, 2026-06-23): "PTL-truncate ×N →
-/// one full compact → error" IS claude-code's DEFAULT. The fuller multi-stage
-/// recovery (`contextCollapse.recoverFromOverflow` / `reactiveCompact.
-/// tryReactiveCompact`) is behind default-OFF gates: `feature('CONTEXT_COLLAPSE')`
-/// (absent from `FEATURE_FLAGS`, always `false`) and `feature('REACTIVE_COMPACT')`
-/// (`CLAUDE_CODE_REACTIVE_COMPACT`, opt-in). v2.1.186 binary: `recoverFromOverflow`
-/// /`tryReactiveCompact`/`isContextCollapseEnabled` are 0-hit (DCE'd). Porting it
-/// would DIVERGE. Evidence: memory `mainloop-parity-2026-06-23`. `betas` for the
-#[allow(clippy::too_many_lines)]
+/// Claude Code 2.1.261 retries context-collapse projections first, then makes
+/// one reactive compaction attempt against the unchanged conversation. The
+/// summary call moves complete trailing API rounds out of its request on PTL;
+/// only a successful summary commits a replacement history. An unwired or
+/// failed compactor surfaces `PromptTooLong` without deleting prior messages.
 pub(crate) async fn call_api_with_ptl_recovery(
     orch: &ConversationOrchestrator,
     system: Option<&str>,
@@ -1367,6 +1343,9 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // raw `session.history`.
     turn_reminders: &[ConversationMessage],
 ) -> Result<PtlCallOutcome, OrchestratorError> {
+    // A first request after resume may overflow before any successful call
+    // has populated the summary fork's cache-safe slot.
+    orch.save_cache_safe_params(system, model, &tools).await;
     // SC-04: the compaction-failure detail is per-CALL state (the oracle reads
     // it off THIS iteration's `precomputeOutcome`), so clear any leftover before
     // the preempt — a failure recorded for an earlier call must never colour
@@ -1602,8 +1581,8 @@ pub(crate) async fn call_api_with_ptl_recovery(
 
     // Context-collapse overflow recovery: drain every already-summarized staged
     // span, persist the resulting append-only commits + last-wins snapshot, and
-    // retry once with the read-time projection. Do this before destructive head
-    // truncation or full reactive compact. A second overflow falls through to
+    // retry once with the read-time projection before reactive compaction.
+    // A second overflow falls through to
     // the established recovery chain; the staged queue is now empty, so the
     // drain is naturally one-shot.
     if compaction::is_context_collapse_enabled() {
@@ -1640,60 +1619,14 @@ pub(crate) async fn call_api_with_ptl_recovery(
         }
     }
 
-    // (3) PTL retry loop: drop oldest API-round groups and retry, ≤ MAX retries.
-    for _attempt in 0..compaction::MAX_PTL_RETRIES {
-        // Snapshot the current (possibly already-truncated) history.
-        let history = {
-            let s = orch.session.lock().await;
-            s.model_context_history()
-        };
-        let Some(truncated_raw) =
-            compaction::ptl_retry::truncate_head_for_ptl_retry(history, token_gap)
-        else {
-            // Nothing safe to drop (< 2 groups). Stop truncating and fall
-            // through to the reactive-compact fallback.
-            break;
-        };
-        {
-            let mut s = orch.session.lock().await;
-            s.replace_model_context_history(truncated_raw.clone());
-        }
-        let mut truncated = orch
-            .rewrite_outgoing_history(truncated_raw, outgoing_history_rewriter.as_ref())
-            .await?;
-        orch.reattach_outgoing_context(
-            &mut truncated,
-            deferred_tools_reminder.as_ref(),
-            date_change_reminder.as_ref(),
-            turn_reminders,
-        )
-        .await;
-        match orch
-            .api
-            .messages_create(model, profile, system, truncated, tools.clone())
-            .await
-        {
-            Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
-            Err(LlmError::ContextOverflow { .. }) => {
-                // token_gap not used in the inner loop — truncation keeps halving.
-            }
-            Err(other) => return Err(other.into()),
-        }
-    }
-
+    // A provider overflow is recovered by summarizing a prefix and preserving
+    // its recent rounds. Never delete live history before that summary succeeds.
     // (4) Reactive-compact fallback: one full compact, then retry once more.
     if let Some(compactor) = orch.compaction_runtime.compaction.clone() {
-        let (snapshot, last_assistant_at) = {
-            let s = orch.session.lock().await;
-            (
-                s.model_context_history(),
-                s.message_timing.last_assistant_at,
-            )
-        };
+        let snapshot = orch.session.lock().await.model_context_history();
         let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
         let bytes_before: u64 = snapshot.iter().map(protocol::text_byte_size).sum();
-        // Capture the token estimate before  is consumed by
-        //  — used for the boundary `preTokens`.
+        // Capture the boundary's preTokens before the summary consumes the snapshot.
         let pre_tokens_estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
         // hooks compaction lifecycle: PreCompact fires before the reactive
         // summary pass. The reactive 413/PTL fallback is part of the automatic
@@ -1704,12 +1637,17 @@ pub(crate) async fn call_api_with_ptl_recovery(
         // is still over the limit, so we surface the prompt-too-long outcome
         // (the same value this fn falls through to).
         let compact_started = std::time::Instant::now();
+        orch.output.emit_compaction_started().await;
         let pre_compact = orch.fire_pre_compact("auto", None).await;
         if let Some(detail) = pre_compact.blocked_by {
             tracing::warn!("Reactive compact blocked by PreCompact hook: {detail}");
+            orch.output
+                .emit_compaction_finished(Some(&format!(
+                    "Compaction blocked by PreCompact hook: {detail}"
+                )))
+                .await;
             return Ok(PtlCallOutcome::PromptTooLong);
         }
-        orch.output.emit_compaction_started().await;
         // API duration = the summarizer pass only; `compact_started` (above,
         // pre-hooks) is the boundary durationMs clock. Folding hook wall-time
         // into `record_compaction_usage` would inflate /cost's API duration.
@@ -1717,13 +1655,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
         let compact_result = {
             let mut tracking = orch.compaction_runtime.compaction_tracking.lock().await;
             compactor
-                .process_iteration_tracked_with_instructions_and_timing(
+                .process_reactive_tracked(
                     snapshot,
-                    0,
                     &mut tracking,
                     pre_compact.additional_instructions.as_deref(),
-                    last_assistant_at,
-                    std::time::SystemTime::now(),
+                    (token_gap > 0).then_some(token_gap),
                 )
                 .await
         };
@@ -1740,6 +1676,9 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 .lock()
                 .await
                 .last_compact_failure_detail = Some(err.to_string());
+            orch.output
+                .emit_compaction_finished(Some(&err.to_string()))
+                .await;
         }
         if let Ok(result) = compact_result {
             let compact_duration = api_started.elapsed();
@@ -1760,13 +1699,12 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     turns_since,
                 )
                 .await;
+                orch.output
+                    .emit_compaction_finished(Some(compaction::RAPID_REFILL_THRASHING_MESSAGE))
+                    .await;
                 return Ok(PtlCallOutcome::RapidRefillBreaker);
             }
             if result.was_compacted {
-                // hooks compaction lifecycle: capture the PostCompact payload
-                // BEFORE `apply_post_compact` consumes the result.
-                let summary = ConversationOrchestrator::compaction_summary_text(&result);
-                let tokens_freed = result.total_tokens_freed;
                 // Apply the post-compact transition (history swap + boundary
                 // marker + CompactionCompleted) via the shared helper.
                 // `cancel: None` — the reactive PTL fallback has no
@@ -1781,8 +1719,6 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     None,
                 )
                 .await;
-                // PostCompact fires AFTER the transition is applied.
-                orch.fire_post_compact("auto", summary, tokens_freed).await;
                 let history_raw = {
                     let s = orch.session.lock().await;
                     s.model_context_history()

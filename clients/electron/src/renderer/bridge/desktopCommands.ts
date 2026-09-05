@@ -30,10 +30,9 @@ export const DESKTOP_COMMANDS: readonly DesktopCommand[] = [
   },
   {
     name: 'compact',
-    args: 'none',
+    args: 'optional',
     async run(args, ctx) {
-      if (args) return ctx.emit('/compact takes no arguments on Desktop', true);
-      await ctx.forceCompact();
+      await ctx.forceCompact(args || undefined);
     },
   },
   {

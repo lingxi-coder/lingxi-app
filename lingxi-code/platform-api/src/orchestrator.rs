@@ -2991,6 +2991,22 @@ pub trait OutputStream: Send + Sync {
     /// during the compaction wait.
     async fn emit_compaction_started(&self) {}
 
+    /// Emit the committed compact boundary with its persistent UUID and metadata.
+    /// SDK transports use this to preserve resume/relink information.
+    async fn emit_compact_boundary(
+        &self,
+        _boundary_uuid: &str,
+        _metadata: &protocol::CompactBoundaryMetadata,
+    ) {
+    }
+
+    /// End the compaction status lifecycle on success or failure. Unlike
+    /// `emit_compaction_completed`, this also clears status after failed attempts.
+    async fn emit_compaction_finished(&self, _error: Option<&str>) {}
+
+    /// Emit a transcript-only synthetic summary after its compact boundary.
+    async fn emit_compact_summary(&self, _summary_uuid: &str, _summary: &str) {}
+
     /// Emit a compaction-completed event, its size delta, and the summary that
     /// transcript UIs reveal in verbose mode.
     /// Default no-op for adapters that do not render compaction state.

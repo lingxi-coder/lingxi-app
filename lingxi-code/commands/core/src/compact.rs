@@ -127,6 +127,14 @@ pub fn compact_failure_display(msg: &str) -> String {
         return "Compaction interrupted · This may be due to network issues — please try again."
             .to_string();
     }
+    for notice in [
+        "Compaction failed · conversation could not be reduced below the context limit",
+        "Compaction failed · attached media exceeds size limits",
+    ] {
+        if msg.contains(notice) {
+            return notice.to_string();
+        }
+    }
     if let Some(i) = msg.find("Error during compaction:") {
         return msg[i..].to_string();
     }
@@ -151,6 +159,21 @@ mod tests {
     use super::*;
     use orchestrator::test_support::MockOrchestratorHandle;
     use platform_api::CompactionSummary;
+
+    #[test]
+    fn latest_reactive_failure_notices_are_preserved() {
+        // Claude Code 2.1.261 /compact exhausted + media_unstrippable cases.
+        for expected in [
+            "Compaction failed · conversation could not be reduced below the context limit",
+            "Compaction failed · attached media exceeds size limits",
+        ] {
+            assert_eq!(
+                compact_failure_display(&format!("handle action failed: {expected}")),
+                expected
+            );
+            assert!(compact_failure_is_error(expected));
+        }
+    }
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
@@ -398,7 +421,10 @@ mod tests {
         let h = CompactHandler::new(handle);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Error compacting conversation", "got: {s}");
+                assert_eq!(
+                    s, "Error during compaction: no forked summarizer wired",
+                    "got: {s}"
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }

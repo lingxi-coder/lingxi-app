@@ -326,7 +326,7 @@ impl ConversationOrchestrator {
         // (e.g. the M3 stub Autocompactor path).
         if cancel.is_cancelled() {
             return Err(platform_api::HandleError::ActionFailed(
-                "compaction cancelled".into(),
+                "Compaction canceled.".into(),
             ));
         }
 
@@ -352,6 +352,7 @@ impl ConversationOrchestrator {
         // hooks are visible too (`Juy` emits `sdk_status: compacting` first).
         self.output.emit_compaction_started().await;
 
+        let outcome = async {
         // hooks compaction lifecycle: PreCompact fires before the summary pass.
         // This is the explicit `/compact` entry point, so the trigger is
         // `manual` (TS `isAutoCompact ? 'auto' : 'manual'`). TS `VJn`: a
@@ -380,7 +381,8 @@ impl ConversationOrchestrator {
         // Autocompactor replaces the slot's potentially stale message clone with
         // `history_before`'s selected prefix before issuing the request.
         let system_prompt = self.effective_system_prompt().await;
-        self.save_cache_safe_params(Some(&system_prompt), &model)
+        let tools = self.build_wire_tools().await;
+        self.save_cache_safe_params(Some(&system_prompt), &model, &tools)
             .await;
 
         // Run the 5-layer compactor, racing against the cancel token.
@@ -396,7 +398,7 @@ impl ConversationOrchestrator {
             biased;
             () = cancel.cancelled() => {
                 return Err(platform_api::HandleError::ActionFailed(
-                    "compaction cancelled".into(),
+                    "Compaction canceled.".into(),
                 ));
             }
             r = compactor.process_forced(history_before, merged_instructions.as_deref()) => r
@@ -407,7 +409,7 @@ impl ConversationOrchestrator {
                     // rather than the generic "compaction failed: …".
                     compaction::autocompact::CompactionError::MaxRetriesExceeded => {
                         platform_api::HandleError::ActionFailed(
-                            compaction::ptl_retry::COMPACTION_CONVERSATION_TOO_LONG.to_string(),
+                            "Compaction failed · conversation could not be reduced below the context limit".to_string(),
                         )
                     }
                     compaction::autocompact::CompactionError::NotEnoughMessages => {
@@ -415,9 +417,14 @@ impl ConversationOrchestrator {
                             "Not enough messages to compact.".to_string(),
                         )
                     }
-                    other => {
-                        platform_api::HandleError::ActionFailed(format!("compaction failed: {other}"))
+                    compaction::autocompact::CompactionError::MediaUnstrippable => {
+                        platform_api::HandleError::ActionFailed("Compaction failed · attached media exceeds size limits".into())
                     }
+                    compaction::autocompact::CompactionError::Summary(detail)
+                    | compaction::autocompact::CompactionError::Internal(detail) => {
+                        platform_api::HandleError::ActionFailed(format!("Error during compaction: {detail}"))
+                    }
+                    other => platform_api::HandleError::ActionFailed(format!("Error during compaction: {other}")),
                 })?,
         };
         // CC re-checks `signal.aborted` between compaction phases: an Esc that
@@ -427,7 +434,7 @@ impl ConversationOrchestrator {
         // from under a prompt the user has since submitted.
         if cancel.is_cancelled() {
             return Err(platform_api::HandleError::ActionFailed(
-                "compaction cancelled".into(),
+                "Compaction canceled.".into(),
             ));
         }
         // API duration = the summarizer round-trip only. `compact_started`
@@ -437,12 +444,6 @@ impl ConversationOrchestrator {
         let compact_duration = api_started.elapsed();
         self.record_compaction_usage(&result, compact_duration)
             .await;
-
-        // hooks compaction lifecycle: capture the summary + freed-token count
-        // BEFORE `apply_post_compact` consumes the result, so PostCompact can
-        // carry the byte-faithful payload (TS `compactData.compactSummary`).
-        let summary = Self::compaction_summary_text(&result);
-        let tokens_freed = result.total_tokens_freed;
 
         // Apply the post-compact transition (boundary marker + history swap +
         // CompactionCompleted emit) via the shared helper reused by the
@@ -464,17 +465,20 @@ impl ConversationOrchestrator {
             // Esc landed before the post-compact commit phase: no auxiliary
             // state or history has been changed.
             return Err(platform_api::HandleError::ActionFailed(
-                "compaction cancelled".into(),
+                "Compaction canceled.".into(),
             ));
         };
 
-        // PostCompact fires AFTER the compaction transition has been applied
-        // (TS `compact.ts:723`). Manual `/compact` ⇒ `manual` trigger.
-        // Best-effort — never fails the call.
-        self.fire_post_compact("manual", summary, tokens_freed)
-            .await;
-
         Ok(summary_out)
+        }.await;
+        if let Err(error) = &outcome {
+            let detail = match error {
+                platform_api::HandleError::ActionFailed(detail) => detail.as_str(),
+                platform_api::HandleError::Unimplemented(_) => "compaction failed",
+            };
+            self.output.emit_compaction_finished(Some(detail)).await;
+        }
+        outcome
     }
 
     /// Apply a completed compaction pass to the live session: append the
@@ -612,31 +616,59 @@ impl ConversationOrchestrator {
     }
 
     fn post_compact_attached_file_paths(messages: &[protocol::ConversationMessage]) -> Vec<String> {
+        // Native 2.1.261 `kXo`: only preserved Read tool calls establish that
+        // a file is still in context. A Read that returned an unchanged-file
+        // stub depends on an earlier result and cannot establish that itself.
+        let dedup_reads = messages
+            .iter()
+            .flat_map(|message| {
+                let protocol::ConversationMessage::User { content, .. } = message else {
+                    return Vec::new();
+                };
+                content
+                    .iter()
+                    .filter_map(|block| match block {
+                        protocol::ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            content_blocks: None,
+                            provider_tool_use_id,
+                            ..
+                        } if tool_file::read::is_dedup_result(content) => Some(
+                            provider_tool_use_id
+                                .clone()
+                                .unwrap_or_else(|| tool_use_id.to_string()),
+                        ),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<HashSet<_>>();
         messages
             .iter()
             .flat_map(|message| {
-                message
-                    .text_content()
-                    .lines()
-                    .filter_map(|line| {
-                        let path = line
-                            .strip_prefix("Referenced file ")
-                            .map(|rest| {
-                                rest.split_once(" (restored after compaction):")
-                                    .map_or(rest, |(path, _)| path)
-                            })
-                            .or_else(|| {
-                                line.strip_prefix("Note: ").and_then(|rest| {
-                                    rest.split_once(
-                                        " was read before the last conversation was summarized",
-                                    )
-                                    .map(|(path, _)| path)
-                                })
-                            })?;
-                        // The rendered path is already escaped. Normalize its
-                        // lexical form but do not escape it a second time (an
-                        // actual filename containing the literal `&lt;` must
-                        // remain distinguishable from a filename containing `<`).
+                let protocol::ConversationMessage::Assistant { content, .. } = message else {
+                    return Vec::new();
+                };
+                content
+                    .iter()
+                    .filter_map(|block| {
+                        let protocol::ContentBlock::ToolUse {
+                            id,
+                            name,
+                            input,
+                            provider_id,
+                        } = block
+                        else {
+                            return None;
+                        };
+                        if name != "Read"
+                            || dedup_reads
+                                .contains(&provider_id.clone().unwrap_or_else(|| id.to_string()))
+                        {
+                            return None;
+                        }
+                        let path = input.get("file_path")?.as_str()?;
                         Some(
                             crate::turn_loop::normalize_lexically(std::path::Path::new(path))
                                 .to_string_lossy()
@@ -665,8 +697,6 @@ impl ConversationOrchestrator {
 
         let mut attached = Vec::new();
         for message in messages {
-            let body = message.text_content();
-            attached.push(compaction::AttachedSkillContent::Body(body.clone()));
             if let Some(contents) = known_attachments.get(&message.id()) {
                 attached.extend(
                     contents
@@ -674,6 +704,28 @@ impl ConversationOrchestrator {
                         .cloned()
                         .map(compaction::AttachedSkillContent::Attachment),
                 );
+                continue;
+            }
+            // Native `Lle` accepts only meta-user messages made entirely of
+            // text, joining multiple blocks with a blank line. Ordinary user
+            // or assistant text must not suppress registry write-backs.
+            if let protocol::ConversationMessage::User {
+                content,
+                is_meta: true,
+                ..
+            } = message
+            {
+                let text = content
+                    .iter()
+                    .map(|block| match block {
+                        protocol::ContentBlock::Text { text }
+                        | protocol::ContentBlock::TextJsUtf16 { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>();
+                if let Some(text) = text {
+                    attached.push(compaction::AttachedSkillContent::Body(text.join("\n\n")));
+                }
             }
         }
         attached
@@ -703,16 +755,36 @@ impl ConversationOrchestrator {
         // already survived in the preserved boundary context, then sort mtime
         // DESC and take the top five.
         let plan_file = crate::turn_loop::normalize_lexically(plan_file);
+        // Native EXo / gQ excludes the five memory entrypoints because the
+        // system prompt reloads them. Keep the repository's branded paths.
+        let mut memory_entrypoints = vec![
+            self.cwd.join(branding::MEMORY_FILE),
+            self.cwd.join(branding::MEMORY_LOCAL_FILE),
+            memory::lingxi_md::hierarchy::managed_path(),
+        ];
+        if let Some(home) = dirs::home_dir() {
+            memory_entrypoints
+                .push(memory::lingxi_md::user_config_dir(&home).join(branding::MEMORY_FILE));
+        }
+        if let Some(dir) = self
+            .prompt_runtime
+            .memory_prefetch
+            .as_ref()
+            .and_then(|p| p.user_memdir())
+        {
+            memory_entrypoints.push(dir.join("MEMORY.md"));
+        }
         let candidates = candidates
             .into_iter()
             .filter(|candidate| {
                 let path = crate::turn_loop::normalize_lexically(&candidate.path);
-                let rendered_path =
-                    crate::prompt::sanitize::escape_reminder_path(&path.to_string_lossy());
                 path != plan_file
+                    && !memory_entrypoints
+                        .iter()
+                        .any(|entrypoint| crate::turn_loop::normalize_lexically(entrypoint) == path)
                     && !already_attached
                         .iter()
-                        .any(|attached| attached == &rendered_path)
+                        .any(|attached| attached == path.to_string_lossy().as_ref())
             })
             .collect();
         let selected = compaction::select_post_compact_files(candidates, &[]);
@@ -737,20 +809,53 @@ impl ConversationOrchestrator {
             match read_utf8_prefix(
                 &candidate.path,
                 compaction::thresholds::POST_COMPACT_MAX_BYTES_PER_FILE_READ,
-                compaction::thresholds::POST_COMPACT_MAX_CHARS_PER_FILE_READ,
+                // vc = Math.round(UTF16.length / 4): 20_001 units still
+                // consume exactly 5_000 tokens in the ordinary-text case.
+                compaction::thresholds::POST_COMPACT_MAX_CHARS_PER_FILE_READ + 1,
             )
             .await
             {
                 Ok(read) => {
-                    self.fire_post_compact_file_restore(true).await;
+                    let units = read.content.encode_utf16().count() as u64;
+                    let extension = candidate
+                        .path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(str::to_ascii_lowercase);
+                    let divisor = match extension.as_deref() {
+                        Some("json" | "jsonl" | "jsonc") => 2,
+                        _ => 4,
+                    };
                     if read.truncated
-                        || compaction::estimate_content_tokens(&read.content)
+                        || (units + divisor / 2) / divisor
                             > compaction::POST_COMPACT_MAX_TOKENS_PER_FILE
                     {
+                        // y5e's compact-reference fallback returns directly,
+                        // before emitting the successful-file-read event.
                         fresh.push(FreshFileAttachment::Reference {
                             path: candidate.path,
                         });
                     } else {
+                        self.fire_post_compact_file_restore(true).await;
+                        if let Ok(metadata) = tokio::fs::metadata(&candidate.path).await {
+                            let mtime_ms = metadata
+                                .modified()
+                                .map(tool_api::read_file_state::mtime_ms_floor)
+                                .unwrap_or(0);
+                            tool_api::read_file_state::set(
+                                &self.prompt_runtime.read_state_map,
+                                candidate.path.clone(),
+                                tool_api::read_file_state::ReadFileEntry {
+                                    content: read.content.clone(),
+                                    mtime_ms,
+                                    offset: None,
+                                    limit: None,
+                                    from_read: true,
+                                    seeded_from_context: false,
+                                    is_partial_view: false,
+                                },
+                            );
+                        }
                         fresh.push(FreshFileAttachment::Content {
                             path: candidate.path,
                             content: read.content,
@@ -770,30 +875,84 @@ impl ConversationOrchestrator {
             .find_by_name("Read")
             .map_or_else(|| "Read".to_string(), |tool| tool.name().to_string());
         let mut running_tokens = 0u64;
-        fresh
-            .into_iter()
-            .filter_map(|attachment| {
-                let body = match attachment {
-                    FreshFileAttachment::Content { path, content } => format!(
-                        "Referenced file {} (restored after compaction):\n{}",
-                        crate::prompt::sanitize::escape_reminder_path(&path.to_string_lossy()),
-                        crate::prompt::sanitize::escape_closing_system_reminder(&content)
-                    ),
-                    FreshFileAttachment::Reference { path } => {
-                        compact_file_reference_body(&path, &read_tool_name)
-                    }
-                };
-                let cost = compaction::estimate_content_tokens(&body);
-                if running_tokens.saturating_add(cost) > compaction::POST_COMPACT_TOKEN_BUDGET {
-                    return None;
+        let mut restored = Vec::new();
+        for attachment in fresh {
+            let (path, data, bodies) = match attachment {
+                FreshFileAttachment::Content { path, content } => {
+                    let num_lines = content.split_inclusive('\n').count();
+                    let total_lines = if content.is_empty() {
+                        0
+                    } else {
+                        content.bytes().filter(|&byte| byte == b'\n').count() + 1
+                    };
+                    let data = serde_json::json!({
+                        "type": "file", "filename": path,
+                        "content": { "type": "text", "file": {
+                            "filePath": path, "content": content,
+                            "numLines": num_lines, "startLine": 1,
+                            "totalLines": total_lines,
+                        }},
+                    });
+                    let result = if content.is_empty() {
+                        tool_file::read::EMPTY_FILE_WARNING.to_string()
+                    } else {
+                        tool_file::read::add_line_numbers(&content, 1)
+                    };
+                    let input = serde_json::json!({"file_path": path});
+                    let bodies = vec![
+                        format!(
+                            "Called the {read_tool_name} tool with the following input: {input}"
+                        ),
+                        format!("Result of calling the {read_tool_name} tool:\n{result}"),
+                    ];
+                    (path, data, bodies)
                 }
-                running_tokens = running_tokens.saturating_add(cost);
-                Some(protocol::ConversationMessage::user_meta(
+                FreshFileAttachment::Reference { path } => {
+                    let data = serde_json::json!({
+                        "type": "compact_file_reference", "filename": path,
+                    });
+                    let body = compact_file_reference_body(&path, &read_tool_name);
+                    (path, data, vec![body])
+                }
+            };
+            // yXo budgets JSON.stringify(pn(attachment)), including JSON
+            // escapes and the attachment envelope, before rendering its
+            // call/result messages. A body-only estimate undercounts
+            // control characters and can exceed the 50k aggregate budget.
+            let mut data = data;
+            let cwd = crate::turn_loop::normalize_lexically(&self.cwd);
+            let normalized_path = crate::turn_loop::normalize_lexically(&path);
+            let common = cwd
+                .components()
+                .zip(normalized_path.components())
+                .take_while(|(left, right)| left == right)
+                .count();
+            let mut display_path = std::path::PathBuf::new();
+            for _ in cwd.components().skip(common) {
+                display_path.push("..");
+            }
+            for component in normalized_path.components().skip(common) {
+                display_path.push(component.as_os_str());
+            }
+            data["displayPath"] = serde_json::json!(display_path.to_string_lossy());
+            let envelope = serde_json::json!({
+                "attachment": data, "type": "attachment",
+                "uuid": uuid::Uuid::new_v4().to_string(),
+                "timestamp": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            });
+            let cost = compaction::estimate_content_tokens(&envelope.to_string());
+            if running_tokens.saturating_add(cost) > compaction::POST_COMPACT_TOKEN_BUDGET {
+                continue;
+            }
+            running_tokens = running_tokens.saturating_add(cost);
+            restored.extend(bodies.into_iter().map(|body| {
+                protocol::ConversationMessage::user_meta(
                     protocol::MessageId::new(),
                     format!("<system-reminder>\n{body}\n</system-reminder>"),
-                ))
-            })
-            .collect()
+                )
+            }));
+        }
+        restored
     }
 
     /// Fire the post-compact file-restore telemetry — `N(r,{})` / `N(n,{})` in
@@ -837,10 +996,10 @@ impl ConversationOrchestrator {
         // compact boundary so Ctrl-O can reveal the same summary sent to the
         // continuation turn.
         let visible_summary = Self::compaction_summary_text(&result);
-        // Modern automatic/reactive compaction (`kio`) stamps boundary
-        // duration before attachment restoration. Manual full compaction
-        // (`hio`) stamps it afterwards. Preserve that observable distinction.
-        let auto_duration_ms = (trigger == compaction::CompactTrigger::Auto)
+        // The manual/reactive group compactor (2.1.261 Ajt) freezes boundary
+        // duration before attachment restoration; full auto (Ejt) freezes it
+        // afterwards. The group compactor always carries a preserved tail.
+        let preserved_duration_ms = (!result.messages_to_preserve.is_empty())
             .then(|| u64::try_from(compact_started.elapsed().as_millis()).unwrap_or(u64::MAX));
         // #58: the usage-zeroed verbatim tail the autocompact layer preserved
         // (`messagesToPreserve` → `messagesToKeep`). Empty on the
@@ -946,6 +1105,19 @@ impl ConversationOrchestrator {
         self.fire_instructions_loaded_with_reason(hooks::events::InstructionsLoadReason::Compact)
             .await;
         let session_start_messages = self.collect_session_start_messages("compact").await;
+        let duration_ms = preserved_duration_ms.unwrap_or_else(|| {
+            u64::try_from(compact_started.elapsed().as_millis()).unwrap_or(u64::MAX)
+        });
+
+        self.fire_post_compact(
+            match trigger {
+                compaction::CompactTrigger::Manual => "manual",
+                compaction::CompactTrigger::Auto => "auto",
+            },
+            result.raw_summary_text.clone(),
+            result.total_tokens_freed,
+        )
+        .await;
 
         // COMPACT.1 / #58: the boundary marker leads the post-compact history,
         // matching TS `buildPostCompactMessages` / `Iqn` order
@@ -998,9 +1170,7 @@ impl ConversationOrchestrator {
         // attachments, and SessionStart hook results.
         let post_tokens = compaction::grouping::estimate_tokens_for_range(&history_after);
         metadata.post_tokens = Some(post_tokens);
-        metadata.duration_ms = Some(auto_duration_ms.unwrap_or_else(|| {
-            u64::try_from(compact_started.elapsed().as_millis()).unwrap_or(u64::MAX)
-        }));
+        metadata.duration_ms = Some(duration_ms);
         let dropped_this_pass = pre_tokens_estimate.saturating_sub(post_tokens);
         let previous_dropped = self
             .compaction_runtime
@@ -1085,6 +1255,18 @@ impl ConversationOrchestrator {
         }
         for m in &session_start_messages {
             self.persist_message_to_jsonl(m).await;
+        }
+
+        // Claude closes the compact command status before the query driver
+        // publishes its boundary. Preserve this order for stream-json clients.
+        self.output.emit_compaction_finished(None).await;
+        self.output
+            .emit_compact_boundary(&marker.id().as_uuid().to_string(), &metadata)
+            .await;
+        for summary in &result.messages {
+            self.output
+                .emit_compact_summary(&summary.id().as_uuid().to_string(), &summary.text_content())
+                .await;
         }
 
         // Best-effort emit so the TUI hears about it.
@@ -1475,15 +1657,17 @@ impl ConversationOrchestrator {
         // blocking PreCompact hook logs `Precomputed compact blocked by
         // PreCompact hook: <blockedBy>` and skips compaction (history untouched).
         let compact_started = std::time::Instant::now();
+        self.output.emit_compaction_started().await;
         let pre_compact = self.fire_pre_compact("auto", None).await;
         if let Some(detail) = pre_compact.blocked_by {
             tracing::warn!("Precomputed compact blocked by PreCompact hook: {detail}");
+            self.output
+                .emit_compaction_finished(Some(&format!(
+                    "Compaction blocked by PreCompact hook: {detail}"
+                )))
+                .await;
             return;
         }
-
-        // Signal the UI that compaction has started so it can show a
-        // spinner / "Compacting…" while the summarizer runs.
-        self.output.emit_compaction_started().await;
 
         // Run the orchestrator pass under the per-conversation tracking lock so
         // the circuit-breaker state is read + written atomically for this turn.
@@ -1511,6 +1695,10 @@ impl ConversationOrchestrator {
                 // never fail the turn (TS `autoCompactIfNeeded` swallows the
                 // error and proceeds with the un-compacted history).
                 tracing::warn!(error = %e, "proactive autocompact failed; continuing un-compacted");
+                drop(tracking);
+                self.output
+                    .emit_compaction_finished(Some(&e.to_string()))
+                    .await;
                 return;
             }
         };
@@ -1537,6 +1725,9 @@ impl ConversationOrchestrator {
             );
             self.fire_rapid_refill_breaker_telemetry(consecutive, turns_since)
                 .await;
+            self.output
+                .emit_compaction_finished(Some(compaction::RAPID_REFILL_THRASHING_MESSAGE))
+                .await;
             return;
         }
 
@@ -1547,6 +1738,8 @@ impl ConversationOrchestrator {
             // no-op whenever autocompact itself did not run — matching the
             // manual-path contract that only the autocompact transition emits a
             // boundary marker.
+            drop(tracking);
+            self.output.emit_compaction_finished(None).await;
             return;
         }
 
@@ -1555,14 +1748,6 @@ impl ConversationOrchestrator {
         drop(tracking);
         self.record_compaction_usage(&result, compact_duration)
             .await;
-
-        // hooks compaction lifecycle: capture the summary + freed-token count
-        // from the compaction result BEFORE `apply_post_compact` consumes it,
-        // so the PostCompact hook can carry the byte-faithful payload (TS
-        // `compactData.compactSummary`). The proactive trigger is always the
-        // `auto` arm (TS `isAutoCompact`).
-        let summary = Self::compaction_summary_text(&result);
-        let tokens_freed = result.total_tokens_freed;
 
         // `cancel: None` — the proactive trigger has no user-cancellable
         // surface, so the apply is infallible.
@@ -1576,11 +1761,6 @@ impl ConversationOrchestrator {
             None,
         )
         .await;
-
-        // PostCompact fires AFTER the compaction transition has been applied to
-        // the live session (TS `compact.ts:723`). Best-effort — never fails the
-        // turn.
-        self.fire_post_compact("auto", summary, tokens_freed).await;
     }
 
     /// Append an SDK/stream-json compact boundary with its structured metadata.
@@ -1662,13 +1842,24 @@ impl ConversationOrchestrator {
     async fn persist_compact_boundary_jsonl_value(
         &self,
         marker: &ConversationMessage,
-        compact_metadata: serde_json::Value,
+        mut compact_metadata: serde_json::Value,
     ) {
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
             return;
         };
         let session_id_str = self.session.lock().await.session_id.to_string();
-        let logical_parent = self.transcript.last_jsonl_uuid.lock().await.clone();
+        let explicit_parent = match marker {
+            ConversationMessage::System {
+                compact_metadata: Some(metadata),
+                ..
+            } => metadata.logical_parent_uuid.clone(),
+            _ => None,
+        };
+        let logical_parent =
+            explicit_parent.or(self.transcript.last_jsonl_uuid.lock().await.clone());
+        if let Some(metadata) = compact_metadata.as_object_mut() {
+            metadata.remove("logicalParentUuid");
+        }
         let git_branch = self.resolve_git_branch().await;
         let content = match marker {
             ConversationMessage::System { content, .. } => content.clone(),
@@ -1764,12 +1955,12 @@ impl ConversationOrchestrator {
             .all_results
             .iter()
             .filter(|(_, result)| result.outcome == hooks::response::HookOutcome::Success)
-            .map(|(_, result)| result.stdout.trim())
+            .map(|(_, result)| compaction::prompt::trim_compact_text(&result.stdout))
             .filter(|text| !text.is_empty())
             .collect();
         PreCompactHookOutcome {
             blocked_by,
-            additional_instructions: (!stdout.is_empty()).then(|| stdout.join("\n")),
+            additional_instructions: (!stdout.is_empty()).then(|| stdout.join("\n\n")),
         }
     }
 

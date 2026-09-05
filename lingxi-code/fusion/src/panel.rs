@@ -2641,11 +2641,26 @@ mark_allocated must not silently set both"
 /// for the whole panel stage — returns `Err(FusionError::Cancelled)` without
 /// awaiting the pinned `run_future`, dropping `run_inner` and this `select!`
 /// with it. So an ordinary Ctrl-C never reaches this arm at all. The arm runs
-/// only when the token flips while `run_inner` is being polled, and its
-/// `sink.update` is reached only when the drain finds every remaining task
-/// already finished, so it runs to `None` without yielding back to that outer
-/// select. That conjunction is exactly what the test below constructs, and it
-/// is the only state in which this discard changes the committed settlement.
+/// only when the token flips while `run_inner` is being polled — a panel task
+/// on another worker cancelling mid-poll, which the multi-threaded runtime
+/// the hosts run on (`apps/bridge-server`'s bare `#[tokio::main]`) makes
+/// ordinary.
+///
+/// From there the arm has two exits, and each of its two `sink.update` calls
+/// owns one. When the drain finds every remaining task already finished it
+/// runs to `None` without yielding back to that outer select, and the
+/// trailing update recomputes the committed figure — that conjunction is what
+/// `cancel_drain_settles_a_finished_panel_from_its_real_usage_not_the_prompt_floor`
+/// constructs, and it is the only state in which the round-9 discard changed
+/// the settlement. When the drain instead YIELDS (an aborted task the runtime
+/// has not dropped yet), the outer select wins that yield and the trailing
+/// update NEVER runs: the only figure that survives is whatever the in-loop
+/// update latched from the completions already drained. [Round-11 item N2]
+/// Round-10 mutation testing showed that deleting either of the two calls
+/// left all 156 fusion lib tests green; the tests below now pin both of them
+/// — plus the third refresh in the `JoinError` arm, whose own mutation was
+/// equally silent — each by the settlement figure the missing refresh
+/// mis-commits.
 #[cfg(test)]
 mod cancel_drain_settlement_tests {
     use super::*;
@@ -2705,6 +2720,118 @@ mod cancel_drain_settlement_tests {
     const REAL_INPUT_TOKENS: u64 = 180_000;
     const REAL_OUTPUT_TOKENS: u64 = 24_000;
 
+    /// One `SubagentResult::Completed` carrying real, provider-reported
+    /// usage — the payload every spawner in this module hands back, so the
+    /// two token constants above are stated exactly once.
+    fn completed_with_real_usage() -> SubagentResult {
+        completed_with_real_usage_reporting(serde_json::json!({
+            "schema_version": 1,
+            "summary": "s",
+            "candidate_answer": "a",
+        }))
+    }
+
+    /// The same real usage carrying an arbitrary `content` payload, so a
+    /// test can spend real tokens and STILL fail `parse_and_sanitize` — the
+    /// `finish_panel` shape that keeps `usage` while the status goes
+    /// `Failed`.
+    fn completed_with_real_usage_reporting(content: Value) -> SubagentResult {
+        let usage = SubagentUsage {
+            total_tokens: REAL_INPUT_TOKENS + REAL_OUTPUT_TOKENS,
+            input_tokens: REAL_INPUT_TOKENS,
+            output_tokens: REAL_OUTPUT_TOKENS,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            reasoning_output_tokens: 0,
+        };
+        SubagentResult::Completed {
+            agent_id: protocol::AgentId::new(),
+            content,
+            usage: usage.clone(),
+            total_tool_use_count: 0,
+            total_duration_ms: 1,
+            total_tokens: REAL_INPUT_TOKENS + REAL_OUTPUT_TOKENS,
+            assistant_message_count: 3,
+            response_char_count: 1,
+            last_request_id: None,
+            cumulative_usage: usage,
+            usage_complete: true,
+        }
+    }
+
+    /// The three survives-a-drop cells plus everything `RealizedSpendSink`
+    /// borrows, owned in one place so each test can build the sink in a
+    /// line and read the cells back by name.
+    struct SinkCells {
+        realized_tokens: Arc<Mutex<Option<u64>>>,
+        resolved_egress: Arc<Mutex<Option<Vec<String>>>>,
+        settlement: Arc<Mutex<Option<(u64, bool)>>>,
+        catalog: Vec<CatalogModel>,
+        prices: UnitPrices,
+        analyst: ResolvedPanel,
+    }
+
+    impl SinkCells {
+        fn new() -> Self {
+            Self {
+                realized_tokens: Arc::new(Mutex::new(None)),
+                resolved_egress: Arc::new(Mutex::new(None)),
+                settlement: Arc::new(Mutex::new(None)),
+                catalog: Vec::new(),
+                prices: UnitPrices,
+                analyst: ResolvedPanel {
+                    profile: "anthropic".into(),
+                    model: "claude-sonnet-5".into(),
+                },
+            }
+        }
+
+        fn sink(&self) -> RealizedSpendSink<'_> {
+            RealizedSpendSink {
+                realized_tokens: &self.realized_tokens,
+                resolved_egress: &self.resolved_egress,
+                settlement: &self.settlement,
+                catalog: &self.catalog,
+                prices: &self.prices,
+                analyst: &self.analyst,
+                parent_profile: "anthropic",
+                parent_model: "claude-sonnet-5",
+                request_prompt: "task",
+            }
+        }
+
+        fn realized_tokens(&self) -> Option<u64> {
+            *self
+                .realized_tokens
+                .lock()
+                .expect("realized_tokens cell must not be poisoned")
+        }
+
+        fn resolved_egress(&self) -> Option<Vec<String>> {
+            self.resolved_egress
+                .lock()
+                .expect("resolved_egress cell must not be poisoned")
+                .clone()
+        }
+
+        fn settlement(&self) -> Option<(u64, bool)> {
+            *self
+                .settlement
+                .lock()
+                .expect("settlement cell must not be poisoned")
+        }
+    }
+
+    /// The one-turn floor `in_flight_panels` gives a panel that reached the
+    /// spawner but has not finished: `estimate_in_flight_usage`'s
+    /// `approximate_tokens_for_bytes(prompt.len())` input tokens and ZERO
+    /// output tokens, which at `UnitPrices` IS the nano-USD figure.
+    fn in_flight_floor_nano_usd() -> u64 {
+        llm_client::model::count_tokens::approximate_tokens_for_bytes(
+            panel_prompt("task").len() as u64
+        )
+    }
+
     /// The first panel to reach the spawner finishes with real,
     /// provider-reported usage AND cancels the run from inside that same
     /// call. On a current-thread runtime the collection loop is therefore
@@ -2724,31 +2851,7 @@ mod cancel_drain_settlement_tests {
             _inherit: SubagentInheritance,
         ) -> Result<SubagentResult, SubagentSpawnError> {
             self.cancel.cancel();
-            let usage = SubagentUsage {
-                total_tokens: REAL_INPUT_TOKENS + REAL_OUTPUT_TOKENS,
-                input_tokens: REAL_INPUT_TOKENS,
-                output_tokens: REAL_OUTPUT_TOKENS,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                reasoning_output_tokens: 0,
-            };
-            Ok(SubagentResult::Completed {
-                agent_id: protocol::AgentId::new(),
-                content: serde_json::json!({
-                    "schema_version": 1,
-                    "summary": "s",
-                    "candidate_answer": "a",
-                }),
-                usage: usage.clone(),
-                total_tool_use_count: 0,
-                total_duration_ms: 1,
-                total_tokens: REAL_INPUT_TOKENS + REAL_OUTPUT_TOKENS,
-                assistant_message_count: 3,
-                response_char_count: 1,
-                last_request_id: None,
-                cumulative_usage: usage,
-                usage_complete: true,
-            })
+            Ok(completed_with_real_usage())
         }
     }
 
@@ -2780,26 +2883,8 @@ mod cancel_drain_settlement_tests {
             cancel.clone(),
         );
 
-        let realized_tokens: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
-        let resolved_egress: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
-        let settlement: Arc<Mutex<Option<(u64, bool)>>> = Arc::new(Mutex::new(None));
-        let catalog: Vec<CatalogModel> = Vec::new();
-        let prices = UnitPrices;
-        let analyst = ResolvedPanel {
-            profile: "anthropic".into(),
-            model: "claude-sonnet-5".into(),
-        };
-        let sink = RealizedSpendSink {
-            realized_tokens: &realized_tokens,
-            resolved_egress: &resolved_egress,
-            settlement: &settlement,
-            catalog: &catalog,
-            prices: &prices,
-            analyst: &analyst,
-            parent_profile: "anthropic",
-            parent_model: "claude-sonnet-5",
-            request_prompt: "task",
-        };
+        let cells = SinkCells::new();
+        let sink = cells.sink();
 
         let panels = two_panels();
         let err = run_panels(
@@ -2822,15 +2907,10 @@ mod cancel_drain_settlement_tests {
 
         // What the discard used to leave behind, spelled out so the red run
         // names it: the finished panel re-synthesized at the in-flight floor.
-        let floor_input_tokens = llm_client::model::count_tokens::approximate_tokens_for_bytes(
-            panel_prompt("task").len() as u64,
-        );
+        let floor_input_tokens = in_flight_floor_nano_usd();
 
-        let observed_output = *realized_tokens
-            .lock()
-            .expect("realized_tokens cell must not be poisoned");
         assert_eq!(
-            observed_output,
+            cells.realized_tokens(),
             Some(REAL_OUTPUT_TOKENS),
             "the cancel arm drained a panel that had already finished with \
 {REAL_OUTPUT_TOKENS} provider-reported output tokens; discarding that payload leaves the \
@@ -2838,11 +2918,9 @@ realized-token cell at the in-flight floor's 0 output tokens, so the workflow to
 under-counts real, already-billed spend"
         );
 
-        let observed_settlement = *settlement
-            .lock()
-            .expect("settlement cell must not be poisoned");
-        let (priced_nano_usd, _estimated) =
-            observed_settlement.expect("the cancel arm must leave a settlement figure");
+        let (priced_nano_usd, _estimated) = cells
+            .settlement()
+            .expect("the cancel arm must leave a settlement figure");
         assert_eq!(
             priced_nano_usd,
             REAL_INPUT_TOKENS + REAL_OUTPUT_TOKENS,
@@ -2850,6 +2928,393 @@ under-counts real, already-billed spend"
 {REAL_INPUT_TOKENS} input + {REAL_OUTPUT_TOKENS} output tokens; the discarded drain instead \
 prices it through in_flight_panels at estimate_in_flight_usage's {floor_input_tokens} input \
 tokens and 0 output tokens"
+        );
+    }
+    /// Stand-in for `run()`'s outer `select!`: poll a `run_panels` future
+    /// EXACTLY once, from the test's own stack, with a waker whose wakes go
+    /// nowhere (this test drives the future; the runtime drives the panel
+    /// tasks, which carry their own wakers).
+    ///
+    /// The two tests below have to observe `run_panels` at a point that is
+    /// mid-`select!` — and, for the drain test, take the future away there.
+    /// `.await` cannot do either: the runtime decides when to re-poll and
+    /// nothing can drop the future between polls. Wrapping it in a second
+    /// biased `select!` on the SAME `CancellationToken`, the way `run()`
+    /// does, cannot either: that outer arm wins the instant the token is
+    /// already set, so `run_panels`' own cancel arm would never run at all.
+    /// In production the token flips WHILE `run_inner` is being polled (a
+    /// panel task on another worker cancels mid-poll), which is the state a
+    /// manual poll reproduces exactly, with no sleep and no dependence on
+    /// wake ordering.
+    struct NoopWake;
+    impl std::task::Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn poll_once<F: std::future::Future>(
+        future: &mut std::pin::Pin<Box<F>>,
+    ) -> std::task::Poll<F::Output> {
+        let waker = std::task::Waker::from(Arc::new(NoopWake));
+        let mut cx = std::task::Context::from_waker(&waker);
+        future.as_mut().poll(&mut cx)
+    }
+
+    /// Give the runtime enough turns for every spawned panel task to be
+    /// polled. They are ordinary runtime tasks — independent of the manual
+    /// polls above — so yielding is what lets them reach (or return from)
+    /// their spawner call.
+    async fn let_panel_tasks_run() {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Panel 0 (`anthropic`) marks itself dispatched and then parks inside
+    /// the spawner forever, so its task is still un-finished when the cancel
+    /// arm aborts it — an aborted task is only dropped once the runtime
+    /// polls it again, which is precisely what makes the drain YIELD. Panel
+    /// 1 (`openai`) marks itself dispatched, waits on `gate`, and then
+    /// finishes with real, provider-reported usage — so the test controls
+    /// the exact window in which a finished-but-uncollected panel is sitting
+    /// in the `JoinSet`.
+    struct ParkOneGateTheOther {
+        gate: Arc<Notify>,
+    }
+    #[async_trait]
+    impl SubagentSpawner for ParkOneGateTheOther {
+        async fn spawn(
+            &self,
+            request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            if request.model_profile.as_deref() == Some("anthropic") {
+                std::future::pending::<()>().await;
+            }
+            self.gate.notified().await;
+            Ok(completed_with_real_usage())
+        }
+    }
+
+    /// [Round-11 item N2] The `sink.update` INSIDE the cancel arm's drain
+    /// loop, pinned.
+    ///
+    /// Round-10 mutation testing deleted that one line and all 156 fusion
+    /// lib tests stayed green: the test above drains to `None` without ever
+    /// yielding, so the trailing `sink.update` recomputes the identical
+    /// figure one line later and covers for it. The in-loop call exists for
+    /// the state that trailing update CANNOT reach — the drain yields
+    /// (`abort_all` cannot finish a task that the runtime has not polled
+    /// since), and `run()`'s outer biased cancel arm, waiting on the SAME
+    /// token, then drops `run_inner` and this whole `select!` before the arm
+    /// can run its last statement. The only settlement figure that survives
+    /// is the one this in-loop call latched, and it is the figure `run()`'s
+    /// outer `Err` arm commits through `lease.commit`.
+    #[tokio::test]
+    async fn a_cancel_that_drops_the_future_mid_drain_still_settles_the_panel_it_pulled() {
+        let config = FusionRuntimeConfig {
+            panel_total_timeout_ms: 60_000,
+            ..FusionRuntimeConfig::defaults()
+        };
+        let cancel = CancellationToken::new();
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                tool_invoker: Arc::new(InertInvoker),
+                budget: Arc::new(InertBudget),
+            },
+            cancel.clone(),
+        );
+        let cells = SinkCells::new();
+        let sink = cells.sink();
+        let gate = Arc::new(Notify::new());
+        let panels = two_panels();
+        let floor = in_flight_floor_nano_usd();
+
+        let mut run = Box::pin(run_panels(
+            Arc::new(ParkOneGateTheOther {
+                gate: Arc::clone(&gate),
+            }),
+            &inherit,
+            &config,
+            true,
+            "task",
+            &panels,
+            "run-id",
+            Duration::from_secs(60),
+            &None,
+            Some(&sink),
+        ));
+
+        // Poll 1 spawns the panel tasks; nothing has run yet.
+        assert!(
+            poll_once(&mut run).is_pending(),
+            "run_panels only enqueues the panel tasks on its first poll, so it cannot be \
+ready here"
+        );
+        let_panel_tasks_run().await;
+
+        // Poll 2 takes the `dispatch.notified()` arm for both panels: both
+        // reached the spawner, neither has finished, so the cells hold two
+        // in-flight floors and nothing else.
+        assert!(
+            poll_once(&mut run).is_pending(),
+            "both panels are still inside the spawner, so the collection loop must park \
+again after the dispatch arm"
+        );
+        assert_eq!(
+            cells.settlement(),
+            Some((2 * floor, true)),
+            "before either panel finishes, the only priced spend is the two in-flight \
+floors of {floor} nano-USD each"
+        );
+        assert_eq!(
+            cells.realized_tokens(),
+            Some(0),
+            "an in-flight panel has produced no output tokens this side can count"
+        );
+
+        // Panel 1 finishes with real usage while the collection loop is
+        // parked — the finished-but-uncollected state the cancel arm's drain
+        // is the only thing that can rescue.
+        gate.notify_one();
+        let_panel_tasks_run().await;
+        assert_eq!(
+            cells.settlement(),
+            Some((2 * floor, true)),
+            "the collection loop has not been polled since panel 1 finished, so its real \
+usage cannot have reached the cells yet"
+        );
+
+        // The token flips while nobody is polling `run_inner` — production's
+        // equivalent is another worker cancelling mid-poll. Poll 3 runs the
+        // biased cancel arm: the drain pulls panel 1's finished payload
+        // (refreshing the cells), then parks on panel 0, whose abort the
+        // runtime has not processed yet.
+        cancel.cancel();
+        assert!(
+            poll_once(&mut run).is_pending(),
+            "the drain must YIELD on panel 0's not-yet-dropped abort — that is the whole \
+state under test; if it ran to None, the trailing sink.update would cover for the \
+in-loop one and this test would prove nothing"
+        );
+
+        // `run()`'s outer biased cancel arm wins that yield and drops
+        // `run_inner`. The trailing `sink.update` never runs.
+        drop(run);
+
+        assert_eq!(
+            cells.settlement(),
+            Some((REAL_INPUT_TOKENS + REAL_OUTPUT_TOKENS + floor, true)),
+            "the drain had already pulled panel 1's finished payload, so the settlement \
+this cancel commits must be its real {REAL_INPUT_TOKENS} input + {REAL_OUTPUT_TOKENS} \
+output tokens plus panel 0's {floor} nano-USD in-flight floor; without the sink.update \
+inside the drain loop the cells still hold the {} nano-USD two-floor figure from before \
+panel 1 ever finished, under-charging real, already-billed spend",
+            2 * floor
+        );
+        assert_eq!(
+            cells.realized_tokens(),
+            Some(REAL_OUTPUT_TOKENS),
+            "the workflow token charge must carry panel 1's real {REAL_OUTPUT_TOKENS} \
+output tokens, not the in-flight floor's 0"
+        );
+        assert_eq!(
+            cells.resolved_egress(),
+            Some(vec!["anthropic".to_string(), "openai".to_string()]),
+            "both panels egressed their prompt, so both profiles must be disclosed"
+        );
+    }
+
+    /// Panel 0 marks itself dispatched and then panics inside the spawner:
+    /// its task is FINISHED (so the drain runs to `None` without yielding —
+    /// `run()`'s outer select never gets the chance to drop the future) and
+    /// its slot arrives as a `JoinError`, which the drain deliberately does
+    /// not collect.
+    struct PanicInsideSpawner;
+    #[async_trait]
+    impl SubagentSpawner for PanicInsideSpawner {
+        async fn spawn(
+            &self,
+            _request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            panic!("panel task dies after reaching the spawner");
+        }
+    }
+
+    /// The `sink.update` at the END of the cancel arm, pinned — the other
+    /// member of the same class (round-10 mutation testing deleted it too,
+    /// and all 156 tests stayed green, because the in-loop call above covers
+    /// every state the existing test reaches).
+    ///
+    /// It is load-bearing exactly when the drain collects NOTHING: every
+    /// task it finds is a `JoinError`, which the arm deliberately does not
+    /// collect (see its comment on `panel_from_join_error`'s
+    /// `"not_dispatched"` arm), so no in-loop refresh can run — while a
+    /// panel that reached the spawner and egressed its whole prompt is
+    /// sitting in `in_flight_panels` with nobody having priced it. Without
+    /// this refresh the cancel commits exact $0 for a prompt the provider
+    /// was already sent.
+    #[tokio::test]
+    async fn a_cancel_whose_drain_collects_nothing_still_settles_the_in_flight_floor() {
+        let config = FusionRuntimeConfig {
+            panel_total_timeout_ms: 60_000,
+            ..FusionRuntimeConfig::defaults()
+        };
+        let cancel = CancellationToken::new();
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                tool_invoker: Arc::new(InertInvoker),
+                budget: Arc::new(InertBudget),
+            },
+            cancel.clone(),
+        );
+        let cells = SinkCells::new();
+        let sink = cells.sink();
+        let panels = vec![ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        }];
+        let floor = in_flight_floor_nano_usd();
+
+        let mut run = Box::pin(run_panels(
+            Arc::new(PanicInsideSpawner),
+            &inherit,
+            &config,
+            true,
+            "task",
+            &panels,
+            "run-id",
+            Duration::from_secs(60),
+            &None,
+            Some(&sink),
+        ));
+        assert!(
+            poll_once(&mut run).is_pending(),
+            "run_panels only enqueues the panel task on its first poll"
+        );
+        let_panel_tasks_run().await;
+        assert_eq!(
+            cells.settlement(),
+            None,
+            "the collection loop has not been polled since the panel marked itself \
+dispatched, so no arm has priced anything yet"
+        );
+
+        cancel.cancel();
+        let std::task::Poll::Ready(result) = poll_once(&mut run) else {
+            panic!(
+                "the panicked task's JoinError is already queued and it is the only task, \
+so the drain runs to None without yielding and the cancel arm must finish in this poll"
+            )
+        };
+        assert_eq!(
+            result.expect_err("the run was cancelled"),
+            FusionError::Cancelled
+        );
+        assert_eq!(
+            cells.settlement(),
+            Some((floor, true)),
+            "the drain collected nothing (a JoinError slot is deliberately not pushed \
+into `collected`), so the trailing sink.update is the only thing that can price panel \
+0's already-egressed prompt at its {floor} nano-USD in-flight floor; without it the \
+cancel commits exact $0 for real, already-billed spend"
+        );
+        assert_eq!(
+            cells.resolved_egress(),
+            Some(vec!["anthropic".to_string()]),
+            "panel 0 reached the spawner, so its profile must be disclosed as egressed"
+        );
+    }
+    /// Panel 0 (`anthropic`) finishes with real, provider-reported usage but
+    /// an unparseable report — `finish_panel`'s `Completed` arm keeps the
+    /// usage and sets the status to `Failed`, which seals the panel bar
+    /// (`succeeded + remaining < min_successful`). Panel 1 (`openai`) marks
+    /// itself dispatched and then parks inside the spawner, so `abort_all`
+    /// reaches it mid-call and its slot arrives as a `JoinError`.
+    struct FailTheBarThenParkTheSibling;
+    #[async_trait]
+    impl SubagentSpawner for FailTheBarThenParkTheSibling {
+        async fn spawn(
+            &self,
+            request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            if request.model_profile.as_deref() == Some("openai") {
+                std::future::pending::<()>().await;
+            }
+            Ok(completed_with_real_usage_reporting(serde_json::json!({
+                "not": "a valid panel report"
+            })))
+        }
+    }
+
+    /// The `sink.update` in the JoinError arm of the collection loop, pinned
+    /// — the third member of the same class (round-10 mutation testing
+    /// deleted each of the five `sink.update` calls in `run_panels`; this
+    /// one, like the two above, left every test green).
+    ///
+    /// It is load-bearing because collecting a `JoinError` slot can only
+    /// LOWER the settlement: a task the bar-abort killed before the spawner
+    /// ever allocated a child is `"not_dispatched"`, which provably made no
+    /// provider call, so `finish_panel` gives it `usage: None` (exact $0)
+    /// and it must lose the in-flight floor `in_flight_panels` had been
+    /// charging for it. Without this refresh the cells keep the previous
+    /// arm's figure, which over-charges by that floor and discloses an
+    /// egress profile for a panel that never sent anything.
+    #[tokio::test]
+    async fn a_bar_aborted_slot_drops_its_in_flight_floor_out_of_the_settlement() {
+        let config = FusionRuntimeConfig {
+            panel_total_timeout_ms: 60_000,
+            ..FusionRuntimeConfig::defaults()
+        };
+        let cancel = CancellationToken::new();
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                tool_invoker: Arc::new(InertInvoker),
+                budget: Arc::new(InertBudget),
+            },
+            cancel.clone(),
+        );
+        let cells = SinkCells::new();
+        let sink = cells.sink();
+        let panels = two_panels();
+        let floor = in_flight_floor_nano_usd();
+
+        let collected = run_panels(
+            Arc::new(FailTheBarThenParkTheSibling),
+            &inherit,
+            &config,
+            true,
+            "task",
+            &panels,
+            "run-id",
+            Duration::from_secs(60),
+            &None,
+            Some(&sink),
+        )
+        .await
+        .expect("a sealed bar still returns every panel slot");
+
+        assert_eq!(collected.len(), 2, "no panel slot may be lost");
+        assert_eq!(
+            collected[1].error_category.as_deref(),
+            Some("not_dispatched"),
+            "panel 1 was aborted inside the spawner call before any child was allocated"
+        );
+        assert_eq!(
+            cells.settlement(),
+            Some((REAL_INPUT_TOKENS + REAL_OUTPUT_TOKENS, true)),
+            "once panel 1's slot is collected as not_dispatched (exact $0), the settlement \
+is panel 0's real {REAL_INPUT_TOKENS} input + {REAL_OUTPUT_TOKENS} output tokens and \
+nothing else; without the sink.update in the JoinError arm the cells keep the previous \
+arm's figure — {floor} nano-USD higher, still charging the in-flight floor of a panel \
+that provably never reached a provider"
+        );
+        assert_eq!(
+            cells.resolved_egress(),
+            Some(vec!["anthropic".to_string()]),
+            "panel 1 never dispatched, so its profile must drop back out of the disclosed \
+egress list"
         );
     }
 }

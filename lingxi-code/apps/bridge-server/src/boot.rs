@@ -918,6 +918,104 @@ async fn list_sessions_json_from(cwd: &Path, lingxi_home: &Path) -> Result<Strin
     .map_err(|_| "failed to encode session catalog".to_string())
 }
 
+/// How long connection assembly (and the router's Settings credential arm) is
+/// willing to WAIT for the Fusion catalog refresh a credential write triggers.
+///
+/// Round-10 finding N3. `engine_desktop::refresh_fusion_catalog_after_credential_write`
+/// re-runs `provider_config::compute_availability_with_isolation` over EVERY
+/// `CredentialSource` of every registered refresher, which bottoms out in the
+/// (on macOS, possibly brokered) keychain — the exact call the boot probe
+/// deliberately wraps in a 5s `tokio::time::timeout`
+/// (`apps/engine-desktop/src/lib.rs`, `resolve_llm_stack`) because a contended
+/// broker can stall it. Same probe, same reason, so the same budget.
+pub(crate) const FUSION_CATALOG_REFRESH_BUDGET: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
+/// Refresh Fusion's catalog filter for each of `provider_ids` under ONE shared
+/// [`FUSION_CATALOG_REFRESH_BUDGET`], never cancelling the refresh when the
+/// budget runs out.
+///
+/// Two properties this seam exists for, both of which the inline
+/// `for … { refresh(id).await }` it replaced got wrong:
+///
+/// * **Bounded.** `engine_desktop::refresh_fusion_catalog_after_credential_write`
+///   is a keychain re-probe with no internal timeout. Awaiting it inline put an
+///   unbounded stall on two paths that must not have one: connection assembly
+///   (nothing serves the Electron client until `assemble_with_provider_keys`
+///   returns) and `EngineCommandRouter::route` (awaited straight from the
+///   connection's read loop in `server.rs`'s `on_frame`, whose contract is
+///   "return promptly" — a stall there stops the client's interrupts and
+///   permission replies from even being READ).
+/// * **One budget for N ids, not N budgets.** The packaged Electron host
+///   supplies one key per configured provider, and each id re-probes ALL
+///   credential sources; N serial unbounded probes is the shape that actually
+///   hurts.
+///
+/// On budget exhaustion the work is DETACHED, not dropped: the spawned task
+/// keeps running, so the availability map still converges once the broker
+/// answers. That is why the refresh is SPAWNED rather than raced with
+/// `tokio::time::timeout` directly — timing out a borrowed future would CANCEL
+/// the re-probe and leave the just-written credential invisible to `/fusion`
+/// for the rest of the process, which is the very defect the refresh call was
+/// added to fix.
+///
+/// In the ordinary (non-degraded) case the probe answers in microseconds and
+/// this awaits it to completion, so callers keep the "the map is refreshed by
+/// the time I return" behaviour they had.
+pub(crate) async fn refresh_fusion_catalog_bounded(provider_ids: Vec<String>) {
+    if provider_ids.is_empty() {
+        return;
+    }
+    let pending = provider_ids.len();
+    let refresh = tokio::spawn(async move {
+        for provider_id in provider_ids {
+            engine_desktop::refresh_fusion_catalog_after_credential_write(&provider_id).await;
+        }
+    });
+    if tokio::time::timeout(FUSION_CATALOG_REFRESH_BUDGET, refresh)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            pending_provider_ids = pending,
+            "fusion catalog refresh exceeded its budget; continuing without waiting \
+             (the refresh keeps running in the background)"
+        );
+    }
+}
+
+/// Seed the provider keys the parent process handed over the dedicated stdin
+/// boundary into the runtime's process-local credential cache, then tell
+/// Fusion's catalog filter about them.
+///
+/// Round 9, item 2's class sweep: these keys are seeded AFTER `build` already
+/// computed the boot `provider_availability` map and registered the
+/// process-wide `FusionCatalogRefresher`, so without the refresh Fusion's
+/// `FusionCatalogModelSource::list()` keeps filtering against a map in which the
+/// parent-supplied profile is absent/false — its rows are dropped for the whole
+/// engine process even though `/model` and the turn loop route it. An ephemeral
+/// key is never persisted and so can never be re-probed;
+/// `refresh_after_credential_write` force-marks the named profile available,
+/// which is the only correct answer here.
+///
+/// Round-10 finding N3: the refresh is bounded (see
+/// [`refresh_fusion_catalog_bounded`]) — it used to be one unbounded keychain
+/// re-probe PER key, inline on the assembly path.
+///
+/// Split out of `assemble_with_provider_keys` so it is reachable from a test
+/// without a full engine build.
+pub(crate) async fn seed_parent_supplied_provider_keys(
+    credentials: &Arc<secret::CredentialManager>,
+    provider_keys: &BTreeMap<String, String>,
+) {
+    for (provider_id, secret) in provider_keys {
+        credentials
+            .set_provider_key_ephemeral(provider_id, secret)
+            .await;
+    }
+    refresh_fusion_catalog_bounded(provider_keys.keys().cloned().collect()).await;
+}
+
 /// Assemble a fully-bound [`BridgeConnection`] from a resolved [`DesktopConfig`].
 ///
 /// Wires the connection-scoped sinks into a real [`DesktopRuntime`]
@@ -1085,22 +1183,10 @@ pub async fn assemble_with_provider_keys(
         .await
         .map_err(|e| e.to_string())?;
 
-    for (provider_id, secret) in &provider_keys {
-        runtime
-            .credentials
-            .set_provider_key_ephemeral(provider_id, secret)
-            .await;
-        // Round 9, item 2's class sweep: these parent-supplied keys are seeded
-        // AFTER `build` already computed the boot `provider_availability` map
-        // and registered the process-wide `FusionCatalogRefresher`, so without
-        // this call Fusion's `FusionCatalogModelSource::list()` keeps filtering
-        // against a map in which the parent-supplied profile is absent/false --
-        // its rows are dropped for the whole engine process even though `/model`
-        // and the turn loop route it. An ephemeral key is never persisted and so
-        // can never be re-probed; `refresh_after_credential_write` force-marks
-        // the named profile available, which is the only correct answer here.
-        engine_desktop::refresh_fusion_catalog_after_credential_write(provider_id).await;
-    }
+    // Seeds the parent-supplied keys and refreshes Fusion's catalog filter for
+    // them under ONE bounded budget -- see `seed_parent_supplied_provider_keys`
+    // for why both halves live there (round 9 item 2; round-10 finding N3).
+    seed_parent_supplied_provider_keys(&runtime.credentials, &provider_keys).await;
 
     // The parent-source fact is authoritative for packaged Electron sessions.
     // Unpackaged CLI/TUI-oriented hosts may still derive availability from
@@ -1843,5 +1929,206 @@ mod tests {
             ),
             "assemble must retain the live slash-command registry on DesktopRuntime"
         );
+    }
+}
+
+/// Test-only support shared by the two round-10 finding N3 budget tests (one
+/// here, one in `router.rs`), because both drive the SAME process-wide
+/// `engine_desktop::FUSION_CATALOG_REFRESHERS` registry.
+#[cfg(test)]
+pub(crate) mod fusion_refresh_test_support {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// Serializes every test in this crate that registers into — or fans out
+    /// over — the PROCESS-WIDE Fusion catalog refresher registry.
+    ///
+    /// `engine_desktop::refresh_fusion_catalog_after_credential_write` walks
+    /// that global `Vec` SERIALLY, so a test that deliberately registers a
+    /// refresher over a never-answering credential backend would otherwise park
+    /// a concurrently-running test's refresh behind its own stall (and, with
+    /// the budget in place, make that test's refresh silently miss its
+    /// deadline). Every test that touches the registry takes this lock.
+    pub(crate) static REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A credential backend whose READS never answer — the contended macOS
+    /// keychain broker whose 5s stall the boot availability probe already wraps
+    /// in `tokio::time::timeout` (`apps/engine-desktop/src/lib.rs`,
+    /// `resolve_llm_stack`).
+    ///
+    /// Writes succeed, so seeding an ephemeral key never blocks; only the
+    /// availability RE-PROBE a credential write triggers does, which is exactly
+    /// the shape of the production hazard.
+    pub(crate) struct StallingSecureStorage {
+        reads_started: Arc<AtomicUsize>,
+    }
+
+    impl StallingSecureStorage {
+        /// Returns the storage plus the counter of reads it has swallowed, so a
+        /// test can prove the stall was actually REACHED rather than passing
+        /// because the probe never ran.
+        pub(crate) fn new() -> (Arc<Self>, Arc<AtomicUsize>) {
+            let reads_started = Arc::new(AtomicUsize::new(0));
+            (
+                Arc::new(Self {
+                    reads_started: reads_started.clone(),
+                }),
+                reads_started,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::SecureStorage for StallingSecureStorage {
+        async fn store(
+            &self,
+            _service: &str,
+            _account: &str,
+            _data: protocol::SecureStorageData,
+        ) -> Result<(), platform_api::SecureStorageError> {
+            Ok(())
+        }
+
+        async fn retrieve(
+            &self,
+            _service: &str,
+            _account: &str,
+        ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
+            self.reads_started.fetch_add(1, Ordering::SeqCst);
+            std::future::pending().await
+        }
+
+        async fn delete(
+            &self,
+            _service: &str,
+            _account: &str,
+        ) -> Result<(), platform_api::SecureStorageError> {
+            Ok(())
+        }
+
+        async fn list(
+            &self,
+            _service: &str,
+        ) -> Result<Vec<String>, platform_api::SecureStorageError> {
+            Ok(Vec::new())
+        }
+
+        fn is_encrypted(&self) -> bool {
+            true
+        }
+
+        fn backend(&self) -> platform_api::SecureStorageBackend {
+            platform_api::SecureStorageBackend::MacOsKeychain
+        }
+    }
+
+    /// Build a `CredentialManager` over [`StallingSecureStorage`] and publish a
+    /// `FusionCatalogRefresher` for `profiles` into the process-wide registry —
+    /// the registered refresher a credential write then fans out to.
+    pub(crate) fn register_stalling_refresher(
+        profiles: &[&str],
+    ) -> (
+        Arc<secret::CredentialManager>,
+        Arc<std::sync::RwLock<std::collections::BTreeMap<String, bool>>>,
+        Arc<AtomicUsize>,
+    ) {
+        let (storage, reads) = StallingSecureStorage::new();
+        let credentials = Arc::new(secret::CredentialManager::new(
+            storage,
+            Arc::new(platform_posix::PosixClock::new()),
+            Arc::new(platform_posix::PosixHttp::new()),
+        ));
+        let availability = Arc::new(std::sync::RwLock::new(
+            profiles
+                .iter()
+                .map(|profile| ((*profile).to_string(), false))
+                .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        engine_desktop::register_fusion_catalog_refresher(
+            engine_desktop::FusionCatalogRefresher::for_keychain_profiles(
+                availability.clone(),
+                credentials.clone(),
+                profiles,
+            ),
+        );
+        (credentials, availability, reads)
+    }
+}
+
+/// Round-10 finding N3: the Fusion catalog refresh that follows a credential
+/// write must never put an UNBOUNDED keychain stall on connection assembly.
+#[cfg(test)]
+mod fusion_catalog_refresh_budget_tests {
+    use super::fusion_refresh_test_support::{register_stalling_refresher, REGISTRY_LOCK};
+    use super::{seed_parent_supplied_provider_keys, FUSION_CATALOG_REFRESH_BUDGET};
+    use std::collections::BTreeMap;
+    use std::sync::atomic::Ordering;
+
+    /// The packaged Electron host hands N provider keys over the credential
+    /// stdin boundary; each one triggers a re-probe of EVERY credential source
+    /// through the (possibly brokered) keychain. Awaiting those inline made
+    /// `assemble_with_provider_keys` — and therefore the whole engine startup —
+    /// hang for as long as the broker did, N times over, with no timeout
+    /// anywhere on the path.
+    ///
+    /// Virtual time (`start_paused`): the assertion is on the DEADLINE, so the
+    /// clock only has to advance to it.
+    #[tokio::test(start_paused = true)]
+    async fn parent_supplied_keys_never_block_assembly_on_a_stalled_keychain() {
+        let _registry = REGISTRY_LOCK.lock().await;
+        // The refresher covers four profiles; the parent supplies keys for
+        // three. The fourth has no ephemeral key, so its probe reaches the
+        // never-answering backend — exactly like a real install where the
+        // parent-supplied providers are a subset of the configured ones.
+        let (credentials, _availability, reads) = register_stalling_refresher(&[
+            "openrouter",
+            "deepseek",
+            "groq",
+            "never-answers",
+        ]);
+
+        let provider_keys: BTreeMap<String, String> = [
+            ("openrouter", "sk-or-n3"),
+            ("deepseek", "sk-ds-n3"),
+            ("groq", "sk-gq-n3"),
+        ]
+        .into_iter()
+        .map(|(id, key)| (id.to_string(), key.to_string()))
+        .collect();
+
+        let began = tokio::time::Instant::now();
+        let seeded = tokio::time::timeout(
+            FUSION_CATALOG_REFRESH_BUDGET * 3,
+            seed_parent_supplied_provider_keys(&credentials, &provider_keys),
+        )
+        .await;
+        assert!(
+            seeded.is_ok(),
+            "seeding the parent-supplied provider keys must return even when the \
+credential backend never answers: a stalled keychain here blocks \
+`assemble_with_provider_keys`, so no client is served at all"
+        );
+        let waited = began.elapsed();
+        assert!(
+            waited < FUSION_CATALOG_REFRESH_BUDGET * 2,
+            "the {} parent-supplied keys must share ONE {FUSION_CATALOG_REFRESH_BUDGET:?} \
+budget, not one each; waited {waited:?}",
+            provider_keys.len()
+        );
+        assert!(
+            reads.load(Ordering::SeqCst) >= 1,
+            "the refresh must actually have reached the credential backend — with \
+zero reads this test would pass without exercising the stall at all"
+        );
+        for provider_id in provider_keys.keys() {
+            assert!(
+                credentials
+                    .get_provider_key_ephemeral(provider_id)
+                    .await
+                    .is_some(),
+                "bounding the refresh must not skip the SEEDING it follows: \
+{provider_id} is missing from the process-local credential cache"
+            );
+        }
     }
 }

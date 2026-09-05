@@ -3234,8 +3234,8 @@ fn filter_fusion_catalog(
 /// authoritative map into the very lock `list()` reads. Every `/fusion` in
 /// that process kept reserving budget for, spawning and failing panels on
 /// providers with no credential. It is now a shared cell the refresher can
-/// re-arm — see `refresh_inner` for why re-arming is gated on a probe that
-/// actually observed an available row.
+/// re-arm — see `refresh_inner` for why re-arming is gated on a probe whose
+/// result a degraded credential backend could not have produced.
 struct FusionCatalogModelSource {
     unfiltered: Vec<fusion::CatalogModel>,
     availability: Arc<std::sync::RwLock<std::collections::BTreeMap<String, bool>>>,
@@ -3274,9 +3274,9 @@ impl fusion::ModelSource for FusionCatalogModelSource {
 pub struct FusionCatalogRefresher {
     availability: Arc<std::sync::RwLock<std::collections::BTreeMap<String, bool>>>,
     /// The SAME cell [`FusionCatalogModelSource`] reads (round-7 finding
-    /// [2]). A re-probe that genuinely completed and observed at least one
-    /// available row re-arms the availability filter a timed-out boot probe
-    /// had disabled; see `refresh_inner`.
+    /// [2]). A re-probe whose result cannot have been corrupted by a
+    /// degraded credential backend re-arms the availability filter a
+    /// timed-out boot probe had disabled; see `refresh_inner`.
     availability_probe_completed: Arc<std::sync::atomic::AtomicBool>,
     credentials: Arc<CredentialManager>,
     credential_sources: Vec<provider_config::CredentialSource>,
@@ -3398,12 +3398,14 @@ impl FusionCatalogRefresher {
     ///   is `keychain_has || env_set`, so `true` can come entirely from the
     ///   ambient environment while the keychain read returned nothing.
     ///
-    /// Both are rejected here. That is the SAFE direction: a false negative
-    /// only leaves the availability filter failing OPEN (an over-broad
-    /// catalog, the round-7 pre-fix behaviour), while a false positive
-    /// publishes a degraded probe's all-`false` map as authoritative and
-    /// empties Fusion's catalog for the rest of the process (round-5 finding
-    /// [5]).
+    /// Both answer `false` here. A `false` row is not "unavailable" — it is
+    /// "this verdict is storage-INDEPENDENT", i.e. a degraded backend could
+    /// not have changed it. `refresh_inner` uses that both ways (round-10
+    /// finding N6): such a row cannot testify that the backend answered, but
+    /// a probe made up ENTIRELY of such rows cannot have been corrupted by a
+    /// degraded backend either, and is therefore authoritative on its own.
+    /// Only the mixed case — some verdict did depend on a storage read —
+    /// needs one of those reads to have come back `available`.
     fn row_availability_came_from_storage(&self, credential_id: &str) -> bool {
         if matches!(
             credential_id,
@@ -3471,8 +3473,12 @@ impl FusionCatalogRefresher {
             })
             .unwrap_or_default();
         // Round-7 finding [2]: re-arm the availability filter that a
-        // timed-out BOOT probe disabled — but only on a probe that actually
-        // observed an available row. The probe cannot fail: it bottoms out
+        // timed-out BOOT probe disabled — but only on a probe whose result a
+        // degraded credential backend could not have produced (see the
+        // round-10 paragraph below for the exact rule; on the ordinary
+        // install shape it reduces to "the probe observed an available row
+        // it actually read from storage"). The probe cannot fail: it bottoms
+        // out
         // in `has_provider_key(..).unwrap_or(false)` over a `SecureStorage`
         // whose runtime fallback already turned `BackendUnavailable` /
         // `PermissionDenied` / `Io` into `Ok(false)` (round-5 finding [5]),
@@ -3489,10 +3495,33 @@ impl FusionCatalogRefresher {
         // Counting every `available` row made this gate ALWAYS true on any
         // install that booted with an Anthropic key/OAuth or a ChatGPT
         // credential, i.e. inert exactly where its comment says it matters.
-        let probe_observed_an_available_row = rows
+        //
+        // Round-10 finding N6: rejecting those rows is right, but requiring
+        // one of the REMAINING rows to be available turned the round-9 gate
+        // into a false NEGATIVE on any install where NO row's verdict
+        // depends on storage — an Anthropic-only/ChatGPT-only install (every
+        // source is one of the three special-cased ids), or a non-isolated
+        // process in which every generic profile carries a set `env_var`.
+        // There the recovery this gate guards could never run at all, so one
+        // 5s boot stall left `filter_fusion_catalog` failing open for the
+        // whole process. The criterion the gate actually wants is not "a
+        // storage-backed row said yes" but "nothing in this result could be
+        // a lie from a degraded backend": when the probe contains no
+        // storage-dependent row, the degraded-broker hypothesis cannot apply
+        // to ANY row and the result is exactly what a boot probe that did
+        // not stall would have published, so it is authoritative. When it
+        // does contain storage-dependent rows, at least one of them must
+        // have answered `available` — the round-9 rule, unchanged.
+        let storage_dependent_rows: Vec<&provider_config::ProviderAvailability> = rows
             .iter()
-            .any(|row| row.available && self.row_availability_came_from_storage(&row.credential_id));
-        if probe_observed_an_available_row {
+            .filter(|row| self.row_availability_came_from_storage(&row.credential_id))
+            .collect();
+        let probe_result_is_authoritative = if storage_dependent_rows.is_empty() {
+            true
+        } else {
+            storage_dependent_rows.iter().any(|row| row.available)
+        };
+        if probe_result_is_authoritative {
             self.availability_probe_completed
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -18553,6 +18582,255 @@ storage read, must NOT satisfy the probe-completion gate"
             2,
             "the catalog must stay fail-open when the only `available` row was \
 env-derived: got {after:?}"
+        );
+    }
+
+    /// Round-10 finding N6: the round-9 gate traded a false POSITIVE for a
+    /// false NEGATIVE. `row_availability_came_from_storage` rejects the three
+    /// special-cased credential ids, so on an install whose credential
+    /// sources are ONLY those ids (an Anthropic-only or ChatGPT-only
+    /// install) NO row can ever satisfy the gate and round-7's recovery
+    /// path became unreachable: one 5s boot-probe stall left
+    /// `filter_fusion_catalog` failing open for the rest of the process, so
+    /// every `/fusion` kept reserving budget for and spawning panels on
+    /// profiles with no credential at all.
+    ///
+    /// The correct criterion is not "some row came from storage and said
+    /// yes" but "nothing in this probe could have been a lie from a degraded
+    /// backend": when NO row's verdict depended on a storage read, the
+    /// degraded-broker hypothesis the gate exists to guard against cannot
+    /// apply, and the probe reproduces exactly what a boot probe that did
+    /// not stall would have published.
+    #[tokio::test]
+    async fn an_anthropic_only_install_can_still_re_arm_availability_filtering() {
+        use async_trait::async_trait;
+        use fusion::ModelSource as _;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+
+        // The documented degraded-broker shape (round-5 finding [5]): every
+        // read answers `Ok(None)`/`Ok(false)` instead of erroring. It is
+        // never consulted for the three special-cased ids, which is the
+        // whole point: this probe's verdict does not depend on it.
+        struct DegradedStorage;
+        #[async_trait]
+        impl SecureStorage for DegradedStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(None)
+            }
+            async fn delete(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(Vec::new())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(DegradedStorage);
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        // The boot credential-source list of an Anthropic-OAuth-only
+        // install: `provider_config::assemble` emits no other source.
+        let credential_sources = vec![provider_config::CredentialSource {
+            provider_id: llm_client::ProviderId::AnthropicFirstParty,
+            profile_name: "anthropic".to_string(),
+            credential_id: "anthropic-oauth".to_string(),
+            env_var: None,
+            kind: provider_config::CredentialKind::OAuth,
+        }];
+
+        // Boot state after a TIMED-OUT probe: no rows, flag `false`.
+        let availability = Arc::new(std::sync::RwLock::new(
+            std::collections::BTreeMap::<String, bool>::new(),
+        ));
+        let probe_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let source = FusionCatalogModelSource {
+            unfiltered: vec![
+                fusion_catalog_row("anthropic", "claude-model"),
+                fusion_catalog_row("openrouter", "some-model"),
+            ],
+            availability: availability.clone(),
+            anthropic_probe_definitive: true,
+            availability_probe_completed: probe_completed.clone(),
+            session_model_restriction: None,
+        };
+        assert_eq!(
+            source.list().len(),
+            2,
+            "precondition: a timed-out boot probe fails OPEN"
+        );
+
+        let refresher = FusionCatalogRefresher {
+            availability,
+            availability_probe_completed: probe_completed.clone(),
+            credentials,
+            credential_sources,
+            anthropic_has_api_key: false,
+            anthropic_has_oauth: true,
+            openai_chatgpt_available: false,
+            isolated: true,
+        };
+        refresher.refresh_after_credential_write("anthropic-oauth").await;
+
+        assert!(
+            probe_completed.load(std::sync::atomic::Ordering::Relaxed),
+            "no row in this probe consulted the credential backend, so a \
+degraded broker could not have produced this result: the re-probe is \
+authoritative and MUST re-arm the availability filter a stalled boot \
+probe disabled"
+        );
+        let after = source.list();
+        let profiles: Vec<&str> = after.iter().map(|row| row.profile.as_str()).collect();
+        assert_eq!(
+            profiles,
+            vec!["anthropic"],
+            "after an authoritative re-probe the uncredentialed `openrouter` \
+row must be filtered out; leaving it in is the permanent fail-open that \
+makes every /fusion spawn a panel answering LlmError::Authentication: \
+got {after:?}"
+        );
+    }
+
+    /// Round-10 finding N6, second shape of the same false negative: a
+    /// NON-isolated process in which every generic profile carries a set
+    /// `env_var`. `row_availability_came_from_storage` rejects each such row
+    /// (its `true` can come entirely from the ambient environment), so the
+    /// round-9 gate could never be satisfied there either — even though a
+    /// degraded credential backend cannot change ANY of those verdicts.
+    #[tokio::test]
+    async fn an_all_env_var_install_can_still_re_arm_availability_filtering() {
+        use async_trait::async_trait;
+        use fusion::ModelSource as _;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+
+        struct DegradedStorage;
+        #[async_trait]
+        impl SecureStorage for DegradedStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(None)
+            }
+            async fn delete(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(Vec::new())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        // A var name unique to this test, so no other test observes it.
+        const ENV_VAR: &str = "LINGXI_ROUND10_ALL_ENV_PROVIDER_KEY";
+        std::env::set_var(ENV_VAR, "sk-ambient");
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(DegradedStorage);
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        let credential_sources = vec![provider_config::CredentialSource {
+            provider_id: llm_client::ProviderId::OpenAICompatible {
+                name: "envrouter".to_string(),
+            },
+            profile_name: "envrouter".to_string(),
+            credential_id: "envrouter".to_string(),
+            env_var: Some(ENV_VAR.to_string()),
+            kind: provider_config::CredentialKind::ApiKey,
+        }];
+
+        let availability = Arc::new(std::sync::RwLock::new(
+            std::collections::BTreeMap::<String, bool>::new(),
+        ));
+        let probe_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let source = FusionCatalogModelSource {
+            unfiltered: vec![
+                fusion_catalog_row("envrouter", "some-model"),
+                fusion_catalog_row("deepseek", "another-model"),
+            ],
+            availability: availability.clone(),
+            anthropic_probe_definitive: true,
+            availability_probe_completed: probe_completed.clone(),
+            session_model_restriction: None,
+        };
+        assert_eq!(
+            source.list().len(),
+            2,
+            "precondition: a timed-out boot probe fails OPEN"
+        );
+
+        let refresher = FusionCatalogRefresher {
+            availability,
+            availability_probe_completed: probe_completed.clone(),
+            credentials,
+            credential_sources,
+            anthropic_has_api_key: false,
+            anthropic_has_oauth: false,
+            openai_chatgpt_available: false,
+            isolated: false,
+        };
+        refresher.refresh().await;
+        std::env::remove_var(ENV_VAR);
+
+        assert!(
+            probe_completed.load(std::sync::atomic::Ordering::Relaxed),
+            "every row's verdict here is env-derived and storage-independent, \
+so a degraded credential backend could not have produced it: the re-probe \
+is authoritative and MUST re-arm the availability filter"
+        );
+        let after = source.list();
+        let profiles: Vec<&str> = after.iter().map(|row| row.profile.as_str()).collect();
+        assert_eq!(
+            profiles,
+            vec!["envrouter"],
+            "after an authoritative re-probe the uncredentialed `deepseek` row \
+must be filtered out: got {after:?}"
         );
     }
 

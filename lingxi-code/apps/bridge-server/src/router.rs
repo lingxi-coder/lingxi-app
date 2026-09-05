@@ -3072,8 +3072,18 @@ impl CommandRouter for EngineCommandRouter {
                     // profile available, so it is correct for the ephemeral
                     // branch too, where the re-probe cannot see a key that was
                     // never persisted.
-                    engine_desktop::refresh_fusion_catalog_after_credential_write(&provider_id)
-                        .await;
+                    //
+                    // Round-10 finding N3's class sweep: BOUNDED, because this
+                    // arm is awaited straight from the connection read loop
+                    // (`server.rs`'s `on_frame`, whose contract is "return
+                    // promptly"), and the refresh is an unbounded keychain
+                    // re-probe. A contended macOS credential broker would
+                    // otherwise stop this connection from READING anything at
+                    // all -- interrupts and permission replies included -- for
+                    // as long as the broker stalls. Same budget, and the same
+                    // detach-rather-than-cancel rule, as the parent-supplied
+                    // keys at `boot::seed_parent_supplied_provider_keys`.
+                    crate::boot::refresh_fusion_catalog_bounded(vec![provider_id.clone()]).await;
                 }
                 let credential_previews = applied
                     .then(|| HashMap::from([(provider_id.clone(), credential_preview)]))
@@ -3405,6 +3415,23 @@ impl CommandRouter for EngineCommandRouter {
             }
 
             // ── Auth ───────────────────────────────────────────────────────
+            // Round-10 finding N5: this IS a credential write (the Anthropic
+            // OAuth handle persists tokens on success), and it is the one
+            // credential-write arm in this file with no
+            // `refresh_fusion_catalog_bounded` call. That is deliberate, not an
+            // omission: the same call would be a provable no-op here.
+            // `provider_config::assemble` emits NO Anthropic `CredentialSource`
+            // in the unauthenticated path (provider-config/src/assemble.rs,
+            // `anthropic_profile`'s final arm), so a refresh keyed on
+            // `anthropic-oauth` matches nothing and its `forced` list is empty,
+            // and `refresh_inner`'s closing
+            // `guard.entry("anthropic").or_insert(..)` cannot overwrite the
+            // `false` the boot map already holds (`resolve_llm_stack` always
+            // seeds an "anthropic" entry before cloning the map into the Fusion
+            // refresher). Making a mid-session sign-in visible to `/fusion`
+            // needs a NEW engine-desktop API — "this profile just GAINED a
+            // credential it had no source for" — the same one the demoted
+            // credential-DELETE direction needs; it is not this one-liner.
             ClientCommand::Login => {
                 let state = match self.auth.login().await {
                     Ok(li) => lower_auth_state(Some(li)),
@@ -4095,6 +4122,12 @@ mod fusion_catalog_refresh_tests {
     /// pins the wiring end to end, not just that some function was called.
     #[tokio::test]
     async fn setting_a_provider_credential_refreshes_the_fusion_catalog() {
+        // The refresher registry is process-wide and its entries are fanned out
+        // to SERIALLY, so this test must not run alongside the sibling test
+        // below, which deliberately registers a never-answering backend.
+        let _registry = crate::boot::fusion_refresh_test_support::REGISTRY_LOCK
+            .lock()
+            .await;
         let temp = tempfile::tempdir().expect("tempdir");
         let storage = Arc::new(
             PlainTextSecureStorage::new(temp.path().join("credentials"))
@@ -4164,6 +4197,62 @@ OpenRouter row from /fusion for the rest of the process: {published:?}"
             "the packaged/brokered EPHEMERAL branch of the same arm must \
 refresh too — its key is never persisted, so only the write-side \
 notification can make it visible to Fusion: {published:?}"
+        );
+    }
+
+    /// Round-10 finding N3's class sweep: the SAME unbounded keychain re-probe
+    /// the parent-supplied-keys path had (`boot::seed_parent_supplied_provider_keys`)
+    /// also sat on this arm — and this one is awaited straight from the
+    /// connection's read loop (`server.rs`'s `on_frame`, contract: "return
+    /// promptly"). A contended macOS credential broker would stop the
+    /// connection from READING anything at all — interrupts and permission
+    /// replies included — for as long as the broker stalled.
+    ///
+    /// Virtual time (`start_paused`): the assertion is on the DEADLINE.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_credential_backend_never_parks_the_router_arm() {
+        let _registry = crate::boot::fusion_refresh_test_support::REGISTRY_LOCK
+            .lock()
+            .await;
+        // "never-answers" has no credential of any kind, so the re-probe this
+        // write triggers reaches the never-answering backend.
+        let (credentials, _availability, reads) =
+            crate::boot::fusion_refresh_test_support::register_stalling_refresher(&[
+                "openrouter",
+                "never-answers",
+            ]);
+
+        let sink: Arc<dyn ClientEventSink> = Arc::new(SilentSink);
+        let router = router_with_credentials(credentials, true).await;
+        let began = tokio::time::Instant::now();
+        let arm_returned = tokio::time::timeout(
+            crate::boot::FUSION_CATALOG_REFRESH_BUDGET * 3,
+            router.route(
+                ClientCommand::SetProviderCredential {
+                    operation_id: 7,
+                    provider_id: "openrouter".into(),
+                    credential: ProviderCredentialSecretDto::new("sk-or-round10".into()),
+                },
+                sink,
+            ),
+        )
+        .await;
+        assert!(
+            arm_returned.is_ok(),
+            "`SetProviderCredential` must return even when the credential backend \
+never answers: this arm is awaited from the connection read loop, so a stall \
+here stops the client's interrupts and permission replies from being read"
+        );
+        assert!(
+            began.elapsed() < crate::boot::FUSION_CATALOG_REFRESH_BUDGET * 2,
+            "the arm must return within one {:?} refresh budget, waited {:?}",
+            crate::boot::FUSION_CATALOG_REFRESH_BUDGET,
+            began.elapsed()
+        );
+        assert!(
+            reads.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the refresh must actually have reached the credential backend — with \
+zero reads this test would pass without exercising the stall at all"
         );
     }
 }

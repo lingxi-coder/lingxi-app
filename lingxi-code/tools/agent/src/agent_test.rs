@@ -4476,9 +4476,16 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
-    /// `LINGXI_SUBAGENT_STEER` is process-global; serialize the tests that
-    /// flip it.
-    static STEER_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // `LINGXI_SUBAGENT_STEER` is process-global AND `build_prompt` reads it
+    // (via `steer_is_default`, which gates the proactive-use / run-in-parallel
+    // pair), so the tests that flip it must share the SAME lock as every other
+    // test that builds a prompt — see the note above `ctx_with_messages`.
+    // A private second mutex used to live here; two mutexes guarding one
+    // prompt builder let this test change the steer state in the middle of
+    // `build_prompt_lean_gate_selects_short_or_long_arm`'s three back-to-back
+    // `build_prompt` calls, so its LONG arm and its unknown-model arm
+    // disagreed by exactly those two bullets — a flake that only surfaced
+    // under the whole-workspace run's thread pressure.
 
     // Binary `g = DZ()==="default"` gates the `## When to use` LEAD sentence
     // (@292441984): a non-default steer keeps the heading but drops "Reach for
@@ -4487,7 +4494,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // prompt) — it just wasn't consulted here.
     #[test]
     fn build_prompt_steer_gate_drops_the_reach_lead() {
-        let _g = STEER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_SUBAGENT_STEER");
         let agents = prompt_agents();
         let default_steer = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);

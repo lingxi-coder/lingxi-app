@@ -5979,3 +5979,80 @@ fn plugin_workflow_agent_types_match_shipped_agent_roster() {
          (roster: {roster:?})"
     );
 }
+
+/// [R5-18] EVERY rejection `parse_workflow_fusion_request` derives from the
+/// caller-supplied `opts` object must carry the marker the prelude's
+/// `__wf_pump` (`workflow/src/lib.rs`) searches for when it sets
+/// `err.name = "WorkflowFusionOptionError"` — not only the
+/// `deny_unknown_fields` "unknown field" shape. `workflow_description.txt`
+/// tells the model, without qualification, to `catch (e)` a `fusion()`
+/// rejection and branch on that name, so a wrong-typed / out-of-range /
+/// malformed option value that reached JS as a plain `Error` skipped the
+/// script's recovery branch and aborted the whole workflow over a fully
+/// recoverable mistake.
+///
+/// The negative case at the bottom is the other half of the contract: a
+/// rejection that is NOT about the caller's options (host state — no parent
+/// model) must NOT claim to be an option error, or a script's recovery
+/// branch would swallow a condition retrying cannot fix.
+#[test]
+fn every_workflow_fusion_option_rejection_carries_the_prelude_option_marker() {
+    const MARKER: &str = "Workflow fusion() received an unknown option";
+    let executor: Arc<dyn FusionExecutor> = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        },
+        3,
+        Ok(workflow_fusion_result()),
+    );
+
+    for (opts_json, why) in [
+        (r#"{"nope":true}"#, "unknown option key"),
+        (r#"{"maxPanel":300}"#, "out-of-range u8 option value"),
+        (r#"{"maxPanel":"3"}"#, "wrong-typed number option"),
+        (r#"{"partialOk":1}"#, "wrong-typed bool option"),
+        (r#"{"dimensions":"speed"}"#, "wrong-typed array option"),
+        (r#"{"preset":"sloppy"}"#, "unrecognized preset option value"),
+        (
+            r#"{"models":[{"profile":"","model":"gpt-5.4"}]}"#,
+            "malformed models entry (empty profile)",
+        ),
+        (
+            r#"{"models":[{"model":""}]}"#,
+            "malformed models entry (empty model)",
+        ),
+        (r#"{"maxPanel":"#, "syntactically broken opts object"),
+    ] {
+        let Err(err) = parse_workflow_fusion_request(
+            Some(&executor),
+            "review this",
+            opts_json,
+            "wf_fusion",
+            Some("gpt-5.4"),
+            Some("openai"),
+        ) else {
+            panic!("{why}: `{opts_json}` must reject");
+        };
+        assert!(
+            err.to_string().contains(MARKER),
+            "{why}: `{opts_json}` rejected with `{err}`, which does not contain the \
+             prelude marker `{MARKER}` — the script's \
+             `e.name === \"WorkflowFusionOptionError\"` branch cannot fire"
+        );
+    }
+
+    let host_err = parse_workflow_fusion_request(
+        Some(&executor),
+        "review this",
+        "{}",
+        "wf_fusion",
+        None,
+        None,
+    )
+    .expect_err("a missing parent model must reject");
+    assert!(
+        !host_err.to_string().contains(MARKER),
+        "a host-state rejection must NOT be labelled an option error, got `{host_err}`"
+    );
+}

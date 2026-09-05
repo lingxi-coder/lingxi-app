@@ -48,6 +48,36 @@ export function hasInFlightTask(tasks: readonly { status: { type: string } }[]):
 }
 
 /**
+ * [R5-14] Whether the OVERVIEW panel should keep pulling `task_list`.
+ *
+ * The round-3 fix gated that pull on `hasInFlightTask(orderedTasks(...))`
+ * -- i.e. on rows the client ALREADY has. That is the wrong question for a
+ * panel that is on screen: with a pull-only task map and no server-pushed
+ * row (`emit_task_rows` fires only in reply to `RefreshListings{Tasks}` /
+ * `TaskList`, and the lone `TaskStatusChanged` push is dropped by the
+ * reducer for an id the map does not know), an empty or all-completed list
+ * is exactly the state in which nothing can ever re-arm the poll. Open the
+ * Runtime Center with no task running, then type `/fusion ...`: the engine
+ * spawns the task and drives its stage, every 1.5s tick reads
+ * `isActive() === false` and issues nothing, and the panel says "No
+ * background tasks." for the whole multi-minute run.
+ *
+ * So while the overview is OPEN the answer is unconditionally yes -- a task
+ * can appear at any moment and only a pull can discover it. The in-flight
+ * term is kept for the closed case (the effect early-returns then, and the
+ * interval is torn down on close, so it is belt-and-braces rather than a
+ * live path). Exported so this predicate can be unit-tested, and asserted
+ * by name from `runtime-center-state.test.ts` so a future edit cannot
+ * quietly put the "already have a row" gate back.
+ */
+export function shouldPollOverviewTasks(
+  overviewOpen: boolean,
+  tasks: readonly { status: { type: string } }[],
+): boolean {
+  return overviewOpen || hasInFlightTask(tasks);
+}
+
+/**
  * [Finding 5] Starts (and returns a stopper for) the interval that keeps a
  * pull-only desktop resource fresh while it is in flight. Before this
  * existed, nothing re-delivered `TaskRow` while a task ran -- a running
@@ -179,12 +209,19 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
     .sort((left, right) => (statusRank[left.status] ?? 99) - (statusRank[right.status] ?? 99) || (right.updated_at_ms ?? 0) - (left.updated_at_ms ?? 0)), [center.agents]);
   const plan = center.plan.length > 0 ? center.plan : bridge.conversation.plan;
   const openerRef = useRef<HTMLElement | null>(null);
-  const hasActiveTask = hasInFlightTask(tasks);
   // [Finding 5, rework round 2] Read every poll tick, never a `useEffect`
   // dependency -- see `startPollingWhileActive`'s doc comment for why
-  // putting `hasActiveTask` in the effect's own dependency array storms.
-  const hasActiveTaskRef = useRef(hasActiveTask);
-  hasActiveTaskRef.current = hasActiveTask;
+  // putting this value in the effect's own dependency array storms.
+  //
+  // [R5-14] The ref holds the overview's POLL PREDICATE
+  // (`shouldPollOverviewTasks`), not merely "is a row I already have in
+  // flight": gating on the current map contents meant a task started AFTER
+  // the panel opened -- the common `/fusion` case, since the panel is
+  // usually opened before there is anything to watch -- was never pulled
+  // and never appeared. (The ref keeps its name so the poll-wiring guards
+  // in `runtime-center-poll.test.ts` still recognize the call site.)
+  const hasActiveTaskRef = useRef(shouldPollOverviewTasks(center.overviewOpen, tasks));
+  hasActiveTaskRef.current = shouldPollOverviewTasks(center.overviewOpen, tasks);
 
   const closeOverview = useCallback((restoreFocus: boolean) => {
     bridge.setRuntimeCenterOverviewOpen(false);

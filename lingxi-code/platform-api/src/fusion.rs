@@ -489,6 +489,32 @@ pub struct PanelOutcome {
     pub usage: Option<FusionUsage>,
 }
 
+/// THE SINGLE SOURCE OF TRUTH for "this panel provably never became a
+/// subagent, so it provably made no provider call and must not be charged
+/// against the session's lifetime spawn quota or disclosed as egress".
+///
+/// The two [`PanelOutcome::error_category`] values that prove it:
+/// - `"spawn"` — the spawner rejected the panel before allocating a child.
+/// - `"not_dispatched"` — the slot was cancelled before its task ever called
+///   the spawner, or aborted while parked INSIDE a spawner call that had not
+///   yet allocated a child (fusion's `PanelDispatch` distinguishes "entered
+///   the spawner call" from "the pool handed us a child" for exactly this).
+///
+/// Every other category describes a panel for which a subagent provably
+/// existed and which may therefore have been billed.
+///
+/// This predicate lives HERE, beside the field it reads, because it is
+/// consumed from two crates that cannot see each other: `fusion` produces the
+/// categories, and `tool-agent` decides the spawn-quota release from them.
+/// Round-6 blocking B2 was precisely those two crates drifting apart — a new
+/// value was added on the fusion side while the tool-agent side still
+/// compared against `"spawn"` alone, silently burning one lifetime spawn slot
+/// per such panel. **Add any new never-dispatched category here and only
+/// here**; both crates route through this function.
+pub fn panel_never_dispatched(category: Option<&str>) -> bool {
+    matches!(category, Some("spawn" | "not_dispatched"))
+}
+
 /// Aggregated Fusion usage / cost.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FusionUsage {
@@ -653,9 +679,11 @@ pub struct FusionProgress {
     /// [Round-3 review B2, reworked] The provider profiles the request was
     /// ACTUALLY dispatched to — never the merely-intended/resolved set.
     /// `FusionOrchestrator::run_inner` latches this only once
-    /// `run_panel_stage` returns, from panels whose `error_category` is not
-    /// `"spawn"` (i.e. panels that made a real provider call — see
-    /// `dispatched_egress_profiles`), and folds in the analyst's profile
+    /// `run_panel_stage` returns, from panels that are NOT
+    /// [`panel_never_dispatched`] (i.e. panels that made a real provider call
+    /// — see `dispatched_egress_profiles`; as of round-5 item 8 and round-6
+    /// B1 that excludes both `"spawn"` AND `"not_dispatched"`, not `"spawn"`
+    /// alone), and folds in the analyst's profile
     /// only once the analyst call is actually issued
     /// (`run_analyst_call`) — never before dispatch happened. `None` on
     /// every progress event emitted before panel dispatch completes

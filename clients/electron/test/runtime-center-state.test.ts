@@ -1,9 +1,13 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ClientEvent, MessageDto, PlanTaskDto } from '@lingxi/bridge-client';
 
+import {
+  shouldPollOverviewTasks,
+  startPollingWhileActive,
+} from '../src/renderer/components/RuntimeCenter';
 import {
   addRuntimeResources,
   closeRuntimeCenterItem,
@@ -243,5 +247,85 @@ test('RuntimeCenterInspector\'s stage-poll effect deps include task presence so 
     + 'dependency (e.g. `!!task`) -- the effect body reads `task` (bridge.desktop.tasks[active.id]) '
     + 'to decide whether to run, so if it first runs while the row is absent it can never recover '
     + 'when the row arrives, leaving task.stage frozen for the rest of the run',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// [R5-14] The overview's task poll used to be gated on
+// `hasInFlightTask(orderedTasks(bridge.desktop))` -- rows the client
+// ALREADY has. Nothing pushes a new row (`emit_task_rows` answers only the
+// `RefreshListings{Tasks}`/`TaskList` commands, and the single
+// `TaskStatusChanged` push is dropped by the reducer for an unknown id), so
+// with an empty or all-completed list the gate was permanently closed: open
+// the Runtime Center first, then run `/fusion ...`, and the panel showed
+// "No background tasks." for the entire run. The predicate now asks whether
+// the PANEL is open, which is the only question a pull-only list can act
+// on.
+// ---------------------------------------------------------------------------
+
+test('shouldPollOverviewTasks keeps polling while the overview is open even with no task in the map yet', () => {
+  assert.equal(
+    shouldPollOverviewTasks(true, []), true,
+    'an open overview with an empty task map must still poll -- this is exactly the state a '
+    + '/fusion task started after the panel opened lands in, and no push can fill it',
+  );
+  assert.equal(
+    shouldPollOverviewTasks(true, [{ status: { type: 'completed' } }]), true,
+    'an open overview whose only rows are terminal must still poll: the next task has not been '
+    + 'pulled yet',
+  );
+  assert.equal(shouldPollOverviewTasks(true, [{ status: { type: 'running' } }]), true);
+  assert.equal(
+    shouldPollOverviewTasks(false, []), false,
+    'a closed overview polls nothing',
+  );
+});
+
+test('an open overview with an empty task map still issues task_list ticks (a /fusion task started after the panel opened is discovered)', () => {
+  mock.timers.enable({ apis: ['setInterval'] });
+  try {
+    // Mirrors RuntimeCenterOverview: the ref is recomputed on every render
+    // from the same predicate the component uses, and the interval reads it
+    // fresh per tick.
+    let tasks: { status: { type: string } }[] = [];
+    const overviewOpen = true;
+    const ref = { current: shouldPollOverviewTasks(overviewOpen, tasks) };
+    let refreshes = 0;
+    const refresh = async () => {
+      refreshes += 1;
+      // The engine spawned a `local_fusion` task after the panel opened; the
+      // FIRST poll is what delivers its row.
+      tasks = [{ status: { type: 'running' } }];
+      ref.current = shouldPollOverviewTasks(overviewOpen, tasks);
+    };
+    const stop = startPollingWhileActive(() => ref.current, refresh);
+    mock.timers.tick(1_500);
+    assert.equal(
+      refreshes, 1,
+      'the first tick after opening the panel on an empty task map must issue a task_list; '
+      + `got ${refreshes} -- the row of a task started after the panel opened can never arrive`,
+    );
+    mock.timers.tick(1_500);
+    assert.equal(refreshes, 2, 'polling must continue once the row has landed');
+    stop();
+    mock.timers.tick(3_000);
+    assert.equal(refreshes, 2, 'the interval must stop on cleanup');
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('RuntimeCenterOverview feeds its poll ref from shouldPollOverviewTasks, not from the task map alone', () => {
+  const overviewBody = functionBody(runtimeCenterSource, 'RuntimeCenterOverview');
+  assert.ok(
+    overviewBody.includes('hasActiveTaskRef.current = shouldPollOverviewTasks(center.overviewOpen, tasks)'),
+    'RuntimeCenterOverview must assign its poll ref from '
+    + 'shouldPollOverviewTasks(center.overviewOpen, tasks) on every render; assigning it from '
+    + 'hasInFlightTask(tasks)/hasActiveTask alone closes the poll for good whenever the task map '
+    + 'is empty or all-terminal, which is precisely when a newly started task needs to be pulled',
+  );
+  assert.ok(
+    !/hasActiveTaskRef\.current = hasActiveTask\b/.test(overviewBody),
+    'the poll ref must not be fed the raw in-flight flag again',
   );
 });

@@ -3079,6 +3079,7 @@ fn desktop_fusion_catalog_row(
     profile: &str,
     model: &llm_client::ModelProfile,
     billing_mode: platform_api::ModelBillingMode,
+    protocol: &llm_client::ProtocolFamily,
 ) -> fusion::CatalogModel {
     let mut hints = llm_client::hints_for(profile, &model.request_model).unwrap_or_default();
     if billing_mode == platform_api::ModelBillingMode::Subscription {
@@ -3088,7 +3089,51 @@ fn desktop_fusion_catalog_row(
         profile: profile.to_string(),
         model: model.request_model.clone(),
         hints,
-        structured_output: model.capabilities.structured_output,
+        // Round-5 review finding [3]: `capabilities.structured_output` is a
+        // property of the MODEL (copied verbatim from the vendored
+        // models.dev slice); `CatalogModel::structured_output` is the
+        // stronger claim `resolve_analyst`'s `with_schema` gate needs — that
+        // THIS profile can actually put a `response_format` on the wire.
+        // AND-ing the owning profile's codec in is what makes the two agree.
+        structured_output: model.capabilities.structured_output
+            && protocol_encodes_response_format(protocol),
+    }
+}
+
+/// Round-5 review finding [3]: can a profile on this wire protocol encode an
+/// `LlmRequest.response_format` at all?
+///
+/// `llm_client::protocol::validate_capabilities` only checks the MODEL's
+/// `structured_output` capability bit, so a request with a `response_format`
+/// reaches the codec whenever that bit is true — and `GeminiCodec`
+/// (`llm-client/src/providers/gemini.rs`'s `reject_unsupported_request_intent`,
+/// called from `encode_request`) then hard-fails with `InvalidRequest("GeminiCodec
+/// does not encode response_format yet")`. For Fusion that failure lands in
+/// `analyst.rs`'s `query_json_schema` AFTER every panel has already spent
+/// real money, instead of in §4's zero-provider-call preflight. Gating the
+/// catalog row on this predicate moves it back to preflight
+/// (`FusionError::StructuredOutputUnsupported`).
+///
+/// `VertexGemini` is in the same class: `VertexGeminiCodec::encode_request`
+/// delegates body construction to the inner `GeminiCodec` and only rewrites
+/// the URL. `VertexClaude`/`BedrockClaude`/`FoundryClaude` delegate to
+/// `AnthropicMessagesCodec` and `AzureOpenAi` to `OpenAiChatCodec`, all of
+/// which do encode `response_format`.
+///
+/// Deliberately an exhaustive `match` rather than a `matches!`: a new
+/// `ProtocolFamily` must not silently default to "encodes it" and
+/// re-introduce this defect for the next codec that does not.
+fn protocol_encodes_response_format(protocol: &llm_client::ProtocolFamily) -> bool {
+    match protocol {
+        llm_client::ProtocolFamily::GeminiGenerateContent
+        | llm_client::ProtocolFamily::VertexGemini => false,
+        llm_client::ProtocolFamily::AnthropicMessages
+        | llm_client::ProtocolFamily::OpenAiResponses
+        | llm_client::ProtocolFamily::OpenAiChat
+        | llm_client::ProtocolFamily::VertexClaude
+        | llm_client::ProtocolFamily::BedrockClaude
+        | llm_client::ProtocolFamily::FoundryClaude
+        | llm_client::ProtocolFamily::AzureOpenAi => true,
     }
 }
 
@@ -3229,6 +3274,43 @@ pub struct FusionCatalogRefresher {
 }
 
 impl FusionCatalogRefresher {
+    /// Build a refresher over a shared availability map and an explicit list
+    /// of KEYCHAIN-only profiles (no env-var fallback, no Anthropic/ChatGPT
+    /// special-casing).
+    ///
+    /// The composition root builds the real thing with the full
+    /// `provider_config::CredentialSource` list `resolve_llm_stack` already
+    /// has; this is the constructor for callers OUTSIDE that root — which
+    /// [`FUSION_CATALOG_REFRESHERS`] now makes possible — that only know
+    /// profile names.
+    #[must_use]
+    pub fn for_keychain_profiles(
+        availability: Arc<std::sync::RwLock<std::collections::BTreeMap<String, bool>>>,
+        credentials: Arc<CredentialManager>,
+        profiles: &[&str],
+    ) -> Self {
+        Self {
+            availability,
+            credentials,
+            credential_sources: profiles
+                .iter()
+                .map(|profile| provider_config::CredentialSource {
+                    provider_id: llm_client::ProviderId::OpenAICompatible {
+                        name: (*profile).to_string(),
+                    },
+                    profile_name: (*profile).to_string(),
+                    credential_id: (*profile).to_string(),
+                    env_var: None,
+                    kind: provider_config::CredentialKind::Keychain,
+                })
+                .collect(),
+            anthropic_has_api_key: false,
+            anthropic_has_oauth: false,
+            openai_chatgpt_available: false,
+            isolated: true,
+        }
+    }
+
     /// Re-probe every credential source (the SAME call `resolve_llm_stack`
     /// makes at boot, `provider_config::compute_availability_with_isolation`)
     /// and publish the result so the next `FusionCatalogModelSource::list()`
@@ -3247,6 +3329,53 @@ impl FusionCatalogRefresher {
     /// entries stay at their boot-time value, which is exactly what they
     /// already were before this call and is never staler than that.
     pub async fn refresh(&self) {
+        self.refresh_inner(None).await;
+    }
+
+    /// [`Self::refresh`] for a caller that knows WHICH credential it just
+    /// persisted — the shape every production caller actually has.
+    ///
+    /// `credential_id` is matched against `CredentialSource::credential_id`
+    /// (and, defensively, `profile_name`, because the TUI `/connect` seam
+    /// keys its actions by the profile name the availability map uses); every
+    /// matching profile is force-marked available regardless of what the
+    /// re-probe answered. Round-5 review finding [5]: the re-probe bottoms
+    /// out in `SecureStorage::contains`, whose `RuntimeFallbackStorage` impl
+    /// answers `Ok(false)` — not `Err` — for `BackendUnavailable` /
+    /// `PermissionDenied` / `Io`, so a degraded macOS credential broker makes
+    /// a key that was just written successfully read back as absent. Without
+    /// this the refresh triggered BY that write can conclude the provider is
+    /// unavailable, which is the exact opposite of what it was called to do.
+    pub async fn refresh_after_credential_write(&self, credential_id: &str) {
+        self.refresh_inner(Some(credential_id)).await;
+    }
+
+    /// Round-5 review finding [5]: this MERGES the re-probe into the live map
+    /// instead of replacing it (`*guard = map`, the round-4 shape).
+    ///
+    /// The probe cannot distinguish "no credential" from "the credential
+    /// backend is degraded": `provider_config::compute_availability_with_isolation`
+    /// resolves every generic profile as
+    /// `credentials.has_provider_key(id).await.unwrap_or(false)`, and
+    /// `RuntimeFallbackStorage` already turned a `BackendUnavailable` into
+    /// `Ok(false)` below that. A wholesale replace therefore let one degraded
+    /// re-probe overwrite a known-good boot map with an all-`false` one and
+    /// permanently empty Fusion's catalog for every non-anthropic profile
+    /// (`TooFewModels{eligible:0}` on every subsequent `/fusion`), with
+    /// nothing to repair it — strictly worse than the staleness the refresh
+    /// was added to fix, and invisible because `DesktopRuntime.provider_availability`
+    /// (the `/model` picker's copy) still showed those providers connected.
+    ///
+    /// Merge rule: a profile the probe reports AVAILABLE is published as
+    /// available; a profile the probe reports UNAVAILABLE keeps whatever the
+    /// map already held and is only inserted as `false` when the map had no
+    /// entry for it at all. That is sound because a refresh is only ever
+    /// triggered by a credential WRITE — no caller adds availability by
+    /// deleting a credential, so a refresh has no business REMOVING any. If a
+    /// credential-REMOVAL path is ever wired here it must not reuse this
+    /// method; it needs an explicit "this profile lost its credential" call
+    /// that clears exactly that entry.
+    async fn refresh_inner(&self, just_written: Option<&str>) {
         let rows = provider_config::compute_availability_with_isolation(
             &self.credentials,
             &self.credential_sources,
@@ -3256,15 +3385,85 @@ impl FusionCatalogRefresher {
             self.isolated,
         )
         .await;
-        let mut map: std::collections::BTreeMap<String, bool> = rows
-            .into_iter()
-            .map(|a| (a.profile_name, a.available))
-            .collect();
-        map.entry("anthropic".to_string())
-            .or_insert(self.anthropic_has_api_key || self.anthropic_has_oauth);
+        let forced: Vec<String> = just_written
+            .map(|id| {
+                self.credential_sources
+                    .iter()
+                    .filter(|source| source.credential_id == id || source.profile_name == id)
+                    .map(|source| source.profile_name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         if let Ok(mut guard) = self.availability.write() {
-            *guard = map;
+            for row in rows {
+                if row.available {
+                    guard.insert(row.profile_name, true);
+                } else {
+                    guard.entry(row.profile_name).or_insert(false);
+                }
+            }
+            for profile in forced {
+                guard.insert(profile, true);
+            }
+            guard
+                .entry("anthropic".to_string())
+                .or_insert(self.anthropic_has_api_key || self.anthropic_has_oauth);
         }
+    }
+}
+
+/// Round-5 review finding [15]: every credential-write seam in the process
+/// must be able to tell Fusion's catalog filter about the write, including
+/// the ones that do NOT go through `command_core`'s
+/// `ConnectCredentialWriter` / `CopilotConnectDriver` traits.
+///
+/// The TUI's `/connect` is intercepted before the command registry
+/// (`ChatWidget::cmd_connect` -> `ConnectKeyView` -> `ConnectAction::StoreKey`
+/// -> `apps/cli/src/mode.rs`'s `run_connect_action`) and writes through the
+/// RAW `Arc<secret::CredentialManager>` the TUI runtime carries, so the
+/// round-4 wrappers could not see it: a provider connected from the TUI key
+/// view stayed invisible to `/fusion` for the rest of the process while
+/// `/model` and the ordinary turn loop routed the same credential
+/// immediately.
+///
+/// Rather than thread a refresher handle through `DesktopRuntime` ->
+/// `crate::init::Runtime` -> the ratatui callback chain for each such seam,
+/// every runtime registers its refresher here once and any credential-write
+/// path anywhere in the process calls
+/// [`refresh_fusion_catalog_after_credential_write`]. Entries are pruned when
+/// the owning runtime is gone (its shared availability map has no owner left
+/// but this registry), so a long-lived process that builds several runtimes
+/// does not accumulate them.
+static FUSION_CATALOG_REFRESHERS: OnceLock<Mutex<Vec<FusionCatalogRefresher>>> = OnceLock::new();
+
+/// Publish a runtime's [`FusionCatalogRefresher`] to the process-wide
+/// registry — see [`FUSION_CATALOG_REFRESHERS`].
+pub fn register_fusion_catalog_refresher(refresher: FusionCatalogRefresher) {
+    let cell = FUSION_CATALOG_REFRESHERS.get_or_init(|| Mutex::new(Vec::new()));
+    if let Ok(mut guard) = cell.lock() {
+        guard.retain(|entry| Arc::strong_count(&entry.availability) > 1);
+        guard.push(refresher);
+    }
+}
+
+/// Tell every live Fusion catalog filter in this process that
+/// `credential_id`'s credential was just written, so the next
+/// `FusionCatalogModelSource::list()` sees it — the seam-agnostic half of
+/// round-5 review finding [15]. A no-op in a process with no desktop runtime
+/// (headless tests, the management subcommands).
+pub async fn refresh_fusion_catalog_after_credential_write(credential_id: &str) {
+    let refreshers: Vec<FusionCatalogRefresher> = FUSION_CATALOG_REFRESHERS
+        .get()
+        .and_then(|cell| cell.lock().ok())
+        .map(|mut guard| {
+            guard.retain(|entry| Arc::strong_count(&entry.availability) > 1);
+            guard.clone()
+        })
+        .unwrap_or_default();
+    for refresher in refreshers {
+        refresher
+            .refresh_after_credential_write(credential_id)
+            .await;
     }
 }
 
@@ -3275,9 +3474,13 @@ impl FusionCatalogRefresher {
 /// refreshing Fusion's catalog is a desktop-engine-specific consequence of a
 /// credential write, not part of the connect contract itself. Anthropic and
 /// ChatGPT connects are not routed through this seam (they have their own
-/// drivers) and are not wrapped — `FusionCatalogRefresher::refresh`
-/// intentionally keeps those two special-cased inputs frozen at boot (see
-/// its doc comment).
+/// drivers) — round-5 review finding [15] wraps those too
+/// ([`FusionCatalogRefreshingChatGptConnect`],
+/// [`FusionCatalogRefreshingOAuthConnect`]), and
+/// `refresh_after_credential_write` force-marks the named profile available
+/// so the three special-cased inputs `FusionCatalogRefresher` freezes at boot
+/// (`anthropic_has_api_key`/`anthropic_has_oauth`/`openai_chatgpt_available`)
+/// no longer make those two seams no-ops.
 struct FusionCatalogRefreshingCredentialWriter {
     inner: Arc<dyn command_core::ConnectCredentialWriter>,
     refresher: FusionCatalogRefresher,
@@ -3290,7 +3493,9 @@ impl command_core::ConnectCredentialWriter for FusionCatalogRefreshingCredential
         credential_id: &str,
     ) -> Result<(), command_core::ConnectError> {
         self.inner.prompt_and_store_key(credential_id).await?;
-        self.refresher.refresh().await;
+        self.refresher
+            .refresh_after_credential_write(credential_id)
+            .await;
         Ok(())
     }
 }
@@ -3319,8 +3524,58 @@ impl command_core::CopilotConnectDriver for FusionCatalogRefreshingCopilotConnec
         step: &command_core::CopilotConnectStep,
     ) -> Result<(), command_core::ConnectError> {
         self.inner.poll_to_completion(step).await?;
-        self.refresher.refresh().await;
+        // The Copilot device flow persists under the `github-copilot`
+        // credential id (`EngineCopilotConnect::poll_to_completion`); naming
+        // it keeps the degraded-backend guard of
+        // `refresh_after_credential_write` in play here too (finding [5]).
+        self.refresher
+            .refresh_after_credential_write("github-copilot")
+            .await;
         Ok(())
+    }
+}
+
+/// See [`FusionCatalogRefreshingCredentialWriter`] — the same wrapping for
+/// the ChatGPT-subscription OAuth seam (`/connect chatgpt`), which persists
+/// its credential inside `llm_client::oauth::openai`'s handle rather than
+/// through `ConnectCredentialWriter`. Round-5 review finding [15] class
+/// sweep: this was the one engine-desktop `/connect` driver round 4 left
+/// unwrapped, so a ChatGPT sign-in stayed invisible to Fusion for the rest of
+/// the process.
+struct FusionCatalogRefreshingChatGptConnect {
+    inner: Arc<dyn command_core::ChatGptConnectDriver>,
+    refresher: FusionCatalogRefresher,
+}
+
+#[async_trait::async_trait]
+impl command_core::ChatGptConnectDriver for FusionCatalogRefreshingChatGptConnect {
+    async fn connect(&self) -> Result<String, command_core::ConnectError> {
+        let message = self.inner.connect().await?;
+        self.refresher
+            .refresh_after_credential_write("openai-chatgpt")
+            .await;
+        Ok(message)
+    }
+}
+
+/// See [`FusionCatalogRefreshingCredentialWriter`] — the same wrapping for
+/// the unified OAuth sign-in seam the TUI `/connect` picker uses (Anthropic
+/// Pro/Max, OpenAI ChatGPT). Round-5 review finding [15] class sweep: an
+/// OAuth sign-in persists a credential exactly like an API-key write does,
+/// and `EngineOAuthConnect` was not one of the wrapped drivers.
+struct FusionCatalogRefreshingOAuthConnect {
+    inner: Arc<dyn command_core::OAuthConnectDriver>,
+    refresher: FusionCatalogRefresher,
+}
+
+#[async_trait::async_trait]
+impl command_core::OAuthConnectDriver for FusionCatalogRefreshingOAuthConnect {
+    async fn login(&self, provider_id: &str) -> Result<String, command_core::ConnectError> {
+        let message = self.inner.login(provider_id).await?;
+        self.refresher
+            .refresh_after_credential_write(provider_id)
+            .await;
+        Ok(message)
     }
 }
 
@@ -3512,6 +3767,7 @@ mod desktop_fusion_catalog_row_test {
             "anthropic",
             opus,
             platform_api::ModelBillingMode::PerToken,
+            &llm_client::ProtocolFamily::AnthropicMessages,
         );
         assert_eq!(row.profile, "anthropic");
         assert_eq!(row.model, "claude-opus-5");
@@ -3543,6 +3799,7 @@ mod desktop_fusion_catalog_row_test {
             "github-copilot",
             &unhinted,
             platform_api::ModelBillingMode::Subscription,
+            &llm_client::ProtocolFamily::OpenAiChat,
         );
         assert_eq!(
             row.hints.cost_class,
@@ -3571,8 +3828,169 @@ not fall back to FusionModelHints::default()'s cost_class: Medium"
             "openai",
             &unhinted,
             platform_api::ModelBillingMode::PerToken,
+            &llm_client::ProtocolFamily::OpenAiResponses,
         );
         assert_eq!(row.hints.cost_class, platform_api::FusionCostClass::Medium);
+    }
+
+    /// Round-5 review finding [3]: a `gemini` row's model capability bit says
+    /// `structured_output: true` (it is copied verbatim from the vendored
+    /// models.dev slice), but `GeminiCodec::encode_request` rejects ANY
+    /// `response_format` outright. Before this fix the row was built with
+    /// `structured_output: true`, so `resolve_analyst`'s `with_schema` gate
+    /// happily elected a Gemini analyst, §4 preflight passed with zero
+    /// errors, both panels burned real tokens, and only THEN did
+    /// `analyst.rs`'s `query_json_schema` die with
+    /// `InvalidRequest("GeminiCodec does not encode response_format yet")`.
+    #[test]
+    fn a_gemini_row_is_not_marked_structured_output_capable() {
+        let providers = llm_client::builtin_presets().providers;
+        let gemini = providers
+            .iter()
+            .find(|p| p.profile_name == "gemini")
+            .expect("gemini preset must exist in the builtin catalog");
+        assert_eq!(
+            gemini.protocol,
+            llm_client::ProtocolFamily::GeminiGenerateContent,
+            "sanity: the gemini preset must still be on the Gemini codec"
+        );
+        let pro = gemini
+            .models
+            .iter()
+            .find(|m| m.request_model == "gemini-3.1-pro-preview")
+            .expect("gemini-3.1-pro-preview present in the vendored gemini slice");
+        assert!(
+            pro.capabilities.structured_output,
+            "sanity: this test is only meaningful while the MODEL bit is true — \
+that mismatch with the codec is the whole defect"
+        );
+        let row = desktop_fusion_catalog_row(
+            &gemini.profile_name,
+            pro,
+            gemini.pricing.billing_mode,
+            &gemini.protocol,
+        );
+        assert!(
+            !row.structured_output,
+            "a GeminiGenerateContent row must NOT claim structured_output: its codec \
+rejects every response_format, so electing it analyst fails only AFTER the panels have spent"
+        );
+    }
+
+    /// The class guard for finding [3]: NO judge-eligible row anywhere in the
+    /// real builtin catalog may claim `structured_output` while sitting on a
+    /// protocol family whose codec cannot encode `response_format`. Pins the
+    /// property for every preset at once instead of just the `gemini` one the
+    /// finding named — a future preset on `VertexGemini` (or a new
+    /// non-encoding codec) fails here rather than in production after spend.
+    #[test]
+    fn no_judge_eligible_row_claims_structured_output_on_a_non_encoding_codec() {
+        let providers = llm_client::builtin_presets().providers;
+        let mut offenders: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        for provider in &providers {
+            for model in &provider.models {
+                checked += 1;
+                let row = desktop_fusion_catalog_row(
+                    &provider.profile_name,
+                    model,
+                    provider.pricing.billing_mode,
+                    &provider.protocol,
+                );
+                if row.hints.judge_eligible
+                    && row.structured_output
+                    && !protocol_encodes_response_format(&provider.protocol)
+                {
+                    offenders.push(format!(
+                        "{}/{} ({:?})",
+                        row.profile, row.model, provider.protocol
+                    ));
+                }
+            }
+        }
+        assert!(
+            checked > 50,
+            "coverage check: expected the real builtin catalog, only saw {checked} rows"
+        );
+        assert!(
+            offenders.is_empty(),
+            "these rows would be elected Fusion analyst and then hard-fail at encode time: {offenders:?}"
+        );
+    }
+
+    /// Both halves of the AND must be load-bearing: an encoding codec must
+    /// keep a `structured_output: false` model false (the codec bit cannot
+    /// manufacture a capability), and a non-encoding codec must not be
+    /// rescued by a true model bit.
+    #[test]
+    fn protocol_gate_and_model_bit_are_both_required() {
+        let mut caps = llm_client::Capabilities::default();
+        caps.structured_output = true;
+        let capable = llm_client::ModelProfile {
+            display_model: "m".to_string(),
+            request_model: "m".to_string(),
+            billing_model: "m".to_string(),
+            aliases: Vec::new(),
+            description: None,
+            metadata: platform_api::ModelMetadata::default(),
+            capabilities: caps,
+        };
+        let mut incapable = capable.clone();
+        incapable.capabilities.structured_output = false;
+
+        for family in [
+            llm_client::ProtocolFamily::GeminiGenerateContent,
+            llm_client::ProtocolFamily::VertexGemini,
+        ] {
+            assert!(
+                !protocol_encodes_response_format(&family),
+                "{family:?} delegates to GeminiCodec, which rejects response_format"
+            );
+            assert!(
+                !desktop_fusion_catalog_row(
+                    "p",
+                    &capable,
+                    platform_api::ModelBillingMode::PerToken,
+                    &family,
+                )
+                .structured_output,
+                "{family:?} must gate the row false even with capabilities.structured_output = true"
+            );
+        }
+        for family in [
+            llm_client::ProtocolFamily::AnthropicMessages,
+            llm_client::ProtocolFamily::OpenAiResponses,
+            llm_client::ProtocolFamily::OpenAiChat,
+            llm_client::ProtocolFamily::VertexClaude,
+            llm_client::ProtocolFamily::BedrockClaude,
+            llm_client::ProtocolFamily::FoundryClaude,
+            llm_client::ProtocolFamily::AzureOpenAi,
+        ] {
+            assert!(
+                protocol_encodes_response_format(&family),
+                "{family:?} encodes response_format (directly or via the codec it delegates to)"
+            );
+            assert!(
+                desktop_fusion_catalog_row(
+                    "p",
+                    &capable,
+                    platform_api::ModelBillingMode::PerToken,
+                    &family,
+                )
+                .structured_output,
+                "{family:?} must not narrow a genuinely capable model"
+            );
+            assert!(
+                !desktop_fusion_catalog_row(
+                    "p",
+                    &incapable,
+                    platform_api::ModelBillingMode::PerToken,
+                    &family,
+                )
+                .structured_output,
+                "{family:?} must not manufacture a capability the model lacks"
+            );
+        }
     }
 }
 
@@ -6689,6 +7107,63 @@ fn merge_agent_frontmatter_mcp_servers(
     blocked
 }
 
+/// Owns the MCP cleanup handles [`build_agent_mcp_tool_set`]'s connect loop
+/// has accumulated SO FAR, for as long as the loop is still running.
+///
+/// [Round-5 review item 11, class member (1) — handed here by that fixer's
+/// `needs_other_file`.] `agent::handle`'s own `McpCleanupGuard` can only be
+/// armed once this function RETURNS, and the loop below suspends on a real
+/// dial (`connect_agent_scoped` / `connect`) once per server. A caller that
+/// drops the spawn future mid-loop (the Fusion `join_set.abort_all()` race,
+/// one await earlier than findings 11 and 19) therefore dropped a plain local
+/// `Vec` that no caller had ever seen — every server already connected in
+/// this loop leaked its live connection with nothing left able to tear it
+/// down. The guard is armed before the first iteration and handed on, via
+/// [`AgentMcpConnectLoopGuard::take`], only in the expression that builds the
+/// returned [`agent::agent_mcp_tools::AgentMcpToolSet`].
+///
+/// Its `Drop` mirrors `agent::handle::McpCleanupGuard`'s: best-effort teardown
+/// on the current runtime, nothing to do once no runtime is left.
+struct AgentMcpConnectLoopGuard {
+    cleanups: Vec<agent::agent_mcp_tools::AgentMcpCleanupHandle>,
+    agent_type: String,
+}
+
+impl AgentMcpConnectLoopGuard {
+    fn new(agent_type: String) -> Self {
+        Self {
+            cleanups: Vec::new(),
+            agent_type,
+        }
+    }
+
+    fn push(&mut self, handle: agent::agent_mcp_tools::AgentMcpCleanupHandle) {
+        self.cleanups.push(handle);
+    }
+
+    /// Hand the handles to their next owner. Call this ONLY in the expression
+    /// that immediately consumes them; the guard is left empty, so from here
+    /// on its `Drop` is a no-op.
+    fn take(&mut self) -> Vec<agent::agent_mcp_tools::AgentMcpCleanupHandle> {
+        std::mem::take(&mut self.cleanups)
+    }
+}
+
+impl Drop for AgentMcpConnectLoopGuard {
+    fn drop(&mut self) {
+        if self.cleanups.is_empty() {
+            return;
+        }
+        let cleanups = std::mem::take(&mut self.cleanups);
+        let agent_type = std::mem::take(&mut self.agent_type);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                agent::agent_mcp_tools::run_agent_mcp_cleanups(cleanups, &agent_type).await;
+            });
+        }
+    }
+}
+
 /// §24b (claude `Agr`, 2.1.251 @~160977000): connect + build ONE subagent
 /// spawn's per-agent inline `mcpServers` tools. Reuses the SAME `PRn`
 /// conversion as the main-thread-agent merge above
@@ -6724,7 +7199,9 @@ async fn build_agent_mcp_tool_set(
         &existing_configs,
     );
     let mut tools: Vec<Arc<dyn tool_api::Tool>> = Vec::new();
-    let mut cleanups = Vec::new();
+    // Armed BEFORE the first dial: every await inside the loop is a window in
+    // which the caller can drop this future (round-5 review item 11).
+    let mut cleanups = AgentMcpConnectLoopGuard::new(def.agent_type.clone());
     for entry in scoped {
         let plain_name = entry.config.name.clone();
         let config_role = entry.config.metadata.role;
@@ -6829,7 +7306,10 @@ async fn build_agent_mcp_tool_set(
             });
         }
     }
-    agent::agent_mcp_tools::AgentMcpToolSet { tools, cleanups }
+    agent::agent_mcp_tools::AgentMcpToolSet {
+        tools,
+        cleanups: cleanups.take(),
+    }
 }
 
 /// Read the merged `settings.enabledPlugins` allowlist (`plugin@marketplace` →
@@ -8334,8 +8814,9 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         .iter()
         .flat_map(|provider| {
             let billing_mode = provider.pricing.billing_mode;
+            let protocol = provider.protocol.clone();
             provider.models.iter().map(move |model| {
-                desktop_fusion_catalog_row(&provider.profile_name, model, billing_mode)
+                desktop_fusion_catalog_row(&provider.profile_name, model, billing_mode, &protocol)
             })
         })
         .collect::<Vec<_>>();
@@ -8775,6 +9256,12 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         // deliberately excluded.
         isolated: cfg.isolated_credential_storage,
     };
+    // Finding [15]: publish this runtime's refresher so credential writes on
+    // seams that never see a `FusionCatalogRefresher` handle (the TUI
+    // `/connect` key view, which writes straight through
+    // `secret::CredentialManager`) can still reach it — see
+    // `FUSION_CATALOG_REFRESHERS`.
+    register_fusion_catalog_refresher(fusion_catalog_refresher.clone());
 
     let fusion_catalog = filter_fusion_catalog(
         fusion_catalog,
@@ -12716,11 +13203,16 @@ pub async fn build(
     // Plan 3c: `/connect` seams — Copilot device-flow over `PosixHttp`, and the
     // API-key writer over the host secure prompt (tui-supplied; headless no-op).
     // M8: also wire the ChatGPT OAuth seam (`/connect chatgpt`).
-    // Round-4 review finding [8]: both `/connect` seams below are wrapped so
-    // a successful credential write refreshes Fusion's catalog filter
-    // (`FusionCatalogRefresher`) — without this, a provider connected here
-    // stayed invisible to `/fusion` for the rest of the process even though
-    // this same write makes the ordinary turn loop route it immediately.
+    // Round-4 review finding [8] / round-5 finding [15]: EVERY `/connect`
+    // seam below is wrapped so a successful credential write refreshes
+    // Fusion's catalog filter (`FusionCatalogRefresher`) — without this, a
+    // provider connected here stayed invisible to `/fusion` for the rest of
+    // the process even though this same write makes the ordinary turn loop
+    // route it immediately. Round 4 wrapped only the API-key writer and the
+    // Copilot device flow; the ChatGPT and unified-OAuth drivers are wrapped
+    // here too, and the TUI key view (which bypasses all four and writes
+    // straight through `secret::CredentialManager`) reaches the same
+    // refresher through `refresh_fusion_catalog_after_credential_write`.
     let connect_copilot: Arc<dyn command_core::CopilotConnectDriver> =
         Arc::new(FusionCatalogRefreshingCopilotConnect {
             inner: Arc::new(crate::connect::EngineCopilotConnect::new(
@@ -12739,17 +13231,32 @@ pub async fn build(
             )),
             refresher: fusion_catalog_refresher.clone(),
         });
-    let connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver> = Arc::new(
+    let connect_chatgpt_inner: Arc<dyn command_core::ChatGptConnectDriver> = Arc::new(
         crate::connect::EngineChatGptConnect::new(openai_oauth_client, credentials.clone()),
     );
+    // Round-5 review finding [15] class sweep: EVERY `/connect` seam that
+    // persists a credential refreshes Fusion's catalog, not just the two
+    // round 4 wrapped. The OAuth driver below is built over the UNWRAPPED
+    // ChatGPT driver so a ChatGPT sign-in through the picker refreshes once,
+    // not twice.
+    let connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver> =
+        Arc::new(FusionCatalogRefreshingChatGptConnect {
+            inner: connect_chatgpt_inner.clone(),
+            refresher: fusion_catalog_refresher.clone(),
+        });
     // Unified OAuth sign-in driver for the TUI `/connect` picker (Anthropic
     // Pro/Max + OpenAI ChatGPT browser flows). Reuses the same backends as
     // `/login` (the Anthropic `auth` handle) and `/connect chatgpt`
     // (`connect_chatgpt`); built here while both are still owned (the registry
     // call below moves `connect_chatgpt`).
-    let oauth_connect_driver: Arc<dyn command_core::OAuthConnectDriver> = Arc::new(
-        crate::connect::EngineOAuthConnect::new(auth.clone(), connect_chatgpt.clone()),
-    );
+    let oauth_connect_driver: Arc<dyn command_core::OAuthConnectDriver> =
+        Arc::new(FusionCatalogRefreshingOAuthConnect {
+            inner: Arc::new(crate::connect::EngineOAuthConnect::new(
+                auth.clone(),
+                connect_chatgpt_inner,
+            )),
+            refresher: fusion_catalog_refresher.clone(),
+        });
     let mut reg = desktop_command_registry(
         handle.clone(),
         auth.clone(),
@@ -13506,6 +14013,7 @@ mod tests {
     use super::{
         build, build_shared_credential_stack_for_config, desktop_fusion_runtime_config,
         desktop_tool_registry, filter_fusion_catalog, model_deprecation_warning,
+        refresh_fusion_catalog_after_credential_write, register_fusion_catalog_refresher,
         FusionCatalogModelSource, FusionCatalogRefresher,
         parse_worktree_slash_action, resolve_memory_feature_gates,
         resolve_workflow_session_enabled, resolve_workflow_size_guideline,
@@ -14314,6 +14822,231 @@ mod tests {
             "a successful /connect write must flip the SAME shared lock \
 FusionCatalogModelSource::list() reads to available, in this process, \
 with no restart and no ModelSource reconstruction"
+        );
+    }
+
+    /// Round-5 review finding [5]: the round-4 `refresh()` REPLACED the
+    /// shared availability map wholesale (`*guard = map`) with whatever the
+    /// re-probe answered — and the re-probe cannot fail: it bottoms out in
+    /// `has_provider_key(..).unwrap_or(false)` over a `SecureStorage` whose
+    /// runtime fallback already turned `BackendUnavailable` /
+    /// `PermissionDenied` / `Io` into `Ok(false)`. One degraded credential
+    /// broker therefore rewrote a known-good boot map into an all-`false` one
+    /// and emptied Fusion's catalog for every non-anthropic profile for the
+    /// rest of the process (`TooFewModels{eligible:0}` on every `/fusion`),
+    /// with nothing that could ever repair it — strictly worse than the
+    /// staleness the refresh was added to fix.
+    ///
+    /// The degraded backend is modelled exactly as production degrades: a
+    /// storage that answers "nothing here" instead of erroring, so
+    /// `openrouter` (available at boot, credential still on disk) probes as
+    /// absent.
+    #[tokio::test]
+    async fn a_degraded_reprobe_must_not_erase_known_good_availability() {
+        use async_trait::async_trait;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+
+        /// Every read answers "absent" — the shape `RuntimeFallbackStorage`
+        /// produces once the macOS credential broker is unavailable.
+        struct DegradedStorage;
+        #[async_trait]
+        impl SecureStorage for DegradedStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(None)
+            }
+            async fn delete(&self, _service: &str, _account: &str) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(Vec::new())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(DegradedStorage);
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        let sources: Vec<provider_config::CredentialSource> = ["openrouter", "deepseek", "groq"]
+            .iter()
+            .map(|name| provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::OpenAICompatible {
+                    name: (*name).to_string(),
+                },
+                profile_name: (*name).to_string(),
+                credential_id: (*name).to_string(),
+                env_var: None,
+                kind: provider_config::CredentialKind::Keychain,
+            })
+            .collect();
+
+        // Boot map from a HEALTHY probe: two providers genuinely connected.
+        let mut boot = std::collections::BTreeMap::new();
+        boot.insert("anthropic".to_string(), true);
+        boot.insert("openrouter".to_string(), true);
+        boot.insert("deepseek".to_string(), true);
+        boot.insert("groq".to_string(), false);
+        let availability = Arc::new(std::sync::RwLock::new(boot));
+
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            credentials,
+            credential_sources: sources,
+            anthropic_has_api_key: true,
+            anthropic_has_oauth: false,
+            openai_chatgpt_available: false,
+            isolated: true,
+        };
+
+        // The `/connect groq` that triggers the refresh.
+        refresher.refresh_after_credential_write("groq").await;
+
+        let map = availability.read().unwrap().clone();
+        assert_eq!(
+            map.get("openrouter").copied(),
+            Some(true),
+            "a degraded re-probe must not flip a known-good provider to unavailable; \
+map after refresh was {map:?}"
+        );
+        assert_eq!(
+            map.get("deepseek").copied(),
+            Some(true),
+            "same for every other already-available profile; map after refresh was {map:?}"
+        );
+        assert_eq!(
+            map.get("anthropic").copied(),
+            Some(true),
+            "the anthropic entry must survive too; map after refresh was {map:?}"
+        );
+        assert_eq!(
+            map.get("groq").copied(),
+            Some(true),
+            "the credential the refresh was CALLED FOR must be published available even \
+when the degraded backend cannot read it back; map after refresh was {map:?}"
+        );
+    }
+
+    /// Round-5 review finding [15]: a credential-write seam that never sees a
+    /// `FusionCatalogRefresher` handle — the TUI `/connect` key view writes
+    /// straight through `secret::CredentialManager` — must still be able to
+    /// tell Fusion's catalog filter about the write. This pins the
+    /// process-wide notifier both halves of that seam use
+    /// (`apps/cli/src/mode.rs`'s `run_connect_action` calls it; the assertion
+    /// that IT does lives in that crate's own test).
+    #[tokio::test]
+    async fn the_process_wide_notifier_reaches_a_registered_refresher() {
+        use async_trait::async_trait;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+        use std::collections::HashMap;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct MemStorage {
+            map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+        }
+        #[async_trait]
+        impl SecureStorage for MemStorage {
+            async fn store(
+                &self,
+                service: &str,
+                account: &str,
+                data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .insert((service.into(), account.into()), data);
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .get(&(service.into(), account.into()))
+                    .cloned())
+            }
+            async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .remove(&(service.into(), account.into()));
+                Ok(())
+            }
+            async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .filter(|(s, _)| s == service)
+                    .map(|(_, a)| a.clone())
+                    .collect())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        let mut boot = std::collections::BTreeMap::new();
+        boot.insert("openrouter".to_string(), false);
+        let availability = Arc::new(std::sync::RwLock::new(boot));
+        register_fusion_catalog_refresher(FusionCatalogRefresher::for_keychain_profiles(
+            availability.clone(),
+            credentials.clone(),
+            &["openrouter"],
+        ));
+
+        // What the TUI key view does: a RAW credential write, no wrapper.
+        credentials
+            .set_provider_key("openrouter", "sk-or-test")
+            .await
+            .expect("store ok");
+        assert_eq!(
+            availability.read().unwrap().get("openrouter").copied(),
+            Some(false),
+            "sanity: the raw write alone must NOT be visible to Fusion — that is the defect"
+        );
+
+        refresh_fusion_catalog_after_credential_write("openrouter").await;
+        assert_eq!(
+            availability.read().unwrap().get("openrouter").copied(),
+            Some(true),
+            "the process-wide notifier must reach every registered refresher's shared map"
         );
     }
 
@@ -21740,6 +22473,216 @@ mod workspace_lease_forwarding_tests {
             *seen.lock().unwrap(),
             Some(Some(77)),
             "the deferred invoker must forward the lease token, not swallow it"
+        );
+    }
+}
+
+/// Round-5 review item 11's class member (1), handed to the gate by that
+/// fixer's `needs_other_file`: the connect LOOP inside
+/// [`build_agent_mcp_tool_set`] is one await EARLIER than the
+/// `pool.allocate` window `agent::handle::McpCleanupGuard` now covers, and
+/// its half-built `cleanups` vec had no owner at all.
+#[cfg(test)]
+mod desktop_agent_mcp_cleanup_guard_tests {
+    use platform_api::{
+        ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
+        McpNotificationStream, McpRawConnection, McpResourceContentDto, McpResourceDto,
+        McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+    };
+    use protocol::McpConnectionId;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Its `connect` never resolves, so the connect loop's SECOND iteration
+    /// parks forever inside `connect_agent_scoped` — at which point the FIRST
+    /// server is already live and its cleanup handle already sits in the
+    /// function's local `cleanups` vec. Dropping the future there is exactly
+    /// the Fusion `join_set.abort_all()` race the finding describes.
+    struct HangingConnectTransport;
+
+    #[async_trait::async_trait]
+    impl McpTransport for HangingConnectTransport {
+        async fn connect(&self, _spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            std::future::pending::<()>().await;
+            unreachable!("pending() never resolves")
+        }
+
+        async fn connect_and_initialize(
+            &self,
+            _spec: &McpTransportSpec,
+            _options: McpConnectOptions,
+        ) -> Result<McpConnectResult, McpError> {
+            // Overridden: the trait default wraps `connect` in a DEADLINE, and
+            // a deadline would let the loop move on instead of parking.
+            std::future::pending::<()>().await;
+            unreachable!("pending() never resolves")
+        }
+
+        async fn initialize(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<ServerCapabilitiesDto, McpError> {
+            unreachable!("connect never resolves")
+        }
+
+        async fn list_tools(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<Vec<platform_api::McpToolDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_resources(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<Vec<McpResourceDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_prompts(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<Vec<platform_api::McpPromptDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn call_tool(
+            &self,
+            _conn: &McpRawConnection,
+            _tool: &str,
+            _input: serde_json::Value,
+        ) -> Result<McpToolResultDto, McpError> {
+            unreachable!("unused")
+        }
+
+        async fn read_resource(
+            &self,
+            _conn: &McpRawConnection,
+            _uri: &str,
+        ) -> Result<McpResourceContentDto, McpError> {
+            unreachable!("unused")
+        }
+
+        async fn ping(&self, _conn_id: McpConnectionId) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn notifications(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<McpNotificationStream, McpError> {
+            Err(McpError::Connection("unused".into()))
+        }
+
+        async fn handle_elicitation(
+            &self,
+            _conn: &McpRawConnection,
+            _req: ElicitRequestDto,
+        ) -> Result<ElicitResultDto, McpError> {
+            Ok(ElicitResultDto {
+                data: serde_json::json!({ "action": "cancel" }),
+            })
+        }
+
+        async fn disconnect(&self, _conn_id: McpConnectionId) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        fn supported_transports(&self) -> Vec<McpTransportKind> {
+            vec![McpTransportKind::Stdio, McpTransportKind::Http]
+        }
+    }
+
+    fn record_spec(name: &str) -> agent::AgentMcpServerSpec {
+        let mut server = serde_json::Map::new();
+        server.insert(
+            name.into(),
+            serde_json::json!({ "command": "unused-in-test" }),
+        );
+        agent::AgentMcpServerSpec::Record(server)
+    }
+
+    #[tokio::test]
+    async fn a_dropped_connect_loop_tears_down_the_servers_it_already_opened() {
+        let agent_id = protocol::AgentId::new();
+        let opened_key = mcp::registry::agent_scope_table_key(agent_id, "opened");
+        let registry = Arc::new(mcp::McpRegistry::new(Arc::new(HangingConnectTransport)));
+        // `opened` is already live, so `connect_agent_scoped` short-circuits
+        // on it and the loop pushes its cleanup handle; `hangs` is not, so
+        // its connect parks in the transport forever.
+        let config = mcp::build_server_from_json_entry(
+            "opened",
+            &serde_json::json!({ "command": "unused-in-test" }),
+            mcp::ConfigScope::Agent,
+        )
+        .expect("agent MCP config parses");
+        registry.connections.write().await.insert(
+            opened_key.clone(),
+            mcp::McpConnectionState::Connected {
+                config,
+                connection_id: protocol::McpConnectionId::new(),
+                capabilities: platform_api::ServerCapabilitiesDto {
+                    tools: true,
+                    resources: false,
+                    prompts: false,
+                    logging: false,
+                    directory_read: false,
+                    experimental: std::collections::HashMap::new(),
+                    extensions: std::collections::HashMap::new(),
+                },
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                tools: vec![],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+
+        let mut def = agent::parse_agent_from_json(
+            "tester",
+            &serde_json::json!({"description": "d", "prompt": "p"}),
+            agent::AgentSource::Project,
+        )
+        .expect("agent definition parses");
+        def.mcp_servers = vec![record_spec("opened"), record_spec("hangs")];
+
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.mcp_registry = Some(registry.clone());
+
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(300),
+            super::build_agent_mcp_tool_set(registry.clone(), ctx, false, false, agent_id, def),
+        )
+        .await;
+        assert!(
+            outcome.is_err(),
+            "sanity: the second server's connect must still be parked when the \
+future is dropped — otherwise this test is not exercising the drop window"
+        );
+
+        // The guard's teardown is spawned onto the runtime, exactly like
+        // `SpawnDeallocGuard`'s; give it a bounded window to land.
+        let mut still_connected = true;
+        for _ in 0..200 {
+            if !registry.connections.read().await.contains_key(&opened_key) {
+                still_connected = false;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !still_connected,
+            "the MCP server the connect loop had ALREADY opened ({opened_key}) must be \
+disconnected when the future is dropped mid-loop — the half-built `cleanups` vec is \
+a plain local that no caller has ever seen, so nothing else can ever tear it down"
         );
     }
 }

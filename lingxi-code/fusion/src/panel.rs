@@ -5,10 +5,11 @@ use crate::config::FusionRuntimeConfig;
 use crate::model_resolver::{ModelSource, ResolvedPanel};
 use crate::orchestrator::price_realized_usage;
 use crate::progress;
+use async_trait::async_trait;
 use platform_api::subagent_output_guard::sanitize_blocks;
 use platform_api::subagent_spawn::{
-    StructuredOutputMode, SubagentResult, SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
-    SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX,
+    StructuredOutputMode, SubagentObservation, SubagentResult, SubagentSpawnObserver,
+    SubagentSpawnRequest, SubagentSpawner, SubagentUsage, SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX,
 };
 use platform_api::{
     validate_panel_report, FusionError, FusionInheritance, FusionProgress, FusionStage,
@@ -17,9 +18,11 @@ use platform_api::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Sender;
+use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
@@ -52,17 +55,41 @@ pub struct RealizedSpendSink<'a> {
 }
 
 impl RealizedSpendSink<'_> {
-    /// Refresh all three cells from whatever has been collected so far.
+    /// Refresh all three cells from whatever has been collected so far,
+    /// PLUS a one-turn floor for every panel that has already reached the
+    /// spawner but has not finished yet ([`in_flight_panels`]).
     /// Called from inside `run_panels`' collection loop after every push to
-    /// `collected` — see the two call sites below — so the cells are never
-    /// more than one panel-completion stale when a cancel drops the whole
-    /// future and discards `collected` itself.
-    fn update(&self, collected: &[(usize, PanelInternal)]) {
+    /// `collected`, from its cancel arm, and every time a panel task first
+    /// reaches the spawner — so the cells are never more than one panel
+    /// event stale when a cancel drops the whole future and discards
+    /// `collected` itself.
+    ///
+    /// [Round-5 review items 6/7] Before this, `update` priced ONLY the
+    /// panels that had already reached a terminal outcome, so the cell was
+    /// not monotone: the first `update` after a spawn-rejected panel
+    /// (`usage: None`, priced at exact $0) DELETED the pre-panel floor that
+    /// covered the siblings still streaming, and a cancel one moment later
+    /// committed less than a cancel one moment earlier would have. Panels
+    /// still in flight have provably egressed their whole prompt, so they
+    /// carry the same `estimate_in_flight_usage` floor `finish_panel` gives
+    /// a panel killed mid-flight — and a panel that never reached the
+    /// spawner contributes nothing at all (see `PanelDispatch`).
+    fn update(
+        &self,
+        collected: &[(usize, PanelInternal)],
+        panels: &[ResolvedPanel],
+        generic_prompt: &str,
+        dispatch: &PanelDispatch,
+    ) {
+        let in_flight = in_flight_panels(collected, panels, generic_prompt, dispatch);
         if let Ok(mut guard) = self.realized_tokens.lock() {
+            // Output tokens only — an in-flight panel has provably sent its
+            // input but has produced no output this side can count, so the
+            // floor above deliberately contributes 0 here.
             *guard = Some(realized_output_tokens_so_far(collected));
         }
         if let Ok(mut guard) = self.resolved_egress.lock() {
-            *guard = dispatched_profiles_so_far(collected);
+            *guard = dispatched_profiles_so_far(collected, &in_flight);
         }
         if let Ok(mut guard) = self.settlement.lock() {
             // `price_realized_usage` prices a `&[PanelInternal]`, not the
@@ -70,8 +97,9 @@ impl RealizedSpendSink<'_> {
             // clone of whatever has finished so far (never more than
             // `total` panels) is cheap next to the provider round-trips
             // that produced them.
-            let priced_so_far: Vec<PanelInternal> =
+            let mut priced_so_far: Vec<PanelInternal> =
                 collected.iter().map(|(_, panel)| panel.clone()).collect();
+            priced_so_far.extend(in_flight.iter().cloned());
             *guard = Some(price_realized_usage(
                 self.catalog,
                 self.prices,
@@ -101,15 +129,27 @@ fn realized_output_tokens_so_far(collected: &[(usize, PanelInternal)]) -> u64 {
 }
 
 /// Mirrors `orchestrator::dispatched_egress_profiles`'s exact filter
-/// (every panel except a pre-allocation `"spawn"` rejection — the one
-/// category provably reached before any provider call) and `None`-vs-empty
-/// contract, computed over `run_panels`' own in-progress `collected` instead
-/// of the finished `Vec<PanelInternal>` `run_inner` aggregates post-stage.
-fn dispatched_profiles_so_far(collected: &[(usize, PanelInternal)]) -> Option<Vec<String>> {
+/// (every panel except one provably reached before any provider call —
+/// a pre-allocation `"spawn"` rejection or a `"not_dispatched"` slot the
+/// bar/cancel killed before a subagent was ever allocated for it) and its
+/// `None`-vs-empty contract, computed over `run_panels`' own in-progress
+/// `collected` instead of the finished `Vec<PanelInternal>` `run_inner`
+/// aggregates post-stage.
+///
+/// [Round-5 review item 6] `in_flight` (panels that reached the spawner and
+/// have not finished) counts too: their whole prompt has already egressed,
+/// so a cancel landing mid-fan-out must disclose their profiles exactly as
+/// the terminal path does.
+fn dispatched_profiles_so_far(
+    collected: &[(usize, PanelInternal)],
+    in_flight: &[PanelInternal],
+) -> Option<Vec<String>> {
     let mut profiles: Vec<String> = collected
         .iter()
-        .filter(|(_, panel)| panel.error_category.as_deref() != Some("spawn"))
-        .map(|(_, panel)| panel.profile.clone())
+        .map(|(_, panel)| panel)
+        .chain(in_flight.iter())
+        .filter(|panel| !is_never_dispatched_category(panel.error_category.as_deref()))
+        .map(|panel| panel.profile.clone())
         .collect();
     if profiles.is_empty() {
         return None;
@@ -117,6 +157,189 @@ fn dispatched_profiles_so_far(collected: &[(usize, PanelInternal)]) -> Option<Ve
     profiles.sort();
     profiles.dedup();
     Some(profiles)
+}
+
+/// The `error_category` values that PROVE no provider call was made for that
+/// slot: `"spawn"` (the spawner rejected the panel pre-allocation) and
+/// `"not_dispatched"` ([Round-5 review items 8/12, round-6 blocking B1] the
+/// slot was cancelled before its task ever called the spawner, or aborted
+/// while inside a spawner call that never allocated a child — see
+/// [`PanelDispatch`], whose two flags are exactly this distinction). Every
+/// other category describes a panel for which a subagent provably existed,
+/// and which may therefore have been billed.
+///
+/// A thin crate-local alias for [`platform_api::fusion::panel_never_dispatched`],
+/// which is the SINGLE SOURCE OF TRUTH: `tool-agent` reads the same predicate
+/// from there to decide how much of the session spawn reservation to release,
+/// and round-6 blocking B2 was these two lists drifting apart when they were
+/// independent `matches!` arms. Add a new value in platform-api, never here.
+pub(crate) fn is_never_dispatched_category(category: Option<&str>) -> bool {
+    platform_api::fusion::panel_never_dispatched(category)
+}
+
+/// One synthetic [`PanelInternal`] per panel that has reached the spawner
+/// but has not yet reached a terminal outcome, carrying the same
+/// [`estimate_in_flight_usage`] floor `finish_panel` gives a panel killed
+/// mid-flight. Panels whose task never reached the spawner are omitted
+/// entirely: estimating for them would invent spend for a call that
+/// provably never happened (round-5 review item 16's rule).
+fn in_flight_panels(
+    collected: &[(usize, PanelInternal)],
+    panels: &[ResolvedPanel],
+    generic_prompt: &str,
+    dispatch: &PanelDispatch,
+) -> Vec<PanelInternal> {
+    (0..panels.len())
+        .filter(|index| {
+            dispatch.reached_spawner(*index)
+                && !collected.iter().any(|(collected, _)| collected == index)
+        })
+        .map(|index| PanelInternal {
+            index,
+            profile: panels[index].profile.clone(),
+            model: panels[index].model.clone(),
+            anonymous_id: String::new(),
+            status: PanelRunStatus::Failed,
+            report: None,
+            duration_ms: 0,
+            error_category: None,
+            error_detail: None,
+            usage: Some(estimate_in_flight_usage(generic_prompt)),
+            spawn_prompt: generic_prompt.to_string(),
+        })
+        .collect()
+}
+
+/// [Round-5 review items 6/7/8/12] Which panel tasks have actually reached
+/// the spawner.
+///
+/// `JoinSet::spawn` only ENQUEUES a future — tokio does not poll it before
+/// the spawning task yields — and every panel task begins with its own
+/// biased `cancel.cancelled()` arm, so "N tasks were spawned" is not
+/// evidence that any subagent was ever created. Each task flips its own
+/// flag from INSIDE the branch that calls `spawn_workflow_with_observer`
+/// (see `spawn_panel_tasks`), which can only run once that biased cancel
+/// arm has lost, and wakes `run_panels`' collection loop so it can emit
+/// `PanelsDispatched` and refresh the settlement floor at that moment
+/// instead of one line after `spawn_panel_tasks` returns.
+/// [Round-6 blocking B1] The two flags are DELIBERATELY distinct — they
+/// answer two different questions, and conflating them is the defect this
+/// type was reworked to remove:
+///
+/// * `reached` = "this task entered the spawner call". It is set by the
+///   task itself, one line before `spawn_workflow_with_observer`, so it
+///   records an INTENT: the prompt is on its way out. It is the right
+///   predicate for the in-flight settlement floor ([`in_flight_panels`])
+///   and for the `PanelsDispatched` progress emit.
+/// * `allocated` = "the pool actually allocated a child for this panel".
+///   It is set from the `SubagentObservation::Allocated` the production
+///   spawner emits on the line immediately after `pool.allocate` succeeds
+///   and BEFORE the runner that makes any provider call exists
+///   (`agent/src/handle.rs`). It records a FACT, and it is the only sound
+///   predicate for "could this slot have been billed?".
+///
+/// They differ for seconds at a time: `spawn_workflow_with_observer` runs
+/// `build_subagent_context` — which CONNECTS the panel's inline MCP servers
+/// — before the pool can even refuse the spawn. A panel parked in that
+/// window has `reached = true` and `allocated = false`, and if the panel bar
+/// aborts it there (a sibling rejection sealed the run), classifying it as a
+/// mid-flight `"aborted"` charges a lifetime spawn slot for a subagent that
+/// provably never existed.
+pub(crate) struct PanelDispatch {
+    reached: Vec<AtomicBool>,
+    allocated: Vec<AtomicBool>,
+    signal: Notify,
+}
+
+impl PanelDispatch {
+    pub(crate) fn new(total: usize) -> Self {
+        Self {
+            reached: (0..total).map(|_| AtomicBool::new(false)).collect(),
+            allocated: (0..total).map(|_| AtomicBool::new(false)).collect(),
+            signal: Notify::new(),
+        }
+    }
+
+    /// Called by panel `index`'s own task immediately before it calls the
+    /// spawner. `Notify::notify_one` stores a permit when nobody is
+    /// waiting, so a mark that lands while the collection loop is busy is
+    /// never lost.
+    fn mark(&self, index: usize) {
+        if let Some(flag) = self.reached.get(index) {
+            flag.store(true, Ordering::SeqCst);
+        }
+        self.signal.notify_one();
+    }
+
+    /// Called from [`PanelAllocationObserver`] when the spawner reports that
+    /// panel `index` has a real child slot. Deliberately does NOT notify:
+    /// the `PanelsDispatched` emit and the settlement floor are keyed on
+    /// [`Self::reached_spawner`], which has already woken the collection
+    /// loop for this panel.
+    fn mark_allocated(&self, index: usize) {
+        if let Some(flag) = self.allocated.get(index) {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) fn reached_spawner(&self, index: usize) -> bool {
+        self.reached
+            .get(index)
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    }
+
+    /// Whether a subagent was PROVABLY created for panel `index` — see the
+    /// type docs for why this is not the same question as
+    /// [`Self::reached_spawner`].
+    pub(crate) fn allocated(&self, index: usize) -> bool {
+        self.allocated
+            .get(index)
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    }
+
+    fn any_reached_spawner(&self) -> bool {
+        self.reached.iter().any(|flag| flag.load(Ordering::SeqCst))
+    }
+
+    async fn notified(&self) {
+        self.signal.notified().await;
+    }
+}
+
+/// One per panel task: the `observer` slot of `spawn_workflow_with_observer`,
+/// used for the single question `PanelDispatch` cannot answer from this side
+/// of the spawn boundary — did the pool actually allocate a child?
+///
+/// `PoolSubagentSpawner::spawn_with_observer` emits
+/// [`SubagentObservation::Allocated`] exactly once, on the line right after
+/// `pool.allocate` returns `Ok` and before the runner exists, so observing it
+/// is proof that a subagent was created; NOT observing it (the spawner
+/// rejected the panel, or the task was killed while still building the
+/// child's context) is proof that none was. Every other observation is
+/// ignored: this panel's real work is already reported through the
+/// `SubagentResult` the spawner call returns.
+///
+/// The observation is delivered through `agent::api::ObserverEventSink`'s
+/// bounded channel, so there is a sub-millisecond window between
+/// `pool.allocate` returning and this flag being set. `Allocated` is the
+/// FIRST event ever emitted on a spawn's own freshly-built sink, so it can
+/// never be the one the sink drops when full; the only residual is an abort
+/// landing inside that window, which classifies a just-allocated panel as
+/// `"not_dispatched"` and releases its spawn slot. That direction is the
+/// safe one (a slot handed back, never a phantom subagent charged forever),
+/// and it needs the bar to seal in the same instant the pool allocated.
+struct PanelAllocationObserver {
+    dispatch: Arc<PanelDispatch>,
+    index: usize,
+}
+
+#[async_trait]
+impl SubagentSpawnObserver for PanelAllocationObserver {
+    async fn on_event(&self, event: SubagentObservation) {
+        if matches!(event, SubagentObservation::Allocated { .. }) {
+            self.dispatch.mark_allocated(self.index);
+        }
+    }
 }
 
 /// Host-side view of one panel after `JoinSet` collection (pre-anonymization).
@@ -260,6 +483,11 @@ fn spawn_panel_tasks(
     schema: &str,
     generic_prompt: &str,
     max_input_bytes: u64,
+    // [Round-5 review items 8/12] Flipped by each task from inside the
+    // branch that actually calls the spawner, and — [round-6 blocking B1]
+    // — flipped a second time from the spawner's own `Allocated`
+    // observation once a child really exists. See `PanelDispatch`.
+    dispatch: &Arc<PanelDispatch>,
 ) -> (JoinSet<PanelTaskOutput>, HashMap<tokio::task::Id, usize>) {
     let mut join_set = JoinSet::new();
     let mut task_index: HashMap<tokio::task::Id, usize> = HashMap::with_capacity(panels.len());
@@ -288,6 +516,7 @@ fn spawn_panel_tasks(
             max_retries: 0,
         };
         let name_index = anon_rank[index];
+        let dispatch = Arc::clone(dispatch);
         let abort_handle = join_set.spawn(async move {
             let started = Instant::now();
             let request = spawn_request(
@@ -307,16 +536,47 @@ fn spawn_panel_tasks(
             };
             let outcome = tokio::select! {
                 biased;
-                () = cancel.cancelled() => PanelFinish::Cancelled,
+                // [Round-5 review item 16] A cancel that lands before this
+                // task ever called the spawner made no provider call, so it
+                // must NOT be settled with the in-flight estimate the
+                // mid-flight cancel below legitimately gets.
+                () = cancel.cancelled() => PanelFinish::Cancelled {
+                    dispatched: dispatch.reached_spawner(index),
+                },
                 result = timeout(
                     panel_total_timeout,
-                    spawner.spawn_workflow_with_observer(
-                        request,
-                        inherit,
-                        None,
-                        None,
-                        panel_watchdog,
-                    ),
+                    // [Round-5 review items 8/12] The mark lives INSIDE this
+                    // future's body, not beside the `select!`: a `select!`
+                    // branch expression is built eagerly (even when the
+                    // biased cancel arm above wins), while this line runs
+                    // only once this branch is actually polled — i.e. only
+                    // once the spawner call is genuinely about to be made.
+                    async {
+                        dispatch.mark(index);
+                        // [Round-6 blocking B1] The `observer` slot, which
+                        // used to be `None`, is what turns "we called the
+                        // spawner" into "a subagent exists": the pool emits
+                        // `Allocated` the instant it hands this panel a
+                        // child slot. Without it, a panel killed by the bar
+                        // while still INSIDE a slow rejection (the spawner
+                        // connects the panel's inline MCP servers before it
+                        // can refuse) was indistinguishable from one cut
+                        // down mid-stream.
+                        let allocation_observer: Arc<dyn SubagentSpawnObserver> =
+                            Arc::new(PanelAllocationObserver {
+                                dispatch: Arc::clone(&dispatch),
+                                index,
+                            });
+                        spawner
+                            .spawn_workflow_with_observer(
+                                request,
+                                inherit,
+                                None,
+                                Some(allocation_observer),
+                                panel_watchdog,
+                            )
+                            .await
+                    },
                 ) => {
                     match result {
                         Ok(Ok(terminal)) => PanelFinish::Done(terminal),
@@ -379,9 +639,11 @@ pub async fn run_panels(
     progress: &Option<Sender<FusionProgress>>,
     // [Round-4 rework, item 2] `None` in tests that don't exercise the
     // survives-a-drop cells; `Some` from `FusionOrchestrator::run_panel_stage`
-    // on every real run, so a cancel landing mid-fan-out — see the two
-    // `sink.update(&collected)` call sites below — still leaves them
-    // holding whatever finished before it did. See `RealizedSpendSink`.
+    // on every real run, so a cancel landing mid-fan-out — see the four
+    // `sink.update(..)` call sites below (a panel reached the spawner, a
+    // panel finished, a panel's task died, and the cancel arm itself) —
+    // still leaves them holding whatever really happened before it did. See
+    // `RealizedSpendSink`.
     sink: Option<&RealizedSpendSink<'_>>,
 ) -> Result<Vec<PanelInternal>, FusionError> {
     let schema = serde_json::to_string(&panel_report_json_schema()).unwrap_or_default();
@@ -418,6 +680,14 @@ pub async fn run_panels(
     let max_input_bytes = u64::from(config.panel_reserved_input_tokens_per_turn)
         * llm_client::model::count_tokens::APPROX_CHARS_PER_TOKEN;
 
+    // [Round-5 review items 8/12] Shared with every spawned task so both
+    // the `PanelsDispatched` emit below and the aborted-slot classification
+    // further down can tell a task that really called the spawner from one
+    // that was killed before it ever did — and [round-6 blocking B1] so the
+    // latter can further tell a task that was merely INSIDE the spawner
+    // call from one the pool actually allocated a child for. See
+    // `PanelDispatch`.
+    let dispatch = Arc::new(PanelDispatch::new(total));
     let (mut join_set, task_index) = spawn_panel_tasks(
         &spawner,
         inherit,
@@ -428,28 +698,66 @@ pub async fn run_panels(
         &schema,
         &generic_prompt,
         max_input_bytes,
+        &dispatch,
     );
-    // [round-3 review, findings 11/19] Every panel task above has now been
-    // handed to the spawner (real provider calls are, or immediately were,
-    // in flight) — signal that DISTINCTLY from `run_panel_stage`'s pre-spawn
-    // `RunningPanels{completed:0,..}` event, which fires before this
-    // function is even called. `emit_running_panels` below only fires once a
-    // panel reaches a terminal outcome, so without this a cancel landing
-    // between spawn and the first completion looked, to every consumer,
-    // identical to a cancel that landed before any panel task existed.
-    emit_panels_dispatched(progress, total);
 
     let mut collected: Vec<(usize, PanelInternal)> = Vec::with_capacity(total);
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let mut bar_aborted = false;
+    let mut dispatched_emitted = false;
     while collected.len() < total {
         tokio::select! {
             biased;
             () = inherit.cancel.cancelled() => {
                 join_set.abort_all();
                 while join_set.join_next().await.is_some() {}
+                // [Round-5 rework of item 12] This arm is BIASED ABOVE the
+                // `dispatch.notified()` arm below, so when a panel task
+                // really reached the spawner (`dispatch.mark` ran, a
+                // subagent is being built) and the cancel fires before the
+                // loop is next polled, the notify arm never runs and this
+                // exit would leave the whole run with NO progress event at
+                // all. `tools/agent`'s `stage_proves_panel_spawned` would
+                // then see no proof, `releases_full_reservation` would be
+                // true for `FusionError::Cancelled`, and the session would
+                // hand back the entire `panel_n` spawn reservation for
+                // subagents that genuinely exist — the exact mirror of the
+                // over-charge item 12 removed. The shared one-shot helper
+                // is what keeps the two arms from drifting apart again:
+                // nothing is emitted when no task ever reached the spawner.
+                emit_panels_dispatched_once(&mut dispatched_emitted, &dispatch, progress, total);
+                // [Round-5 review item 6] One last refresh before the whole
+                // `collected` vector is discarded: the panels still in
+                // flight at this instant have already egressed their entire
+                // prompt, and without this they would drop out of the
+                // settlement the outer `Err` arm commits — making a cancel
+                // bill strictly less than the total-timeout terminal state
+                // does for the identical panel set.
+                if let Some(sink) = sink {
+                    sink.update(&collected, panels, &generic_prompt, &dispatch);
+                }
                 return Err(FusionError::Cancelled);
+            }
+            // [round-3 review, findings 11/19; round-5 review item 12] A
+            // panel task has reached the spawner — real provider calls are,
+            // or immediately were, in flight. This is the earliest point at
+            // which that is TRUE: `spawn_panel_tasks` only enqueues futures
+            // (tokio polls none of them before this task yields) and every
+            // panel task begins with its own biased cancel arm, so the old
+            // emit — one synchronous line after `spawn_panel_tasks`
+            // returned — announced dispatch for a set of panels a cancel in
+            // that same window guaranteed would never exist, and the Agent
+            // tool kept the session's spawn quota charged for them.
+            () = dispatch.notified() => {
+                emit_panels_dispatched_once(&mut dispatched_emitted, &dispatch, progress, total);
+                // The in-flight floor this panel just earned (its prompt is
+                // egressed the moment the spawner call is made) belongs in
+                // the settlement cell right away — a cancel one poll later
+                // reads exactly this value.
+                if let Some(sink) = sink {
+                    sink.update(&collected, panels, &generic_prompt, &dispatch);
+                }
             }
             next = join_set.join_next_with_id() => {
                 match next {
@@ -468,7 +776,7 @@ pub async fn run_panels(
                         // cancel landing right after this panel's own
                         // completion would still see stale (or `None`) cells.
                         if let Some(sink) = sink {
-                            sink.update(&collected);
+                            sink.update(&collected, panels, &generic_prompt, &dispatch);
                         }
                         // F005: fan out ONE `RunningPanels{completed,total}`
                         // event per finished panel (not just once at 0/total
@@ -478,24 +786,13 @@ pub async fn run_panels(
                         emit_running_panels(progress, index, collected.len(), total);
                     }
                     Some(Err(join_err)) => {
-                        // A panicked or (post-abort) cancelled task loses its
-                        // `(index, panel, ..)` payload with the join error —
-                        // recover the index from the id map planted at spawn
-                        // time and the panel identity from the ORIGINAL
-                        // `panels` slice (still borrowed for the whole call),
-                        // so the slot is never simply dropped (F012-join).
-                        if let Some(&index) = task_index.get(&join_err.id()) {
-                            let category = if join_err.is_panic() { "panic" } else { "aborted" };
-                            let internal = finish_panel(
-                                index,
-                                panels[index].clone(),
-                                generic_prompt.clone(),
-                                Duration::default(),
-                                PanelFinish::Failed {
-                                    category: category.into(),
-                                    detail: Some(sanitize_detail(&join_err.to_string())),
-                                },
-                            );
+                        if let Some((index, internal)) = panel_from_join_error(
+                            &join_err,
+                            &task_index,
+                            panels,
+                            &generic_prompt,
+                            &dispatch,
+                        ) {
                             failed += 1;
                             collected.push((index, internal));
                             // [Round-4 rework, item 2] Same incremental
@@ -503,7 +800,7 @@ pub async fn run_panels(
                             // panicked/aborted slot still needs to be
                             // reflected before the next cancel poll.
                             if let Some(sink) = sink {
-                                sink.update(&collected);
+                                sink.update(&collected, panels, &generic_prompt, &dispatch);
                             }
                             emit_running_panels(progress, index, collected.len(), total);
                         }
@@ -527,6 +824,60 @@ pub async fn run_panels(
     Ok(collected.into_iter().map(|(_, internal)| internal).collect())
 }
 
+/// `run_panels` helper: synthesize the panel slot behind a `JoinError`.
+///
+/// A panicked or (post-abort) cancelled task loses its `(index, panel, ..)`
+/// payload with the join error — recover the index from the id map planted
+/// at spawn time and the panel identity from the ORIGINAL `panels` slice, so
+/// the slot is never simply dropped (F012-join).
+///
+/// [Round-5 review item 8] A slot aborted before its task ever called the
+/// spawner (`abort_all` racing a still-unpolled task, or one still parked on
+/// its own cancel arm) provably created no subagent and made no provider
+/// call — the same shape as a pre-allocation `"spawn"` rejection, and the
+/// opposite of a panel cut down mid-stream. Only the latter keeps
+/// `"aborted"` (and with it the in-flight usage estimate `finish_panel`
+/// gives that category).
+///
+/// [Round-6 blocking B1] The predicate for "cut down mid-stream" is
+/// `PanelDispatch::allocated`, NOT `reached_spawner`. Entering the spawner
+/// call is only an intent: `spawn_workflow_with_observer` builds the child's
+/// context (connecting its inline MCP servers) and contends the pool's slot
+/// table before it can even reject, and a panel the bar aborts inside THAT
+/// window provably has no subagent and no provider call — exactly the
+/// `"spawn"` shape. Keying this on `reached_spawner` meant a run whose every
+/// panel was rejected by a full pool, with one rejection slow enough for the
+/// bar to abort it first, reported `AllPanelsFailed` instead of
+/// `AllPanelsFailedPreflight` and kept the caller's ENTIRE spawn
+/// reservation charged for zero subagents.
+fn panel_from_join_error(
+    join_err: &tokio::task::JoinError,
+    task_index: &HashMap<tokio::task::Id, usize>,
+    panels: &[ResolvedPanel],
+    generic_prompt: &str,
+    dispatch: &PanelDispatch,
+) -> Option<(usize, PanelInternal)> {
+    let &index = task_index.get(&join_err.id())?;
+    let category = if join_err.is_panic() {
+        "panic"
+    } else if dispatch.allocated(index) {
+        "aborted"
+    } else {
+        "not_dispatched"
+    };
+    let internal = finish_panel(
+        index,
+        panels[index].clone(),
+        generic_prompt.to_string(),
+        Duration::default(),
+        PanelFinish::Failed {
+            category: category.into(),
+            detail: Some(sanitize_detail(&join_err.to_string())),
+        },
+    );
+    Some((index, internal))
+}
+
 /// Emit `RunningPanels{completed,total}` for one finished panel (F005). Panels
 /// are not yet anonymized inside `run_panels` (anonymization runs on the
 /// caller's side after this returns), so `panel_id` is the pre-shuffle spawn
@@ -542,6 +893,41 @@ fn emit_panels_dispatched(progress: &Option<Sender<FusionProgress>>, total: usiz
         total: u8::try_from(total).unwrap_or(u8::MAX),
     };
     progress::emit(progress, stage.clone(), None, stage.label());
+}
+
+/// [Round-5 rework of item 12] The one-shot `PanelsDispatched` emit shared
+/// by BOTH exits of `run_panels`' collection loop that can be the first to
+/// observe a panel reaching the spawner: the biased `cancel.cancelled()`
+/// arm and the `dispatch.notified()` arm below it.
+///
+/// It exists as one function precisely so those two cannot drift apart
+/// again. Item 12 moved the emit off the synchronous line after
+/// `spawn_panel_tasks` (which announced dispatch for panels a cancel in
+/// that window guaranteed would never exist) into the notify arm — but the
+/// cancel arm is polled FIRST, so a cancel landing after a task had really
+/// run `dispatch.mark` and entered `spawn_workflow_with_observer` returned
+/// `Err(Cancelled)` with no progress event at all. `tools/agent`'s
+/// `panels_proven_spawned` then saw no proof and released the session's
+/// ENTIRE `panel_n` spawn reservation for subagents that genuinely exist —
+/// the exact mirror of the over-charge item 12 removed.
+///
+/// The two other exits of that loop (a panel completed, a panel's task
+/// died) never need this: `select!` is `biased`, so `dispatch.notified()`
+/// is polled before `join_next_with_id()`, and `PanelDispatch::mark` sets
+/// its flag before storing the `Notify` permit — so any panel that reached
+/// the spawner has already made the notify arm win an earlier poll. See
+/// `panels_dispatched_precedes_the_completed_arm_for_a_dispatched_panel`.
+fn emit_panels_dispatched_once(
+    emitted: &mut bool,
+    dispatch: &PanelDispatch,
+    progress: &Option<Sender<FusionProgress>>,
+    total: usize,
+) {
+    if *emitted || !dispatch.any_reached_spawner() {
+        return;
+    }
+    *emitted = true;
+    emit_panels_dispatched(progress, total);
 }
 
 fn emit_running_panels(
@@ -572,7 +958,28 @@ enum PanelFinish {
         detail: Option<String>,
     },
     TotalTimedOut,
-    Cancelled,
+    /// The panel's own biased `cancel.cancelled()` arm won. `dispatched`
+    /// records whether this task had already called the spawner when that
+    /// happened — [Round-5 review item 16] a cancel that landed first made
+    /// no provider call at all, so it must not be settled with the
+    /// in-flight estimate a genuinely mid-flight cancel gets.
+    ///
+    /// [Round-6 blocking B1, class sweep] This stays keyed on
+    /// `reached_spawner`, NOT on the new `allocated` flag, for two reasons.
+    /// (1) It also decides the SETTLEMENT: `dispatched: true` is what buys
+    /// the `estimate_in_flight_usage` floor, and B1 explicitly keeps that
+    /// floor on "the prompt has egressed" rather than "a child exists".
+    /// (2) Its category can never reach a spawn-quota consumer: this
+    /// variant is only produced once `inherit.cancel` is set, and
+    /// `run_panels`' own collection loop has a BIASED `cancel.cancelled()`
+    /// arm above every arm that could collect it, so the loop returns
+    /// `Err(FusionError::Cancelled)` — an error whose accounting keys on
+    /// `PanelsDispatched`, not on any panel category — before this outcome
+    /// can be pushed into `collected`. `dispatched: false` still implies
+    /// `!allocated`, so the `"not_dispatched"` it does emit is never a lie.
+    Cancelled {
+        dispatched: bool,
+    },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -662,11 +1069,22 @@ fn finish_panel(
             // spend.
             internal.usage = Some(estimate_in_flight_usage(&internal.spawn_prompt));
         }
-        PanelFinish::Cancelled | PanelFinish::Done(SubagentResult::Killed { .. }) => {
+        PanelFinish::Cancelled { dispatched: true }
+        | PanelFinish::Done(SubagentResult::Killed { .. }) => {
             internal.status = PanelRunStatus::Cancelled;
             internal.error_category = Some("cancelled".into());
             // Same reasoning as the timeout arm above.
             internal.usage = Some(estimate_in_flight_usage(&internal.spawn_prompt));
+        }
+        PanelFinish::Cancelled { dispatched: false } => {
+            // [Round-5 review item 16] The cancel beat this task to its own
+            // spawner call, so nothing was ever sent: `usage` stays `None`
+            // (exact $0, the same treatment a `"spawn"` rejection gets)
+            // and the category says the slot never dispatched so
+            // `check_panel_bar` / `dispatched_egress_profiles` can tell it
+            // apart from a panel killed mid-stream.
+            internal.status = PanelRunStatus::Cancelled;
+            internal.error_category = Some("not_dispatched".into());
         }
         PanelFinish::Failed { category, detail } => {
             // Round-3 review item 2 fix: a `"aborted"`/`"panic"` category
@@ -1255,7 +1673,7 @@ prompt, not a second, divergent formula"
             panel(),
             prompt.clone(),
             Duration::from_millis(1),
-            PanelFinish::Cancelled,
+            PanelFinish::Cancelled { dispatched: true },
         );
         assert_eq!(internal.status, PanelRunStatus::Cancelled);
         let usage = internal
@@ -1266,6 +1684,36 @@ prompt, not a second, divergent formula"
             usage.input_tokens,
             llm_client::model::count_tokens::approximate_tokens_for_bytes(prompt.len() as u64)
         );
+    }
+
+    /// [Round-5 review item 16] The other half of the same policy: a cancel
+    /// that beat this panel's task to its own spawner call sent nothing, so
+    /// it must report NO usage at all (exact $0) and must say so in a
+    /// category `check_panel_bar` / `dispatched_egress_profiles` can read.
+    /// Estimating here would invent spend for a provider call that provably
+    /// never happened.
+    #[test]
+    fn cancel_before_the_spawner_call_reports_no_usage_and_a_not_dispatched_category() {
+        let internal = finish_panel(
+            0,
+            panel(),
+            "z".repeat(75),
+            Duration::from_millis(1),
+            PanelFinish::Cancelled { dispatched: false },
+        );
+        assert_eq!(internal.status, PanelRunStatus::Cancelled);
+        assert_eq!(
+            internal.error_category.as_deref(),
+            Some("not_dispatched"),
+            "a slot cancelled before its spawner call must be distinguishable from one cut \
+down mid-flight"
+        );
+        assert!(
+            internal.usage.is_none(),
+            "nothing was sent, so there is no usage to estimate: got {:?}",
+            internal.usage
+        );
+        assert!(is_never_dispatched_category(internal.error_category.as_deref()));
     }
 
     /// A genuine PRE-FLIGHT spawn failure (the spawner's `Result::Err`
@@ -1822,5 +2270,313 @@ returns, before it can possibly have collected a completion — got {:?} instead
 
         cancel.cancel();
         let _ = run.await;
+    }
+    /// [Round-5 review item 12] The inverse of the test above: when the
+    /// cancel token is ALREADY set, `spawn_panel_tasks` still enqueues N
+    /// futures — tokio has not polled a single one, and each begins with
+    /// its own biased `cancel.cancelled()` arm, so none of them will ever
+    /// call the spawner. No `PanelsDispatched` may be emitted for that set.
+    ///
+    /// Before this fix the event fired on the very next synchronous line
+    /// after `spawn_panel_tasks` returned, and `tools/agent`'s
+    /// `stage_proves_panel_spawned` treats it as proof that real provider
+    /// calls are in flight — so the session's spawn quota stayed charged
+    /// for the whole run for subagents that were never created.
+    #[tokio::test]
+    async fn emits_no_panels_dispatched_when_the_cancel_beats_the_first_spawner_call() {
+        let config = FusionRuntimeConfig {
+            panel_total_timeout_ms: 60_000,
+            ..FusionRuntimeConfig::defaults()
+        };
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                tool_invoker: Arc::new(InertInvoker),
+                budget: Arc::new(InertBudget),
+            },
+            cancel,
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<FusionProgress>(8);
+        let progress = Some(tx);
+
+        let err = run_panels(
+            Arc::new(HangingSpawner),
+            &inherit,
+            &config,
+            true,
+            "task",
+            &two_panels(),
+            "run-id",
+            Duration::from_secs(60),
+            &progress,
+            None,
+        )
+        .await
+        .expect_err("an already-cancelled run must not produce panels");
+        assert_eq!(err, FusionError::Cancelled);
+
+        drop(progress);
+        let mut stages = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            stages.push(event.stage);
+        }
+        assert!(
+            !stages
+                .iter()
+                .any(|stage| matches!(stage, FusionStage::PanelsDispatched { .. })),
+            "no panel task ever reached the spawner, so PanelsDispatched must not be \
+emitted — got {stages:?}"
+        );
+    }
+
+    /// A spawner that reaches its body (so `dispatch.mark(index)` has run)
+    /// and then fails immediately — the panel task therefore terminates
+    /// through the collection loop's COMPLETED arm rather than its cancel
+    /// or notify arm.
+    struct FailingSpawner;
+    #[async_trait]
+    impl SubagentSpawner for FailingSpawner {
+        async fn spawn(
+            &self,
+            _request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            Err(SubagentSpawnError::Runtime("probe".into()))
+        }
+    }
+
+    /// [Round-5 rework of item 12, class sweep] The other two exits of the
+    /// collection loop (a panel completed, a panel's task died) never have
+    /// to emit `PanelsDispatched` themselves: `select!` is `biased`, so
+    /// `dispatch.notified()` is polled BEFORE `join_next_with_id()`, and
+    /// `PanelDispatch::mark` sets its flag before `notify_one` stores the
+    /// permit — so any panel that reached the spawner has already made the
+    /// notify arm win an earlier poll. This pins that ordering: every panel
+    /// here reaches the spawner and then fails, and `PanelsDispatched` must
+    /// still arrive, ahead of the per-completion `RunningPanels` events.
+    #[tokio::test]
+    async fn panels_dispatched_precedes_the_completed_arm_for_a_dispatched_panel() {
+        let config = FusionRuntimeConfig {
+            panel_total_timeout_ms: 60_000,
+            ..FusionRuntimeConfig::defaults()
+        };
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                tool_invoker: Arc::new(InertInvoker),
+                budget: Arc::new(InertBudget),
+            },
+            CancellationToken::new(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<FusionProgress>(8);
+        let progress = Some(tx);
+
+        let panels = run_panels(
+            Arc::new(FailingSpawner),
+            &inherit,
+            &config,
+            true,
+            "task",
+            &two_panels(),
+            "run-id",
+            Duration::from_secs(60),
+            &progress,
+            None,
+        )
+        .await
+        .expect("partial_ok run must return its (failed) panel slots");
+        assert_eq!(panels.len(), 2);
+
+        drop(progress);
+        let mut stages = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            stages.push(event.stage);
+        }
+        let dispatched_at = stages
+            .iter()
+            .position(|stage| matches!(stage, FusionStage::PanelsDispatched { total: 2 }));
+        let first_running_at = stages
+            .iter()
+            .position(|stage| matches!(stage, FusionStage::RunningPanels { .. }));
+        assert!(
+            dispatched_at.is_some(),
+            "panels reached the spawner, so PanelsDispatched must be emitted even though \
+this run exits through the completed arm — got {stages:?}"
+        );
+        assert!(
+            first_running_at.is_none() || dispatched_at < first_running_at,
+            "PanelsDispatched must arrive before the first RunningPanels — got {stages:?}"
+        );
+    }
+
+    /// A spawner that cancels the run from INSIDE `spawn`, then hangs.
+    ///
+    /// Reaching this body PROVES the panel task got past its own biased
+    /// `cancel.cancelled()` arm and ran `dispatch.mark(index)` — a subagent
+    /// is genuinely being built — so the cancel it sets here is the
+    /// "cancel lands after a panel really reached the spawner" case, the
+    /// exact mirror of `HangingSpawner` + an already-cancelled token.
+    struct CancelFromInsideSpawner {
+        cancel: CancellationToken,
+    }
+    #[async_trait]
+    impl SubagentSpawner for CancelFromInsideSpawner {
+        async fn spawn(
+            &self,
+            _request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            self.cancel.cancel();
+            std::future::pending::<()>().await;
+            unreachable!("hangs forever; the cancel set above ends the run")
+        }
+    }
+
+    /// [Round-5 rework of item 12] The third case, between the two tests
+    /// above: a panel task REACHED the spawner (so a subagent really was
+    /// created) and only then did the cancel fire. Item 12's fix moved the
+    /// emit out of the synchronous line after `spawn_panel_tasks` and into
+    /// the `dispatch.notified()` arm of the collection loop — but that arm
+    /// sits BELOW the biased `cancel.cancelled()` arm, which returned
+    /// `Err(FusionError::Cancelled)` without emitting anything. With no
+    /// `PanelsDispatched` (and no `RunningPanels{completed>0}`),
+    /// `tools/agent`'s `stage_proves_panel_spawned` sees no proof, so
+    /// `releases_full_reservation` is true for `FusionError::Cancelled` and
+    /// the session hands back the ENTIRE `panel_n` spawn reservation for
+    /// subagents that were really created — letting the session exceed
+    /// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`. That is the exact opposite
+    /// of the over-charge item 12 was filed to remove.
+    #[tokio::test]
+    async fn emits_panels_dispatched_when_the_cancel_lands_after_a_panel_reached_the_spawner() {
+        let config = FusionRuntimeConfig {
+            panel_total_timeout_ms: 60_000,
+            ..FusionRuntimeConfig::defaults()
+        };
+        let cancel = CancellationToken::new();
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                tool_invoker: Arc::new(InertInvoker),
+                budget: Arc::new(InertBudget),
+            },
+            cancel.clone(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<FusionProgress>(8);
+        let progress = Some(tx);
+
+        let err = run_panels(
+            Arc::new(CancelFromInsideSpawner {
+                cancel: cancel.clone(),
+            }),
+            &inherit,
+            &config,
+            true,
+            "task",
+            &two_panels(),
+            "run-id",
+            Duration::from_secs(60),
+            &progress,
+            None,
+        )
+        .await
+        .expect_err("the spawner cancels the run from inside, so this must be Cancelled");
+        assert_eq!(err, FusionError::Cancelled);
+
+        drop(progress);
+        let mut stages = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            stages.push(event.stage);
+        }
+        assert!(
+            stages
+                .iter()
+                .any(|stage| matches!(stage, FusionStage::PanelsDispatched { total: 2 })),
+            "a panel task REACHED the spawner (a subagent was created), so \
+PanelsDispatched must still be emitted on the cancel exit — otherwise the whole spawn \
+reservation is released for subagents that really exist — got {stages:?}"
+        );
+    }
+}
+
+/// [Round-6 blocking B1] The two `PanelDispatch` flags mean different things
+/// and must never be re-conflated: `mark` (this task entered the spawner
+/// call) is an intent, `mark_allocated` (the spawner reported a real child
+/// slot) is a fact. Everything that decides whether a session's lifetime
+/// spawn quota stays charged reads the second one.
+#[cfg(test)]
+mod dispatch_flag_tests {
+    use super::*;
+    use platform_api::subagent_spawn::SubagentObservation;
+
+    fn observation(kind: &str) -> SubagentObservation {
+        match kind {
+            "allocated" => SubagentObservation::Allocated {
+                agent_id: protocol::AgentId::new(),
+                agent_type: FUSION_PANEL_TYPE.to_string(),
+                name: None,
+                model: "claude-sonnet-5".into(),
+                model_profile: Some("anthropic".into()),
+                persistent: false,
+                initial_message_index: 0,
+            },
+            _ => SubagentObservation::Progress {
+                agent_id: protocol::AgentId::new(),
+                tool_use_count: 1,
+                token_count: 10,
+            },
+        }
+    }
+
+    /// Entering the spawner call is NOT evidence that a subagent exists —
+    /// `spawn_workflow_with_observer` connects the panel's inline MCP
+    /// servers and contends the pool slot table before it can even reject.
+    #[test]
+    fn marking_a_panel_as_having_reached_the_spawner_does_not_make_it_allocated() {
+        let dispatch = PanelDispatch::new(2);
+        dispatch.mark(0);
+        assert!(
+            dispatch.reached_spawner(0),
+            "mark(0) must record that panel 0 entered the spawner call"
+        );
+        assert!(
+            !dispatch.allocated(0),
+            "no Allocated observation has arrived for panel 0, so nothing may claim a \
+subagent exists for it"
+        );
+        assert!(!dispatch.reached_spawner(1) && !dispatch.allocated(1));
+    }
+
+    /// The observer in the `spawn_workflow_with_observer` `observer` slot
+    /// flips `allocated` for ITS OWN panel index and only on the
+    /// `Allocated` observation — every other event on a panel's stream
+    /// (progress beacons, messages, the terminal result) is already
+    /// reported through the spawner call's own return value.
+    #[tokio::test]
+    async fn only_the_allocated_observation_flips_the_allocated_flag() {
+        let dispatch = Arc::new(PanelDispatch::new(2));
+        let observer = PanelAllocationObserver {
+            dispatch: Arc::clone(&dispatch),
+            index: 1,
+        };
+        observer.on_event(observation("progress")).await;
+        assert!(
+            !dispatch.allocated(1),
+            "a Progress observation must not be mistaken for proof that the pool \
+allocated a child"
+        );
+        observer.on_event(observation("allocated")).await;
+        assert!(
+            dispatch.allocated(1),
+            "the Allocated observation is the spawner's own proof that a child slot \
+exists for panel 1"
+        );
+        assert!(
+            !dispatch.allocated(0),
+            "one panel's allocation must never be credited to a sibling index"
+        );
+        assert!(
+            !dispatch.reached_spawner(1),
+            "the allocation flag is separate from the reached-spawner flag; \
+mark_allocated must not silently set both"
+        );
     }
 }

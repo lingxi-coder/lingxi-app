@@ -355,18 +355,63 @@ fn workflow_agent_display_model(opts: &Value) -> Option<String> {
     ))
 }
 
+/// [R5-18] The marker the `workflow/src/lib.rs` prelude's `__wf_pump`
+/// searches for (anywhere in the message — `FusionError::InvalidRequest`'s
+/// Display prepends "invalid fusion request: ") to set
+/// `err.name = "WorkflowFusionOptionError"` on the rejected `fusion()`
+/// promise. EVERY rejection derived from the caller's `opts` object must
+/// carry it, not just the `deny_unknown_fields` "unknown field" shape:
+/// `workflow_description.txt` tells the model, unqualified, to catch a
+/// `fusion()` rejection and branch on that name, so a wrong-typed /
+/// out-of-range / otherwise malformed option value that reached JS with the
+/// default name "Error" skipped the script's recovery branch and aborted
+/// the whole workflow over a fully recoverable mistake. Byte-locked with
+/// the prelude's `indexOf` and with `local_workflow_test::
+/// every_workflow_fusion_option_rejection_carries_the_prelude_option_marker`.
+const WORKFLOW_FUSION_OPTION_MARKER: &str = "Workflow fusion() received an unknown option";
+
+/// [R5-18] Wraps a malformed option VALUE (wrong type, out-of-range number,
+/// unrecognized preset, blank `models` entry, unparseable opts JSON) in
+/// [`WORKFLOW_FUSION_OPTION_MARKER`] so it names itself to the prelude the
+/// same way an unknown option KEY does — the unknown-key branch keeps its
+/// own byte-locked wording, this one says "or an invalid option value" and
+/// carries the raw detail in parentheses.
+///
+/// Host-state rejections (no parent model/profile, disabled executor, call
+/// cap, boot-time invalid `fusion.*` settings) must NOT go through here:
+/// they are not something a script's option-recovery branch can fix, and
+/// mislabelling them would make a script silently retry a call that can
+/// never succeed. `every_workflow_fusion_option_rejection_carries_the_
+/// prelude_option_marker`'s negative case pins that boundary.
+fn workflow_fusion_option_error(detail: impl std::fmt::Display) -> FusionError {
+    FusionError::InvalidRequest(format!(
+        "{WORKFLOW_FUSION_OPTION_MARKER} or an invalid option value ({detail})"
+    ))
+}
+
 /// `default_preset` keeps its own parameter (the runtime's `fusion.preset`
 /// default when the script omits `opts.preset`) — only the wire-string ⇒
 /// [`FusionPreset`] parse itself delegates to the shared `FromStr` impl, so
-/// an unrecognized preset rejects with the same message the Agent tool and
-/// `/fusion` give.
+/// an unrecognized preset names the same accepted values the Agent tool and
+/// `/fusion` do.
+///
+/// [R5-18] The shared message is then wrapped in
+/// [`WORKFLOW_FUSION_OPTION_MARKER`]: `opts.preset` is one of the caller's
+/// options, so a script must be able to recover from a bad one through the
+/// same `e.name === "WorkflowFusionOptionError"` branch as any other bad
+/// option. The wrapping happens HERE (the workflow-only call path) rather
+/// than in `FusionPreset::from_str`, so the CLI and Agent-tool entrypoints
+/// keep the bare shared message.
 fn parse_workflow_fusion_preset(
     raw: Option<&str>,
     default_preset: FusionPreset,
 ) -> Result<FusionPreset, FusionError> {
     match raw {
         None => Ok(default_preset),
-        Some(other) => other.parse(),
+        Some(other) => other.parse().map_err(|error| match error {
+            FusionError::InvalidRequest(detail) => workflow_fusion_option_error(detail),
+            other => other,
+        }),
     }
 }
 
@@ -402,14 +447,14 @@ fn validate_workflow_fusion_model_ref(model_ref: &FusionModelRef) -> Result<(), 
         .as_deref()
         .is_some_and(|profile| profile.trim().is_empty())
     {
-        return Err(FusionError::InvalidRequest(format!(
+        return Err(workflow_fusion_option_error(format!(
             "invalid fusion models entry: profile must not be empty (model `{}`)",
             model_ref.model
         )));
     }
     if model_ref.model.trim().is_empty() {
-        return Err(FusionError::InvalidRequest(
-            "invalid fusion models entry: model must not be empty".into(),
+        return Err(workflow_fusion_option_error(
+            "invalid fusion models entry: model must not be empty",
         ));
     }
     Ok(())
@@ -444,12 +489,19 @@ fn parse_workflow_fusion_request(
         // recognizes (workflow/src/lib.rs) so a script can `catch (e)` and
         // branch on `e.name === "WorkflowFusionOptionError"` instead of
         // string-matching the raw serde message.
+        //
+        // [R5-18] EVERY other deserialization failure of this same object is
+        // just as much a bad-option error — `{maxPanel: 300}` (out of u8
+        // range), `{maxPanel: "3"}` / `{partialOk: 1}` / `{dimensions:
+        // "speed"}` (wrong types), or unparseable JSON — and used to fall
+        // through with the bare serde message, reaching JS with the default
+        // `err.name = "Error"` so the script's documented recovery branch
+        // never fired. Both halves now carry
+        // `WORKFLOW_FUSION_OPTION_MARKER`.
         if detail.contains("unknown field") {
-            FusionError::InvalidRequest(format!(
-                "Workflow fusion() received an unknown option ({detail})"
-            ))
+            FusionError::InvalidRequest(format!("{WORKFLOW_FUSION_OPTION_MARKER} ({detail})"))
         } else {
-            FusionError::InvalidRequest(detail)
+            workflow_fusion_option_error(detail)
         }
     })?;
     if let Some(models) = &opts.models {

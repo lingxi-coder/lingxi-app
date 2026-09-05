@@ -253,6 +253,16 @@ enum FakePanel {
     /// BEFORE the unrecovered mid-stream error). The panel still reports a
     /// (short) usage figure, but the run must be marked `estimated`.
     SalvagedIncomplete(PanelReport),
+    /// [Round-6 blocking B1] A spawner rejection that is SLOW: the panel task
+    /// is parked inside `spawn_workflow_with_observer` (in production:
+    /// `build_subagent_context` connecting the panel's inline MCP servers)
+    /// and has therefore run `PanelDispatch::mark`, but the pool has NOT
+    /// allocated a child and never will — so no `Allocated` observation is
+    /// ever emitted for it. This is the ONLY fixture shape that separates
+    /// "entered the spawner call" from "a subagent was created"; every other
+    /// non-`SpawnErr` variant emits `Allocated` exactly as
+    /// `PoolSubagentSpawner` does.
+    SlowSpawnErr,
     /// [Finding 1, rework round 1] Same as `Report`, but with a caller-chosen
     /// non-zero `reasoning_output_tokens` — the ONLY fixture shape that can
     /// distinguish "reasoning is billed" from "reasoning is silently
@@ -288,12 +298,42 @@ impl Drop for LiveGuard<'_> {
     }
 }
 
-#[async_trait]
-impl SubagentSpawner for FakeSpawner {
-    async fn spawn(
+impl FakeSpawner {
+    /// [Round-6 blocking B1] Mirrors `PoolSubagentSpawner::spawn_with_observer`'s
+    /// OWN ordering: the pool rejection arms (`SpawnErr`, `SlowSpawnErr`)
+    /// return without ever emitting anything, while every other script
+    /// emits `SubagentObservation::Allocated` first — `handle.rs` emits it
+    /// on the line immediately after `pool.allocate` succeeds, before the
+    /// runner that makes any provider call exists. Without this the fixture
+    /// could not tell "the task entered the spawner" from "a subagent was
+    /// created", which is exactly the distinction
+    /// `PanelDispatch::allocated` is keyed on.
+    async fn emit_allocated(
+        observer: &Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        request: &SubagentSpawnRequest,
+    ) {
+        let Some(observer) = observer else {
+            return;
+        };
+        observer
+            .on_event(
+                platform_api::subagent_spawn::SubagentObservation::Allocated {
+                    agent_id: AgentId::new(),
+                    agent_type: platform_api::FUSION_PANEL_TYPE.to_string(),
+                    name: request.name.clone(),
+                    model: request.model.clone().unwrap_or_default(),
+                    model_profile: request.model_profile.clone(),
+                    persistent: false,
+                    initial_message_index: 0,
+                },
+            )
+            .await;
+    }
+
+    async fn run_script(
         &self,
         request: SubagentSpawnRequest,
-        _inherit: SubagentInheritance,
+        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(live, Ordering::SeqCst);
@@ -303,7 +343,20 @@ impl SubagentSpawner for FakeSpawner {
         tokio::time::sleep(std::time::Duration::from_millis(15)).await;
         let model = request.model.clone().unwrap_or_default();
         let script = self.by_model.lock().unwrap().remove(&model);
+        if !matches!(
+            script,
+            Some(FakePanel::SpawnErr) | Some(FakePanel::SlowSpawnErr)
+        ) {
+            Self::emit_allocated(&observer, &request).await;
+        }
         match script {
+            Some(FakePanel::SlowSpawnErr) => {
+                // Parked inside the spawner call with no allocation behind
+                // it: the panel bar's `abort_all()` kills this task long
+                // before the rejection below could be returned.
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Err(SubagentSpawnError::PoolFull)
+            }
             Some(FakePanel::Hang) => {
                 std::future::pending::<()>().await;
                 unreachable!()
@@ -453,6 +506,32 @@ impl SubagentSpawner for FakeSpawner {
                         usage_complete: true,
 }),
         }
+    }
+}
+
+#[async_trait]
+impl SubagentSpawner for FakeSpawner {
+    async fn spawn(
+        &self,
+        request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.run_script(request, None).await
+    }
+
+    /// The path `panel::run_panels` actually calls. Overriding it (rather
+    /// than letting the trait default chain fall through to `spawn`) is what
+    /// lets the fixture deliver the `Allocated` observation the production
+    /// pool spawner delivers — see [`FakeSpawner::emit_allocated`].
+    async fn spawn_workflow_with_observer(
+        &self,
+        request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<String>>,
+        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        _watchdog: WorkflowQueryWatchdog,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.run_script(request, observer).await
     }
 }
 
@@ -2562,11 +2641,13 @@ async fn budget_reservation_releases_on_cancel() {
     // 3-Hang-panel fixture `budget_reservation_releases_on_total_timeout`
     // (right below) already bills via the inner per-panel timeout's
     // estimate fallback: a cancel must settle identically, not for $0.
-    // `run()`'s outer `Err` arm now commits the coarse pre-panel estimate
-    // latched the instant the lease was acquired
-    // (`estimate_pre_panel_settlement`), which prices exactly one turn of
-    // `panel::panel_prompt` per resolved panel — the same formula, and the
-    // same expected total, as the timeout test below.
+    // [Round-5 review items 6/7/16] `run()`'s outer `Err` arm commits
+    // whatever `panel::RealizedSpendSink` last wrote: with all three panels
+    // dispatched and none finished, that is one priced turn of
+    // `panel::panel_prompt` per DISPATCHED panel — the same formula, and the
+    // same expected total, as the timeout test below. (It used to come from
+    // a `resolve_and_reserve` latch that charged this even when no panel had
+    // been dispatched at all; the floor now follows real dispatch.)
     let per_panel_input_tokens = llm_client::model::count_tokens::approximate_tokens_for_bytes(
         crate::panel::panel_prompt("task").len() as u64,
     );
@@ -2637,14 +2718,22 @@ no longer silently reported as exact $0"
     assert_reservation_settled_exactly_once(&budget);
 }
 
-/// [Round-4 review findings 1/2/3/19 — cancel path never settles] A cancel
-/// landing AFTER the panel stage has already returned real, billed usage
-/// (mid-analyst-call) must commit that REAL panel spend, not merely the
-/// coarse pre-panel estimate `budget_reservation_releases_on_cancel` above
-/// falls back to when nothing has completed yet. `run_inner` refreshes the
-/// settlement cell with the actual `price_realized_usage` figure the
-/// instant `run_panel_stage` returns (before `check_panel_bar` even runs),
-/// so `run()`'s outer `Err` arm commits the precise 3-panel total here.
+/// [Round-4 review findings 1/2/3/19 — cancel path never settles;
+/// round-5 review items 1/2/4] A cancel landing AFTER the panel stage has
+/// already returned real, billed usage (mid-analyst-call) must commit that
+/// REAL panel spend — and the analyst call it interrupted, which has
+/// demonstrably egressed the prompt plus all three reports and is being
+/// billed for them right now.
+///
+/// This assertion used to read `vec![36]` — panels only, i.e. it pinned the
+/// defect itself: the settlement cell was last written the instant
+/// `run_panel_stage` returned, with `analyst_attempted: false`, so an
+/// analyst call in flight was committed as exact $0. `run_analyst_call` now
+/// refreshes the cell with `analyst_attempted: true` immediately before
+/// dispatching, which is precisely `price_realized_usage`'s
+/// "attempted, usage unknown" case (`judge_input_token_estimate`, flagged
+/// `estimated`) — the same estimate `analyst_failure_estimates_and_prices_its_attempted_call`
+/// already pins for a run that reaches its terminal state normally.
 #[tokio::test]
 async fn cancel_mid_analyst_call_commits_the_real_panel_spend_already_billed() {
     let budget = RecordingBudget::new();
@@ -2681,11 +2770,14 @@ async fn cancel_mid_analyst_call_commits_the_real_panel_spend_already_billed() {
         1,
         "the 3 panels' real, already-billed usage must be committed, not released for $0"
     );
+    let estimated_analyst_tokens =
+        crate::orchestrator::judge_input_token_estimate("task", &three_ok_completed_panels());
     assert_eq!(
         budget.committed.lock().unwrap().clone(),
-        vec![36],
-        "3 panels * (8 input + 4 output) tokens at $1/token = 36 nano-USD — the REAL \
-priced panel spend, not the coarser pre-panel estimate"
+        vec![36 + estimated_analyst_tokens],
+        "3 panels * (8 input + 4 output) tokens at $1/token = 36 nano-USD of REAL priced \
+panel spend, PLUS the in-flight analyst call's estimated input — committing 36 alone bills \
+the analyst's already-egressed tokens to nobody"
     );
     assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
     assert_reservation_settled_exactly_once(&budget);
@@ -3810,6 +3902,96 @@ async fn end_to_end_run_seals_on_request_level_no_partial_even_though_config_par
          panel_total_timeout_ms"
     );
 }
+/// Mirrors `tools/agent`'s `fusion_error_is_preflight` (agent.rs:917) — the
+/// predicate `call_fusion`'s `Err` arm uses to decide whether to hand the
+/// WHOLE `panel_n` spawn reservation back. Duplicated here (rather than
+/// imported: `tools/agent` does not depend on `fusion`) so this test can
+/// state its verdict in the unit that actually matters — SPAWN SLOTS
+/// RELEASED — instead of only naming an error variant.
+fn released_spawn_slots(err: &FusionError, reserved: u64) -> u64 {
+    let preflight = matches!(
+        err,
+        FusionError::Disabled
+            | FusionError::UnavailableOnPlatform
+            | FusionError::InvalidConfiguration(_)
+            | FusionError::InvalidRequest(_)
+            | FusionError::TooFewModels { .. }
+            | FusionError::InvalidCustomModels(_)
+            | FusionError::CrossProviderDenied
+            | FusionError::NoJudgeModel { .. }
+            | FusionError::StructuredOutputUnsupported
+            | FusionError::BudgetReservationUnavailable
+            | FusionError::BudgetExceeded
+            | FusionError::SpawnLimitExceeded
+            | FusionError::AllPanelsFailedPreflight
+    );
+    if preflight {
+        reserved
+    } else {
+        0
+    }
+}
+
+/// [Round-6 blocking B1] Finding 8's literal fixture, end to end: the pool
+/// is at capacity, so the spawner rejects ALL THREE panels — but P3's
+/// rejection is slow (in production `build_subagent_context` connects the
+/// panel's inline MCP servers before the pool can refuse), so P3 is still
+/// parked inside `spawn_workflow_with_observer` when the bar seals the run
+/// and `abort_all()` kills it.
+///
+/// ZERO subagents exist in this run, so all three reserved spawn slots must
+/// come back. Before the fix `PanelDispatch::mark` was set on the line
+/// BEFORE the spawner call, so `reached_spawner(P3)` was already true: the
+/// join-error arm labelled P3 `"aborted"` (a category that means "may have
+/// been billed"), `check_panel_bar` degraded to `AllPanelsFailed`,
+/// `fusion_error_is_preflight` was false — and since item 12 emits
+/// `PanelsDispatched { total: 3 }` for the same P3, `panels_proven_spawned`
+/// reported 3 and `call_fusion`'s `Err` arm released `3 - 3 = 0`. Three
+/// lifetime spawn slots stayed charged forever for a run in which no
+/// subagent was ever created.
+#[tokio::test]
+async fn three_spawner_rejections_one_slow_enough_to_be_bar_aborted_release_every_spawn_slot() {
+    let mut config = test_config();
+    config.min_successful_panels = 2;
+    config.panel_total_timeout_ms = 5_000;
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::SpawnErr),
+        ("gpt-5.6-terra".into(), FakePanel::SpawnErr),
+        // The slow rejection: parked inside the spawner call, never
+        // allocated, so no `Allocated` observation is ever emitted for it.
+        ("deepseek-v4-pro".into(), FakePanel::SlowSpawnErr),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let (orch, _sink) = orch_with_telemetry(spawner.clone(), side, config).await;
+
+    let err = orch
+        .run(request("task"), inherit(), None)
+        .await
+        .expect_err("every panel was rejected by the spawner");
+
+    // Precondition: this must be the HARD case, not the already-fixed
+    // "the task never entered the spawner" one. All three tasks ran
+    // `PanelDispatch::mark` and called into the spawner.
+    assert_eq!(
+        spawner.requests.lock().unwrap().len(),
+        3,
+        "all three panel tasks must have entered the spawner call — otherwise this \
+test is exercising the round-5 `never reached the spawner` case instead of B1's"
+    );
+    assert_eq!(
+        err,
+        FusionError::AllPanelsFailedPreflight,
+        "no panel was ever allocated a subagent, so zero provider calls were possible; \
+a slow rejection killed by the bar must not be classified as a mid-flight abort"
+    );
+    assert_eq!(
+        released_spawn_slots(&err, 3),
+        3,
+        "three panel slots were reserved and ZERO subagents were created, so all three \
+must be released back to CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"
+    );
+}
 
 /// [Finding 25] A panel that exhausts `panelMaxTurns` without ever landing a
 /// valid `StructuredOutput` arrives at `finish_panel` as a normal
@@ -3977,4 +4159,351 @@ fn check_panel_bar_still_reports_all_panels_failed_on_genuine_provider_failures(
     ];
     let err = crate::orchestrator::check_panel_bar(&panels, &request("task"), &config).unwrap_err();
     assert_eq!(err, FusionError::AllPanelsFailed);
+}
+
+// ---------------------------------------------------------------------------
+// [Round-5 review items 1/2/4/6/7/16] The settlement cell across every stage
+// boundary a run can be dropped on. See `orchestrator::StageSettlement`'s doc
+// comment for the full stage table these tests pin, one boundary at a time.
+// ---------------------------------------------------------------------------
+
+/// One priced turn of the panel prompt — the floor a panel that has reached
+/// the spawner but not finished contributes to the settlement, at
+/// `priced_book()`'s 1 nano-USD/token unit rate.
+fn in_flight_panel_floor(prompt: &str) -> u64 {
+    llm_client::model::count_tokens::approximate_tokens_for_bytes(
+        crate::panel::panel_prompt(prompt).len() as u64,
+    )
+}
+
+/// An analyst that bills real usage (5 input + 3 output, same as
+/// `ScriptedAnalyst`) and returns a `Merge` verdict, followed by a
+/// synthesizer call that parks forever — so a test can land a cancel
+/// squarely inside the SYNTHESIZER stage with the analyst's exact,
+/// already-billed usage known to `run_inner`'s stack and to nothing else.
+struct BilledAnalystThenBlockingSynth {
+    synth_started: Arc<Notify>,
+}
+
+#[async_trait]
+impl SideQueryClient for BilledAnalystThenBlockingSynth {
+    async fn query(&self, _request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
+        self.synth_started.notify_one();
+        std::future::pending::<()>().await;
+        unreachable!("the synthesizer call never resolves; the test cancels the run")
+    }
+
+    async fn query_json_schema(
+        &self,
+        request: StrictStructuredQueryRequest,
+    ) -> Result<StrictStructuredQueryResponse, SideQueryError> {
+        let user = user_text(&request);
+        let ids = panel_ids_from_user(&user);
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let dimensions = DEFAULT_FUSION_DIMENSIONS
+            .iter()
+            .map(|dimension| (*dimension).to_string())
+            .collect::<Vec<_>>();
+        Ok(StrictStructuredQueryResponse {
+            value: merge_analysis(&id_refs, &dimensions, 80, false),
+            usage: cost::Usage {
+                tokens: cost::TokenUsage {
+                    input: 5,
+                    output: 3,
+                    ..cost::TokenUsage::default()
+                },
+                ..cost::Usage::default()
+            },
+            model: request.model,
+            profile: request.profile,
+            request_id: None,
+            retry_count: 0,
+        })
+    }
+}
+
+/// [Round-5 review items 1/2/4] A cancel landing during the SYNTHESIZER
+/// stage must commit the analyst's EXACT, provider-reported usage — it is
+/// already known at that point (`handle_analyst_success` has it in
+/// `priced_analyst`) — plus the synthesizer's attempted-call estimate, on
+/// top of the panels.
+///
+/// Before this fix the settlement cell was last written the instant
+/// `run_panel_stage` returned, with `analyst_usage: None, analyst_attempted:
+/// false` — so this window committed the panel-only figure and both judge
+/// calls were billed to nobody, while the same run allowed to finish
+/// committed them in full through `finalize_result`. Two terminal states,
+/// two different answers for identical spend.
+#[tokio::test]
+async fn cancel_mid_synthesis_commits_the_analysts_real_usage_and_the_synth_attempt() {
+    let budget = RecordingBudget::new();
+    let synth_started = Arc::new(Notify::new());
+    let side = Arc::new(BilledAnalystThenBlockingSynth {
+        synth_started: synth_started.clone(),
+    });
+    let spawner = FakeSpawner::new(three_ok());
+    let orch = FusionOrchestrator::new(spawner, side, Arc::new(test_config()), Arc::new(catalog()))
+        .with_price_book(Arc::new(priced_book()));
+    let cancel = CancellationToken::new();
+    let inherit = inherit_recording_cancel(budget.clone(), cancel.clone());
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<platform_api::FusionProgress>(64);
+    let handle = tokio::spawn(async move { orch.run(request("task"), inherit, Some(tx)).await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), synth_started.notified())
+        .await
+        .expect("the synthesizer call should start once the analyst has billed real usage");
+    cancel.cancel();
+    let err = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("cancelled synthesis should unwind")
+        .expect("join")
+        .expect_err("cancelled fusion");
+    assert_eq!(err, platform_api::FusionError::Cancelled);
+    settle_spawned_drops().await;
+
+    let panels = three_ok_completed_panels();
+    let estimated_synth_tokens = crate::orchestrator::judge_input_token_estimate("task", &panels);
+    // 3 panels * (8 input + 4 output) = 36, the analyst's REAL (5 + 3) = 8,
+    // and the synthesizer's attempted-but-unfinished call estimated from
+    // the same prompt + reports its payload really carried.
+    let expected = 36 + 8 + estimated_synth_tokens;
+    assert_eq!(
+        budget.committed.lock().unwrap().clone(),
+        vec![expected],
+        "a cancel during synthesis must commit panels + the analyst's exact usage + the \
+synthesizer attempt, not the panel-only figure"
+    );
+    assert_reservation_settled_exactly_once(&budget);
+
+    let mut terminal = None;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event.stage, platform_api::FusionStage::Cancelled) {
+            terminal = Some(event);
+        }
+    }
+    let event = terminal.expect("a terminal Cancelled progress event");
+    assert_eq!(
+        event.realized_output_tokens,
+        Some(12 + 3),
+        "the token disclosure a workflow charges its own budget from must include the \
+analyst's 3 already-billed output tokens, not just the panels' 12"
+    );
+}
+
+/// [Round-5 review items 6/7] A cancel mid-fan-out must still bill the
+/// panels that are STILL IN FLIGHT. Panel A finishes at ~15 ms with real
+/// usage; B and C hang, each having already egressed the whole panel
+/// prompt. Before this fix `RealizedSpendSink::update` overwrote the cell
+/// with A's price alone, so cancelling here committed 12 nano-USD — LESS
+/// than cancelling one moment earlier (which committed the coarse
+/// three-panel estimate) and ~3x less than the total-timeout terminal state
+/// bills for the identical panel set.
+#[tokio::test]
+async fn cancel_mid_fan_out_still_bills_the_panels_still_in_flight() {
+    let budget = RecordingBudget::new();
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Report(report("A"))),
+        ("gpt-5.6-terra".into(), FakePanel::Hang),
+        ("deepseek-v4-pro".into(), FakePanel::Hang),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(spawner, side).with_price_book(Arc::new(priced_book()));
+    let cancel = CancellationToken::new();
+    let inherit = inherit_recording_cancel(budget.clone(), cancel.clone());
+    let handle = tokio::spawn(async move { orch.run(request("task"), inherit, None).await });
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    cancel.cancel();
+    let err = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("cancelled run should unwind promptly")
+        .expect("join")
+        .expect_err("cancelled fusion");
+    assert_eq!(err, platform_api::FusionError::Cancelled);
+    settle_spawned_drops().await;
+
+    let expected = 12 + 2 * in_flight_panel_floor("task");
+    assert_eq!(
+        budget.committed.lock().unwrap().clone(),
+        vec![expected],
+        "the finished panel's real 12 nano-USD plus one in-flight turn for each of the two \
+panels still streaming — dropping the in-flight pair bills their already-egressed prompts \
+to nobody"
+    );
+    assert_reservation_settled_exactly_once(&budget);
+}
+
+/// [Round-5 review item 7] The exact non-monotonicity the finding names: a
+/// panel rejected PRE-ALLOCATION prices at a real, exact $0, and before the
+/// fix the first `sink.update` carrying it replaced the whole pre-panel
+/// floor with that zero — so a cancel a moment later committed $0 for a run
+/// with two panels genuinely streaming.
+#[tokio::test]
+async fn a_spawn_rejection_never_deletes_the_floor_of_the_panels_still_streaming() {
+    let budget = RecordingBudget::new();
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::SpawnErr),
+        ("gpt-5.6-terra".into(), FakePanel::Hang),
+        ("deepseek-v4-pro".into(), FakePanel::Hang),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(spawner, side).with_price_book(Arc::new(priced_book()));
+    let cancel = CancellationToken::new();
+    let inherit = inherit_recording_cancel(budget.clone(), cancel.clone());
+    let handle = tokio::spawn(async move { orch.run(request("task"), inherit, None).await });
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    cancel.cancel();
+    let err = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("cancelled run should unwind promptly")
+        .expect("join")
+        .expect_err("cancelled fusion");
+    assert_eq!(err, platform_api::FusionError::Cancelled);
+    settle_spawned_drops().await;
+
+    let expected = 2 * in_flight_panel_floor("task");
+    assert_eq!(
+        budget.committed.lock().unwrap().clone(),
+        vec![expected],
+        "the spawn-rejected panel contributes an exact $0 (it never called a provider), but \
+the two panels still streaming must keep their in-flight floor — the settlement must never \
+move DOWN because a cheap/free panel landed first"
+    );
+    assert_reservation_settled_exactly_once(&budget);
+}
+
+/// A budget whose `reserve_nano_usd` cancels the run's token before it
+/// returns — so the cancel lands in the window AFTER the lease exists and
+/// BEFORE a single panel task has been handed to the spawner, with no
+/// timing race at all.
+struct CancelOnReserveBudget {
+    cancel: CancellationToken,
+    committed: Mutex<Vec<u64>>,
+    release_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl BudgetEnforcerHandle for CancelOnReserveBudget {
+    async fn check_and_charge(&self, _: u64) -> Result<(), BudgetError> {
+        Ok(())
+    }
+    async fn snapshot_total_nano_usd(&self) -> u64 {
+        0
+    }
+    fn max_session_nano_usd(&self) -> Option<u64> {
+        Some(u64::MAX)
+    }
+    async fn active_reservation_nano_usd(&self) -> u64 {
+        0
+    }
+    async fn reserve_nano_usd(&self, _nano_usd: u64) -> Result<BudgetReservationId, BudgetError> {
+        // The hold now exists; from the caller's point of view the run has a
+        // lease and has still not dispatched anything.
+        self.cancel.cancel();
+        Ok(BudgetReservationId::from_raw(1))
+    }
+    async fn commit_reservation(
+        &self,
+        _id: BudgetReservationId,
+        actual_nano_usd: u64,
+    ) -> Result<(), BudgetError> {
+        self.committed.lock().unwrap().push(actual_nano_usd);
+        Ok(())
+    }
+    async fn release_reservation(&self, _id: BudgetReservationId) {
+        self.release_calls.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// [Round-5 review item 16] A cancel that lands before ANY panel is
+/// dispatched must settle for exactly $0: the lease exists, but no panel
+/// task has been handed to the spawner, so zero provider calls happened.
+///
+/// Before this fix `resolve_and_reserve` latched one priced `panel_prompt`
+/// turn per RESOLVED panel into the settlement cell the instant the lease
+/// was acquired — one line above the `is_cancelled` early-out this test
+/// drives — so the session's `/cost` total and its `--max-budget` headroom
+/// were permanently debited for money that was provably never spent.
+#[tokio::test]
+async fn a_cancel_before_any_panel_is_dispatched_commits_exactly_zero() {
+    let cancel = CancellationToken::new();
+    let budget = Arc::new(CancelOnReserveBudget {
+        cancel: cancel.clone(),
+        committed: Mutex::new(Vec::new()),
+        release_calls: AtomicUsize::new(0),
+    });
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(spawner.clone(), side).with_price_book(Arc::new(priced_book()));
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: budget.clone(),
+        },
+        cancel,
+    );
+    let err = orch
+        .run(request("task"), inherit, None)
+        .await
+        .expect_err("a cancelled run must not produce a result");
+    assert_eq!(err, platform_api::FusionError::Cancelled);
+    settle_spawned_drops().await;
+
+    assert!(
+        spawner.prompts().is_empty(),
+        "no panel may have been handed to the spawner in this window, got {:?}",
+        spawner.prompts()
+    );
+    assert_eq!(
+        budget.committed.lock().unwrap().clone(),
+        vec![0],
+        "zero provider calls were made, so the lease must settle for exactly $0 — never a \
+fabricated per-panel estimate"
+    );
+}
+
+/// [Round-5 review item 9] A synthesizer call that COMPLETED and was billed
+/// but produced no text block (a reasoning-only completion that hit
+/// `max_tokens`, or a refusal) must have its provider-reported usage priced
+/// for real, not thrown away and re-estimated as input-only.
+///
+/// `ScriptedAnalyst` bills the synthesizer's `reasoning_output` here, so the
+/// figure below can only be right if the real usage survived
+/// `SynthError::Failed`: the old code left `priced_synth = None` and
+/// substituted `judge_input_token_estimate` input tokens with output, cache
+/// and reasoning hard-coded to 0.
+#[tokio::test]
+async fn a_billed_synthesizer_response_with_no_text_still_prices_its_real_usage() {
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(AnalystMode::Merge, vec![Ok(String::new())]);
+    side.synth_reasoning_output.store(1234, Ordering::SeqCst);
+    let orch = orch_scripted(spawner, side.clone()).with_price_book(Arc::new(priced_book()));
+    let result = orch.run(request("task"), inherit(), None).await.unwrap();
+    assert_eq!(side.synth_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        matches!(
+            result.decision,
+            FusionDecision::NeedsParent {
+                reason: FusionNeedsParentReason::SynthesisFailed
+            }
+        ),
+        "an empty-text synthesizer response still degrades to NeedsParent, got {:?}",
+        result.decision
+    );
+    assert_eq!(
+        result.usage.reasoning_tokens, 1234,
+        "the 1234 reasoning tokens the provider reported for the failed synthesizer call \
+must reach FusionUsage, not be dropped on the floor"
+    );
+    assert_eq!(
+        result.usage.realized_nano_usd,
+        THREE_PANEL_PICK_PRICED_NANO_USD + 1234,
+        "the synthesizer's REAL 1234 reasoning tokens must be priced (1 nano-USD/token), \
+not replaced by the attempted-call input estimate"
+    );
+    assert!(
+        result.usage.estimated,
+        "a failed synthesizer call never claims the run's total is exact"
+    );
 }

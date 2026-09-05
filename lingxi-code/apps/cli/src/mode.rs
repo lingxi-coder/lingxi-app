@@ -2817,6 +2817,17 @@ pub(crate) async fn run_connect_action(
             match key_store.set_provider_key(&provider_id, &key).await {
                 Ok(()) => {
                     notice(format!("✓ Saved {} API key.", label(&provider_id)), false);
+                    // Round-5 review finding [15]: this seam writes through
+                    // the RAW `secret::CredentialManager` on the TUI runtime,
+                    // NOT through the `FusionCatalogRefreshingCredentialWriter`
+                    // wrapper the text `/connect <provider>` command uses — so
+                    // without this call Fusion's catalog filter kept using the
+                    // BOOT availability snapshot and dropped every row of the
+                    // provider just connected, for the rest of the process,
+                    // while `connected()` below and the ordinary turn loop both
+                    // started routing it on the very next request.
+                    engine_desktop::refresh_fusion_catalog_after_credential_write(&provider_id)
+                        .await;
                     connected(provider_id);
                 }
                 Err(e) => notice(format!("✗ Failed to store key: {e}"), true),
@@ -2863,6 +2874,12 @@ pub(crate) async fn run_connect_action(
                         msg
                     };
                     notice(body, false);
+                    // Finding [15], same class as the `StoreKey` arm above:
+                    // an OAuth sign-in persists a credential too (Anthropic
+                    // Pro/Max, ChatGPT), and `EngineOAuthConnect` is NOT one
+                    // of the wrapped `/connect` drivers.
+                    engine_desktop::refresh_fusion_catalog_after_credential_write(&provider_id)
+                        .await;
                     connected(provider_id);
                 }
                 // (H-BIN-09) A managed `forceLoginOrgUUID` org pin rejected the
@@ -4054,6 +4071,165 @@ mod tests {
             orchestrator::prompt::large_memory_warning_rows(&files, cwd, home, &resolved, &[])
                 .is_empty(),
             "resolved {resolved} should be a 1M model with a 150k threshold"
+        );
+    }
+
+    /// Round-5 review finding [15]: the TUI `/connect` key seam
+    /// (`ChatWidget::cmd_connect` -> `ConnectKeyView` ->
+    /// `ConnectAction::StoreKey` -> here) writes through the RAW
+    /// `secret::CredentialManager` the TUI runtime carries, NOT through the
+    /// `FusionCatalogRefreshingCredentialWriter` wrapper that the text
+    /// `/connect <provider>` command goes through. Before this fix the write
+    /// therefore never reached Fusion's catalog filter: `/model` and the
+    /// ordinary turn loop routed the new provider on the very next request
+    /// while `/fusion` kept filtering against the BOOT availability snapshot
+    /// and dropped every one of its rows for the rest of the process.
+    #[tokio::test]
+    async fn store_key_connect_action_makes_the_provider_visible_to_fusion() {
+        use async_trait::async_trait;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex as StdMutex};
+        use tui::bottom_pane::ConnectAction;
+
+        #[derive(Default)]
+        struct MemStorage {
+            map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+        }
+        #[async_trait]
+        impl SecureStorage for MemStorage {
+            async fn store(
+                &self,
+                service: &str,
+                account: &str,
+                data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .insert((service.into(), account.into()), data);
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .get(&(service.into(), account.into()))
+                    .cloned())
+            }
+            async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .remove(&(service.into(), account.into()));
+                Ok(())
+            }
+            async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .filter(|(s, _)| s == service)
+                    .map(|(_, a)| a.clone())
+                    .collect())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        struct UnusedOAuth;
+        #[async_trait]
+        impl command_core::OAuthConnectDriver for UnusedOAuth {
+            async fn login(&self, _provider_id: &str) -> Result<String, command_core::ConnectError> {
+                unreachable!("the StoreKey arm must not touch the OAuth driver")
+            }
+        }
+        struct UnusedCopilot;
+        #[async_trait]
+        impl command_core::CopilotConnectDriver for UnusedCopilot {
+            async fn begin(
+                &self,
+                _domain: Option<&str>,
+            ) -> Result<command_core::CopilotConnectStep, command_core::ConnectError> {
+                unreachable!("the StoreKey arm must not touch the Copilot driver")
+            }
+            async fn poll_to_completion(
+                &self,
+                _step: &command_core::CopilotConnectStep,
+            ) -> Result<(), command_core::ConnectError> {
+                unreachable!("the StoreKey arm must not touch the Copilot driver")
+            }
+        }
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        // The live Fusion catalog filter's shared availability map, as
+        // `resolve_llm_stack` publishes it at boot: openrouter uncredentialed.
+        let mut boot = std::collections::BTreeMap::new();
+        boot.insert("openrouter".to_string(), false);
+        let availability = Arc::new(std::sync::RwLock::new(boot));
+        engine_desktop::register_fusion_catalog_refresher(
+            engine_desktop::FusionCatalogRefresher::for_keychain_profiles(
+                availability.clone(),
+                credentials.clone(),
+                &["openrouter"],
+            ),
+        );
+
+        let (turn_tx, mut turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        run_connect_action(
+            ConnectAction::StoreKey {
+                provider_id: "openrouter".to_string(),
+                key: "sk-or-test-789".to_string(),
+            },
+            credentials.clone(),
+            Arc::new(UnusedOAuth),
+            Arc::new(UnusedCopilot),
+            turn_tx,
+        )
+        .await;
+
+        // Sanity: the write itself succeeded (this is the seam the TUI uses).
+        let stored = credentials
+            .get_provider_key("openrouter")
+            .await
+            .expect("read ok")
+            .expect("key present");
+        assert_eq!(stored.expose_secret(), "sk-or-test-789");
+        let mut events = Vec::new();
+        while let Ok(ev) = turn_rx.try_recv() {
+            events.push(ev);
+        }
+        assert!(
+            events.iter().any(|ev| matches!(
+                ev,
+                tui_core::orchestrator_bridge::TurnEvent::ProviderConnected { provider_id }
+                    if provider_id == "openrouter"
+            )),
+            "sanity: the TUI's own availability map is already refreshed on this path, \
+which is exactly why Fusion falling behind is observable to the user"
+        );
+
+        assert_eq!(
+            availability.read().unwrap().get("openrouter").copied(),
+            Some(true),
+            "the TUI /connect key seam must make the provider visible to Fusion's catalog \
+filter in THIS process — /model and the turn loop already route it"
         );
     }
 

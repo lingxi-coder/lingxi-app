@@ -1710,10 +1710,20 @@ impl PoolSubagentSpawner {
         // (4) (`AgentToolResolver::resolve`'s `agent_mcp_tools` append) can
         // include them. Unwired builder (tests / minimal builds) ⇒ empty —
         // byte-identical legacy.
-        let agent_mcp = match self.mcp_tool_builder.get() {
+        let mut agent_mcp = match self.mcp_tool_builder.get() {
             Some(builder) => builder(ctx.agent_id, ctx.agent_definition.clone()).await,
             None => crate::agent_mcp_tools::AgentMcpToolSet::default(),
         };
+        // [round-5 finding 11, one layer up] The builder above just CONNECTED
+        // this spawn's MCP servers, and `resolve_tools` below is both an
+        // `.await` and a `?`. A rejected tool policy (or a drop while
+        // resolving) used to discard the handles right here, before any
+        // caller had seen them — no guard, no owner, no teardown. Own them
+        // from the instant they exist and hand them out at the `Ok` below.
+        let mut mcp_guard = McpCleanupGuard::new(
+            std::mem::take(&mut agent_mcp.cleanups),
+            ctx.agent_definition.agent_type.clone(),
+        );
         let (tool_schemas, allowed_tools) = self
             .resolve_tools(&ctx.agent_definition, request.depth, &agent_mcp.tools)
             .await?;
@@ -1797,7 +1807,7 @@ impl PoolSubagentSpawner {
         // `is_async` marks background scheduling (vs the foreground one-shot).
         ctx.persistent = persistent;
         ctx.is_async = persistent;
-        Ok((ctx, agent_mcp.cleanups))
+        Ok((ctx, mcp_guard.take()))
     }
 }
 
@@ -1860,6 +1870,13 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
             self.build_subagent_context(&request, inherit, true).await?;
         let agent_id = ctx.agent_id;
         let resolved_agent_type = ctx.agent_definition.agent_type.clone();
+        // [round-5 finding 11] Same window as the one-shot path, and worse:
+        // this path builds no `SpawnDeallocGuard` at all, and `stop` — the
+        // only consumer of `persistent_agent_mcp_cleanups` — can only ever
+        // reach an id that made it INTO that map. Both awaits below
+        // (`pool.allocate`, then the map's own `lock()`) are therefore
+        // unowned windows unless the handles live in a guard.
+        let mut mcp_guard = McpCleanupGuard::new(agent_mcp_cleanups, resolved_agent_type.clone());
         let resolved_model = crate::runner::resolve_model(&ctx);
         let resolved_model_profile = ctx.model_profile.clone();
         let initial_message_index = observer_initial_message_index(ctx.resumed_history.as_deref());
@@ -1869,7 +1886,7 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
                 // Never allocated, so `stop` will never be called for this id:
                 // settle the debt here rather than leak it.
                 crate::agent_mcp_tools::run_agent_mcp_cleanups(
-                    agent_mcp_cleanups,
+                    mcp_guard.take(),
                     &request.subagent_type,
                 )
                 .await;
@@ -1879,11 +1896,14 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
                 });
             }
         };
-        if !agent_mcp_cleanups.is_empty() {
+        if !mcp_guard.is_empty() {
+            // `take()` runs only after the `lock()` await has resolved, so a
+            // drop while contending that mutex still leaves the handles owned
+            // by the guard.
             self.persistent_agent_mcp_cleanups
                 .lock()
                 .await
-                .insert(agent_id, agent_mcp_cleanups);
+                .insert(agent_id, mcp_guard.take());
         }
         // Persistent agents are pumped by the task layer rather than this
         // spawner, so wrap their channel to preserve the same global observer
@@ -2177,6 +2197,75 @@ fn rule_tool_name(rule: &str) -> &str {
     }
 }
 
+/// Owns the MCP cleanup handles [`PoolSubagentSpawner::build_subagent_context`]
+/// just produced — it CONNECTS the definition's inline `mcpServers`, so these
+/// are LIVE connections from the moment it returns — across every await where
+/// nothing else owns them, so a dropped spawn future can never orphan one.
+///
+/// [`SpawnDeallocGuard`] covers only the window between `pool.allocate`
+/// returning and the normal terminal path's `run_agent_mcp_cleanups` call. Two
+/// awaits sit outside it and both leaked [round-5 findings 11 and 19]:
+/// `pool.allocate(...).await` itself (it suspends on `runtime.spawn` and on
+/// `slots.write()`) runs BEFORE that guard exists, and
+/// `pool.deallocate(...).await` runs AFTER it was disarmed and its vector
+/// `mem::take`n empty. This guard is armed the instant the handles exist and
+/// hands them on — via [`McpCleanupGuard::take`], in the very expression that
+/// consumes them — to whoever owns them next.
+///
+/// Its `Drop` mirrors `SpawnDeallocGuard`'s: best-effort teardown on the
+/// current runtime, nothing to do once no runtime is left. It emits no
+/// observation of its own, so the "exactly one terminal event per spawn"
+/// contract is untouched — the windows it covers are either before any
+/// terminal event is possible (`allocate`) or after the normal path already
+/// emitted one (`deallocate`) — and so is round-3 finding B1's ordering
+/// (terminal event FIRST, MCP teardown second).
+struct McpCleanupGuard {
+    cleanups: Vec<crate::agent_mcp_tools::AgentMcpCleanupHandle>,
+    agent_type: String,
+}
+
+impl McpCleanupGuard {
+    fn new(
+        cleanups: Vec<crate::agent_mcp_tools::AgentMcpCleanupHandle>,
+        agent_type: String,
+    ) -> Self {
+        Self {
+            cleanups,
+            agent_type,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.cleanups.is_empty()
+    }
+
+    /// Hand the handles to their next owner. Call this ONLY in the expression
+    /// that immediately consumes them (a struct field, or the argument of the
+    /// `run_agent_mcp_cleanups` call being awaited on that same statement):
+    /// the guard is left empty, so from here on its `Drop` is a no-op.
+    fn take(&mut self) -> Vec<crate::agent_mcp_tools::AgentMcpCleanupHandle> {
+        std::mem::take(&mut self.cleanups)
+    }
+}
+
+impl Drop for McpCleanupGuard {
+    fn drop(&mut self) {
+        if self.cleanups.is_empty() {
+            return;
+        }
+        let cleanups = std::mem::take(&mut self.cleanups);
+        let agent_type = std::mem::take(&mut self.agent_type);
+        // Best-effort, exactly like `SpawnDeallocGuard::drop`: hand the async
+        // teardown to the current runtime; with no runtime active (shutdown)
+        // there is nothing left to disconnect from.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                crate::agent_mcp_tools::run_agent_mcp_cleanups(cleanups, &agent_type).await;
+            });
+        }
+    }
+}
+
 /// Grace period [`SpawnDeallocGuard`]'s early-drop path gives the runner to
 /// observe a cooperative `UserInterrupt` — reach its own `record_terminal`
 /// transcript write and return on its own — before the hard `abort()`
@@ -2351,6 +2440,13 @@ impl SubagentSpawner for PoolSubagentSpawner {
             .build_subagent_context(&request, inherit, false)
             .await?;
         let resolved_agent_type = ctx.agent_definition.agent_type.clone();
+        // [round-5 finding 11] Own the freshly-opened connections from HERE,
+        // not from `SpawnDeallocGuard` below: `pool.allocate` suspends twice
+        // before that guard exists, and a caller that drops this future while
+        // it is parked in there (a Fusion panel the panel bar's
+        // `join_set.abort_all()` drops while siblings contend the slot table)
+        // would otherwise leave the handles in a plain local with no owner.
+        let mut mcp_guard = McpCleanupGuard::new(agent_mcp_cleanups, resolved_agent_type.clone());
         let observer_events = crate::api::ObserverEventSink::new(observers.clone());
         let watchdog = WORKFLOW_QUERY_WATCHDOG_OVERRIDE
             .try_with(|policy| policy.borrow_mut().take())
@@ -2379,7 +2475,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 // claude's `finally` running even when the body never reached
                 // the model.
                 crate::agent_mcp_tools::run_agent_mcp_cleanups(
-                    agent_mcp_cleanups,
+                    mcp_guard.take(),
                     &resolved_agent_type,
                 )
                 .await;
@@ -2398,9 +2494,12 @@ impl SubagentSpawner for PoolSubagentSpawner {
             agent_id,
             observer_events: observer_events.clone(),
             armed: true,
-            mcp_cleanups: agent_mcp_cleanups,
+            // Ownership moves out of `mcp_guard` synchronously here — no
+            // await separates the take from the guard that receives them.
+            mcp_cleanups: mcp_guard.take(),
             agent_type: resolved_agent_type.clone(),
         };
+        drop(mcp_guard);
         observer_events.try_emit(SubagentObservation::Allocated {
             agent_id,
             agent_type: resolved_agent_type.clone(),
@@ -2598,19 +2697,32 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // Disarm the guard so it does not double-deallocate (or double-emit
         // a `Killed`) on drop. `pool.deallocate` below is best-effort and no
         // longer guarded by it, matching the guard's early-drop path, which
-        // also deallocates. Reclaim the MCP cleanup handles the guard has
-        // held since construction (`mem::take` leaves an empty `Vec` behind
-        // it, so if a drop races in after this point its own `Drop` runs no
-        // cleanups — this path already reached them).
+        // also deallocates.
+        //
+        // [round-5 finding 19] The MCP handles the guard has held since
+        // construction move into an `McpCleanupGuard` rather than into a bare
+        // local: `pool.deallocate` below is a genuine suspension point (the
+        // pool's `slots.write()`, then the runtime's `cancel`), and a drop
+        // while parked in it used to run NO teardown at all —
+        // `dealloc_guard.armed` is already false and its vector already
+        // emptied, so neither producer reached `run_agent_mcp_cleanups`. The
+        // terminal observation was emitted above, before any of this, so
+        // round-3 finding B1's ordering (terminal event first, MCP teardown
+        // second) still holds on both this path and the guard's drop path.
         dealloc_guard.armed = false;
-        let agent_mcp_cleanups = std::mem::take(&mut dealloc_guard.mcp_cleanups);
+        let mut mcp_guard = McpCleanupGuard::new(
+            std::mem::take(&mut dealloc_guard.mcp_cleanups),
+            resolved_agent_type.clone(),
+        );
         // Best-effort deallocate; failures here don't change the surfaced
-        // result.
+        // result. Kept AHEAD of the teardown so a wedged MCP `disconnect`
+        // cannot hold the pool slot (and the capacity permit inside it)
+        // hostage — the same reason the guard's drop path deallocates first.
         let _ = self.pool.deallocate(&agent_id).await;
         // §24b (claude `Agr`'s `cleanup` — `runAgent`'s `finally`): tear down
         // exactly the connections THIS spawn newly created, regardless of the
         // terminal outcome (`Completed`/`Failed`/`Killed` all reach here).
-        crate::agent_mcp_tools::run_agent_mcp_cleanups(agent_mcp_cleanups, &resolved_agent_type)
+        crate::agent_mcp_tools::run_agent_mcp_cleanups(mcp_guard.take(), &resolved_agent_type)
             .await;
 
         if let (Some(spec), SubagentResult::Completed { content, .. }) =
@@ -3820,6 +3932,303 @@ mod tests {
              `run_agent_mcp_cleanups`"
         );
     }
+
+    /// An MCP tool builder whose one cleanup resolves immediately and bumps
+    /// `counter`, so a test can assert the teardown actually RAN (rather than
+    /// merely being in flight, which is all a hanging cleanup can show).
+    fn counting_mcp_cleanup_builder(
+        counter: Arc<AtomicUsize>,
+    ) -> crate::agent_mcp_tools::AgentMcpToolBuilder {
+        Arc::new(move |_agent_id, _def| {
+            let counter = counter.clone();
+            Box::pin(async move {
+                let counter = counter.clone();
+                let cleanup = crate::agent_mcp_tools::AgentMcpCleanupHandle {
+                    server_name: "newly-created".into(),
+                    run: Arc::new(move || {
+                        let counter = counter.clone();
+                        Box::pin(async move {
+                            counter.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        })
+                    }),
+                };
+                crate::agent_mcp_tools::AgentMcpToolSet {
+                    tools: vec![],
+                    cleanups: vec![cleanup],
+                }
+            })
+        })
+    }
+
+    fn minimal_spawn_request(prompt: &str) -> SubagentSpawnRequest {
+        serde_json::from_value(serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": prompt
+        }))
+        .expect("minimal spawn request")
+    }
+
+    fn dummy_inherit() -> SubagentInheritance {
+        SubagentInheritance {
+            tool_invoker: Arc::new(DummyInvoker),
+            budget: Arc::new(DummyBudget),
+        }
+    }
+
+    /// Tokio-backed [`RuntimeSpawner`] whose `cancel` never resolves, which
+    /// parks [`StateMachinePool::deallocate`] — and therefore the normal
+    /// terminal path's `self.pool.deallocate(&agent_id).await` — forever.
+    #[derive(Default)]
+    struct HangingCancelRuntimeSpawner {
+        next_id: AtomicU64,
+    }
+
+    #[async_trait]
+    impl RuntimeSpawner for HangingCancelRuntimeSpawner {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+        ) -> Result<BackgroundTaskHandle, RuntimeError> {
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(task);
+            Ok(BackgroundTaskHandle {
+                task_name: name.to_string(),
+                task_id: id,
+            })
+        }
+
+        async fn sleep(&self, duration: std::time::Duration) {
+            tokio::time::sleep(duration).await;
+        }
+
+        async fn cancel(&self, _handle: &BackgroundTaskHandle) -> Result<(), RuntimeError> {
+            std::future::pending().await
+        }
+    }
+
+    /// [round-5 finding 11] `build_subagent_context` CONNECTS the spawn's
+    /// inline `mcpServers` and hands back their cleanup handles, but
+    /// `SpawnDeallocGuard` — the only thing that tears them down on a drop —
+    /// is not constructed until AFTER `pool.allocate(...).await` returns.
+    /// `allocate` suspends twice (`runtime.spawn`, `slots.write()`), so a
+    /// caller that drops the spawn future while it is parked in there (a
+    /// Fusion panel dropped by the panel bar's `join_set.abort_all()` while
+    /// two siblings contend the slot table) leaked every connection the spawn
+    /// had just opened: `allocate`'s `Err(e)` arm covers only the error path,
+    /// and the guard's `Drop` does not exist yet.
+    #[tokio::test(start_paused = true)]
+    async fn spawn_future_dropped_inside_pool_allocate_still_runs_its_mcp_cleanups() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // Park `allocate` between `runtime.spawn` and `slots.write()` — the
+        // exact window that has no owner for the cleanup handles.
+        let wait = Arc::new(tokio::sync::Notify::new());
+        pool.set_post_spawn_wait(wait.clone()).await;
+
+        let cleanup_ran = Arc::new(AtomicUsize::new(0));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_api_client(Arc::new(HangingApi))
+            .with_mcp_tool_builder(counting_mcp_cleanup_builder(cleanup_ran.clone()));
+
+        let spawn_result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            spawner.spawn(minimal_spawn_request("go"), dummy_inherit()),
+        )
+        .await;
+        assert!(
+            spawn_result.is_err(),
+            "the spawn must still be parked inside `pool.allocate` when the caller times out"
+        );
+
+        for _ in 0..200 {
+            if cleanup_ran.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            cleanup_ran.load(Ordering::SeqCst),
+            1,
+            "the MCP connections `build_subagent_context` already opened must be torn down when \
+             the spawn future is dropped while suspended inside `pool.allocate`"
+        );
+
+        // Release the paused hook so a later test never inherits it.
+        wait.notify_waiters();
+    }
+
+    /// [round-5 finding 11, persistent twin] `spawn_persistent` parks the very
+    /// same freshly-opened cleanup handles in a plain local across
+    /// `pool.allocate(...).await` AND `persistent_agent_mcp_cleanups.lock()`
+    /// before parking them in the map that `stop` drains. A drop in either
+    /// window leaves them unreachable: no `SpawnDeallocGuard` is ever built on
+    /// this path at all, and `stop` is only ever called for an id that made it
+    /// into that map.
+    #[tokio::test(start_paused = true)]
+    async fn persistent_spawn_dropped_inside_pool_allocate_still_runs_its_mcp_cleanups() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let wait = Arc::new(tokio::sync::Notify::new());
+        pool.set_post_spawn_wait(wait.clone()).await;
+
+        let cleanup_ran = Arc::new(AtomicUsize::new(0));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_api_client(Arc::new(HangingApi))
+            .with_mcp_tool_builder(counting_mcp_cleanup_builder(cleanup_ran.clone()));
+
+        let launch = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            spawner.spawn_persistent(minimal_spawn_request("go"), dummy_inherit()),
+        )
+        .await;
+        assert!(
+            launch.is_err(),
+            "the persistent launch must still be parked inside `pool.allocate`"
+        );
+
+        for _ in 0..200 {
+            if cleanup_ran.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            cleanup_ran.load(Ordering::SeqCst),
+            1,
+            "a persistent launch dropped before its cleanups reach \
+             `persistent_agent_mcp_cleanups` must still tear down the MCP connections it opened"
+        );
+
+        wait.notify_waiters();
+    }
+
+    /// [round-5 finding 19] On the NORMAL terminal path the guard is disarmed
+    /// and its cleanup handles are `mem::take`n into a plain local, and only
+    /// THEN does `self.pool.deallocate(&agent_id).await` run. A drop while
+    /// suspended in that deallocate (the pool's `slots.write()` contended by
+    /// sibling panels, or the runtime's own `cancel`) runs no teardown at all:
+    /// the guard's `Drop` returns early because `armed == false` and its
+    /// vector is empty. The child here completes normally, so the terminal
+    /// observation has already been emitted — the B1 ordering invariant
+    /// (terminal event BEFORE MCP teardown) must survive the fix.
+    #[tokio::test]
+    async fn spawn_future_dropped_inside_pool_deallocate_still_runs_its_mcp_cleanups() {
+        let runtime = Arc::new(HangingCancelRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let api = Arc::new(QueueApi {
+            responses: Mutex::new(VecDeque::from([text_response("done")])),
+            calls: AtomicUsize::new(0),
+        });
+        let observer = Arc::new(RecordingLifecycleObserver::default());
+
+        let cleanup_ran = Arc::new(AtomicUsize::new(0));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_api_client(api)
+            .with_spawn_observer(observer.clone())
+            .with_mcp_tool_builder(counting_mcp_cleanup_builder(cleanup_ran.clone()));
+
+        let spawn_result = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            spawner.spawn(minimal_spawn_request("finish"), dummy_inherit()),
+        )
+        .await;
+        assert!(
+            spawn_result.is_err(),
+            "the never-resolving `cancel` must still hold the spawn inside `pool.deallocate`"
+        );
+
+        for _ in 0..40 {
+            if cleanup_ran.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            cleanup_ran.load(Ordering::SeqCst),
+            1,
+            "the spawn's MCP connections must be torn down even when the caller drops the future \
+             while it is suspended inside `pool.deallocate`, after the guard was disarmed"
+        );
+
+        // [round-3 finding B1] The terminal observation still precedes the
+        // teardown — exactly one terminal event, emitted before any of this.
+        let terminal_count = observer
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    SubagentObservation::Completed { .. }
+                        | SubagentObservation::Failed { .. }
+                        | SubagentObservation::Killed { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            terminal_count, 1,
+            "the terminal observation must still be emitted exactly once, and before the MCP \
+             teardown; got: {:?}",
+            observer.events.lock().unwrap()
+        );
+    }
+    /// [round-5 finding 11, same class one layer up] The MCP builder INSIDE
+    /// `build_subagent_context` connects the definition's `mcpServers` and
+    /// hands back their cleanup handles — and `resolve_tools` runs on the very
+    /// next statement, which is both an `.await` and a `?`. Until the guard
+    /// was armed there, a rejected tool policy (an `Explicit` policy naming a
+    /// tool the registry does not have) dropped those handles on the floor
+    /// inside the function, before any caller had even seen them: no
+    /// `SpawnDeallocGuard`, no `McpCleanupGuard`, no owner at all.
+    #[tokio::test]
+    async fn build_subagent_context_runs_its_mcp_cleanups_when_tool_resolution_rejects_the_spawn() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let cleanup_ran = Arc::new(AtomicUsize::new(0));
+
+        let definition = AgentDefinition {
+            agent_type: "mcp-heavy".to_string(),
+            ..agent_def(AgentToolPolicy::Explicit(vec!["NoSuchTool".to_string()]))
+        };
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_tool_registry(registry_with(&["Read"]))
+            .with_agent_catalog(Arc::new(RwLock::new(vec![definition])))
+            .with_mcp_tool_builder(counting_mcp_cleanup_builder(cleanup_ran.clone()));
+
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "mcp-heavy",
+            "prompt": "go"
+        }))
+        .expect("minimal spawn request");
+        let err = match spawner
+            .build_subagent_context(&request, dummy_inherit(), false)
+            .await
+        {
+            Ok(_) => panic!("an explicit policy naming an unknown tool must reject the spawn"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("NoSuchTool"),
+            "the rejection must be the tool-resolution one, got: {err}"
+        );
+
+        for _ in 0..40 {
+            if cleanup_ran.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            cleanup_ran.load(Ordering::SeqCst),
+            1,
+            "the MCP connections the builder already opened must be torn down when \
+             `build_subagent_context` bails out on the `resolve_tools` await that follows it"
+        );
+    }
+
 
     /// [round-3 finding B1] `SpawnDeallocGuard::drop`'s spawned cleanup task
     /// must emit its terminal `Killed` observation even when its OWN MCP

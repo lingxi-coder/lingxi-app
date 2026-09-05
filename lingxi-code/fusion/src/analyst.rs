@@ -143,6 +143,19 @@ pub async fn analyze(
             // Transport / 4xx / 5xx / partial: not a decode failure, not
             // retried (see doc comment above).
             Ok(Err(other)) => {
+                // [Round-5 review item 9, same class as the synthesizer's
+                // `Partial` arm] `SideQueryError::Partial` arrives with the
+                // provider's OWN usage for the batches that completed before
+                // the later one failed — "the partial accounting must still
+                // be charged" is that variant's documented contract. Roll it
+                // into the accumulator exactly as the `Ok(Ok(..))` arm does,
+                // otherwise already-egressed, already-billed tokens are
+                // charged to nobody. The total is still knowingly missing the
+                // failed batch's spend, so mark it `incomplete` too.
+                if let SideQueryError::Partial { usage, .. } = &other {
+                    acc.usage.add(usage);
+                    acc.incomplete = true;
+                }
                 return Err((
                     AnalystError::Failed(analyst_failure_category(&other).into()),
                     acc,
@@ -1060,6 +1073,91 @@ tag name survives rather than a specific backslash count, got: {user_message}"
 length: user_message.len()={} decode_err.len()={}",
             user_message.len(),
             decode_err.len()
+        );
+    }
+
+    /// A [`SideQueryClient`] whose only call fails with
+    /// [`SideQueryError::Partial`] carrying the provider's own usage for the
+    /// batches that DID complete before the later one failed.
+    struct PartialAccountingClient;
+
+    #[async_trait::async_trait]
+    impl sidequery::SideQueryClient for PartialAccountingClient {
+        async fn query(
+            &self,
+            _request: sidequery::SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, SideQueryError> {
+            unreachable!("analyze() only calls query_json_schema")
+        }
+
+        async fn query_json_schema(
+            &self,
+            _request: StrictStructuredQueryRequest,
+        ) -> Result<StrictStructuredQueryResponse, SideQueryError> {
+            Err(SideQueryError::Partial {
+                source: Box::new(SideQueryError::InvalidResponse("later batch died".into())),
+                usage: cost::Usage {
+                    tokens: cost::TokenUsage {
+                        input: 777,
+                        output: 333,
+                        ..cost::TokenUsage::default()
+                    },
+                    ..cost::Usage::default()
+                },
+                elapsed: Duration::from_millis(5),
+                retry_count: 0,
+                api_calls: 2,
+            })
+        }
+    }
+
+    /// Round-5 review item 9, same class as the synthesizer's `Partial` arm
+    /// (found by that fixer's sweep, applied here by the gate):
+    /// `analyze`'s transport/4xx/5xx arm matched `Ok(Err(other))` as one
+    /// opaque value and threw `SideQueryError::Partial`'s real,
+    /// provider-reported usage on the floor — "the partial accounting must
+    /// still be charged" is that variant's own documented contract.
+    #[tokio::test]
+    async fn a_partial_failure_still_returns_the_provider_reported_usage() {
+        let panels = vec![stub_panel("P1")];
+        let request = FusionRequest {
+            schema_version: 1,
+            origin: platform_api::FusionOrigin::Slash,
+            prompt: "task".into(),
+            preset: platform_api::FusionPreset::Quality,
+            models: None,
+            dimensions: vec!["coverage".into()],
+            partial_ok: true,
+            max_panel: None,
+            cross_provider: true,
+            parent_profile: "anthropic".into(),
+            parent_model: "claude-sonnet-5".into(),
+            conversation_id: None,
+            workflow_run_id: None,
+        };
+        let analyst = ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        };
+        let config = FusionRuntimeConfig::defaults();
+        let client: Arc<dyn SideQueryClient> = Arc::new(PartialAccountingClient);
+        let (err, acc) = analyze(client, &config, &request, &analyst, &panels)
+            .await
+            .expect_err("a Partial failure is not retried and fails the analyst stage");
+        assert_eq!(err, AnalystError::Failed("partial".into()));
+        assert_eq!(
+            acc.usage.tokens.input, 777,
+            "the 777 input tokens the provider already billed for the completed \
+batches must reach the caller, not be discarded with the error"
+        );
+        assert_eq!(
+            acc.usage.tokens.output, 333,
+            "the 333 output tokens the provider already billed must survive too"
+        );
+        assert!(
+            acc.incomplete,
+            "a Partial total is by definition missing the failed batch's spend — \
+the accumulator must never let it be reported as exact"
         );
     }
 }

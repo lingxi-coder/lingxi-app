@@ -168,8 +168,9 @@ impl FusionOrchestrator {
         // outer `Err` arm) takes it back out with `.lock().ok().and_then(|mut
         // g| g.take())`.
         lease_cell: &Arc<Mutex<Option<ReservationLease>>>,
-        // Coarse settlement estimate latched alongside the lease — see
-        // `estimate_pre_panel_settlement`'s doc comment.
+        // Settlement figure latched alongside the lease — see the
+        // `StageSettlement` doc comment for what it holds at each stage
+        // boundary of a run.
         settlement: &Arc<Mutex<Option<(u64, bool)>>>,
     ) -> Result<(FusionRequest, ResolvedSet), FusionError> {
         let request_for_fail = request.clone();
@@ -222,19 +223,29 @@ impl FusionOrchestrator {
         .await
         {
             Ok(lease) => {
-                // [Round-4 review findings 1/2/3/19] Stash the lease (and a
-                // coarse settlement estimate for it) the moment it exists —
-                // BEFORE the `is_cancelled` check two lines below, which
-                // used to return `Err` with the lease as a doomed plain
-                // local, dropped uncommitted (`ReservationLease::drop` only
-                // releases the hold).
+                // [Round-4 review findings 1/2/3/19] Stash the lease (and
+                // the settlement figure that pairs with it) the moment it
+                // exists — BEFORE the `is_cancelled` check two lines below,
+                // which used to return `Err` with the lease as a doomed
+                // plain local, dropped uncommitted
+                // (`ReservationLease::drop` only releases the hold).
+                //
+                // [Round-5 review item 16] The figure at THIS boundary is
+                // exact zero: the lease exists, but not one panel task has
+                // been handed to the spawner yet (`run_panel_stage` has not
+                // even emitted `PANEL_STARTED`), so no provider call can
+                // have happened. It used to latch one priced turn of
+                // `panel::panel_prompt` per RESOLVED panel here, which
+                // charged a cancel landing in this window — the
+                // `is_cancelled` early-out immediately below is one of
+                // them — for money that was provably never spent. The
+                // per-panel floor is installed by `panel::run_panels`
+                // instead, the moment each panel task actually reaches the
+                // spawner (`panel::PanelDispatch`), and `estimated` is
+                // `true` from the start because every later refresh in this
+                // run may still be an estimate.
                 if let Ok(mut guard) = settlement.lock() {
-                    *guard = Some(estimate_pre_panel_settlement(
-                        self.catalog.as_ref(),
-                        self.prices.as_ref(),
-                        &resolved,
-                        &request,
-                    ));
+                    *guard = Some((0, true));
                 }
                 if let Ok(mut guard) = lease_cell.lock() {
                     *guard = Some(lease);
@@ -497,8 +508,8 @@ impl FusionOrchestrator {
         // Priced-so-far settlement (nano-USD, estimated) paired with
         // `lease_cell` — refreshed at each stage boundary this function
         // reaches, so `run()`'s recovery commit (if it ever runs) uses the
-        // most precise figure available rather than always falling back to
-        // the coarse pre-panel guess. See `estimate_pre_panel_settlement`.
+        // most precise figure available. See `StageSettlement`, whose doc
+        // comment tabulates what this cell holds at every boundary.
         settlement: Arc<Mutex<Option<(u64, bool)>>>,
         // [Round-4 review item 19 rework] Flipped `true` at the very top of
         // `finalize_result`, before ANY of its irreversible side effects
@@ -522,14 +533,28 @@ impl FusionOrchestrator {
                 &realized_tokens, &resolved_egress, &settlement,
             )
             .await?;
+        // [Round-5 review items 1/2/4] Every stage from here to
+        // `finalize_result` refreshes both survives-a-drop money cells
+        // through this one borrow — see `StageSettlement`'s stage table for
+        // what each boundary is required to leave behind.
+        let stage_settlement = StageSettlement {
+            realized_tokens: &realized_tokens,
+            settlement: &settlement,
+            catalog: self.catalog.as_ref(),
+            prices: self.prices.as_ref(),
+            analyst: &resolved.analyst,
+            parent_profile: &request.parent_profile,
+            parent_model: &request.parent_model,
+            request_prompt: &request.prompt,
+            panels: &panels,
+        };
         // Panels are the earliest point in `run_inner` where real,
         // already-billed provider spend exists. Record it now so a cancel
         // or outer-timeout that later drops this future's own stack still
         // leaves `run()` able to report it — see the field doc above and
-        // `run()`'s outer `Err` arm.
-        if let Ok(mut guard) = realized_tokens.lock() {
-            *guard = Some(aggregate_panel_usage(&panels).output_tokens);
-        }
+        // `run()`'s outer `Err` arm. The analyst has not run yet, so its
+        // contribution here is exactly $0 — not an estimate.
+        stage_settlement.refresh(None, false, None, false);
         // [Round-3 review B2, reworked] Latch the DISPATCHED egress set
         // (panels that made a real provider call — see
         // `dispatched_egress_profiles`) now, right after dispatch is known,
@@ -540,28 +565,6 @@ impl FusionOrchestrator {
         // only real egress.
         if let Ok(mut guard) = resolved_egress.lock() {
             *guard = dispatched_egress_profiles(&panels);
-        }
-        // [Round-4 review findings 1/2/3/19] Refresh the settlement cell
-        // with the REAL priced panel spend now that it exists (the analyst
-        // has not run yet, so its contribution is exactly $0 here — not an
-        // estimate) — replaces the coarse pre-panel guess latched in
-        // `resolve_and_reserve`, so a cancel/timeout that drops this future
-        // during the analyst/synthesizer stage settles the accurate panel
-        // figure instead of the coarse one.
-        if let Ok(mut guard) = settlement.lock() {
-            *guard = Some(price_realized_usage(
-                self.catalog.as_ref(),
-                self.prices.as_ref(),
-                &panels,
-                &resolved.analyst,
-                None,
-                false,
-                &request.parent_profile,
-                &request.parent_model,
-                None,
-                false,
-                &request.prompt,
-            ));
         }
         if let Err(error) = check_panel_bar(&panels, &request, config) {
             // The bar failing (not enough successful panels, or an
@@ -653,6 +656,7 @@ impl FusionOrchestrator {
                 &run_id,
                 started,
                 &resolved_egress,
+                &stage_settlement,
             )
             .await;
 
@@ -718,9 +722,10 @@ impl FusionOrchestrator {
 
         // [Round-4 review finding 14] Built from the panels that were
         // ACTUALLY dispatched (`dispatched_egress_profiles`, which excludes
-        // any panel rejected pre-allocation — `error_category ==
-        // Some("spawn")`), not from `resolved.panels` — the merely INTENDED
-        // set. A spawn-rejected panel makes zero provider calls, so
+        // every panel for which no subagent was ever allocated —
+        // `panel::is_never_dispatched_category`: `"spawn"` and
+        // `"not_dispatched"`), not from `resolved.panels` — the merely
+        // INTENDED set. Such a panel makes zero provider calls, so
         // including its profile here would falsely tell the user their
         // prompt reached a provider it never touched (this run still
         // completes when `partial_ok` covers the rejection).
@@ -895,6 +900,9 @@ impl FusionOrchestrator {
         run_id: &str,
         started: Instant,
         resolved_egress: &Arc<Mutex<Option<Vec<String>>>>,
+        // [Round-5 review items 1/2/4] Refreshed at every boundary of this
+        // stage and the synthesizer stage below it — see `StageSettlement`.
+        stage_settlement: &StageSettlement<'_>,
     ) -> AnalysisOutcome {
         progress::emit(
             progress,
@@ -903,7 +911,15 @@ impl FusionOrchestrator {
             FusionStage::Analyzing.label(),
         );
         let (analysis_outcome, analyst_ms) = self
-            .run_analyst_call(config, request, resolved, panels, started, resolved_egress)
+            .run_analyst_call(
+                config,
+                request,
+                resolved,
+                panels,
+                started,
+                resolved_egress,
+                stage_settlement,
+            )
             .await;
 
         let mut usage = aggregate_panel_usage(panels);
@@ -926,6 +942,7 @@ impl FusionOrchestrator {
                     &mut usage,
                     &mut priced_analyst,
                     &mut analyst_usage_incomplete,
+                    stage_settlement,
                 );
                 self.analysis_failed_outcome(
                     request,
@@ -950,6 +967,7 @@ impl FusionOrchestrator {
                     &mut usage,
                     &mut priced_analyst,
                     &mut analyst_usage_incomplete,
+                    stage_settlement,
                 );
                 self.analysis_failed_outcome(
                     request,
@@ -970,6 +988,7 @@ impl FusionOrchestrator {
                     &mut usage,
                     &mut priced_analyst,
                     &mut analyst_usage_incomplete,
+                    stage_settlement,
                 );
                 self.analysis_failed_outcome(
                     request,
@@ -1001,6 +1020,7 @@ impl FusionOrchestrator {
                     &mut priced_analyst,
                     &mut priced_synth,
                     &mut synth_attempted,
+                    stage_settlement,
                 )
                 .await
             }
@@ -1049,12 +1069,24 @@ impl FusionOrchestrator {
         usage: &mut FusionUsage,
         priced_analyst: &mut Option<(cost::Usage, u32)>,
         analyst_usage_incomplete: &mut bool,
+        // [Round-5 review items 1/2/4] A failed analyst call still ran:
+        // whatever real usage `acc` recovered must reach the
+        // survives-a-drop cells too, or a cancel/timeout landing in the
+        // NeedsParent degradation below (which still emits telemetry and
+        // builds a summary) would settle the panel-only figure.
+        stage_settlement: &StageSettlement<'_>,
     ) {
         *analyst_usage_incomplete = true;
         if acc.usage.total_tokens() > 0 {
             add_cost_usage(usage, &acc.usage, acc.calls);
             *priced_analyst = Some((acc.usage, acc.calls));
         }
+        stage_settlement.refresh(
+            priced_analyst.as_ref().map(|(usage, calls)| (usage, *calls)),
+            true,
+            None,
+            false,
+        );
     }
 
     /// `analyze_and_decide` helper: the `Ok` arm of the analyst-call match —
@@ -1079,9 +1111,20 @@ impl FusionOrchestrator {
         priced_analyst: &mut Option<(cost::Usage, u32)>,
         priced_synth: &mut Option<cost::Usage>,
         synth_attempted: &mut bool,
+        stage_settlement: &StageSettlement<'_>,
     ) -> (FusionDecision, String, Option<FusionAnalysis>, u64) {
         add_cost_usage(usage, &analyst_usage, analyst_calls);
         *priced_analyst = Some((analyst_usage, analyst_calls));
+        // [Round-5 review items 1/2/4] The analyst's EXACT, provider-
+        // reported usage is known right here. Publish it to the
+        // survives-a-drop cells before the verdict is even interpreted —
+        // everything below this line (the `interpret` match, the whole
+        // synthesizer stage) is a window in which an outer cancel drops
+        // `run_inner`'s stack, and until this refresh existed that window
+        // committed the panel-only figure and billed these tokens to
+        // nobody.
+        stage_settlement.refresh(Some((&analyst_usage, analyst_calls)), true, None, false);
+
         let mut md = fusion_event_metadata(request);
         md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
         add_panel_counts(&mut md, panels);
@@ -1115,8 +1158,22 @@ impl FusionOrchestrator {
             }
             HostDecision::Merge => {
                 self.run_synthesis(
-                    config, request, analysis, panels, progress, run_id, started, usage,
-                    priced_synth, synth_attempted,
+                    config,
+                    request,
+                    analysis,
+                    panels,
+                    progress,
+                    run_id,
+                    started,
+                    usage,
+                    priced_synth,
+                    synth_attempted,
+                    stage_settlement,
+                    // `cost::Usage` is `Copy`; the synthesizer stage needs
+                    // the analyst's figure so its own refreshes keep
+                    // reporting it rather than dropping back to the
+                    // panel-only total.
+                    Some((analyst_usage, analyst_calls)),
                 )
                 .await
             }
@@ -1134,6 +1191,7 @@ impl FusionOrchestrator {
         panels: &[PanelInternal],
         started: Instant,
         resolved_egress: &Arc<Mutex<Option<Vec<String>>>>,
+        stage_settlement: &StageSettlement<'_>,
     ) -> (
         Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)>,
         u64,
@@ -1153,6 +1211,16 @@ impl FusionOrchestrator {
             }
             *guard = Some(egress);
         }
+        // [Round-5 review items 1/2/4] Same reasoning as the egress latch
+        // directly above, for the money: from the next line on, the analyst
+        // call is in flight and its input (the task prompt plus every
+        // successful panel report) has been egressed and will be billed. An
+        // outer cancel/timeout dropping `run_inner`'s stack while it streams
+        // used to settle the panel-only figure — exact $0 for a call that
+        // was demonstrably made. `analyst_attempted: true` with no usage yet
+        // is precisely `price_realized_usage`'s "attempted, usage unknown"
+        // case: it prices `judge_input_token_estimate` and flags `estimated`.
+        stage_settlement.refresh(None, true, None, false);
         let analyst_started = Instant::now();
         // F004: bound the analyst stage by what actually remains of the
         // end-to-end deadline, not just its own `analystTimeoutMs` budget —
@@ -1184,6 +1252,64 @@ impl FusionOrchestrator {
             Err(_) => Err((AnalystError::Failed("timeout".into()), AnalystUsage::default())),
         };
         (analysis_outcome, millis_since(analyst_started))
+    }
+
+    /// `run_synthesis` helper: the `SYNTHESIS_FAILED` telemetry both
+    /// failure arms emit — identical metadata, only `error` differs. Split
+    /// out to keep `run_synthesis` under the line-count lint.
+    async fn emit_synthesis_failed(
+        &self,
+        request: &FusionRequest,
+        panels: &[PanelInternal],
+        run_id: &str,
+        synthesizer_ms: u64,
+        error_label: &str,
+    ) {
+        let mut md = fusion_event_metadata(request);
+        md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
+        add_panel_counts(&mut md, panels);
+        md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(saturating_i64(synthesizer_ms)),
+        );
+        md.insert(
+            "error".into(),
+            AnalyticsValue::String(error_label.to_string()),
+        );
+        self.bus
+            .log_event(telemetry::tengu::fusion::SYNTHESIS_FAILED, md)
+            .await;
+    }
+
+    /// `run_synthesis` helper [Round-5 review item 9]: a synthesizer call
+    /// that FAILED can still have been billed — an empty-text completion
+    /// (all reasoning, or a refusal) and a `SideQueryError::Partial` both
+    /// arrive carrying the provider's own `cost::Usage`. Roll it into the
+    /// run's token/request totals and into the survives-a-drop settlement
+    /// cell exactly the way `record_failed_analyst_usage` does for the
+    /// analyst, instead of leaving `priced_synth` at `None` and letting
+    /// `price_realized_usage` re-price a known call as an input-only
+    /// estimate with output/cache/reasoning hard-coded to 0.
+    ///
+    /// `usage.estimated` is forced regardless: a failed call's figure is
+    /// never claimed as this run's exact total (a `Partial` is short by
+    /// construction, and a timeout/transport arm hands back an empty usage
+    /// that `price_realized_usage`'s `synth_attempted` fallback then has to
+    /// estimate).
+    fn record_failed_synth_usage(
+        lost_usage: cost::Usage,
+        usage: &mut FusionUsage,
+        priced_synth: &mut Option<cost::Usage>,
+        stage_settlement: &StageSettlement<'_>,
+        analyst_for_refresh: Option<(&cost::Usage, u32)>,
+    ) {
+        usage.estimated = true;
+        if lost_usage.total_tokens() == 0 {
+            return;
+        }
+        add_cost_usage(usage, &lost_usage, 1);
+        *priced_synth = Some(lost_usage);
+        stage_settlement.refresh(analyst_for_refresh, true, Some(&lost_usage), true);
     }
 
     /// `analyze_and_decide` helper: the shared `NeedsParent` degrade+telemetry
@@ -1242,6 +1368,10 @@ impl FusionOrchestrator {
         usage: &mut FusionUsage,
         priced_synth: &mut Option<cost::Usage>,
         synth_attempted: &mut bool,
+        stage_settlement: &StageSettlement<'_>,
+        // The analyst's already-known usage, so every refresh below keeps
+        // reporting it instead of regressing to the panel-only total.
+        priced_analyst: Option<(cost::Usage, u32)>,
     ) -> (FusionDecision, String, Option<FusionAnalysis>, u64) {
         // T1 item 1: set unconditionally, before the call and its own
         // timeout race — every path below (success, timeout, failure) is a
@@ -1251,6 +1381,16 @@ impl FusionOrchestrator {
         // `price_realized_usage` has to tell "never ran, $0 is exact" apart
         // from "ran and lost its usage, needs the settlement estimate".
         *synth_attempted = true;
+        // [Round-5 review items 1/2/4] The synthesizer's payload (the
+        // prompt, the whole analysis and every panel's candidate answer)
+        // reaches the parent provider on every path below, so publish the
+        // attempt to the survives-a-drop cells BEFORE the call: a cancel
+        // landing mid-synthesis then settles panels + analyst + the
+        // synthesizer's estimated input rather than the panel-only figure.
+        let analyst_for_refresh = priced_analyst
+            .as_ref()
+            .map(|(usage, calls)| (usage, *calls));
+        stage_settlement.refresh(analyst_for_refresh, true, None, true);
         progress::emit(
             progress,
             FusionStage::Synthesizing,
@@ -1271,13 +1411,17 @@ impl FusionOrchestrator {
         .await
         {
             Ok(outcome) => outcome,
-            Err(_) => Err(SynthError::TimedOut),
+            Err(_) => Err((SynthError::TimedOut, cost::Usage::default())),
         };
         let synthesizer_ms = millis_since(synth_started);
         match synth {
             Ok((text, synth_usage)) => {
                 add_cost_usage(usage, &synth_usage, 1);
                 *priced_synth = Some(synth_usage);
+                // [Round-5 review items 1/2/4] The synthesizer's exact usage
+                // is known here; publish it before the telemetry below, so
+                // a cancel racing `finalize_result` settles the real figure.
+                stage_settlement.refresh(analyst_for_refresh, true, Some(&synth_usage), true);
                 let mut md = fusion_event_metadata(request);
                 md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
                 add_panel_counts(&mut md, panels);
@@ -1291,50 +1435,31 @@ impl FusionOrchestrator {
                     .await;
                 (FusionDecision::Merged, text, Some(analysis), synthesizer_ms)
             }
-            Err(SynthError::TimedOut) => {
-                let mut md = fusion_event_metadata(request);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
-                add_panel_counts(&mut md, panels);
-                md.insert(
-                    "duration_ms".into(),
-                    AnalyticsValue::Int(saturating_i64(synthesizer_ms)),
+            Err((error, lost_usage)) => {
+                Self::record_failed_synth_usage(
+                    lost_usage,
+                    usage,
+                    priced_synth,
+                    stage_settlement,
+                    analyst_for_refresh,
                 );
-                md.insert(
-                    "error".into(),
-                    AnalyticsValue::String("synthesis_timed_out".into()),
-                );
-                self.bus
-                    .log_event(telemetry::tengu::fusion::SYNTHESIS_FAILED, md)
+                let (reason, error_label, message) = match error {
+                    SynthError::TimedOut => (
+                        FusionNeedsParentReason::SynthesisTimedOut,
+                        "synthesis_timed_out",
+                        "synthesizer timed out",
+                    ),
+                    SynthError::Failed => (
+                        FusionNeedsParentReason::SynthesisFailed,
+                        "synthesis_failed",
+                        "synthesizer failed",
+                    ),
+                };
+                self.emit_synthesis_failed(request, panels, run_id, synthesizer_ms, error_label)
                     .await;
                 (
-                    FusionDecision::NeedsParent {
-                        reason: FusionNeedsParentReason::SynthesisTimedOut,
-                    },
-                    needs_parent_text(panels, "synthesizer timed out", Some(&analysis)),
-                    Some(analysis),
-                    synthesizer_ms,
-                )
-            }
-            Err(SynthError::Failed) => {
-                let mut md = fusion_event_metadata(request);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
-                add_panel_counts(&mut md, panels);
-                md.insert(
-                    "duration_ms".into(),
-                    AnalyticsValue::Int(saturating_i64(synthesizer_ms)),
-                );
-                md.insert(
-                    "error".into(),
-                    AnalyticsValue::String("synthesis_failed".into()),
-                );
-                self.bus
-                    .log_event(telemetry::tengu::fusion::SYNTHESIS_FAILED, md)
-                    .await;
-                (
-                    FusionDecision::NeedsParent {
-                        reason: FusionNeedsParentReason::SynthesisFailed,
-                    },
-                    needs_parent_text(panels, "synthesizer failed", Some(&analysis)),
+                    FusionDecision::NeedsParent { reason },
+                    needs_parent_text(panels, message, Some(&analysis)),
                     Some(analysis),
                     synthesizer_ms,
                 )
@@ -1666,9 +1791,18 @@ pub(crate) fn check_panel_bar(
         // out, the run-level error stays `TimedOutEmpty` even when the bar
         // sealed early and aborted a still-running sibling before its own
         // timeout could fire.
+        // [Round-5 review item 8] `"not_dispatched"` is excluded for the
+        // same reason `"aborted"` is: the slot was killed before its task
+        // ever called the spawner, so it carries no information about WHY
+        // the run failed and must not mask a set of genuine timeouts.
         let real_outcomes: Vec<&PanelInternal> = panels
             .iter()
-            .filter(|panel| panel.error_category.as_deref() != Some("aborted"))
+            .filter(|panel| {
+                !matches!(
+                    panel.error_category.as_deref(),
+                    Some("aborted" | "not_dispatched")
+                )
+            })
             .collect();
         if !real_outcomes.is_empty()
             && real_outcomes
@@ -1688,10 +1822,31 @@ pub(crate) fn check_panel_bar(
         // charged for subagents that never existed. Deliberately narrow —
         // this does NOT extend to `MinPanelsNotMet`/`PanelSetIncomplete`
         // below, where at least `min`/some panels genuinely ran.
+        // [Round-5 review item 8] `"not_dispatched"` counts as a
+        // preflight failure alongside `"spawn"`: the early-abort bar
+        // (`panel::run_panels`' `join_set.abort_all()`) kills siblings the
+        // instant the run is sealed, and a slot killed before its task
+        // ever reached the spawner is exactly as provably-pre-provider-call
+        // as a spawner rejection. Before this, ONE such slot made the
+        // `all(== "spawn")` test below false forever, so an all-rejected
+        // run degraded to the generic `AllPanelsFailed` — which
+        // `fusion_error_is_preflight` does not release the spawn
+        // reservation for — and whether a session stayed charged for
+        // subagents that never existed came down to which rejection
+        // happened to return last. A panel that was actually ALLOCATED a
+        // child still keeps its `"aborted"` category and still blocks this
+        // classification: we cannot prove it made no provider call.
+        // [Round-6 blocking B1] "Allocated", not "reached the spawner":
+        // `panel::panel_from_join_error` keys the distinction on the
+        // spawner's own `Allocated` observation, because entering
+        // `spawn_workflow_with_observer` (which connects the panel's inline
+        // MCP servers before the pool can even refuse) proves nothing about
+        // whether a subagent — and therefore a billable provider call —
+        // ever came to exist.
         if !panels.is_empty()
-            && panels
-                .iter()
-                .all(|panel| panel.error_category.as_deref() == Some("spawn"))
+            && panels.iter().all(|panel| {
+                crate::panel::is_never_dispatched_category(panel.error_category.as_deref())
+            })
         {
             return Err(FusionError::AllPanelsFailedPreflight);
         }
@@ -1707,16 +1862,107 @@ pub(crate) fn check_panel_bar(
     Ok(())
 }
 
+/// [Round-5 review items 1/2/4] The two survives-a-drop money cells
+/// (`realized_tokens`, `settlement`) plus everything `price_realized_usage`
+/// needs, threaded through EVERY stage that runs after the panel fan-out.
+///
+/// `run()`'s outer `Err` arm is the only settler when `run_inner`'s future
+/// is DROPPED (an outer cancel, or the outer total timeout): it commits
+/// whatever these cells last held. Round 4 taught `panel::RealizedSpendSink`
+/// to keep them fresh during the panel fan-out and `run_inner` to refresh
+/// them once the panel stage returned — and then stopped. The analyst's and
+/// the synthesizer's usage lived only on `run_inner`'s own stack, so a
+/// cancel during either stage committed the panel-only figure and charged
+/// real, already-billed judge tokens to nobody.
+///
+/// The full stage table this type exists to keep honest — what the
+/// settlement cell holds at each boundary a run can be dropped on:
+///
+/// | boundary | settlement holds | source |
+/// |---|---|---|
+/// | lease acquired, nothing dispatched | `(0, true)` | exact — no call yet (`resolve_and_reserve`) |
+/// | a panel task reaches the spawner | one priced `panel_prompt` turn per DISPATCHED panel | estimate (`panel::PanelDispatch` + `RealizedSpendSink`) |
+/// | a panel finishes | that panel's real usage + the floor for the ones still in flight | provider usage where known |
+/// | panel stage returns | every panel's real usage, analyst/synth exactly $0 | provider usage (`refresh(None, false, None, false)`) |
+/// | analyst call dispatched | panels + `judge_input_token_estimate` for the analyst | estimate (`refresh(None, true, ..)`) |
+/// | analyst returned | panels + the analyst's REAL usage | provider usage (`refresh(Some(..), true, ..)`) |
+/// | synthesizer dispatched | + `judge_input_token_estimate` for the synth | estimate (`refresh(.., None, true)`) |
+/// | synthesizer returned | + the synthesizer's REAL usage | provider usage (`refresh(.., Some(..), true)`) |
+/// | `finalize_result` | the same figure, committed against the lease | `price_realized_usage` |
+///
+/// Provider-reported usage always wins; an estimate is only ever
+/// substituted for a call that was ATTEMPTED and lost its usage, and always
+/// with `estimated = true` (`price_realized_usage`'s own contract).
+struct StageSettlement<'a> {
+    realized_tokens: &'a Arc<Mutex<Option<u64>>>,
+    settlement: &'a Arc<Mutex<Option<(u64, bool)>>>,
+    catalog: &'a dyn ModelSource,
+    prices: &'a dyn FusionPriceBook,
+    analyst: &'a ResolvedPanel,
+    parent_profile: &'a str,
+    parent_model: &'a str,
+    request_prompt: &'a str,
+    /// The finished, anonymized panel set — fixed for the whole life of
+    /// this borrow (every stage below only reads it).
+    panels: &'a [PanelInternal],
+}
+
+impl StageSettlement<'_> {
+    /// Rewrite both cells for the stage boundary just reached. Arguments
+    /// mirror `price_realized_usage`'s own analyst/synth parameters exactly,
+    /// so "what does this stage know" is the only decision at each call
+    /// site.
+    fn refresh(
+        &self,
+        analyst_usage: Option<(&cost::Usage, u32)>,
+        analyst_attempted: bool,
+        synth_usage: Option<&cost::Usage>,
+        synth_attempted: bool,
+    ) {
+        if let Ok(mut guard) = self.realized_tokens.lock() {
+            // Same field `add_cost_usage` rolls into `FusionUsage::output_tokens`
+            // for these two calls, so a cancelled run discloses the same
+            // token total a completed one would (`local_workflow`'s
+            // `fusion()` bridge charges its own budget from this number).
+            let mut output_tokens = aggregate_panel_usage(self.panels).output_tokens;
+            if let Some((usage, _)) = analyst_usage {
+                output_tokens = output_tokens.saturating_add(usage.tokens.output);
+            }
+            if let Some(usage) = synth_usage {
+                output_tokens = output_tokens.saturating_add(usage.tokens.output);
+            }
+            *guard = Some(output_tokens);
+        }
+        if let Ok(mut guard) = self.settlement.lock() {
+            *guard = Some(price_realized_usage(
+                self.catalog,
+                self.prices,
+                self.panels,
+                self.analyst,
+                analyst_usage,
+                analyst_attempted,
+                self.parent_profile,
+                self.parent_model,
+                synth_usage,
+                synth_attempted,
+                self.request_prompt,
+            ));
+        }
+    }
+}
+
 /// [Round-3 review B2, reworked] The provider profiles this panel set was
 /// ACTUALLY dispatched to — every panel except those whose `error_category`
-/// is `"spawn"` (`panel.rs`'s pre-allocation spawner-rejection arm, the ONE
-/// category that is provably reached before any provider call could have
-/// been made — see round-3 review finding 12's own reasoning, which this
-/// mirrors). Equivalently: every panel with `usage.is_some()`, plus any
-/// panel that dispatched but failed AFTER making its call (whose
-/// `error_category` is something other than `"spawn"`, e.g. a timeout or a
-/// provider error, and which therefore still reached the provider even
-/// though it has no `usage` to show for it). Returns `None` (never
+/// satisfies [`panel::is_never_dispatched_category`]. As of round-5 item 8
+/// and round-6 blocking B1 that is TWO categories, not one: `"spawn"`
+/// (`panel.rs`'s pre-allocation spawner-rejection arm) and
+/// `"not_dispatched"` (a slot cancelled before it called the spawner, or
+/// aborted while parked inside a spawner call that never allocated a child).
+/// Both are provably reached before any provider call could have been made.
+/// Equivalently: every panel with `usage.is_some()`, plus any panel that
+/// dispatched but failed AFTER making its call (a timeout or a provider
+/// error, say — it still reached the provider even though it has no `usage`
+/// to show for it). Returns `None` (never
 /// `Some(vec![])`) when nothing dispatched, so a caller renders no
 /// `<egress-profiles>` section rather than an empty one — this is what
 /// keeps `AllPanelsFailedPreflight`'s "guarantees zero provider calls"
@@ -1724,7 +1970,12 @@ pub(crate) fn check_panel_bar(
 fn dispatched_egress_profiles(panels: &[PanelInternal]) -> Option<Vec<String>> {
     let mut profiles: Vec<String> = panels
         .iter()
-        .filter(|panel| panel.error_category.as_deref() != Some("spawn"))
+        .filter(|panel| {
+            // [Round-5 review items 8/12/16] `"not_dispatched"` joins
+            // `"spawn"` here: both name a slot whose task provably never
+            // called the spawner — see `panel::is_never_dispatched_category`.
+            !crate::panel::is_never_dispatched_category(panel.error_category.as_deref())
+        })
         .map(|panel| panel.profile.clone())
         .collect();
     if profiles.is_empty() {
@@ -1733,53 +1984,6 @@ fn dispatched_egress_profiles(panels: &[PanelInternal]) -> Option<Vec<String>> {
     profiles.sort();
     profiles.dedup();
     Some(profiles)
-}
-
-/// [Round-4 review findings 1/2/3/19 — cancel path never settles] The
-/// FIRST settlement estimate for a run's lease, latched by
-/// `resolve_and_reserve` the instant the lease is acquired — before a
-/// single panel has even been dispatched. This is what `run()`'s outer
-/// `Err` arm commits when `run_inner`'s future is dropped (or returns
-/// `Err` from `resolve_and_reserve`'s own `is_cancelled` check) before
-/// EITHER of `run_inner`'s own commit points (`check_panel_bar`'s failure
-/// arm, `finalize_result`) — and before the more precise post-panel-stage
-/// refresh in `run_inner` — ever runs, e.g. every panel is still hung when
-/// the cancel/timeout lands (see `budget_reservation_releases_on_cancel`).
-///
-/// Prices exactly ONE turn of `panel::panel_prompt` per RESOLVED panel
-/// (input-only, no output) through the same [`FusionPriceBook`] real
-/// settlement uses — mirroring the T1 policy `panel::estimate_in_flight_usage`
-/// already applies to a single genuinely in-flight panel turn: a component
-/// that was reserved and dispatched but has no real usage yet is estimated
-/// from what is known to have been sent, never billed as exact $0. Always
-/// `estimated: true` — this is a floor, not a claim of precision.
-fn estimate_pre_panel_settlement(
-    catalog: &dyn ModelSource,
-    prices: &dyn FusionPriceBook,
-    resolved: &ResolvedSet,
-    request: &FusionRequest,
-) -> (u64, bool) {
-    let estimated_input = llm_client::model::count_tokens::approximate_tokens_for_bytes(
-        panel::panel_prompt(&request.prompt).len() as u64,
-    );
-    let mut total_nano_usd = 0_u64;
-    for panel in &resolved.panels {
-        if let Some(nano_usd) = budget::price_component(
-            &panel.profile,
-            &panel.model,
-            catalog,
-            prices,
-            estimated_input,
-            0,
-            0,
-            0,
-            0,
-            1,
-        ) {
-            total_nano_usd = total_nano_usd.saturating_add(nano_usd);
-        }
-    }
-    (total_nano_usd, true)
 }
 
 fn panel_outcome(panel: &PanelInternal) -> PanelOutcome {
@@ -2347,6 +2551,50 @@ fn add_egress_metadata(md: &mut LogEventMetadata, egress: &[String]) {
 #[cfg(test)]
 mod record_failed_analyst_usage_tests {
     use super::*;
+    use crate::model_resolver::CatalogModel;
+
+    /// Minimal, price-less stage cell: these tests only assert what
+    /// `record_failed_analyst_usage` writes into `usage`/`priced_analyst`,
+    /// but it now also refreshes the survives-a-drop cells (round-5 review
+    /// items 1/2/4), so it needs one to write into. `()` is the
+    /// no-rates `FusionPriceBook` and an empty `Vec<CatalogModel>` the empty
+    /// `ModelSource`.
+    struct StageFixture {
+        realized_tokens: Arc<Mutex<Option<u64>>>,
+        settlement: Arc<Mutex<Option<(u64, bool)>>>,
+        catalog: Vec<CatalogModel>,
+        prices: (),
+        analyst: ResolvedPanel,
+    }
+
+    impl StageFixture {
+        fn new() -> Self {
+            Self {
+                realized_tokens: Arc::new(Mutex::new(None)),
+                settlement: Arc::new(Mutex::new(None)),
+                catalog: Vec::new(),
+                prices: (),
+                analyst: ResolvedPanel {
+                    profile: "profile".into(),
+                    model: "model".into(),
+                },
+            }
+        }
+
+        fn cell(&self) -> StageSettlement<'_> {
+            StageSettlement {
+                realized_tokens: &self.realized_tokens,
+                settlement: &self.settlement,
+                catalog: &self.catalog,
+                prices: &self.prices,
+                analyst: &self.analyst,
+                parent_profile: "profile",
+                parent_model: "model",
+                request_prompt: "task",
+                panels: &[],
+            }
+        }
+    }
 
     #[test]
     fn prices_real_non_empty_usage_instead_of_discarding_it_and_flags_incomplete() {
@@ -2365,11 +2613,13 @@ mod record_failed_analyst_usage_tests {
         let mut priced_analyst: Option<(cost::Usage, u32)> = None;
         let mut incomplete = false;
         let mut usage = FusionUsage::default();
+        let fixture = StageFixture::new();
         FusionOrchestrator::record_failed_analyst_usage(
             acc,
             &mut usage,
             &mut priced_analyst,
             &mut incomplete,
+            &fixture.cell(),
         );
         assert!(
             incomplete,
@@ -2411,11 +2661,13 @@ counted in FusionUsage, not just priced into realized_nano_usd"
         let mut priced_analyst: Option<(cost::Usage, u32)> = None;
         let mut incomplete = false;
         let mut usage = FusionUsage::default();
+        let fixture = StageFixture::new();
         FusionOrchestrator::record_failed_analyst_usage(
             acc,
             &mut usage,
             &mut priced_analyst,
             &mut incomplete,
+            &fixture.cell(),
         );
         assert!(incomplete);
         assert!(
@@ -2521,6 +2773,63 @@ were possible — so this must be reported distinctly from a genuine all-panels-
             FusionError::AllPanelsFailed,
             "at least one panel genuinely called a provider (and was billed) — this must NOT \
 be classified as preflight, or a real spend would be refunded as if it never happened"
+        );
+    }
+
+    /// [Round-5 review item 8] The early-abort bar (`join_set.abort_all()`)
+    /// seals a doomed run by killing every still-running sibling, and a
+    /// slot killed before its task ever reached the spawner is exactly as
+    /// provably-preflight as a spawner rejection — `panel::run_panels`
+    /// labels it `"not_dispatched"`. Before this fix ONE such slot made the
+    /// `all(== "spawn")` test false forever, so a run in which the spawner
+    /// rejected every panel degraded to the generic `AllPanelsFailed` and
+    /// the caller kept the whole spawn reservation charged for subagents
+    /// that never existed — and WHICH variant came out depended on which
+    /// rejection happened to return last.
+    #[test]
+    fn spawn_rejections_plus_an_undispatched_abort_still_report_preflight() {
+        let panels = vec![
+            panel_with_category(Some("spawn")),
+            panel_with_category(Some("spawn")),
+            panel_with_category(Some("not_dispatched")),
+        ];
+        let err =
+            check_panel_bar(&panels, &minimal_request(), &FusionRuntimeConfig::defaults())
+                .unwrap_err();
+        assert_eq!(
+            err,
+            FusionError::AllPanelsFailedPreflight,
+            "no panel here reached the spawner, so zero provider calls were possible — the \
+bar-abort of an unstarted slot must not mask that"
+        );
+    }
+
+    /// Negative guard for the case directly above: an `"aborted"` slot was
+    /// ALLOCATED a real child and then cut down mid-flight, so it can have
+    /// been billed. Mixing one into an otherwise all-rejected set must keep
+    /// the general variant — releasing the reservation there would refund a
+    /// subagent that really existed.
+    ///
+    /// [Round-6 blocking B1] Re-pointed from "reached the spawner" to
+    /// "was allocated": `panel::panel_from_join_error` now only labels a
+    /// bar-aborted slot `"aborted"` when the spawner reported
+    /// `SubagentObservation::Allocated` for it. A slot aborted while still
+    /// INSIDE a spawner call that had not allocated anything is
+    /// `"not_dispatched"` and belongs to the preflight case above.
+    #[test]
+    fn an_allocated_slot_cut_down_mid_flight_blocks_the_preflight_variant() {
+        let panels = vec![
+            panel_with_category(Some("spawn")),
+            panel_with_category(Some("aborted")),
+        ];
+        let err =
+            check_panel_bar(&panels, &minimal_request(), &FusionRuntimeConfig::defaults())
+                .unwrap_err();
+        assert_eq!(
+            err,
+            FusionError::AllPanelsFailed,
+            "a mid-flight abort of an ALLOCATED child may have been billed; only a slot \
+that never had a subagent allocated is provably preflight"
         );
     }
 

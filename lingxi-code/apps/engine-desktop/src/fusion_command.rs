@@ -67,9 +67,26 @@ impl FusionCompletionSink for DesktopFusionCompletionSink {
         // finished. Fire a best-effort UI notice (whichever session/client is
         // currently connected); the durable record above is the source of
         // truth regardless of whether this reaches anyone live.
-        self.handle
-            .emit_background_system_notice(&fusion_completion_notice(result))
-            .await;
+        //
+        // [Round-5 finding 13] `emit_background_system_notice` has NO session
+        // argument — it routes to whatever session is connected RIGHT NOW
+        // (`handle_impl.rs`: `self.output.emit_system_notice(body, false)`).
+        // The append above, by contrast, is session-TARGETED and returns
+        // `Ok(())` for a target that is no longer current as long as the
+        // durable write landed (it only pushes into live history inside its
+        // `current == target` branch). So `Ok` does NOT mean "this
+        // conversation": after a `/clear` or a hot-resume mid-run the result
+        // is persisted to the OLD session's JSONL while this notice appears
+        // in the NEW one. Ask which session is live and pick copy that is
+        // true of the session the user is actually looking at.
+        let appended_to_current =
+            self.handle.current_session_id().await.to_string() == conversation_id;
+        let body = if appended_to_current {
+            fusion_completion_notice(result)
+        } else {
+            fusion_completion_notice_other_session(result, conversation_id)
+        };
+        self.handle.emit_background_system_notice(&body).await;
         seen.insert(key);
     }
 }
@@ -86,6 +103,42 @@ fn fusion_completion_notice(result: &FusionResult) -> String {
             "Fusion run finished — it needs your judgment; see the summary appended to this conversation.".to_string()
         }
     }
+}
+
+/// [Round-5 finding 13] Notice text for the append-SUCCEEDED-ELSEWHERE path:
+/// the durable `<fusion-result>` row exists, but it is in the session the run
+/// was started in, not the one this notice is about to be rendered into.
+/// Saying "appended to this conversation" there points the user at a
+/// conversation that contains no fusion result anywhere and gives them no
+/// pointer to where the (already paid-for) result actually went.
+///
+/// [Rework r1] The id is truncated to 8 characters OF ITS UUID BODY, not of
+/// the string as it arrives. Every production caller feeds this
+/// `SessionId::to_string()` (`fusion_command.rs`'s own handler and
+/// `tasks/src/registry.rs`'s `LocalFusionTaskState.conversation_id`, both from
+/// `current_session_id().await.to_string()`), and `protocol`'s
+/// `id_newtype!(SessionId, "sess")` renders that as `"sess:<uuid>"` — so
+/// truncating the raw string spent 5 of the 8 characters on the constant
+/// prefix and printed `"sess:111"`, three hex digits of the real id. The
+/// pointer has to be matchable against `/resume`'s listing, which keys rows by
+/// the JSONL file stem, i.e. the BARE uuid (`session/src/jsonl/loader.rs`:
+/// `let sid = stem.as_str()`), so the prefix is stripped rather than shown.
+/// Eight uuid characters is short enough not to dominate a one-line notice.
+fn fusion_completion_notice_other_session(result: &FusionResult, conversation_id: &str) -> String {
+    // `parse_prefixed` accepts both the prefixed display form and a bare uuid,
+    // so this stays correct if a caller ever hands over an unprefixed id; a
+    // string that is neither falls back to being truncated as-is.
+    let body = protocol::SessionId::parse_prefixed(conversation_id)
+        .map_or_else(|| conversation_id.to_string(), |id| id.as_uuid().to_string());
+    let short: String = body.chars().take(8).collect();
+    let what = match result.status {
+        FusionStatus::Completed => "its result",
+        FusionStatus::NeedsParent => "its summary (it needs your judgment)",
+    };
+    format!(
+        "Fusion run finished — {what} was saved to the conversation it was started in \
+(session {short}…), not this one. Resume that session, or check the task list, to see it."
+    )
 }
 
 /// [Finding 13] Notice text for the append-failure path: unlike
@@ -402,6 +455,195 @@ mod tests {
         assert_eq!(notices.len(), 1);
         assert!(
             notices[0].contains("needs your judgment"),
+            "got: {notices:?}"
+        );
+    }
+
+    /// [Round-5 finding 13] The PRODUCTION `append_meta_user_message_to_session`
+    /// (`orchestrator/src/handle_impl.rs`) returns `Ok(())` for a target
+    /// session that is no longer current as long as the durable write landed
+    /// — it only touches live history inside its `current == target` branch,
+    /// and only errors when nothing was persisted. `MockOrchestratorHandle`
+    /// uses the platform-api TRAIT DEFAULT instead, which fails closed on a
+    /// session mismatch, so every existing test drives the opposite of
+    /// production on exactly the path this finding is about. This double
+    /// delegates everything to the mock except that one method, whose
+    /// production semantics it reproduces.
+    struct AppendsToAnySessionHandle {
+        inner: Arc<orchestrator::test_support::MockOrchestratorHandle>,
+        appended_to: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl OrchestratorHandle for AppendsToAnySessionHandle {
+        async fn append_meta_user_message_to_session(
+            &self,
+            session_id: &str,
+            _text: &str,
+        ) -> Result<(), platform_api::HandleError> {
+            self.appended_to.lock().unwrap().push(session_id.to_string());
+            Ok(())
+        }
+        async fn emit_background_system_notice(&self, body: &str) {
+            self.inner.emit_background_system_notice(body).await;
+        }
+        async fn current_session_id(&self) -> protocol::SessionId {
+            self.inner.current_session_id().await
+        }
+        async fn clear_session(&self) -> Result<(), platform_api::HandleError> {
+            self.inner.clear_session().await
+        }
+        async fn force_compact(
+            &self,
+        ) -> Result<platform_api::CompactionSummary, platform_api::HandleError> {
+            self.inner.force_compact().await
+        }
+        async fn snapshot_cost(&self) -> platform_api::CostSnapshot {
+            self.inner.snapshot_cost().await
+        }
+        async fn switch_model(
+            &self,
+            model: &str,
+            profile: Option<&str>,
+        ) -> Result<(), platform_api::HandleError> {
+            self.inner.switch_model(model, profile).await
+        }
+        async fn request_exit(&self) {
+            self.inner.request_exit().await;
+        }
+        async fn current_should_exit(&self) -> bool {
+            self.inner.current_should_exit().await
+        }
+        async fn open_memory_editor(
+            &self,
+        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
+            self.inner.open_memory_editor().await
+        }
+        async fn list_mcp_servers(&self) -> Vec<platform_api::McpServerInfo> {
+            self.inner.list_mcp_servers().await
+        }
+        async fn list_skills(&self) -> Vec<platform_api::SkillInfo> {
+            self.inner.list_skills().await
+        }
+        async fn list_hooks(&self) -> Vec<platform_api::HookInfo> {
+            self.inner.list_hooks().await
+        }
+        async fn list_agents(&self) -> Vec<platform_api::AgentInfo> {
+            self.inner.list_agents().await
+        }
+        async fn run_doctor_checks(&self) -> platform_api::DoctorReport {
+            self.inner.run_doctor_checks().await
+        }
+        async fn get_status_snapshot(&self) -> platform_api::StatusSnapshot {
+            self.inner.get_status_snapshot().await
+        }
+        async fn edit_config_file(
+            &self,
+        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
+            self.inner.edit_config_file().await
+        }
+        async fn edit_permissions_file(
+            &self,
+        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
+            self.inner.edit_permissions_file().await
+        }
+        async fn list_available_models(&self) -> Vec<String> {
+            self.inner.list_available_models().await
+        }
+    }
+
+    /// [Round-5 finding 13] `/fusion` started in session A, `/clear` before it
+    /// finishes, result lands in A's durable transcript while the user is
+    /// looking at session B. The append SUCCEEDS, so the
+    /// `could not be recorded` copy never fires; the success copy must not
+    /// claim the result is in "this conversation", which contains no fusion
+    /// result at all.
+    #[tokio::test]
+    async fn publish_does_not_claim_this_conversation_when_the_append_landed_elsewhere() {
+        let mock = Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
+        let current = mock.current_session_id().await.to_string();
+        // [Rework r1] Production NEVER hands this sink a bare uuid: both
+        // producers feed it `current_session_id().await.to_string()`
+        // (fusion_command.rs:256, tasks/src/registry.rs:2342), and
+        // `SessionId`'s `Display` (protocol/src/ids.rs, `id_newtype!(SessionId,
+        // "sess")`) renders `"sess:<uuid>"`. A bare-uuid fixture here silently
+        // hid a truncation that prints `"sess:111"` in production.
+        let started_in = "sess:11112222-3333-4444-5555-666677778888";
+        assert_eq!(
+            started_in,
+            protocol::SessionId::parse_prefixed(started_in)
+                .expect("fixture must parse as a real SessionId")
+                .to_string(),
+            "sanity: the fixture must be exactly what `SessionId::to_string()` produces"
+        );
+        assert_ne!(
+            current, started_in,
+            "sanity: the run's session must differ from the connected one"
+        );
+        let handle = Arc::new(AppendsToAnySessionHandle {
+            inner: mock.clone(),
+            appended_to: std::sync::Mutex::new(Vec::new()),
+        });
+        let sink = DesktopFusionCompletionSink::new(handle.clone());
+        let mut result = dummy_result("fu_cleared");
+        result.status = FusionStatus::Completed;
+
+        sink.publish(started_in, &result).await;
+
+        assert_eq!(
+            handle.appended_to.lock().unwrap().as_slice(),
+            [started_in.to_string()],
+            "sanity: the durable append targeted the ORIGINATING session and succeeded"
+        );
+        let notices = mock.background_notices();
+        assert_eq!(notices.len(), 1, "exactly one notice: {notices:?}");
+        assert!(
+            !notices[0].contains("appended to this conversation"),
+            "the result is NOT in this conversation — that copy is false here: {notices:?}"
+        );
+        assert!(
+            notices[0].contains("saved to the conversation it was started in"),
+            "the notice must say where the result actually went: {notices:?}"
+        );
+        assert!(
+            notices[0].contains("11112222"),
+            "the notice must name the originating session so the user can find it: {notices:?}"
+        );
+        // The pointer must be usable against `/resume`'s listing, which keys
+        // rows by the JSONL file stem — the BARE uuid (`session/src/jsonl/
+        // loader.rs`: `let sid = stem.as_str()`). Printing the `sess:` prefix
+        // inside an 8-character budget spends 5 of them on a constant and
+        // leaves 3 hex digits of the real id.
+        assert!(
+            !notices[0].contains("sess:"),
+            "the id prefix must be stripped, not truncated into: {notices:?}"
+        );
+        assert!(
+            !notices[0].contains("could not be recorded"),
+            "the append SUCCEEDED — the unrecorded copy would be wrong too: {notices:?}"
+        );
+    }
+
+    /// The other half of the same branch: when the run's session IS the
+    /// connected one, the original F006 copy must be unchanged.
+    #[tokio::test]
+    async fn publish_still_says_this_conversation_when_the_append_landed_here() {
+        let mock = Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
+        let current = mock.current_session_id().await.to_string();
+        let handle = Arc::new(AppendsToAnySessionHandle {
+            inner: mock.clone(),
+            appended_to: std::sync::Mutex::new(Vec::new()),
+        });
+        let sink = DesktopFusionCompletionSink::new(handle.clone());
+        let mut result = dummy_result("fu_same_session");
+        result.status = FusionStatus::Completed;
+
+        sink.publish(&current, &result).await;
+
+        let notices = mock.background_notices();
+        assert_eq!(notices.len(), 1, "exactly one notice: {notices:?}");
+        assert!(
+            notices[0].contains("see the result appended to this conversation"),
             "got: {notices:?}"
         );
     }

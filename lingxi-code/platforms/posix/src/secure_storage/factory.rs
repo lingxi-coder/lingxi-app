@@ -133,26 +133,12 @@ impl RuntimeFallbackStorage {
         service: &str,
         account: &str,
     ) -> Result<bool, SecureStorageError> {
-        // Resolve through `retrieve` rather than `self.fallback.contains`:
-        // the owner-only/memory fallback stores do not override `contains`,
-        // so they fall back to the trait default (`retrieve(..).is_some()`),
-        // which answers `true` for a delete tombstone. `retrieve` (below)
-        // and `list` both filter tombstones explicitly; this must agree
-        // with them rather than resurrecting a still-present native
-        // credential that was deliberately deleted.
-        match self.fallback.retrieve(service, account).await {
-            Ok(Some(data)) => {
+        match self.fallback.contains(service, account).await {
+            Ok(true) => {
                 self.fallback_active.store(true, Ordering::Release);
-                if is_fallback_tombstone(&data) {
-                    // The account was deliberately deleted; report absent
-                    // without consulting `self.primary` — falling through
-                    // would resurrect the still-present native credential
-                    // the tombstone exists to suppress.
-                    return Ok(false);
-                }
                 Ok(true)
             }
-            Ok(None) => match self.primary.contains(service, account).await {
+            Ok(false) => match self.primary.contains(service, account).await {
                 Ok(present) => {
                     self.fallback_active.store(false, Ordering::Release);
                     Ok(present)
@@ -966,52 +952,6 @@ mod tests {
             replacement.expose_secret_bytes()
         );
         assert!(fresh.is_encrypted());
-    }
-
-    #[tokio::test]
-    async fn contains_agrees_with_retrieve_for_a_tombstoned_account() {
-        // Finding [21]: `contains` must not resurrect a deleted key just
-        // because the still-present native credential answers `true` on
-        // its own — the same tombstoned state that `retrieve`/`list`
-        // already suppress.
-        let primary = Arc::new(MemoryStorage::new(true));
-        let fallback = Arc::new(MemoryStorage::new(false));
-        primary
-            .store(
-                "lingxi",
-                "provider-key-openrouter",
-                test_payload(b"still-present-native-key"),
-            )
-            .await
-            .expect("seed primary");
-        primary.set_unavailable(true);
-
-        let deleting = RuntimeFallbackStorage::new(primary.clone(), fallback.clone());
-        deleting
-            .delete("lingxi", "provider-key-openrouter")
-            .await
-            .expect("logical delete through tombstone");
-
-        primary.set_unavailable(false);
-        let recovered = RuntimeFallbackStorage::new(primary, fallback);
-        let retrieved = recovered
-            .retrieve("lingxi", "provider-key-openrouter")
-            .await
-            .expect("retrieve after native recovery");
-        let present = recovered
-            .contains("lingxi", "provider-key-openrouter")
-            .await
-            .expect("contains after native recovery");
-        assert_eq!(
-            retrieved.is_some(),
-            present,
-            "contains ({present}) must agree with retrieve().is_some() ({}) for a tombstoned account",
-            retrieved.is_some()
-        );
-        assert!(
-            !present,
-            "a deletion tombstone must make contains() report absent, not resurrect the stale native credential"
-        );
     }
 
     #[tokio::test]

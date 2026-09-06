@@ -8,18 +8,18 @@
 //! side-effects), 21 `AllowByDefault` (read-only or agent-local) = 44 tools,
 //! plus one synthetic `<unknown>` fallback.
 //!
-//! LINGXI DIVERGENCE: 35 further rows with no oracle counterpart, reported by
-//! [`is_divergence_tool`]. 34 are the `LocalApp*` first-party local-app host
+//! LINGXI DIVERGENCE: 39 further rows with no oracle counterpart, reported by
+//! [`is_divergence_tool`]. 38 are the `LocalApp*` first-party local-app host
 //! operations (`engine_mobile::local_apps_tools`) — claude-code has no
-//! host-owned local-app surface. The 35th is `Workflow`: claude-code gates it
+//! host-owned local-app surface. The 39th is `Workflow`: claude-code gates it
 //! behind the `WORKFLOW_SCRIPTS` feature and it is absent from external builds
 //! (see `mode_policy`'s module doc), so the M5-05 table has no row for it and
 //! its default here is a LingXi decision, NOT oracle parity.
 //!
-//! The divergence rows are split by REVERSIBILITY: 14 `AllowByDefault`
+//! The divergence rows are split by REVERSIBILITY: 15 `AllowByDefault`
 //! (read-only, plus the network-disabled build, the restartable local preview
 //! runtime, the shell-scaffolding commit, template-selection staging, and the
-//! `Workflow` hand-off), 21 `DenyByDefault` (user data, UI actuation, view
+//! `Workflow` hand-off), 24 `DenyByDefault` (user data, UI actuation, view
 //! capture, checkpoint restore, network, template validation, and the MCP
 //! proposal / dependency-review lifecycle).
 //!
@@ -44,7 +44,7 @@ static TOOL_DEFAULTS: OnceLock<HashMap<&'static str, PromptDefault>> = OnceLock:
 
 fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     use PromptDefault::{AllowByDefault, DenyByDefault};
-    let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(77);
+    let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(83);
 
     // Allow-by-default tools ([Y/n]) — 21 entries. (It said 20 while there
     // were 21, from before `ListAgents` was added; the count is asserted in
@@ -144,6 +144,10 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("LocalAppResolveTemplateSelection", AllowByDefault);
     m.insert("LocalAppLogs", AllowByDefault);
     m.insert("LocalAppCheckpointList", AllowByDefault);
+    // Contract reads/staging are Host-bound to the current app workspace and
+    // are part of the authoring loop; the tool still fails closed when the
+    // session has no bound app.
+    m.insert("LocalAppContract", AllowByDefault);
     // NOT auto-allowed: `read_app_events` DRAINS the unread queue and advances
     // a persisted cursor by default, so a speculative call permanently
     // consumes what the user's running app posted. `peek=true` is the
@@ -207,6 +211,11 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     // DenyByDefault: the DOM snapshot nulls out `password`/`hidden` input
     // values and a pixel capture cannot redact anything it renders.
     m.insert("LocalAppCaptureUi", DenyByDefault);
+    // QA evidence can contain user data and screenshots. Beginning or
+    // finalizing a run mutates Host QA state; reading evidence exposes it.
+    m.insert("LocalAppQaBegin", DenyByDefault);
+    m.insert("LocalAppQaReadEvidence", DenyByDefault);
+    m.insert("LocalAppQaFinalize", DenyByDefault);
     m.insert("LocalAppManifest", DenyByDefault);
     m.insert("LocalAppMutateData", DenyByDefault);
     m.insert("LocalAppActOnUi", DenyByDefault);
@@ -217,9 +226,9 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("LocalAppBackgroundCancel", DenyByDefault);
     m.insert("LocalAppBackgroundRetry", DenyByDefault);
 
-    // 44 oracle-parity tools + 35 LingXi divergence rows (34 local-app
+    // 44 oracle-parity tools + 39 LingXi divergence rows (38 local-app
     // builtins + `Workflow`).
-    debug_assert_eq!(m.len(), 79, "tool defaults table must list all 79 tools");
+    debug_assert_eq!(m.len(), 83, "tool defaults table must list all 83 tools");
     m
 }
 
@@ -256,12 +265,12 @@ pub fn tool_default_row(name: &str) -> Option<PromptDefault> {
 /// could answer "does this ROW name a tool that still exists", because
 /// `TOOL_DEFAULTS` is a private `static` and only single-key lookups were
 /// exported. THREE guards do constrain this table's composition, not one:
-/// `init_defaults`'s own `debug_assert_eq!(m.len(), 79, "tool defaults table
-/// must list all 79 tools")`, the test
+/// `init_defaults`'s own `debug_assert_eq!(m.len(), 83, "tool defaults table
+/// must list all 83 tools")`, the test
 /// `table_splits_into_the_parity_set_and_the_mobile_divergence`'s
-/// `oracle == 44` / `divergence == 35`, and the test
+/// `oracle == 44` / `divergence == 39`, and the test
 /// `the_counts_in_this_module_doc_are_the_counts_in_the_table`'s four
-/// hand-bumped bucket counts (23/21/14/21). NONE of those seven numbers moves
+/// hand-bumped bucket counts (23/21/15/24). NONE of those seven numbers moves
 /// for the orphan this function exists for, because every one of them counts
 /// `TOOL_DEFAULTS` alone: delete a tool from a CONSUMER crate's table, leave
 /// its row here, and all seven still hold. They also fail by naming a NUMBER
@@ -439,7 +448,7 @@ mod tests {
         let oracle = m.keys().filter(|k| !is_divergence_tool(k)).count();
         let divergence = m.keys().filter(|k| is_divergence_tool(k)).count();
         assert_eq!(oracle, 44, "oracle-parity tool count changed");
-        assert_eq!(divergence, 35, "divergence row count changed");
+        assert_eq!(divergence, 39, "divergence row count changed");
         assert_eq!(m.len(), oracle + divergence);
         // `Workflow` must be booked as a divergence, never as oracle parity:
         // the M5-05 table has no row for it.
@@ -469,12 +478,12 @@ mod tests {
         );
         assert_eq!(
             count(true, PromptDefault::AllowByDefault),
-            14,
+            15,
             "divergence allow"
         );
         assert_eq!(
             count(true, PromptDefault::DenyByDefault),
-            21,
+            24,
             "divergence deny"
         );
     }

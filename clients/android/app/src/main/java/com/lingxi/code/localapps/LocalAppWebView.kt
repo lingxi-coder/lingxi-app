@@ -35,6 +35,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
 import java.lang.ref.WeakReference
+import java.net.URI
 
 data class LocalAppBridgeMessage(
     val appId: String,
@@ -76,6 +77,173 @@ sealed interface LocalAppUiAutomationAction {
 
     /// Keyboard event. There was no key action at all before this.
     data class Key(val key: String, val phase: String) : LocalAppUiAutomationAction
+
+    /** Host-owned QA identity; the nested action retains the original value bytes. */
+    data class Qa(
+        val expectedRuntimeUrl: String,
+        val action: LocalAppUiAutomationAction,
+    ) : LocalAppUiAutomationAction
+}
+
+internal data class LocalAppQaEnvelope(
+    val expectedRuntimeUrl: String,
+    val actionValue: String?,
+)
+
+internal data class LocalAppQaDocument(
+    val loadedRuntimeUrl: String,
+    val navigationGeneration: Long,
+)
+
+/** Pure lifecycle state so same-port A → B races can be regression-tested on the JVM. */
+internal class LocalAppQaDocumentState(initialRuntimeUrl: String) {
+    private var expectedRuntimeUrl = initialRuntimeUrl.asUriOrNull()
+    private var pendingStartUrl: URI? = null
+    private var activeStartGeneration: Long? = null
+    private var activeStartUrl: URI? = null
+    private var committedUrl: URI? = null
+    private var ready = false
+    var isDetached = false
+        private set
+
+    var navigationGeneration: Long = 0
+        private set
+
+    fun beginNavigation(url: String): Long {
+        navigationGeneration += 1
+        val requested = url.asUriOrNull()
+        if (requested?.let(::isLocalAppQaRuntimeUrl) == true || expectedRuntimeUrl == null) {
+            expectedRuntimeUrl = requested
+        }
+        pendingStartUrl = requested
+        activeStartGeneration = null
+        activeStartUrl = null
+        committedUrl = null
+        ready = false
+        return navigationGeneration
+    }
+
+    fun onPageStarted(url: String) {
+        if (isDetached) return
+        val started = url.asUriOrNull()
+        if (started != pendingStartUrl) navigationGeneration += 1
+        pendingStartUrl = null
+        activeStartGeneration = navigationGeneration
+        activeStartUrl = started
+        committedUrl = null
+        ready = false
+    }
+
+    fun onPageFinished(url: String) {
+        if (isDetached || activeStartGeneration != navigationGeneration) return
+        val committed = url.asUriOrNull() ?: return
+        // Ignore an old runtime's late finish without consuming the current
+        // generation; the current document may still finish afterward.
+        if (!sameLocalAppRuntimeIdentity(expectedRuntimeUrl, committed) || committed != activeStartUrl) return
+        committedUrl = committed
+        activeStartGeneration = null
+        activeStartUrl = null
+        ready = true
+    }
+
+    fun document(expected: URI, minimumGeneration: Long = 0): LocalAppQaDocument? {
+        val committed = committedUrl
+        if (isDetached || !ready || navigationGeneration < minimumGeneration ||
+            !sameLocalAppRuntimeIdentity(expected, committed)) return null
+        return LocalAppQaDocument(committed.toString(), navigationGeneration)
+    }
+
+    fun detach() {
+        isDetached = true
+        pendingStartUrl = null
+        activeStartGeneration = null
+        activeStartUrl = null
+        committedUrl = null
+        ready = false
+    }
+}
+
+internal fun isLocalAppQaRequestId(requestId: String): Boolean = requestId.startsWith("qa-ui-")
+
+/** Decode only the Host-reserved wrapper; ordinary action values remain opaque. */
+internal fun parseLocalAppQaEnvelope(value: String?, requestId: String): LocalAppQaEnvelope? {
+    // The request id is minted by the Host and cannot be supplied by page
+    // content. Value shape alone would hijack literal JSON text entry.
+    if (!isLocalAppQaRequestId(requestId)) return null
+    val root = runCatching { JSONObject(value.orEmpty()) }.getOrNull() ?: return null
+    val qa = root.optJSONObject("lingxi_qa") ?: return null
+    val version = qa.opt("version")
+    if (version !is Number || version.toDouble() != 1.0) return null
+    val expected = qa.optString("expected_runtime_url", "")
+    val parsed = expected.asUriOrNull() ?: return null
+    if (!isLocalAppQaRuntimeUrl(parsed) || root.keys().asSequence().any { it != "lingxi_qa" } ||
+        qa.keys().asSequence().any { it !in setOf("version", "expected_runtime_url", "action_value") }) {
+        return null
+    }
+    val actionValue = when {
+        !qa.has("action_value") || qa.isNull("action_value") -> null
+        qa.opt("action_value") is String -> qa.getString("action_value")
+        else -> return null
+    }
+    return LocalAppQaEnvelope(expected, actionValue)
+}
+
+private fun String.asUriOrNull(): URI? = runCatching { URI(this) }.getOrNull()
+
+private fun URI.normalizedLoopbackHost(): String? =
+    host?.lowercase()?.removePrefix("[")?.removeSuffix("]")
+        ?.takeIf { it in setOf("127.0.0.1", "localhost", "::1") }
+
+private fun URI.runtimeMarkers(): List<String> =
+    rawQuery.orEmpty().split('&').mapNotNull { item ->
+        item.split('=', limit = 2).takeIf { it.size == 2 && it[0] == "lingxi_runtime" }?.get(1)
+    }
+
+internal fun isLocalAppQaRuntimeUrl(url: URI): Boolean {
+    val markers = url.runtimeMarkers()
+    return url.scheme.equals("http", ignoreCase = true) &&
+        url.normalizedLoopbackHost() != null &&
+        url.userInfo == null && url.fragment == null && url.rawPath == "/" &&
+        url.port in 1..65_535 && markers.size == 1 &&
+        markers[0].isNotEmpty() && markers[0].all(Char::isDigit) &&
+        url.rawQuery.orEmpty().split('&').size == 1
+}
+
+internal fun sameLocalAppRuntimeIdentity(expected: URI?, committed: URI?): Boolean {
+    if (expected == null || committed == null || !isLocalAppQaRuntimeUrl(expected)) return false
+    val expectedMarker = expected.runtimeMarkers().single()
+    val committedMarkers = committed.runtimeMarkers()
+    return committed.scheme.equals(expected.scheme, ignoreCase = true) &&
+        committed.normalizedLoopbackHost() == expected.normalizedLoopbackHost() &&
+        committed.port == expected.port && committed.userInfo == null &&
+        committedMarkers.size == 1 && committedMarkers[0] == expectedMarker
+}
+
+internal fun buildLocalAppQaExecutionResult(
+    originalResultJson: String?,
+    requested: URI,
+    document: LocalAppQaDocument,
+    platform: String,
+    formFactor: String,
+    width: Int,
+    height: Int,
+    devicePixelRatio: Float,
+): String {
+    val metadata = jsonObjectString(
+        "version" to 1,
+        "requested_runtime_url" to requested.toString(),
+        "loaded_runtime_url" to document.loadedRuntimeUrl,
+        "platform" to platform,
+        "form_factor" to formFactor,
+        "navigation_generation" to document.navigationGeneration,
+        "width" to width,
+        "height" to height,
+        "device_pixel_ratio" to devicePixelRatio,
+    )
+    return jsonObjectString(
+        "lingxi_qa" to RawJson(metadata),
+        "result" to (originalResultJson?.let(::RawJson) ?: JSONObject.NULL),
+    )
 }
 
 data class LocalAppUiExecutionResult(
@@ -106,11 +274,87 @@ class LocalAppWebViewController internal constructor(
     private val guardedWebViewClient: WebViewClient,
     private val initialUrl: String,
 ) {
+    private val platform = "android"
+    private val formFactor = androidFormFactor(webView.resources.configuration)
     private var suspendedUrl: String? = null
     private var deletionSuspended = false
+    private val qaDocumentState = LocalAppQaDocumentState(initialUrl)
+
+    internal fun beginNavigation(url: String) {
+        qaDocumentState.beginNavigation(url)
+    }
+
+    internal fun onPageStarted(url: String) {
+        qaDocumentState.onPageStarted(url)
+    }
+
+    internal fun onPageFinished(url: String) {
+        qaDocumentState.onPageFinished(url)
+    }
+
+    private fun awaitQaDocument(
+        expected: URI,
+        minimumGeneration: Long,
+        attempts: Int = 0,
+        onReady: (LocalAppQaDocument?) -> Unit,
+    ) {
+        qaDocumentState.document(expected, minimumGeneration)?.let { document ->
+            onReady(document)
+            return
+        }
+        if (qaDocumentState.isDetached || attempts >= 100) {
+            onReady(null)
+            return
+        }
+        webView.postDelayed({
+            awaitQaDocument(expected, minimumGeneration, attempts + 1, onReady)
+        }, 50L)
+    }
+
     fun execute(
         action: LocalAppUiAutomationAction,
         onResult: (LocalAppUiExecutionResult) -> Unit = {},
+    ) {
+        val qa = action as? LocalAppUiAutomationAction.Qa
+        if (qa != null) {
+            val expected = qa.expectedRuntimeUrl.asUriOrNull()
+            if (expected == null || !isLocalAppQaRuntimeUrl(expected)) {
+                onResult(LocalAppUiExecutionResult(null, "Invalid Local App QA runtime URL"))
+                return
+            }
+            val startedGeneration = qaDocumentState.navigationGeneration
+            awaitQaDocument(expected, startedGeneration) { before ->
+                if (before == null) {
+                    onResult(LocalAppUiExecutionResult(null, "Local App QA document identity did not become ready"))
+                    return@awaitQaDocument
+                }
+                execute(qa.action) { result ->
+                    val transitions = qa.action is LocalAppUiAutomationAction.Navigate ||
+                        qa.action is LocalAppUiAutomationAction.Back ||
+                        qa.action is LocalAppUiAutomationAction.Reload
+                    val minimumGeneration = if (transitions) before.navigationGeneration + 1 else before.navigationGeneration
+                    // Give synchronous page navigation (for example a click
+                    // handler) one UI turn to enter onPageStarted before the
+                    // post-action identity validation.
+                    webView.postDelayed({
+                        awaitQaDocument(expected, minimumGeneration) { after ->
+                            if (after == null) {
+                                onResult(LocalAppUiExecutionResult(null, "Local App QA document identity changed during the action"))
+                            } else {
+                                onResult(attestQaResult(result, expected, after))
+                            }
+                        }
+                    }, 50L)
+                }
+            }
+            return
+        }
+        executeOrdinary(action, onResult)
+    }
+
+    private fun executeOrdinary(
+        action: LocalAppUiAutomationAction,
+        onResult: (LocalAppUiExecutionResult) -> Unit,
     ) {
         when (action) {
             LocalAppUiAutomationAction.Inspect,
@@ -123,13 +367,9 @@ class LocalAppWebViewController internal constructor(
             is LocalAppUiAutomationAction.Key -> executeStructuredAction(action, onResult)
             is LocalAppUiAutomationAction.Navigate -> {
                 val current = Uri.parse(webView.url.orEmpty())
-                val requested = Uri.parse(action.path)
-                val target = if (requested.isAbsolute) {
-                    requested
-                } else {
-                    current.buildUpon().encodedPath(action.path).clearQuery().build()
-                }
+                val target = Uri.parse(resolveLocalAppNavigation(webView.url.orEmpty(), action.path))
                 if (target.sameTrustedOrigin(current)) {
+                    beginNavigation(target.toString())
                     webView.loadUrl(target.toString())
                     onResult(
                         LocalAppUiExecutionResult(
@@ -146,6 +386,7 @@ class LocalAppWebViewController internal constructor(
                 }
             }
             LocalAppUiAutomationAction.Back -> if (webView.canGoBack()) {
+                beginNavigation(webView.url ?: initialUrl)
                 webView.goBack()
                 onResult(
                     LocalAppUiExecutionResult(
@@ -157,6 +398,7 @@ class LocalAppWebViewController internal constructor(
                 onResult(LocalAppUiExecutionResult(resultJson = null, error = "WebView cannot navigate back"))
             }
             LocalAppUiAutomationAction.Reload -> {
+                beginNavigation(webView.url ?: initialUrl)
                 webView.reload()
                 onResult(
                     LocalAppUiExecutionResult(
@@ -166,7 +408,28 @@ class LocalAppWebViewController internal constructor(
                 )
             }
             is LocalAppUiAutomationAction.CaptureView -> captureFrame(webView, action.value, onResult)
+            is LocalAppUiAutomationAction.Qa -> error("QA action must be unwrapped before execution")
         }
+    }
+
+    private fun attestQaResult(
+        result: LocalAppUiExecutionResult,
+        requested: URI,
+        document: LocalAppQaDocument,
+    ): LocalAppUiExecutionResult {
+        return LocalAppUiExecutionResult(
+            resultJson = buildLocalAppQaExecutionResult(
+                originalResultJson = result.resultJson,
+                requested = requested,
+                document = document,
+                platform = platform,
+                formFactor = formFactor,
+                width = webView.width,
+                height = webView.height,
+                devicePixelRatio = webView.resources.displayMetrics.density,
+            ),
+            error = result.error,
+        )
     }
 
     /**
@@ -517,6 +780,7 @@ class LocalAppWebViewController internal constructor(
     }
 
     internal fun detach() {
+        qaDocumentState.detach()
         broker.failAllInFlight()
         webView.stopLoading()
         WebViewCompat.removeWebMessageListener(webView, LINGXI_V1_MESSAGE_OBJECT)
@@ -548,6 +812,7 @@ class LocalAppWebViewController internal constructor(
         val url = suspendedUrl ?: initialUrl
         suspendedUrl = null
         webView.webViewClient = guardedWebViewClient
+        beginNavigation(url)
         webView.loadUrl(url)
     }
 
@@ -682,6 +947,7 @@ private fun Any?.asFiniteCssNumber(): Double? =
 
 internal fun buildLocalAppUiExecutionRequest(action: LocalAppUiAutomationAction): String {
     return when (action) {
+        is LocalAppUiAutomationAction.Qa -> buildLocalAppUiExecutionRequest(action.action)
         LocalAppUiAutomationAction.Inspect -> jsonObjectString("action" to "inspect")
         is LocalAppUiAutomationAction.Click -> {
             jsonObjectString(
@@ -1598,7 +1864,12 @@ fun LocalAppWebView(
                     }
 
                     override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                        controller?.onPageStarted(url)
                         if (!Uri.parse(url).sameTrustedOrigin(trustedOrigin)) view.stopLoading()
+                    }
+
+                    override fun onPageFinished(view: WebView, url: String) {
+                        controller?.onPageFinished(url)
                     }
 
                     override fun onSafeBrowsingHit(
@@ -1623,6 +1894,7 @@ fun LocalAppWebView(
                 controller = LocalAppWebViewController(this, broker, guardedClient, url).also { attached ->
                     LocalAppWebViewRegistry.register(appId, attached)
                     currentControllerHandler(attached)
+                    attached.beginNavigation(url)
                 }
                 tag = url
                 loadUrl(url)
@@ -1631,6 +1903,7 @@ fun LocalAppWebView(
         update = { view ->
             if (view.tag != url) {
                 view.tag = url
+                controller?.beginNavigation(url)
                 view.loadUrl(url)
             }
         },
@@ -1680,6 +1953,76 @@ private fun Uri?.sameTrustedOrigin(other: Uri?): Boolean =
     this != null && other != null &&
         isTrustedLoopback() && other.isTrustedLoopback() &&
         scheme == other.scheme && normalizedHost() == other.normalizedHost() && effectivePort() == other.effectivePort()
+
+/** Resolve page navigation like `new URL(value, location.href)` without
+ * carrying the current page's ordinary query parameters across routes. */
+internal fun resolveLocalAppNavigation(currentUrl: String, requested: String): String {
+    val base = runCatching { URI(currentUrl) }.getOrNull() ?: return requested
+    val destination = runCatching { URI(requested) }.getOrNull() ?: return requested
+    val baseWithoutQueryOrFragment = runCatching {
+        URI(base.toString().substringBefore('#').substringBefore('?'))
+    }.getOrNull() ?: return requested
+    // Preserve an explicit authority (including a scheme-relative URL) so the
+    // caller's same-origin gate can reject it instead of silently rebasing it.
+    val resolved = if (destination.isAbsolute || destination.rawAuthority != null) {
+        destination
+    } else if (destination.rawPath.isNullOrEmpty()) {
+        // java.net.URI resolves `?query` against the containing directory and
+        // resolves `#fragment` by inheriting the complete old query. Neither
+        // matches the Local App contract: retain the document path, but let
+        // the destination own its query/fragment so old business parameters
+        // cannot leak into the next route.
+        val query = destination.rawQuery?.let { "?$it" }.orEmpty()
+        val fragment = destination.rawFragment?.let { "#$it" }.orEmpty()
+        URI("$baseWithoutQueryOrFragment$query$fragment")
+    } else {
+        baseWithoutQueryOrFragment.resolve(destination)
+    }
+    val marker = rawRuntimeMarker(base.rawQuery)
+    val target = if (marker != null) {
+        replaceRuntimeMarker(resolved.toString(), resolved.rawQuery, marker)
+    } else {
+        resolved.toString()
+    }
+    return target
+}
+
+private fun rawRuntimeMarker(rawQuery: String?): String? =
+    rawQuery.orEmpty().split('&').filter { item ->
+        item.substringBefore('=') == "lingxi_runtime" && item.contains('=')
+    }.singleOrNull()?.substringAfter('=')
+
+private fun replaceRuntimeMarker(raw: String, rawQuery: String?, marker: String): String {
+    val fragmentStart = raw.indexOf('#')
+    val beforeFragment = if (fragmentStart >= 0) raw.substring(0, fragmentStart) else raw
+    val fragment = if (fragmentStart >= 0) raw.substring(fragmentStart) else ""
+    val withoutQuery = beforeFragment.substringBefore('?')
+    val ordinaryItems = rawQuery.orEmpty().split('&').filter { item ->
+        item.isNotEmpty() && !isRuntimeMarkerKey(item.substringBefore('='))
+    }
+    val query = (ordinaryItems + "lingxi_runtime=$marker").joinToString("&")
+    return "$withoutQuery?$query$fragment"
+}
+
+/** Match URLSearchParams' percent-decoded key semantics for this ASCII-only
+ * reserved name without pulling Android URI decoding into pure JVM tests. */
+private fun isRuntimeMarkerKey(rawKey: String): Boolean {
+    val expected = "lingxi_runtime"
+    var rawIndex = 0
+    var expectedIndex = 0
+    while (rawIndex < rawKey.length && expectedIndex < expected.length) {
+        val actual = if (rawKey[rawIndex] == '%' && rawIndex + 2 < rawKey.length) {
+            val high = rawKey[rawIndex + 1].digitToIntOrNull(16) ?: return false
+            val low = rawKey[rawIndex + 2].digitToIntOrNull(16) ?: return false
+            rawIndex += 3
+            (high * 16 + low).toChar()
+        } else {
+            rawKey[rawIndex++]
+        }
+        if (actual != expected[expectedIndex++]) return false
+    }
+    return rawIndex == rawKey.length && expectedIndex == expected.length
+}
 
 private fun Uri.isTrustedLoopback(): Boolean =
     scheme == "http" && normalizedHost() in setOf("127.0.0.1", "localhost", "::1")

@@ -949,6 +949,9 @@
     <string name="local_apps_verification_summary_needs_revalidation">승인된 MCP 카탈로그가 활성 빌드와 더 이상 일치하지 않아 재검증이 필요합니다.</string>
     <string name="local_apps_verification_summary_needs_setup">승인된 로컬 앱 MCP 카탈로그가 아직 활성화되지 않았습니다.</string>
     <string name="local_apps_verification_summary_passed">MCP 스키마·Flow·호출·격리 검증을 통과했습니다.</string>
+    <string name="local_apps_verification_summary_ui_verification_corrupt">저장된 UI 검증 증거가 손상되었습니다.</string>
+    <string name="local_apps_verification_summary_ui_verification_passed">호스트 UI 및 데이터 검증 증거를 통과했습니다.</string>
+    <string name="local_apps_verification_summary_ui_verification_required">현재 앱의 UI 검증이 아직 완료되지 않았습니다.</string>
     <string name="local_apps_verification_summary_verification_unavailable">이 호스트에서는 UI 검증 증거를 확인할 수 없습니다.</string>
     <string name="local_apps_verification_ui">UI 검증</string>
     <string name="local_apps_view_all">모든 앱 보기</string>

@@ -37,6 +37,68 @@ fn workflow_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../plugins/lingxi-local-app/workflows")
 }
 
+fn authoring_spec() -> serde_json::Value {
+    serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"),
+        )
+        .expect("read the Host-valid checked-in AuthoringSpec fixture"),
+    )
+    .expect("parse the Host-valid checked-in AuthoringSpec fixture")
+}
+
+fn design_subtree() -> serde_json::Value {
+    serde_json::json!({"design": authoring_spec()["design"].clone()})
+}
+
+fn workflow_schemas() -> serde_json::Value {
+    let path = workflow_dir()
+        .parent()
+        .expect("plugin root")
+        .join("schemas/workflow-agent-results.schema.json");
+    let document: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path).expect("read checked-in workflow-agent-results schema"),
+    )
+    .expect("parse checked-in workflow-agent-results schema");
+    let defs = document["$defs"]
+        .as_object()
+        .expect("workflow-agent-results schema must expose role definitions")
+        .clone();
+    let mut schemas = serde_json::Map::new();
+    for name in [
+        "template_selection",
+        "design_subtree",
+        "create_preparer",
+        "build_result",
+        "operator_result",
+        "qa_review",
+        "qa_finalize",
+        "mcp_promoter",
+    ] {
+        let mut role = defs
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| panic!("missing role schema {name}"));
+        role["$defs"] = serde_json::Value::Object(defs.clone());
+        schemas.insert(name.to_string(), role);
+    }
+    schemas.insert(
+        "mcp_proposal".into(),
+        serde_json::from_str(
+            &std::fs::read_to_string(
+                workflow_dir()
+                    .parent()
+                    .expect("plugin root")
+                    .join("schemas/mcp-proposal.schema.json"),
+            )
+            .expect("read checked-in MCP proposal schema"),
+        )
+        .expect("parse checked-in MCP proposal schema"),
+    );
+    serde_json::Value::Object(schemas)
+}
+
 #[test]
 fn every_checked_in_plugin_workflow_passes_the_runtime_validators() {
     let dir = workflow_dir();
@@ -174,7 +236,9 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
     let args = serde_json::json!({
         "operation": "create",
         "app_id": "aaaa1111",
-        "spec": "A small form app",
+        "name": "Form App",
+        "brief": "A small form app",
+        "authoring_spec": authoring_spec(),
         "quality_level": "balanced",
         // r3-workflow-runtime-02: the Host launch boundary always injects
         // `workflow_run_id` at the TOP level of args (workflow_support.rs
@@ -190,24 +254,13 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
             "app_id": "aaaa1111",
             "workflow_run_id": "wf_hermetic1",
             "selector_capability": "sel_00000000000000000000000000000000",
+            "schemas": workflow_schemas(),
             "invocation_capability": "mcpv_00000000000000000000000000000000",
             "template_catalog": {"catalog_digest": "digest", "available_template_ids": ["react-dom-r2"]},
-            "staging": {"isolated": true, "final_publish": false}
+            "staging": {"isolated": true, "final_publish": false},
+            "authoring_spec": authoring_spec()
         }
     });
-    let report = serde_json::json!({
-        "ok": true,
-        "findings": [],
-        "checked_matrix": ["smoke"],
-        "browser_available": true,
-        "webview_checked": true,
-        "degraded_verification": false,
-        "data_roundtrip": {"status": "passed"},
-        "render_check": {"status": "passed"},
-        "motion_check": {"status": "passed"},
-        "summary": "hermetic pass"
-    });
-    let stage = serde_json::json!({"ok": true, "dependency_input_sha256": "a".repeat(64), "summary": "staged"});
     let build = serde_json::json!({"ok": true, "preview_url": "http://127.0.0.1:20000", "summary": "built"});
     // r2-tests-honesty-002: capture every (label, prompt) pair the workflow
     // actually sends an agent, keyed by the SAME `options` substring the stub
@@ -230,13 +283,8 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
                 .map(|(prompt, options)| {
                     // r3-workflow-runtime-07: dispatch on the exact `label`
                     // field of the PARSED opts, not a substring of the whole
-                    // serialized `options` string. `native-create-approval`'s
-                    // agentType is `mcp-designer`, which itself contains the
-                    // substring "designer" -- a `options.contains("designer")`
-                    // check only stayed correct because it was ORDERED after
-                    // the `native-create-approval` check, and would have
-                    // silently misdispatched that call to the designer
-                    // response had the branches been reordered.
+                    // Dispatch on the exact label, not a substring of the
+                    // serialized options.
                     let opts: serde_json::Value =
                         serde_json::from_str(options).unwrap_or(serde_json::Value::Null);
                     let opts_label = opts
@@ -255,17 +303,19 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
                         .push((capture_label, prompt.clone()));
                     match opts_label {
                         "template-selector" => serde_json::json!({"catalog_digest":"digest","template_id":"react-dom-r2","reason":"ordinary form","rejected":[],"validated_selection_handle":"vsel_0123456789abcdef0123456789abcdef"}).to_string(),
-                        "native-create-approval" => serde_json::json!({
+                        "create-preparer" => serde_json::json!({
                             "approved": true,
+                            "ok": true,
+                            "contract_handle": "contract_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "contract_sha256": "c".repeat(64),
                             "receipt_id": "mcp-create-receipt",
                             "status": "create_approved_no_mcp"
                         })
                         .to_string(),
-                        "designer" => serde_json::json!({"runtime_family":"react_dom","acceptance_checks":[],"summary":"design"}).to_string(),
-                        "builder-stage" => stage.to_string(),
+                        "designer" => design_subtree().to_string(),
                         "builder-build" => build.to_string(),
                         _ if opts_label.starts_with("repair-") => build.to_string(),
-                        _ => report.to_string(),
+                        _ => passing_qa_reply(opts_label, "wf_hermetic1", "balanced"),
                     }
                 })
                 .collect()
@@ -289,10 +339,8 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
     let agent_calls = prompts.len();
     assert_eq!(
         agent_calls,
-        8,
-        "a hermetic create run with quality_level 'balanced' and every stub reporting success \
-         must make exactly template-selector, designer, builder-stage, native-create-approval, \
-         builder-build, operator, tester, verifier — 8 agent calls (saw: {:?})",
+        6,
+        "a hermetic balanced create run must make exactly selector, designer, preparer, builder, operator, tester — 6 agent calls (saw: {:?})",
         prompts.iter().map(|(label, _)| label).collect::<Vec<_>>()
     );
     let prompt_for = |label: &str| -> &str {
@@ -302,10 +350,11 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
             .map(|(_, prompt)| prompt.as_str())
             .unwrap_or_else(|| panic!("no agent call was dispatched under label {label:?}"))
     };
-    let stage_prompt = prompt_for("builder-stage");
+    let stage_prompt = prompt_for("create-preparer");
     assert!(
-        stage_prompt.contains("Call LocalAppStageCreate with app_id=aaaa1111"),
-        "builder-stage prompt must instruct the agent to stage the create candidate for the \
+        stage_prompt
+            .contains("call LocalAppStageCreate with contract_handle from LocalAppContract"),
+        "create-preparer prompt must instruct the agent to stage the create candidate for the \
          real app_id: {stage_prompt}"
     );
     assert!(
@@ -313,7 +362,7 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
         "builder-stage prompt must carry the Host-minted workflow_run_id from host_context, \
          not a value the script invented: {stage_prompt}"
     );
-    let approval_prompt = prompt_for("native-create-approval");
+    let approval_prompt = prompt_for("create-preparer");
     assert!(
         approval_prompt.contains("create_without_mcp=true"),
         "native-create-approval prompt must request the native (no-MCP) create path: \
@@ -330,65 +379,210 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
         "builder-build prompt must instruct the agent to declare collections through \
          LocalAppManifest before writing against them: {build_prompt}"
     );
+    assert!(
+        build_prompt.contains("LocalAppBuild with app_id=aaaa1111, workflow_run_id=wf_hermetic1"),
+        "every build call must carry the Host workflow run identity: {build_prompt}"
+    );
+    let stage_prompt = prompt_for("create-preparer");
+    assert!(
+        !stage_prompt.contains("mcp_intent="),
+        "an unasked MCP question must omit the object-only mcp_intent field: {stage_prompt}"
+    );
+}
+
+#[test]
+fn first_pass_agent_call_counts_are_exercised_for_each_quality_level() {
+    let source = build_workflow_script();
+    for (quality, expected) in [("fast", 5usize), ("balanced", 6), ("thorough", 7)] {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let calls_for_run = Arc::clone(&calls);
+        let args = build_create_args(serde_json::json!({"quality_level": quality}));
+        let outcome = workflow::run_with_progress(
+            &source,
+            move |prompts, options| {
+                prompts
+                    .iter()
+                    .zip(options.iter())
+                    .map(|(_, options)| {
+                        let label = stage_label(options);
+                        let options_value: serde_json::Value =
+                            serde_json::from_str(options).expect("workflow agent options JSON");
+                        let role_schema = options_value
+                            .get("schema")
+                            .and_then(serde_json::Value::as_object)
+                            .expect("each Local App agent call must carry a role schema");
+                        let defs = role_schema
+                            .get("$defs")
+                            .and_then(serde_json::Value::as_object)
+                            .expect("role schema must retain the complete workflow schema defs");
+                        assert!(
+                            defs.contains_key("qa_candidate") && defs.contains_key("mcp_promoter"),
+                            "agent call {label} must use the checked-in full role schema, not a permissive object witness"
+                        );
+                        calls_for_run
+                            .lock()
+                            .expect("call capture")
+                            .push(label.clone());
+                        canned_stage_reply(&label)
+                            .unwrap_or_else(|| passing_qa_reply(&label, "wf_regression", quality))
+                    })
+                    .collect()
+            },
+            |_progress| {},
+            None,
+            true,
+            Some(args.to_string()),
+            None,
+        )
+        .unwrap_or_else(|error| panic!("{quality} quality workflow should execute: {error}"));
+        assert!(
+            outcome.result.is_some(),
+            "{quality} quality must return a result"
+        );
+        let labels = calls.lock().expect("call capture");
+        assert_eq!(
+            labels.len(),
+            expected,
+            "{quality} quality must dispatch exactly {expected} successful first-pass agents: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|label| label.starts_with("repair-")),
+            "{quality} quality fixture must not enter repair: {labels:?}"
+        );
+    }
+}
+
+#[test]
+fn actual_role_schemas_drive_a_host_shaped_successful_create_chain() {
+    let source = build_workflow_script();
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let calls_for_run = Arc::clone(&calls);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |prompts, options| {
+            prompts
+                .iter()
+                .zip(options.iter())
+                .map(|(_, options)| {
+                    let label = stage_label(options);
+                    let options_value: serde_json::Value =
+                        serde_json::from_str(options).expect("workflow agent options JSON");
+                    let schema = options_value.get("schema").expect("agent schema");
+                    assert!(
+                        schema["$defs"]["qa_candidate"].is_object()
+                            && schema["$defs"]["mcp_promoter"].is_object(),
+                        "{label} must receive the checked-in complete role schema"
+                    );
+                    calls_for_run.lock().expect("call log").push(label.clone());
+                    canned_stage_reply(&label).unwrap_or_else(|| {
+                        host_shaped_passing_qa_reply(&label, "wf_regression", "balanced")
+                    })
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    )
+    .expect("actual-schema create chain should execute");
+    let result = outcome.result.expect("workflow result");
+    assert!(result.contains("\"ok\":true"), "{result}");
+    assert!(
+        result.contains("qa_0123456789abcdef0123456789abcdef"),
+        "{result}"
+    );
+    assert_eq!(
+        calls.lock().expect("call log").as_slice(),
+        [
+            "template-selector",
+            "designer",
+            "create-preparer",
+            "builder-build",
+            "operator-0",
+            "tester-0"
+        ]
+    );
+}
+
+#[test]
+fn qa_prompts_project_host_identity_without_schemas_catalog_or_selector_capability() {
+    let source = build_workflow_script();
+    let qa_prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let qa_prompts_for_run = Arc::clone(&qa_prompts);
+    let mut args = build_create_args(serde_json::json!({}));
+    let context = args["host_context"]
+        .as_object_mut()
+        .expect("host context object");
+    context.insert(
+        "selector_capability".into(),
+        serde_json::Value::String("selector_secret_sentinel".into()),
+    );
+    context["template_catalog"]["catalog_secret"] =
+        serde_json::Value::String("catalog_secret_sentinel".into());
+    context["schemas"]["schema_secret"] =
+        serde_json::Value::String("schema_secret_sentinel".into());
+    workflow::run_with_progress(
+        &source,
+        move |prompts, options| {
+            prompts
+                .iter()
+                .zip(options.iter())
+                .map(|(prompt, options)| {
+                    let label = stage_label(options);
+                    if label.starts_with("operator-")
+                        || label.starts_with("tester-")
+                        || label.starts_with("verifier")
+                    {
+                        qa_prompts_for_run
+                            .lock()
+                            .expect("QA prompt capture")
+                            .push(prompt.clone());
+                    }
+                    canned_stage_reply(&label)
+                        .unwrap_or_else(|| passing_qa_reply(&label, "wf_regression", "balanced"))
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(args.to_string()),
+        None,
+    )
+    .expect("workflow should retain the bounded Host QA identity");
+    let prompts = qa_prompts.lock().expect("QA prompts");
+    assert!(!prompts.is_empty());
+    for prompt in prompts.iter() {
+        for secret in [
+            "selector_secret_sentinel",
+            "catalog_secret_sentinel",
+            "schema_secret_sentinel",
+        ] {
+            assert!(
+                !prompt.contains(secret),
+                "QA prompt leaked {secret}: {prompt}"
+            );
+        }
+        assert!(
+            prompt.contains("primary-action"),
+            "QA prompt lost the persisted acceptance identity: {prompt}"
+        );
+    }
 }
 
 #[test]
 fn unified_build_verify_is_read_only_and_persisted_canvas_rejects_fast() {
     let source = std::fs::read_to_string(workflow_dir().join("local-app-build.js"))
         .expect("read build workflow");
-    let verify_args = serde_json::json!({
-        "operation": "verify",
-        "app_id": "aaaa1111",
-        "quality_level": "balanced",
-        // r3-workflow-runtime-02: mirror the Host's real top-level injection
-        // (workflow_support.rs :1488-1493, :1775-1779) alongside host_context,
-        // not only inside it.
-        "workflow_run_id": "wf_verify1",
-        // The build path's top-level `runtime_profile` carries exactly three
-        // fields (workflow_support.rs:1478-1482); `surface` is added only by
-        // `enrich_persisted_plugin_workflow_context` on the use-test /
-        // mcp-authoring path, so it must NOT appear here.
-        "runtime_profile": {
-            "family": "react_dom",
-            "revision": 1,
-            "contract_sha256": "a".repeat(64)
-        },
-        "expected_writable_collections": [],
-        "host_context": {
-            "source": "verified_host",
-            "operation": "verify",
-            "app_id": "aaaa1111",
-            "workflow_run_id": "wf_verify1",
-            "runtime_profile": {
-                "family": "react_dom",
-                "revision": 1,
-                "contract_sha256": "a".repeat(64),
-                "surface": "dom"
-            },
-            "template_catalog": {
-                "catalog_digest": "catalog",
-                "available_template_ids": ["react-dom-r2"]
-            },
-            "expected_writable_collections": [],
-            "dependency_snapshot": {"verified": true}
-        }
-    });
+    // r3-workflow-runtime-02: this helper mirrors the Host's real top-level
+    // runtime profile and workflow identity injection alongside host_context.
+    let verify_args = build_verify_args("balanced");
     let seen_options = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let seen_prompts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let options_for_run = Arc::clone(&seen_options);
     let prompts_for_run = Arc::clone(&seen_prompts);
-    let failed_report = serde_json::json!({
-        "ok": false,
-        "findings": [],
-        "checked_matrix": ["webview"],
-        "browser_available": true,
-        "webview_checked": true,
-        "degraded_verification": false,
-        "data_roundtrip": {"status": "passed"},
-        "render_check": {"status": "not_applicable"},
-        "motion_check": {"status": "not_applicable"},
-        "summary": "acceptance check failed"
-    });
     let outcome = workflow::run_with_progress(
         &source,
         move |prompts, options| {
@@ -400,7 +594,10 @@ fn unified_build_verify_is_read_only_and_persisted_canvas_rejects_fast() {
                 .lock()
                 .expect("option capture")
                 .extend(options.iter().cloned());
-            prompts.iter().map(|_| failed_report.to_string()).collect()
+            options
+                .iter()
+                .map(|options| failing_qa_reply(&stage_label(options), "wf_verify1", "balanced"))
+                .collect()
         },
         |_progress| {},
         None,
@@ -412,7 +609,7 @@ fn unified_build_verify_is_read_only_and_persisted_canvas_rejects_fast() {
     let result = outcome.result.expect("verify result");
     assert!(result.contains("\"status\":\"verification_failed\""));
     assert!(result.contains("\"repair_rounds\":0"));
-    assert!(result.contains("verification report returned ok=false"));
+    assert!(result.contains("\"status\":\"verification_failed\""));
     assert!(
         seen_options
             .lock()
@@ -439,6 +636,7 @@ fn unified_build_verify_is_read_only_and_persisted_canvas_rejects_fast() {
             "operation": "update",
             "app_id": "aaaa1111",
             "workflow_run_id": "wf_update1",
+            "schemas": workflow_schemas(),
             "runtime_profile": {
                 "family": "canvas_2d",
                 "revision": 1,
@@ -453,6 +651,15 @@ fn unified_build_verify_is_read_only_and_persisted_canvas_rejects_fast() {
             "dependency_snapshot": {"verified": true}
         }
     });
+    let mut bare_args = build_create_args(serde_json::json!({}));
+    bare_args
+        .as_object_mut()
+        .expect("create args")
+        .remove("name");
+    bare_args
+        .as_object_mut()
+        .expect("create args")
+        .remove("brief");
     let error = workflow::run_with_progress(
         &source,
         |_prompts, _options| panic!("fast Canvas rejection must happen before any agent call"),
@@ -495,6 +702,7 @@ fn unified_build_update_keeps_mcp_authoring_explicit() {
             "operation": "update",
             "app_id": "aaaa1111",
             "workflow_run_id": "wf_update2",
+            "schemas": workflow_schemas(),
             "invocation_capability": "mcpv_00000000000000000000000000000000",
             "runtime_profile": {
                 "family": "react_dom",
@@ -508,41 +716,43 @@ fn unified_build_update_keeps_mcp_authoring_explicit() {
             },
             "expected_writable_collections": ["items"],
             "dependency_snapshot": {"verified": true},
-            "active_catalog": {"catalog_sha256": "b".repeat(64)}
+            "active_catalog": {"catalog_sha256": "b".repeat(64)},
+            "authoring_contract_sha256": "f".repeat(64),
+            "authoring_contract": {
+                "contract_handle": "contract_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "spec": authoring_spec()
+            },
+            "authoring_spec": authoring_spec()
         }
     });
     let nested_calls = Arc::new(AtomicUsize::new(0));
     let nested_calls_for_run = Arc::clone(&nested_calls);
-    let report = serde_json::json!({
-        "ok": true,
-        "findings": [],
-        "checked_matrix": ["webview", "data"],
-        "browser_available": true,
-        "webview_checked": true,
-        "degraded_verification": false,
-        "data_roundtrip": {"status": "passed"},
-        "render_check": {"status": "not_applicable"},
-        "motion_check": {"status": "not_applicable"},
-        "summary": "update verified"
-    });
+    let update_calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let update_calls_for_run = Arc::clone(&update_calls);
     let build = serde_json::json!({
         "ok": true,
         "preview_url": "http://127.0.0.1:20000",
+        "contract_handle": "contract_cccccccccccccccccccccccccccccccc",
         "summary": "updated"
     });
     let outcome = workflow::run_with_progress(
         &source,
-        move |_prompts, options| {
+        move |prompts, options| {
             options
                 .iter()
-                .map(|options| {
+                .zip(prompts.iter())
+                .map(|(options, prompt)| {
+                    update_calls_for_run
+                        .lock()
+                        .expect("update call log")
+                        .push((stage_label(options), prompt.clone()));
                     if options.contains("__wf_resolve") {
                         nested_calls_for_run.fetch_add(1, Ordering::SeqCst);
                         "return { status: 'promoted', promotion: { promoted: true } };".to_string()
                     } else if options.contains("builder") {
                         build.to_string()
                     } else {
-                        report.to_string()
+                        passing_qa_reply(&stage_label(options), "wf_update2", "balanced")
                     }
                 })
                 .collect()
@@ -555,11 +765,96 @@ fn unified_build_update_keeps_mcp_authoring_explicit() {
     )
     .expect("update workflow should execute");
     let result = outcome.result.expect("update result");
-    assert!(result.contains("\"mcp_update\":null"));
+    assert!(result.contains("\"ok\":true"));
     assert_eq!(
         nested_calls.load(Ordering::SeqCst),
         0,
         "ordinary app updates must not run MCP authoring without an explicit user request"
+    );
+    let update_calls = update_calls.lock().expect("update call log");
+    assert!(
+        !update_calls.iter().any(|(label, _)| label == "designer"),
+        "a code-only update must skip designer: {update_calls:?}"
+    );
+    let builder_prompt = update_calls
+        .iter()
+        .find(|(label, _)| label == "builder")
+        .map(|(_, prompt)| prompt)
+        .expect("update builder prompt");
+    for required in [
+        "operation=stage, app_id=aaaa1111, workflow_run_id=wf_update2",
+        "base_contract_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "the full confirmed update",
+        "LocalAppBuild with exactly app_id=aaaa1111, workflow_run_id=wf_update2",
+    ] {
+        assert!(
+            builder_prompt.contains(required),
+            "update builder prompt is missing {required:?}: {builder_prompt}"
+        );
+    }
+}
+
+#[test]
+fn host_ui_impact_flag_is_the_only_update_design_trigger() {
+    let source = build_workflow_script();
+    let args = serde_json::json!({
+        "operation": "update",
+        "app_id": "aaaa1111",
+        "revision_prompt": "Refresh the search presentation",
+        "quality_level": "balanced",
+        "workflow_run_id": "wf_update_ui1",
+        "host_context": {
+            "source": "verified_host",
+            "operation": "update",
+            "app_id": "aaaa1111",
+            "workflow_run_id": "wf_update_ui1",
+            "update_ui_impact": true,
+            "authoring_contract_sha256": "f".repeat(64),
+            "schemas": workflow_schemas(),
+            "runtime_profile": {"family": "react_dom", "revision": 1, "contract_sha256": "a".repeat(64)},
+            "template_catalog": {"catalog_digest": "catalog", "available_template_ids": ["react-dom-r2"]},
+            "expected_writable_collections": [],
+            "dependency_snapshot": {"verified": true},
+            "authoring_contract": {"contract_handle": "contract_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "spec": authoring_spec()},
+            "authoring_spec": authoring_spec()
+        }
+    });
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let calls_for_run = Arc::clone(&calls);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |prompts, options| {
+            prompts
+                .iter()
+                .zip(options.iter())
+                .map(|(prompt, options)| {
+                    let label = stage_label(options);
+                    calls_for_run.lock().expect("call log").push(label.clone());
+                    if label == "designer" {
+                        assert!(prompt.contains("Resolve impact"), "UI-impact update lost design instruction: {prompt}");
+                        design_subtree().to_string()
+                    } else if label == "builder" {
+                        serde_json::json!({"ok": true, "preview_url": "http://127.0.0.1:20000", "contract_handle": "contract_cccccccccccccccccccccccccccccccc", "summary": "updated"}).to_string()
+                    } else {
+                        passing_qa_reply(&label, "wf_update_ui1", "balanced")
+                    }
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(args.to_string()),
+        None,
+    )
+    .expect("UI-impact update should execute");
+    assert!(outcome
+        .result
+        .expect("workflow result")
+        .contains("\"ok\":true"));
+    assert_eq!(
+        calls.lock().expect("call log").as_slice(),
+        ["designer", "builder", "operator-0", "tester-0"]
     );
 }
 
@@ -570,12 +865,16 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
     let initial_args = serde_json::json!({
         "app_id": "aaaa1111",
         "user_goal": "Expose the saved recipes search as MCP",
+        "workflow_run_id": "wf_mcp_authoring1",
+        "runtime_profile": {"family":"react_dom","revision":1,"contract_sha256":"a".repeat(64),"surface":"dom"},
+        "expected_writable_collections": ["recipes"],
         "host_context": {
             "source": "verified_host",
             "operation": "initial",
             "app_id": "aaaa1111",
             "workflow_run_id": "wf_mcp_authoring1",
             "invocation_capability": "mcpv_00000000000000000000000000000000",
+            "schemas": workflow_schemas(),
             "template_catalog": {"catalog_digest": "digest", "available_template_ids": ["react-dom-r2"]},
             "expected_writable_collections": ["recipes"],
             "dependency_snapshot": {"verified": true},
@@ -585,12 +884,16 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
     let revise_args = serde_json::json!({
         "app_id": "aaaa1111",
         "user_goal": "Expose the saved recipes search as MCP",
+        "workflow_run_id": "wf_mcp_authoring2",
+        "runtime_profile": {"family":"react_dom","revision":1,"contract_sha256":"a".repeat(64),"surface":"dom"},
+        "expected_writable_collections": ["recipes"],
         "host_context": {
             "source": "verified_host",
             "operation": "revise",
             "app_id": "aaaa1111",
             "workflow_run_id": "wf_mcp_authoring2",
             "invocation_capability": "mcpv_00000000000000000000000000000000",
+            "schemas": workflow_schemas(),
             "template_catalog": {"catalog_digest": "digest", "available_template_ids": ["react-dom-r2"]},
             "expected_writable_collections": ["recipes"],
             "dependency_snapshot": {"verified": true},
@@ -604,22 +907,22 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
         "active_catalog": null
     });
     let proposal = serde_json::json!({
-        "app_id": "aaaa1111",
-        "manifest_revision": 3,
-        "user_goal_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "appId": "aaaa1111",
+        "manifestRevision": 3,
+        "userGoalSha256": "0000000000000000000000000000000000000000000000000000000000000000",
         "summary": "Expose bounded recipe search",
         "tools": [{
             "name": "search_recipes",
             "title": "Search recipes",
             "description": "Search saved recipes",
-            "input_schema": {"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false},
-            "output_schema": {"type":"object","properties":{"items":{"type":"array"}},"required":["items"],"additionalProperties":false},
-            "semantic_flow_id": "search_recipes",
-            "inputs": {"query":{"toolInput":{"json_pointer":"/query"}}},
-            "result": {"stepOutput":{"step_id":"search","json_pointer":"/items"}}
+            "inputSchema": {"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false},
+            "outputSchema": {"type":"object","properties":{"items":{"type":"array"}},"required":["items"],"additionalProperties":false},
+            "semanticFlowId": "search_recipes",
+            "inputs": {"query":{"tool_input":{"json_pointer":"/query"}}},
+            "result": {"step_output":{"step_id":"search","json_pointer":"/items"}}
         }],
-        "required_flow_changes": [],
-        "excluded_capabilities": []
+        "requiredFlowChanges": [],
+        "excludedCapabilities": []
     });
     let validated = serde_json::json!({
         "ok": true,
@@ -658,12 +961,15 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
     let approved_for_initial = approved.clone();
     let qa_for_initial = qa.clone();
     let promoted_for_initial = promoted.clone();
+    let promotion_prompt = Arc::new(Mutex::new(String::new()));
+    let promotion_prompt_for_run = Arc::clone(&promotion_prompt);
     let outcome = workflow::run_with_progress(
         &source,
-        move |_prompts, options| {
+        move |prompts, options| {
             options
                 .iter()
-                .map(|options| {
+                .zip(prompts.iter())
+                .map(|(options, prompt)| {
                     if options.contains("app-evidence") {
                         evidence.to_string()
                     } else if options.contains("host-proposal-validation") {
@@ -674,6 +980,8 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
                     } else if options.contains("mcp-qa") {
                         qa_for_initial.to_string()
                     } else if options.contains("mcp-promote") {
+                        *promotion_prompt_for_run.lock().expect("promotion prompt") =
+                            prompt.clone();
                         promoted_for_initial.to_string()
                     } else {
                         proposal_for_initial.to_string()
@@ -691,28 +999,51 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
     let result = outcome.result.expect("workflow result");
     assert!(result.contains("\"status\":\"promoted\""));
     assert_eq!(approval_calls.load(Ordering::SeqCst), 1);
+    let promotion_prompt = promotion_prompt.lock().expect("promotion prompt");
+    assert!(
+        promotion_prompt.contains(
+            r#"{"app_id":"aaaa1111","workflow_run_id":"wf_mcp_authoring1","receipt_id":"mrcpt_00000000000000000000000000000000"}"#
+        ),
+        "promotion must use only the real tool input fields: {promotion_prompt}"
+    );
+    for forbidden_payload in [
+        "1111111111111111",
+        "4444444444444444",
+        "tool_surface_sha256",
+    ] {
+        assert!(
+            !promotion_prompt.contains(forbidden_payload),
+            "promotion prompt leaked non-input candidate/QA data {forbidden_payload}: {promotion_prompt}"
+        );
+    }
 
     let evidence_for_zero_tools = evidence_for_promote.clone();
     let proposal_for_revise = proposal.clone();
-    let validated_for_revise = validated.clone();
-    let approved_for_revise = approved.clone();
+    let mut validated_for_revise = validated.clone();
+    validated_for_revise["status"] = serde_json::Value::String("approved_reusable".into());
     let qa_for_revise = qa.clone();
     let promoted_for_revise = promoted.clone();
+    let reuse_promotion_prompt = Arc::new(Mutex::new(String::new()));
+    let reuse_promotion_prompt_for_run = Arc::clone(&reuse_promotion_prompt);
     let revise_outcome = workflow::run_with_progress(
         &source,
-        move |_prompts, options| {
+        move |prompts, options| {
             options
                 .iter()
-                .map(|options| {
+                .zip(prompts.iter())
+                .map(|(options, prompt)| {
                     if options.contains("app-evidence") {
                         evidence_for_promote.to_string()
                     } else if options.contains("host-proposal-validation") {
                         validated_for_revise.to_string()
                     } else if options.contains("native-approval") {
-                        approved_for_revise.to_string()
+                        panic!("approved_reusable must not request a second native approval")
                     } else if options.contains("mcp-qa") {
                         qa_for_revise.to_string()
                     } else if options.contains("mcp-promote") {
+                        *reuse_promotion_prompt_for_run
+                            .lock()
+                            .expect("reuse promotion prompt") = prompt.clone();
                         promoted_for_revise.to_string()
                     } else {
                         proposal_for_revise.to_string()
@@ -729,6 +1060,15 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
     .expect("revise mcp authoring workflow should execute");
     let revise_result = revise_outcome.result.expect("revise workflow result");
     assert!(revise_result.contains("\"status\":\"promoted\""));
+    let reuse_promotion_prompt = reuse_promotion_prompt
+        .lock()
+        .expect("reuse promotion prompt");
+    assert!(
+        reuse_promotion_prompt.contains(
+            r#"{"app_id":"aaaa1111","workflow_run_id":"wf_mcp_authoring2"}"#
+        ) && !reuse_promotion_prompt.contains("receipt_id"),
+        "an approval-reuse promotion must omit the absent optional receipt: {reuse_promotion_prompt}"
+    );
 
     let zero_tool_outcome = workflow::run_with_progress(
         &source,
@@ -750,13 +1090,13 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
                         .to_string()
                     } else {
                         serde_json::json!({
-                            "app_id": "aaaa1111",
-                            "manifest_revision": 3,
-                            "user_goal_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                            "appId": "aaaa1111",
+                            "manifestRevision": 3,
+                            "userGoalSha256": "0000000000000000000000000000000000000000000000000000000000000000",
                             "summary": "No bounded MCP surface available",
                             "tools": [],
-                            "required_flow_changes": [],
-                            "excluded_capabilities": []
+                            "requiredFlowChanges": [],
+                            "excludedCapabilities": []
                         })
                         .to_string()
                     }
@@ -806,7 +1146,9 @@ fn build_create_args(extra: serde_json::Value) -> serde_json::Value {
     let mut base = serde_json::json!({
         "operation": "create",
         "app_id": "aaaa1111",
-        "spec": "A small form app",
+        "name": "Form App",
+        "brief": "A small form app",
+        "authoring_spec": authoring_spec(),
         "quality_level": "balanced",
         "workflow_run_id": "wf_regression",
         "host_context": {
@@ -815,11 +1157,13 @@ fn build_create_args(extra: serde_json::Value) -> serde_json::Value {
             "app_id": "aaaa1111",
             "workflow_run_id": "wf_regression",
             "selector_capability": "sel_00000000000000000000000000000000",
+            "schemas": workflow_schemas(),
             "template_catalog": {
                 "catalog_digest": "digest",
                 "available_template_ids": ["react-dom-r2"]
             },
-            "staging": {"isolated": true, "final_publish": false}
+            "staging": {"isolated": true, "final_publish": false},
+            "authoring_spec": authoring_spec()
         }
     });
     for (key, value) in extra.as_object().expect("extra must be an object") {
@@ -830,41 +1174,209 @@ fn build_create_args(extra: serde_json::Value) -> serde_json::Value {
     base
 }
 
-/// A verifier report that passes — but with `degraded_verification` set, so a
-/// test can prove the flag is SURFACED on an `ok:true` run rather than gated on.
-fn passing_verifier_report() -> serde_json::Value {
+fn build_verify_args(quality: &str) -> serde_json::Value {
     serde_json::json!({
-        "ok": true,
-        "findings": [],
-        "checked_matrix": ["smoke"],
-        "browser_available": true,
-        "webview_checked": true,
-        "degraded_verification": true,
-        "data_roundtrip": {"status": "passed"},
-        "render_check": {"status": "passed"},
-        "motion_check": {"status": "passed"},
-        "summary": "hermetic pass"
+        "operation": "verify",
+        "app_id": "aaaa1111",
+        "quality_level": quality,
+        "workflow_run_id": "wf_verify1",
+        "runtime_profile": {
+            "family": "react_dom",
+            "revision": 1,
+            "contract_sha256": "a".repeat(64)
+        },
+        "expected_writable_collections": [],
+        "host_context": {
+            "source": "verified_host",
+            "operation": "verify",
+            "app_id": "aaaa1111",
+            "workflow_run_id": "wf_verify1",
+            "schemas": workflow_schemas(),
+            "runtime_profile": {
+                "family": "react_dom",
+                "revision": 1,
+                "contract_sha256": "a".repeat(64),
+                "surface": "dom"
+            },
+            "template_catalog": {
+                "catalog_digest": "catalog",
+                "available_template_ids": ["react-dom-r2"]
+            },
+            "expected_writable_collections": [],
+            "dependency_snapshot": {"verified": true},
+            "authoring_spec": authoring_spec()
+        }
     })
 }
 
-/// A verifier report that fails with a blocking acceptance finding.
-fn failing_verifier_report() -> serde_json::Value {
+fn use_test_args(quality: &str) -> serde_json::Value {
     serde_json::json!({
-        "ok": false,
-        "findings": [{
-            "kind": "acceptance",
-            "severity": "blocking",
-            "evidence": "the save button does nothing"
-        }],
-        "checked_matrix": ["smoke"],
-        "browser_available": false,
-        "webview_checked": true,
-        "degraded_verification": true,
-        "data_roundtrip": {"status": "passed"},
-        "render_check": {"status": "passed"},
-        "motion_check": {"status": "passed"},
-        "summary": "acceptance failed"
+        "app_id": "aaaa1111",
+        "scope": "acceptance",
+        "scenarios": ["primary-action"],
+        "quality_level": quality,
+        "workflow_run_id": "wf_use_test",
+        "runtime_profile": {
+            "family": "react_dom",
+            "revision": 1,
+            "contract_sha256": "a".repeat(64)
+        },
+        "host_context": {
+            "source": "verified_host",
+            "app_id": "aaaa1111",
+            "workflow_run_id": "wf_use_test",
+            "schemas": workflow_schemas(),
+            "runtime_profile": {
+                "family": "react_dom",
+                "revision": 1,
+                "contract_sha256": "a".repeat(64),
+                "surface": "dom"
+            },
+            "authoring_spec": authoring_spec()
+        }
     })
+}
+
+/// Raw evidence identity returned by the non-judging operator.
+fn operator_report(qa_handle: &str) -> serde_json::Value {
+    serde_json::json!({
+        "qa_handle": qa_handle,
+        "evidence_ids": ["native-1"],
+        "status": "evidence_collected",
+        "issues": [],
+        "summary": "Host evidence collected"
+    })
+}
+
+fn qa_candidate_report(
+    workflow_run_id: &str,
+    quality: &str,
+    passed: bool,
+    verifier: bool,
+    qa_handle: &str,
+) -> serde_json::Value {
+    let result_id = if verifier {
+        "qa-result-verifier"
+    } else {
+        "qa-result-tester"
+    };
+    let findings = if passed {
+        serde_json::json!([])
+    } else {
+        serde_json::json!([{
+            "id": "source:acceptance-save",
+            "message": "the save button does nothing",
+            "blocking": true,
+            "resolved_by_evidence_ids": []
+        }])
+    };
+    let mut result: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../local-apps/tests/fixtures/qa-result.valid.json"),
+        )
+        .expect("read the Host-valid checked-in QA result fixture"),
+    )
+    .expect("parse the Host-valid checked-in QA result fixture");
+    result["identity"]["app_id"] = serde_json::Value::String("aaaa1111".into());
+    result["identity"]["workflow_run_id"] = serde_json::Value::String(workflow_run_id.into());
+    result["identity"]["qa_handle"] = serde_json::Value::String(qa_handle.into());
+    result["identity"]["verification_strategy"] = serde_json::Value::String(quality.into());
+    result["scenario_judgements"][0]["status"] =
+        serde_json::Value::String(if passed { "passed" } else { "failed" }.into());
+    result["scenario_judgements"][0]["summary"] =
+        serde_json::Value::String(if passed { "Passed" } else { "Failed" }.into());
+    result["findings"] = findings;
+    result["previous_result_id"] = if verifier {
+        serde_json::Value::String("qa-result-tester".into())
+    } else {
+        serde_json::Value::Null
+    };
+    result["finalized_at_ms"] = serde_json::Value::from(if verifier { 3 } else { 2 });
+    let result_sha256 = result["result_sha256"]
+        .as_str()
+        .expect("fixture result digest")
+        .to_string();
+    serde_json::json!({
+        // Deliberately opposite on passing results: workflow success must come
+        // from the Host candidate, never this model-facing convenience flag.
+        "ok": !passed,
+        "status": "candidate",
+        "receipt": {
+            "receipt_id": format!("receipt-{result_id}"),
+            "app_id": "aaaa1111",
+            "workflow_run_id": workflow_run_id,
+            "qa_handle": qa_handle,
+            "result_id": result_id,
+            "identity_sha256": "a".repeat(64),
+            "result_sha256": result_sha256,
+            "issued_at_ms": 2
+        },
+        "result": result
+    })
+}
+
+fn passing_qa_reply(label: &str, workflow_run_id: &str, quality: &str) -> String {
+    let qa_handle = qa_handle_for_label(label);
+    if label.starts_with("operator-") {
+        operator_report(&qa_handle).to_string()
+    } else {
+        qa_candidate_report(
+            workflow_run_id,
+            quality,
+            true,
+            label.starts_with("verifier"),
+            &qa_handle,
+        )
+        .to_string()
+    }
+}
+
+fn host_shaped_passing_qa_reply(label: &str, workflow_run_id: &str, quality: &str) -> String {
+    let qa_handle = "qa_0123456789abcdef0123456789abcdef";
+    if label.starts_with("operator-") {
+        operator_report(qa_handle).to_string()
+    } else {
+        qa_candidate_report(
+            workflow_run_id,
+            quality,
+            true,
+            label.starts_with("verifier"),
+            qa_handle,
+        )
+        .to_string()
+    }
+}
+
+fn failing_qa_reply(label: &str, workflow_run_id: &str, quality: &str) -> String {
+    let qa_handle = qa_handle_for_label(label);
+    if label.starts_with("operator-") {
+        operator_report(&qa_handle).to_string()
+    } else {
+        qa_candidate_report(
+            workflow_run_id,
+            quality,
+            false,
+            label.starts_with("verifier"),
+            &qa_handle,
+        )
+        .to_string()
+    }
+}
+
+fn qa_handle_for_label(label: &str) -> String {
+    if label.contains("resample") {
+        return "qa_11111111111111111111111111111111".into();
+    }
+    let round = label
+        .rsplit_once('-')
+        .and_then(|(_, suffix)| suffix.parse::<usize>().ok())
+        .unwrap_or(0);
+    if round == 0 {
+        "qa_00000000000000000000000000000000".into()
+    } else {
+        format!("qa_{round:032}")
+    }
 }
 
 /// Canned answers for the non-verification stages. `None` means "this stage is
@@ -879,24 +1391,16 @@ fn canned_stage_reply(label: &str) -> Option<String> {
             "validated_selection_handle": "vsel_0123456789abcdef0123456789abcdef"
         })
         .to_string(),
-        "native-create-approval" => serde_json::json!({
+        "create-preparer" => serde_json::json!({
             "approved": true,
+            "ok": true,
+            "contract_handle": "contract_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "contract_sha256": "c".repeat(64),
             "receipt_id": "mcp-create-receipt",
             "status": "create_approved_no_mcp"
         })
         .to_string(),
-        "designer" => serde_json::json!({
-            "runtime_family": "react_dom",
-            "acceptance_checks": [],
-            "summary": "design"
-        })
-        .to_string(),
-        "builder-stage" => serde_json::json!({
-            "ok": true,
-            "dependency_input_sha256": "a".repeat(64),
-            "summary": "staged"
-        })
-        .to_string(),
+        "designer" => design_subtree().to_string(),
         _ if label == "builder-build" || label.starts_with("repair-") => serde_json::json!({
             "ok": true,
             "preview_url": "http://127.0.0.1:20000",
@@ -918,8 +1422,8 @@ fn stage_label(options: &str) -> String {
 
 /// r4-failure-paths-05: ONE transient verification-stage failure (the host
 /// hands back the null sentinel) is retried once and the create still
-/// completes. Also pins the degradation half: the verifier's own
-/// `degraded_verification` must reach the caller on an `ok:true` run.
+/// completes. The Host candidate, rather than any model pass flag, decides the
+/// result.
 #[test]
 fn a_single_transient_verification_agent_failure_is_retried_once() {
     let src = build_workflow_script();
@@ -935,12 +1439,10 @@ fn a_single_transient_verification_agent_failure_is_retried_once() {
                     if let Some(canned) = canned_stage_reply(&label) {
                         return canned;
                     }
-                    if label.starts_with("operator-")
-                        && seen.fetch_add(1, Ordering::SeqCst) == 0
-                    {
+                    if label.starts_with("operator-") && seen.fetch_add(1, Ordering::SeqCst) == 0 {
                         return workflow::WF_NULL_SENTINEL.to_string();
                     }
-                    passing_verifier_report().to_string()
+                    passing_qa_reply(&label, "wf_regression", "balanced")
                 })
                 .collect()
         },
@@ -960,14 +1462,10 @@ fn a_single_transient_verification_agent_failure_is_retried_once() {
         "the operator must be dispatched exactly twice (fail, then retry), got {result}"
     );
     assert!(result.contains("\"ok\":true"), "{result}");
-    // 8 nominal stages + the one retried operator call.
+    // 6 nominal stages + the one retried operator call.
     assert!(
-        result.contains("\"agent_calls\":9"),
+        result.contains("\"agent_calls\":7"),
         "agent_calls must count the retry: {result}"
-    );
-    assert!(
-        result.contains("\"degraded_verification\":true"),
-        "the verifier's degraded_verification must be surfaced on an ok:true run: {result}"
     );
 }
 
@@ -990,7 +1488,7 @@ fn a_persistent_verification_agent_failure_is_still_terminal() {
                     if label.starts_with("operator-") {
                         return workflow::WF_NULL_SENTINEL.to_string();
                     }
-                    passing_verifier_report().to_string()
+                    passing_qa_reply(&label, "wf_regression", "balanced")
                 })
                 .collect()
         },
@@ -1022,7 +1520,7 @@ fn create_verification_exhaustion_returns_a_structured_result() {
                 .map(|options| {
                     let label = stage_label(options);
                     canned_stage_reply(&label)
-                        .unwrap_or_else(|| failing_verifier_report().to_string())
+                        .unwrap_or_else(|| failing_qa_reply(&label, "wf_regression", "balanced"))
                 })
                 .collect()
         },
@@ -1071,8 +1569,9 @@ fn a_name_only_confirmed_launch_reaches_both_naming_stages_verbatim() {
                 .zip(options.iter())
                 .map(|(prompt, options)| {
                     sink.lock().expect("prompt sink").push(prompt.clone());
-                    canned_stage_reply(&stage_label(options))
-                        .unwrap_or_else(|| passing_verifier_report().to_string())
+                    let label = stage_label(options);
+                    canned_stage_reply(&label)
+                        .unwrap_or_else(|| passing_qa_reply(&label, "wf_regression", "balanced"))
                 })
                 .collect()
         },
@@ -1090,7 +1589,7 @@ fn a_name_only_confirmed_launch_reaches_both_naming_stages_verbatim() {
             .cloned()
             .unwrap_or_else(|| panic!("no prompt contained {needle:?}"))
     };
-    let stage = find("Call LocalAppStageCreate with app_id=");
+    let stage = find("call LocalAppStageCreate with contract_handle from LocalAppContract");
     assert!(
         stage.contains("name=\"Recipe Box\""),
         "the confirmed display name must reach LocalAppStageCreate verbatim: {stage}"
@@ -1099,22 +1598,24 @@ fn a_name_only_confirmed_launch_reaches_both_naming_stages_verbatim() {
         !stage.contains("carried no user-confirmed values"),
         "a name-only launch must not be reported as carrying nothing: {stage}"
     );
-    let scaffold = find("Call LocalAppScaffold with app_id=");
-    assert!(
-        scaffold.contains("name=\"Recipe Box\""),
-        "the confirmed display name must reach LocalAppScaffold verbatim: {scaffold}"
-    );
 }
 
-/// The fourth arm of the same ternary: a launch with NEITHER half confirmed
-/// still falls back to prose and never emits an empty `name=""` argument,
-/// which would read to the model as a confirmed empty name.
+/// A create without confirmed naming fails before any agent can write or stage.
 #[test]
 fn a_launch_with_no_confirmed_values_falls_back_to_prose() {
     let src = build_workflow_script();
     let prompts_seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&prompts_seen);
-    workflow::run_with_progress(
+    let mut bare_args = build_create_args(serde_json::json!({}));
+    bare_args
+        .as_object_mut()
+        .expect("create args")
+        .remove("name");
+    bare_args
+        .as_object_mut()
+        .expect("create args")
+        .remove("brief");
+    let error = workflow::run_with_progress(
         &src,
         move |prompts, options| {
             prompts
@@ -1122,8 +1623,235 @@ fn a_launch_with_no_confirmed_values_falls_back_to_prose() {
                 .zip(options.iter())
                 .map(|(prompt, options)| {
                     sink.lock().expect("prompt sink").push(prompt.clone());
-                    canned_stage_reply(&stage_label(options))
-                        .unwrap_or_else(|| passing_verifier_report().to_string())
+                    let label = stage_label(options);
+                    canned_stage_reply(&label)
+                        .unwrap_or_else(|| passing_qa_reply(&label, "wf_regression", "balanced"))
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(bare_args.to_string()),
+        None,
+    )
+    .expect_err("a create without confirmed naming must fail closed");
+    assert!(error.to_string().contains("CREATE_NAMING_REQUIRED"));
+    assert!(prompts_seen.lock().expect("prompt sink").is_empty());
+}
+
+#[test]
+fn stale_template_selection_stops_before_preparer_or_builder() {
+    let source = build_workflow_script();
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let calls_for_run = Arc::clone(&calls);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    calls_for_run.lock().expect("call log").push(label.clone());
+                    if label == "template-selector" {
+                        serde_json::json!({
+                            "catalog_digest": "stale",
+                            "template_id": "react-dom-r2",
+                            "reason": "stale",
+                            "rejected": [],
+                            "validated_selection_handle": "vsel_0123456789abcdef0123456789abcdef"
+                        })
+                        .to_string()
+                    } else {
+                        panic!("stale selection must stop before {label}")
+                    }
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    );
+    let error = outcome.expect_err("stale selection must fail closed");
+    assert!(error.to_string().contains("stale or unavailable template"));
+    assert_eq!(
+        calls.lock().expect("call log").as_slice(),
+        ["template-selector"]
+    );
+}
+
+#[test]
+fn create_denial_returns_normal_result_without_builder_or_contract_erasure() {
+    let source = build_workflow_script();
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let calls_for_run = Arc::clone(&calls);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options.iter().map(|options| {
+                let label = stage_label(options);
+                calls_for_run.lock().expect("call log").push(label.clone());
+                match label.as_str() {
+                    "template-selector" => serde_json::json!({
+                        "catalog_digest": "digest",
+                        "template_id": "react-dom-r2",
+                        "reason": "form",
+                        "rejected": [],
+                        "validated_selection_handle": "vsel_0123456789abcdef0123456789abcdef"
+                    }).to_string(),
+                    "designer" => design_subtree().to_string(),
+                    "create-preparer" => serde_json::json!({"ok": false, "approved": false, "status": "create_declined"}).to_string(),
+                    _ => panic!("denial must stop before {label}"),
+                }
+            }).collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    )
+    .expect("user denial is a normal workflow result");
+    let result = outcome.result.expect("denial result");
+    assert!(result.contains("\"status\":\"create_declined\""));
+    assert!(result.contains("\"ok\":false"));
+    assert!(!calls
+        .lock()
+        .expect("call log")
+        .iter()
+        .any(|label| label == "builder-build"));
+}
+
+#[test]
+fn qa_success_without_host_receipt_fails_closed() {
+    let source = build_workflow_script();
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    canned_stage_reply(&label).unwrap_or_else(|| {
+                        if label.starts_with("operator-") {
+                            return operator_report("qa_00000000000000000000000000000000")
+                                .to_string();
+                        }
+                        let mut report = qa_candidate_report(
+                            "wf_regression",
+                            "balanced",
+                            true,
+                            false,
+                            "qa_00000000000000000000000000000000",
+                        );
+                        if label == "tester-0" {
+                            report
+                                .as_object_mut()
+                                .expect("report object")
+                                .remove("receipt");
+                        }
+                        report.to_string()
+                    })
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    );
+    let error = outcome.expect_err("Host receipt is required");
+    assert!(error
+        .to_string()
+        .contains("tester must return the complete Host QA candidate and receipt"));
+}
+
+#[test]
+fn thorough_requires_tester_finalize_before_verifier() {
+    let source = build_workflow_script();
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let calls_for_run = Arc::clone(&calls);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    calls_for_run.lock().expect("call log").push(label.clone());
+                    if let Some(canned) = canned_stage_reply(&label) {
+                        return canned;
+                    }
+                    if label.starts_with("operator-") {
+                        return operator_report("qa_00000000000000000000000000000000").to_string();
+                    }
+                    if label == "tester-0" {
+                        let mut report = qa_candidate_report(
+                            "wf_regression",
+                            "thorough",
+                            true,
+                            false,
+                            "qa_00000000000000000000000000000000",
+                        );
+                        report.as_object_mut().expect("candidate").remove("receipt");
+                        return report.to_string();
+                    }
+                    panic!("verifier must not run without tester receipt: {label}");
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({"quality_level": "thorough"})).to_string()),
+        None,
+    );
+    let error = outcome.expect_err("thorough tester receipt is mandatory");
+    assert!(
+        error
+            .to_string()
+            .contains("tester must return the complete Host QA candidate and receipt"),
+        "{error}"
+    );
+    assert!(
+        !calls
+            .lock()
+            .expect("call log")
+            .iter()
+            .any(|label| label == "verifier"),
+        "verifier ran before tester finalized"
+    );
+}
+
+#[test]
+fn infrastructure_failure_never_enters_source_repair() {
+    let source = build_workflow_script();
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let calls_for_run = Arc::clone(&calls);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    calls_for_run.lock().expect("call log").push(label.clone());
+                    canned_stage_reply(&label).unwrap_or_else(|| {
+                        if label.starts_with("operator-") {
+                            operator_report("qa_00000000000000000000000000000000").to_string()
+                        } else {
+                            serde_json::json!({
+                                "status": "infrastructure_failed",
+                                "qa_handle": "qa_00000000000000000000000000000000",
+                                "findings": [],
+                                "summary": "Host QA backend unavailable"
+                            })
+                            .to_string()
+                        }
+                    })
                 })
                 .collect()
         },
@@ -1133,12 +1861,805 @@ fn a_launch_with_no_confirmed_values_falls_back_to_prose() {
         Some(build_create_args(serde_json::json!({})).to_string()),
         None,
     )
-    .expect("a bare create must run");
-    let seen = prompts_seen.lock().expect("prompt sink");
-    let stage = seen
-        .iter()
-        .find(|prompt| prompt.contains("Call LocalAppStageCreate with app_id="))
-        .expect("stage prompt");
-    assert!(!stage.contains("name=\"\""), "{stage}");
-    assert!(stage.contains("carried no user-confirmed values"), "{stage}");
+    .expect("infrastructure failure should remain a structured workflow result");
+    let result = outcome.result.expect("workflow result");
+    assert!(
+        result.contains("\"status\":\"infrastructure_failed\""),
+        "{result}"
+    );
+    assert!(result.contains("\"repair_rounds\":0"), "{result}");
+    assert!(
+        !calls
+            .lock()
+            .expect("call log")
+            .iter()
+            .any(|label| label.starts_with("repair-")),
+        "infrastructure failure was sent to source repair"
+    );
+}
+
+#[test]
+fn evidence_resample_is_once_and_separate_from_source_repair() {
+    let source = build_workflow_script();
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let calls_for_run = Arc::clone(&calls);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    calls_for_run.lock().expect("call log").push(label.clone());
+                    if let Some(canned) = canned_stage_reply(&label) {
+                        return canned;
+                    }
+                    if label == "tester-0" {
+                        return serde_json::json!({
+                            "status": "evidence_resample_required",
+                            "qa_handle": "qa_00000000000000000000000000000000",
+                            "findings": [],
+                            "summary": "capture was incomplete"
+                        })
+                        .to_string();
+                    }
+                    passing_qa_reply(&label, "wf_regression", "balanced")
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    )
+    .expect("one evidence resample should recover");
+    let result = outcome.result.expect("workflow result");
+    assert!(result.contains("\"ok\":true"), "{result}");
+    assert!(result.contains("\"evidence_resamples\":1"), "{result}");
+    assert!(result.contains("\"repair_rounds\":0"), "{result}");
+    let calls = calls.lock().expect("call log");
+    assert!(calls.iter().any(|label| label == "operator-resample"));
+    assert!(calls.iter().any(|label| label == "tester-resample"));
+    assert!(!calls.iter().any(|label| label.starts_with("repair-")));
+}
+
+#[test]
+fn verify_operation_can_use_its_one_evidence_resample_without_repair() {
+    let source = build_workflow_script();
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let calls_for_run = Arc::clone(&calls);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    calls_for_run.lock().expect("call log").push(label.clone());
+                    if label == "tester-0" {
+                        return serde_json::json!({
+                            "status": "evidence_resample_required",
+                            "qa_handle": "qa_00000000000000000000000000000000",
+                            "findings": [],
+                            "summary": "capture was incomplete"
+                        })
+                        .to_string();
+                    }
+                    passing_qa_reply(&label, "wf_verify1", "balanced")
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_verify_args("balanced").to_string()),
+        None,
+    )
+    .expect("verify should recover through its bounded evidence resample");
+    let result = outcome.result.expect("workflow result");
+    assert!(result.contains("\"ok\":true"), "{result}");
+    assert!(result.contains("\"evidence_resamples\":1"), "{result}");
+    assert!(result.contains("\"repair_rounds\":0"), "{result}");
+    assert_eq!(
+        calls.lock().expect("call log").as_slice(),
+        [
+            "operator-0",
+            "tester-0",
+            "operator-resample",
+            "tester-resample"
+        ]
+    );
+}
+
+#[test]
+fn evidence_resample_remains_available_after_the_final_source_repair() {
+    let source = build_workflow_script();
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let calls_for_run = Arc::clone(&calls);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    calls_for_run.lock().expect("call log").push(label.clone());
+                    if let Some(canned) = canned_stage_reply(&label) {
+                        return canned;
+                    }
+                    if label == "operator-0" || label == "tester-0" {
+                        return failing_qa_reply(&label, "wf_regression", "balanced");
+                    }
+                    if label == "tester-1" {
+                        return serde_json::json!({
+                            "status": "evidence_resample_required",
+                            "qa_handle": "qa_00000000000000000000000000000001",
+                            "findings": [],
+                            "summary": "post-rebuild capture was incomplete"
+                        })
+                        .to_string();
+                    }
+                    passing_qa_reply(&label, "wf_regression", "balanced")
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    )
+    .expect("the independent evidence budget should survive the final source repair");
+    let result = outcome.result.expect("workflow result");
+    assert!(result.contains("\"ok\":true"), "{result}");
+    assert!(result.contains("\"repair_rounds\":1"), "{result}");
+    assert!(result.contains("\"evidence_resamples\":1"), "{result}");
+    let calls = calls.lock().expect("call log");
+    assert!(calls.iter().any(|label| label == "repair-1"), "{calls:?}");
+    assert!(
+        calls.iter().any(|label| label == "operator-resample")
+            && calls.iter().any(|label| label == "tester-resample"),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn source_repair_budgets_are_one_one_two() {
+    let source = build_workflow_script();
+    for (quality, expected_repairs) in [("fast", 1usize), ("balanced", 1), ("thorough", 2)] {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let calls_for_run = Arc::clone(&calls);
+        let outcome = workflow::run_with_progress(
+            &source,
+            move |_prompts, options| {
+                options
+                    .iter()
+                    .map(|options| {
+                        let label = stage_label(options);
+                        calls_for_run.lock().expect("call log").push(label.clone());
+                        canned_stage_reply(&label)
+                            .unwrap_or_else(|| failing_qa_reply(&label, "wf_regression", quality))
+                    })
+                    .collect()
+            },
+            |_progress| {},
+            None,
+            true,
+            Some(build_create_args(serde_json::json!({"quality_level": quality})).to_string()),
+            None,
+        )
+        .unwrap_or_else(|error| panic!("{quality} failure must return findings: {error}"));
+        let result = outcome.result.expect("workflow result");
+        assert!(
+            result.contains("\"status\":\"verification_failed\""),
+            "{result}"
+        );
+        assert!(
+            result.contains(&format!("\"repair_rounds\":{expected_repairs}")),
+            "{result}"
+        );
+        let repair_calls = calls
+            .lock()
+            .expect("call log")
+            .iter()
+            .filter(|label| label.starts_with("repair-"))
+            .count();
+        assert_eq!(repair_calls, expected_repairs, "{quality}: {result}");
+    }
+}
+
+#[test]
+fn non_source_host_candidate_does_not_consume_repair_budget() {
+    let source = build_workflow_script();
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let calls_for_run = Arc::clone(&calls);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    calls_for_run.lock().expect("call log").push(label.clone());
+                    canned_stage_reply(&label).unwrap_or_else(|| {
+                        if label.starts_with("operator-") {
+                            return operator_report("qa_00000000000000000000000000000000")
+                                .to_string();
+                        }
+                        let mut candidate = qa_candidate_report(
+                            "wf_regression",
+                            "balanced",
+                            false,
+                            false,
+                            "qa_00000000000000000000000000000000",
+                        );
+                        candidate["result"]["findings"][0]["id"] =
+                            serde_json::Value::String("contract:acceptance-mismatch".into());
+                        candidate.to_string()
+                    })
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    )
+    .expect("non-source failure should be a structured result");
+    let result = outcome.result.expect("workflow result");
+    assert!(
+        result.contains("\"status\":\"verification_failed\""),
+        "{result}"
+    );
+    assert!(result.contains("\"repair_rounds\":0"), "{result}");
+    assert!(
+        !calls
+            .lock()
+            .expect("call log")
+            .iter()
+            .any(|label| label.starts_with("repair-")),
+        "a non-source Host finding entered repair"
+    );
+}
+
+#[test]
+fn repair_uses_no_expired_contract_and_denies_contract_manifest_dependency_tools() {
+    let source = build_workflow_script();
+    let repair_prompt = Arc::new(Mutex::new(String::new()));
+    let repair_options = Arc::new(Mutex::new(String::new()));
+    let repair_prompt_for_run = Arc::clone(&repair_prompt);
+    let repair_options_for_run = Arc::clone(&repair_options);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |prompts, options| {
+            prompts
+                .iter()
+                .zip(options.iter())
+                .map(|(prompt, options)| {
+                    let label = stage_label(options);
+                    if label == "repair-1" {
+                        *repair_prompt_for_run.lock().expect("repair prompt") = prompt.clone();
+                        *repair_options_for_run.lock().expect("repair options") = options.clone();
+                        return canned_stage_reply(&label).expect("repair build");
+                    }
+                    if let Some(canned) = canned_stage_reply(&label) {
+                        return canned;
+                    }
+                    if label == "operator-0" {
+                        failing_qa_reply(&label, "wf_regression", "balanced")
+                    } else if label == "tester-0" {
+                        let mut report = qa_candidate_report(
+                            "wf_regression",
+                            "balanced",
+                            false,
+                            false,
+                            "qa_00000000000000000000000000000000",
+                        );
+                        report["result"]["identity"]["runtime_profile"]["family"] =
+                            serde_json::Value::String("canvas_2d".into());
+                        report.to_string()
+                    } else {
+                        passing_qa_reply(&label, "wf_regression", "balanced")
+                    }
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    )
+    .expect("one source repair should recover");
+    let result = outcome.result.expect("workflow result");
+    assert!(result.contains("\"ok\":true"), "{result}");
+    assert!(result.contains("\"repair_rounds\":1"), "{result}");
+    let prompt = repair_prompt.lock().expect("repair prompt");
+    assert!(
+        prompt.contains("LocalAppBuild with app_id=aaaa1111 and workflow_run_id=wf_regression; omit contract_handle"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("do not reuse it and do not restage"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(r#""family":"canvas_2d""#),
+        "repair must carry the authoritative non-DOM Host QA profile: {prompt}"
+    );
+    let options: serde_json::Value =
+        serde_json::from_str(&repair_options.lock().expect("repair options"))
+            .expect("repair options JSON");
+    let denied = options["disallowedTools"]
+        .as_array()
+        .expect("repair disallowedTools");
+    for tool in [
+        "LocalAppContract",
+        "LocalAppManifest",
+        "LocalAppInstallDeps",
+        "LocalAppConfirmDependencyChange",
+        "LocalAppUpdateDependencies",
+        "LocalAppScaffold",
+        "LocalAppApproveMcpProposal",
+    ] {
+        assert!(
+            denied.iter().any(|entry| entry.as_str() == Some(tool)),
+            "repair did not deny {tool}: {options}"
+        );
+    }
+}
+
+#[test]
+fn valid_host_evidence_ids_are_not_truncated_from_tester_prompt() {
+    let source = build_workflow_script();
+    let tester_prompt = Arc::new(Mutex::new(String::new()));
+    let tester_prompt_for_run = Arc::clone(&tester_prompt);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |prompts, options| {
+            prompts
+                .iter()
+                .zip(options.iter())
+                .map(|(prompt, options)| {
+                    let label = stage_label(options);
+                    if let Some(canned) = canned_stage_reply(&label) {
+                        return canned;
+                    }
+                    if label == "operator-0" {
+                        let evidence_ids = (0..64)
+                            .map(|index| format!("evidence-{index:03}"))
+                            .collect::<Vec<_>>();
+                        return serde_json::json!({
+                            "qa_handle": "qa_00000000000000000000000000000000",
+                            "evidence_ids": evidence_ids,
+                            "status": "evidence_collected",
+                            "issues": [],
+                            "summary": "complete"
+                        })
+                        .to_string();
+                    }
+                    if label == "tester-0" {
+                        *tester_prompt_for_run.lock().expect("tester prompt") = prompt.clone();
+                    }
+                    passing_qa_reply(&label, "wf_regression", "balanced")
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    )
+    .expect("workflow with 64 valid evidence ids should run");
+    assert!(outcome.result.expect("result").contains("\"ok\":true"));
+    let prompt = tester_prompt.lock().expect("tester prompt");
+    assert!(
+        prompt.contains("evidence-063"),
+        "the last valid Host evidence id was truncated: {prompt}"
+    );
+}
+
+#[test]
+fn use_test_reads_persisted_authoring_spec_and_rejects_overrides() {
+    let source = std::fs::read_to_string(workflow_dir().join("local-app-use-test.js"))
+        .expect("read use-test workflow");
+    let args = use_test_args("balanced");
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let calls_for_run = Arc::clone(&calls);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    calls_for_run.lock().expect("call log").push(label.clone());
+                    passing_qa_reply(&label, "wf_use_test", "balanced")
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(args.to_string()),
+        None,
+    )
+    .expect("use-test should consume the Host-persisted contract");
+    let result = outcome.result.expect("use-test result");
+    assert!(result.contains("\"ok\":true"), "{result}");
+    assert_eq!(
+        calls.lock().expect("call log").as_slice(),
+        ["operator-0", "tester-0"]
+    );
+
+    let mut forged = args;
+    forged
+        .as_object_mut()
+        .expect("args")
+        .insert("authoring_spec".into(), authoring_spec());
+    let error = workflow::run_with_progress(
+        &source,
+        |_prompts, _options| panic!("override must fail before agent dispatch"),
+        |_progress| {},
+        None,
+        true,
+        Some(forged.to_string()),
+        None,
+    )
+    .expect_err("use-test must reject caller-supplied AuthoringSpec");
+    assert!(
+        error
+            .to_string()
+            .contains("unknown field(s): authoring_spec"),
+        "{error}"
+    );
+}
+
+#[test]
+fn use_test_qa_prompts_do_not_echo_host_schemas_or_catalog_capabilities() {
+    let source = std::fs::read_to_string(workflow_dir().join("local-app-use-test.js"))
+        .expect("read use-test workflow");
+    let prompts_seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let prompts_for_run = Arc::clone(&prompts_seen);
+    let mut args = use_test_args("balanced");
+    let context = args["host_context"]
+        .as_object_mut()
+        .expect("host context object");
+    context["schemas"]["schema_secret"] =
+        serde_json::Value::String("schema_secret_sentinel".into());
+    context.insert(
+        "template_catalog".into(),
+        serde_json::json!({"catalog_secret": "catalog_secret_sentinel"}),
+    );
+    context.insert(
+        "selector_capability".into(),
+        serde_json::Value::String("selector_secret_sentinel".into()),
+    );
+    workflow::run_with_progress(
+        &source,
+        move |prompts, options| {
+            prompts
+                .iter()
+                .zip(options.iter())
+                .map(|(prompt, options)| {
+                    prompts_for_run
+                        .lock()
+                        .expect("prompt capture")
+                        .push(prompt.clone());
+                    passing_qa_reply(&stage_label(options), "wf_use_test", "balanced")
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(args.to_string()),
+        None,
+    )
+    .expect("use-test should retain only its bounded QA context");
+    for prompt in prompts_seen.lock().expect("prompts").iter() {
+        for secret in [
+            "selector_secret_sentinel",
+            "catalog_secret_sentinel",
+            "schema_secret_sentinel",
+        ] {
+            assert!(
+                !prompt.contains(secret),
+                "use-test prompt leaked {secret}: {prompt}"
+            );
+        }
+        assert!(
+            prompt.contains("primary-action"),
+            "use-test prompt lost the persisted acceptance identity: {prompt}"
+        );
+    }
+}
+
+#[test]
+fn use_test_returns_host_candidate_failure_instead_of_throwing() {
+    let source = std::fs::read_to_string(workflow_dir().join("local-app-use-test.js"))
+        .expect("read use-test workflow");
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| failing_qa_reply(&stage_label(options), "wf_use_test", "balanced"))
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(use_test_args("balanced").to_string()),
+        None,
+    )
+    .expect("a Host verification failure is a structured workflow outcome");
+    let result = outcome.result.expect("use-test result");
+    assert!(result.contains("\"ok\":false"), "{result}");
+    assert!(
+        result.contains("\"status\":\"verification_failed\""),
+        "{result}"
+    );
+    assert!(result.contains("receipt-qa-result-tester"), "{result}");
+    assert!(result.contains("the save button does nothing"), "{result}");
+}
+
+#[test]
+fn use_test_returns_infrastructure_failure_without_throwing_or_resampling() {
+    let source = std::fs::read_to_string(workflow_dir().join("local-app-use-test.js"))
+        .expect("read use-test workflow");
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let calls_for_run = Arc::clone(&calls);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    calls_for_run.lock().expect("call log").push(label.clone());
+                    if label.starts_with("operator-") {
+                        operator_report("qa_00000000000000000000000000000000").to_string()
+                    } else {
+                        serde_json::json!({
+                            "status": "infrastructure_failed",
+                            "qa_handle": "qa_00000000000000000000000000000000",
+                            "findings": [],
+                            "summary": "Host QA backend unavailable"
+                        })
+                        .to_string()
+                    }
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(use_test_args("balanced").to_string()),
+        None,
+    )
+    .expect("infrastructure failure is a structured workflow outcome");
+    let result = outcome.result.expect("use-test result");
+    assert!(result.contains("\"ok\":false"), "{result}");
+    assert!(
+        result.contains("\"status\":\"infrastructure_failed\""),
+        "{result}"
+    );
+    assert!(result.contains("\"evidence_resamples\":0"), "{result}");
+    assert_eq!(
+        calls.lock().expect("call log").as_slice(),
+        ["operator-0", "tester-0"]
+    );
+}
+
+#[test]
+fn verifier_and_tester_agent_grants_remain_read_only() {
+    let agents = workflow_dir().parent().expect("plugin root").join("agents");
+    let verifier = std::fs::read_to_string(agents.join("verifier.md")).expect("verifier");
+    let tester = std::fs::read_to_string(agents.join("tester.md")).expect("tester");
+    let designer = std::fs::read_to_string(agents.join("designer.md")).expect("designer");
+    for (role, source) in [("verifier", &verifier), ("tester", &tester)] {
+        let grants = source.split("---").nth(1).unwrap_or_default();
+        for forbidden in [
+            "LocalAppInspectUi",
+            "LocalAppCaptureUi",
+            "LocalAppActOnUi",
+            "LocalAppMutateData",
+            "LocalAppBuild",
+            "LocalAppPromoteMcpCandidate",
+            "Write",
+            "Edit",
+        ] {
+            assert!(
+                !grants
+                    .lines()
+                    .any(|line| line.trim() == format!("- {forbidden}")),
+                "{role} must not grant {forbidden}: {grants}"
+            );
+        }
+    }
+    let designer_grants = designer.split("---").nth(1).unwrap_or_default();
+    for engine in [
+        "ionic-react-local-app",
+        "canvas-2d-local-app",
+        "threejs-local-app",
+        "phaser-2d-local-app",
+        "babylon-3d-local-app",
+    ] {
+        assert!(
+            !designer_grants.contains(engine),
+            "designer must not preload engine guide {engine}"
+        );
+    }
+}
+
+#[test]
+fn mcp_promotion_uses_a_dedicated_tools_only_agent() {
+    let agents = workflow_dir().parent().expect("plugin root").join("agents");
+    let promoter = std::fs::read_to_string(agents.join("mcp-promoter.md")).expect("mcp promoter");
+    let grants = promoter.split("---").nth(1).unwrap_or_default();
+    assert!(
+        grants
+            .lines()
+            .any(|line| line.trim() == "- LocalAppPromoteMcpCandidate"),
+        "promoter must have the Host promotion tool: {grants}"
+    );
+    for forbidden in [
+        "Write",
+        "Edit",
+        "LocalAppBuild",
+        "LocalAppMutateData",
+        "LocalAppQaFinalize",
+    ] {
+        assert!(
+            !grants
+                .lines()
+                .any(|line| line.trim() == format!("- {forbidden}")),
+            "promoter must not grant {forbidden}: {grants}"
+        );
+    }
+    let workflow = std::fs::read_to_string(workflow_dir().join("local-app-mcp-authoring.js"))
+        .expect("mcp workflow");
+    assert!(
+        workflow.contains("agentType: 'mcp-promoter'"),
+        "promotion must run as the dedicated promoter role"
+    );
+    assert!(
+        !workflow.contains("agentType: 'verifier', label: 'mcp-promote'"),
+        "verifier must not own MCP promotion"
+    );
+    let inventory = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../apps/engine-mobile/builtin-plugin-inventory.txt");
+    let inventory = std::fs::read_to_string(inventory).expect("plugin inventory");
+    assert!(
+        inventory
+            .lines()
+            .any(|line| line.trim() == "agents/mcp-promoter.md"),
+        "promoter must be registered in the compiled plugin inventory"
+    );
+}
+
+#[test]
+fn mcp_proposal_schema_uses_the_actual_host_dto_wire_names() {
+    let path = workflow_dir()
+        .parent()
+        .expect("plugin root")
+        .join("schemas/mcp-proposal.schema.json");
+    let schema: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).expect("read MCP proposal schema"))
+            .expect("parse MCP proposal schema");
+    let properties = schema["properties"]
+        .as_object()
+        .expect("proposal properties");
+    for required in [
+        "appId",
+        "manifestRevision",
+        "userGoalSha256",
+        "tools",
+        "requiredFlowChanges",
+        "excludedCapabilities",
+    ] {
+        assert!(
+            properties.contains_key(required),
+            "missing Host DTO field {required}"
+        );
+    }
+    for stale in [
+        "app_id",
+        "manifest_revision",
+        "user_goal_sha256",
+        "required_flow_changes",
+        "excluded_capabilities",
+    ] {
+        assert!(
+            !properties.contains_key(stale),
+            "stale non-DTO field {stale}"
+        );
+    }
+    assert_eq!(schema["additionalProperties"], false);
+    assert!(
+        schema["properties"]["tools"].get("minItems").is_none(),
+        "the Host DTO and workflow both support a zero-tool candidate"
+    );
+    let tool = schema["$defs"]["tool"]["properties"]
+        .as_object()
+        .expect("tool properties");
+    for field in [
+        "inputSchema",
+        "outputSchema",
+        "semanticFlowId",
+        "inputs",
+        "result",
+    ] {
+        assert!(
+            tool.contains_key(field),
+            "missing AppMcpToolProposal field {field}"
+        );
+    }
+    let variants = schema["$defs"]["flow_value_binding"]["oneOf"]
+        .as_array()
+        .expect("FlowValueBinding variants");
+    for tag in ["literal", "tool_input", "step_output"] {
+        assert!(
+            variants
+                .iter()
+                .any(|variant| variant["properties"].get(tag).is_some()),
+            "missing serde FlowValueBinding tag {tag}"
+        );
+    }
+}
+
+#[test]
+fn callback_fixtures_are_host_shaped_and_invalid_qa_handles_fail_closed() {
+    let spec = authoring_spec();
+    assert!(!spec["design"]["presentations"]
+        .as_array()
+        .expect("fixture presentations")
+        .is_empty());
+    assert_eq!(spec["targets"][0]["form_factor"], "iphone");
+    let candidate = qa_candidate_report(
+        "wf_fixture",
+        "balanced",
+        true,
+        false,
+        "qa_0123456789abcdef0123456789abcdef",
+    );
+    assert!(!candidate["result"]["evidence"]
+        .as_array()
+        .expect("fixture evidence")
+        .is_empty());
+    assert_eq!(
+        candidate["result"]["scenario_judgements"][0]["evidence_ids"][0],
+        candidate["result"]["evidence"][0]["evidence_id"]
+    );
+
+    let source = build_workflow_script();
+    let error = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    if let Some(canned) = canned_stage_reply(&label) {
+                        return canned;
+                    }
+                    if label.starts_with("operator-") {
+                        return operator_report("qa_test").to_string();
+                    }
+                    passing_qa_reply(&label, "wf_regression", "balanced")
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    )
+    .expect_err("a permissive callback runner must not make a non-Host QA handle green");
+    assert!(error.to_string().contains("qa_<32>"), "{error}");
 }

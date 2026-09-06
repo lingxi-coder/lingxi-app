@@ -51,6 +51,16 @@ pub fn runtime_transition_allowed(from: AppRuntimeState, to: AppRuntimeState) ->
     )
 }
 
+fn monotonic_runtime_timestamp(previous: u64, requested: u64) -> Result<u64, AppError> {
+    if requested > previous {
+        Ok(requested)
+    } else {
+        previous.checked_add(1).ok_or_else(|| {
+            AppError::InvalidRequest("runtime generation timestamp exhausted".into())
+        })
+    }
+}
+
 /// The full in-memory state of one app: record + runtime record (mirroring
 /// the two persisted documents).
 #[derive(Debug, Clone, PartialEq)]
@@ -151,6 +161,7 @@ impl AppState {
                 self.record.id
             )));
         }
+        let next_timestamp = monotonic_runtime_timestamp(self.runtime.updated_at_ms, now_ms)?;
         if let Some(new_port) = port {
             match self.runtime.port {
                 Some(existing) if existing != new_port => {
@@ -165,15 +176,17 @@ impl AppState {
         self.runtime.state = next;
         self.runtime.pid = pid;
         self.runtime.last_error = last_error;
-        self.runtime.updated_at_ms = now_ms;
+        self.runtime.updated_at_ms = next_timestamp;
         Ok(())
     }
 
     /// Persist the distribution-selected runtime mode independently from the
     /// process-state transition table.
-    pub fn set_runtime_mode(&mut self, mode: AppRuntimeMode, now_ms: u64) {
+    pub fn set_runtime_mode(&mut self, mode: AppRuntimeMode, now_ms: u64) -> Result<(), AppError> {
+        let next_timestamp = monotonic_runtime_timestamp(self.runtime.updated_at_ms, now_ms)?;
         self.runtime.mode = Some(mode);
-        self.runtime.updated_at_ms = now_ms;
+        self.runtime.updated_at_ms = next_timestamp;
+        Ok(())
     }
 }
 
@@ -336,10 +349,53 @@ mod tests {
     #[test]
     fn set_runtime_mode_stamps_the_mode_and_timestamp() {
         let mut a = app();
-        a.set_runtime_mode(AppRuntimeMode::StaticExport, 42);
+        a.set_runtime_mode(AppRuntimeMode::StaticExport, 42)
+            .unwrap();
         assert_eq!(a.runtime.mode, Some(AppRuntimeMode::StaticExport));
         assert_eq!(a.runtime.updated_at_ms, 42);
-        a.set_runtime_mode(AppRuntimeMode::NextProduction, 43);
+        a.set_runtime_mode(AppRuntimeMode::NextProduction, 43)
+            .unwrap();
         assert_eq!(a.runtime.mode, Some(AppRuntimeMode::NextProduction));
+    }
+
+    #[test]
+    fn runtime_timestamps_advance_when_clock_repeats() {
+        let mut a = app();
+        a.set_runtime(AppRuntimeState::Starting, None, None, None, 10)
+            .unwrap();
+        assert_eq!(a.runtime.updated_at_ms, 11);
+        a.set_runtime(AppRuntimeState::Running, None, None, None, 10)
+            .unwrap();
+        assert_eq!(a.runtime.updated_at_ms, 12);
+        a.set_runtime_mode(AppRuntimeMode::StaticExport, 10)
+            .unwrap();
+        assert_eq!(a.runtime.updated_at_ms, 13);
+    }
+
+    #[test]
+    fn runtime_timestamp_exhaustion_fails_closed() {
+        let mut a = app();
+        a.runtime.updated_at_ms = u64::MAX;
+        let before = a.clone();
+        let error = a
+            .set_runtime(
+                AppRuntimeState::Starting,
+                Some(3210),
+                Some(99),
+                Some("must not land".into()),
+                u64::MAX,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), AppErrorCode::InvalidRequest);
+        assert_eq!(
+            a, before,
+            "timestamp allocation must precede every mutation"
+        );
+
+        let error = a
+            .set_runtime_mode(AppRuntimeMode::StaticExport, u64::MAX)
+            .unwrap_err();
+        assert_eq!(error.code(), AppErrorCode::InvalidRequest);
+        assert_eq!(a, before, "mode mutation must also fail atomically");
     }
 }

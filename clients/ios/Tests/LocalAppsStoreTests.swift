@@ -4,6 +4,69 @@ import WebKit
 
 @MainActor
 final class LocalAppsStoreTests: XCTestCase {
+    func testQaEnvelopePreservesOpaqueActionValueAndAddsRuntimeIdentity() throws {
+        let original = #"{"rect":{"x":10.5,"y":2,"width":30,"height":20}}"#
+        let valueData = try JSONSerialization.data(withJSONObject: [
+            "lingxi_qa": [
+                "version": 1,
+                "expected_runtime_url": "http://127.0.0.1:43123/?lingxi_runtime=42",
+                "action_value": original,
+            ],
+        ])
+        let value = try XCTUnwrap(String(data: valueData, encoding: .utf8))
+        let envelope = try XCTUnwrap(try LocalAppQaEnvelope.decode(value, requestID: "qa-ui-1").get())
+        XCTAssertEqual(envelope.expectedRuntimeURL.absoluteString, "http://127.0.0.1:43123/?lingxi_runtime=42")
+        XCTAssertEqual(envelope.actionValue, original)
+        XCTAssertNil(try LocalAppQaEnvelope.decode(value, requestID: "app-ui-1").get())
+        XCTAssertNil(try LocalAppQaEnvelope.decode(original, requestID: "app-ui-2").get())
+    }
+
+    func testQaEnvelopeRejectsMissingMarkerAndNonStringActionValue() throws {
+        let missingMarker = #"{"lingxi_qa":{"version":1,"expected_runtime_url":"http://127.0.0.1:43123","action_value":null}}"#
+        XCTAssertThrowsError(try LocalAppQaEnvelope.decode(missingMarker, requestID: "qa-ui-1").get())
+        let nonString = #"{"lingxi_qa":{"version":1,"expected_runtime_url":"http://127.0.0.1:43123/?lingxi_runtime=42","action_value":{"x":1}}}"#
+        XCTAssertThrowsError(try LocalAppQaEnvelope.decode(nonString, requestID: "qa-ui-2").get())
+        let booleanVersion = #"{"lingxi_qa":{"version":true,"expected_runtime_url":"http://127.0.0.1:43123/?lingxi_runtime=42","action_value":null}}"#
+        XCTAssertThrowsError(try LocalAppQaEnvelope.decode(booleanVersion, requestID: "qa-ui-3").get())
+        let routedExpected = #"{"lingxi_qa":{"version":1,"expected_runtime_url":"http://127.0.0.1:43123/route?lingxi_runtime=42","action_value":null}}"#
+        XCTAssertThrowsError(try LocalAppQaEnvelope.decode(routedExpected, requestID: "qa-ui-4").get())
+    }
+
+    func testRuntimeIdentityIgnoresRoutePathButRequiresGenerationMarker() throws {
+        let expected = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/?lingxi_runtime=42"))
+        let route = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/settings?lingxi_runtime=42"))
+        let stale = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/settings?lingxi_runtime=41"))
+        XCTAssertTrue(LocalAppWebViewController.sameRuntimeIdentity(expected, route))
+        XCTAssertFalse(LocalAppWebViewController.sameRuntimeIdentity(expected, stale))
+    }
+
+    func testQaControllerRejectsStaleSamePortFinishAndCannotReviveAfterClose() throws {
+        let runtimeA = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/?lingxi_runtime=41"))
+        let runtimeB = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/?lingxi_runtime=42"))
+        let routeB = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/settings?lingxi_runtime=42"))
+        let controller = LocalAppWebViewController(
+            appID: "tracker",
+            broker: LocalAppBridgeBroker(appID: "tracker")
+        )
+        controller.webView = WKWebView()
+
+        let generationA = controller.beginNavigation(expectedURL: runtimeA)
+        controller.markReady(committedURL: runtimeA, navigationGeneration: generationA)
+        XCTAssertEqual(controller.qaDocument(expectedURL: runtimeA)?.navigationGeneration, generationA)
+
+        let generationB = controller.beginNavigation(expectedURL: runtimeB)
+        controller.markReady(committedURL: runtimeA, navigationGeneration: generationA)
+        XCTAssertNil(controller.qaDocument(expectedURL: runtimeB), "late generation A callback must be ignored")
+        controller.markReady(committedURL: runtimeA, navigationGeneration: generationB)
+        XCTAssertNil(controller.qaDocument(expectedURL: runtimeB), "same port does not make runtime A equal B")
+        controller.markReady(committedURL: routeB, navigationGeneration: generationB)
+        XCTAssertEqual(controller.qaDocument(expectedURL: runtimeB)?.loadedURL, routeB)
+
+        controller.close()
+        controller.markReady(committedURL: routeB, navigationGeneration: generationB)
+        XCTAssertNil(controller.qaDocument(expectedURL: runtimeB), "a detached controller cannot be revived")
+    }
+
     func testFilteringUsesLocalizedSearch() {
         let store = LocalAppsStore()
         #if canImport(engine_mobileFFI)
@@ -1537,6 +1600,129 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(value, "Orders")
         }
 
+        func testQaExecutionPreservesExplicitNullActionValueAndAttestsTheFinishedDocument() async throws {
+            let runtimeURL = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/?lingxi_runtime=42"))
+            let broker = LocalAppBridgeBroker(appID: "tracker")
+            let controller = LocalAppWebViewController(appID: "tracker", broker: broker)
+            let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+            controller.webView = webView
+            let generation = controller.beginNavigation(expectedURL: runtimeURL)
+            webView.loadHTMLString(#"<input id="title" value="Orders">"#, baseURL: runtimeURL)
+            try await waitForElement("title", in: webView)
+            let committedURL = try XCTUnwrap(webView.url)
+            XCTAssertTrue(LocalAppWebViewController.sameRuntimeIdentity(runtimeURL, committedURL))
+            controller.markReady(committedURL: committedURL, navigationGeneration: generation)
+
+            let wrapperData = try JSONSerialization.data(withJSONObject: [
+                "lingxi_qa": [
+                    "version": 1,
+                    "expected_runtime_url": runtimeURL.absoluteString,
+                    "action_value": NSNull(),
+                ],
+            ])
+            let wrapper = try XCTUnwrap(String(data: wrapperData, encoding: .utf8))
+            let response = await controller.execute(request: AppUiRequestDto(
+                requestId: "qa-ui-fill",
+                appId: "tracker",
+                action: .fill,
+                target: AppUiTargetDto(elementId: "title", role: nil, name: nil),
+                value: wrapper
+            ))
+
+            XCTAssertNil(response.error)
+            let fieldValue = try await webView.evaluateJavaScript(
+                "document.getElementById('title').value"
+            ) as? String
+            XCTAssertEqual(
+                fieldValue,
+                "",
+                "action_value:null must remain null, not become the QA wrapper text"
+            )
+            let responseData = try XCTUnwrap(response.resultJSON?.data(using: .utf8))
+            let object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: responseData) as? [String: Any]
+            )
+            let attestation = try XCTUnwrap(object["lingxi_qa"] as? [String: Any])
+            XCTAssertEqual(attestation["requested_runtime_url"] as? String, runtimeURL.absoluteString)
+            XCTAssertEqual(attestation["loaded_runtime_url"] as? String, committedURL.absoluteString)
+            XCTAssertEqual(attestation["navigation_generation"] as? Int, Int(generation))
+            XCTAssertNotNil(object["result"] as? [String: Any])
+
+            let ordinary = await controller.execute(request: AppUiRequestDto(
+                requestId: "app-ui-literal",
+                appId: "tracker",
+                action: .fill,
+                target: AppUiTargetDto(elementId: "title", role: nil, name: nil),
+                value: wrapper
+            ))
+            XCTAssertNil(ordinary.error)
+            let ordinaryFieldValue = try await webView.evaluateJavaScript(
+                "document.getElementById('title').value"
+            ) as? String
+            XCTAssertEqual(
+                ordinaryFieldValue,
+                wrapper,
+                "an ordinary request must treat reserved-looking JSON as literal text"
+            )
+        }
+
+        func testQaRegistryWaitsForTheCurrentRuntimeControllerInsteadOfUsingStaleSamePortController() async throws {
+            let runtimeA = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/?lingxi_runtime=41"))
+            let runtimeB = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/?lingxi_runtime=42"))
+            let stale = LocalAppWebViewController(
+                appID: "tracker",
+                broker: LocalAppBridgeBroker(appID: "tracker")
+            )
+            stale.webView = WKWebView()
+            let staleGeneration = stale.beginNavigation(expectedURL: runtimeA)
+            stale.markReady(committedURL: runtimeA, navigationGeneration: staleGeneration)
+            LocalAppWebViewRegistry.shared.register(stale, appID: "tracker")
+
+            let wrapperData = try JSONSerialization.data(withJSONObject: [
+                "lingxi_qa": [
+                    "version": 1,
+                    "expected_runtime_url": runtimeB.absoluteString,
+                    "action_value": NSNull(),
+                ],
+            ])
+            let wrapper = try XCTUnwrap(String(data: wrapperData, encoding: .utf8))
+            let request = AppUiRequestDto(
+                requestId: "qa-ui-current-controller",
+                appId: "tracker",
+                action: .inspect,
+                target: nil,
+                value: wrapper
+            )
+            async let pendingResult = LocalAppWebViewRegistry.shared.execute(request: request)
+            try await Task.sleep(for: .milliseconds(100))
+
+            let current = LocalAppWebViewController(
+                appID: "tracker",
+                broker: LocalAppBridgeBroker(appID: "tracker")
+            )
+            let currentWebView = WKWebView()
+            current.webView = currentWebView
+            let currentGeneration = current.beginNavigation(expectedURL: runtimeB)
+            LocalAppWebViewRegistry.shared.register(current, appID: "tracker")
+            defer { LocalAppWebViewRegistry.shared.unregister(current, appID: "tracker") }
+            currentWebView.loadHTMLString(#"<main id="runtime-b">Runtime B</main>"#, baseURL: runtimeB)
+            try await waitForElement("runtime-b", in: currentWebView)
+            let committedURL = try XCTUnwrap(currentWebView.url)
+            current.markReady(committedURL: committedURL, navigationGeneration: currentGeneration)
+
+            let result = await pendingResult
+            XCTAssertNil(result.error)
+            XCTAssertTrue(stale.webView == nil, "replacement must detach the stale controller")
+            let data = try XCTUnwrap(result.resultJSON?.data(using: .utf8))
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let attestation = try XCTUnwrap(object["lingxi_qa"] as? [String: Any])
+            XCTAssertEqual(attestation["requested_runtime_url"] as? String, runtimeB.absoluteString)
+            let loadedString = try XCTUnwrap(attestation["loaded_runtime_url"] as? String)
+            let loadedURL = try XCTUnwrap(URL(string: loadedString))
+            XCTAssertTrue(LocalAppWebViewController.sameRuntimeIdentity(runtimeB, loadedURL))
+            XCTAssertEqual(attestation["navigation_generation"] as? Int, Int(currentGeneration))
+        }
+
         /// Fix round 1 — code review required PROOF, not an assertion, that
         /// `TextEncoder` (which the budget ladder in `snapshot()` now calls
         /// to measure real UTF-8 bytes) is not silently blocked by the CSP
@@ -2077,6 +2263,45 @@ final class LocalAppsStoreTests: XCTestCase {
                 result = await controller.execute(request: request)
             }
             return result
+        }
+
+        func testQaCaptureAttestationPreservesTheOwnedImageObject() async throws {
+            let runtimeURL = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/?lingxi_runtime=42"))
+            let (controller, webView, window) = makeComposedCaptureController()
+            defer { window.isHidden = true }
+            let generation = controller.beginNavigation(expectedURL: runtimeURL)
+            webView.loadHTMLString(
+                #"<body style="margin:0;background:#3366ff"><div id="ready">hi</div></body>"#,
+                baseURL: runtimeURL
+            )
+            try await waitForElement("ready", in: webView)
+            let committedURL = try XCTUnwrap(webView.url)
+            controller.markReady(committedURL: committedURL, navigationGeneration: generation)
+            let cropValue = #"{"rect":{"x":0,"y":0,"width":118,"height":74}}"#
+            let wrapperData = try JSONSerialization.data(withJSONObject: [
+                "lingxi_qa": [
+                    "version": 1,
+                    "expected_runtime_url": runtimeURL.absoluteString,
+                    "action_value": cropValue,
+                ],
+            ])
+            let wrapper = try XCTUnwrap(String(data: wrapperData, encoding: .utf8))
+
+            let result = await captureUntilComposited(controller, request: AppUiRequestDto(
+                requestId: "qa-ui-capture",
+                appId: "tracker",
+                action: .captureView,
+                target: nil,
+                value: wrapper
+            ))
+            XCTAssertNil(result.error, "QA capture never succeeded: \(result.error ?? "?")")
+            let data = try XCTUnwrap(result.resultJSON?.data(using: .utf8))
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let original = try XCTUnwrap(object["result"] as? [String: Any])
+            let image = try XCTUnwrap(original["image"] as? [String: Any])
+            XCTAssertFalse((image["data"] as? String)?.isEmpty ?? true)
+            XCTAssertEqual((original["capture_rect"] as? [String: Any])?["width"] as? Double, 118)
+            XCTAssertNotNil(object["lingxi_qa"] as? [String: Any])
         }
 
         /// Fix round 1, ruling point 1 — `capture_rect` must be OMITTED
@@ -3649,11 +3874,10 @@ final class LocalAppsStoreTests: XCTestCase {
         /// Every value `LocalAppVerificationSummaryDto.code` can carry maps to
         /// the client's own catalog, INCLUDING `nil`.
         ///
-        /// The four production emitters are in `local_apps_host.rs`:
-        /// `needs_setup`, `needs_revalidation`, `verification_unavailable`,
-        /// and no code at all for a clean MCP pass. The `nil` case is the one
-        /// that matters most — it is the state that otherwise still renders
-        /// the engine's English.
+        /// Existing MCP summaries use `needs_setup`, `needs_revalidation`,
+        /// `verification_unavailable`, or no code for a clean MCP pass. Host
+        /// UI verification uses three explicit `ui_verification_*` codes, so a
+        /// UI pass can never reuse the nil-code MCP sentence.
         ///
         /// Each key is asserted to differ BOTH from the raw key (so deleting
         /// the key from the catalog fails here instead of putting
@@ -3670,6 +3894,18 @@ final class LocalAppsStoreTests: XCTestCase {
                 (
                     "verification_unavailable", .unavailable,
                     "local_apps_verification_summary_verification_unavailable"
+                ),
+                (
+                    "ui_verification_required", .unverified,
+                    "local_apps_verification_summary_ui_verification_required"
+                ),
+                (
+                    "ui_verification_passed", .passed,
+                    "local_apps_verification_summary_ui_verification_passed"
+                ),
+                (
+                    "ui_verification_corrupt", .failed,
+                    "local_apps_verification_summary_ui_verification_corrupt"
                 ),
                 (nil, .passed, "local_apps_verification_summary_passed"),
             ]
@@ -3688,6 +3924,15 @@ final class LocalAppsStoreTests: XCTestCase {
                     summary.localizedSummary, engineEnglish,
                     "code \(code ?? "nil") must NOT fall through to the engine's English")
             }
+
+            let uiPass = LocalAppVerificationSummary(
+                status: .passed,
+                summary: "Host UI/data verification evidence passed.",
+                code: "ui_verification_passed")
+            XCTAssertNotEqual(
+                uiPass.localizedSummary,
+                String(localized: "local_apps_verification_summary_passed"),
+                "a UI QA pass must never render the nil-code MCP verification sentence")
         }
 
         /// An unrecognized future code keeps the engine's sentence rather than

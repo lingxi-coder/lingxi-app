@@ -4,8 +4,10 @@
 # path. Keep entries root-relative and sorted.
 .lingxi-plugin/plugin.json
 agents/builder.md
+agents/create-preparer.md
 agents/designer.md
 agents/mcp-designer.md
+agents/mcp-promoter.md
 agents/operator.md
 agents/template-selector.md
 agents/tester.md
@@ -133,10 +135,12 @@ assets/templates/three-3d/r1/public/.gitkeep
 assets/templates/three-3d/r1/src/stores/game-store.js
 assets/templates/three-3d/r1/styles/foundation.css
 assets/templates/three-3d/r1/vite.config.mjs
+schemas/authoring-spec.schema.json
 schemas/design-spec.schema.json
 schemas/mcp-proposal.schema.json
 schemas/qa-report.schema.json
 schemas/use-test-report.schema.json
+schemas/workflow-agent-results.schema.json
 skills/accessibility/SKILL.md
 skills/accessibility/agents/openai.yaml
 skills/accessibility/references/profiles/canvas.md

@@ -27,80 +27,62 @@ surface, an empty workspace, and an app-scoped conversation — and hands that
 conversation to you. Its `LINGXI.md` names the app id and says the app has no
 shape yet. Settling what the app IS is your work in that conversation:
 
-**If the shell's workspace contract already handed off to this skill, RESUME AT
-STEP 3.** That contract is the `LINGXI.md` a `+`-created shell carries; it runs
-its own steps 1-4 before it invokes `lingxi-local-app:create-local-app`, and its
-step 5 says so in as many words. By the time you are reading this file through
-that hand-off, the opening question, the one clarification round, the display
-**name**, the **shape** (`dom` or `canvas`) and the MCP choice have all been
-answered in this same conversation. Carry those answers forward verbatim and ask
-none of them a second time — re-asking throws away what the user just told you.
-Step 3 below is where you re-enter, and inside it only the one-line **brief** and
-the runtime sub-profile *within the already-confirmed shape* are still open; the
-name is confirmed, so restate it rather than re-propose it. Steps 1-2 apply only
-when you entered this skill WITHOUT that hand-off — for instance from a
-conversation that never went through a shell contract.
+If a shell workspace contract handed off to this skill, carry forward only the
+answers explicitly present in the current conversation. Do not assume that
+name, targets, runtime family, MCP intent, or visual decisions were already
+confirmed, and never re-ask a decision the user has actually answered. Fill
+only the remaining material gaps before the final AuthoringSpec confirmation.
 
-1. Open in ORDINARY ASSISTANT TEXT: ask what they want to build, in one short
-   open question, and wait for their answer. Do NOT use `AskUserQuestion` here.
-   That tool renders a picker, and on this turn you know nothing about the app,
-   so every option you could put in it is a guess at the user's own idea —
-   handing them a menu of your guesses replaces the description you actually
-   need. Their words in their own phrasing are the input to everything below,
-   and no option list can collect them. This one opening turn is the single
-   deliberate exception to the rule further down about unresolved questions in
-   ordinary text; from step 2 onward that rule holds without exception.
+1. If no product request or usable brief is present, open in ORDINARY ASSISTANT
+   TEXT with one short open question asking what they want to build, then wait
+   for the answer. Do NOT use `AskUserQuestion` for that opening: a picker
+   would guess the user's idea. If the current conversation or Host handoff
+   already contains a product request, skip the question and use that brief
+   verbatim; never re-ask an answered decision.
 2. Read what they wrote and settle whatever it already settles. Infer every
-   point the description and the host device context determine, state the
-   inference, and move on — do not ask back something they have already told
-   you. Ask at most ONE clarification `AskUserQuestion` round: omit the round
-   if none are material; otherwise ask 1-3 focused questions, never padding a
-   quota, then use the answers in step 3.
-3. Call `LocalAppRuntimeProfiles`, then propose a display **name**, a one-line
-   **brief**, and one available **runtime profile**. Show its derived surface,
-   core engine, revision, and recommendation reason in the same final
-   confirmation. Profile family is immutable once committed, so it is the
-   user's call to confirm.
-4. In **ordinary conversational text**, tell the user in one or two sentences
-   what MCP is and what it would let this specific app do — reach a live
-   external service or data source it could not reach on its own. Call
-   `LocalAppTemplateCatalog` and read the `mcpSuggestions` for the template
-   family matching the confirmed runtime profile, then turn those into 2-3
-   concrete named recommendations for THIS app rather than asking a bare
-   "do you want MCP?" with nothing to say yes to. Use `AskUserQuestion` to let
-   the user pick which of those to set up, or none. If this conversation already
-   carries that answer — the workspace contract's own step 4 asked it before the
-   skill started, and wrote the picked service names or the refusal back in plain
-   text — carry that answer forward instead of asking a second time. Nothing is
-   set up now — creating the app never runs MCP authoring — this only decides
-   what carries forward into step 5 below as `mcp_intent`.
+   point the description and host context determine, state the inference, and
+   move on. Ask only material unresolved questions; there is no question-count
+   quota and no re-asking of an answered decision. Continue until the confirmed
+   AuthoringSpec is complete, then use the answers in step 3.
+3. Call `LocalAppRuntimeProfiles` to make a technical recommendation, then
+   propose a display **name**, one-line **brief**, targets, and the complete
+   AuthoringSpec. Include a user-facing one-line UI summary naming the
+   structure/navigation, light/dark/system theme and accent, style/density, and
+   phone/tablet or Canvas treatment. Show the profile's derived surface, core
+   engine, revision, and recommendation reason in the same final confirmation.
+   Do not turn a technical profile recommendation into a separate mandatory
+   questionnaire; the Host-verified selector commits it only after the
+   confirmed spec.
+4. Keep MCP authoring separate from creation, but preserve an explicit
+   create-time MCP intent when the user names business capabilities they want
+   the LLM to expose later. Explain the distinction between app-exposure
+   capabilities and external integrations, read the verified catalog's
+   `mcpSuggestions`, and ask only if that intent is materially unresolved. If
+   asked, record `{"status":"declined"}` or
+   `{"status":"requested","capabilities":[...]}`; if not asked, omit
+   `mcp_intent` so Host records `never_asked`. This does not configure or
+   publish MCP during creation.
 5. After the conversational confirmation, call the unified
    `lingxi-local-app:local-app-build` create branch through the `Workflow`
    tool for this shell app. That
    Host-owned path re-reads the template catalog, stages the create candidate,
    shows one trusted native create confirmation, and only then calls
-   `LocalAppScaffold`. Pass the display **name** and **brief** the user just
+   `LocalAppScaffold`. Pass the complete Host-bound AuthoringSpec, including
+   product, targets, UI structure/theme/style, design, and acceptance checks.
+   Pass the display **name** and **brief** the user just
    confirmed in step 3 verbatim: they are staged with the create candidate, they
    are what the native create confirmation sheet renders, and they are what the
    Host commits onto the record — the shell app created in step 1 is still the
    empty `untitled` placeholder, so a create launched without them cannot show
-   or commit the confirmed wording. Pass the user's step 4 MCP choice as
-   `mcp_intent` in the same call — `{"status":"declined"}` when they declined,
-   or `{"status":"requested","services":["<name>", ...]}` naming the exact
-   services they picked from `mcpSuggestions`. If step 4 never ran at all, omit
-   `mcp_intent` from the call entirely: a create that omits it is recorded as
-   never-asked, and sending `{"status":"declined"}` for a question nobody asked
-   is what stops the app's settings from ever offering MCP again. `LocalAppStageCreate` stages it
-   alongside name/brief and the Host commits it onto the record, where the
-   app's formal `LINGXI.md` carries it forward for the Settings MCP flow to
-   read later. App creation itself never runs MCP authoring: the app-owned MCP
-   remains unconfigured and disabled until the user explicitly
-   starts MCP setup from that app's settings. Never call a
+   or commit the confirmed wording. App creation itself never runs MCP
+   authoring: the app-owned MCP remains unconfigured and disabled until the
+   user explicitly starts MCP setup from that app's settings. Pass the exact
+   `mcp_intent` outcome when one was collected; never call a
    standalone runtime-profile selector or pass a model-authored
    surface/profile override. Do not supply `args.runtime_profile` as an authority; on a create launch the host strips any caller-supplied `runtime_profile` at the launch boundary and injects no profile at all — the profile is fixed later in the run by the Host-verified template selection:
 
 ```
-Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<the id LINGXI.md names>","name":"<the display name confirmed in step 3>","brief":"<the one-line brief confirmed in step 3>","spec":"<confirmed product + UI + data + runtime intent>","quality_level":"balanced","mcp_intent":<the step 4 answer — {"status":"declined"} or {"status":"requested","services":["<each service they picked>"]}; omit this key entirely if step 4 never ran>}})
+Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"app_123","name":"Errand List","brief":"Track errands with a quick add flow","authoring_spec":{"product":{"goal":"Track errands","tasks":["add an errand"],"external_integrations":[]},"targets":[{"id":"phone","os":"ios","form_factor":"iphone"}],"ui":{"structure":["list","editor"],"theme":{"mode":"system","accent":"blue"},"style":{"direction":"clear","density":"comfortable"},"references":[]},"design":{"presentations":[{"target_id":"phone","presentation":"single-column list","navigation":"push editor; back returns to list"}],"tokens":{"spacing":"8px"},"states":{"loading":"skeleton","empty":"prompt to add","error":"retry","success":"show list","permission":"explain if needed"},"inputs":{"pointer_touch":["tap"],"keyboard_mouse":["tab"],"back":"pop editor","reduced_motion":"respect device"},"canvas":null},"acceptance_checks":[{"id":"add-item","target_ids":["phone"],"required":true,"preconditions":[],"steps":["open editor","save errand"],"expected":"errand appears in list","evidence":["inspect","ui_action"]}]},"quality_level":"balanced","mcp_intent":{"status":"requested","capabilities":["search saved errands"]}}})
 ```
 
 6. Re-read `LINGXI.md`. `LocalAppScaffold` overwrites the guided text with the
@@ -111,9 +93,9 @@ Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":"create"
 ### Ambiguity routing
 
 After the opening description, classify only unresolved decisions that could
-materially change the result. Group related decisions so the single
-clarification `AskUserQuestion` round contains 1-3 real questions; omit the
-round if no material decision remains:
+materially change the result. Group related decisions into focused
+`AskUserQuestion` rounds; ask as many rounds as material decisions require,
+without padding a quota, and never repeat an answered question:
 
 - **Product / process** — resolve the primary job, audience, success condition,
   or the required flow when the brief leaves more than one plausible product.
@@ -121,8 +103,10 @@ round if no material decision remains:
   brief do not determine it; otherwise state the inferred target for the final
   confirmation.
 - **Data / capabilities** — resolve writable collections, permissions, host
-  capabilities, or an explicitly requested external service when alternatives
-  would change the implementation or privacy boundary.
+  capabilities or an explicitly requested external integration when alternatives
+  would change the implementation or privacy boundary. Keep Host app-exposure
+  capabilities, product external integrations, and optional post-create MCP
+  exposure intent as separate decisions.
 - **UI / visual style** — ask only when the visual choice would significantly
   change the result and cannot be inferred from the brief. Otherwise propose a
   concrete design direction, tokens, and platform treatment in the final
@@ -171,17 +155,17 @@ the interview and confirmation in that app session, where `LINGXI.md` is
 auto-loaded. Do not write app source or launch a build from the global/project
 working directory.
 
-The build orchestration below therefore applies only inside an app's OWN
-conversation, the one whose `LINGXI.md` names the app id you are building, and
-only once that app has a shape. A shell has no source, no dependencies and no
-build workflow to choose between.
+The build orchestration below applies only inside an app's OWN conversation,
+the one whose `LINGXI.md` names the app id you are building. Its create branch
+accepts that app while it is still an empty shell; update and verify require the
+Host-persisted shape. A shell has no source or dependencies until the approved
+scaffold lands.
 
-Inside a shell there is no brief yet to sharpen — the interview above produces
-it. Inside an app that already has a shape, read `LINGXI.md` and sharpen the
-brief it carries. In a global chat, gather the product, screens, data,
-capabilities, and visual intent before creating the app. When a material decision is unresolved, call `AskUserQuestion`
-with one short round of 1-3 focused questions; omit the round when there are
-none. Never ask unresolved questions in ordinary assistant text.
+Inside a shell, preserve any usable brief already present in the conversation
+or Host handoff and ask for one only when it is absent. Inside an app that
+already has a shape, read `LINGXI.md` and its persisted
+AuthoringSpec, then sharpen only the requested change. In a global chat, gather the product, screens, data,
+capabilities, and visual intent before creating the app. When a material decision is unresolved, call `AskUserQuestion` for that decision; do not impose a question quota and never re-ask an answered decision. Never ask unresolved questions in ordinary assistant text.
 The one exception is the opening turn of a shell conversation (step 1 above),
 where you have no options to offer and need the user's own description; that
 exception covers that turn only, and does not extend to any later question in
@@ -206,9 +190,17 @@ specification containing:
   and input paths that make that choice appropriate;
 - design direction, platform tokens, responsive/adaptive behavior, and any
   source-only implementation constraints required by the locked host scaffold;
-- which host-provided data, LLM, device, and agent capabilities satisfy each
-  product requirement, plus any user-requested external exception;
+- which Host app-exposure capabilities (data, LLM, device, and agent) satisfy
+  each product requirement, separately from any user-requested external
+  integration. Host capabilities are manifest permissions. An external
+  integration may be required to build the app and must be confirmed as a
+  product dependency; it is not an MCP exposure intent by implication.
 - whether original raster imagery is required.
+- for each acceptance check, set `motion_required: true` only when dynamic
+  motion across frames is part of the expected behavior; such a check must
+  request `capture` evidence and use a Canvas profile. Omit it or keep it false
+  for static UI and reduced-motion checks; identical captured frames remain
+  valid when motion is not required.
 
 Before the final confirmation, classify the confirmed specification without
 starting another agent. Score screens/routes, data complexity, host or external
@@ -295,7 +287,8 @@ UI paths that write those manifest collections. On mobile, the host reads the
 materialized manifest and overwrites the workflow's list with every declared
 collection id, so the caller's list is advisory only; every declared collection
 must have a real UI write path, or be removed from the manifest before building.
-Inside an app that already has a shape, call neither again.
+Inside an app that already has a shape, do not create another shell or repeat
+the opening interview; use its persisted Host contract as the starting point.
 
 The persisted Runtime Profile picks the scaffold and derives its surface.
 Profile family CANNOT be changed afterwards — the workspace on disk is that
@@ -382,6 +375,13 @@ retryable error; never swallow them and report a successful save.
 
 ## Prefer local and host-provided capabilities
 
+Keep separate lists in the confirmed AuthoringSpec. `manifest capabilities`
+are closed Host app-exposure permissions used by the generated app itself.
+`product.external_integrations` names remote services the app may need to
+fulfil its product goal; confirm them, their domain/capability, and privacy or
+quota impact before creation. MCP intent names business actions the user may
+later expose to an LLM. Never silently turn one list into the other.
+
 Resolve every requirement against the capabilities already supplied by the
 host before proposing an external API, hosted AI service, or custom
 replacement. In particular:
@@ -433,41 +433,36 @@ launch with the verified catalog (Create) or persisted profile/snapshot
 (Update/Verify); caller input never selects a renderer or profile:
 
 ```
-Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"<id>","name":"<confirmed display name>","brief":"<confirmed one-line brief>","spec":"<confirmed spec>","quality_level":"balanced","mcp_intent":<the step 4 answer — {"status":"declined"} or {"status":"requested","services":["<each service they picked>"]}; omit this key entirely if step 4 never ran>}})
+Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"app_123","name":"Errand List","brief":"Track errands with a quick add flow","authoring_spec":{"product":{"goal":"Track errands","tasks":["add an errand"],"external_integrations":[]},"targets":[{"id":"phone","os":"ios","form_factor":"iphone"}],"ui":{"structure":["list","editor"],"theme":{"mode":"system","accent":"blue"},"style":{"direction":"clear","density":"comfortable"},"references":[]},"design":{"presentations":[{"target_id":"phone","presentation":"single-column list","navigation":"push editor; back returns to list"}],"tokens":{"spacing":"8px"},"states":{"loading":"skeleton","empty":"prompt to add","error":"retry","success":"show list","permission":"explain if needed"},"inputs":{"pointer_touch":["tap"],"keyboard_mouse":["tab"],"back":"pop editor","reduced_motion":"respect device"},"canvas":null},"acceptance_checks":[{"id":"add-item","target_ids":["phone"],"required":true,"preconditions":[],"steps":["open editor","save errand"],"expected":"errand appears in list","evidence":["inspect","ui_action"]}]},"quality_level":"balanced"}})
 ```
 
-`name`, `brief`, and `mcp_intent` are create-only and carry the user-confirmed
-wording; every other identity field stays Host-derived. `mcp_intent` is the
-create-time MCP interview's outcome from step 4 above —
-`{"status":"declined"}` or `{"status":"requested","services":[...]}` naming
-the concrete services the user picked from `LocalAppTemplateCatalog`'s
-`mcpSuggestions`, never free text the model invented.
+`name` and `brief` carry the user-confirmed create wording; every
+identity field stays Host-derived. External integrations are recorded in the
+AuthoringSpec as product requirements. They are not MCP exposure intent and
+creation does not configure or expose them.
 For update use `operation: "update"` and pass the user-confirmed change as
 `revision_prompt` (a plain string carrying what the user asked to change —
-`spec` is create-only and ignored on update); for a verification-only run use
+`authoring_spec` is the full confirmed object for create/update (verify uses the
+Host effective contract); for a verification-only run use
 `operation: "verify"`. Both fail closed unless Host can read the persisted
 Runtime Profile and dependency snapshot. `quality_level` is the only quality
-selector. `fast` is rejected twice over, and the FIRST rejection lands
-before any Runtime Profile family is resolved: the workflow throws
-`CANVAS_FAST_REJECTED` the moment the selector returns a `template_id` that
-does not begin with `react-dom-`, keying purely on that id prefix. Host's
-`LocalAppStageCreate` then rejects `fast` again for any non-`react_dom`
-family, which is the family-resolved check. Repair
+selector. `fast` is rejected by Host staging for any non-`react_dom` family
+after the Host resolves the selection; the workflow never treats a
+template-id spelling as a runtime-family contract. Repair
 budgets are fast=1, balanced=1, thorough=2. Host derives writable collection
 ids and all template/profile identity; do not pass `renderer`,
 `runtime_profile`, template paths, or expected collections.
 
-A create run can come back two ways that are not build defects. If the
+A create run can come back in several ways that are not source defects. If the
 workflow returns `{"ok":false,"status":"create_declined",...}`, the user
 declined the native create confirmation — that is their answer, not a host
-failure: re-confirm the name/brief/spec (offering to change them) and relaunch
-`operation: "create"` once the user is ready to try again. If instead the
-workflow throws after scaffold succeeded (Build or Verify failed), the app
-record and workspace already exist under `app_id`: report the failure with
-evidence, and continue from that same `app_id` with `operation: "update"` when
-the user wants to.
-
-The workflow phases are:
+failure: re-confirm the name/brief/AuthoringSpec (offering to change them) and relaunch
+`operation: "create"` once the user is ready to try again. A structured
+`verification_failed` result preserves the existing app, preview, Host receipt,
+and findings. An infrastructure failure is reported without source repair. If
+the workflow throws after scaffold succeeded because build tooling failed, the
+app record and workspace still exist under `app_id`; continue from that same
+app only after the failure is understood.
 
 The directory contract is fixed across every phase. The persistent source
 project lives at the current app workspace and is already scaffolded by the
@@ -483,16 +478,19 @@ serves only `build/store/dist/`. Never configure another `build.outDir`,
 inspect host staging paths, or copy generated output back into editable
 source.
 
-1. **Design** — for `dom`, invoke `$frontend-design` for `balanced` and
-   `thorough`, while `fast` folds compact decisions into Generate & Build. For
-   `canvas`, invoke `$frontend-design` for both accepted strategies; its
+1. **Design** — for `dom`, the designer uses the frontend-design and
+   accessibility guidance for `balanced` and `thorough`, while `fast` folds
+   compact decisions into Generate & Build. For `canvas`, use the designer for
+   both accepted strategies; its
    confirmation never includes `fast`. Produce/confirm platform and form
    factor, page structure, tokens, adapters, interactions, and asset decision.
-   Assume the project scaffold and dependency graph are already present and
-   locked by the host. Do not propose template choices, npm operations,
-   fallback scaffold modes, or root-file edits.
-2. **Generate** — invoke `$accessibility` and `$react-best-practices`; consume
-   the host-provided LingXi bridge, `deviceContext`, source policy/manifest
+   On Create, this is a structured design return before scaffold; do not write
+   files. Do not propose npm operations, fallback scaffold modes, or root-file
+   edits.
+2. **Generate** — after the preparer receipt and scaffold, the builder consumes
+   its generic device/React guidance and invokes exactly one Host-profile
+   renderer guide. Consume the host-provided LingXi bridge, `deviceContext`,
+   source policy/manifest
    integration, and platform adapter while writing complete React source and
    all required states under the editable roots. Use `queryCollection`, `upsertRecord`, and
    `deleteRecord` from the locked bridge for declared collection data; read
@@ -541,10 +539,12 @@ source.
    removed from the manifest and rebuilt. A local-only value or swallowed bridge
    failure is not persistence.
 
-On a verification finding, repair, rebuild, and re-verify according to the
-selected surface strategy: for `dom`, at most once for `fast`/`balanced` and
-twice for `thorough`; for `canvas`, at most once for `balanced` and twice for
-`thorough`.
+On a completed Host QA candidate with a source finding, repair, rebuild, and
+re-verify according to the selected surface strategy: for `dom`, at most once
+for `fast`/`balanced` and twice for `thorough`; for `canvas`, at most once for
+`balanced` and twice for `thorough`. One bounded evidence resample is separate
+from those budgets. Never send an evidence-resample request or infrastructure
+failure to source repair.
 If issues remain, return them with evidence and the reduced verification level;
 never claim full Browser or native QA that was not run.
 

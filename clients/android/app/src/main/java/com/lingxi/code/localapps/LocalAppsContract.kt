@@ -188,15 +188,17 @@ data class LocalAppVerificationSummary(
  *  - ABSENCE, i.e. `null` alongside [LocalAppVerificationStatus.Passed] (:2078)
  *  - `"verification_unavailable"` (:2123, status Unavailable)
  *
- * Only four are mapped here. `"active_state_corrupt"` deliberately has no
+ * The MCP summaries and the three explicit Host UI-verification summaries are
+ * mapped here. `"active_state_corrupt"` deliberately has no
  * client key — the engine's own comment at `local_apps_host.rs:2031-2036` says
  * so — and therefore takes the `else ->` arm and renders the engine's English
  * sentence, with the STATUS badge beside it still localized. It is named in the
  * `code` field precisely so a failure can never land on the `null` arm, which
  * would claim verification passed.
  *
- * The ABSENCE case is not a missing code: it is the "everything verified"
- * summary, and the one state that otherwise still renders English. A `null`
+ * The ABSENCE case is not a missing code: it is the legacy "MCP verified"
+ * summary. Host UI verification always supplies one of its explicit codes, so
+ * it cannot accidentally reuse that copy. A `null`
  * code with any OTHER status is deliberately NOT mapped: nothing in the engine
  * produces that pair today, and guessing the "passed" copy for a summary whose
  * status is not Passed would be worse than the English sentence the engine
@@ -210,6 +212,9 @@ fun localAppVerificationSummaryRes(
     "needs_setup" -> R.string.local_apps_verification_summary_needs_setup
     "needs_revalidation" -> R.string.local_apps_verification_summary_needs_revalidation
     "verification_unavailable" -> R.string.local_apps_verification_summary_verification_unavailable
+    "ui_verification_required" -> R.string.local_apps_verification_summary_ui_verification_required
+    "ui_verification_passed" -> R.string.local_apps_verification_summary_ui_verification_passed
+    "ui_verification_corrupt" -> R.string.local_apps_verification_summary_ui_verification_corrupt
     null -> R.string.local_apps_verification_summary_passed
         .takeIf { status == LocalAppVerificationStatus.Passed }
     else -> null

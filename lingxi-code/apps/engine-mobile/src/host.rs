@@ -561,6 +561,12 @@ pub struct MobileRuntime {
     /// provider and also loads the app-private `settings.json` plus project
     /// `.mcp.json` entries using the shared MCP parser.
     pub mcp_registry: Arc<McpRegistry>,
+    /// The exact registry/context pair used to materialize MCP tools for the
+    /// main conversation. Initial Local App activation happens after the
+    /// profile service is attached, so the synchronous engine constructor
+    /// uses these handles to publish that one app before returning.
+    mcp_tool_registry: Arc<ToolRegistry>,
+    mcp_tool_context: tool_api::BuiltinToolContext,
     /// Shared mobile LSP registry used by plugin registration, file sync, and
     /// passive diagnostics.
     pub lsp_registry: Arc<lsp::LspRegistry>,
@@ -2498,6 +2504,7 @@ fn apply_mobile_profile_allowlist(
 fn mobile_skill_listing_provider(
     registry: Arc<RwLock<command_api::CommandRegistry>>,
     session_mode: session::jsonl::SessionMode,
+    local_app_scope: bool,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
     Arc::new(
         orchestrator::prompt::skill_listing::LazySkillListingProvider::new(move || {
@@ -2519,6 +2526,21 @@ fn mobile_skill_listing_provider(
                     })
                     // TS `cmd.source !== 'builtin'`.
                     .filter(|c| c.source != CommandSource::Builtin)
+                    // Local App's full specialist/tooling skill set is only
+                    // useful inside an app workspace. Global/project
+                    // conversations keep the three entry routers visible;
+                    // every other plugin remains unaffected.
+                    .filter(|c| {
+                        local_app_scope
+                            || c.source != CommandSource::Plugin
+                            || !c.name.starts_with("lingxi-local-app:")
+                            || matches!(
+                                c.name.as_str(),
+                                "lingxi-local-app:create-local-app"
+                                    | "lingxi-local-app:local-app-use"
+                                    | "lingxi-local-app:expose-as-mcp"
+                            )
+                    })
                     .filter(|c| command_visible_in_session_mode(c, session_mode))
                     // TS loadedFrom ∈ {bundled,skills,commands_DEPRECATED} ||
                     //    hasUserSpecifiedDescription || whenToUse.
@@ -2541,6 +2563,45 @@ fn mobile_skill_listing_provider(
             }
         }),
     )
+}
+
+/// Return the exact Host-resolved app id when the session cwd is a Local App
+/// workspace root.
+///
+/// This is intentionally bounded to the host-owned layout
+/// (`apps/<id>/workspace`). Canonical spelling keeps the iOS `/var` vs
+/// `/private/var` alias from changing scope classification. It does not inspect
+/// the app store or plugin bundle, so disabled-plugin boot remains
+/// metadata/settings-only until an explicit enable request takes the normal
+/// materialization path.
+fn mobile_local_app_scope_id(cwd: &std::path::Path, data_root: &std::path::Path) -> Option<String> {
+    let canonical_cwd = std::path::PathBuf::from(canonical_cwd_string(cwd));
+    let canonical_root = std::path::PathBuf::from(canonical_cwd_string(data_root));
+    let relative = canonical_cwd.strip_prefix(&canonical_root).ok();
+    let Some(mut components) = relative.map(|path| path.components()) else {
+        return None;
+    };
+    let app_id = match (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) {
+        (
+            Some(std::path::Component::Normal(apps)),
+            Some(std::path::Component::Normal(app_id)),
+            Some(std::path::Component::Normal(workspace)),
+            None,
+        ) if apps == std::ffi::OsStr::new("apps")
+            && !app_id.is_empty()
+            && workspace == std::ffi::OsStr::new("workspace") =>
+        {
+            app_id.to_str()?
+        }
+        _ => return None,
+    };
+    local_apps::AppLayout::new(&canonical_root, app_id).ok()?;
+    Some(app_id.to_string())
 }
 
 async fn mobile_live_plugin_skill_count(
@@ -4514,8 +4575,18 @@ async fn build_mobile_inner_with_ask(
     // itself — so handing either surface a registry other than
     // `shared_command_registry` fails that test instead of silently emptying
     // the model's skill listing on device.
-    let wired_skill_listing_provider =
-        mobile_skill_listing_provider(shared_command_registry.clone(), cfg.session_mode);
+    // One Host-bounded scope decision drives both Local App model surfaces.
+    // `permission::local_app_id_for_root` intentionally also understands
+    // guest/legacy spellings for isolated runtimes, but using that broader
+    // detector directly at this main-session composition root would let an
+    // ordinary project whose path merely ends in `apps/<id>/workspace` inherit
+    // the full app authoring surface.
+    let local_app_scope_id = mobile_local_app_scope_id(&cwd, &mobile_apps_data_root(&cfg));
+    let wired_skill_listing_provider = mobile_skill_listing_provider(
+        shared_command_registry.clone(),
+        cfg.session_mode,
+        local_app_scope_id.is_some(),
+    );
     #[cfg(test)]
     let wired_skill_loader = skill_loader.clone();
     // (#3 shell-expansion) Build the shared prompt shell-expansion provider from
@@ -4604,11 +4675,15 @@ async fn build_mobile_inner_with_ask(
     // the registry is `Arc`-wrapped below. The DYNAMIC per-app tools stay on
     // the MCP transport (their namespace binds `app_id` host-side, and they
     // must be added at runtime, which only `register_mcp_tools(&self, …)` does).
-    for tool in crate::local_apps_tools::local_app_builtin_tools(&local_apps_mcp, &cwd) {
+    for tool in crate::local_apps_tools::local_app_builtin_tools(
+        &local_apps_mcp,
+        local_app_scope_id.clone(),
+    ) {
         tools.register_builtin(tool);
     }
     crate::apply_mobile_session_tool_policy(&mut tools, cfg.session_mode);
     let live_mcp_tool_ctx = tool_ctx.clone();
+    let initial_mcp_tool_ctx = live_mcp_tool_ctx.clone();
     let app_agent_mcp_tool_context = live_mcp_tool_ctx.clone();
     if cfg.session_mode == session::jsonl::SessionMode::Code {
         for (connection_id, mcp_tools) in
@@ -4804,7 +4879,7 @@ async fn build_mobile_inner_with_ask(
         orch_cfg,
         api_client,
         streaming_api,
-        tools,
+        tools.clone(),
         hooks,
         perms,
         output,
@@ -5043,50 +5118,44 @@ async fn build_mobile_inner_with_ask(
         cwd.clone(),
     )));
     *shared_command_registry.write().await = reg;
-    // P1.10 (§19.2): materialize and register only after the base command
-    // registry has been installed. The plugin manager writes into this shared
-    // Arc; registering earlier would be overwritten by the composition-root
-    // assignment above and silently drop the plugin's skills/commands.
-    let builtin_plugin_bundle_root = cfg.lingxi_home.join("builtin-plugin-bundle");
-    match crate::register_mobile_builtin_plugins_materialized(
-        &plugin_manager,
-        &builtin_plugin_bundle_root,
-        None,
-    )
-    .await
-    {
-        Ok(_) => {
-            let settings_path = cfg.lingxi_home.join("settings.json");
-            let enabled = match mobile_builtin_plugin_enabled(
-                &settings_path,
-                crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
-            ) {
-                Ok(enabled) => enabled,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "invalid mobile builtin plugin setting; using manifest default"
-                    );
-                    crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED
-                }
-            };
-            if !enabled {
-                if let Err(error) = plugin_manager
-                    .disable(&crate::mobile_builtin_plugin_id())
-                    .await
-                {
-                    tracing::warn!(
-                        %error,
-                        "failed to apply disabled mobile builtin plugin setting"
-                    );
-                }
-            }
+    // P1.10 (§19.2): read the activation bit BEFORE materializing the
+    // compiled-in bundle. A disabled boot keeps its inventory/status available
+    // from compiled metadata but performs no bundle filesystem work; enabling
+    // later takes the existing verified materialization + registration path.
+    let settings_path = cfg.lingxi_home.join("settings.json");
+    let enabled = match mobile_builtin_plugin_enabled(
+        &settings_path,
+        crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
+    ) {
+        Ok(enabled) => enabled,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "invalid mobile builtin plugin setting; using manifest default"
+            );
+            crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED
         }
-        Err(error) => tracing::warn!(
-            %error,
-            "failed to materialize/register the compiled-in mobile plugin; any \
-             commands/skills/agents it would have contributed are unavailable this boot"
-        ),
+    };
+    if enabled {
+        // The plugin manager writes into this shared Arc; registering earlier
+        // would be overwritten by the composition-root assignment above and
+        // silently drop the plugin's skills/commands.
+        let builtin_plugin_bundle_root = cfg.lingxi_home.join("builtin-plugin-bundle");
+        if let Err(error) = crate::register_mobile_builtin_plugins_materialized(
+            &plugin_manager,
+            &builtin_plugin_bundle_root,
+            None,
+        )
+        .await
+        {
+            tracing::warn!(
+                %error,
+                "failed to materialize/register the compiled-in mobile plugin; any \
+                 commands/skills/agents it would have contributed are unavailable this boot"
+            );
+        }
+    } else {
+        tracing::debug!("mobile builtin plugin disabled; deferring bundle materialization");
     }
     // r2-critic-1 (coverage half): the agent-facing `LocalAppCreate` MCP tool
     // is a SECOND live create entry point — it never enters
@@ -5223,6 +5292,8 @@ async fn build_mobile_inner_with_ask(
         credentials,
         mobile_linux,
         mcp_registry,
+        mcp_tool_registry: tools,
+        mcp_tool_context: initial_mcp_tool_ctx,
         lsp_registry: plugin_lsp_registry,
         typescript_lsp_runtime_available: mobile_lsp_ready,
         mcp_reload_generations,
@@ -7325,38 +7396,56 @@ impl MobileEngineHandle {
         Ok(lower_mobile_linux_status(capability, status))
     }
 
+    /// Resolve the client-visible builtin-plugin state without requiring a
+    /// materialized bundle. On a disabled boot the PluginManager deliberately
+    /// has no loaded/disabled state entry (avoiding generic manager API and
+    /// bundle filesystem work), so the persisted activation bit is the
+    /// authoritative fallback. An enabled-but-unavailable bundle remains an
+    /// error rather than being misreported as Disabled.
+    async fn mobile_builtin_plugin_activation_state(
+        &self,
+    ) -> Result<PluginActivationStateDto, ClientError> {
+        match self
+            .inner
+            .plugin_manager
+            .plugin_state(&crate::mobile_builtin_plugin_id())
+            .await
+        {
+            Some(plugin::PluginState::Loaded { .. }) => Ok(PluginActivationStateDto::Loaded),
+            Some(plugin::PluginState::Disabled { .. }) => Ok(PluginActivationStateDto::Disabled),
+            Some(_) => Err(ClientError::Internal {
+                message: "mobile builtin plugin is not in a stable activation state".into(),
+            }),
+            None => {
+                let enabled = mobile_builtin_plugin_enabled(
+                    &self.lingxi_home.join("settings.json"),
+                    crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
+                )
+                .map_err(|error| ClientError::Internal { message: error })?;
+                if enabled {
+                    Err(ClientError::Internal {
+                        message: "mobile builtin plugin bundle is unavailable".into(),
+                    })
+                } else {
+                    Ok(PluginActivationStateDto::Disabled)
+                }
+            }
+        }
+    }
+
     async fn emit_builtin_plugin_status(&self, plugin_id: &str) -> Result<(), ClientError> {
         if plugin_id != crate::MOBILE_BUILTIN_PLUGIN_NAME {
             return Err(ClientError::NotFound {
                 message: format!("mobile plugin {plugin_id:?}"),
             });
         }
-        let state = self
-            .inner
-            .plugin_manager
-            .plugin_state(&crate::mobile_builtin_plugin_id())
-            .await
-            .ok_or_else(|| ClientError::Internal {
-                message: "mobile builtin plugin bundle is unavailable".to_string(),
-            })?;
+        let state = self.mobile_builtin_plugin_activation_state().await?;
         self.event_sink
             .emit(ClientEvent::AppEvent {
                 event: AppEventDto::PluginStatusChanged {
                     status: PluginStatusDto {
                         plugin_id: plugin_id.to_string(),
-                        state: match state {
-                            plugin::PluginState::Loaded { .. } => PluginActivationStateDto::Loaded,
-                            plugin::PluginState::Disabled { .. } => {
-                                PluginActivationStateDto::Disabled
-                            }
-                            _ => {
-                                return Err(ClientError::Internal {
-                                    message:
-                                        "mobile builtin plugin is not in a stable activation state"
-                                            .to_string(),
-                                });
-                            }
-                        },
+                        state,
                         manifest_default_enabled: crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
                     },
                 },
@@ -7371,23 +7460,7 @@ impl MobileEngineHandle {
                 message: format!("mobile plugin {plugin_id:?}"),
             });
         }
-        let state = self
-            .inner
-            .plugin_manager
-            .plugin_state(&crate::mobile_builtin_plugin_id())
-            .await
-            .ok_or_else(|| ClientError::Internal {
-                message: "mobile builtin plugin bundle is unavailable".to_string(),
-            })?;
-        let state = match state {
-            plugin::PluginState::Loaded { .. } => PluginActivationStateDto::Loaded,
-            plugin::PluginState::Disabled { .. } => PluginActivationStateDto::Disabled,
-            _ => {
-                return Err(ClientError::Internal {
-                    message: "mobile builtin plugin is not in a stable activation state".into(),
-                });
-            }
-        };
+        let state = self.mobile_builtin_plugin_activation_state().await?;
         let inventory = crate::builtin_bundle::COMPILED_PLUGIN_INVENTORY;
         let count = |prefix: &str, suffix: &str| {
             u32::try_from(
@@ -12480,7 +12553,7 @@ pub fn build_mobile_engine_inner(
             .as_uuid()
             .to_string()
     });
-    let (session_lifecycle_tx, _) = tokio::sync::watch::channel(initial_session_key);
+    let (session_lifecycle_tx, _) = tokio::sync::watch::channel(initial_session_key.clone());
 
     let skill_count = crate::mobile_skill_registry().len();
     let message_queue = Arc::new(msgqueue::MessageQueueManager::new());
@@ -12591,6 +12664,17 @@ pub fn build_mobile_engine_inner(
     {
         tracing::warn!("local-apps MCP host was already attached");
     }
+    // Terminal Local App build/use-test outcomes are revalidated by the
+    // Host-owned QA boundary before the workflow sink publishes completion.
+    // Keep this as a weak, one-time composition attachment: the sink must not
+    // retain the profile broker or create a broker↔workflow ownership cycle.
+    if inner
+        .workflow_status_sink
+        .attach_local_apps_host(Arc::downgrade(&local_apps_host))
+        .is_err()
+    {
+        tracing::warn!("local-apps workflow status sink was already attached");
+    }
     if local_apps_host
         .attach_mcp_registry(Arc::downgrade(&inner.mcp_registry))
         .is_err()
@@ -12643,20 +12727,41 @@ pub fn build_mobile_engine_inner(
             {
                 tracing::warn!("local-apps MCP service was already attached");
             }
-            runtime.block_on(async {
-                for record in service.list_apps().await {
-                    if let Err(error) = local_apps_host
-                        .sync_managed_local_app_publication(&record.id)
-                        .await
-                    {
-                        tracing::warn!(
-                            app_id = %record.id,
-                            %error,
-                            "local-apps managed MCP publication sync deferred"
-                        );
+            // A freshly-built handle has not passed through
+            // `retarget_session_writer`, which is the normal New/Resume/Clear
+            // activation boundary. Restore the INITIAL app conversation here
+            // so an already-published MCP is usable immediately after a cold
+            // boot. This is deliberately bounded to the current Host-owned app
+            // cwd: global/project startup performs no all-app publication
+            // sweep, and the Local App authoring plugin's enabled bit does not
+            // suppress an independently enabled published app MCP.
+            let apps_data_root = mobile_apps_data_root(&firer_cfg);
+            if let Some(app_id) = mobile_local_app_scope_id(&firer_cfg.cwd, &apps_data_root) {
+                match runtime.block_on(local_apps_host.expose_managed_mcp_for_conversation(
+                    &initial_session_key,
+                    &app_id,
+                    false,
+                )) {
+                    Ok(true) => {
+                        // The registry listener is asynchronous. Rebuild the
+                        // already-connected partitions here as well so the
+                        // freshly returned engine cannot race its first turn
+                        // against delivery of the connect notification.
+                        let refreshed = runtime.block_on(tool_mcp::build_registered_mcp_tools(
+                            &inner.mcp_registry,
+                            inner.mcp_tool_context.clone(),
+                        ));
+                        inner.mcp_tool_registry.replace_mcp_tools(refreshed);
                     }
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(
+                        session_id = %initial_session_key,
+                        %app_id,
+                        %error,
+                        "failed to expose initial managed Local App MCP tools"
+                    ),
                 }
-            });
+            }
             // v3 Phase 4: repair init-session pins, drifted catalogs and
             // placeholder titles for every app. Runs as a background sweep on
             // the shared worker runtime (this builder is sync); see
@@ -12668,7 +12773,6 @@ pub fn build_mobile_engine_inner(
             // doc — this builder re-runs on every scope switch/reconnect
             // within the same process, and without the guard the sweep would
             // re-walk every app record on each one.
-            let apps_data_root = mobile_apps_data_root(&firer_cfg);
             if boot_backfill_sweep_should_run(&apps_data_root) {
                 crate::local_apps_profile::worker_runtime().spawn(run_app_boot_backfill_sweep(
                     firer_cfg.lingxi_home.clone(),
@@ -12747,7 +12851,7 @@ mod tests {
         provider_models_endpoint, session_agent_conversation_is_visible,
         session_agent_transcript_event, session_agent_transcript_revision, McpConfigScope,
         McpRegistry, McpServerConfig, MobileConfig, MobileCronStoreHandle, MobileMcpReloadJob,
-        MobileSessionAgentObserver,
+        MobileRuntime, MobileSessionAgentObserver,
     };
 
     #[test]
@@ -13548,19 +13652,20 @@ mod tests {
             rt.orchestrator.has_skill_listing(),
             "mobile orchestrator must expose a skill-listing provider"
         );
-        let listed = mobile_skill_listing_provider(rt.slash_registry.clone(), rt.session_mode)
-            .skill_entries()
-            .await;
+        let listed =
+            mobile_skill_listing_provider(rt.slash_registry.clone(), rt.session_mode, false)
+                .skill_entries()
+                .await;
         let listed_names: std::collections::BTreeSet<_> =
             listed.iter().map(|entry| entry.name.as_str()).collect();
-        let expected_names: Vec<String> = crate::mobile_plugin_skill_names()
+        let expected_names = ["create-local-app", "local-app-use", "expose-as-mcp"]
             .into_iter()
             .map(|name| format!("{}:{name}", crate::MOBILE_BUILTIN_PLUGIN_NAME))
-            .collect();
+            .collect::<Vec<_>>();
         assert_eq!(
             expected_names.len(),
-            27,
-            "the Local App Plugin must ship exactly 27 skills"
+            3,
+            "a global Code listing must expose exactly the three Local App routers"
         );
         for name in &expected_names {
             assert!(
@@ -13568,6 +13673,33 @@ mod tests {
                 "mobile skill-listing provider must expose bundled skill {name:?}: {listed_names:?}"
             );
         }
+        let listed_local_app_names = listed_names
+            .iter()
+            .filter(|name| name.starts_with("lingxi-local-app:"))
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected_local_app_names = expected_names
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            listed_local_app_names, expected_local_app_names,
+            "a global Code cold boot must hide every app-only Local App skill"
+        );
+        let local_app_tool_names = rt
+            .orchestrator
+            .tool_names()
+            .into_iter()
+            .filter(|name| name.starts_with("LocalApp"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            local_app_tool_names,
+            ["LocalAppCreate", "LocalAppGet", "LocalAppList"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            "a global Code cold boot must register only the three Local App management tools"
+        );
         let registry = rt.slash_registry.read().await;
         for name in &expected_names {
             assert!(
@@ -13575,6 +13707,237 @@ mod tests {
                 "compiled-in mobile skill {name:?} must be present in the live slash registry"
             );
         }
+        let app_scoped =
+            mobile_skill_listing_provider(rt.slash_registry.clone(), rt.session_mode, true)
+                .skill_entries()
+                .await;
+        let app_scoped_names: std::collections::BTreeSet<_> =
+            app_scoped.iter().map(|entry| entry.name.as_str()).collect();
+        for name in crate::mobile_plugin_skill_names()
+            .into_iter()
+            .map(|name| format!("{}:{name}", crate::MOBILE_BUILTIN_PLUGIN_NAME))
+        {
+            assert!(
+                app_scoped_names.contains(name.as_str()),
+                "an app-scoped listing must expose the full Local App skill set: {name:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mobile_local_app_scope_id_uses_the_canonical_target_not_the_alias_spelling() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("app data root");
+        let app_two = root.path().join("apps/app-two/workspace");
+        std::fs::create_dir_all(&app_two).expect("canonical app workspace");
+        let alias_parent = root.path().join("apps/app-one");
+        std::fs::create_dir_all(&alias_parent).expect("alias parent");
+        let alias = alias_parent.join("workspace");
+        symlink(&app_two, &alias).expect("A-to-B workspace alias");
+
+        assert_eq!(
+            super::mobile_local_app_scope_id(&app_two, root.path()).as_deref(),
+            Some("app-two")
+        );
+        assert_eq!(
+            super::mobile_local_app_scope_id(&alias, root.path()).as_deref(),
+            Some("app-two"),
+            "the Host must carry the canonical target id, never the alias's app-one spelling"
+        );
+
+        let outside = tempfile::tempdir().expect("ordinary project");
+        let forged = outside.path().join("apps/app-two/workspace");
+        std::fs::create_dir_all(&forged).expect("forged suffix");
+        assert_eq!(
+            super::mobile_local_app_scope_id(&forged, root.path()),
+            None,
+            "an app-shaped suffix outside the Host data root must stay global"
+        );
+    }
+
+    #[tokio::test]
+    async fn mobile_local_app_exposure_is_host_cwd_bounded_and_chat_stays_isolated() {
+        async fn build_for_cwd(
+            data_root: &std::path::Path,
+            cwd: std::path::PathBuf,
+            session_mode: session::jsonl::SessionMode,
+        ) -> MobileRuntime {
+            std::fs::create_dir_all(&cwd).expect("session cwd");
+            let mut cfg = test_config(data_root);
+            cfg.cwd = cwd;
+            cfg.session_mode = session_mode;
+            let platform: Arc<dyn platform_api::Platform> =
+                Arc::new(HostFakePlatform::new(data_root.to_path_buf()));
+            let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+            let permission_sink: Arc<dyn PermissionRequestSink> =
+                Arc::new(RecordingPermissionSink::default());
+            build_mobile(cfg, platform, listener, permission_sink)
+                .await
+                .expect("build scoped mobile runtime")
+        }
+
+        fn local_app_tool_names(runtime: &MobileRuntime) -> std::collections::BTreeSet<String> {
+            runtime
+                .orchestrator
+                .tool_names()
+                .into_iter()
+                .filter(|name| name.starts_with("LocalApp"))
+                .collect()
+        }
+
+        async fn local_app_skill_names(
+            runtime: &MobileRuntime,
+        ) -> std::collections::BTreeSet<String> {
+            runtime
+                .wired_skill_listing_provider
+                .skill_entries()
+                .await
+                .into_iter()
+                .map(|entry| entry.name)
+                .filter(|name| name.starts_with("lingxi-local-app:"))
+                .collect()
+        }
+
+        let global_tools = ["LocalAppCreate", "LocalAppGet", "LocalAppList"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<std::collections::BTreeSet<_>>();
+        let global_skills = ["create-local-app", "expose-as-mcp", "local-app-use"]
+            .into_iter()
+            .map(|name| format!("{}:{name}", crate::MOBILE_BUILTIN_PLUGIN_NAME))
+            .collect::<std::collections::BTreeSet<_>>();
+
+        // A project is allowed to contain this directory shape. The Host must
+        // not infer Local App authority from the suffix alone.
+        let project_root = tempfile::tempdir().expect("project root");
+        let forged_project_cwd = project_root
+            .path()
+            .join("project")
+            .join("apps")
+            .join("not-a-local-app")
+            .join("workspace");
+        let forged = build_for_cwd(
+            project_root.path(),
+            forged_project_cwd,
+            session::jsonl::SessionMode::Code,
+        )
+        .await;
+        assert_eq!(
+            local_app_tool_names(&forged),
+            global_tools,
+            "a project with an app-shaped suffix must retain the global three-tool surface"
+        );
+        assert_eq!(
+            local_app_skill_names(&forged).await,
+            global_skills,
+            "a project with an app-shaped suffix must retain the global three-skill surface"
+        );
+
+        let app_root = tempfile::tempdir().expect("app root");
+        let app_cwd = app_root
+            .path()
+            .join("apps")
+            .join("app-one")
+            .join("workspace");
+        let app = build_for_cwd(
+            app_root.path(),
+            app_cwd.clone(),
+            session::jsonl::SessionMode::Code,
+        )
+        .await;
+        let expected_app_tools = crate::local_apps_tools::LOCAL_APP_TOOLS
+            .iter()
+            .map(|(name, _, _)| (*name).to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            local_app_tool_names(&app),
+            expected_app_tools,
+            "a Host-owned Local App workspace must receive the complete builtin surface"
+        );
+        let expected_app_skills = crate::mobile_plugin_skill_names()
+            .into_iter()
+            .map(|name| format!("{}:{name}", crate::MOBILE_BUILTIN_PLUGIN_NAME))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            local_app_skill_names(&app).await,
+            expected_app_skills,
+            "a Host-owned Local App workspace must receive the complete skill listing"
+        );
+
+        let chat = build_for_cwd(app_root.path(), app_cwd, session::jsonl::SessionMode::Chat).await;
+        assert!(
+            local_app_tool_names(&chat).is_empty(),
+            "Chat's existing tool allowlist must remain authoritative in an app workspace"
+        );
+        assert!(
+            local_app_skill_names(&chat).await.is_empty(),
+            "Chat must not gain Code-only Local App skills from app cwd classification"
+        );
+    }
+
+    #[tokio::test]
+    async fn mobile_local_app_listing_keeps_chat_visibility_and_other_plugins() {
+        let registry = Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new()));
+        let mut chat_frontmatter = command_api::CommandFrontmatter::default();
+        chat_frontmatter.session_modes = Some(vec!["chat".to_string()]);
+        for name in [
+            "third-party:chat-router",
+            "lingxi-local-app:create-local-app",
+        ] {
+            let frontmatter = if name.starts_with("lingxi-local-app:") {
+                command_api::CommandFrontmatter::default()
+            } else {
+                chat_frontmatter.clone()
+            };
+            registry
+                .write()
+                .await
+                .register_command(command_api::SlashCommand {
+                    name: name.to_string(),
+                    description: "router".to_string(),
+                    source: command_api::CommandSource::Plugin,
+                    kind: command_api::SlashCommandKind::Markdown {
+                        file_path: std::path::PathBuf::from("/virtual/SKILL.md"),
+                        frontmatter,
+                        prompt_template: "route".to_string(),
+                    },
+                    loaded_from: Some("plugin".to_string()),
+                    has_user_specified_description: true,
+                    ..command_api::SlashCommand::default()
+                });
+        }
+
+        let chat = mobile_skill_listing_provider(
+            registry.clone(),
+            session::jsonl::SessionMode::Chat,
+            false,
+        )
+        .skill_entries()
+        .await;
+        assert!(
+            chat.iter()
+                .any(|entry| entry.name == "third-party:chat-router"),
+            "Chat's existing session-mode visibility must remain intact"
+        );
+        assert!(
+            !chat
+                .iter()
+                .any(|entry| entry.name == "lingxi-local-app:create-local-app"),
+            "the Local App router must not bypass Chat's existing frontmatter gate"
+        );
+
+        let code =
+            mobile_skill_listing_provider(registry, session::jsonl::SessionMode::Code, false)
+                .skill_entries()
+                .await;
+        assert!(code
+            .iter()
+            .any(|entry| entry.name == "third-party:chat-router"));
+        assert!(code
+            .iter()
+            .any(|entry| entry.name == "lingxi-local-app:create-local-app"));
     }
 
     fn write_skill(root: &Path, name: &str, description: &str, body: &str) {
@@ -13636,14 +13999,14 @@ mod tests {
             listed.iter().map(|entry| entry.name.as_str()).collect();
         let mut expected = vec!["loop".to_string(), "foo".to_string()];
         expected.extend(
-            crate::mobile_plugin_skill_names()
+            ["create-local-app", "local-app-use", "expose-as-mcp"]
                 .into_iter()
                 .map(|name| format!("{}:{name}", crate::MOBILE_BUILTIN_PLUGIN_NAME)),
         );
         assert_eq!(
             expected.len(),
-            29,
-            "loop + foo + 27 Plugin skills must be listed"
+            5,
+            "loop + foo + three global Local App routers must be listed"
         );
         for name in &expected {
             assert!(
@@ -14147,10 +14510,10 @@ mod tests {
         let namespaced_device_skill = format!("{}:device", crate::MOBILE_BUILTIN_PLUGIN_NAME);
         let listed = rt.wired_skill_listing_provider.skill_entries().await;
         assert!(
-            listed
+            !listed
                 .iter()
                 .any(|entry| entry.name == namespaced_device_skill),
-            "the plugin's `device` skill must appear in the live per-turn listing: {:?}",
+            "a global session must not list app-only Local App skills: {:?}",
             listed.iter().map(|e| e.name.as_str()).collect::<Vec<_>>()
         );
         let loaded_device_skill = rt
@@ -15358,17 +15721,22 @@ mod tests {
                 .await
                 .expect("load after re-enable")
                 .is_some());
-            assert!(handle
-                .inner
-                .wired_skill_listing_provider
-                .skill_entries()
-                .await
-                .iter()
-                .any(|entry| entry.name == namespaced_skill));
+            assert!(
+                !handle
+                    .inner
+                    .wired_skill_listing_provider
+                    .skill_entries()
+                    .await
+                    .iter()
+                    .any(|entry| entry.name == namespaced_skill),
+                "re-enabling must restore the complete live registry without leaking an \
+                 app-only skill into this global conversation's listing"
+            );
             assert_eq!(
                 super::mobile_live_plugin_skill_count(&handle.inner.slash_registry).await,
                 crate::mobile_plugin_skill_names().len(),
-                "live FFI count source must agree with re-enabled listing"
+                "re-enable must restore the complete live registry even though the \
+                 global listing exposes only its three routers"
             );
             let settings =
                 std::fs::read_to_string(tmp.path().join(branding::DOT_DIR).join("settings.json"))
@@ -15382,7 +15750,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_state_is_present_and_survives_restart() {
+    fn disabled_state_is_present_and_status_survives_restart() {
         let tmp = tempfile::tempdir().expect("tempdir");
         {
             let (handle, _) = build_submit_handle(tmp.path());
@@ -15414,14 +15782,16 @@ mod tests {
             "an explicitly disabled Plugin must report zero live skills after restart"
         );
         restarted.runtime().block_on(async {
-            assert!(matches!(
+            assert!(
                 restarted
                     .inner
                     .plugin_manager
                     .plugin_state(&crate::mobile_builtin_plugin_id())
-                    .await,
-                Some(plugin::PluginState::Disabled { .. })
-            ));
+                    .await
+                    .is_none(),
+                "a disabled boot must not materialize/register the plugin merely \
+                 to manufacture a generic PluginManager Disabled state"
+            );
             assert!(restarted
                 .inner
                 .wired_plugin_workflow_registry
@@ -15449,6 +15819,127 @@ mod tests {
                 )
             }));
         });
+    }
+
+    #[test]
+    fn disabled_boot_defers_bundle_materialization_until_enable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let settings_dir = tmp.path().join(branding::DOT_DIR);
+        std::fs::create_dir_all(&settings_dir).expect("settings directory");
+        std::fs::write(
+            settings_dir.join("settings.json"),
+            serde_json::json!({
+                "enabledPlugins": {
+                    "lingxi-local-app": false
+                }
+            })
+            .to_string(),
+        )
+        .expect("disabled settings");
+
+        // A pre-existing container makes the negative assertion meaningful:
+        // merely checking that an absent directory stays absent cannot catch a
+        // future sync path that reads/repairs an existing plugin root.
+        let bundle_root = settings_dir.join("builtin-plugin-bundle");
+        std::fs::create_dir_all(&bundle_root).expect("stale bundle container");
+        let sentinel = bundle_root.join("disabled-boot-sentinel");
+        std::fs::write(&sentinel, b"must remain the only entry").expect("bundle sentinel");
+        let bundle_entries = || {
+            std::fs::read_dir(&bundle_root)
+                .expect("bundle entries")
+                .map(|entry| {
+                    entry
+                        .expect("bundle entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+
+        let (handle, listener) = build_submit_handle(tmp.path());
+        assert_eq!(
+            bundle_entries(),
+            ["disabled-boot-sentinel".to_string()]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            "disabled boot must not materialize or repair an existing compiled-plugin container"
+        );
+        handle.runtime().block_on(async {
+            assert!(
+                handle
+                    .inner
+                    .plugin_manager
+                    .plugin_state(&crate::mobile_builtin_plugin_id())
+                    .await
+                    .is_none(),
+                "disabled boot should retain no materialized PluginManager state"
+            );
+            for command in [
+                client_protocol::local_apps::PluginCommandDto::GetStatus {
+                    plugin_id: crate::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+                },
+                client_protocol::local_apps::PluginCommandDto::GetInventory {
+                    plugin_id: crate::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+                },
+            ] {
+                handle
+                    .submit(ClientCommand::PluginCommand { command })
+                    .await
+                    .expect("disabled metadata query");
+            }
+        });
+        assert_eq!(
+            bundle_entries(),
+            ["disabled-boot-sentinel".to_string()]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            "compiled status/inventory queries must not enter plugin filesystem materialization"
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).expect("sentinel after metadata queries"),
+            b"must remain the only entry"
+        );
+        let events = listener.received.blocking_lock().clone();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ev::AppEvent {
+                event: client_protocol::local_apps::AppEventDto::PluginStatusChanged { status }
+            } if matches!(
+                status.state,
+                client_protocol::local_apps::PluginActivationStateDto::Disabled
+            )
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ev::AppEvent {
+                event: client_protocol::local_apps::AppEventDto::PluginInventoryChanged {
+                    inventory
+                }
+            } if matches!(
+                inventory.state,
+                client_protocol::local_apps::PluginActivationStateDto::Disabled
+            ) && inventory.counts.skills > 0
+        )));
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::PluginCommand {
+                    command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                        plugin_id: crate::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+                        enabled: true,
+                    },
+                })
+                .await
+                .expect("enable should use the existing registration path");
+        });
+        assert!(
+            bundle_root
+                .join("materialized")
+                .join("active.manifest.json")
+                .is_file(),
+            "enabling must be the first operation that materializes and activates the bundle"
+        );
     }
 
     #[test]
@@ -20532,7 +21023,6 @@ mod tests {
             let events = drain_events(&handle, &listener).await;
             let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
             let app_id = record.id;
-            let service = handle.local_apps().expect("local-apps service");
             app_id
         });
         // The store lives at the per-profile data root (`<root>/apps/…`) —
@@ -20572,6 +21062,138 @@ mod tests {
             !tmp.path().join("apps").join(&app_id).exists(),
             "DeleteApp must remove the app directory"
         );
+    }
+
+    #[test]
+    fn initial_app_cold_boot_exposes_only_its_enabled_managed_mcp() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let seed_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("seed runtime");
+        let (app_id, workspace) = seed_runtime.block_on(async {
+            let service = local_apps::AppService::load(
+                tmp.path().to_path_buf(),
+                Arc::new(platform_posix_minimal::PosixClock::new()),
+                Arc::new(local_apps::NoopAppEventObserver),
+            )
+            .await
+            .expect("seed app service");
+            let record = service
+                .create_app(Some("Published"), "cold-boot MCP", None)
+                .await
+                .expect("seed app");
+            let layout =
+                local_apps::AppLayout::new(tmp.path(), record.id.clone()).expect("seed app layout");
+            let definition = platform_api::McpToolDefinitionDto::new(
+                "read_value",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            );
+            let catalog = serde_json::json!({
+                "appId": record.id.clone(),
+                "buildId": "build-cold",
+                "tools": [{
+                    "definition": definition,
+                    "ceiling": "allow"
+                }],
+                "execution": []
+            });
+            let catalog_sha256 =
+                local_apps::hash_mcp_catalog(catalog.clone()).expect("catalog digest");
+            local_apps::save_mcp_catalog(&layout, &catalog_sha256, &catalog).expect("save catalog");
+            let mut manifest = local_apps::load_manifest(&layout).expect("seed manifest");
+            manifest.revision = manifest.revision.max(1);
+            let profile_sha256 = "2".repeat(64);
+            manifest.surface = Some(local_apps::AppSurface::Dom);
+            manifest.runtime_profile = Some(local_apps::AppRuntimeProfileBinding {
+                family: local_apps::AppRuntimeProfile::ReactDom,
+                revision: 1,
+                contract_sha256: profile_sha256.clone(),
+            });
+            manifest.dependency_snapshot = Some(local_apps::AppDependencySnapshot {
+                requested_sha256: "3".repeat(64),
+                package_sha256: "4".repeat(64),
+                lockfile_sha256: "5".repeat(64),
+                dependency_tree_sha256: "6".repeat(64),
+                sbom_sha256: "7".repeat(64),
+                toolchain_key: "pnpm@test/node@test".into(),
+                verified_profile_contract_sha256: profile_sha256.clone(),
+            });
+            manifest.template_origin = Some(local_apps::AppTemplateOrigin {
+                plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+                plugin_version: "builtin".into(),
+                template_id: "react-dom-r1".into(),
+                template_sha256: profile_sha256,
+            });
+            manifest.active_mcp_catalog = Some(local_apps::AppMcpCatalogRef {
+                build_id: "build-cold".into(),
+                manifest_revision: manifest.revision,
+                authoring_revision: 1,
+                user_goal_sha256: "0".repeat(64),
+                proposal_sha256: "0".repeat(64),
+                approval_contract_sha256: "0".repeat(64),
+                tool_surface_sha256: "1".repeat(64),
+                catalog_sha256,
+                mcp_verification_sha256: "0".repeat(64),
+            });
+            local_apps::save_manifest(&layout, &manifest).expect("publish catalog pointer");
+            local_apps::save_mcp_settings(
+                &layout,
+                &local_apps::AppMcpSettings {
+                    enabled: true,
+                    enabled_tools: vec!["read_value".into()],
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("enable published MCP");
+            (record.id, tmp.path().join(layout.workspace_rel()))
+        });
+        drop(seed_runtime);
+
+        // The authoring plugin can be disabled independently of an app MCP
+        // the user already published and enabled.
+        let settings_dir = tmp.path().join(branding::DOT_DIR);
+        std::fs::create_dir_all(&settings_dir).expect("settings directory");
+        std::fs::write(
+            settings_dir.join("settings.json"),
+            serde_json::json!({
+                "enabledPlugins": { "lingxi-local-app": false }
+            })
+            .to_string(),
+        )
+        .expect("disabled authoring plugin setting");
+
+        let mut cfg = test_config(tmp.path());
+        cfg.cwd = workspace;
+        let (handle, _) = build_submit_handle_with_config(cfg, tmp.path());
+        assert_eq!(
+            handle.skill_count(),
+            0,
+            "the authoring plugin must remain disabled on this cold boot"
+        );
+        let expected = format!("mcp__local_app_{app_id}__read_value");
+        handle.runtime().block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if handle.inner.orchestrator.tool_names().contains(&expected) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "initial Local App cold boot did not expose {expected:?}; tools={:?}",
+                    handle.inner.orchestrator.tool_names()
+                )
+            });
+        });
     }
 
     /// r1-engine-core-015 / r1-backlog-engine-create-06: an app's transcripts
@@ -20933,17 +21555,28 @@ mod tests {
             let contract =
                 std::fs::read_to_string(workspace.join("LINGXI.md")).expect("guided contract");
             assert!(
-                contract.contains("LocalAppScaffold"),
-                "the contract must name the one useful tool: {contract}"
+                contract.contains("lingxi-local-app:create-local-app")
+                    && contract.contains("Immediately use the `Skill` tool"),
+                "the thin shell must immediately enter the create coordinator: {contract}"
             );
             assert!(
-                contract.contains("will be deleted the moment the scaffold lands"),
+                contract.contains("Any source written before the scaffold lands will be deleted"),
                 "the contract must warn that pre-confirmation source is wiped: {contract}"
+            );
+            assert!(
+                contract.contains("do not call `LocalAppScaffold` directly"),
+                "the shell must preserve the direct-scaffold guard: {contract}"
+            );
+            assert!(
+                contract.contains("Do not run a separate questionnaire")
+                    && contract.contains("do not force a technical surface picker"),
+                "the Host shell must leave adaptive and technical choices to the coordinator: \
+                 {contract}"
             );
             assert!(
                 contract.contains(&record.id),
                 "the contract must bind the workspace to its app id so the agent \
-                 can call LocalAppScaffold without rediscovering it: {contract}"
+                 can enter the create flow without rediscovering it: {contract}"
             );
         });
     }

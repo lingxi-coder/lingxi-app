@@ -18,9 +18,8 @@ use client_protocol::local_apps::{
     LocalAppGateStatusDto, LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto,
     LocalAppMcpToolDiffDto, LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto,
     LocalAppPluginErrorCodeDto, LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto,
-    LocalAppVerificationStatusDto,
-    LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto, ManagedLocalAppMcpStatusDto,
-    McpAppWidgetDto,
+    LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto,
+    ManagedLocalAppMcpStatusDto, McpAppWidgetDto,
 };
 use futures_util::StreamExt;
 use local_apps::{
@@ -47,12 +46,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, watch, Mutex, Semaphore};
+use tokio::sync::{oneshot, watch, Mutex, Notify, Semaphore};
 use tokio::time::{sleep, timeout, Duration};
+use tracing::Instrument;
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const APPROVAL_RECEIPT_TTL: Duration = Duration::from_secs(10 * 60);
 const UI_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+/// Keep a successful QA action window open briefly so a page-bridge request
+/// already issued by the click handler can enter the Host after the native
+/// evaluation result. Requests are then allowed a bounded time to settle.
+const QA_ACTION_BRIDGE_GRACE: Duration = Duration::from_millis(100);
+const QA_ACTION_BRIDGE_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 const LOCAL_APP_WIDGET_MIME: &str = "text/html;profile=mcp-app";
 const LOCAL_APP_WIDGET_FILE: &str = "mcp-app.html";
 const LOCAL_APP_WIDGET_DIR: &str = "resources";
@@ -68,6 +73,11 @@ const DEPENDENCY_INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PNPM_TOOLCHAIN_KEY: &str = crate::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY;
 const DEPENDENCY_SNAPSHOT_VERSION: u8 = 2;
 const DEPENDENCY_SNAPSHOT_READY_FILE: &str = ".lingxi-dependency-ready";
+const MAX_DEPENDENCY_SNAPSHOT_READY_BYTES: u64 = 4 * 1024;
+const DEPENDENCY_SNAPSHOT_INVENTORY_FILE: &str = ".lingxi-dependency-inventory.json";
+const DEPENDENCY_SNAPSHOT_INVENTORY_SCHEMA_VERSION: u8 = 1;
+const MAX_DEPENDENCY_SNAPSHOT_INVENTORY_BYTES: usize = 4 * 1024 * 1024;
+const LOCAL_APP_PERF_DIAGNOSTIC_ENV: &str = "LINGXI_LOCAL_APP_PERF_DIAGNOSTIC";
 const DEPENDENCY_UPDATE_RECOVERY_FILE_REL: &str =
     ".lingxi-build-state/dependency-update-recovery.json";
 const DEPENDENCY_UPDATE_RECOVERY_SCHEMA_VERSION: u32 = 1;
@@ -95,6 +105,14 @@ const FLOW_EXECUTION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const FLOW_STEP_TIMEOUT: Duration = Duration::from_secs(60);
 const MCP_FLOW_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
+// Generation optimization Host extensions live in a child module so the
+// existing broker remains the owner of WebView/data/runtime handles while the
+// contract and QA journals stay private to the Host.  The MCP trait wiring is
+// intentionally left to local_apps_mcp.rs' owner.
+#[path = "local_apps_host/authoring.rs"]
+mod authoring;
+pub(crate) use authoring::PreparedWorkflowQaPublication;
+
 /// Availability of the exact profile dependency lock on this host. The
 /// selector distinguishes a reusable shared snapshot from a device-bundled
 /// seed; both avoid a network download but carry different provenance.
@@ -116,8 +134,7 @@ impl RuntimeProfileDependencyAvailability {
 }
 
 static LOCAL_APP_BUILD_LOCK: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
-static DEPENDENCY_SNAPSHOT_DIGESTS: OnceLock<std::sync::Mutex<HashMap<PathBuf, String>>> =
-    OnceLock::new();
+static LOCAL_APP_PERF_DIAGNOSTIC_ENABLED: OnceLock<bool> = OnceLock::new();
 /// The policy every local app is served.
 ///
 /// `worker-src 'self' blob:` and `script-src … 'wasm-unsafe-eval'` are DEFAULTS,
@@ -268,6 +285,27 @@ struct QaToolExecutionEvidence {
     step_calls: Vec<BoundMcpStepEvidence>,
 }
 
+#[derive(Clone, Debug)]
+struct QaInFlightAction {
+    qa_handle: String,
+    scenario_id: String,
+    target_id: String,
+    event_id: String,
+    /// Results of page-bridge mutations observed while the native action is
+    /// pending. The datastore write itself is deliberately performed before
+    /// this buffer is populated; only the Host evidence attribution waits for
+    /// native success.
+    pending_bridge_results: Vec<Value>,
+}
+
+#[derive(Clone, Debug)]
+struct QaActiveActionState {
+    event_id: String,
+    bridge_requests_in_flight: usize,
+    bridge_last_activity: tokio::time::Instant,
+    bridge_settled: Arc<Notify>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DependencyBaselineIdentity {
     dependency_snapshot_sha256: String,
@@ -410,6 +448,69 @@ struct DependencyInstallCompletion {
     toolchain_key: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstalledDependencyPackage {
+    name: String,
+    version: String,
+    license: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerifiedDependencyInventory {
+    schema_version: u8,
+    toolchain_key: String,
+    lock_digest: String,
+    tree_digest: String,
+    inventory_digest: String,
+    packages: Vec<InstalledDependencyPackage>,
+}
+
+/// Opt-in device-visible timing for Local App work. Mobile installs do not
+/// install a tracing subscriber, so spans alone are not observable there.
+/// Phase names are fixed Host strings: never place app IDs, paths, package
+/// names, or other user-controlled values in this diagnostic.
+pub(crate) struct LocalAppPerfDiagnosticTimer {
+    phase: &'static str,
+    started: Option<std::time::Instant>,
+}
+
+impl LocalAppPerfDiagnosticTimer {
+    pub(crate) fn start(phase: &'static str) -> Self {
+        let enabled = *LOCAL_APP_PERF_DIAGNOSTIC_ENABLED
+            .get_or_init(|| std::env::var_os(LOCAL_APP_PERF_DIAGNOSTIC_ENV).is_some());
+        Self {
+            phase,
+            started: enabled.then(std::time::Instant::now),
+        }
+    }
+}
+
+impl Drop for LocalAppPerfDiagnosticTimer {
+    fn drop(&mut self) {
+        if let Some(started) = self.started.as_ref() {
+            if let Some(line) = local_app_perf_diagnostic_line(true, self.phase, started.elapsed())
+            {
+                eprintln!("{line}");
+            }
+        }
+    }
+}
+
+fn local_app_perf_diagnostic_line(
+    enabled: bool,
+    phase: &'static str,
+    elapsed: Duration,
+) -> Option<String> {
+    enabled.then(|| {
+        format!(
+            "[local-app-perf] phase={phase} elapsed_us={}",
+            elapsed.as_micros()
+        )
+    })
+}
+
 #[derive(Debug)]
 struct DependencyUpdateFileBackup {
     relative: &'static str,
@@ -480,7 +581,19 @@ struct RuntimeEntry {
     state: RuntimeEntryState,
     last_used: u64,
     generation: u64,
+    /// Build provenance selected when this runtime start was reserved.  The
+    /// port is intentionally stable for IndexedDB origin continuity, so QA
+    /// uses this identity in addition to the generation counter.
+    build_id: String,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimePublicationIdentity {
+    generation: u64,
+    build_id: String,
+}
+
+type RuntimePublicationCell = Arc<RwLock<Option<RuntimePublicationIdentity>>>;
 
 /// Releases a `Starting` reservation whose owner never resolved it.
 ///
@@ -1307,6 +1420,20 @@ pub(crate) struct LocalAppsHostBroker {
     pending_mcp_receipts: Arc<std::sync::Mutex<local_apps::McpReceiptBook>>,
     session_permissions: Mutex<SessionPermissions>,
     runtimes: Arc<Mutex<HashMap<String, RuntimeEntry>>>,
+    /// Per-app synchronous mirror used only by the bounded terminal QA commit.
+    /// Runtime transitions update the same cell while holding `runtimes`; the
+    /// commit holds a read guard through marker/pointer publication, closing
+    /// the prepare-to-commit restart race without awaiting under the registry
+    /// critical section or blocking unrelated apps.
+    runtime_publication_identities: Arc<std::sync::Mutex<HashMap<String, RuntimePublicationCell>>>,
+    /// A bounded action window opened before native UI dispatch. Page bridge
+    /// writes are attributed only while this Host-owned window is active.
+    qa_inflight_actions: Arc<Mutex<HashMap<String, QaInFlightAction>>>,
+    /// Synchronous liveness mirror for QA action cancellation. A dropped
+    /// `act_on_ui` future can clear this map from `Drop` without awaiting,
+    /// preventing a later page bridge request from entering a stale action
+    /// window while the async action map is eventually reclaimed.
+    qa_active_actions: Arc<std::sync::Mutex<HashMap<String, QaActiveActionState>>>,
     /// See [`PortLeases`].  Broker-scoped because a profile's apps are what
     /// collide with each other, and one broker is exactly one profile.
     port_leases: PortLeases,
@@ -1445,6 +1572,9 @@ impl LocalAppsHostBroker {
             )),
             session_permissions: Mutex::new(SessionPermissions::default()),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
+            runtime_publication_identities: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            qa_inflight_actions: Arc::new(Mutex::new(HashMap::new())),
+            qa_active_actions: Arc::new(std::sync::Mutex::new(HashMap::new())),
             port_leases: Arc::new(std::sync::Mutex::new(HashMap::new())),
             port_allocation: Mutex::new(()),
             dependency_snapshot_locks: Mutex::new(HashMap::new()),
@@ -1463,6 +1593,17 @@ impl LocalAppsHostBroker {
     /// Weak handle for tasks that outlive the call that spawned them.
     fn weak_self(&self) -> std::sync::Weak<LocalAppsHostBroker> {
         self.self_ref.get().cloned().unwrap_or_default()
+    }
+
+    fn runtime_publication_cell(&self, app_id: &str) -> Result<RuntimePublicationCell, String> {
+        let mut identities = self
+            .runtime_publication_identities
+            .lock()
+            .map_err(|_| "runtime publication identity registry is poisoned".to_string())?;
+        Ok(identities
+            .entry(app_id.to_string())
+            .or_insert_with(|| Arc::new(RwLock::new(None)))
+            .clone())
     }
 
     pub(crate) fn attach_service(&self, service: Arc<AppService>) -> Result<(), Arc<AppService>> {
@@ -1963,9 +2104,13 @@ impl LocalAppsHostBroker {
             let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
             let active_build_id = crate::local_apps_build::active_build_id(&layout)
                 .map_err(|error| error.to_string())?;
-            let publication =
-                local_apps::derive_publication_state(&manifest, active_build_id.as_deref(), false)
-                    .map_err(|error| error.to_string())?;
+            let ui_verification = self.qa_ui_verification_summary(&record.id).await;
+            let publication = local_apps::derive_publication_state(
+                &manifest,
+                active_build_id.as_deref(),
+                ui_verification.status == LocalAppVerificationStatusDto::Passed,
+            )
+            .map_err(|error| error.to_string())?;
             if matches!(publication, local_apps::AppPublicationState::Draft) {
                 continue;
             }
@@ -2077,7 +2222,8 @@ impl LocalAppsHostBroker {
                     } else {
                         LocalAppVerificationSummaryDto {
                             status: LocalAppVerificationStatusDto::Passed,
-                            summary: "MCP schema, Flow, call and isolation verification passed.".into(),
+                            summary: "MCP schema, Flow, call and isolation verification passed."
+                                .into(),
                             code: None,
                         }
                     };
@@ -2120,11 +2266,7 @@ impl LocalAppsHostBroker {
                     }
                 },
                 mcp_verification,
-                ui_verification: LocalAppVerificationSummaryDto {
-                    status: LocalAppVerificationStatusDto::Unavailable,
-                    summary: "UI verification evidence is unavailable on this host.".into(),
-                    code: Some("verification_unavailable".into()),
-                },
+                ui_verification,
                 widget,
                 tools,
             });
@@ -2723,22 +2865,21 @@ impl LocalAppsHostBroker {
         // therefore adopted silently. Compare, including the present/absent
         // case, and fail with the same named error the other corruption
         // checks above use.
-        let recorded_design_sha256 = match staging_evidence.get("designSpecSha256") {
-            None => {
-                return Err(
+        let recorded_design_sha256 =
+            match staging_evidence.get("designSpecSha256") {
+                None => return Err(
                     "create_staging_evidence_invalid: staged evidence is missing designSpecSha256"
                         .to_string(),
-                )
-            }
-            Some(Value::Null) => None,
-            Some(Value::String(digest)) => Some(digest.as_str()),
-            Some(_) => {
-                return Err(
-                    "create_staging_evidence_invalid: staged designSpecSha256 is not a string"
-                        .to_string(),
-                )
-            }
-        };
+                ),
+                Some(Value::Null) => None,
+                Some(Value::String(digest)) => Some(digest.as_str()),
+                Some(_) => {
+                    return Err(
+                        "create_staging_evidence_invalid: staged designSpecSha256 is not a string"
+                            .to_string(),
+                    )
+                }
+            };
         if recorded_design_sha256 != design_spec_sha256.as_deref() {
             return Err(format!(
                 "create_staging_evidence_invalid: staged design-spec.json digest {observed:?} \
@@ -2915,6 +3056,8 @@ impl LocalAppsHostBroker {
             // point in the flow (it is only overwritten once `commit_scaffold`
             // lands, long after this confirmation is answered).
             let create_context = self.load_create_proposal_context(&record.id, workflow_run_id)?;
+            let layout = self.layout(&record.id)?;
+            let confirmed_ui = self.authoring_ui_confirmation_summary(&layout, workflow_run_id)?;
             let selection = create_context.selection;
             let template = crate::local_app_template_catalog::catalog_view()?
                 .templates
@@ -2936,7 +3079,7 @@ impl LocalAppsHostBroker {
                         summary: template.summary,
                     },
                     runtime_profile: self.create_runtime_option(&selection.runtime_profile)?,
-                    reason: selection.reason,
+                    reason: format!("{confirmed_ui} Template: {}", selection.reason),
                     rejected: selection
                         .rejected
                         .into_iter()
@@ -3671,7 +3814,18 @@ impl LocalAppsHostBroker {
     ) -> Result<(), String> {
         let network = request.network;
         let resource_limits = request.resource_limits;
-        match runtime.run_isolated(request).await {
+        let frozen_lockfile = request.args.iter().any(|arg| arg == "--frozen-lockfile");
+        let install_span = tracing::debug_span!(
+            "local_app_dependency_install",
+            network = ?network,
+            frozen_lockfile = frozen_lockfile,
+        );
+        let _perf = LocalAppPerfDiagnosticTimer::start(if frozen_lockfile {
+            "dependency_pnpm_frozen_install"
+        } else {
+            "dependency_pnpm_resolve"
+        });
+        match runtime.run_isolated(request).instrument(install_span).await {
             Ok(result) => {
                 result
                     .enforcement
@@ -3717,6 +3871,7 @@ impl LocalAppsHostBroker {
         snapshot_root: &Path,
         lock_digest: &str,
     ) -> Result<bool, String> {
+        let _perf = LocalAppPerfDiagnosticTimer::start("dependency_snapshot_verify");
         let root_metadata = match std::fs::symlink_metadata(snapshot_root) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -3741,11 +3896,16 @@ impl LocalAppsHostBroker {
                 ))
             }
         };
-        if !marker_metadata.is_file() || marker_metadata.file_type().is_symlink() {
+        if !marker_metadata.is_file()
+            || marker_metadata.file_type().is_symlink()
+            || marker_metadata.len() > MAX_DEPENDENCY_SNAPSHOT_READY_BYTES
+        {
             return Ok(false);
         }
-        let marker_contents = std::fs::read_to_string(&marker)
-            .map_err(|error| format!("read dependency snapshot marker: {error}"))?;
+        let marker_contents = match std::fs::read_to_string(&marker) {
+            Ok(contents) => contents,
+            Err(_) => return Ok(false),
+        };
         let mut marker_lines = marker_contents.lines();
         let expected_version = DEPENDENCY_SNAPSHOT_VERSION.to_string();
         if marker_lines.next() != Some(expected_version.as_str())
@@ -3769,23 +3929,24 @@ impl LocalAppsHostBroker {
         if !node_modules_metadata.is_dir() || node_modules_metadata.file_type().is_symlink() {
             return Ok(false);
         }
-        let digest_cached = DEPENDENCY_SNAPSHOT_DIGESTS
-            .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-            .lock()
-            .expect("dependency snapshot digest cache poisoned")
-            .get(snapshot_root)
-            .is_some_and(|digest| digest == expected_tree_digest);
-        if !digest_cached {
-            validate_dependency_tree(&node_modules)?;
-            let actual_tree_digest = dependency_tree_digest(&node_modules)?;
-            if actual_tree_digest != expected_tree_digest {
-                return Ok(false);
-            }
-            DEPENDENCY_SNAPSHOT_DIGESTS
-                .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-                .lock()
-                .expect("dependency snapshot digest cache poisoned")
-                .insert(snapshot_root.to_path_buf(), actual_tree_digest);
+        // Snapshot directories are read-only by convention, not by an OS
+        // sandbox boundary. Re-hash the bytes on every lookup so a tree that
+        // changed after an earlier successful lookup cannot inherit stale
+        // in-process trust from its marker or path alone.
+        if validate_dependency_tree(&node_modules).is_err() {
+            return Ok(false);
+        }
+        let actual_tree_digest = match dependency_tree_digest(&node_modules) {
+            Ok(digest) => digest,
+            Err(_) => return Ok(false),
+        };
+        if actual_tree_digest != expected_tree_digest {
+            return Ok(false);
+        }
+        if read_verified_dependency_inventory(snapshot_root, lock_digest, expected_tree_digest)?
+            .is_none()
+        {
+            return Ok(false);
         }
         let vite = node_modules.join("vite/bin/vite.js");
         let vite_metadata = match std::fs::symlink_metadata(&vite) {
@@ -3888,22 +4049,39 @@ impl LocalAppsHostBroker {
         Self::remove_owned_path(&staging_root)?;
         std::fs::create_dir_all(&staging_root)
             .map_err(|error| format!("create dependency snapshot staging: {error}"))?;
-        if let Err(error) =
-            clone_or_copy_tree(source_node_modules, &staging_root.join("node_modules"))
-                .and_then(|_| {
-                    let tree_digest = dependency_tree_digest(&staging_root.join("node_modules"))
-                        .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
-                    let marker = staging_root.join(DEPENDENCY_SNAPSHOT_READY_FILE);
-                    let expected = dependency_attestation(lock_digest, &tree_digest);
-                    std::fs::write(marker, expected)
-                        .map_err(|error| io::Error::new(io::ErrorKind::Other, error))
-                })
-                .and_then(|_| {
-                    validate_dependency_tree(&staging_root.join("node_modules"))
-                        .map_err(|error| io::Error::new(io::ErrorKind::Other, error))
-                })
-                .and_then(|_| make_dependency_files_read_only(&staging_root.join("node_modules")))
-        {
+        let staged_node_modules = staging_root.join("node_modules");
+        let prepare_result = (|| -> Result<(), String> {
+            clone_or_copy_tree(source_node_modules, &staged_node_modules)
+                .map_err(|error| error.to_string())?;
+            if !Self::workspace_dependencies_ready_path(&staging_root)? {
+                return Err(format!(
+                    "staged Vite executable was not produced at {}",
+                    staged_node_modules.join("vite/bin/vite.js").display()
+                ));
+            }
+            validate_dependency_tree(&staged_node_modules)?;
+            let tree_digest = dependency_tree_digest(&staged_node_modules)?;
+            {
+                let _perf =
+                    LocalAppPerfDiagnosticTimer::start("dependency_inventory_collect_publish");
+                let mut packages = BTreeMap::new();
+                collect_installed_packages(&staged_node_modules, &mut packages)?;
+                write_verified_dependency_inventory(
+                    &staging_root,
+                    lock_digest,
+                    &tree_digest,
+                    &packages,
+                )?;
+            }
+            std::fs::write(
+                staging_root.join(DEPENDENCY_SNAPSHOT_READY_FILE),
+                dependency_attestation(lock_digest, &tree_digest),
+            )
+            .map_err(|error| format!("write dependency snapshot marker: {error}"))?;
+            make_dependency_files_read_only(&staged_node_modules)
+                .map_err(|error| format!("protect dependency snapshot: {error}"))
+        })();
+        if let Err(error) = prepare_result {
             let _ = Self::remove_owned_path(&staging_root);
             return Err(format!("prepare dependency snapshot: {error}"));
         }
@@ -4224,7 +4402,11 @@ impl LocalAppsHostBroker {
             true,
         )
         .map_err(|error| error.to_string())?;
-        refresh_runtime_profile_snapshot(layout, &tree_digest)?;
+        refresh_runtime_profile_snapshot(
+            layout,
+            &tree_digest,
+            Some((&snapshot_root, expected_lock_digest)),
+        )?;
         Ok(DependencyInstallCompletion {
             lockfile_sha256: actual_lock_digest,
             toolchain_key: PNPM_TOOLCHAIN_KEY.to_string(),
@@ -4938,7 +5120,15 @@ impl LocalAppsHostBroker {
         };
         let snapshot_root = self.dependency_snapshot_root(&lock_digest);
         let snapshot_lock = self.dependency_snapshot_lock(&lock_digest).await;
-        let _snapshot_guard = snapshot_lock.lock().await;
+        let lock_wait_span = tracing::debug_span!(
+            "local_app_dependency_snapshot_lock_wait",
+            app_id = %app_id,
+            lock_digest = %lock_digest,
+        );
+        let _snapshot_guard = {
+            let _perf = LocalAppPerfDiagnosticTimer::start("dependency_snapshot_lock_wait");
+            snapshot_lock.lock().instrument(lock_wait_span).await
+        };
         let dependency_staging = match Self::prepare_dependency_staging(&layout) {
             Ok(path) => path,
             Err(error) => return Err(error),
@@ -4976,9 +5166,19 @@ impl LocalAppsHostBroker {
             }
         }
         if snapshot_ready {
-            if let Err(error) =
-                Self::materialize_dependency_snapshot(&snapshot_root, &dependency_staging)
-            {
+            let snapshot_span = tracing::debug_span!(
+                "local_app_dependency_snapshot_materialize",
+                app_id = %app_id,
+                lock_digest = %lock_digest,
+                cache_hit = true,
+            );
+            let materialize_result = {
+                let _perf = LocalAppPerfDiagnosticTimer::start("dependency_snapshot_materialize");
+                snapshot_span.in_scope(|| {
+                    Self::materialize_dependency_snapshot(&snapshot_root, &dependency_staging)
+                })
+            };
+            if let Err(error) = materialize_result {
                 let _ = Self::remove_owned_path(&dependency_staging);
                 return Err(error);
             }
@@ -5030,11 +5230,23 @@ impl LocalAppsHostBroker {
         let outcome = Self::run_dependency_install_command(runtime.as_ref(), request).await;
         match outcome {
             Ok(()) => {
-                if let Err(error) = Self::publish_dependency_snapshot(
-                    &dependency_staging.join("node_modules"),
-                    &snapshot_root,
-                    &lock_digest,
-                ) {
+                let snapshot_span = tracing::debug_span!(
+                    "local_app_dependency_snapshot_publish",
+                    app_id = %app_id,
+                    lock_digest = %lock_digest,
+                    cache_hit = false,
+                );
+                let publish_result = {
+                    let _perf = LocalAppPerfDiagnosticTimer::start("dependency_snapshot_publish");
+                    snapshot_span.in_scope(|| {
+                        Self::publish_dependency_snapshot(
+                            &dependency_staging.join("node_modules"),
+                            &snapshot_root,
+                            &lock_digest,
+                        )
+                    })
+                };
+                if let Err(error) = publish_result {
                     let _ = Self::remove_owned_path(&dependency_staging);
                     return Err(error);
                 }
@@ -5674,12 +5886,22 @@ impl LocalAppsHostBroker {
     }
 
     async fn runtime_profiles_value(&self, _input: Value) -> Result<Value, String> {
+        // Several profile families can intentionally share an exact
+        // toolchain+lock snapshot. Verify that immutable tree once for this
+        // catalog operation, then discard the proof: a later call (or a new
+        // Host over the same root) must revalidate the bytes rather than trust
+        // process-global path/mtime metadata.
+        let mut dependency_availability_by_lock = HashMap::new();
         Ok(json!({
             "profiles": crate::local_app_runtime_profiles::list_runtime_profiles()
                 .into_iter()
                 .map(|entry| {
                     let dependency_status = if entry.available {
-                        self.runtime_profile_dependency_availability(entry.family, entry.revision)
+                        self.runtime_profile_dependency_availability_cached(
+                            entry.family,
+                            entry.revision,
+                            &mut dependency_availability_by_lock,
+                        )
                     } else {
                         RuntimeProfileDependencyAvailability::DownloadRequired
                     };
@@ -5739,6 +5961,15 @@ impl LocalAppsHostBroker {
         family: AppRuntimeProfile,
         revision: u32,
     ) -> RuntimeProfileDependencyAvailability {
+        self.runtime_profile_dependency_availability_cached(family, revision, &mut HashMap::new())
+    }
+
+    fn runtime_profile_dependency_availability_cached(
+        &self,
+        family: AppRuntimeProfile,
+        revision: u32,
+        availability_by_lock: &mut HashMap<String, RuntimeProfileDependencyAvailability>,
+    ) -> RuntimeProfileDependencyAvailability {
         let Ok(binding) = crate::local_app_runtime_profiles::current_binding_for_family(family)
         else {
             return RuntimeProfileDependencyAvailability::DownloadRequired;
@@ -5750,8 +5981,20 @@ impl LocalAppsHostBroker {
             return RuntimeProfileDependencyAvailability::DownloadRequired;
         };
         let lock_digest = crate::local_app_runtime_profiles::lockfile_sha256(contract);
-        let snapshot_root = self.dependency_snapshot_root(&lock_digest);
-        if Self::dependency_snapshot_is_ready(&snapshot_root, &lock_digest).unwrap_or(false) {
+        if let Some(availability) = availability_by_lock.get(&lock_digest) {
+            return *availability;
+        }
+        let availability = self.runtime_profile_dependency_availability_for_lock(&lock_digest);
+        availability_by_lock.insert(lock_digest, availability);
+        availability
+    }
+
+    fn runtime_profile_dependency_availability_for_lock(
+        &self,
+        lock_digest: &str,
+    ) -> RuntimeProfileDependencyAvailability {
+        let snapshot_root = self.dependency_snapshot_root(lock_digest);
+        if Self::dependency_snapshot_is_ready(&snapshot_root, lock_digest).unwrap_or(false) {
             return RuntimeProfileDependencyAvailability::Cached;
         }
         let Ok(runtime_root) = self.configured_runtime_root() else {
@@ -5761,7 +6004,7 @@ impl LocalAppsHostBroker {
         else {
             return RuntimeProfileDependencyAvailability::DownloadRequired;
         };
-        if manifest.get("pnpm_lock_sha256").and_then(Value::as_str) != Some(lock_digest.as_str()) {
+        if manifest.get("pnpm_lock_sha256").and_then(Value::as_str) != Some(lock_digest) {
             return RuntimeProfileDependencyAvailability::DownloadRequired;
         }
         let Ok(metadata) = std::fs::symlink_metadata(runtime_root.join("node_modules")) else {
@@ -5776,6 +6019,11 @@ impl LocalAppsHostBroker {
 
     async fn query_data_value(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
+        self.validate_qa_request(&input).await?;
+        let qa_event_id = input
+            .get("qa_handle")
+            .and_then(Value::as_str)
+            .map(|_| self.request_id("qa-query"));
         self.service()?
             .record(&app_id)
             .await
@@ -5783,21 +6031,41 @@ impl LocalAppsHostBroker {
         let layout = self.layout(&app_id)?;
         let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
         let query = normalize_query(&input)?;
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             AppDataStore::with_cached(layout, |store| store.query(&manifest, &query))
         })
         .await
         .map_err(|error| format!("data query worker failed: {error}"))?
         .map(|page| json!(page))
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+        self.validate_qa_request(&input).await?;
+        if let Some(qa_event_id) = qa_event_id {
+            // The durable artifact is the actual native query page. Core
+            // validates its collection/record/revision against the causally
+            // linked bridge mutation; wrapping it in request metadata would
+            // make the real `records` array invisible to that validation.
+            let evidence = self
+                .record_qa_observation(&input, "query_data", result.clone(), qa_event_id, None)
+                .await?;
+            if let Some(handle) = input.get("qa_handle").and_then(Value::as_str) {
+                return Ok(authoring::qa_result_with_evidence_ids(
+                    result,
+                    handle,
+                    authoring::qa_observation_id(&evidence),
+                ));
+            }
+        }
+        Ok(result)
     }
 
     async fn mutate_data_value(
         &self,
         input: Value,
         require_approval: bool,
+        qa_bridge_event_id: Option<&str>,
     ) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
+        self.validate_qa_request(&input).await?;
         self.service()?
             .record(&app_id)
             .await
@@ -5819,13 +6087,32 @@ impl LocalAppsHostBroker {
             .map_or(0, |elapsed| {
                 u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
             });
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             AppDataStore::with_cached(layout, |store| store.mutate(&manifest, &mutations, now_ms))
         })
         .await
         .map_err(|error| format!("data mutation worker failed: {error}"))?
         .map(|results| json!({ "results": results }))
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+        if let Some(event_id) = qa_bridge_event_id {
+            // The page receives the actual datastore result immediately. Only
+            // Host evidence attribution waits for the native action result;
+            // failed/cancelled native actions must never erase this business
+            // write or expose a fabricated empty response.
+            if let Err(error) = self.validate_qa_request(&input).await {
+                tracing::warn!(app_id = %app_id, %error, "QA identity changed after page write; omitting evidence attribution");
+                return Ok(result);
+            }
+            if let Err(error) = self
+                .buffer_qa_bridge_result(&app_id, event_id, result.clone())
+                .await
+            {
+                tracing::warn!(app_id = %app_id, %error, "QA bridge evidence attribution unavailable after page write");
+            }
+            return Ok(result);
+        }
+        self.validate_qa_request(&input).await?;
+        Ok(result)
     }
 
     async fn request_ui(&self, request: AppUiRequestDto) -> Result<Value, String> {
@@ -5890,6 +6177,30 @@ impl LocalAppsHostBroker {
         &self,
         request: &AppBridgeRequestDto,
     ) -> Result<Value, BridgeFailure> {
+        // Track every page request, not just the eventual mutation: an async
+        // click handler may await a query/device bridge before issuing its
+        // persisted write. Only MutateData receives the scoped event id.
+        let qa_bridge_guard = self.begin_qa_bridge_request(&request.app_id).await;
+        let qa_action_event_id = qa_bridge_guard
+            .as_ref()
+            .map(|guard| guard.event_id().to_string());
+        let qa_bridge_event_id = matches!(request.operation, AppBridgeOperationDto::MutateData)
+            .then_some(qa_action_event_id.as_deref())
+            .flatten();
+        let result = self
+            .execute_bridge_inner_scoped(request, qa_bridge_event_id)
+            .await;
+        // Dropping the guard synchronously settles the in-flight counter even
+        // when the bridge future is cancelled before this point.
+        drop(qa_bridge_guard);
+        result
+    }
+
+    async fn execute_bridge_inner_scoped(
+        &self,
+        request: &AppBridgeRequestDto,
+        qa_bridge_event_id: Option<&str>,
+    ) -> Result<Value, BridgeFailure> {
         let payload_json = request.payload_json.as_deref().unwrap_or("{}");
         let payload_limit = if matches!(
             request.operation,
@@ -5937,7 +6248,7 @@ impl LocalAppsHostBroker {
             // The page is acting for the foreground user, not an agent.  Its
             // app id is host-bound and the manifest still constrains writes.
             AppBridgeOperationDto::MutateData => self
-                .mutate_data_value(Value::Object(input), false)
+                .mutate_data_value(Value::Object(input), false, qa_bridge_event_id)
                 .await
                 .map_err(BridgeFailure::from),
             AppBridgeOperationDto::RuntimeStatus => {
@@ -6271,6 +6582,11 @@ impl LocalAppsHostBroker {
             .record(app_id)
             .await
             .map_err(|error| error.to_string())?;
+        let layout = self.layout(app_id)?;
+        let requested_build_id = crate::local_apps_build::active_build_id(&layout)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "runtime start requires an active build".to_string())?;
+        let publication_cell = self.runtime_publication_cell(app_id)?;
         let access_tick = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let mut wait_for_start = None;
         let mut return_running = false;
@@ -6284,18 +6600,28 @@ impl LocalAppsHostBroker {
                         wait_for_start = Some(gate.subscribe());
                     }
                     RuntimeEntryState::Running { .. } => {
+                        if entry.build_id != requested_build_id {
+                            return Err(
+                                "runtime_stale_build: running runtime does not serve the active build; stop and restart it"
+                                    .into(),
+                            );
+                        }
                         return_running = true;
                     }
                 }
             } else {
                 let generation = self.next_request_id.fetch_add(1, Ordering::Relaxed);
                 let (gate, _) = watch::channel(RuntimeStartStatus::Pending);
+                *publication_cell
+                    .write()
+                    .map_err(|_| "runtime publication identity is poisoned".to_string())? = None;
                 runtimes.insert(
                     app_id.to_string(),
                     RuntimeEntry {
                         state: RuntimeEntryState::Starting { gate },
                         last_used: access_tick,
                         generation,
+                        build_id: requested_build_id.clone(),
                     },
                 );
                 reserved_generation = Some(generation);
@@ -6312,7 +6638,8 @@ impl LocalAppsHostBroker {
             return Ok(json!({
                 "app_id": app_id,
                 "state": runtime.state,
-                "url": runtime.port.map(|port| format!("http://127.0.0.1:{port}"))
+                "url": runtime.port.map(|port| format!("http://127.0.0.1:{port}")),
+                "build_id": requested_build_id,
             }));
         }
         let Some(generation) = reserved_generation else {
@@ -6341,10 +6668,13 @@ impl LocalAppsHostBroker {
                         .runtime_record(app_id)
                         .await
                         .map_err(|error| error.to_string())?;
+                    let build_id = crate::local_apps_build::active_build_id(&self.layout(app_id)?)
+                        .map_err(|error| error.to_string())?;
                     return Ok(json!({
                         "app_id": app_id,
                         "state": runtime.state,
-                        "url": runtime.port.map(|port| format!("http://127.0.0.1:{port}"))
+                        "url": runtime.port.map(|port| format!("http://127.0.0.1:{port}")),
+                        "build_id": build_id,
                     }));
                 }
                 RuntimeStartStatus::Failed(detail) => return Err(detail),
@@ -6360,6 +6690,25 @@ impl LocalAppsHostBroker {
         };
         let service = self.service()?;
         let layout = self.layout(app_id)?;
+        let expected_build_id = crate::local_apps_build::active_build_id(&layout)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "runtime start requires an active build".to_string())?;
+        let reservation_matches = {
+            let runtimes = self.runtimes.lock().await;
+            runtimes.get(app_id).is_some_and(|entry| {
+                entry.generation == generation && entry.build_id == expected_build_id
+            })
+        };
+        if !reservation_matches {
+            return self
+                .fail_reserved_runtime_start(
+                    app_id,
+                    generation,
+                    None,
+                    "runtime start build identity changed before launch".into(),
+                )
+                .await;
+        }
         let manifest = local_apps::load_manifest(&layout).map_err(|error| error.to_string())?;
         if !manifest.runtime_api_compatible() {
             return self
@@ -6439,6 +6788,20 @@ impl LocalAppsHostBroker {
                     .await;
             }
         };
+        let latest_build_id = crate::local_apps_build::active_build_id(&layout)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "runtime start lost its active build".to_string())?;
+        if latest_build_id != expected_build_id {
+            drop(port_lease);
+            return self
+                .fail_reserved_runtime_start(
+                    app_id,
+                    generation,
+                    Some(port),
+                    "runtime start build identity changed while binding".into(),
+                )
+                .await;
+        }
         if let Err(error) = service
             .set_runtime_mode(app_id, AppRuntimeMode::StaticExport)
             .await
@@ -6481,11 +6844,13 @@ impl LocalAppsHostBroker {
             lease.commit();
         }
 
+        let publication_cell = self.runtime_publication_cell(app_id)?;
         let (shutdown, receiver) = oneshot::channel();
         self.spawn_static_server(
             service.clone(),
             app_id.to_string(),
             generation,
+            publication_cell.clone(),
             listener,
             static_root,
             receiver,
@@ -6506,6 +6871,20 @@ impl LocalAppsHostBroker {
                 )
                 .await;
         }
+        let latest_build_id = crate::local_apps_build::active_build_id(&layout)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "runtime start lost its active build".to_string())?;
+        if latest_build_id != expected_build_id {
+            self.cleanup_runtime_handle(handle).await;
+            return self
+                .fail_reserved_runtime_start(
+                    app_id,
+                    generation,
+                    Some(port),
+                    "runtime start build identity changed before commit".into(),
+                )
+                .await;
+        }
         let gate = {
             let mut runtimes = self.runtimes.lock().await;
             let Some(entry) = runtimes.get_mut(app_id) else {
@@ -6516,18 +6895,32 @@ impl LocalAppsHostBroker {
                 self.cleanup_runtime_handle(handle).await;
                 return Err("runtime start reservation changed before completion".into());
             }
+            let mut publication_identity = publication_cell
+                .write()
+                .map_err(|_| "runtime publication identity is poisoned".to_string())?;
             let previous =
                 std::mem::replace(&mut entry.state, RuntimeEntryState::Running { handle });
-            match previous {
+            let gate = match previous {
                 RuntimeEntryState::Starting { gate } => gate,
                 RuntimeEntryState::Running { handle } => {
                     entry.state = RuntimeEntryState::Running { handle };
                     return Err("runtime start reservation was already resolved".into());
                 }
-            }
+            };
+            *publication_identity = Some(RuntimePublicationIdentity {
+                generation,
+                build_id: expected_build_id.clone(),
+            });
+            gate
         };
         let _ = gate.send(RuntimeStartStatus::Running);
-        Ok(json!({"app_id": app_id, "state": "running", "url": format!("http://127.0.0.1:{port}")}))
+        Ok(json!({
+            "app_id": app_id,
+            "state": "running",
+            "url": format!("http://127.0.0.1:{port}"),
+            "build_id": expected_build_id,
+            "runtime_generation": generation,
+        }))
     }
 
     async fn stop_runtime(&self, app_id: &str) -> Result<Value, String> {
@@ -6537,21 +6930,31 @@ impl LocalAppsHostBroker {
             .await
             .map_err(|error| error.to_string())?;
         self.release_app_runtime_state(app_id).await;
+        let publication_cell = self.runtime_publication_cell(app_id)?;
         // Classify and remove under ONE acquisition: a start woken in the gap
         // between a `remove` and its rollback `insert` finds no entry, kills the
         // runtime it just spawned and returns without resolving the gate,
         // leaving a reservation nothing can ever complete.
         let handle = {
             let mut runtimes = self.runtimes.lock().await;
+            let mut publication_identity = publication_cell
+                .write()
+                .map_err(|_| "runtime publication identity is poisoned".to_string())?;
             match runtimes.get(app_id).map(|entry| &entry.state) {
-                None => return Ok(json!({"app_id": app_id, "state": "stopped"})),
+                None => {
+                    *publication_identity = None;
+                    return Ok(json!({"app_id": app_id, "state": "stopped"}));
+                }
                 Some(RuntimeEntryState::Starting { .. }) => {
                     return Err("runtime is still starting; retry stop shortly".into());
                 }
                 Some(RuntimeEntryState::Running { .. }) => {}
             }
             match runtimes.remove(app_id).map(|entry| entry.state) {
-                Some(RuntimeEntryState::Running { handle }) => handle,
+                Some(RuntimeEntryState::Running { handle }) => {
+                    *publication_identity = None;
+                    handle
+                }
                 _ => return Ok(json!({"app_id": app_id, "state": "stopped"})),
             }
         };
@@ -6666,6 +7069,21 @@ impl LocalAppsHostBroker {
         self.session_permissions.lock().await.revoke_app(app_id);
     }
 
+    /// Return the Host-owned runtime generation and the build provenance that
+    /// was selected when it was started.  The stable loopback port is omitted
+    /// deliberately: it preserves the app's IndexedDB origin and cannot prove
+    /// which promoted build a native WebView currently displays.
+    pub(crate) async fn runtime_identity(
+        &self,
+        app_id: &str,
+    ) -> Result<Option<(u64, String)>, String> {
+        let runtimes = self.runtimes.lock().await;
+        Ok(runtimes.get(app_id).and_then(|entry| {
+            matches!(entry.state, RuntimeEntryState::Running { .. })
+                .then(|| (entry.generation, entry.build_id.clone()))
+        }))
+    }
+
     /// Serves the static export on the anchored runtime, and reconciles the
     /// record when the LISTENER dies the way the Full handle's exit watch does.
     /// A static handle has no process to poll, so without this a retired server
@@ -6680,6 +7098,7 @@ impl LocalAppsHostBroker {
         service: Arc<AppService>,
         app_id: String,
         generation: u64,
+        publication_cell: RuntimePublicationCell,
         listener: TcpListener,
         root: PathBuf,
         shutdown: oneshot::Receiver<()>,
@@ -6690,8 +7109,16 @@ impl LocalAppsHostBroker {
             let Some(detail) = run_static_server(listener, root, shutdown).await else {
                 return;
             };
-            reconcile_static_runtime_exit(runtimes, service, app_id, generation, detail, broker)
-                .await;
+            reconcile_static_runtime_exit(
+                runtimes,
+                service,
+                app_id,
+                generation,
+                publication_cell,
+                detail,
+                broker,
+            )
+            .await;
         });
     }
 
@@ -6799,6 +7226,8 @@ impl LocalAppsHostBroker {
         };
         self.rebind_active_mcp_catalog_to_current_build(&app_id, &layout)
             .await?;
+        self.emit_current_verification_summary(&app_id, &layout)
+            .await;
         Ok(json!({
             "ok": true,
             "app_id": app_id,
@@ -7500,6 +7929,195 @@ fn canonicalize_json(value: Value) -> Value {
     }
 }
 
+fn dependency_yaml_scalar(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("dependency lock contains an empty YAML scalar".into());
+    }
+    if value.starts_with('\'') {
+        if value.len() < 2 || !value.ends_with('\'') {
+            return Err("dependency lock contains an unterminated single-quoted scalar".into());
+        }
+        return Ok(value[1..value.len() - 1].replace("''", "'"));
+    }
+    if value.starts_with('"') {
+        return serde_json::from_str::<String>(value).map_err(|error| {
+            format!("dependency lock contains an invalid quoted scalar: {error}")
+        });
+    }
+    Ok(value.to_string())
+}
+
+/// Read the exact direct dependency specifiers from pnpm's root importer.
+///
+/// The host pins pnpm's lockfile format through `PNPM_TOOLCHAIN_KEY`, so this
+/// intentionally parses only the small, stable `importers -> . ->
+/// dependencies -> <package> -> specifier` surface that must agree with the
+/// Host-minted effective package. It does not use package-resolution entries
+/// as proof: the same package can occur there transitively without being a
+/// requested root dependency.
+fn pnpm_root_dependency_specifiers(lockfile: &[u8]) -> Result<BTreeMap<String, String>, String> {
+    let lockfile = std::str::from_utf8(lockfile)
+        .map_err(|error| format!("resolved dependency lockfile is not UTF-8: {error}"))?;
+    let mut in_importers = false;
+    let mut in_root_importer = false;
+    let mut in_dependencies = false;
+    let mut found_importers = false;
+    let mut found_root_importer = false;
+    let mut found_dependencies = false;
+    let mut current_package: Option<String> = None;
+    let mut dependency_keys = HashSet::new();
+    let mut specifiers = BTreeMap::new();
+
+    for line in lockfile.lines() {
+        let leading = line.trim_start_matches(' ');
+        if leading.starts_with('\t') {
+            return Err("resolved dependency lockfile uses tabs for indentation".into());
+        }
+        let indent = line.len() - leading.len();
+        let trimmed = leading.trim_end();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if indent == 0 {
+            if trimmed == "importers:" {
+                if found_importers {
+                    return Err("resolved dependency lockfile repeats the importers map".into());
+                }
+                found_importers = true;
+                in_importers = true;
+                continue;
+            }
+            in_importers = false;
+            in_root_importer = false;
+            in_dependencies = false;
+            current_package = None;
+            continue;
+        }
+        if !in_importers {
+            continue;
+        }
+        if indent == 2 {
+            let importer = trimmed.strip_suffix(':').ok_or_else(|| {
+                "resolved dependency lockfile has an invalid importer".to_string()
+            })?;
+            in_root_importer = dependency_yaml_scalar(importer)? == ".";
+            if in_root_importer && found_root_importer {
+                return Err("resolved dependency lockfile repeats the root importer".into());
+            }
+            found_root_importer |= in_root_importer;
+            in_dependencies = false;
+            current_package = None;
+            continue;
+        }
+        if !in_root_importer {
+            continue;
+        }
+        if indent == 4 {
+            in_dependencies = trimmed == "dependencies:";
+            if in_dependencies && found_dependencies {
+                return Err(
+                    "resolved dependency lockfile repeats the root dependencies map".into(),
+                );
+            }
+            if matches!(trimmed, "devDependencies:" | "optionalDependencies:") {
+                return Err(format!(
+                    "resolved dependency lockfile contains unexpected root {trimmed}"
+                ));
+            }
+            found_dependencies |= in_dependencies;
+            current_package = None;
+            continue;
+        }
+        if !in_dependencies {
+            continue;
+        }
+        if indent == 6 {
+            let package = trimmed.strip_suffix(':').ok_or_else(|| {
+                "resolved dependency lockfile has an invalid dependency key".to_string()
+            })?;
+            let package = dependency_yaml_scalar(package)?;
+            if !dependency_keys.insert(package.clone()) {
+                return Err(format!(
+                    "resolved dependency lockfile repeats root dependency {package}"
+                ));
+            }
+            current_package = Some(package);
+            continue;
+        }
+        if indent == 8 {
+            let Some(package) = current_package.as_ref() else {
+                continue;
+            };
+            if let Some(specifier) = trimmed.strip_prefix("specifier:") {
+                let specifier = dependency_yaml_scalar(specifier)?;
+                if specifiers.insert(package.clone(), specifier).is_some() {
+                    return Err(format!(
+                        "resolved dependency lockfile repeats the specifier for {package}"
+                    ));
+                }
+            }
+        }
+    }
+
+    if !found_root_importer || !found_dependencies {
+        return Err("resolved dependency lockfile is missing the root dependency importer".into());
+    }
+    if dependency_keys.len() != specifiers.len() {
+        let missing = dependency_keys
+            .iter()
+            .find(|package| !specifiers.contains_key(*package))
+            .cloned()
+            .unwrap_or_else(|| "<unknown>".to_string());
+        return Err(format!(
+            "resolved dependency lockfile is missing the root specifier for {missing}"
+        ));
+    }
+    Ok(specifiers)
+}
+
+fn effective_package_dependency_specifiers(
+    package_json: &[u8],
+) -> Result<BTreeMap<String, String>, String> {
+    let package: Value = serde_json::from_slice(package_json)
+        .map_err(|error| format!("parse effective dependency package: {error}"))?;
+    let dependencies = package
+        .get("dependencies")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "effective dependency package is missing dependencies".to_string())?;
+    dependencies
+        .iter()
+        .map(|(name, version)| {
+            let version = version.as_str().ok_or_else(|| {
+                format!("effective dependency {name} must use a string specifier")
+            })?;
+            Ok((name.clone(), version.to_string()))
+        })
+        .collect()
+}
+
+fn validate_resolved_dependency_lock(package_json: &[u8], lockfile: &[u8]) -> Result<(), String> {
+    let expected = effective_package_dependency_specifiers(package_json)?;
+    let actual = pnpm_root_dependency_specifiers(lockfile)?;
+    if actual == expected {
+        return Ok(());
+    }
+    let mismatch = expected
+        .iter()
+        .find(|(package, version)| actual.get(*package) != Some(*version))
+        .map(|(package, version)| format!("{package}@{version}"))
+        .or_else(|| {
+            actual
+                .keys()
+                .find(|package| !expected.contains_key(*package))
+                .map(|package| format!("unexpected {package}"))
+        })
+        .unwrap_or_else(|| "unknown mismatch".to_string());
+    Err(format!(
+        "resolved dependency lockfile does not match the effective package root importer ({mismatch})"
+    ))
+}
+
 fn installed_package_manifest(path: &Path) -> bool {
     if path.file_name().and_then(|name| name.to_str()) != Some("package.json") {
         return false;
@@ -7600,6 +8218,126 @@ fn collect_installed_packages(
     Ok(())
 }
 
+fn dependency_snapshot_inventory_path(snapshot_root: &Path) -> PathBuf {
+    snapshot_root.join(DEPENDENCY_SNAPSHOT_INVENTORY_FILE)
+}
+
+fn dependency_inventory_digest(inventory: &VerifiedDependencyInventory) -> Result<String, String> {
+    let mut unsigned = inventory.clone();
+    unsigned.inventory_digest.clear();
+    let bytes = serde_json::to_vec(&unsigned)
+        .map_err(|error| format!("serialize dependency inventory for digest: {error}"))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn write_verified_dependency_inventory(
+    snapshot_root: &Path,
+    lock_digest: &str,
+    tree_digest: &str,
+    packages: &BTreeMap<(String, String), Option<String>>,
+) -> Result<(), String> {
+    let mut inventory = VerifiedDependencyInventory {
+        schema_version: DEPENDENCY_SNAPSHOT_INVENTORY_SCHEMA_VERSION,
+        toolchain_key: PNPM_TOOLCHAIN_KEY.to_string(),
+        lock_digest: lock_digest.to_string(),
+        tree_digest: tree_digest.to_string(),
+        inventory_digest: String::new(),
+        packages: packages
+            .iter()
+            .map(|((name, version), license)| InstalledDependencyPackage {
+                name: name.clone(),
+                version: version.clone(),
+                license: license.clone(),
+            })
+            .collect(),
+    };
+    inventory.inventory_digest = dependency_inventory_digest(&inventory)?;
+    let bytes = serde_json::to_vec_pretty(&inventory)
+        .map_err(|error| format!("serialize dependency inventory: {error}"))?;
+    if bytes.len() > MAX_DEPENDENCY_SNAPSHOT_INVENTORY_BYTES {
+        return Err(format!(
+            "dependency inventory exceeds {} bytes",
+            MAX_DEPENDENCY_SNAPSHOT_INVENTORY_BYTES
+        ));
+    }
+    let path = dependency_snapshot_inventory_path(snapshot_root);
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, bytes).map_err(|error| {
+        format!(
+            "write dependency inventory {}: {error}",
+            temporary.display()
+        )
+    })?;
+    std::fs::rename(&temporary, &path)
+        .map_err(|error| format!("publish dependency inventory {}: {error}", path.display()))?;
+    make_dependency_files_read_only(&path)
+        .map_err(|error| format!("protect dependency inventory {}: {error}", path.display()))
+}
+
+/// Read only an inventory whose provenance and content digest match the
+/// immutable snapshot it sits beside.  A malformed or stale sidecar is a
+/// cache miss, never permission to trust a tree or an invented ready state.
+fn read_verified_dependency_inventory(
+    snapshot_root: &Path,
+    lock_digest: &str,
+    tree_digest: &str,
+) -> Result<Option<BTreeMap<(String, String), Option<String>>>, String> {
+    let path = dependency_snapshot_inventory_path(snapshot_root);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Ok(None),
+    };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_DEPENDENCY_SNAPSHOT_INVENTORY_BYTES as u64
+    {
+        return Ok(None);
+    }
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(None),
+    };
+    let inventory: VerifiedDependencyInventory = match serde_json::from_slice(&bytes) {
+        Ok(inventory) => inventory,
+        Err(_) => return Ok(None),
+    };
+    if inventory.schema_version != DEPENDENCY_SNAPSHOT_INVENTORY_SCHEMA_VERSION
+        || inventory.toolchain_key != PNPM_TOOLCHAIN_KEY
+        || inventory.lock_digest != lock_digest
+        || inventory.tree_digest != tree_digest
+        || inventory.inventory_digest.is_empty()
+        || dependency_inventory_digest(&inventory)? != inventory.inventory_digest
+    {
+        return Ok(None);
+    }
+    let mut packages = BTreeMap::new();
+    let mut previous_identity: Option<(&str, &str)> = None;
+    for package in &inventory.packages {
+        let identity = (package.name.as_str(), package.version.as_str());
+        if package.name.trim().is_empty()
+            || package.name.trim() != package.name
+            || package.version.trim().is_empty()
+            || package.version.trim() != package.version
+            || package
+                .license
+                .as_ref()
+                .is_some_and(|license| license.trim().is_empty() || license.trim() != license)
+            || previous_identity.is_some_and(|previous| previous >= identity)
+            || packages
+                .insert(
+                    (package.name.clone(), package.version.clone()),
+                    package.license.clone(),
+                )
+                .is_some()
+        {
+            return Ok(None);
+        }
+        previous_identity = Some(identity);
+    }
+    Ok(Some(packages))
+}
+
 fn spdx_ref_for_package(name: &str, version: &str) -> String {
     let normalized = format!("{name}-{version}")
         .chars()
@@ -7618,8 +8356,30 @@ fn installed_dependency_sbom(
     binding: &local_apps::AppRuntimeProfileBinding,
     tree_sha256: &str,
 ) -> Result<Vec<u8>, String> {
+    installed_dependency_sbom_with_inventory(node_modules_root, binding, tree_sha256, None)
+}
+
+fn installed_dependency_sbom_with_inventory(
+    node_modules_root: &Path,
+    binding: &local_apps::AppRuntimeProfileBinding,
+    tree_sha256: &str,
+    snapshot_inventory: Option<(&Path, &str)>,
+) -> Result<Vec<u8>, String> {
     let mut packages = BTreeMap::<(String, String), Option<String>>::new();
-    collect_installed_packages(node_modules_root, &mut packages)?;
+    let used_inventory = snapshot_inventory
+        .and_then(|(snapshot_root, lock_digest)| {
+            read_verified_dependency_inventory(snapshot_root, lock_digest, tree_sha256)
+                .ok()
+                .flatten()
+        })
+        .filter(|cached| !cached.is_empty())
+        .map(|cached| {
+            packages = cached;
+        })
+        .is_some();
+    if !used_inventory {
+        collect_installed_packages(node_modules_root, &mut packages)?;
+    }
     if packages.is_empty() {
         return Err(format!(
             "dependency snapshot cannot be verified because {} contains no installed package manifests",
@@ -7756,6 +8516,7 @@ fn installed_dependency_sbom(
 fn refresh_runtime_profile_snapshot(
     layout: &AppLayout,
     tree_sha256: &str,
+    snapshot_inventory: Option<(&Path, &str)>,
 ) -> Result<local_apps::AppDependencySnapshot, String> {
     let mut manifest = local_apps::load_manifest(layout).map_err(|error| error.to_string())?;
     let binding = manifest.runtime_profile.clone().ok_or_else(|| {
@@ -7775,7 +8536,23 @@ fn refresh_runtime_profile_snapshot(
     let lockfile_bytes =
         std::fs::read(workspace.join(crate::local_app_runtime_profiles::LOCKFILE_FILE_REL))
             .map_err(|error| format!("read dependency lockfile: {error}"))?;
-    let sbom = installed_dependency_sbom(&workspace.join("node_modules"), &binding, tree_sha256)?;
+    let sbom_span = tracing::debug_span!(
+        "local_app_dependency_sbom",
+        app_id = %layout.app_id(),
+        tree_digest = %tree_sha256,
+        cached_inventory = snapshot_inventory.is_some(),
+    );
+    let sbom = {
+        let _perf = LocalAppPerfDiagnosticTimer::start("dependency_sbom_generate");
+        sbom_span.in_scope(|| {
+            installed_dependency_sbom_with_inventory(
+                &workspace.join("node_modules"),
+                &binding,
+                tree_sha256,
+                snapshot_inventory,
+            )
+        })?
+    };
     let artifacts = crate::local_app_runtime_profiles::snapshot_artifacts_for_binding(
         &binding,
         crate::local_app_runtime_profiles::hash_bytes(&requested_bytes),
@@ -7823,9 +8600,9 @@ fn mcp_intent_contract_line(intent: Option<&local_apps::AppMcpIntent>) -> String
         Some(local_apps::AppMcpIntent::Declined) => {
             "MCP intent: asked during creation; the user declined MCP for this app.\n\n".into()
         }
-        Some(local_apps::AppMcpIntent::Requested { services }) => format!(
+        Some(local_apps::AppMcpIntent::Requested { capabilities }) => format!(
             "MCP intent: asked during creation; the user asked for MCP access to {}.\n\n",
-            services.join(", ")
+            capabilities.join(", ")
         ),
     }
 }
@@ -7987,145 +8764,36 @@ fn formal_workspace_contract(
     )
 }
 
-/// The GUIDED workspace contract: what a `CreateMode::Shell` app's
-/// `workspace/LINGXI.md` says before the app has a shape.
+/// Thin bootstrap contract for an unformed `CreateMode::Shell` workspace.
 ///
-/// Written by [`LocalAppsHostBroker::write_guided_contract_value`] and
-/// OVERWRITTEN wholesale by the formal contract `land_scaffold` renders once
-/// `LocalAppScaffold` lands — the two never coexist, so this text does not
-/// have to compose with the formal one and deliberately does not try.
-///
-/// Every clause is load-bearing:
-///
-/// - the app id, because an agent in this workspace has no other authoritative
-///   source for it and the tool gate's own message is keyed on it;
-/// - "任何源文件都会被删除", because the first scaffold WIPES the editable
-///   surface (§C.0.1). An agent that writes code here does not merely waste the
-///   turn, it loses work it believes it has done;
-/// - "不要自己直接调 `LocalAppScaffold`", because scaffold fails closed without
-///   the receipt the unified create flow issues (`scaffold_shell_app_value`
-///   refuses with "receipt_id is required; create scaffold only accepts a
-///   Host-issued unified create confirmation receipt"), and every OTHER
-///   local-app tool is gated off for an unformed app and will refuse too;
-/// - the surface vocabulary, because the surface is IMMUTABLE once scaffolded,
-///   so it is the one decision the user has to make before anything is written;
-/// - "这一轮**不要用 `AskUserQuestion`**" on step 1, because `AskUserQuestion`
-///   renders a native picker and the opening turn has nothing to put in it.
-///   The model knows only that an app is wanted, so any option list it writes
-///   is a set of guesses at the user's idea, and the picker then collects a
-///   choice among those guesses INSTEAD of the free-text description every
-///   later step reads. The generic rule elsewhere ("问需求用
-///   `AskUserQuestion`") is right for a decision between namable options and
-///   wrong for the one turn that has none — which is why step 1 states the
-///   exception in the same breath as the tool, rather than leaving a reader to
-///   reconcile the two.
-/// - step 4 (the MCP interview) grounds its recommendations in
-///   `LocalAppTemplateCatalog`'s `mcpSuggestions` rather than free invention,
-///   and asks with concrete named options rather than a bare "do you want
-///   MCP?" — a yes/no with nothing to say yes TO gives the user nothing to
-///   decide between. It does NOT call `LocalAppStageCreate` itself: staging
-///   is the workflow's own sub-agent call (see below), so this step only
-///   determines the answer and lets it ride the conversation into step 5.
-///   That is why the step asks the model to restate the answer in plain text
-///   instead of promising it a slot to put it in: the ONLY thing that makes
-///   this answer durable is the create skill/workflow passing it to
-///   `LocalAppStageCreate`'s `mcp_intent` argument, and until that wiring
-///   exists the step must not describe a carry-forward mechanism the model
-///   would then have to invent. The create workflow's launch-argument
-///   allowlist rejects unknown keys outright (`unknown external field(s)`),
-///   so a model improvising an `mcp_intent` launch argument would not
-///   silently lose the answer — it would fail the whole create.
-/// - step 5 names the create SKILL below, not the build workflow it launches
-///   internally. There is no host-initiated launch site for the build
-///   workflow (the host only auto-starts MCP authoring and resume), so an
-///   agent that reaches this file can only get to `LocalAppScaffold` through
-///   the skill's own name — the only place that name lives, and the reason
-///   the literal below is a deliberate, allowlisted exception to the "no
-///   component names in Host prose" rule `component_literal_scan.rs`
-///   enforces elsewhere in this file's own history (P-1.4). Naming the
-///   WORKFLOW instead would reintroduce exactly the coupling that rule
-///   removed; naming the skill does not, because skill selection here was
-///   always model-driven (the model is only ever in this file's workspace
-///   because it already ran the skill once, to create the shell) while
-///   WORKFLOW selection stays fully Host-resolved and still appears nowhere
-///   in this file. `lingxi_md_contract_prose_names_no_workflow` still pins
-///   the FORMED contract and the tool-result guidance prose to naming no
-///   build workflow
-///   (the host authorizes exactly one and refuses any other there); this
-///   step never names the workflow id either, only the skill that owns the
-///   interview. Do not have this step call `LocalAppStageCreate` or
-///   `LocalAppApproveMcpProposal` directly: those are the workflow's own
-///   sub-agent calls, not something the top-level interview agent invokes
-///   itself.
+/// The Host supplies only immutable app identity, the recorded brief, and the
+/// no-write boundary. The create skill is the single coordinator for adaptive
+/// requirements, technical profile recommendation, concise native UI
+/// confirmation, staging, build, and verification.
 fn guided_workspace_contract(record: &local_apps::AppRecord) -> String {
-    // r3-e2e-trace-05: an MCP-created (chat-origin) app's init session is a
-    // FORK of the very conversation that already described it — asking the
-    // open-ended "what do you want to build" question again throws that
-    // description away and makes the user repeat themselves. `LocalAppCreate`
-    // (the only writer that stamps `conversation_id`) always carries a real,
-    // non-empty `brief` from the same turn; a `+`-button shell never does.
-    let step_one = if record.conversation_id.is_some() {
-        format!(
-            "1. This app was created from a request already described **in this same \
-             conversation** — do not ask the opening question again. Its recorded brief \
-             is: \"{brief}\". Treat that as the answer to \"what do you want to build\" and \
-             move straight to step 2 unless it leaves something essential unresolved; if it \
-             does, ask for just that missing piece in **ordinary conversational text**, not \
-             `AskUserQuestion`.\n"
-        , brief = record.brief)
-    } else {
-        "1. In **ordinary conversational text**, ask the user what they want to build — one \
-         open-ended question — then wait for their answer. **Do not use `AskUserQuestion`** for \
-         this round: it renders a picker, and at this point you know nothing about the app, so \
-         the only thing you could put in the options is your own guess at what the user means — \
-         turning that guess into a menu crowds out the very description you need from them.\n"
-            .to_string()
-    };
     format!(
         "# Local App (new, not yet shaped)\n\n\
          This app was just created and **has no shape yet** — its workspace is empty.\n\n\
          This workspace is already bound to local app `{id}`. Treat `{id}` as authoritative: \
          do not call `LocalAppList` or `LocalAppGet` to rediscover or reconfirm it, and do not \
          call `LocalAppCreate` again.\n\n\
-         Your job right now is to interview the user, not to write code. **Any source file you \
-         write now will be deleted the moment the scaffold lands** — writing it is wasted work.\n\n\
-         Do not build, install dependencies, or operate the runtime yet; none of that means \
-         anything before the app has a shape and a scaffold on disk.\n\n\
-         Steps:\n\
-         {step_one}\
-         2. Read what they wrote. Settle anything you can settle yourself; do not re-ask \
-         something they already said. Only when a point still hangs open, **would change what \
-         gets built**, and is a choice you can lay out as options, ask ONE round of \
-         `AskUserQuestion` with 1-3 focused questions; skip this round if nothing is left \
-         undecided. If their description already settled everything, go straight to step 3.\n\
-         3. Use `AskUserQuestion` to have the user confirm or change the proposed **name** and \
-         **shape**:\n\
-         \u{20}  - `dom` — a multi-screen interface (forms, lists, page navigation)\n\
-         \u{20}  - `canvas` — a single drawing surface (games, 3D, visualizations)\n\
-         4. In **ordinary conversational text**, tell the user in one or two sentences what MCP \
-         is and what it would let this specific app do — reach a live external service or data \
-         source it could not reach on its own. Call `LocalAppTemplateCatalog` and read the \
-         `mcpSuggestions` for the template family matching their confirmed shape and what they \
-         described, then turn those into 2-3 concrete named recommendations for THIS app. Use \
-         `AskUserQuestion` to let them pick which of those to set up, or none. Then write their \
-         answer back in one short line of ordinary text — the exact service names they picked, or \
-         that they declined — so the choice is stated plainly in this conversation for step 5 to \
-         read. Nothing is set up now: creating the app never configures MCP.\n\
-         5. Once the name, shape, and MCP choice are confirmed, use the `Skill` tool to start \
-         `lingxi-local-app:create-local-app` (the skill is registered only under this \
-         plugin-prefixed name; the bare name will not resolve) to continue: it reads \
-         `LocalAppRuntimeProfiles` to decide the runtime sub-profile, stages a candidate through \
-         the unified create flow, raises one native confirmation, and only then lands \
-         `LocalAppScaffold`. Do not call `LocalAppScaffold` yourself — it needs the receipt that \
-         flow issues; there is no shortcut around it. Steps 1-4 above already settled that \
-         skill's own opening question, its one clarification round, the display **name** and \
-         **shape**, and the MCP choice — carry those confirmed answers into it verbatim and do \
-         not ask the user any of them a second time. Inside the skill only the one-line brief \
-         and the runtime sub-profile within the already-confirmed shape are still open.\n\
-         6. Re-read this file and continue under the new contract.\n\n\
-         The shape cannot change once it lands, so it must be the user's confirmed choice, never \
-         something you decide on their behalf.\n",
+         Recorded brief: \"{brief}\". Carry it forward exactly; it may already contain the \
+         user's product intent.\n\n\
+         **Do not write source, build, install dependencies, or operate the runtime in this \
+         shell. Any source written before the scaffold lands will be deleted.**\n\n\
+         Immediately use the `Skill` tool to start \
+         `lingxi-local-app:create-local-app` (the plugin-qualified name is required). That skill \
+         owns the adaptive interview and complete create flow. Do not run a separate questionnaire \
+         here, and do not call `LocalAppScaffold` directly.\n\n\
+         Let the coordinator recommend the technical renderer and runtime profile from confirmed \
+         product and UI requirements. The user confirms the concise structure, theme, and style \
+         in the single native create confirmation; do not force a technical surface picker.\n\n\
+         MCP exposure is not a prerequisite for creating the app. After creation, the user may \
+         optionally expose named business capabilities through app settings. Integrations the app \
+         needs for its own product behavior are separate from MCP exposure.\n\n\
+         After the skill completes, re-read this file and continue under the formal contract.\n",
         id = record.id,
+        brief = record.brief,
     )
 }
 
@@ -8596,7 +9264,7 @@ impl LocalAppsHostBroker {
         let request_id = format!("flow:{flow_id}:{step_id}");
         match capability {
             local_apps::CapabilityId::DataQuery => self.query_data_value(input).await,
-            local_apps::CapabilityId::DataMutate => self.mutate_data_value(input, true).await,
+            local_apps::CapabilityId::DataMutate => self.mutate_data_value(input, true, None).await,
             local_apps::CapabilityId::NetworkRequest => self.network_request(app_id, input).await,
             local_apps::CapabilityId::RuntimeStatus => Ok(json!({
                 "app_id": app_id,
@@ -9309,7 +9977,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 approval_contract_sha256: approval_contract_sha256.clone(),
                 tool_surface_sha256: validated.tool_surface_sha256.clone(),
                 catalog_sha256: None,
-                    integrity_sha256: String::new(),
+                integrity_sha256: String::new(),
             }
             .seal()
             .map_err(|issue| issue.message)?;
@@ -9906,14 +10574,37 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         service.record(&app_id).await.map_err(|e| e.to_string())?;
         let layout =
             AppLayout::new(self.root.clone(), app_id.clone()).map_err(|e| e.to_string())?;
+        let authoring_candidate = self.authoring_contract_for_build(&layout, &input)?;
+        // Persist the immutable candidate document before the build starts.
+        // The active build receipt remains the selector, so a failed build
+        // continues to select the old contract/build identity.
+        if let Some(candidate) = authoring_candidate.as_ref() {
+            let digest =
+                local_apps::authoring::save_authoring_contract(&layout, &candidate.contract)
+                    .map_err(|error| error.to_string())?;
+            if digest != candidate.contract_sha256 {
+                return Err(
+                    "authoring_contract_invalid: Host candidate digest changed while persisting"
+                        .into(),
+                );
+            }
+        }
         let builder = crate::local_apps_build::LocalAppBuilder {
             mobile_linux: self.mobile_linux(),
             host: self,
         };
         builder
-            .build_workspace(&layout)
+            .build_workspace_with_authoring(
+                &layout,
+                authoring_candidate
+                    .as_ref()
+                    .map(|candidate| candidate.contract_sha256.as_str()),
+            )
             .await
             .map_err(|e| e.to_string())?;
+        if authoring_candidate.is_some() {
+            let _ = local_apps::authoring::delete_authoring_candidate(&layout);
+        }
         // "Ready" means SERVABLE, not "the build tool exited 0". The static
         // preview server refuses to start without `build/store/dist/index.html`
         // (see `start_reserved_runtime`), and a build whose output landed
@@ -9938,6 +10629,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         // workflow state or advertise an active MCP surface.
         self.rebind_active_mcp_catalog_to_current_build(&app_id, &layout)
             .await?;
+        self.emit_current_verification_summary(&app_id, &layout)
+            .await;
         let dependencies = service
             .dependency_record(&app_id)
             .await
@@ -10029,32 +10722,47 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                     },
                 })
                 .await;
-            let approved = match timeout(APPROVAL_TIMEOUT, receiver).await {
-                Ok(Ok(approved)) => approved,
-                Ok(Err(_)) => {
-                    self.pending_dependency_change_confirmations
-                        .lock()
-                        .await
-                        .remove(&request_id);
-                    return Err("dependency change confirmation was cancelled".into());
-                }
-                Err(_) => {
-                    self.pending_dependency_change_confirmations
-                        .lock()
-                        .await
-                        .remove(&request_id);
-                    return Err("dependency change confirmation timed out".into());
+            let approval_wait_span = tracing::debug_span!(
+                "local_app_dependency_native_confirmation_wait",
+                app_id = %app_id,
+                request_id = %request_id,
+            );
+            let approved = {
+                let _perf = LocalAppPerfDiagnosticTimer::start("dependency_native_approval_wait");
+                match timeout(APPROVAL_TIMEOUT, receiver)
+                    .instrument(approval_wait_span)
+                    .await
+                {
+                    Ok(Ok(approved)) => approved,
+                    Ok(Err(_)) => {
+                        self.pending_dependency_change_confirmations
+                            .lock()
+                            .await
+                            .remove(&request_id);
+                        return Err("dependency change confirmation was cancelled".into());
+                    }
+                    Err(_) => {
+                        self.pending_dependency_change_confirmations
+                            .lock()
+                            .await
+                            .remove(&request_id);
+                        return Err("dependency change confirmation timed out".into());
+                    }
                 }
             };
             if !approved {
                 return Err("user denied dependency changes".into());
             }
         }
-        let build_lock = self.build_lock();
-        let _build_guard = build_lock.lock().await;
-        let _process_build_guard =
+        // Native approval may take minutes.  The receipt recheck below only
+        // needs the app's cross-process lock; waiting on the broker-wide Node
+        // build mutex here would block an unrelated app's build for the whole
+        // approval-to-receipt gap.
+        let _process_build_guard = {
+            let _perf = LocalAppPerfDiagnosticTimer::start("dependency_app_lock_wait");
             local_apps::storage::lock_app_build(layout.root(), layout.app_id())
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| error.to_string())?
+        };
         let current_dependency = service
             .dependency_record(&app_id)
             .await
@@ -10102,10 +10810,15 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         // snapshot, production build and any rollback therefore form one
         // transaction without deadlocking the builder.
         let build_lock = self.build_lock();
-        let _build_guard = build_lock.lock().await;
-        let _process_build_guard =
+        let _build_guard = {
+            let _perf = LocalAppPerfDiagnosticTimer::start("dependency_global_build_lock_wait");
+            build_lock.lock().await
+        };
+        let _process_build_guard = {
+            let _perf = LocalAppPerfDiagnosticTimer::start("dependency_app_lock_wait");
             local_apps::storage::lock_app_build(layout.root(), layout.app_id())
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| error.to_string())?
+        };
         let previous_dependency = service
             .dependency_record(&app_id)
             .await
@@ -10224,10 +10937,11 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             // Add/update flows may use approved network access to resolve the
             // user-confirmed manifest and preheat the shared store. Remove-only
             // flows stay offline throughout so they cannot silently upgrade an
-            // unrelated dependency. The second pass is always the commit gate:
-            // after clearing the first tree, it must materialize that same
-            // lock with network disabled before any snapshot or workspace file
-            // is published.
+            // unrelated dependency. Resolve once, bind the resulting lock
+            // digest immediately, and serialize only the immutable snapshot
+            // decision. A verified snapshot supplies the already-validated
+            // tree directly; otherwise the frozen, network-disabled pass is
+            // still the commit gate.
             let resolution_request = Self::dependency_install_request(
                 &build_mount,
                 &store_mount,
@@ -10243,52 +10957,123 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 false,
                 true,
             );
-            if let Err(error) =
-                Self::run_dependency_install_command(runtime.as_ref(), resolution_request).await
-            {
-                let _ = Self::remove_owned_path(&dependency_staging);
-                return Err(error);
-            }
-            if let Err(error) = Self::reset_dependency_staging_node_modules(&dependency_staging) {
-                let _ = Self::remove_owned_path(&dependency_staging);
-                return Err(error);
-            }
-            let frozen_request = Self::dependency_install_request(
-                &build_mount,
-                &store_mount,
-                dependency_staging_guest_path,
-                &build_state_root,
-                memory_mb,
-                NetworkPolicy::Disabled,
-                true,
-                false,
-                true,
+            let resolution_span = tracing::debug_span!(
+                "local_app_dependency_resolve",
+                app_id = %app_id,
+                network = ?resolution_request.network,
             );
+            let resolution_result =
+                Self::run_dependency_install_command(runtime.as_ref(), resolution_request)
+                    .instrument(resolution_span)
+                    .await;
+            if let Err(error) = resolution_result {
+                let _ = Self::remove_owned_path(&dependency_staging);
+                return Err(error);
+            }
+            let lock_bytes = match std::fs::read(dependency_staging.join("pnpm-lock.yaml")) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let _ = Self::remove_owned_path(&dependency_staging);
+                    return Err(format!("read updated pnpm-lock.yaml: {error}"));
+                }
+            };
             if let Err(error) =
-                Self::run_dependency_install_command(runtime.as_ref(), frozen_request).await
+                validate_resolved_dependency_lock(&receipt.effective_package_json, &lock_bytes)
             {
                 let _ = Self::remove_owned_path(&dependency_staging);
                 return Err(error);
             }
-            if let Err(error) =
-                validate_dependency_lifecycle_scripts(&dependency_staging.join("node_modules"))
-            {
-                let _ = Self::remove_owned_path(&dependency_staging);
-                return Err(error);
-            }
-            let lock_bytes = std::fs::read(dependency_staging.join("pnpm-lock.yaml"))
-                .map_err(|error| format!("read updated pnpm-lock.yaml: {error}"))?;
             let lock_digest = format!("{:x}", Sha256::digest(&lock_bytes));
             let snapshot_root = self.dependency_snapshot_root(&lock_digest);
             let snapshot_lock = self.dependency_snapshot_lock(&lock_digest).await;
-            let _snapshot_guard = snapshot_lock.lock().await;
-            if !Self::dependency_snapshot_is_ready(&snapshot_root, &lock_digest)? {
-                Self::publish_dependency_snapshot(
-                    &dependency_staging.join("node_modules"),
-                    &snapshot_root,
-                    &lock_digest,
-                )?;
+            let lock_wait_span = tracing::debug_span!(
+                "local_app_dependency_snapshot_lock_wait",
+                app_id = %app_id,
+                lock_digest = %lock_digest,
+            );
+            let _snapshot_guard = {
+                let _perf = LocalAppPerfDiagnosticTimer::start("dependency_snapshot_lock_wait");
+                snapshot_lock.lock().instrument(lock_wait_span).await
+            };
+            let snapshot_ready = Self::dependency_snapshot_is_ready(&snapshot_root, &lock_digest)?;
+            if snapshot_ready {
+                let snapshot_span = tracing::debug_span!(
+                    "local_app_dependency_snapshot_materialize",
+                    app_id = %app_id,
+                    lock_digest = %lock_digest,
+                    cache_hit = true,
+                );
+                let materialize_result = {
+                    let _perf =
+                        LocalAppPerfDiagnosticTimer::start("dependency_snapshot_materialize");
+                    snapshot_span.in_scope(|| {
+                        Self::materialize_dependency_snapshot(&snapshot_root, &dependency_staging)
+                    })
+                };
+                if let Err(error) = materialize_result {
+                    let _ = Self::remove_owned_path(&dependency_staging);
+                    return Err(error);
+                }
+            } else {
+                if let Err(error) = Self::reset_dependency_staging_node_modules(&dependency_staging)
+                {
+                    let _ = Self::remove_owned_path(&dependency_staging);
+                    return Err(error);
+                }
+                let frozen_request = Self::dependency_install_request(
+                    &build_mount,
+                    &store_mount,
+                    dependency_staging_guest_path,
+                    &build_state_root,
+                    memory_mb,
+                    NetworkPolicy::Disabled,
+                    true,
+                    false,
+                    true,
+                );
+                let install_span = tracing::debug_span!(
+                    "local_app_dependency_frozen_install",
+                    app_id = %app_id,
+                    lock_digest = %lock_digest,
+                    cache_hit = false,
+                );
+                let frozen_result =
+                    Self::run_dependency_install_command(runtime.as_ref(), frozen_request)
+                        .instrument(install_span)
+                        .await;
+                if let Err(error) = frozen_result {
+                    let _ = Self::remove_owned_path(&dependency_staging);
+                    return Err(error);
+                }
+                if let Err(error) =
+                    validate_dependency_lifecycle_scripts(&dependency_staging.join("node_modules"))
+                {
+                    let _ = Self::remove_owned_path(&dependency_staging);
+                    return Err(error);
+                }
+                let snapshot_span = tracing::debug_span!(
+                    "local_app_dependency_snapshot_publish",
+                    app_id = %app_id,
+                    lock_digest = %lock_digest,
+                    cache_hit = false,
+                );
+                {
+                    let _perf = LocalAppPerfDiagnosticTimer::start("dependency_snapshot_publish");
+                    snapshot_span.in_scope(|| {
+                        Self::publish_dependency_snapshot(
+                            &dependency_staging.join("node_modules"),
+                            &snapshot_root,
+                            &lock_digest,
+                        )
+                    })?;
+                }
             }
+            /*
+             * The snapshot lock remains held through staging promotion and
+             * profile metadata publication. A second app can therefore
+             * materialize only after the first has published a complete,
+             * inventory-backed snapshot.
+             */
             let commit_result: Result<(), String> = (|| {
                 crate::local_apps_build::write_file(
                     &workspace,
@@ -10337,6 +11122,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             {
                 return Err(error);
             }
+            drop(_snapshot_guard);
             service
                 .complete_dependency_install_with_metadata(
                     &app_id,
@@ -10383,6 +11169,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                     );
                 }
                 self.consume_dependency_change_receipt(&app_id, &receipt_id)
+                    .await;
+                self.emit_current_verification_summary(&app_id, &layout)
                     .await;
                 Ok(value)
             }
@@ -10506,11 +11294,12 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
     }
 
     async fn mutate_data(&self, input: Value) -> Result<Value, String> {
-        self.mutate_data_value(input, true).await
+        self.mutate_data_value(input, true, None).await
     }
 
     async fn capture_ui(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
+        self.validate_qa_request(&input).await?;
         self.service()?
             .record(&app_id)
             .await
@@ -10519,41 +11308,97 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         // `capture_ui_value`), which the native side DOES honour, so a
         // selector here would be a second, redundant way to say the same
         // thing — with no way to report which one won.
-        self.request_ui(AppUiRequestDto {
-            request_id: self.request_id("app-ui"),
-            app_id,
-            action: AppUiActionKindDto::CaptureView,
-            target: None,
-            value: capture_ui_value(&input)?,
-        })
-        .await
+        let capture_value = self
+            .qa_ui_request_value(&input, capture_ui_value(&input)?)
+            .await?;
+        let qa_event_id = input
+            .get("qa_handle")
+            .and_then(Value::as_str)
+            .map(|_| self.request_id("qa-capture"));
+        let ui_request_id = if qa_event_id.is_some() {
+            self.request_id("qa-ui")
+        } else {
+            self.request_id("app-ui")
+        };
+        let result = self
+            .request_ui(AppUiRequestDto {
+                request_id: ui_request_id,
+                app_id,
+                action: AppUiActionKindDto::CaptureView,
+                target: None,
+                value: capture_value,
+            })
+            .await?;
+        let result = self.qa_ui_response_value(&input, result).await?;
+        self.validate_qa_request(&input).await?;
+        if let Some(qa_event_id) = qa_event_id {
+            let evidence = self
+                .record_qa_observation(&input, "capture_ui", result.clone(), qa_event_id, None)
+                .await?;
+            if let Some(handle) = input.get("qa_handle").and_then(Value::as_str) {
+                return Ok(authoring::qa_result_with_evidence_ids(
+                    result,
+                    handle,
+                    authoring::qa_observation_id(&evidence),
+                ));
+            }
+        }
+        Ok(result)
     }
 
     async fn inspect_ui(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
+        self.validate_qa_request(&input).await?;
         self.service()?
             .record(&app_id)
             .await
             .map_err(|e| e.to_string())?;
-        self.request_ui(AppUiRequestDto {
-            request_id: self.request_id("app-ui"),
-            app_id,
-            action: AppUiActionKindDto::Inspect,
-            target: input
-                .get("selector")
-                .and_then(Value::as_str)
-                .map(|selector| AppUiTargetDto {
-                    element_id: Some(selector.to_string()),
-                    role: None,
-                    name: None,
-                }),
-            value: None,
-        })
-        .await
+        let inspect_value = self.qa_ui_request_value(&input, None).await?;
+        let qa_event_id = input
+            .get("qa_handle")
+            .and_then(Value::as_str)
+            .map(|_| self.request_id("qa-inspect"));
+        let ui_request_id = if qa_event_id.is_some() {
+            self.request_id("qa-ui")
+        } else {
+            self.request_id("app-ui")
+        };
+        let result = self
+            .request_ui(AppUiRequestDto {
+                request_id: ui_request_id,
+                app_id,
+                action: AppUiActionKindDto::Inspect,
+                target: input
+                    .get("selector")
+                    .and_then(Value::as_str)
+                    .map(|selector| AppUiTargetDto {
+                        element_id: Some(selector.to_string()),
+                        role: None,
+                        name: None,
+                    }),
+                value: inspect_value,
+            })
+            .await?;
+        let result = self.qa_ui_response_value(&input, result).await?;
+        self.validate_qa_request(&input).await?;
+        if let Some(qa_event_id) = qa_event_id {
+            let evidence = self
+                .record_qa_observation(&input, "inspect_ui", result.clone(), qa_event_id, None)
+                .await?;
+            if let Some(handle) = input.get("qa_handle").and_then(Value::as_str) {
+                return Ok(authoring::qa_result_with_evidence_ids(
+                    result,
+                    handle,
+                    authoring::qa_observation_id(&evidence),
+                ));
+            }
+        }
+        Ok(result)
     }
 
     async fn act_on_ui(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
+        self.validate_qa_request(&input).await?;
         self.service()?
             .record(&app_id)
             .await
@@ -10583,14 +11428,90 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             Value::String(value) => value.clone(),
             value => value.to_string(),
         });
-        self.request_ui(AppUiRequestDto {
-            request_id: self.request_id("app-ui"),
-            app_id,
-            action,
-            target,
-            value,
-        })
-        .await
+        let qa_action = self.begin_qa_action_with_guard(&input).await?;
+        let qa_event_id = qa_action.as_ref().map(|(event_id, _)| event_id.clone());
+        let _qa_guard = qa_action.map(|(_, guard)| guard);
+        let action_value = match self.qa_ui_request_value(&input, value).await {
+            Ok(value) => value,
+            Err(error) => {
+                if let Some(event_id) = qa_event_id.as_deref() {
+                    self.end_qa_action(&app_id, event_id).await;
+                }
+                return Err(error);
+            }
+        };
+        let ui_request_id = if qa_event_id.is_some() {
+            self.request_id("qa-ui")
+        } else {
+            self.request_id("app-ui")
+        };
+        let result = self
+            .request_ui(AppUiRequestDto {
+                request_id: ui_request_id,
+                app_id: app_id.clone(),
+                action,
+                target,
+                value: action_value,
+            })
+            .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(event_id) = qa_event_id.as_deref() {
+                    self.end_qa_action(&app_id, event_id).await;
+                }
+                return Err(error);
+            }
+        };
+        let result = match self.qa_ui_response_value(&input, result).await {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(event_id) = qa_event_id.as_deref() {
+                    self.end_qa_action(&app_id, event_id).await;
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.validate_qa_request(&input).await {
+            if let Some(event_id) = qa_event_id.as_deref() {
+                self.end_qa_action(&app_id, event_id).await;
+            }
+            return Err(error);
+        }
+        if let Some(qa_event_id) = qa_event_id {
+            // Close the window before publishing any evidence. A page write
+            // racing after this point is an ordinary page mutation and cannot
+            // be attributed to the completed action.
+            let action = self.settle_qa_action(&app_id, &qa_event_id).await?;
+            let action_evidence = match self
+                .record_qa_observation(&input, "act_on_ui", result.clone(), qa_event_id, None)
+                .await
+            {
+                Ok(evidence) => evidence,
+                Err(error) => {
+                    tracing::warn!(app_id = %app_id, %error, "QA action evidence attribution unavailable after native success");
+                    Value::Null
+                }
+            };
+            let bridge_evidence_ids = match self.commit_qa_action_mutations(&app_id, &action).await
+            {
+                Ok(ids) => ids,
+                Err(error) => {
+                    tracing::warn!(app_id = %app_id, %error, "QA bridge evidence attribution unavailable after native success");
+                    Vec::new()
+                }
+            };
+            let mut evidence_ids = bridge_evidence_ids;
+            if let Some(evidence_id) = authoring::qa_observation_id(&action_evidence) {
+                evidence_ids.push(evidence_id);
+            }
+            return Ok(authoring::qa_result_with_evidence_ids(
+                result,
+                required_string(&input, "qa_handle")?,
+                evidence_ids,
+            ));
+        }
+        Ok(result)
     }
 
     async fn restore_checkpoint(&self, input: Value) -> Result<Value, String> {
@@ -10904,31 +11825,32 @@ fn parse_staged_mcp_intent(input: &Value) -> Result<Option<local_apps::AppMcpInt
         Some(value) => {
             let intent: local_apps::AppMcpIntent = serde_json::from_value(value.clone())
                 .map_err(|error| format!("invalid_argument: mcp_intent is malformed: {error}"))?;
-            if let local_apps::AppMcpIntent::Requested { services } = &intent {
-                if services.is_empty() {
+            if let local_apps::AppMcpIntent::Requested { capabilities } = &intent {
+                if capabilities.is_empty() {
                     return Err(
-                        "invalid_argument: mcp_intent Requested must name at least one service"
+                        "invalid_argument: mcp_intent Requested must name at least one capability"
                             .into(),
                     );
                 }
-                if services.len() > local_apps::service::MAX_MCP_INTENT_SERVICES {
+                if capabilities.len() > local_apps::service::MAX_MCP_INTENT_CAPABILITIES {
                     return Err(format!(
-                        "invalid_argument: mcp_intent names {} services (limit {})",
-                        services.len(),
-                        local_apps::service::MAX_MCP_INTENT_SERVICES
+                        "invalid_argument: mcp_intent names {} capabilities (limit {})",
+                        capabilities.len(),
+                        local_apps::service::MAX_MCP_INTENT_CAPABILITIES
                     ));
                 }
-                for service in services {
-                    if service.trim().is_empty() {
+                for capability in capabilities {
+                    if capability.trim().is_empty() {
                         return Err(
-                            "invalid_argument: mcp_intent service name must not be blank".into(),
+                            "invalid_argument: mcp_intent capability name must not be blank".into(),
                         );
                     }
-                    if service.len() > local_apps::service::MAX_MCP_INTENT_SERVICE_NAME_BYTES {
+                    if capability.len() > local_apps::service::MAX_MCP_INTENT_CAPABILITY_NAME_BYTES
+                    {
                         return Err(format!(
-                            "invalid_argument: mcp_intent service name is {} bytes (limit {})",
-                            service.len(),
-                            local_apps::service::MAX_MCP_INTENT_SERVICE_NAME_BYTES
+                            "invalid_argument: mcp_intent capability name is {} bytes (limit {})",
+                            capability.len(),
+                            local_apps::service::MAX_MCP_INTENT_CAPABILITY_NAME_BYTES
                         ));
                     }
                 }
@@ -11821,6 +12743,7 @@ async fn reconcile_static_runtime_exit(
     service: Arc<AppService>,
     app_id: String,
     generation: u64,
+    publication_cell: RuntimePublicationCell,
     detail: String,
     broker: std::sync::Weak<LocalAppsHostBroker>,
 ) {
@@ -11836,6 +12759,9 @@ async fn reconcile_static_runtime_exit(
                 )
         });
         if should_remove {
+            if let Ok(mut identity) = publication_cell.write() {
+                *identity = None;
+            }
             runtimes.remove(&app_id);
         }
         should_remove
@@ -12744,7 +13670,6 @@ fn public_ip(ip: IpAddr) -> bool {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12893,8 +13818,8 @@ mod tests {
         let mut cursor = 0usize;
         while let Some(relative) = text[cursor..].find("LocalApp") {
             let start = cursor + relative;
-            let preceded_by_identifier = start > 0
-                && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+            let preceded_by_identifier =
+                start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
             let end = start
                 + text[start..]
                     .find(|c: char| !c.is_ascii_alphanumeric())
@@ -12967,6 +13892,24 @@ mod tests {
         async fn emit(&self, _event: ClientEvent) {}
     }
 
+    fn mock_pnpm_lockfile(package_json: &[u8]) -> Result<Vec<u8>, String> {
+        let dependencies = effective_package_dependency_specifiers(package_json)?;
+        let mut lockfile = String::from(
+            "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n\nimporters:\n\n  .:\n    dependencies:\n",
+        );
+        for (package, version) in dependencies {
+            let package = serde_json::to_string(&package)
+                .map_err(|error| format!("serialize mock lock package: {error}"))?;
+            let version = serde_json::to_string(&version)
+                .map_err(|error| format!("serialize mock lock specifier: {error}"))?;
+            lockfile.push_str(&format!(
+                "      {package}:\n        specifier: {version}\n        version: {version}\n"
+            ));
+        }
+        lockfile.push_str("\npackages: {}\n");
+        Ok(lockfile.into_bytes())
+    }
+
     struct MockTask {
         snapshot: Mutex<MobileLinuxTaskSnapshot>,
         shutdown: Mutex<Option<oneshot::Sender<()>>>,
@@ -12980,6 +13923,7 @@ mod tests {
         last_request: Mutex<Option<LinuxCommandRequest>>,
         isolated_requests: Mutex<Vec<LinuxCommandRequest>>,
         pnpm_node_modules_entries: Mutex<Vec<Vec<String>>>,
+        resolved_pnpm_lockfile: Mutex<Option<Vec<u8>>>,
         enforcement_receipt: AtomicBool,
         fail_kill: AtomicBool,
         fail_build: AtomicBool,
@@ -12998,6 +13942,7 @@ mod tests {
                 last_request: Mutex::new(None),
                 isolated_requests: Mutex::new(Vec::new()),
                 pnpm_node_modules_entries: Mutex::new(Vec::new()),
+                resolved_pnpm_lockfile: Mutex::new(None),
                 enforcement_receipt: AtomicBool::new(true),
                 fail_kill: AtomicBool::new(false),
                 fail_build: AtomicBool::new(false),
@@ -13025,6 +13970,10 @@ mod tests {
 
         fn set_fail_frozen_install(&self, fail: bool) {
             self.fail_frozen_install.store(fail, Ordering::SeqCst);
+        }
+
+        async fn set_resolved_pnpm_lockfile(&self, lockfile: Vec<u8>) {
+            *self.resolved_pnpm_lockfile.lock().await = Some(lockfile);
         }
 
         fn set_inject_lifecycle_script(&self, inject: bool) {
@@ -13193,6 +14142,24 @@ mod tests {
                 });
             }
             if request.command == "/usr/bin/pnpm"
+                && request.args.iter().any(|arg| arg == "--no-frozen-lockfile")
+            {
+                let lockfile = match self.resolved_pnpm_lockfile.lock().await.clone() {
+                    Some(lockfile) => lockfile,
+                    None => {
+                        let package = fs::read(host_cwd.join("package.json")).map_err(|error| {
+                            MobileLinuxError::Io(format!(
+                                "read fake resolution input package: {error}"
+                            ))
+                        })?;
+                        mock_pnpm_lockfile(&package).map_err(MobileLinuxError::Io)?
+                    }
+                };
+                fs::write(host_cwd.join("pnpm-lock.yaml"), lockfile).map_err(|error| {
+                    MobileLinuxError::Io(format!("write fake resolved lockfile: {error}"))
+                })?;
+            }
+            if request.command == "/usr/bin/pnpm"
                 && request.args.iter().any(|arg| arg == "--lockfile-only")
             {
                 return Ok(platform_api::LinuxCommandResult {
@@ -13287,6 +14254,45 @@ mod tests {
                 react_manifest,
             )
             .map_err(|error| MobileLinuxError::Io(format!("write fake react manifest: {error}")))?;
+            let effective_package: Value =
+                serde_json::from_slice(&fs::read(host_cwd.join("package.json")).map_err(
+                    |error| MobileLinuxError::Io(format!("read fake install package: {error}")),
+                )?)
+                .map_err(|error| {
+                    MobileLinuxError::Io(format!("parse fake install package: {error}"))
+                })?;
+            for (package, version) in effective_package
+                .get("dependencies")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+            {
+                let Some(version) = version.as_str() else {
+                    continue;
+                };
+                let package_root = host_cwd
+                    .join("node_modules")
+                    .join(dependency_package_path(package));
+                let package_manifest = package_root.join("package.json");
+                if package_manifest.is_file() {
+                    continue;
+                }
+                fs::create_dir_all(&package_root).map_err(|error| {
+                    MobileLinuxError::Io(format!("create fake installed package: {error}"))
+                })?;
+                fs::write(
+                    &package_manifest,
+                    serde_json::to_vec(&json!({
+                        "name": package,
+                        "version": version,
+                        "license": "MIT",
+                    }))
+                    .expect("serialize fake installed package"),
+                )
+                .map_err(|error| {
+                    MobileLinuxError::Io(format!("write fake installed package: {error}"))
+                })?;
+            }
             Ok(platform_api::LinuxCommandResult {
                 stdout: "ok".into(),
                 stderr: String::new(),
@@ -13718,6 +14724,1559 @@ mod tests {
         layout
     }
 
+    struct HostQaFixture {
+        _root: TempDir,
+        broker: Arc<LocalAppsHostBroker>,
+        sink: Arc<MockSink>,
+        app_id: String,
+        workflow_run_id: String,
+        qa_handle: String,
+        layout: AppLayout,
+    }
+
+    async fn host_qa_fixture() -> HostQaFixture {
+        host_qa_fixture_with_mobile_linux(None).await
+    }
+
+    async fn host_qa_fixture_with_mobile_linux(
+        mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    ) -> HostQaFixture {
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sink = MockSink::arc();
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            sink.clone(),
+            mobile_linux,
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let app_id = create_app_fixture(&root, &service, "Host QA").await;
+        let layout = AppLayout::new(root.path(), &app_id).expect("layout");
+        let mut manifest = load_manifest(&layout).expect("manifest");
+        manifest.revision = manifest.revision.saturating_add(1).max(1);
+        manifest.collections = vec![local_apps::DataCollectionSchema {
+            id: "chores".into(),
+            name: "Chores".into(),
+            fields: vec![local_apps::DataFieldSchema {
+                id: "title".into(),
+                label: "Title".into(),
+                kind: local_apps::DataFieldKind::Text,
+                required: true,
+                enum_options: Vec::new(),
+            }],
+        }];
+        local_apps::save_manifest(&layout, &manifest).expect("save QA manifest");
+        AppDataStore::with_cached(layout.clone(), |store| {
+            store
+                .migrate_manifest(&manifest, false, now_ms())
+                .map(|_| ())
+        })
+        .expect("bind QA database to manifest");
+        let spec: local_apps::AppAuthoringSpec = serde_json::from_str(include_str!(
+            "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+        ))
+        .expect("authoring fixture");
+        let contract = local_apps::AppAuthoringContract {
+            version: local_apps::AUTHORING_SCHEMA_VERSION,
+            revision: 1,
+            app_id: app_id.clone(),
+            runtime_profile: manifest.runtime_profile.clone().expect("runtime profile"),
+            spec,
+        };
+        let authoring_sha256 = local_apps::save_authoring_contract(&layout, &contract)
+            .expect("save authoring contract");
+        let build_path = root.path().join(layout.build_rel(false)).join("build.json");
+        let mut build: Value =
+            serde_json::from_slice(&fs::read(&build_path).expect("build receipt"))
+                .expect("parse build receipt");
+        build["runtimeContractSha256"] =
+            Value::String(manifest.runtime_contract_hash().expect("runtime digest"));
+        build["dependencySnapshotSha256"] = Value::String(
+            manifest
+                .dependency_snapshot_hash()
+                .expect("dependency digest"),
+        );
+        build["authoringContractSha256"] = Value::String(authoring_sha256);
+        fs::write(
+            &build_path,
+            serde_json::to_vec_pretty(&build).expect("serialize build receipt"),
+        )
+        .expect("select authoring contract");
+        broker
+            .start_runtime(&app_id)
+            .await
+            .expect("start static QA runtime");
+        let workflow_run_id = "workflow-host-qa".to_string();
+        let begun = broker
+            .qa_begin(json!({
+                "app_id": app_id,
+                "workflow_run_id": workflow_run_id,
+                "verification_strategy": "balanced",
+            }))
+            .await
+            .expect("begin Host QA");
+        let qa_handle = begun["qa_handle"].as_str().expect("QA handle").to_string();
+        HostQaFixture {
+            _root: root,
+            broker,
+            sink,
+            app_id,
+            workflow_run_id,
+            qa_handle,
+            layout,
+        }
+    }
+
+    async fn finalize_passing_host_qa(fixture: &HostQaFixture) -> Value {
+        let input = json!({
+            "app_id": fixture.app_id,
+            "qa_handle": fixture.qa_handle,
+            "scenario_id": "primary-action",
+            "target_id": "primary",
+        });
+        let action_event = fixture
+            .broker
+            .begin_qa_action(&input)
+            .await
+            .expect("open QA action")
+            .expect("QA event id");
+        let bridge_result = fixture
+            .broker
+            .execute_bridge_inner(&AppBridgeRequestDto {
+                request_id: "qa-fixture-write".into(),
+                app_id: fixture.app_id.clone(),
+                operation: AppBridgeOperationDto::MutateData,
+                payload_json: Some(
+                    json!({
+                        "collection": "chores",
+                        "operations": [{"kind": "upsert", "recordId": "row-1", "document": {"title": "Sweep"}}],
+                    })
+                    .to_string(),
+                ),
+            })
+            .await
+            .expect("perform page bridge mutation");
+        assert_eq!(bridge_result["results"][0]["recordId"], "row-1");
+        assert_eq!(bridge_result["results"][0]["revision"], 1);
+        let after_write = fixture
+            .broker
+            .query_data_value(json!({"app_id": fixture.app_id, "collection": "chores"}))
+            .await
+            .expect("query after page write");
+        assert_eq!(
+            after_write["records"][0]["recordId"], "row-1",
+            "the page bridge write must be immediately visible before native attribution settles"
+        );
+
+        let runtime = fixture
+            .broker
+            .service()
+            .expect("service")
+            .runtime_record(&fixture.app_id)
+            .await
+            .expect("runtime record");
+        let runtime_url =
+            crate::local_apps_bridge::runtime_preview_url(&runtime).expect("runtime preview URL");
+        let result = fixture
+            .broker
+            .qa_ui_response_value(
+                &input,
+                json!({
+                    "lingxi_qa": {
+                        "version": 1,
+                        "requested_runtime_url": runtime_url,
+                        "loaded_runtime_url": runtime_url,
+                        "platform": "ios",
+                        "form_factor": "iphone",
+                        "navigation_generation": 1,
+                        "device_model": "iPhone fixture",
+                    },
+                    "result": {"clicked": true},
+                }),
+            )
+            .await
+            .expect("validate native attestation");
+        let action = fixture
+            .broker
+            .take_qa_action(&fixture.app_id, &action_event)
+            .await
+            .expect("close QA action window");
+        fixture
+            .broker
+            .record_qa_observation(&input, "act_on_ui", result, action_event, None)
+            .await
+            .expect("record UI action");
+        fixture
+            .broker
+            .commit_qa_action_mutations(&fixture.app_id, &action)
+            .await
+            .expect("commit page mutation evidence attribution");
+        fixture
+            .broker
+            .record_qa_observation(
+                &input,
+                "inspect_ui",
+                json!({"elements": [{"role": "row", "name": "Sweep"}]}),
+                fixture.broker.request_id("qa-inspect"),
+                None,
+            )
+            .await
+            .expect("record inspect evidence");
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let capture = fixture
+            .broker
+            .qa_ui_response_value(
+                &input,
+                json!({
+                    "lingxi_qa": {
+                        "version": 1,
+                        "requested_runtime_url": runtime_url,
+                        "loaded_runtime_url": runtime_url,
+                        "platform": "ios",
+                        "form_factor": "iphone",
+                        "navigation_generation": 1,
+                        "device_model": "iPhone fixture",
+                    },
+                    "result": {"image": {"data": png, "mime_type": "image/png"}},
+                }),
+            )
+            .await
+            .expect("validate native capture attestation");
+        fixture
+            .broker
+            .record_qa_observation(
+                &input,
+                "capture_ui",
+                capture,
+                fixture.broker.request_id("qa-capture"),
+                None,
+            )
+            .await
+            .expect("record image evidence");
+        fixture
+            .broker
+            .query_data_value(json!({
+                "app_id": fixture.app_id,
+                "qa_handle": fixture.qa_handle,
+                "scenario_id": "primary-action",
+                "target_id": "primary",
+                "collection": "chores",
+                "filters": [{"fieldId": "title", "operator": "equal", "value": "Sweep"}],
+            }))
+            .await
+            .expect("record matching query evidence");
+        let session = local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle)
+            .expect("load QA session");
+        let evidence_ids = session
+            .evidence
+            .iter()
+            .map(|evidence| evidence.evidence_id.clone())
+            .collect::<Vec<_>>();
+        fixture
+            .broker
+            .qa_finalize(json!({
+                "app_id": fixture.app_id,
+                "qa_handle": fixture.qa_handle,
+                "scenario_judgements": [{
+                    "scenario_id": "primary-action",
+                    "status": "passed",
+                    "evidence_ids": evidence_ids,
+                    "summary": "UI action persisted and remained visible",
+                }],
+                "findings": [],
+            }))
+            .await
+            .expect("finalize Host QA")
+    }
+
+    fn workflow_result_for(candidate: &Value) -> Value {
+        json!({
+            "ok": true,
+            "summary": "Host QA passed",
+            "receipt_id": candidate["receipt"]["receipt_id"],
+            "verification": candidate,
+        })
+    }
+
+    async fn publish_passing_host_qa_and_emit(fixture: &HostQaFixture) {
+        let candidate = finalize_passing_host_qa(fixture).await;
+        let prepared = fixture
+            .broker
+            .prepare_workflow_qa_outcome(
+                &fixture.app_id,
+                &fixture.workflow_run_id,
+                local_apps::QaVerificationStrategy::Balanced,
+                workflow_result_for(&candidate),
+            )
+            .await
+            .expect("prepare passing QA publication");
+        fixture
+            .broker
+            .commit_prepared_workflow_qa_publication(&prepared)
+            .expect("publish passing QA receipt");
+        fixture
+            .broker
+            .emit_committed_workflow_qa_summary(&prepared)
+            .await;
+    }
+
+    fn sync_fixture_dependency_roots(broker: &LocalAppsHostBroker, layout: &AppLayout) {
+        let workspace = layout.root().join(layout.workspace_rel());
+        fs::copy(
+            workspace.join(crate::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL),
+            workspace.join("package.json"),
+        )
+        .expect("restore fixture package.json from its trusted snapshot");
+        fs::copy(
+            workspace.join(crate::local_app_runtime_profiles::LOCKFILE_FILE_REL),
+            workspace.join("pnpm-lock.yaml"),
+        )
+        .expect("restore fixture lockfile from its trusted snapshot");
+        let target =
+            crate::local_apps_build::detect_build_target(layout).expect("fixture build target");
+        crate::local_apps_build::restore_host_managed_files(&workspace, target)
+            .expect("restore fixture host-managed dependency roots");
+        assert!(
+            LocalAppsHostBroker::dependency_inputs_match(layout)
+                .expect("validate fixture dependency roots"),
+            "the synthetic QA fixture must satisfy the same dependency preflight as LocalAppBuild"
+        );
+        let lock_digest = LocalAppsHostBroker::dependency_lock_digest(layout)
+            .expect("fixture dependency lock digest");
+        let snapshot_root = broker.dependency_snapshot_root(&lock_digest);
+        LocalAppsHostBroker::publish_dependency_snapshot(
+            &workspace.join("node_modules"),
+            &snapshot_root,
+            &lock_digest,
+        )
+        .expect("publish fixture dependency snapshot");
+        assert!(
+            LocalAppsHostBroker::workspace_dependencies_match_snapshot(
+                &workspace,
+                &snapshot_root,
+                &lock_digest,
+            )
+            .expect("validate fixture dependency snapshot"),
+            "the synthetic QA fixture must not reinstall dependencies during the build"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_qa_roundtrip_publishes_only_after_terminal_commit_and_survives_stop() {
+        let fixture = host_qa_fixture().await;
+        let candidate = finalize_passing_host_qa(&fixture).await;
+        assert_eq!(candidate["ok"], true, "canonical Host result must pass");
+        assert_eq!(candidate["status"], "candidate");
+
+        let capture_id = local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle)
+            .expect("QA session remains readable through verifier")
+            .evidence
+            .into_iter()
+            .find(|evidence| evidence.kind == local_apps::QaEvidenceKind::Capture)
+            .expect("capture evidence")
+            .evidence_id;
+        let image = fixture
+            .broker
+            .qa_read_evidence(json!({
+                "app_id": fixture.app_id,
+                "qa_handle": fixture.qa_handle,
+                "evidence_id": capture_id,
+            }))
+            .await
+            .expect("verifier reads actual capture");
+        assert_eq!(image["content"]["type"], "image");
+        assert!(image["content"]["data"]
+            .as_str()
+            .is_some_and(|data| !data.is_empty()));
+
+        assert_eq!(
+            fixture
+                .broker
+                .qa_ui_verification_summary(&fixture.app_id)
+                .await
+                .status,
+            LocalAppVerificationStatusDto::Unverified,
+            "a passing candidate is not published proof"
+        );
+        let prepared = fixture
+            .broker
+            .prepare_workflow_qa_outcome(
+                &fixture.app_id,
+                &fixture.workflow_run_id,
+                local_apps::QaVerificationStrategy::Balanced,
+                workflow_result_for(&candidate),
+            )
+            .await
+            .expect("prepare terminal publication");
+        fixture
+            .broker
+            .commit_prepared_workflow_qa_publication(&prepared)
+            .expect("commit published QA receipt");
+        fixture
+            .broker
+            .stop_runtime(&fixture.app_id)
+            .await
+            .expect("stop runtime");
+        assert_eq!(
+            fixture
+                .broker
+                .qa_ui_verification_summary(&fixture.app_id)
+                .await
+                .status,
+            LocalAppVerificationStatusDto::Passed,
+            "stopping the same immutable build must not erase historical verification"
+        );
+        fixture
+            .broker
+            .emit_committed_workflow_qa_summary(&prepared)
+            .await;
+        assert!(
+            local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle).is_err(),
+            "post-terminal cleanup must remove raw session artifacts"
+        );
+        let emitted = fixture
+            .sink
+            .events()
+            .await
+            .into_iter()
+            .find_map(|event| match event {
+                ClientEvent::AppEvent {
+                    event:
+                        AppEventDto::VerificationSummaryChanged {
+                            app_id,
+                            publication_state,
+                            ui_verification,
+                            ..
+                        },
+                } if app_id == fixture.app_id => Some((publication_state, ui_verification)),
+                _ => None,
+            })
+            .expect("postcommit emits this app's verification summary");
+        assert_eq!(emitted.0, AppWorkflowStateDto::PublishedVerified);
+        assert_eq!(emitted.1.status, LocalAppVerificationStatusDto::Passed);
+        assert_eq!(emitted.1.code.as_deref(), Some("ui_verification_passed"));
+    }
+
+    #[tokio::test]
+    async fn rebuilding_a_verified_no_mcp_app_emits_unverified_only_after_build_commit() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let fixture = host_qa_fixture_with_mobile_linux(Some(runtime.clone())).await;
+        assert!(
+            load_manifest(&fixture.layout)
+                .expect("manifest")
+                .active_mcp_catalog
+                .is_none(),
+            "the regression must exercise the usual no-MCP app path"
+        );
+        publish_passing_host_qa_and_emit(&fixture).await;
+        let old_build_id = crate::local_apps_build::active_build_id(&fixture.layout)
+            .expect("active build")
+            .expect("published build id");
+        let passed_event_count = fixture
+            .sink
+            .events()
+            .await
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    ClientEvent::AppEvent {
+                        event: AppEventDto::VerificationSummaryChanged { app_id, .. }
+                    } if app_id == &fixture.app_id
+                )
+            })
+            .count();
+
+        sync_fixture_dependency_roots(&fixture.broker, &fixture.layout);
+        runtime.set_fail_build(true);
+        fixture
+            .broker
+            .build_app(json!({"app_id": fixture.app_id}))
+            .await
+            .expect_err("synthetic build failure");
+        assert_eq!(
+            crate::local_apps_build::active_build_id(&fixture.layout)
+                .expect("active build after failure")
+                .as_deref(),
+            Some(old_build_id.as_str()),
+            "a failed build must preserve the verified active receipt"
+        );
+        assert_eq!(
+            fixture
+                .broker
+                .qa_ui_verification_summary(&fixture.app_id)
+                .await
+                .status,
+            LocalAppVerificationStatusDto::Passed,
+            "a failed build must preserve the previous immutable QA publication"
+        );
+        assert_eq!(
+            fixture
+                .sink
+                .events()
+                .await
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        ClientEvent::AppEvent {
+                            event: AppEventDto::VerificationSummaryChanged { app_id, .. }
+                        } if app_id == &fixture.app_id
+                    )
+                })
+                .count(),
+            passed_event_count,
+            "a failed candidate must not invalidate the published client summary"
+        );
+
+        runtime.set_fail_build(false);
+        fixture
+            .broker
+            .build_app(json!({"app_id": fixture.app_id}))
+            .await
+            .expect("commit replacement build");
+        assert_ne!(
+            crate::local_apps_build::active_build_id(&fixture.layout)
+                .expect("replacement active build")
+                .as_deref(),
+            Some(old_build_id.as_str()),
+            "the successful build must actually replace the identity under test"
+        );
+        let (publication_state, ui_verification) = fixture
+            .sink
+            .events()
+            .await
+            .into_iter()
+            .rev()
+            .find_map(|event| match event {
+                ClientEvent::AppEvent {
+                    event:
+                        AppEventDto::VerificationSummaryChanged {
+                            app_id,
+                            publication_state,
+                            ui_verification,
+                            ..
+                        },
+                } if app_id == fixture.app_id => Some((publication_state, ui_verification)),
+                _ => None,
+            })
+            .expect("a committed no-MCP rebuild must refresh this app's summary");
+        assert_eq!(publication_state, AppWorkflowStateDto::PublishedUnverified);
+        assert_eq!(
+            ui_verification.status,
+            LocalAppVerificationStatusDto::Unverified
+        );
+        assert_eq!(
+            ui_verification.code.as_deref(),
+            Some("ui_verification_required")
+        );
+    }
+
+    #[tokio::test]
+    async fn qa_terminal_uses_host_canonical_fields_and_rejects_restart_before_commit() {
+        let fixture = host_qa_fixture().await;
+        let candidate = finalize_passing_host_qa(&fixture).await;
+        let mut untrusted = workflow_result_for(&candidate);
+        untrusted["app_id"] = Value::String("foreign-app".into());
+        untrusted["workflow_run_id"] = Value::String("foreign-run".into());
+        untrusted["findings"] = json!([{"id": "invented", "blocking": false}]);
+        untrusted["verification"] = json!({"status": "model-claimed-passed"});
+        let prepared = fixture
+            .broker
+            .prepare_workflow_qa_outcome(
+                &fixture.app_id,
+                &fixture.workflow_run_id,
+                local_apps::QaVerificationStrategy::Balanced,
+                untrusted,
+            )
+            .await
+            .expect("prepare trusted terminal result");
+        let canonical = prepared.canonical_result();
+        assert_eq!(canonical["app_id"], fixture.app_id);
+        assert_eq!(canonical["workflow_run_id"], fixture.workflow_run_id);
+        assert_eq!(canonical["findings"], json!([]));
+        assert_eq!(
+            canonical["verification"]["receipt"]["receipt_id"],
+            candidate["receipt"]["receipt_id"]
+        );
+        assert_eq!(
+            canonical["verification"]["result"]["identity"]["qa_handle"],
+            fixture.qa_handle
+        );
+        assert_eq!(
+            canonical["workflow_result_diagnostic"]["app_id"],
+            "foreign-app"
+        );
+
+        let old_generation = fixture
+            .broker
+            .runtime_identity(&fixture.app_id)
+            .await
+            .expect("runtime identity")
+            .expect("running identity")
+            .0;
+        fixture
+            .broker
+            .stop_runtime(&fixture.app_id)
+            .await
+            .expect("stop before terminal commit");
+        fixture
+            .broker
+            .start_runtime(&fixture.app_id)
+            .await
+            .expect("restart before terminal commit");
+        let new_generation = fixture
+            .broker
+            .runtime_identity(&fixture.app_id)
+            .await
+            .expect("runtime identity")
+            .expect("restarted identity")
+            .0;
+        assert_ne!(old_generation, new_generation);
+        let error = fixture
+            .broker
+            .commit_prepared_workflow_qa_publication(&prepared)
+            .expect_err("a restarted runtime invalidates an in-flight prepared candidate");
+        assert!(error.contains("runtime generation"), "{error}");
+        let summary = fixture
+            .broker
+            .qa_ui_verification_summary(&fixture.app_id)
+            .await;
+        assert_eq!(summary.status, LocalAppVerificationStatusDto::Unverified);
+        assert_eq!(summary.code.as_deref(), Some("ui_verification_required"));
+    }
+
+    #[tokio::test]
+    async fn host_qa_terminal_rejects_wrong_scope_and_every_stale_identity() {
+        let fixture = host_qa_fixture().await;
+        let candidate = finalize_passing_host_qa(&fixture).await;
+        let workflow_result = workflow_result_for(&candidate);
+        let receipt_id = candidate["receipt"]["receipt_id"]
+            .as_str()
+            .expect("receipt id");
+
+        let wrong_app = fixture
+            .broker
+            .prepare_workflow_qa_outcome(
+                "zzzzzzzz",
+                &fixture.workflow_run_id,
+                local_apps::QaVerificationStrategy::Balanced,
+                workflow_result.clone(),
+            )
+            .await
+            .expect_err("foreign app must not resolve this receipt");
+        assert!(wrong_app.contains("receipt"), "{wrong_app}");
+        let wrong_run = fixture
+            .broker
+            .prepare_workflow_qa_outcome(
+                &fixture.app_id,
+                "other-run",
+                local_apps::QaVerificationStrategy::Balanced,
+                workflow_result.clone(),
+            )
+            .await
+            .expect_err("foreign workflow run must fail");
+        assert!(wrong_run.contains("workflow run mismatch"), "{wrong_run}");
+        let wrong_strategy = fixture
+            .broker
+            .prepare_workflow_qa_outcome(
+                &fixture.app_id,
+                &fixture.workflow_run_id,
+                local_apps::QaVerificationStrategy::Thorough,
+                workflow_result.clone(),
+            )
+            .await
+            .expect_err("authenticated strategy mismatch must fail");
+        assert!(
+            wrong_strategy.contains("verification strategy"),
+            "{wrong_strategy}"
+        );
+        let missing_receipt = fixture
+            .broker
+            .prepare_workflow_qa_outcome(
+                &fixture.app_id,
+                &fixture.workflow_run_id,
+                local_apps::QaVerificationStrategy::Balanced,
+                json!({"receipt_id": "qa-missing"}),
+            )
+            .await
+            .expect_err("unknown receipt must fail");
+        assert!(missing_receipt.contains("receipt"), "{missing_receipt}");
+
+        let original_generation = {
+            let mut runtimes = fixture.broker.runtimes.lock().await;
+            let entry = runtimes.get_mut(&fixture.app_id).expect("runtime entry");
+            let original = entry.generation;
+            entry.generation = original.saturating_add(1);
+            original
+        };
+        let stale_generation = fixture
+            .broker
+            .prepare_workflow_qa_outcome(
+                &fixture.app_id,
+                &fixture.workflow_run_id,
+                local_apps::QaVerificationStrategy::Balanced,
+                workflow_result.clone(),
+            )
+            .await
+            .expect_err("changed runtime generation must fail");
+        assert!(
+            stale_generation.contains("stale_runtime"),
+            "{stale_generation}"
+        );
+        fixture
+            .broker
+            .runtimes
+            .lock()
+            .await
+            .get_mut(&fixture.app_id)
+            .expect("runtime entry")
+            .generation = original_generation;
+
+        let build_path = fixture
+            .layout
+            .root()
+            .join(fixture.layout.build_rel(false))
+            .join("build.json");
+        let original_build = fs::read(&build_path).expect("build receipt");
+        let mut stale_build: Value =
+            serde_json::from_slice(&original_build).expect("parse build receipt");
+        stale_build["buildId"] = Value::String("new-build".into());
+        fs::write(
+            &build_path,
+            serde_json::to_vec_pretty(&stale_build).expect("serialize stale build"),
+        )
+        .expect("replace build identity");
+        let wrong_build = fixture
+            .broker
+            .prepare_workflow_qa_outcome(
+                &fixture.app_id,
+                &fixture.workflow_run_id,
+                local_apps::QaVerificationStrategy::Balanced,
+                workflow_result.clone(),
+            )
+            .await
+            .expect_err("changed active build must fail");
+        assert!(wrong_build.contains("stale_build"), "{wrong_build}");
+        fs::write(&build_path, &original_build).expect("restore build receipt");
+
+        let manifest = load_manifest(&fixture.layout).expect("manifest");
+        let mut changed_manifest = manifest.clone();
+        changed_manifest
+            .dependency_snapshot
+            .as_mut()
+            .expect("dependency snapshot")
+            .requested_sha256 = "a".repeat(64);
+        local_apps::save_manifest(&fixture.layout, &changed_manifest)
+            .expect("save changed dependency identity");
+        let wrong_dependency = fixture
+            .broker
+            .prepare_workflow_qa_outcome(
+                &fixture.app_id,
+                &fixture.workflow_run_id,
+                local_apps::QaVerificationStrategy::Balanced,
+                workflow_result,
+            )
+            .await
+            .expect_err("changed dependency snapshot must fail");
+        assert!(
+            wrong_dependency.contains("stale_manifest"),
+            "{wrong_dependency}"
+        );
+        local_apps::save_manifest(&fixture.layout, &manifest).expect("restore manifest");
+        assert_eq!(
+            local_apps::load_qa_receipt(&fixture.layout, receipt_id)
+                .expect("original receipt remains immutable")
+                .receipt_id,
+            receipt_id
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_qa_action_keeps_real_write_but_drops_ui_evidence() {
+        let fixture = host_qa_fixture().await;
+        let input = json!({
+            "app_id": fixture.app_id,
+            "qa_handle": fixture.qa_handle,
+            "scenario_id": "primary-action",
+            "target_id": "primary",
+        });
+        let event_id = fixture
+            .broker
+            .begin_qa_action(&input)
+            .await
+            .expect("begin action")
+            .expect("QA action id");
+        fixture
+            .broker
+            .mutate_data_value(
+                json!({
+                    "app_id": fixture.app_id,
+                    "collection": "chores",
+                    "operations": [{"kind": "upsert", "recordId": "cancelled", "document": {"title": "Cancelled"}}],
+                }),
+                false,
+                Some(&event_id),
+            )
+            .await
+            .expect("perform page write");
+        let direct_result = fixture
+            .broker
+            .mutate_data_value(
+                json!({
+                    "app_id": fixture.app_id,
+                    "qa_handle": fixture.qa_handle,
+                    "scenario_id": "primary-action",
+                    "target_id": "primary",
+                    "collection": "chores",
+                    "operations": [{"kind": "upsert", "recordId": "seed", "document": {"title": "Seed"}}],
+                }),
+                false,
+                None,
+            )
+            .await
+            .expect("direct seed mutation");
+        assert_eq!(direct_result["results"][0]["recordId"], "seed");
+        assert_eq!(
+            fixture
+                .broker
+                .qa_inflight_actions
+                .lock()
+                .await
+                .get(&fixture.app_id)
+                .expect("active action")
+                .pending_bridge_results
+                .len(),
+            1,
+            "a direct/background mutation during the window must not be laundered into UI evidence"
+        );
+        fixture
+            .broker
+            .end_qa_action(&fixture.app_id, &event_id)
+            .await;
+        let after_cancel = fixture
+            .broker
+            .query_data_value(json!({"app_id": fixture.app_id, "collection": "chores"}))
+            .await
+            .expect("query after cancel");
+        let record_ids = after_cancel["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .filter_map(|record| record["recordId"].as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(record_ids, HashSet::from(["cancelled", "seed"]));
+        let session =
+            local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle).expect("QA session");
+        assert!(
+            session
+                .evidence
+                .iter()
+                .all(|evidence| evidence.kind != local_apps::QaEvidenceKind::BridgeWrite),
+            "direct mutation must not be recorded as a page bridge write"
+        );
+    }
+
+    #[tokio::test]
+    async fn real_qa_ui_roundtrip_returns_only_callable_host_evidence_ids() {
+        let fixture = host_qa_fixture().await;
+        fixture
+            .broker
+            .session_permissions
+            .lock()
+            .await
+            .grant(&fixture.app_id, AppCapability::UiControl);
+        let input = json!({
+            "app_id": fixture.app_id,
+            "qa_handle": fixture.qa_handle,
+            "scenario_id": "primary-action",
+            "target_id": "primary",
+            "action": "click",
+            "target": {"element_id": "submit"},
+        });
+        let action_task = tokio::spawn({
+            let broker = fixture.broker.clone();
+            let input = input.clone();
+            async move { broker.act_on_ui(input).await }
+        });
+        let request_id = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(request_id) =
+                    fixture
+                        .sink
+                        .events()
+                        .await
+                        .into_iter()
+                        .find_map(|event| match event {
+                            ClientEvent::AppEvent {
+                                event: AppEventDto::AppUiRequest { request },
+                            } if request.app_id == fixture.app_id => Some(request.request_id),
+                            _ => None,
+                        })
+                {
+                    break request_id;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("real act_on_ui reaches its native request");
+
+        let bridge_result = fixture
+            .broker
+            .execute_bridge_inner(&AppBridgeRequestDto {
+                request_id: "real-roundtrip-write".into(),
+                app_id: fixture.app_id.clone(),
+                operation: AppBridgeOperationDto::MutateData,
+                payload_json: Some(
+                    json!({
+                        "collection": "chores",
+                        "operations": [{
+                            "kind": "upsert",
+                            "recordId": "real-roundtrip-row",
+                            "document": {"title": "Persisted"},
+                        }],
+                    })
+                    .to_string(),
+                ),
+            })
+            .await
+            .expect("real page bridge write");
+        assert_eq!(
+            bridge_result["results"][0]["recordId"],
+            "real-roundtrip-row"
+        );
+        let runtime = fixture
+            .broker
+            .service()
+            .expect("service")
+            .runtime_record(&fixture.app_id)
+            .await
+            .expect("runtime record");
+        let runtime_url =
+            crate::local_apps_bridge::runtime_preview_url(&runtime).expect("runtime preview URL");
+        let mut loaded_url = url::Url::parse(&runtime_url).expect("runtime URL");
+        loaded_url.set_path("/business/chores");
+        loaded_url
+            .query_pairs_mut()
+            .append_pair("selected", "real-roundtrip-row");
+        loaded_url.set_fragment(Some("detail"));
+        assert!(
+            fixture
+                .broker
+                .resolve_ui(
+                    &request_id,
+                    AppAuthorizationDecisionDto::AllowOnce,
+                    Some(
+                        json!({
+                            "lingxi_qa": {
+                                "version": 1,
+                                "requested_runtime_url": runtime_url,
+                                "loaded_runtime_url": loaded_url,
+                                "platform": "ios",
+                                "form_factor": "iphone",
+                                "navigation_generation": 1,
+                                "device_model": "iPhone fixture",
+                            },
+                            "result": {
+                                "clicked": true,
+                                "qa_handle": "qa_spoofed",
+                                "qa_evidence_ids": ["qa-evidence-spoofed"],
+                            },
+                        })
+                        .to_string(),
+                    ),
+                    None,
+                )
+                .await,
+            "native response resolves the real tool request"
+        );
+        let action_result = action_task
+            .await
+            .expect("join real QA action")
+            .expect("real QA action succeeds");
+        assert_eq!(action_result["qa_handle"], fixture.qa_handle);
+        let action_evidence_ids = action_result["qa_evidence_ids"]
+            .as_array()
+            .expect("action evidence ids")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            action_evidence_ids.len(),
+            3,
+            "native provenance, UI action and bridge write must all be returned"
+        );
+        assert!(
+            !action_evidence_ids.contains(&"qa-evidence-spoofed"),
+            "native/app-controlled metadata must not enter the Host evidence envelope"
+        );
+        for evidence_id in &action_evidence_ids {
+            fixture
+                .broker
+                .qa_read_evidence(json!({
+                    "app_id": fixture.app_id,
+                    "qa_handle": fixture.qa_handle,
+                    "evidence_id": evidence_id,
+                }))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("returned action evidence {evidence_id:?} must be readable: {error}")
+                });
+        }
+        let kinds = local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle)
+            .expect("QA session")
+            .evidence
+            .into_iter()
+            .filter(|evidence| action_evidence_ids.contains(&evidence.evidence_id.as_str()))
+            .map(|evidence| evidence.kind)
+            .collect::<Vec<_>>();
+        assert!(
+            kinds.contains(&local_apps::QaEvidenceKind::NativeTargetProvenance)
+                && kinds.contains(&local_apps::QaEvidenceKind::UiAction)
+                && kinds.contains(&local_apps::QaEvidenceKind::BridgeWrite),
+            "returned IDs must cover native, action and bridge evidence; got {kinds:?}"
+        );
+
+        let query_result = fixture
+            .broker
+            .query_data_value(json!({
+                "app_id": fixture.app_id,
+                "qa_handle": fixture.qa_handle,
+                "scenario_id": "primary-action",
+                "target_id": "primary",
+                "collection": "chores",
+                "filters": [{
+                    "fieldId": "title",
+                    "operator": "equal",
+                    "value": "Persisted",
+                }],
+            }))
+            .await
+            .expect("real QA query");
+        assert_eq!(query_result["records"][0]["recordId"], "real-roundtrip-row");
+        assert_eq!(query_result["qa_handle"], fixture.qa_handle);
+        let query_evidence_ids = query_result["qa_evidence_ids"]
+            .as_array()
+            .expect("query evidence ids");
+        assert_eq!(query_evidence_ids.len(), 1);
+        fixture
+            .broker
+            .qa_read_evidence(json!({
+                "app_id": fixture.app_id,
+                "qa_handle": fixture.qa_handle,
+                "evidence_id": query_evidence_ids[0],
+            }))
+            .await
+            .expect("returned query evidence is readable");
+
+        let mut routed_request = url::Url::parse(&runtime_url).expect("runtime URL");
+        routed_request.set_path("/must-not-be-requested");
+        let wrong_route = fixture
+            .broker
+            .qa_ui_response_value(
+                &input,
+                json!({
+                    "lingxi_qa": {
+                        "version": 1,
+                        "requested_runtime_url": routed_request,
+                        "loaded_runtime_url": loaded_url,
+                        "platform": "ios",
+                        "form_factor": "iphone",
+                        "navigation_generation": 2,
+                    },
+                    "result": {},
+                }),
+            )
+            .await
+            .expect_err("the Host-requested URL must remain strict and origin-rooted");
+        assert!(
+            wrong_route.contains("native_attestation_invalid"),
+            "{wrong_route}"
+        );
+
+        let mut wrong_marker = loaded_url.clone();
+        wrong_marker.set_query(Some("lingxi_runtime=999999"));
+        let wrong_marker = fixture
+            .broker
+            .qa_ui_response_value(
+                &input,
+                json!({
+                    "lingxi_qa": {
+                        "version": 1,
+                        "requested_runtime_url": runtime_url,
+                        "loaded_runtime_url": wrong_marker,
+                        "platform": "ios",
+                        "form_factor": "iphone",
+                        "navigation_generation": 3,
+                    },
+                    "result": {},
+                }),
+            )
+            .await
+            .expect_err("the loaded route must retain the requested runtime marker");
+        assert!(
+            wrong_marker.contains("not the requested runtime generation"),
+            "{wrong_marker}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_real_act_on_ui_future_deactivates_attribution_and_keeps_page_write() {
+        let fixture = host_qa_fixture().await;
+        fixture
+            .broker
+            .session_permissions
+            .lock()
+            .await
+            .grant(&fixture.app_id, AppCapability::UiControl);
+        let input = json!({
+            "app_id": fixture.app_id,
+            "qa_handle": fixture.qa_handle,
+            "scenario_id": "primary-action",
+            "target_id": "primary",
+            "action": "click",
+            "target": {"element_id": "submit"},
+        });
+        let action_task = tokio::spawn({
+            let broker = fixture.broker.clone();
+            async move { broker.act_on_ui(input).await }
+        });
+        let request_id = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(request_id) =
+                    fixture
+                        .sink
+                        .events()
+                        .await
+                        .into_iter()
+                        .find_map(|event| match event {
+                            ClientEvent::AppEvent {
+                                event: AppEventDto::AppUiRequest { request },
+                            } if request.app_id == fixture.app_id => Some(request.request_id),
+                            _ => None,
+                        })
+                {
+                    break request_id;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("real act_on_ui reaches its native request");
+        assert!(
+            fixture
+                .broker
+                .qa_active_actions
+                .lock()
+                .expect("active action map")
+                .contains_key(&fixture.app_id),
+            "the real tool future must own an active attribution window while native UI is pending"
+        );
+
+        let bridge_result = fixture
+            .broker
+            .execute_bridge_inner(&AppBridgeRequestDto {
+                request_id: "cancelled-tool-write".into(),
+                app_id: fixture.app_id.clone(),
+                operation: AppBridgeOperationDto::MutateData,
+                payload_json: Some(
+                    json!({
+                        "collection": "chores",
+                        "operations": [{
+                            "kind": "upsert",
+                            "recordId": "cancelled-tool-row",
+                            "document": {"title": "Still saved"},
+                        }],
+                    })
+                    .to_string(),
+                ),
+            })
+            .await
+            .expect("page write completes while native UI is pending");
+        assert_eq!(
+            bridge_result["results"][0]["recordId"],
+            "cancelled-tool-row"
+        );
+
+        action_task.abort();
+        assert!(action_task
+            .await
+            .expect_err("aborted tool future must not complete")
+            .is_cancelled());
+        assert!(
+            !fixture
+                .broker
+                .qa_active_actions
+                .lock()
+                .expect("active action map")
+                .contains_key(&fixture.app_id),
+            "dropping the actual tool future must synchronously close attribution"
+        );
+        assert!(
+            !fixture
+                .broker
+                .resolve_ui(
+                    &request_id,
+                    AppAuthorizationDecisionDto::AllowOnce,
+                    Some("{}".into()),
+                    None,
+                )
+                .await,
+            "the dropped tool receiver must reject and remove its late native response"
+        );
+        let stored = fixture
+            .broker
+            .query_data_value(json!({"app_id": fixture.app_id, "collection": "chores"}))
+            .await
+            .expect("read after cancelled tool");
+        assert_eq!(stored["records"][0]["recordId"], "cancelled-tool-row");
+        assert!(
+            local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle)
+                .expect("QA session")
+                .evidence
+                .iter()
+                .all(|evidence| evidence.kind != local_apps::QaEvidenceKind::BridgeWrite),
+            "cancelled native UI must drop only pending evidence attribution"
+        );
+
+        let restarted = fixture
+            .broker
+            .begin_qa_action(&json!({
+                "app_id": fixture.app_id,
+                "qa_handle": fixture.qa_handle,
+                "scenario_id": "primary-action",
+                "target_id": "primary",
+            }))
+            .await
+            .expect("restart after dropping real tool future")
+            .expect("restarted QA action");
+        fixture
+            .broker
+            .end_qa_action(&fixture.app_id, &restarted)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn qa_attribution_overflow_does_not_change_page_write_results_or_errors() {
+        let fixture = host_qa_fixture().await;
+        let input = json!({
+            "app_id": fixture.app_id,
+            "qa_handle": fixture.qa_handle,
+            "scenario_id": "primary-action",
+            "target_id": "primary",
+        });
+        let event_id = fixture
+            .broker
+            .begin_qa_action(&input)
+            .await
+            .expect("begin action")
+            .expect("QA action id");
+        fixture
+            .broker
+            .qa_inflight_actions
+            .lock()
+            .await
+            .get_mut(&fixture.app_id)
+            .expect("active action")
+            .pending_bridge_results =
+            vec![json!({"already": "attributed"}); local_apps::MAX_MUTATION_BATCH_SIZE];
+
+        let bridge_result = fixture
+            .broker
+            .execute_bridge_inner(&AppBridgeRequestDto {
+                request_id: "overflow-write".into(),
+                app_id: fixture.app_id.clone(),
+                operation: AppBridgeOperationDto::MutateData,
+                payload_json: Some(
+                    json!({
+                        "collection": "chores",
+                        "operations": [{
+                            "kind": "upsert",
+                            "recordId": "overflow-row",
+                            "document": {"title": "Overflow still saves"},
+                        }],
+                    })
+                    .to_string(),
+                ),
+            })
+            .await
+            .expect("attribution overflow must not replace the business response");
+        assert_eq!(bridge_result["results"][0]["recordId"], "overflow-row");
+        assert_eq!(bridge_result["results"][0]["revision"], 1);
+        let stored = fixture
+            .broker
+            .query_data_value(json!({"app_id": fixture.app_id, "collection": "chores"}))
+            .await
+            .expect("overflow write remains readable");
+        assert_eq!(stored["records"][0]["recordId"], "overflow-row");
+
+        let invalid = fixture
+            .broker
+            .execute_bridge_inner(&AppBridgeRequestDto {
+                request_id: "overflow-invalid".into(),
+                app_id: fixture.app_id.clone(),
+                operation: AppBridgeOperationDto::MutateData,
+                payload_json: Some(
+                    json!({
+                        "collection": "missing",
+                        "operations": [{"kind": "delete", "recordId": "nope"}],
+                    })
+                    .to_string(),
+                ),
+            })
+            .await
+            .expect_err("a real datastore error must not be hidden by QA attribution");
+        assert!(
+            invalid.message.contains("collection"),
+            "expected the datastore error, got: {}",
+            invalid.message
+        );
+        fixture
+            .broker
+            .end_qa_action(&fixture.app_id, &event_id)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn dropped_qa_action_guard_deactivates_window_and_allows_restart() {
+        let fixture = host_qa_fixture().await;
+        let input = json!({
+            "app_id": fixture.app_id,
+            "qa_handle": fixture.qa_handle,
+            "scenario_id": "primary-action",
+            "target_id": "primary",
+        });
+        let Some((first_event, guard)) = fixture
+            .broker
+            .begin_qa_action_with_guard(&input)
+            .await
+            .expect("begin guarded QA action")
+        else {
+            panic!("QA fixture must return an action window");
+        };
+        drop(guard);
+
+        let second_event = fixture
+            .broker
+            .begin_qa_action(&input)
+            .await
+            .expect("restart after cancellation")
+            .expect("restarted QA action");
+        assert_ne!(first_event, second_event);
+        fixture
+            .broker
+            .end_qa_action(&fixture.app_id, &second_event)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn qa_action_waits_for_a_page_write_issued_after_native_success() {
+        let fixture = host_qa_fixture().await;
+        let input = json!({
+            "app_id": fixture.app_id,
+            "qa_handle": fixture.qa_handle,
+            "scenario_id": "primary-action",
+            "target_id": "primary",
+        });
+        let event_id = fixture
+            .broker
+            .begin_qa_action(&input)
+            .await
+            .expect("begin action")
+            .expect("QA action id");
+
+        // Native reports successful click evaluation before the handler's
+        // asynchronously scheduled bridge mutation has entered the Host.
+        let settlement = tokio::spawn({
+            let broker = fixture.broker.clone();
+            let app_id = fixture.app_id.clone();
+            let event_id = event_id.clone();
+            async move { broker.settle_qa_action(&app_id, &event_id).await }
+        });
+        sleep(Duration::from_millis(75)).await;
+        let first_bridge = fixture
+            .broker
+            .execute_bridge_inner(&AppBridgeRequestDto {
+                request_id: "late-ui-read".into(),
+                app_id: fixture.app_id.clone(),
+                operation: AppBridgeOperationDto::QueryData,
+                payload_json: Some(json!({"collection": "chores"}).to_string()),
+            })
+            .await
+            .expect("first awaited bridge request remains inside action window");
+        assert_eq!(first_bridge["records"], json!([]));
+        // This begins after the original native-success grace. The preceding
+        // bridge activity is what keeps the chained handler window alive.
+        sleep(Duration::from_millis(75)).await;
+        let bridge_result = fixture
+            .broker
+            .execute_bridge_inner(&AppBridgeRequestDto {
+                request_id: "late-ui-write".into(),
+                app_id: fixture.app_id.clone(),
+                operation: AppBridgeOperationDto::MutateData,
+                payload_json: Some(
+                    json!({
+                        "collection": "chores",
+                        "operations": [{
+                            "kind": "upsert",
+                            "recordId": "late-row",
+                            "document": {"title": "Late sweep"},
+                        }],
+                    })
+                    .to_string(),
+                ),
+            })
+            .await
+            .expect("late page bridge write remains inside bounded action window");
+        assert_eq!(bridge_result["results"][0]["recordId"], "late-row");
+        let before_commit = fixture
+            .broker
+            .query_data_value(json!({"app_id": fixture.app_id, "collection": "chores"}))
+            .await
+            .expect("query before native success commit");
+        assert_eq!(before_commit["records"][0]["recordId"], "late-row");
+
+        let action = settlement
+            .await
+            .expect("join QA settlement")
+            .expect("settle QA action");
+        assert_eq!(action.pending_bridge_results.len(), 1);
+        fixture
+            .broker
+            .record_qa_observation(
+                &input,
+                "act_on_ui",
+                json!({"clicked": true}),
+                event_id,
+                None,
+            )
+            .await
+            .expect("record successful action");
+        fixture
+            .broker
+            .commit_qa_action_mutations(&fixture.app_id, &action)
+            .await
+            .expect("commit late page write after native success");
+        let changed = fixture
+            .broker
+            .query_data_value(json!({
+                "app_id": fixture.app_id,
+                "qa_handle": fixture.qa_handle,
+                "scenario_id": "primary-action",
+                "target_id": "primary",
+                "collection": "chores",
+                "filters": [{"fieldId": "title", "operator": "equal", "value": "Late sweep"}],
+            }))
+            .await
+            .expect("query actual changed row");
+        assert_eq!(changed["records"].as_array().map(Vec::len), Some(1));
+        assert_eq!(changed["records"][0]["collection"], "chores");
+        assert_eq!(changed["records"][0]["recordId"], "late-row");
+        assert_eq!(changed["records"][0]["revision"], 1);
+
+        let session = local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle)
+            .expect("load QA evidence");
+        let bridge = session
+            .evidence
+            .iter()
+            .find(|evidence| evidence.kind == local_apps::QaEvidenceKind::BridgeWrite)
+            .expect("actual bridge evidence");
+        let bridge_id = bridge.evidence_id.clone();
+        let bridge_event_id = bridge.event_id.clone();
+        let bridge_content =
+            match local_apps::qa_read_evidence(&fixture.layout, &fixture.qa_handle, &bridge_id)
+                .expect("read actual bridge artifact")
+            {
+                local_apps::QaEvidenceBlock::Json { content, .. } => content,
+                other => panic!("bridge evidence must be JSON, got {other:?}"),
+            };
+        assert_eq!(bridge_content["results"][0]["collection"], "chores");
+        assert_eq!(bridge_content["results"][0]["recordId"], "late-row");
+        assert_eq!(bridge_content["results"][0]["revision"], 1);
+        let query = session
+            .evidence
+            .iter()
+            .find(|evidence| evidence.kind == local_apps::QaEvidenceKind::Query)
+            .expect("actual query evidence");
+        assert_eq!(query.caused_by.as_deref(), Some(bridge_event_id.as_str()));
+        let query_content = match local_apps::qa_read_evidence(
+            &fixture.layout,
+            &fixture.qa_handle,
+            &query.evidence_id,
+        )
+        .expect("read actual query artifact")
+        {
+            local_apps::QaEvidenceBlock::Json { content, .. } => content,
+            other => panic!("query evidence must be JSON, got {other:?}"),
+        };
+        assert_eq!(query_content["records"][0]["recordId"], "late-row");
+    }
+
+    #[tokio::test]
+    async fn authoring_candidate_run_and_base_are_rechecked_at_the_build_lock_boundary() {
+        let fixture = host_qa_fixture().await;
+        let base = crate::local_apps_build::active_build_authoring_contract_sha256(&fixture.layout)
+            .expect("active authoring selector")
+            .expect("active contract digest");
+        let spec: local_apps::AppAuthoringSpec = serde_json::from_str(include_str!(
+            "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+        ))
+        .expect("authoring fixture");
+        let staged = fixture
+            .broker
+            .local_app_contract(json!({
+                "operation": "stage",
+                "app_id": fixture.app_id,
+                "workflow_run_id": "workflow-update",
+                "base_contract_sha256": base,
+                "spec": spec,
+            }))
+            .await
+            .expect("stage update contract");
+        let handle = staged["contract_handle"].as_str().expect("contract handle");
+        let wrong_run = fixture
+            .broker
+            .authoring_contract_for_build(
+                &fixture.layout,
+                &json!({"contract_handle": handle, "workflow_run_id": "other-run"}),
+            )
+            .expect_err("candidate handle must remain workflow-bound");
+        assert!(
+            wrong_run.contains("workflow binding mismatch"),
+            "{wrong_run}"
+        );
+
+        let build_path = fixture
+            .layout
+            .root()
+            .join(fixture.layout.build_rel(false))
+            .join("build.json");
+        let mut build: Value = serde_json::from_slice(&fs::read(&build_path).expect("receipt"))
+            .expect("parse receipt");
+        build["authoringContractSha256"] = Value::String("f".repeat(64));
+        fs::write(
+            &build_path,
+            serde_json::to_vec_pretty(&build).expect("serialize receipt"),
+        )
+        .expect("change active contract selector");
+        let stale = fixture
+            .broker
+            .verify_authoring_candidate_digest(
+                &fixture.layout,
+                staged["contract_sha256"]
+                    .as_str()
+                    .expect("candidate digest"),
+            )
+            .expect_err("candidate base changed before locked build");
+        assert!(
+            stale.contains("candidate base no longer matches"),
+            "{stale}"
+        );
+    }
+
     /// r3-never-wired-05: `LocalAppVerificationStatusDto::Failed` had zero
     /// producers while both clients carried localized copy for it, and the
     /// condition that should have produced it — an active MCP catalog whose
@@ -13730,13 +16289,8 @@ mod tests {
         let root = TempDir::new().expect("tempdir");
         let service = test_service(&root).await;
         let sink = MockSink::arc();
-        let broker = LocalAppsHostBroker::new(
-            root.path().to_path_buf(),
-            sink.clone(),
-            None,
-            false,
-            None,
-        );
+        let broker =
+            LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
         assert!(broker.attach_service(service.clone()).is_ok());
         let healthy = create_app_fixture(&root, &service, "Healthy").await;
         let corrupt = create_app_fixture(&root, &service, "Corrupt").await;
@@ -13883,13 +16437,8 @@ mod tests {
     async fn a_pending_native_approval_is_re_announced_verbatim_to_a_reattaching_client() {
         let root = TempDir::new().expect("tempdir");
         let sink = MockSink::arc();
-        let broker = LocalAppsHostBroker::new(
-            root.path().to_path_buf(),
-            sink.clone(),
-            None,
-            false,
-            None,
-        );
+        let broker =
+            LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
         // The fixture event carries the request id, so "the same sheet came
         // back" is checked on the wire content, not on a count alone.
         let event = |request_id: &str| AppEventDto::LocalAppOperationFailed {
@@ -14041,13 +16590,17 @@ mod tests {
             std::panic::set_hook(Box::new(|_| {}));
             let outcome = std::panic::catch_unwind(scan);
             std::panic::set_hook(previous);
-            let payload = outcome
-                .err()
-                .unwrap_or_else(|| panic!("the scanner accepted a planted dead tool name in {what}"));
+            let payload = outcome.err().unwrap_or_else(|| {
+                panic!("the scanner accepted a planted dead tool name in {what}")
+            });
             payload
                 .downcast_ref::<String>()
                 .cloned()
-                .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_string()))
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|text| (*text).to_string())
+                })
                 .unwrap_or_else(|| panic!("the scanner's panic carried no message for {what}"))
         }
 
@@ -14461,10 +17014,9 @@ mod tests {
         fs::write(&vite_bin, b"#!/usr/bin/env node\n").expect("write fixture vite marker");
         fs::write(workspace.join("vite.config.mjs"), "export default {};\n")
             .expect("mark fixture as a Vite app");
-
         let tree_sha256 =
             dependency_tree_digest(&workspace.join("node_modules")).expect("dependency tree");
-        refresh_runtime_profile_snapshot(&layout, &tree_sha256)
+        refresh_runtime_profile_snapshot(&layout, &tree_sha256, None)
             .expect("refresh fixture dependency snapshot");
         let manifest = load_manifest(&layout).expect("fixture manifest");
         storage::save_dependency_record(
@@ -14710,10 +17262,8 @@ mod tests {
         record
     }
 
-    /// r3-e2e-trace-05: a chat-origin app (`LocalAppCreate`, which always
-    /// stamps `conversation_id`) must not receive step 1's open-ended
-    /// question — the user already answered it in the conversation that
-    /// created the app.
+    /// A chat-origin app's recorded brief must survive the thin bootstrap
+    /// handoff without triggering a second Host-authored interview.
     #[tokio::test]
     async fn a_chat_origin_shells_guided_contract_does_not_re_ask_the_opening_question() {
         let (root, service, broker) = create_broker(false, None).await;
@@ -14743,12 +17293,13 @@ mod tests {
              already answered: {guided}"
         );
         assert!(
-            guided.contains("a todo list app with reminders"),
-            "step 1 must carry the recorded brief forward instead of discarding it: {guided}"
+            guided.contains("Recorded brief: \"a todo list app with reminders\""),
+            "the bootstrap must carry the recorded brief into the coordinator: {guided}"
         );
         assert!(
-            guided.contains("already described **in this same conversation**"),
-            "step 1 must say why it is skipping the open-ended question: {guided}"
+            guided.contains("Immediately use the `Skill` tool"),
+            "the bootstrap must hand the recorded brief to the create coordinator immediately: \
+             {guided}"
         );
     }
 
@@ -14770,6 +17321,31 @@ mod tests {
 
     const TEST_DEFAULT_APP_NAME: &str = "Test App";
     const TEST_DEFAULT_APP_BRIEF: &str = "test app brief";
+
+    async fn stage_react_dom_authoring_contract(
+        broker: &Arc<LocalAppsHostBroker>,
+        app_id: &str,
+        workflow_run_id: &str,
+        validated_selection_handle: &str,
+    ) -> String {
+        let spec: local_apps::AppAuthoringSpec = serde_json::from_str(include_str!(
+            "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+        ))
+        .expect("authoring fixture");
+        broker
+            .local_app_contract(json!({
+                "operation": "stage",
+                "app_id": app_id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": validated_selection_handle,
+                "spec": spec,
+            }))
+            .await
+            .expect("stage authoring contract")["contract_handle"]
+            .as_str()
+            .expect("contract handle")
+            .to_string()
+    }
 
     async fn approved_create_receipt(
         broker: &Arc<LocalAppsHostBroker>,
@@ -14818,6 +17394,31 @@ mod tests {
         let handle = selection["validated_selection_handle"]
             .as_str()
             .expect("selection handle");
+        let mut authoring_value: Value = serde_json::from_str(include_str!(
+            "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+        ))
+        .expect("authoring fixture");
+        if surface == "canvas" {
+            authoring_value["design"]["canvas"] = json!({
+                "scene": "Test scene",
+                "phases": ["ready", "running"],
+                "controls": ["tap"],
+                "hud": "Score",
+            });
+            authoring_value["acceptance_checks"][0]["evidence"] = json!(["capture"]);
+        }
+        let authoring_spec: local_apps::AppAuthoringSpec =
+            serde_json::from_value(authoring_value).expect("profile-compatible authoring spec");
+        let staged_contract = broker
+            .local_app_contract(json!({
+                "operation": "stage",
+                "app_id": app_id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "spec": authoring_spec,
+            }))
+            .await
+            .expect("stage authoring contract");
         // r2-tests-honesty-001: a real design-less create OMITS the
         // `design_spec` key entirely — `json!({"design_spec": design_spec})`
         // with `design_spec: None` instead serializes a literal JSON `null`,
@@ -14835,6 +17436,7 @@ mod tests {
             "quality_level": if surface == "canvas" { "balanced" } else { "fast" },
             "name": name,
             "brief": brief,
+            "contract_handle": staged_contract["contract_handle"],
         });
         if let Some(design_spec) = design_spec {
             stage_request["design_spec"] = design_spec;
@@ -14844,7 +17446,9 @@ mod tests {
             .await
             .expect("stage create");
         assert_eq!(
-            stage.get("design_spec_sha256").map_or(false, |v| !v.is_null()),
+            stage
+                .get("design_spec_sha256")
+                .map_or(false, |v| !v.is_null()),
             has_design_spec,
             "design_spec_sha256 presence must track whether a design spec was staged: {stage}"
         );
@@ -14866,23 +17470,28 @@ mod tests {
                     .await
             }
         });
-        let request_id = timeout(Duration::from_secs(2), async {
-            loop {
-                if let Some(request_id) = broker
-                    .pending_create_confirmations
-                    .lock()
-                    .await
-                    .keys()
-                    .next()
-                    .cloned()
-                {
-                    break request_id;
+        tokio::pin!(approval);
+        let request_id = tokio::select! {
+            found = timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(request_id) = broker
+                        .pending_create_confirmations
+                        .lock()
+                        .await
+                        .keys()
+                        .next()
+                        .cloned()
+                    {
+                        break request_id;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("create confirmation request");
+            }) => found.expect("create confirmation request"),
+            result = &mut approval => panic!(
+                "approval returned before raising create confirmation: {:?}",
+                result.expect("approval task did not panic")
+            ),
+        };
         assert!(
             broker.resolve_create_confirmation(&request_id, true).await,
             "approval resolver must consume the pending create confirmation"
@@ -15207,64 +17816,48 @@ mod tests {
         fs::write(index, original).expect("restore index after injected failure");
     }
 
-    /// The opening turn of the interview must ask for a DESCRIPTION in ordinary
-    /// text, not present a picker.
-    ///
-    /// `AskUserQuestion` renders a native option sheet. On the opening turn the
-    /// model knows only that the user wants an app, so every option it could
-    /// offer is a guess at the user's own idea — and the sheet then collects a
-    /// choice among those guesses INSTEAD of the free-text description that
-    /// steps 2 and 3 both read. The user reported exactly this: the flow opened
-    /// by making them choose.
-    ///
-    /// Nothing else in this file would catch a regression. Step 1 reverting to
-    /// a bare "ask the user what they want with `AskUserQuestion`" compiles,
-    /// keeps `has no shape yet`, and leaves every other contract test green,
-    /// because they assert on the header and on the formal contract that
-    /// REPLACES this text. So this test pins the two halves that carry the
-    /// behaviour: that step 1 names ordinary text, and that it names the tool
-    /// only to forbid it there.
+    /// The shell is only an identity/no-write guard. Product discovery,
+    /// technical recommendations, and the one native confirmation belong to
+    /// the create coordinator, while MCP exposure is an optional post-create
+    /// capability rather than a prerequisite questionnaire.
     #[tokio::test]
-    async fn the_interview_opens_with_a_description_prompt_not_a_picker() {
+    async fn guided_shell_delegates_without_technical_or_mcp_prerequisites() {
         let (root, service, broker) = create_broker(false, None).await;
         let shell = shell_app_fixture(&broker, &service).await;
         let guided = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
             .expect("read the guided contract");
 
         assert!(
-            guided
-                .contains("**ordinary conversational text**, ask the user what they want to build"),
-            "step 1 must ask for a description in ordinary text: {guided}"
+            guided.contains("Immediately use the `Skill` tool")
+                && guided.contains("lingxi-local-app:create-local-app"),
+            "the shell must immediately enter the plugin-qualified create coordinator: {guided}"
         );
         assert!(
-            guided.contains("**Do not use `AskUserQuestion`** for this round"),
-            "step 1 must forbid the picker on the opening turn: {guided}"
-        );
-        // A generic, unqualified "ask the user's needs with `AskUserQuestion`"
-        // line would contradict step 1 outright: a model reading both resolves
-        // the contradiction back to the picker, so that unqualified form must
-        // never appear.
-        assert!(
-            !guided.contains("ask the user's needs with `AskUserQuestion`"),
-            "an unqualified rule would contradict step 1: {guided}"
-        );
-        // The tool is still the right instrument once there are options to pick
-        // between — the name/surface confirmation. Forbidding it everywhere
-        // would be the opposite mistake.
-        assert!(
-            guided.contains(
-                "Use `AskUserQuestion` to have the user confirm or change the proposed **name** and **shape**"
-            ),
-            "the name/surface confirmation still belongs in a picker: {guided}"
+            guided.contains("recommend the technical renderer and runtime profile")
+                && guided.contains("single native create confirmation"),
+            "the coordinator must recommend technical choices for the concise native \
+             confirmation: {guided}"
         );
         assert!(
-            guided.contains("1-3 focused questions"),
-            "a clarification round must contain one to three questions: {guided}"
+            guided.contains("optionally expose named business capabilities"),
+            "MCP exposure must remain optional and post-create: {guided}"
         );
-        assert!(
-            guided.contains("skip this round if nothing is left undecided"),
-            "no unresolved decisions must omit the clarification round: {guided}"
-        );
+        for forbidden in [
+            "target **shape**",
+            "`dom` —",
+            "`canvas` —",
+            "LocalAppTemplateCatalog",
+            "mcpSuggestions",
+            "2-3 concrete named recommendations",
+            "Once the name, shape, and MCP choice are confirmed",
+            "live external service or data source",
+            "must be the user's confirmed choice",
+        ] {
+            assert!(
+                !guided.contains(forbidden),
+                "the thin shell must not contain `{forbidden}`: {guided}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -15313,11 +17906,26 @@ mod tests {
         let handle = selection["validated_selection_handle"]
             .as_str()
             .expect("selection handle");
+        let authoring_spec: local_apps::AppAuthoringSpec = serde_json::from_str(include_str!(
+            "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+        ))
+        .expect("authoring fixture");
+        let contract = broker
+            .local_app_contract(json!({
+                "operation": "stage",
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "spec": authoring_spec,
+            }))
+            .await
+            .expect("stage authoring contract");
         broker
             .stage_create(json!({
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
+                "contract_handle": contract["contract_handle"],
                 "quality_level": "fast",
                 "name": "Plain create",
                 "brief": "MCP remains optional",
@@ -15538,9 +18146,15 @@ mod tests {
     /// stay green, because they all go through `stage_create` itself.
     #[tokio::test]
     async fn staged_evidence_missing_name_or_brief_is_a_named_hard_fail() {
-        async fn stage_with_evidence_missing(broker: &Arc<LocalAppsHostBroker>, app_id: &str, drop_key: &str) -> String {
-            let workflow_run_id =
-                format!("wf_evidence_gap_{drop_key}_{}", uuid::Uuid::new_v4().simple());
+        async fn stage_with_evidence_missing(
+            broker: &Arc<LocalAppsHostBroker>,
+            app_id: &str,
+            drop_key: &str,
+        ) -> String {
+            let workflow_run_id = format!(
+                "wf_evidence_gap_{drop_key}_{}",
+                uuid::Uuid::new_v4().simple()
+            );
             let catalog =
                 crate::local_app_template_catalog::catalog_view().expect("template catalog");
             let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
@@ -15847,8 +18461,7 @@ mod tests {
             .load_create_proposal_context(&shell.id, &workflow_run_id)
             .expect_err("a design spec that does not match its recorded digest must be refused");
         assert!(
-            error.contains("create_staging_evidence_invalid")
-                && error.contains("designSpecSha256"),
+            error.contains("create_staging_evidence_invalid") && error.contains("designSpecSha256"),
             "expected a named designSpecSha256 mismatch, got: {error}"
         );
 
@@ -15859,8 +18472,7 @@ mod tests {
             .load_create_proposal_context(&shell.id, &workflow_run_id)
             .expect_err("a missing design spec that evidence says was staged must be refused");
         assert!(
-            error.contains("create_staging_evidence_invalid")
-                && error.contains("designSpecSha256"),
+            error.contains("create_staging_evidence_invalid") && error.contains("designSpecSha256"),
             "expected a named designSpecSha256 mismatch for the missing file, got: {error}"
         );
     }
@@ -15912,11 +18524,14 @@ mod tests {
         let handle = selection["validated_selection_handle"]
             .as_str()
             .expect("selection handle");
+        let contract_handle =
+            stage_react_dom_authoring_contract(&broker, &shell.id, &workflow_run_id, handle).await;
         broker
             .stage_create(json!({
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
+                "contract_handle": contract_handle,
                 "quality_level": "fast",
                 "name": "Reuse arm",
                 "brief": "second approval call must reuse the sealed journal",
@@ -16140,10 +18755,30 @@ mod tests {
     fn declined_create_confirmation_is_terminal_in_the_build_workflow() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let authoring_spec = json!({
+            "product": {"goal": "Small form", "tasks": ["submit"], "external_integrations": []},
+            "targets": [{"id": "primary", "os": "ios", "form_factor": "iphone"}],
+            "ui": {
+                "structure": ["form"],
+                "theme": {"mode": "system", "accent": "blue"},
+                "style": {"direction": "clear", "density": "comfortable"},
+                "references": []
+            },
+            "design": {
+                "presentations": [{"target_id": "primary", "presentation": "form", "navigation": "none"}],
+                "tokens": {},
+                "states": {"loading": "loading", "empty": "empty", "error": "error", "success": "done", "permission": "explain"},
+                "inputs": {"pointer_touch": ["tap"], "keyboard_mouse": ["tab"], "back": "close", "reduced_motion": "respect system"},
+                "canvas": null
+            },
+            "acceptance_checks": [{"id": "submit", "target_ids": ["primary"], "required": true, "preconditions": [], "steps": ["submit"], "expected": "done", "evidence": ["inspect", "ui_action"]}]
+        });
         let args = json!({
             "operation": "create",
             "app_id": "aaaa1111",
-            "spec": "A small form app",
+            "authoring_spec": authoring_spec,
+            "name": "Small form",
+            "brief": "A small form app",
             "quality_level": "balanced",
             "host_context": {
                 "source": "verified_host",
@@ -16155,6 +18790,10 @@ mod tests {
                 "template_catalog": {
                     "catalog_digest": "digest",
                     "available_template_ids": ["react-dom-r2"],
+                },
+                "schemas": {
+                    "template_selection": {}, "design_subtree": {}, "create_preparer": {},
+                    "build_result": {}, "operator_result": {}, "qa_review": {}, "qa_finalize": {}
                 },
                 "staging": {"isolated": true, "final_publish": false},
             },
@@ -16181,11 +18820,10 @@ mod tests {
                             })
                             .to_string();
                         }
-                        // Checked BEFORE "designer": the approval stage's
-                        // agentType IS `mcp-designer`.
-                        if options.contains("native-create-approval") {
+                        if options.contains("create-preparer") {
                             approval_counter.fetch_add(1, Ordering::SeqCst);
                             return json!({
+                                "ok": false,
                                 "approved": false,
                                 "status": "create_declined",
                             })
@@ -16193,17 +18831,10 @@ mod tests {
                         }
                         if options.contains("designer") {
                             return json!({
-                                "runtime_family": "react_dom",
-                                "acceptance_checks": [],
-                                "summary": "design",
-                            })
-                            .to_string();
-                        }
-                        if options.contains("builder-stage") {
-                            return json!({
-                                "ok": true,
-                                "dependency_input_sha256": "a".repeat(64),
-                                "summary": "staged",
+                                "design": {
+                                    "presentations": [], "tokens": {}, "states": {},
+                                    "inputs": {}, "canvas": null
+                                }
                             })
                             .to_string();
                         }
@@ -16229,7 +18860,7 @@ mod tests {
         assert_eq!(
             asked, 1,
             "a declined create confirmation must not be re-asked, but the workflow called the \
-             native-create-approval agent {asked} time(s)"
+             create-preparer {asked} time(s)"
         );
         let outcome = match outcome {
             Ok(outcome) => outcome,
@@ -16262,10 +18893,19 @@ mod tests {
     #[test]
     fn contradictory_create_approval_is_never_reported_as_a_user_decline() {
         let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let authoring_spec = json!({
+            "product": {"goal": "Small form", "tasks": ["submit"], "external_integrations": []},
+            "targets": [{"id": "primary", "os": "ios", "form_factor": "iphone"}],
+            "ui": {"structure": ["form"], "theme": {"mode": "system", "accent": "blue"}, "style": {"direction": "clear", "density": "comfortable"}, "references": []},
+            "design": {"presentations": [{"target_id": "primary", "presentation": "form", "navigation": "none"}], "tokens": {}, "states": {"loading": "loading", "empty": "empty", "error": "error", "success": "done", "permission": "explain"}, "inputs": {"pointer_touch": ["tap"], "keyboard_mouse": ["tab"], "back": "close", "reduced_motion": "respect system"}, "canvas": null},
+            "acceptance_checks": [{"id": "submit", "target_ids": ["primary"], "required": true, "preconditions": [], "steps": ["submit"], "expected": "done", "evidence": ["inspect", "ui_action"]}]
+        });
         let args = json!({
             "operation": "create",
             "app_id": "aaaa1111",
-            "spec": "A small form app",
+            "authoring_spec": authoring_spec,
+            "name": "Small form",
+            "brief": "A small form app",
             "quality_level": "balanced",
             "host_context": {
                 "source": "verified_host",
@@ -16277,6 +18917,10 @@ mod tests {
                 "template_catalog": {
                     "catalog_digest": "digest",
                     "available_template_ids": ["react-dom-r2"],
+                },
+                "schemas": {
+                    "template_selection": {}, "design_subtree": {}, "create_preparer": {},
+                    "build_result": {}, "operator_result": {}, "qa_review": {}, "qa_finalize": {}
                 },
                 "staging": {"isolated": true, "final_publish": false},
             },
@@ -16299,9 +18943,12 @@ mod tests {
                             })
                             .to_string();
                         }
-                        if options.contains("native-create-approval") {
+                        if options.contains("create-preparer") {
                             return json!({
+                                "ok": true,
                                 "approved": true,
+                                "contract_handle": "contract-create",
+                                "contract_sha256": "c".repeat(64),
                                 "receipt_id": "mcp-create-receipt",
                                 "status": "create_declined",
                             })
@@ -16309,17 +18956,10 @@ mod tests {
                         }
                         if options.contains("designer") {
                             return json!({
-                                "runtime_family": "react_dom",
-                                "acceptance_checks": [],
-                                "summary": "design",
-                            })
-                            .to_string();
-                        }
-                        if options.contains("builder-stage") {
-                            return json!({
-                                "ok": true,
-                                "dependency_input_sha256": "a".repeat(64),
-                                "summary": "staged",
+                                "design": {
+                                    "presentations": [], "tokens": {}, "states": {},
+                                    "inputs": {}, "canvas": null
+                                }
                             })
                             .to_string();
                         }
@@ -16389,11 +19029,14 @@ mod tests {
         let handle = selection["validated_selection_handle"]
             .as_str()
             .expect("selection handle");
+        let contract_handle =
+            stage_react_dom_authoring_contract(&broker, &shell.id, &workflow_run_id, handle).await;
         broker
             .stage_create(json!({
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
+                "contract_handle": contract_handle,
                 "quality_level": "fast",
                 "name": "Staged context only",
                 "brief": "create without MCP lands an empty active context set",
@@ -16462,6 +19105,15 @@ mod tests {
             "create_without_mcp must not surface any initial_tools: {:?}",
             request.initial_tools
         );
+        assert!(
+            request
+                .reason
+                .contains("structure Chore list → Add chore form")
+                && request.reason.contains("theme system with blue")
+                && request.reason.contains("style calm, comfortable"),
+            "native confirmation must show the concise confirmed UI intent: {}",
+            request.reason
+        );
         // r1-never-wired-06, at the PRODUCTION call site: the sheet for a
         // create that grants no MCP tools must not promise an MCP QA gate.
         // The unit test above pins the function; this pins that the real
@@ -16527,7 +19179,11 @@ mod tests {
             "the re-announced sheet must be the SAME request, unchanged"
         );
 
-        assert!(broker.resolve_create_confirmation(&request.request_id, true).await);
+        assert!(
+            broker
+                .resolve_create_confirmation(&request.request_id, true)
+                .await
+        );
         let approved = approval
             .await
             .expect("approval task")
@@ -16605,11 +19261,14 @@ mod tests {
         let handle = selection["validated_selection_handle"]
             .as_str()
             .expect("selection handle");
+        let contract_handle =
+            stage_react_dom_authoring_contract(&broker, &shell.id, &workflow_run_id, handle).await;
         broker
             .stage_create(json!({
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
+                "contract_handle": contract_handle,
                 "quality_level": "fast",
                 "name": "Resurrection regression",
                 "brief": "app is deleted mid-approval and must not come back",
@@ -16672,9 +19331,8 @@ mod tests {
 
         assert!(broker.resolve_create_confirmation(&request_id, true).await);
         let outcome = approval.await.expect("approval task did not panic");
-        let error = outcome.expect_err(
-            "approving a create for a since-deleted app must fail, not resurrect it",
-        );
+        let error = outcome
+            .expect_err("approving a create for a since-deleted app must fail, not resurrect it");
         assert!(
             error.contains("app_deleted_during_approval"),
             "expected the fail-closed app_deleted_during_approval error, got: {error}"
@@ -16720,11 +19378,14 @@ mod tests {
         let handle = selection["validated_selection_handle"]
             .as_str()
             .expect("selection handle");
+        let contract_handle =
+            stage_react_dom_authoring_contract(&broker, &shell.id, &workflow_run_id, handle).await;
         broker
             .stage_create(json!({
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
+                "contract_handle": contract_handle,
                 "quality_level": "fast",
                 "name": "Denied create",
                 "brief": "r4-tests-honesty-03 regression",
@@ -16892,6 +19553,8 @@ mod tests {
         let handle = selection["validated_selection_handle"]
             .as_str()
             .expect("selection handle");
+        let contract_handle =
+            stage_react_dom_authoring_contract(&broker, &shell.id, &workflow_run_id, handle).await;
         let design_spec = json!({
             "runtime_family": "react_dom",
             "acceptance_checks": ["render list", "save item"],
@@ -16902,6 +19565,7 @@ mod tests {
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
+                "contract_handle": contract_handle,
                 "quality_level": "balanced",
                 "name": "Recipe list",
                 "brief": "two-screen recipe list",
@@ -16971,6 +19635,8 @@ mod tests {
         let handle = selection["validated_selection_handle"]
             .as_str()
             .expect("selection handle");
+        let contract_handle =
+            stage_react_dom_authoring_contract(&broker, &shell.id, &workflow_run_id, handle).await;
         // WP5 gate (a): a distinctive staged name/brief, never echoed anywhere
         // else in this test, so the assertion below can only pass if the
         // native confirmation sheet actually rendered what was staged here.
@@ -16981,6 +19647,7 @@ mod tests {
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
+                "contract_handle": contract_handle,
                 "quality_level": "balanced",
                 "name": STAGED_NAME,
                 "brief": STAGED_BRIEF,
@@ -17246,6 +19913,8 @@ mod tests {
         let handle = selection["validated_selection_handle"]
             .as_str()
             .expect("selection handle");
+        let contract_handle =
+            stage_react_dom_authoring_contract(&broker, &shell.id, &workflow_run_id, handle).await;
         const STAGED_NAME: &str = "记账本";
         const STAGED_BRIEF: &str = "记录日常收支的小工具";
         let stage = broker
@@ -17253,10 +19922,11 @@ mod tests {
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
+                "contract_handle": contract_handle,
                 "quality_level": "fast",
                 "name": STAGED_NAME,
                 "brief": STAGED_BRIEF,
-                "mcp_intent": {"status": "requested", "services": ["github", "google-drive"]},
+                "mcp_intent": {"status": "requested", "capabilities": ["github", "google-drive"]},
             }))
             .await
             .expect("stage create");
@@ -17337,7 +20007,7 @@ mod tests {
         assert_eq!(
             record.mcp_intent,
             Some(local_apps::AppMcpIntent::Requested {
-                services: vec!["github".to_string(), "google-drive".to_string()]
+                capabilities: vec!["github".to_string(), "google-drive".to_string()]
             }),
             "the staged mcp_intent must land on the committed record, not be dropped or genericized"
         );
@@ -17378,7 +20048,7 @@ mod tests {
         );
         assert_eq!(
             mcp_intent_contract_line(Some(&local_apps::AppMcpIntent::Requested {
-                services: vec!["github".to_string(), "google-drive".to_string()]
+                capabilities: vec!["github".to_string(), "google-drive".to_string()]
             })),
             "MCP intent: asked during creation; the user asked for MCP access to github, google-drive.\n\n"
         );
@@ -18199,11 +20869,14 @@ mod tests {
         let handle = selection["validated_selection_handle"]
             .as_str()
             .expect("selection handle");
+        let contract_handle =
+            stage_react_dom_authoring_contract(&broker, &shell.id, &workflow_run_id, handle).await;
         broker
             .stage_create(json!({
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "validated_selection_handle": handle,
+                "contract_handle": contract_handle,
                 "quality_level": "fast",
                 "name": "Dropped create approval",
                 "brief": "r4-failure-paths-06 regression",
@@ -18359,17 +21032,12 @@ mod tests {
     /// Some(...)` to distinguish the NEW retraction emit from that unrelated
     /// initial-request emit.
     #[tokio::test]
-    async fn wait_for_native_approval_cancelled_and_timed_out_arms_emit_local_app_operation_failed(
-    ) {
+    async fn wait_for_native_approval_cancelled_and_timed_out_arms_emit_local_app_operation_failed()
+    {
         let root = TempDir::new().expect("tempdir");
         let sink = MockSink::arc();
-        let broker = LocalAppsHostBroker::new(
-            root.path().to_path_buf(),
-            sink.clone(),
-            None,
-            false,
-            None,
-        );
+        let broker =
+            LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
         let pending: Mutex<HashMap<String, PendingNativeApproval>> = Mutex::new(HashMap::new());
 
         // --- cancelled arm: drop the sender out from under the wait without
@@ -18833,6 +21501,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dependency_confirmation_does_not_wait_on_unrelated_global_build_lock() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sink = MockSink::arc();
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            sink.clone(),
+            Some(runtime),
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "锁隔离", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+
+        let global_build_lock = broker.build_lock();
+        let _global_build_guard = global_build_lock.lock().await;
+        let request = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            async move {
+                broker
+                    .confirm_dependency_change(json!({
+                        "app_id": app_id,
+                        "changes": [{
+                            "kind": "add",
+                            "package": "dayjs",
+                            "version": "1.11.13"
+                        }]
+                    }))
+                    .await
+            }
+        });
+        let confirmation = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(request) = sink.events().await.into_iter().find_map(|event| {
+                    if let ClientEvent::AppEvent {
+                        event: AppEventDto::AppDependencyChangeConfirmationRequested { request },
+                    } = event
+                    {
+                        Some(request)
+                    } else {
+                        None
+                    }
+                }) {
+                    break request;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("dedicated confirmation event");
+        assert!(
+            broker
+                .resolve_dependency_change_confirmation(&confirmation.request_id, true)
+                .await
+        );
+        let result = timeout(Duration::from_millis(500), request)
+            .await
+            .expect("receipt recheck must not wait on the unrelated build lock")
+            .expect("confirmation task")
+            .expect("approved dependency change");
+        assert!(result["receipt"]["id"].as_str().is_some(), "{result}");
+    }
+
+    #[tokio::test]
     async fn dependency_add_denial_does_not_issue_receipt() {
         let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
         let root = TempDir::new().expect("tempdir");
@@ -18921,10 +21661,12 @@ mod tests {
             )
             .await
             .expect("scaffold");
-        let request_start = runtime.isolated_requests().await.len();
 
         let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
         let workspace = root.path().join(layout.workspace_rel());
+        let previous_package = fs::read(workspace.join("package.json")).expect("baseline package");
+        let previous_lock_digest = LocalAppsHostBroker::dependency_lock_digest(&layout)
+            .expect("baseline dependency lock digest");
         let binding = load_manifest(&layout)
             .expect("manifest")
             .runtime_profile
@@ -18934,6 +21676,11 @@ mod tests {
         let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
             .expect("requested dependency map");
         requested.insert("dayjs".into(), "1.11.13".into());
+        let requested_json = LocalAppsHostBroker::serialize_requested_dependency_map(&requested)
+            .expect("requested JSON");
+        let effective_package_json =
+            LocalAppsHostBroker::build_effective_package_json(contract, &requested)
+                .expect("effective package");
         let dependency_record = service
             .dependency_record(&shell.id)
             .await
@@ -18942,10 +21689,8 @@ mod tests {
             .issue_dependency_change_receipt(
                 &shell.id,
                 dependency_baseline_for(&layout, &dependency_record),
-                LocalAppsHostBroker::serialize_requested_dependency_map(&requested)
-                    .expect("requested json"),
-                LocalAppsHostBroker::build_effective_package_json(contract, &requested)
-                    .expect("effective package"),
+                requested_json,
+                effective_package_json.clone(),
                 vec![DependencyChange {
                     kind: DependencyChangeKind::Add,
                     package: "dayjs".into(),
@@ -18954,11 +21699,44 @@ mod tests {
             )
             .await
             .expect("issue dependency receipt");
+        let receipt_id = receipt.receipt_id;
+
+        runtime
+            .set_resolved_pnpm_lockfile(
+                fs::read(workspace.join("pnpm-lock.yaml")).expect("baseline lockfile"),
+            )
+            .await;
+        let error = broker
+            .update_dependencies(json!({
+                "app_id": shell.id,
+                "receipt_id": receipt_id.clone(),
+            }))
+            .await
+            .expect_err("a resolver must not reuse the baseline lock for a changed package");
+        assert!(error.contains("dayjs@1.11.13"), "{error}");
+        assert_eq!(
+            fs::read(workspace.join("package.json")).expect("rolled back package"),
+            previous_package,
+            "a lock/package mismatch must restore authoritative package state"
+        );
+        assert!(
+            !workspace
+                .join(".lingxi-build-state/dependency-staging")
+                .exists(),
+            "a lock/package mismatch must discard the untrusted staging tree"
+        );
+
+        runtime
+            .set_resolved_pnpm_lockfile(
+                mock_pnpm_lockfile(&effective_package_json).expect("matching resolved lockfile"),
+            )
+            .await;
+        let request_start = runtime.isolated_requests().await.len();
 
         broker
             .update_dependencies(json!({
                 "app_id": shell.id,
-                "receipt_id": receipt.receipt_id,
+                "receipt_id": receipt_id,
             }))
             .await
             .expect("dependency update");
@@ -19001,11 +21779,158 @@ mod tests {
         assert!(!frozen.args.iter().any(|arg| arg == "--no-frozen-lockfile"));
         assert!(!frozen.args.iter().any(|arg| arg == "--lockfile-only"));
 
+        let updated_dependency = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("updated dependency record");
+        assert_ne!(
+            updated_dependency.lockfile_sha256.as_deref(),
+            Some(previous_lock_digest.as_str()),
+            "the resolver fixture must not let a changed package reuse the baseline lock"
+        );
+        let sbom: Value = serde_json::from_slice(
+            &fs::read(workspace.join(crate::local_app_runtime_profiles::SBOM_FILE_REL))
+                .expect("updated dependency SBOM"),
+        )
+        .expect("updated dependency SBOM JSON");
+        assert!(
+            sbom["packages"]
+                .as_array()
+                .expect("SBOM packages")
+                .iter()
+                .any(|package| package["name"] == "dayjs"),
+            "the cold frozen tree must actually represent the requested dependency graph"
+        );
+
         assert!(
             !workspace
                 .join(".lingxi-build-state/dependency-staging/node_modules")
                 .exists(),
             "successful dependency update must clean its staging tree after publication"
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_update_warm_snapshot_skips_frozen_install() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "依赖热缓存", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        let workspace = root.path().join(layout.workspace_rel());
+        let previous_lock_digest = LocalAppsHostBroker::dependency_lock_digest(&layout)
+            .expect("current dependency lock digest");
+        let binding = load_manifest(&layout)
+            .expect("manifest")
+            .runtime_profile
+            .expect("runtime profile");
+        let contract = crate::local_app_runtime_profiles::contract_for_binding(&binding)
+            .expect("runtime contract");
+        let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
+            .expect("requested dependency map");
+        requested.insert("dayjs".into(), "1.11.13".into());
+        let requested_json = LocalAppsHostBroker::serialize_requested_dependency_map(&requested)
+            .expect("requested json");
+        let effective_package_json =
+            LocalAppsHostBroker::build_effective_package_json(contract, &requested)
+                .expect("effective package");
+        let resolved_lockfile =
+            mock_pnpm_lockfile(&effective_package_json).expect("resolved lockfile fixture");
+        validate_resolved_dependency_lock(&effective_package_json, &resolved_lockfile)
+            .expect("warm lockfile fixture must represent the requested graph");
+        let lock_digest = format!("{:x}", Sha256::digest(&resolved_lockfile));
+        assert_ne!(
+            lock_digest, previous_lock_digest,
+            "the fixture must prove lookup by the newly resolved lock, not the old app lock"
+        );
+        runtime.set_resolved_pnpm_lockfile(resolved_lockfile).await;
+
+        let snapshot_source = root.path().join("warm-update/node_modules");
+        clone_or_copy_tree(&workspace.join("node_modules"), &snapshot_source)
+            .expect("copy resolved dependency tree fixture");
+        fs::create_dir_all(snapshot_source.join("dayjs")).expect("dayjs package directory");
+        fs::write(
+            snapshot_source.join("dayjs/package.json"),
+            r#"{"name":"dayjs","version":"1.11.13","license":"MIT"}"#,
+        )
+        .expect("dayjs package manifest");
+        let snapshot = broker.dependency_snapshot_root(&lock_digest);
+        LocalAppsHostBroker::publish_dependency_snapshot(&snapshot_source, &snapshot, &lock_digest)
+            .expect("preseed exact verified dependency snapshot");
+        assert!(
+            LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, &lock_digest)
+                .expect("preseeded snapshot readiness")
+        );
+
+        let dependency_record = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("dependency record");
+        let receipt = broker
+            .issue_dependency_change_receipt(
+                &shell.id,
+                dependency_baseline_for(&layout, &dependency_record),
+                requested_json,
+                effective_package_json,
+                vec![DependencyChange {
+                    kind: DependencyChangeKind::Add,
+                    package: "dayjs".into(),
+                    version: Some("1.11.13".into()),
+                }],
+            )
+            .await
+            .expect("issue dependency receipt");
+
+        runtime.set_fail_frozen_install(true);
+        let request_start = runtime.isolated_requests().await.len();
+        broker
+            .update_dependencies(json!({
+                "app_id": shell.id,
+                "receipt_id": receipt.receipt_id,
+            }))
+            .await
+            .expect("warm snapshot update must not need frozen pnpm");
+        let requests = runtime.isolated_requests().await;
+        let dependency_requests: Vec<_> = requests[request_start..]
+            .iter()
+            .filter(|request| request.command == "/usr/bin/pnpm")
+            .collect();
+        assert_eq!(dependency_requests.len(), 1, "{dependency_requests:?}");
+        assert_eq!(dependency_requests[0].network, NetworkPolicy::Allowed);
+        assert!(
+            !dependency_requests[0]
+                .args
+                .iter()
+                .any(|arg| arg == "--frozen-lockfile"),
+            "a verified snapshot hit must skip the second frozen install: {dependency_requests:?}"
+        );
+        let dependency = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("updated dependency record");
+        assert_eq!(
+            dependency.lockfile_sha256.as_deref(),
+            Some(lock_digest.as_str()),
+            "the committed dependency record must bind the resolved lock digest"
+        );
+        let sbom: Value = serde_json::from_slice(
+            &fs::read(workspace.join(crate::local_app_runtime_profiles::SBOM_FILE_REL))
+                .expect("updated dependency SBOM"),
+        )
+        .expect("updated dependency SBOM JSON");
+        assert!(
+            sbom["packages"]
+                .as_array()
+                .expect("SBOM packages")
+                .iter()
+                .any(|package| package["name"] == "dayjs"),
+            "the warm snapshot's verified inventory must feed the fresh app-specific SBOM"
         );
     }
 
@@ -20039,7 +22964,6 @@ mod tests {
     /// scan, rather than pretending the scan alone would have caught it.
     #[tokio::test]
     async fn workspace_contracts_name_no_local_app_tool_outside_local_app_tools() {
-
         let (root, service, broker) = create_broker(false, None).await;
         let shell = shell_app_fixture(&broker, &service).await;
         let guided = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
@@ -20118,7 +23042,8 @@ mod tests {
     fn shipped_prompt_files_name_no_tool_outside_local_app_tools() {
         let skill =
             include_str!("../../../plugins/lingxi-local-app/skills/create-local-app/SKILL.md");
-        let workflow = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
+        let workflow =
+            include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
         // Vacuity guards: a gate that scans the wrong file, or a file that
         // stopped naming tools at all, must not read as "all clear".
         assert!(
@@ -20212,7 +23137,11 @@ mod tests {
             payload
                 .downcast_ref::<String>()
                 .cloned()
-                .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_string()))
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|text| (*text).to_string())
+                })
                 .unwrap_or_else(|| panic!("the scanner's panic carried no message: {sample}"))
         }
 
@@ -20269,7 +23198,11 @@ mod tests {
             payload
                 .downcast_ref::<String>()
                 .cloned()
-                .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_string()))
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|text| (*text).to_string())
+                })
                 .unwrap_or_else(|| panic!("the token scanner's panic carried no message"))
         }
         assert_only_real_local_app_tool_tokens(
@@ -20277,7 +23210,10 @@ mod tests {
             "the token positive control",
         );
         for (sample, needle) in [
-            ("then call LocalAppConfirmRuntime.", "LocalAppConfirmRuntime"),
+            (
+                "then call LocalAppConfirmRuntime.",
+                "LocalAppConfirmRuntime",
+            ),
             ("this text names no tool at all", "never ran"),
         ] {
             let message = token_rejection_message(sample);
@@ -20738,7 +23674,8 @@ mod tests {
             brief: &str,
         ) -> Value {
             let workflow_run_id = format!("wf_bound_{}", uuid::Uuid::new_v4().simple());
-            let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+            let catalog =
+                crate::local_app_template_catalog::catalog_view().expect("template catalog");
             let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
                 &broker.root,
                 app_id,
@@ -20993,6 +23930,29 @@ mod tests {
     }
 
     #[test]
+    fn local_app_perf_diagnostic_is_opt_in_and_has_stable_safe_fields() {
+        assert_eq!(
+            local_app_perf_diagnostic_line(
+                false,
+                "dependency_snapshot_verify",
+                Duration::from_micros(42),
+            ),
+            None,
+            "the Local App timing diagnostic must be silent unless explicitly enabled"
+        );
+        assert_eq!(
+            local_app_perf_diagnostic_line(
+                true,
+                "dependency_snapshot_verify",
+                Duration::from_micros(42),
+            )
+            .as_deref(),
+            Some("[local-app-perf] phase=dependency_snapshot_verify elapsed_us=42"),
+            "diagnostics expose only a fixed phase and elapsed duration"
+        );
+    }
+
+    #[test]
     fn dependency_snapshot_is_atomic_and_reusable() {
         let root = TempDir::new().expect("tempdir");
         let source = root.path().join("install/node_modules");
@@ -21005,6 +23965,57 @@ mod tests {
         assert!(
             LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
                 .expect("validate snapshot")
+        );
+        let marker = snapshot.join(DEPENDENCY_SNAPSHOT_READY_FILE);
+        fs::remove_file(&marker).expect("remove marker for malformed-cache probe");
+        fs::write(&marker, [0xff]).expect("write malformed snapshot marker");
+        assert!(
+            !LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
+                .expect("malformed marker is a safe miss")
+        );
+        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
+            .expect("rebuild snapshot with malformed marker");
+        fs::remove_file(snapshot.join("node_modules/react.js"))
+            .expect("remove read-only file for corruption probe");
+        fs::write(snapshot.join("node_modules/react.js"), b"tampered")
+            .expect("replace snapshot dependency bytes");
+        assert!(
+            !LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
+                .expect("revalidate modified snapshot"),
+            "an earlier successful lookup must not memoize trust after tree bytes change"
+        );
+        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
+            .expect("rebuild modified snapshot");
+        assert!(
+            LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
+                .expect("validate rebuilt snapshot")
+        );
+        let invalid_package = snapshot.join("node_modules/untrusted");
+        fs::create_dir_all(&invalid_package).expect("invalid cached package directory");
+        fs::write(
+            invalid_package.join("package.json"),
+            r#"{"name":"untrusted","version":"1.0.0","scripts":{"install":"node install.js"}}"#,
+        )
+        .expect("invalid cached package manifest");
+        assert!(
+            !LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
+                .expect("invalid cached tree is a safe miss"),
+            "a cached tree that fails dependency validation must be rebuilt, not trusted"
+        );
+        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
+            .expect("rebuild invalid cached tree");
+        assert!(
+            LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
+                .expect("validate tree after invalid-cache rebuild")
+        );
+        fs::write(source.join("react.js"), b"replacement source")
+            .expect("change later source tree");
+        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
+            .expect("a valid snapshot is already published");
+        assert_eq!(
+            fs::read(snapshot.join("node_modules/react.js")).expect("published dependency"),
+            b"react",
+            "a verified immutable snapshot must not be replaced by a later same-lock source"
         );
 
         let staging = root.path().join("staging");
@@ -21035,6 +24046,127 @@ mod tests {
             "lock-digest",
         )
         .expect("match attested workspace dependencies"));
+    }
+
+    #[test]
+    fn dependency_snapshot_inventory_is_verified_and_reused_for_sbom() {
+        let root = TempDir::new().expect("tempdir");
+        let source = root.path().join("install/node_modules");
+        fs::create_dir_all(source.join("vite/bin")).expect("source tree");
+        fs::write(source.join("vite/bin/vite.js"), b"vite").expect("vite marker");
+        write_fixture_package_manifest(&source, "vite", "6.0.0");
+        write_fixture_package_manifest(&source, "react", "19.2.8");
+        let snapshot = root.path().join("cache/snapshot");
+        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
+            .expect("publish snapshot");
+        assert!(
+            dependency_snapshot_inventory_path(&snapshot).is_file(),
+            "verified snapshots carry their package inventory beside the immutable tree"
+        );
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
+            local_apps::AppRuntimeProfile::ReactDom,
+        )
+        .expect("published react-dom runtime profile");
+        let missing_workspace = root.path().join("no-workspace-node-modules");
+        let sbom = installed_dependency_sbom_with_inventory(
+            &missing_workspace,
+            &binding,
+            &dependency_tree_digest(&snapshot.join("node_modules")).expect("tree digest"),
+            Some((&snapshot, "lock-digest")),
+        )
+        .expect("a valid inventory avoids rescanning the workspace tree");
+        let document: Value = serde_json::from_slice(&sbom).expect("sbom json");
+        assert!(
+            document["packages"]
+                .as_array()
+                .expect("packages")
+                .iter()
+                .any(|package| package["name"] == "vite"),
+            "the cached package inventory must feed the profile SBOM"
+        );
+        let canvas_binding = crate::local_app_runtime_profiles::current_binding_for_family(
+            local_apps::AppRuntimeProfile::Canvas2d,
+        )
+        .expect("published canvas runtime profile");
+        let canvas_sbom = installed_dependency_sbom_with_inventory(
+            &missing_workspace,
+            &canvas_binding,
+            &dependency_tree_digest(&snapshot.join("node_modules")).expect("tree digest"),
+            Some((&snapshot, "lock-digest")),
+        )
+        .expect("the shared inventory can feed a second profile's fresh SBOM");
+        let canvas_document: Value =
+            serde_json::from_slice(&canvas_sbom).expect("canvas SBOM JSON");
+        assert_ne!(
+            document["documentNamespace"], canvas_document["documentNamespace"],
+            "shared package inventory must not reuse another profile's document identity"
+        );
+        assert_ne!(
+            document["documentDescribes"], canvas_document["documentDescribes"],
+            "shared package inventory must not reuse another profile's SPDX root"
+        );
+
+        let inventory_path = dependency_snapshot_inventory_path(&snapshot);
+        let mut unbound: Value =
+            serde_json::from_slice(&fs::read(&inventory_path).expect("inventory"))
+                .expect("inventory JSON");
+        unbound["unbound_metadata"] = json!("must not be ignored");
+        fs::remove_file(&inventory_path).expect("remove inventory for unknown-field probe");
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec_pretty(&unbound).expect("inventory with unknown field"),
+        )
+        .expect("write inventory with unknown field");
+        assert!(
+            !LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
+                .expect("unknown inventory fields are a cache miss"),
+            "unbound sidecar fields must not sit outside the inventory digest"
+        );
+        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
+            .expect("an inventory with unknown fields must be rebuilt");
+
+        let mut noncanonical: VerifiedDependencyInventory =
+            serde_json::from_slice(&fs::read(&inventory_path).expect("inventory"))
+                .expect("inventory JSON");
+        noncanonical.packages.reverse();
+        noncanonical.inventory_digest =
+            dependency_inventory_digest(&noncanonical).expect("reordered inventory digest");
+        fs::remove_file(&inventory_path).expect("remove immutable inventory for ordering probe");
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec_pretty(&noncanonical).expect("reordered inventory JSON"),
+        )
+        .expect("write reordered inventory");
+        assert!(
+            !LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
+                .expect("noncanonical inventory is a cache miss"),
+            "an inventory with a valid self-digest must still use canonical package ordering"
+        );
+        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
+            .expect("a noncanonical sidecar must rebuild from the verified source tree");
+
+        let mut inventory: Value =
+            serde_json::from_slice(&fs::read(&inventory_path).expect("inventory"))
+                .expect("inventory json");
+        inventory["tree_digest"] = json!("tampered");
+        fs::remove_file(&inventory_path).expect("remove immutable inventory for corruption probe");
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec_pretty(&inventory).expect("tampered inventory json"),
+        )
+        .expect("tamper inventory");
+        assert!(
+            !LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
+                .expect("tampered inventory is a cache miss"),
+            "a sidecar with mismatched provenance must not create ready trust"
+        );
+        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
+            .expect("a malformed sidecar must rebuild from the verified source tree");
+        assert!(
+            LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
+                .expect("rebuilt snapshot"),
+            "rebuilding a bad cache must restore a verified snapshot"
+        );
     }
 
     #[test]
@@ -21230,6 +24362,44 @@ mod tests {
             LocalAppsHostBroker::validate_dependency_version(version)
                 .unwrap_or_else(|error| panic!("ordinary registry version {version}: {error}"));
         }
+    }
+
+    #[test]
+    fn resolved_dependency_lock_must_match_effective_root_specifiers() {
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
+            local_apps::AppRuntimeProfile::ReactDom,
+        )
+        .expect("react binding");
+        let contract = crate::local_app_runtime_profiles::contract_for_binding(&binding)
+            .expect("react contract");
+        let package =
+            LocalAppsHostBroker::dependency_manifest_bytes(contract).expect("profile package.json");
+        let lockfile = contract
+            .managed_files
+            .iter()
+            .find_map(|(relative, bytes)| (*relative == "pnpm-lock.yaml").then_some(*bytes))
+            .expect("profile pnpm lockfile");
+        validate_resolved_dependency_lock(package, lockfile)
+            .expect("the published profile lock must represent its effective package");
+
+        let mut changed: Value = serde_json::from_slice(package).expect("package JSON");
+        changed["dependencies"]["dayjs"] = json!("1.11.13");
+        let changed = serde_json::to_vec(&changed).expect("changed package JSON");
+        let error = validate_resolved_dependency_lock(&changed, lockfile)
+            .expect_err("the baseline lock cannot stand in for an added dependency");
+        assert!(error.contains("dayjs@1.11.13"), "{error}");
+
+        let resolved = mock_pnpm_lockfile(&changed).expect("mock resolved lockfile");
+        validate_resolved_dependency_lock(&changed, &resolved)
+            .expect("the realistic test resolver must mint the requested root graph");
+
+        let duplicate_importers = format!(
+            "{}\nimporters:\n  .:\n    dependencies:\n      dayjs:\n        specifier: 0.0.0\n        version: 0.0.0\n",
+            String::from_utf8(resolved).expect("UTF-8 mock lockfile")
+        );
+        let error = validate_resolved_dependency_lock(&changed, duplicate_importers.as_bytes())
+            .expect_err("duplicate top-level importer maps must fail closed");
+        assert!(error.contains("repeats the importers map"), "{error}");
     }
 
     /// The shape `pnpm install` ACTUALLY produces for this template: every
@@ -23050,13 +26220,23 @@ mod tests {
                     },
                     last_used: 1,
                     generation,
+                    build_id: "test-build".into(),
                 },
             );
             let layout = AppLayout::new(root.path().to_path_buf(), app_id.clone()).expect("layout");
+            let publication_cell = broker
+                .runtime_publication_cell(&app_id)
+                .expect("publication cell");
+            *publication_cell.write().expect("publication identity") =
+                Some(RuntimePublicationIdentity {
+                    generation,
+                    build_id: "test-build".into(),
+                });
             broker.spawn_static_server(
                 service.clone(),
                 app_id.clone(),
                 generation,
+                publication_cell.clone(),
                 listener,
                 root.path()
                     .join(layout.build_rel(false))
@@ -23085,6 +26265,14 @@ mod tests {
                 },
             )
             .await;
+
+            assert!(
+                publication_cell
+                    .read()
+                    .expect("publication identity")
+                    .is_none(),
+                "dead runtime must invalidate synchronous QA publication identity"
+            );
 
             let record = service
                 .runtime_record(&app_id)

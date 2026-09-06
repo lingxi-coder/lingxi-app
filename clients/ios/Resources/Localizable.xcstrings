@@ -35016,6 +35016,108 @@
         }
       }
     },
+    "local_apps_verification_summary_ui_verification_corrupt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已存储的界面验证证据已损坏。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已儲存的介面驗證證據已損毀。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stored UI verification evidence is corrupt."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存済みの UI 検証証跡が破損しています。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "저장된 UI 검증 증거가 손상되었습니다."
+          }
+        }
+      }
+    },
+    "local_apps_verification_summary_ui_verification_passed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "宿主界面与数据验证证据已通过。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "主機介面與資料驗證證據已通過。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Host UI and data verification evidence passed."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ホストの UI／データ検証証跡に合格しました。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "호스트 UI 및 데이터 검증 증거를 통과했습니다."
+          }
+        }
+      }
+    },
+    "local_apps_verification_summary_ui_verification_required": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前应用尚未完成界面验证。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前應用尚未完成介面驗證。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "UI verification has not completed on the active app."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "現在のアプリでは UI 検証がまだ完了していません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "현재 앱의 UI 검증이 아직 완료되지 않았습니다."
+          }
+        }
+      }
+    },
     "local_apps_verification_summary_verification_unavailable": {
       "localizations": {
         "zh-Hans": {

@@ -2,179 +2,100 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://lingxi.local/local-app/design-spec.schema.json",
   "title": "Local App design spec",
-  "$comment": "PHASE 2 CONTENT, transcription not invention. This schema was drafted as a byte-for-byte transcription of design-result schemas once planned for two SEPARATE builtin workflows (design §18 Phase 4, §8.3 'only one build workflow'), tagged below as DESIGN_RESULT_SCHEMA from `local_app_build_workflow.js` (react_dom / routed branch) and from `local_app_canvas_workflow.js` (canvas_2d|three_3d|phaser_2d|babylon_3d / drawn-surface branch). Neither file exists anywhere in this repo (grepped; zero hits) — the plugin ships ONE unified build workflow instead, `lingxi-code/plugins/lingxi-local-app/workflows/local-app-build.js`, whose actual, much slimmer `designSchema` is `{runtime_family, acceptance_checks, summary}` (required). Those two drafted schemas diverge STRUCTURALLY, not just optionally (compare 'information_architecture' vs 'drawn_surface'/'runtime_family'), and the design doc does not specify how design §18 Phase 4 merges them into one unified schema for the unified build workflow. Rather than invent that merge, this file expresses a discriminated union of the two draft shapes as a design-only reference — not a schema any production code enforces. Whoever implements Phase 4's unification should treat this file as a starting point to edit, not a settled answer. additionalProperties:false is added on each branch (not present in the draft schemas, which are permissive by omission) so oneOf can actually discriminate between the two branches; this is a Phase 2 authoring choice, not something enforced anywhere today.",
-  "oneOf": [
-    {
-      "title": "Routed (react_dom) design spec",
-      "$comment": "DRAFT, not built — `local_app_build_workflow.js` does not exist in this repo; the shipped workflow's designSchema is the much slimmer {runtime_family, acceptance_checks, summary} in lingxi-code/plugins/lingxi-local-app/workflows/local-app-build.js.",
+  "description": "Closed designer-owned design subtree. Confirmed product, targets and acceptance requirements are not present.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "design": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "targets": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "os": { "type": "string" },
-              "form_factor": { "type": "string" },
-              "presentation": { "type": "string" },
-              "navigation": { "type": "string" }
-            },
-            "required": ["os", "form_factor", "presentation", "navigation"]
-          }
-        },
-        "information_architecture": {
-          "type": "object",
-          "properties": {
-            "screens": { "type": "array", "items": { "type": "string" } },
-            "states": {
-              "type": "object",
-              "properties": {
-                "loading": { "type": "string" },
-                "empty": { "type": "string" },
-                "error": { "type": "string" },
-                "success": { "type": "string" },
-                "permission": { "type": "string" }
-              },
-              "required": ["loading", "empty", "error", "success", "permission"]
-            }
-          },
-          "required": ["screens", "states"]
-        },
-        "visual_system": {
-          "type": "object",
-          "properties": {
-            "design_direction": { "type": "string" },
-            "tokens": {
-              "type": "object",
-              "properties": {
-                "color": { "type": "array", "items": { "type": "string" } },
-                "typography": { "type": "array", "items": { "type": "string" } },
-                "spacing": { "type": "array", "items": { "type": "string" } },
-                "radius": { "type": "array", "items": { "type": "string" } },
-                "elevation": { "type": "array", "items": { "type": "string" } },
-                "motion": { "type": "array", "items": { "type": "string" } },
-                "safe_area": { "type": "array", "items": { "type": "string" } }
-              },
-              "required": ["color", "typography", "spacing", "radius", "elevation", "motion", "safe_area"]
-            }
-          },
-          "required": ["design_direction", "tokens"]
-        },
-        "interaction_model": {
-          "type": "object",
-          "properties": {
-            "pointer_touch": { "type": "array", "items": { "type": "string" } },
-            "keyboard_mouse": { "type": "array", "items": { "type": "string" } },
-            "back": { "type": "array", "items": { "type": "string" } },
-            "reduced_motion": { "type": "array", "items": { "type": "string" } }
-          },
-          "required": ["pointer_touch", "keyboard_mouse", "back", "reduced_motion"]
-        },
-        "adapter_boundary": {
-          "type": "object",
-          "properties": {
-            "shared_logic": { "type": "array", "items": { "type": "string" } },
-            "platform_specific_shell": { "type": "array", "items": { "type": "string" } }
-          },
-          "required": ["shared_logic", "platform_specific_shell"]
-        },
-        "acceptance_checks": { "type": "array", "items": { "type": "string" } },
-        "summary": { "type": "string" }
+        "presentations": { "$ref": "#/$defs/presentations" },
+        "tokens": { "$ref": "#/$defs/tokens" },
+        "states": { "$ref": "#/$defs/states" },
+        "inputs": { "$ref": "#/$defs/inputs" },
+        "canvas": { "$ref": "#/$defs/canvas" }
       },
-      "required": [
-        "targets",
-        "information_architecture",
-        "visual_system",
-        "interaction_model",
-        "adapter_boundary",
-        "acceptance_checks",
-        "summary"
-      ]
-    },
-    {
-      "title": "Drawn-surface (canvas_2d | three_3d | phaser_2d | babylon_3d) design spec",
-      "$comment": "DRAFT, not built — `local_app_canvas_workflow.js` does not exist in this repo; the shipped workflow's designSchema is the much slimmer {runtime_family, acceptance_checks, summary} in lingxi-code/plugins/lingxi-local-app/workflows/local-app-build.js.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "targets": {
-          "type": "array",
-          "description": "Confirmed native targets as {os, form_factor} entries.",
-          "items": {
-            "type": "object",
-            "properties": {
-              "os": { "type": "string" },
-              "form_factor": { "type": "string" },
-              "presentation": { "type": "string" },
-              "navigation": { "type": "string" }
-            },
-            "required": ["os", "form_factor", "presentation", "navigation"]
-          }
-        },
-        "runtime_family": {
-          "type": "string",
-          "enum": ["canvas_2d", "three_3d", "phaser_2d", "babylon_3d"],
-          "description": "The persisted runtime profile family. Preserve it exactly; do not select a different runtime from prompt wording."
-        },
-        "drawn_surface": {
-          "type": "object",
-          "description": "Explicitly separates the primary drawn scene from its UI overlays.",
-          "properties": {
-            "scene": { "type": "string" },
-            "layers": { "type": "array", "items": { "type": "string" } },
-            "mechanics": { "type": "array", "items": { "type": "string" } }
-          },
-          "required": ["scene", "layers", "mechanics"]
-        },
-        "hud_overlay": {
-          "type": "object",
-          "description": "HUD/menu/overlay contract, including safe-area placement and phase relation.",
-          "properties": {
-            "placement_safe_area": { "type": "string" },
-            "phase_pause_relation": { "type": "string" },
-            "live_text": { "type": "array", "items": { "type": "string" } },
-            "reduced_motion": { "type": "string" },
-            "platform_treatment": { "type": "array", "items": { "type": "string" } }
-          },
-          "required": ["placement_safe_area", "phase_pause_relation", "live_text", "reduced_motion", "platform_treatment"]
-        },
-        "loop": {
-          "type": "string",
-          "description": "What advances every frame, in terms of dt: motion, spawning, collision, scoring. Name what is simulated, not how it is drawn."
-        },
-        "phases": {
-          "type": "array",
-          "description": "The phase machine, e.g. menu, playing, paused, over. Each entry names the phase and what leaves it.",
-          "items": { "type": "string" }
-        },
-        "inputs": {
-          "type": "array",
-          "description": "Every action the player can take, each with BOTH its pointer form and its key form.",
-          "items": { "type": "string" }
-        },
-        "end_conditions": {
-          "type": "string",
-          "description": "How a run ends and what carries over between runs."
-        },
-        "frame_budget": {
-          "type": "string",
-          "description": "Roughly what has to be drawn per frame and why it fits a phone GPU: entity counts, draw calls, texture sizes."
-        },
-        "summary": { "type": "string" }
-      },
-      "required": [
-        "targets",
-        "runtime_family",
-        "drawn_surface",
-        "hud_overlay",
-        "loop",
-        "phases",
-        "inputs",
-        "end_conditions",
-        "frame_budget",
-        "summary"
-      ]
+      "required": ["presentations", "tokens", "states", "inputs"]
     }
-  ]
+  },
+  "required": ["design"],
+  "$defs": {
+    "string": { "type": "string", "minLength": 1, "maxLength": 16384 },
+    "strings": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/string" } },
+    "ui": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "structure": { "$ref": "#/$defs/strings" },
+        "theme": { "$ref": "#/$defs/theme" },
+        "style": { "$ref": "#/$defs/style" },
+        "references": { "$ref": "#/$defs/strings" }
+      },
+      "required": ["structure", "theme", "style", "references"]
+    },
+    "theme": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "mode": { "$ref": "#/$defs/string" }, "accent": { "$ref": "#/$defs/string" } },
+      "required": ["mode", "accent"]
+    },
+    "style": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "direction": { "$ref": "#/$defs/string" }, "density": { "$ref": "#/$defs/string" } },
+      "required": ["direction", "density"]
+    },
+    "presentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "target_id": { "$ref": "#/$defs/string" },
+        "presentation": { "$ref": "#/$defs/string" },
+        "navigation": { "$ref": "#/$defs/string" }
+      },
+      "required": ["target_id", "presentation", "navigation"]
+    },
+    "presentations": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/presentation" } },
+    "tokens": {
+      "type": "object",
+      "maxProperties": 128,
+      "additionalProperties": { "$ref": "#/$defs/string" },
+      "propertyNames": { "minLength": 1, "maxLength": 16384 }
+    },
+    "states": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "loading": { "$ref": "#/$defs/string" },
+        "empty": { "$ref": "#/$defs/string" },
+        "error": { "$ref": "#/$defs/string" },
+        "success": { "$ref": "#/$defs/string" },
+        "permission": { "$ref": "#/$defs/string" }
+      },
+      "required": ["loading", "empty", "error", "success", "permission"]
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pointer_touch": { "$ref": "#/$defs/strings" },
+        "keyboard_mouse": { "$ref": "#/$defs/strings" },
+        "back": { "$ref": "#/$defs/string" },
+        "reduced_motion": { "$ref": "#/$defs/string" }
+      },
+      "required": ["pointer_touch", "keyboard_mouse", "back", "reduced_motion"]
+    },
+    "canvas": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "scene": { "$ref": "#/$defs/string" },
+        "phases": { "allOf": [{ "$ref": "#/$defs/strings" }, { "minItems": 1 }] },
+        "controls": { "allOf": [{ "$ref": "#/$defs/strings" }, { "minItems": 1 }] },
+        "hud": { "$ref": "#/$defs/string" }
+      },
+      "required": ["scene", "phases", "controls", "hud"]
+    }
+  }
 }

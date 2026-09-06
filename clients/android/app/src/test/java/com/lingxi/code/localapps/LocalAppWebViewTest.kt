@@ -1,13 +1,219 @@
 package com.lingxi.code.localapps
 
 import com.lingxi.code.bindings.AppBridgeOperationDto
+import com.lingxi.code.bindings.AppUiActionKindDto
+import com.lingxi.code.bindings.AppUiRequestDto
+import com.lingxi.code.bindings.AppUiTargetDto
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.net.URI
 
 class LocalAppWebViewTest {
+
+    @Test
+    fun `QA envelope preserves opaque action value and rejects ordinary values as QA`() {
+        val original = "{\"rect\":{\"x\":10.5,\"y\":2,\"width\":30,\"height\":20}}"
+        val wrapper = """{"lingxi_qa":{"version":1,"expected_runtime_url":"http://127.0.0.1:43123/?lingxi_runtime=42","action_value":${org.json.JSONObject.quote(original)}}}"""
+        val envelope = parseLocalAppQaEnvelope(wrapper, "qa-ui-1")
+        assertEquals("http://127.0.0.1:43123/?lingxi_runtime=42", envelope?.expectedRuntimeUrl)
+        assertEquals(original, envelope?.actionValue)
+        assertNull(parseLocalAppQaEnvelope(wrapper, "app-ui-1"))
+        assertNull(parseLocalAppQaEnvelope(original, "app-ui-2"))
+    }
+
+    @Test
+    fun `QA envelope rejects a missing runtime marker or non-string action`() {
+        assertNull(parseLocalAppQaEnvelope("""{"lingxi_qa":{"version":1,"expected_runtime_url":"http://127.0.0.1:43123","action_value":null}}""", "qa-ui-1"))
+        assertNull(parseLocalAppQaEnvelope("""{"lingxi_qa":{"version":1,"expected_runtime_url":"http://127.0.0.1:43123/?lingxi_runtime=42","action_value":{"x":1}}}""", "qa-ui-2"))
+        assertNull(parseLocalAppQaEnvelope("""{"lingxi_qa":{"version":true,"expected_runtime_url":"http://127.0.0.1:43123/?lingxi_runtime=42","action_value":null}}""", "qa-ui-3"))
+        assertNull(parseLocalAppQaEnvelope("""{"lingxi_qa":{"version":1,"expected_runtime_url":"http://127.0.0.1:43123/route?lingxi_runtime=42","action_value":null}}""", "qa-ui-4"))
+        assertNull(parseLocalAppQaEnvelope("""{"lingxi_qa":{"version":1,"expected_runtime_url":"http://127.0.0.1:43123/?lingxi_runtime=42","action_value":null},"extra":true}""", "qa-ui-5"))
+    }
+
+    @Test
+    fun `ordinary literal QA JSON stays opaque while Host QA preserves nested action bytes`() {
+        val literalWrapper = """{"lingxi_qa":{"version":1,"expected_runtime_url":"http://127.0.0.1:43123/?lingxi_runtime=42","action_value":"reserved-looking text"}}"""
+        val target = AppUiTargetDto(elementId = "editor", role = null, name = null)
+        val ordinary = AppUiRequestDto(
+            requestId = "app-ui-1",
+            appId = "tracker",
+            action = AppUiActionKindDto.FILL,
+            target = target,
+            value = literalWrapper,
+        ).toUiAutomationAction() as LocalAppUiAutomationAction.Fill
+        assertEquals(literalWrapper, ordinary.value)
+
+        val opaqueAction = "  {\n  \"pointer\": [10.5, 20], \"text\": \"lingxi_qa\"\n}  "
+        val qaWrapper = """{"lingxi_qa":{"version":1,"expected_runtime_url":"http://127.0.0.1:43123/?lingxi_runtime=42","action_value":${org.json.JSONObject.quote(opaqueAction)}}}"""
+        val qa = AppUiRequestDto(
+            requestId = "qa-ui-2",
+            appId = "tracker",
+            action = AppUiActionKindDto.FILL,
+            target = target,
+            value = qaWrapper,
+        ).toUiAutomationAction() as LocalAppUiAutomationAction.Qa
+        assertEquals(opaqueAction, (qa.action as LocalAppUiAutomationAction.Fill).value)
+    }
+
+    @Test
+    fun `QA action unwraps to the same structured script request`() {
+        val action = LocalAppUiAutomationAction.Qa(
+            expectedRuntimeUrl = "http://127.0.0.1:43123/?lingxi_runtime=42",
+            action = LocalAppUiAutomationAction.CaptureView("{\"rect\":{\"x\":1}}"),
+        )
+        // Capture is intentionally native-only; the helper must nevertheless
+        // recurse rather than treating the QA wrapper as a page action.
+        assertTrue(action.action is LocalAppUiAutomationAction.CaptureView)
+    }
+
+    @Test
+    fun `QA lifecycle requires current page start and finish and ignores stale same-port callback`() {
+        val runtimeA = "http://127.0.0.1:43123/?lingxi_runtime=41"
+        val runtimeB = "http://127.0.0.1:43123/?lingxi_runtime=42"
+        val state = LocalAppQaDocumentState(runtimeA)
+
+        val generationA = state.beginNavigation(runtimeA)
+        state.onPageFinished(runtimeA)
+        assertNull("finish without a matching start is not a loaded document", state.document(URI(runtimeA)))
+        state.onPageStarted(runtimeA)
+        state.onPageFinished(runtimeA)
+        assertEquals(generationA, state.document(URI(runtimeA))?.navigationGeneration)
+
+        val generationB = state.beginNavigation(runtimeB)
+        state.onPageStarted(runtimeB)
+        state.onPageFinished("http://127.0.0.1:43123/stale?lingxi_runtime=41")
+        assertNull("runtime A must not certify B merely because the port matches", state.document(URI(runtimeB)))
+        state.onPageFinished(runtimeB)
+        assertEquals(generationB, state.document(URI(runtimeB))?.navigationGeneration)
+
+        val routeB = "http://127.0.0.1:43123/settings?tab=qa&lingxi_runtime=42"
+        state.onPageStarted(routeB)
+        state.onPageFinished(routeB)
+        val current = state.document(URI(runtimeB))
+        assertNotNull(current)
+        assertEquals(generationB + 1, current?.navigationGeneration)
+        assertEquals(routeB, current?.loadedRuntimeUrl)
+    }
+
+    @Test
+    fun `QA lifecycle increments routed navigations and detached state cannot be revived`() {
+        val runtime = "http://127.0.0.1:43123/?lingxi_runtime=42"
+        val state = LocalAppQaDocumentState(runtime)
+        val initialGeneration = state.beginNavigation(runtime)
+        state.onPageStarted(runtime)
+        state.onPageFinished(runtime)
+        assertNotNull(state.document(URI(runtime)))
+
+        val firstRoute = "http://127.0.0.1:43123/first?lingxi_runtime=42"
+        val currentRoute = "http://127.0.0.1:43123/next?lingxi_runtime=42"
+        state.onPageStarted(firstRoute)
+        state.onPageStarted(currentRoute)
+        state.onPageFinished(firstRoute)
+        assertNull("a late same-marker route finish cannot certify the newer navigation", state.document(URI(runtime)))
+        state.onPageFinished(currentRoute)
+        assertEquals(initialGeneration + 2, state.document(URI(runtime))?.navigationGeneration)
+
+        state.detach()
+        state.onPageStarted(runtime)
+        state.onPageFinished(runtime)
+        assertNull("late callbacks cannot revive a detached controller", state.document(URI(runtime)))
+    }
+
+    @Test
+    fun `relative navigation carries only the reserved runtime query`() {
+        val current = "http://127.0.0.1:43123/search?lingxi_runtime=42&q=old"
+        val target = resolveLocalAppNavigation(current, "/details")
+
+        assertEquals(
+            "http://127.0.0.1:43123/details?lingxi_runtime=42",
+            target,
+        )
+        assertFalse(target.contains("q=old"))
+    }
+
+    @Test
+    fun `relative navigation preserves explicit query and fragment`() {
+        val current = "http://127.0.0.1:43123/search?lingxi_runtime=42&q=old"
+        val target = URI(resolveLocalAppNavigation(current, "/details?q=new#section"))
+
+        assertEquals("/details", target.path)
+        assertEquals("q=new&lingxi_runtime=42", target.rawQuery)
+        assertEquals("section", target.fragment)
+    }
+
+    @Test
+    fun `query-only and fragment-only navigation retain the path but not old business params`() {
+        val current = "http://127.0.0.1:43123/search?lingxi_runtime=42&q=old"
+
+        assertEquals(
+            "http://127.0.0.1:43123/search?q=new&lingxi_runtime=42#results",
+            resolveLocalAppNavigation(current, "?q=new#results"),
+        )
+        assertEquals(
+            "http://127.0.0.1:43123/search?lingxi_runtime=42#section",
+            resolveLocalAppNavigation(current, "#section"),
+        )
+    }
+
+    @Test
+    fun `absolute and protocol-relative authorities stay visible for same origin rejection`() {
+        val current = "http://127.0.0.1:43123/search?lingxi_runtime=42"
+        val sameOrigin = resolveLocalAppNavigation(
+            current,
+            "http://127.0.0.1:43123/absolute?q=new#result",
+        )
+        val absolute = URI(resolveLocalAppNavigation(current, "http://evil.example/details"))
+        val protocolRelative = URI(resolveLocalAppNavigation(current, "//evil.example/other"))
+
+        assertEquals(
+            "http://127.0.0.1:43123/absolute?q=new&lingxi_runtime=42#result",
+            sameOrigin,
+        )
+        assertEquals("evil.example", absolute.host)
+        assertFalse(absolute.host == URI(current).host && absolute.port == URI(current).port)
+        assertNull(protocolRelative.scheme)
+        assertEquals("evil.example", protocolRelative.host)
+    }
+
+    @Test
+    fun `destination cannot replace or duplicate the reserved runtime marker`() {
+        val current = "http://127.0.0.1:43123/search?lingxi_runtime=42&q=old"
+        val target = URI(
+            resolveLocalAppNavigation(
+                current,
+                "?lingxi%5Fruntime=encoded&x=1&lingxi_runtime=plain&lingxi%5fruntime=lower",
+            ),
+        )
+
+        assertEquals("/search", target.path)
+        assertEquals("x=1&lingxi_runtime=42", target.rawQuery)
+        assertEquals(1, target.rawQuery.split('&').count { it.startsWith("lingxi_runtime=") })
+    }
+
+    @Test
+    fun `QA result attestation keeps a capture image as an owned JSON object`() {
+        val runtime = URI("http://127.0.0.1:43123/?lingxi_runtime=42")
+        val loaded = "http://127.0.0.1:43123/canvas?lingxi_runtime=42"
+        val wrapped = buildLocalAppQaExecutionResult(
+            originalResultJson = """{"image":{"format":"jpeg","data":"base64-image"},"viewport":{"width":393}}""",
+            requested = runtime,
+            document = LocalAppQaDocument(loaded, 7),
+            platform = "android",
+            formFactor = "phone",
+            width = 393,
+            height = 852,
+            devicePixelRatio = 3f,
+        )
+        val objectValue = org.json.JSONObject(wrapped)
+
+        assertEquals("base64-image", objectValue.getJSONObject("result").getJSONObject("image").getString("data"))
+        assertEquals(loaded, objectValue.getJSONObject("lingxi_qa").getString("loaded_runtime_url"))
+        assertEquals(7L, objectValue.getJSONObject("lingxi_qa").getLong("navigation_generation"))
+    }
 
     @Test
     fun `all bridge operations have an exhaustive Android wire mapping`() {

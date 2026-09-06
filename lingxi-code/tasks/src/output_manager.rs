@@ -4,7 +4,7 @@
 //! sandbox directory, with a per-file and total byte budget.
 
 use platform_api::FileSystem;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
@@ -35,6 +35,14 @@ pub struct TaskOutputManager {
     /// dropped (after a single truncation marker is written), mirroring
     /// claude-code's `DiskTaskOutput.#bytesWritten` / `#capped`.
     caps: Mutex<HashMap<PathBuf, CapState>>,
+    /// Per-spool serialization for append/terminal replacement operations. A
+    /// terminal Local App result must replace its raw payload as one
+    /// indivisible write; unrelated task spools must remain independent.
+    write_locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
+    /// Spools whose terminal payload has been replaced. Further handler
+    /// appends are ignored so a late raw chunk cannot follow the canonical
+    /// result back into the externally readable spool.
+    terminal: Mutex<HashSet<PathBuf>>,
 }
 
 /// Per-spool write-side cap state (claude-code `DiskTaskOutput` `#bytesWritten`
@@ -102,6 +110,8 @@ impl TaskOutputManager {
             fs,
             root_pin: Mutex::new(OutputRootState::default()),
             caps: Mutex::new(HashMap::new()),
+            write_locks: Mutex::new(HashMap::new()),
+            terminal: Mutex::new(HashSet::new()),
         }
     }
 
@@ -178,6 +188,14 @@ impl TaskOutputManager {
         }
     }
 
+    async fn write_lock_for(&self, output_file: &Path) -> Arc<Mutex<()>> {
+        let mut locks = self.write_locks.lock().await;
+        locks
+            .entry(output_file.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     /// Allocate a fresh spool file inside `output_dir`. Refuse any `..` or
     /// absolute leak (D8).
     ///
@@ -220,6 +238,11 @@ impl TaskOutputManager {
     /// path from inside the sandbox cannot redirect it (T18).
     pub async fn append(&self, output_file: &Path, content: &str) -> Result<(), OutputError> {
         let relative = self.relative_path_for(output_file)?;
+        let write_lock = self.write_lock_for(output_file).await;
+        let _writes = write_lock.lock().await;
+        if self.terminal.lock().await.contains(output_file) {
+            return Ok(());
+        }
         let root_identity = self.check_output_root().await?;
         // Determine what to write under the cap, holding the per-path state lock
         // only across the cheap bookkeeping (not the await on the fs write).
@@ -252,6 +275,49 @@ impl TaskOutputManager {
                 .await
                 .map_err(|e| self.map_rooted_error(e))?;
         }
+        Ok(())
+    }
+
+    /// Replace a terminal task payload in its already-allocated spool.
+    ///
+    /// This is deliberately narrower than the generic task-output API: the
+    /// mobile Local App completion sink calls it only after authenticating a
+    /// Host QA result (or constructing a fail-closed terminal error). The
+    /// path is validated against this manager's output root, the root identity
+    /// is pinned before and after the rooted atomic write, and replacement is
+    /// serialized with appends so raw handler output cannot win a race with
+    /// the checked terminal payload.
+    pub async fn replace_terminal_result(
+        &self,
+        output_file: &Path,
+        content: &str,
+    ) -> Result<(), OutputError> {
+        let relative = self.relative_path_for(output_file)?;
+        let write_lock = self.write_lock_for(output_file).await;
+        let _writes = write_lock.lock().await;
+        let _root_identity = self.check_output_root().await?;
+        if content.len() as u64 > MAX_TASK_OUTPUT_BYTES {
+            return Err(OutputError::Io(format!(
+                "terminal output exceeds {MAX_TASK_OUTPUT_BYTES_DISPLAY} disk cap"
+            )));
+        }
+        self.fs
+            .write_file_rooted_atomic(&self.output_dir, &relative, content)
+            .await
+            .map_err(|e| self.map_rooted_error(e))?;
+        // The rooted atomic write is platform-confined; this second identity
+        // check also rejects a directory swap that raced the operation before
+        // the next append/read can proceed.
+        self.check_output_root().await?;
+        let mut caps = self.caps.lock().await;
+        caps.insert(
+            output_file.to_path_buf(),
+            CapState {
+                bytes_written: content.len() as u64,
+                capped: false,
+            },
+        );
+        self.terminal.lock().await.insert(output_file.to_path_buf());
         Ok(())
     }
 
@@ -496,6 +562,52 @@ mod tests {
             !read.content.contains("disk cap"),
             "no truncation marker under the cap; got {:?}",
             read.content
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_replacement_overwrites_raw_and_blocks_late_append() {
+        let (_fs, mgr) = manager();
+        let path = mgr.allocate("bterminal1").await.unwrap();
+        mgr.append(&path, "{\"ok\":true,\"raw\":true}\n")
+            .await
+            .unwrap();
+
+        mgr.replace_terminal_result(&path, "{\"ok\":true,\"verified\":true}\n")
+            .await
+            .unwrap();
+        // A handler chunk racing after terminal publication must not make the
+        // unverified payload externally visible again.
+        mgr.append(&path, "forged late chunk\n").await.unwrap();
+
+        let read = mgr.read(&path, OutputOptions::default()).await.unwrap();
+        assert_eq!(read.content, "{\"ok\":true,\"verified\":true}\n");
+    }
+
+    #[tokio::test]
+    async fn different_spools_progress_during_terminal_replacement() {
+        let (_fs, mgr) = manager();
+        let left = mgr.allocate("bleft0001").await.unwrap();
+        let right = mgr.allocate("bright001").await.unwrap();
+        let (left_result, right_result) = tokio::join!(
+            mgr.replace_terminal_result(&left, "verified-left\n"),
+            mgr.append(&right, "independent-right\n"),
+        );
+        left_result.unwrap();
+        right_result.unwrap();
+        assert_eq!(
+            mgr.read(&left, OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "verified-left\n"
+        );
+        assert_eq!(
+            mgr.read(&right, OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "independent-right\n"
         );
     }
 

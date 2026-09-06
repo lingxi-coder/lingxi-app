@@ -781,6 +781,95 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
             fail(f"{relative} still discards the bundled local-app runtime root")
 
 
+OPTIMIZED_CREATE_SKILL_TOKENS = {
+    "If no product request or usable brief is present",
+    "skip the question and use that brief",
+    "never re-ask an answered decision",
+    "Pass the complete Host-bound AuthoringSpec",
+    "structure/navigation, light/dark/system theme and accent, style/density",
+    "Keep MCP authoring separate from creation",
+    "app-exposure\n   capabilities and external integrations",
+    "`mcpSuggestions`",
+    "ask only if that intent is materially unresolved",
+    "This does not configure or\n   publish MCP during creation",
+}
+
+
+def validate_optimized_create_skill_contract(text: str) -> None:
+    missing = sorted(token for token in OPTIMIZED_CREATE_SKILL_TOKENS if token not in text)
+    if missing:
+        fail(f"create-local-app skill is missing optimized contract tokens: {missing}")
+    call_lines = [
+        (index + 1, line)
+        for index, line in enumerate(text.split("\n"))
+        if 'Workflow({"name":"lingxi-local-app:local-app-build"' in line
+        and '"operation":"create"' in line
+    ]
+    if not call_lines:
+        fail("create-local-app skill has no wrapped create workflow example")
+    incomplete = [
+        number
+        for number, line in call_lines
+        if '"authoring_spec":' not in line or '"name":' not in line or '"brief":' not in line
+    ]
+    if incomplete:
+        fail(
+            f"create-local-app skill line(s) {incomplete}: create launch examples "
+            "must carry name, brief, and the complete authoring_spec"
+        )
+    with_intent = [
+        number
+        for number, line in call_lines
+        if '"mcp_intent":{"status":"requested","capabilities":[' in line
+    ]
+    without_intent = [number for number, line in call_lines if '"mcp_intent":' not in line]
+    if not with_intent or not without_intent:
+        fail(
+            "create-local-app skill examples must demonstrate both an explicit "
+            "business-capability MCP intent and omission for never-asked"
+        )
+
+
+OPTIMIZED_BUILD_WORKFLOW_REQUIRED = {
+    "Call LocalAppScaffold first with exactly app_id=${input.app_id}, name=${JSON.stringify(confirmedName)}, brief=${JSON.stringify(confirmedBrief)}, workflow_run_id=${context.workflow_run_id}, and receipt_id=${prepared.receipt_id}",
+    "operation=stage, app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}",
+    "const testerDisposition = finalizeDisposition(tester, 'tester', qaHandle)",
+    "verifier.result.previous_result_id !== tester.receipt.result_id",
+    "result.scenario_judgements.every",
+    "result.findings.every",
+    "input.operation === 'verify' || repairRounds >= repairBudget || qa.disposition !== 'candidate' || qa.source_findings.length === 0",
+    "QA pass reused the previous Host qa_handle",
+    "Infrastructure failures, evidence-resample requests, and non-source findings never enter this path",
+    "LocalAppBuild with exactly app_id=${input.app_id} and no contract_handle",
+    "'LocalAppContract', 'LocalAppManifest', 'LocalAppInstallDeps'",
+}
+OPTIMIZED_BUILD_WORKFLOW_FORBIDDEN = {
+    "localPolicyFindings",
+    "checked_matrix",
+    "webview_checked",
+    "frames_captured",
+    "frames_compared",
+    ".slice(0, 40)",
+    ".slice(0, 500)",
+}
+
+
+def validate_optimized_build_workflow_contract(source: str) -> None:
+    missing = sorted(
+        token for token in OPTIMIZED_BUILD_WORKFLOW_REQUIRED if token not in source
+    )
+    if missing:
+        fail(f"local-app-build workflow is missing optimized invariants: {missing}")
+    lingering = sorted(
+        token for token in OPTIMIZED_BUILD_WORKFLOW_FORBIDDEN if token in source
+    )
+    if lingering:
+        fail(
+            "local-app-build workflow still trusts or truncates model QA data: "
+            f"{lingering}"
+        )
+
+
 def validate_create_skill(repo: pathlib.Path) -> None:
     skill_path = repo / "skills" / "create-local-app" / "SKILL.md"
     try:
@@ -812,6 +901,7 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         )
     if not text.startswith("---\nname: create-local-app\ndescription: "):
         fail("create-local-app skill frontmatter is invalid")
+    validate_optimized_create_skill_contract(text)
     required_tokens = {
         "LocalAppCreate",
         "LocalAppRuntimeProfiles",
@@ -884,23 +974,20 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "searchContacts",
         "getMedia",
         "background_schedule",
-        # The create-time MCP interview (WP-MCP-intent): the skill must ask
-        # about MCP the same way the guided create-time contract does --
-        # grounded in the real per-family catalog, never invented -- and
-        # thread the answer through as a create-only `mcp_intent` argument
-        # rather than leaving it to evaporate at the end of the conversation.
-        "In **ordinary conversational text**, tell the user in one or two sentences",
-        "`LocalAppTemplateCatalog` and read the `mcpSuggestions` for the template",
-        "forward into step 5 below as `mcp_intent`",
-        '`mcp_intent` in the same call — `{"status":"declined"}` when they declined,',
-        "`name`, `brief`, and `mcp_intent` are create-only",
-        # The guided workspace contract runs this same interview one hop
-        # earlier; without this clause the most literal reading of the two
-        # texts is "explain MCP and show the picker, then do it again".
-        "carry that answer forward instead of asking a second time",
-        # Never-asked must stay reachable from the skill: omitting the key is
-        # the ONLY way the model can express it.
-        "omit\n   `mcp_intent` from the call entirely",
+        # The optimized interview is dynamic: keep a usable brief, ask only
+        # material gaps, and make one compact AuthoringSpec confirmation.
+        "If no product request or usable brief is present",
+        "skip the question and use that brief",
+        "never re-ask an answered decision",
+        "Pass the complete Host-bound AuthoringSpec",
+        "structure/navigation, light/dark/system theme and accent, style/density",
+        # App capabilities, external integrations, and optional post-create
+        # MCP exposure are separate concepts. Creation never auto-configures.
+        "Keep MCP authoring separate from creation",
+        "app-exposure\n   capabilities and external integrations",
+        "`mcpSuggestions`",
+        "ask only if that intent is materially unresolved",
+        "This does not configure or\n   publish MCP during creation",
     }
     missing = sorted(token for token in required_tokens if token not in text)
     if missing:
@@ -928,18 +1015,9 @@ def validate_create_skill(repo: pathlib.Path) -> None:
             'a bare payload. Write it as a call — Workflow({"name":...,"args":...}) '
             "— so the tool name is inside the text the model copies."
         )
-    # Every create-launch example must keep demonstrating `mcp_intent` inside
-    # the wrapped call form (never reintroduced as a bare payload example the
-    # stray-payload check above would also catch, and never silently dropped
-    # from the example the model actually copies).
-    #
-    # Deliberately pinned as a FORM, not as one of the three states. An earlier
-    # revision pinned the literal `{"status":"declined"}` here, which locked a
-    # concrete refusal into the only line the model copies while every
-    # neighbouring field stayed an angle-bracket slot -- a model that skipped
-    # the interview would have emitted "asked and declined" for a user nobody
-    # asked, collapsing never-asked into declined, which is exactly the
-    # distinction the tri-state exists to keep.
+    # Create examples must carry a complete authoring_spec. At least one
+    # example records explicit business-capability exposure intent and one
+    # omits mcp_intent to preserve the never-asked state.
     call_lines = [
         (index + 1, line)
         for index, line in enumerate(text.split("\n"))
@@ -952,27 +1030,26 @@ def validate_create_skill(repo: pathlib.Path) -> None:
             'Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":"create"...}}) '
             "— the tool name must ride inside the text the model copies"
         )
-    without_intent = [number for number, line in call_lines if '"mcp_intent":' not in line]
-    if without_intent:
-        fail(
-            f"create-local-app skill line(s) {without_intent}: a local-app-build "
-            "create-launch example no longer carries mcp_intent inside the "
-            'Workflow({"name":...,"args":...}) call — the create-time MCP '
-            "interview answer must ride the same call form as name/brief"
-        )
-    hardcoded = [
+    incomplete = [
         number
         for number, line in call_lines
-        if '"mcp_intent":{"status":"declined"}' in line
-        or '"mcp_intent":{"status":"requested"' in line
+        if '"authoring_spec":' not in line or '"name":' not in line or '"brief":' not in line
     ]
-    if hardcoded:
+    if incomplete:
         fail(
-            f"create-local-app skill line(s) {hardcoded}: the create-launch example "
-            "hardcodes one MCP interview outcome. Every other field there is a "
-            "placeholder the model fills in; a concrete answer in this slot is the "
-            "one the model copies when the interview was skipped, which records "
-            "never-asked as declined"
+            f"create-local-app skill line(s) {incomplete}: create launch examples "
+            "must carry name, brief, and the complete authoring_spec"
+        )
+    with_intent = [
+        number
+        for number, line in call_lines
+        if '"mcp_intent":{"status":"requested","capabilities":[' in line
+    ]
+    without_intent = [number for number, line in call_lines if '"mcp_intent":' not in line]
+    if not with_intent or not without_intent:
+        fail(
+            "create-local-app skill examples must demonstrate both an explicit "
+            "business-capability MCP intent and omission for never-asked"
         )
     local_apps_host_path = (
         repo / "lingxi-code" / "apps" / "engine-mobile" / "src" / "local_apps_host.rs"
@@ -1015,64 +1092,56 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         )
     except OSError as exc:
         fail(f"missing plugin-owned local-app workflow: {exc}")
+    validate_optimized_build_workflow_contract(workflow)
     workflow_tokens = {
         "const WORKFLOW_ID = 'lingxi-local-app:local-app-build';",
         "HOST_CONTEXT_REQUIRED",
         "PERSISTED_PROFILE_REQUIRED",
+        "HOST_AUTHORING_SPEC_REQUIRED",
         "quality_level must be fast, balanced, or thorough",
         "validated_selection_handle",
         "selector_capability",
+        "create-preparer",
+        "tools-only create-preparer",
         "LocalAppResolveTemplateSelection",
+        "LocalAppContract with operation=stage",
         "LocalAppStageCreate",
-        "Do not call LocalAppScaffold, LocalAppBuild or LocalAppRuntime yet",
-        "const BUILDER_STAGE_DENIES",
-        "const BUILDER_CREATE_BUILD_DENIES",
-        "const BUILDER_UPDATE_DENIES",
-        "disallowedTools: BUILDER_STAGE_DENIES",
-        "disallowedTools: BUILDER_CREATE_BUILD_DENIES",
-        "disallowedTools: BUILDER_UPDATE_DENIES",
+        "LocalAppApproveMcpProposal exactly once",
         "create_without_mcp=true",
-        "create_approved_no_mcp",
-        "create approval did not yield a unified scaffold receipt",
-        # The create builder no longer re-reads the shell record: its name and
-        # brief are the `untitled` placeholder until the scaffold commits, so the
-        # contract now pins the staged values and the inverted instruction.
-        "Do not call LocalAppGet to rediscover them",
-        "the Host commits the staged values",
-        "call LocalAppManifest to declare every collection",
+        "status === 'create_declined'",
+        "prepared.approved !== true",
+        "Call LocalAppScaffold first with exactly app_id=",
+        "After scaffold succeeds, and only then, write App-managed source",
+        "Declare required collections with LocalAppManifest before source uses them",
         "LocalAppScaffold",
-        # Re-pointed: the prompt used to say "Invoke exactly the matching
-        # runtime specialist", an action the builder cannot take. All five
-        # renderer guides are PRELOADED from builder.md's `skills:` frontmatter
-        # (agents/builder.md:18-26) and its `tools:` list holds no `Skill`
-        # (:4-17), so there is nothing to invoke. What the contract actually
-        # needs pinned is that exactly one of the five preloaded guides is
-        # applied and the other four are ignored.
-        "already-preloaded runtime specialist guide",
-        "ignoring the other four preloaded renderer guides",
+        "Invoke Skill exactly once for the one Host-profile renderer",
+        "do not preload or apply other renderer guides",
+        "base_contract_sha256=${persistedContractSha256}",
+        "operation=stage, app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}",
         "LocalAppBuild",
         "LocalAppRuntime",
-        "MCP remains unconfigured and disabled until the user starts MCP authoring",
+        "MCP remains unconfigured and disabled until post-create authoring from app settings",
         "CANVAS_FAST_REJECTED",
         "'balanced'",
         "agent_calls",
-        "expected_writable_collections",
-        "webview_checked",
-        "render_check",
-        "motion_check",
-        "The host draws NO chrome around a running app",
-        "The host floats ONE control over the BOTTOM-LEADING corner",
+        "LocalAppQaBegin",
+        "LocalAppQaReadEvidence",
+        "LocalAppQaFinalize in this same pass",
+        "complete Host QA candidate and receipt",
+        "previous_result_id",
+        "result.scenario_judgements.every",
+        "result.findings.every",
+        "evidence_resample_required",
+        "infrastructure_failed",
+        "Infrastructure failures, evidence-resample requests, and non-source findings never enter this path",
+        "quality === 'thorough' ? 2 : 1",
+        "The host draws no running-app chrome",
         "leading 80 CSS px by the bottom 80 CSS px",
-        # WP-MCP-intent: mcp_intent must ride the launch-arg allowlist,
-        # be validated to the same tagged shape local_apps::AppMcpIntent
-        # serializes, be create-only like name/brief, and actually reach the
-        # LocalAppStageCreate prompt -- not just be accepted and dropped.
         "'name', 'brief', 'mcp_intent'",
         "mcp_intent.status must be declined or requested",
-        "mcp_intent.services must be a non-empty array of non-empty strings when requested",
-        "name/brief/mcp_intent are create-only",
-        "${mcpIntentClause}",
-        "must record this as never-asked, not as declined",
+        "requested mcp_intent.capabilities must be non-empty strings",
+        "mcp_intent is create-only",
+        "external_integrations in the spec are separate app requirements",
     }
     missing_workflow = sorted(token for token in workflow_tokens if token not in workflow)
     if missing_workflow:
@@ -1130,84 +1199,91 @@ def validate_create_skill(repo: pathlib.Path) -> None:
 
 
 def validate_agent_prompt_contracts(repo: pathlib.Path) -> None:
-    """Pin the P2-fix-round prompt contracts so a later edit can't quietly
-    reopen the reconciled findings (verifier's thin-tool-list enumeration,
-    the operator's ok/findings non-verdict semantics, builder.md's
-    isolated-staging contradiction, the verifier/acceptance-checks starve,
-    the fast-quality "confirmed design spec" reference, and the two
-    workflows that never advanced meta.phases)."""
+    """Pin least-privilege roles and Host-bound optimized orchestration."""
     agents_dir = repo / "lingxi-code" / "plugins" / "lingxi-local-app" / "agents"
     workflows_dir = repo / "lingxi-code" / "plugins" / "lingxi-local-app" / "workflows"
 
     verifier = (agents_dir / "verifier.md").read_text(encoding="utf-8")
-    marker = "tool list is deliberately thin:"
-    idx = verifier.find(marker)
-    if idx == -1:
-        fail("verifier.md is missing the 'deliberately thin' tool-list enumeration")
-    enumeration = verifier[idx : idx + 800].split("\n\n#")[0]
-    for tool in ("LocalAppResolveTemplateSelection", "LocalAppPromoteMcpCandidate"):
-        if tool not in enumeration:
-            fail(
-                f"verifier.md's thin-tool-list enumeration omits {tool} even though it is "
-                "granted in frontmatter"
-            )
+    verifier_frontmatter = verifier.split("---", 2)[1]
+    for tool in ("LocalAppGet", "LocalAppQaReadEvidence", "LocalAppQaFinalize"):
+        if f"  - {tool}\n" not in verifier_frontmatter:
+            fail(f"verifier.md must grant {tool}")
+    for tool in (
+        "LocalAppInspectUi",
+        "LocalAppCaptureUi",
+        "LocalAppActOnUi",
+        "LocalAppMutateData",
+        "LocalAppBuild",
+        "LocalAppPromoteMcpCandidate",
+        "LocalAppResolveTemplateSelection",
+    ):
+        if f"  - {tool}\n" in verifier_frontmatter:
+            fail(f"verifier.md must not grant {tool}")
+    if "previous_result_id must name the tester's" not in verifier:
+        fail("verifier.md no longer binds its candidate to the tester Host result")
 
     operator = (agents_dir / "operator.md").read_text(encoding="utf-8")
-    if "`ok: true` means only" not in operator or "never a scenario" not in operator:
-        fail("operator.md no longer documents that ok/findings are not a pass/fail verdict")
+    if "Return the Host qa_handle and every evidence ID without truncation" not in operator:
+        fail("operator.md no longer requires complete Host evidence identities")
+    if "do not judge scenario\npass/fail" not in operator:
+        fail("operator.md no longer separates operation from QA judgement")
 
     builder = (agents_dir / "builder.md").read_text(encoding="utf-8")
-    if "isolated staging (Create) or its own workspace inside an update transaction" in builder:
-        fail("builder.md frontmatter description still claims create-stage writes land in isolated staging")
-    if "shipped Host/cwd wiring actually bounds you — and where it does not" not in builder:
-        fail(
-            "builder.md's quoted §7.3 design intent no longer carries its shipped-behavior caveat "
-            "(the caveat must point at \"Where your write access actually comes from\" without "
-            "re-asserting that the Host structurally enforces create-stage isolated staging)"
-        )
+    for token in (
+        "Call LocalAppScaffold first with that exact receipt",
+        "Do not write\nsource until scaffold succeeds",
+        "Invoke Skill exactly once for the renderer guide matching the Host profile",
+        "Evidence-resample requests, non-source findings, and\ninfrastructure/tooling failures",
+    ):
+        if token not in builder:
+            fail(f"builder.md is missing optimized boundary: {token!r}")
+    for obsolete in ("builder-stage", "BUILDER_STAGE_DENIES", "source-code-review"):
+        if obsolete in builder:
+            fail(f"builder.md still contains obsolete prompt prose: {obsolete}")
+
+    designer = (agents_dir / "designer.md").read_text(encoding="utf-8")
+    designer_frontmatter = designer.split("---", 2)[1]
+    for engine_skill in (
+        "ionic-react-local-app",
+        "canvas-2d-local-app",
+        "threejs-local-app",
+        "phaser-2d-local-app",
+        "babylon-3d-local-app",
+    ):
+        if f"  - {engine_skill}\n" in designer_frontmatter:
+            fail(f"designer.md must not preload engine guide {engine_skill}")
+    if "Do not select or change a renderer/engine" not in designer:
+        fail("designer.md no longer forbids engine selection")
+
+    tester = (agents_dir / "tester.md").read_text(encoding="utf-8")
+    if "For every quality level, call LocalAppQaFinalize in this same agent pass" not in tester:
+        fail("tester.md no longer Finalizes in the same pass for thorough mode")
+    if "previous_result_id names this result" not in tester:
+        fail("tester.md no longer anchors the thorough verifier candidate")
 
     build_js = (workflows_dir / "local-app-build.js").read_text(encoding="utf-8")
-    # The three evidence stages (operator/tester/verifier) mutate nothing, so
-    # they call `runVerification` -- the retry-once wrapper around `run` -- while
-    # every mutating stage still calls `run` directly. Accept either spelling:
-    # what this check is actually pinning is that the verifier prompt is built
-    # inline as a template literal and carries `acceptanceChecks`, not which
-    # helper dispatches it.
-    verifier_prompt_match = re.search(
-        r"report = await (?:run|runVerification)\(`(.*?)`, \{ agentType: 'verifier', label: `verifier-",
-        build_js,
-        re.DOTALL,
-    )
-    if not verifier_prompt_match:
-        fail(
-            "local-app-build.js's verifier prompt call "
-            "(report = await run(...) / runVerification(...)) was not found"
-        )
-    if "Acceptance checks: ${JSON.stringify(acceptanceChecks)}" not in verifier_prompt_match.group(1):
-        fail("local-app-build.js's verifier prompt is never given acceptanceChecks")
-    if "designSpecReference" not in build_js or "no design spec was produced for this fast-quality run" not in build_js:
-        fail(
-            "local-app-build.js no longer declares designSpecReference with its fast-quality "
-            "fallback wording, so builder-build cannot be pointed away from a design spec that "
-            "was never produced"
-        )
-    scaffold_line = next(
-        (line for line in build_js.splitlines() if "Call LocalAppScaffold with app_id=" in line),
-        None,
-    )
-    if scaffold_line is None:
-        fail("local-app-build.js's builder-build LocalAppScaffold prompt line was not found")
-    if "${designSpecReference}" not in scaffold_line or "the confirmed design spec relies on" in scaffold_line:
-        fail(
-            "local-app-build.js's builder-build prompt no longer interpolates ${designSpecReference} "
-            "at its LocalAppManifest clause, so it still tells builder-build to work from \"the "
-            "confirmed design spec\" unconditionally on a fast-quality run that skipped the designer"
-        )
-    if "ok means only that you completed the scenarios" not in build_js:
-        fail(
-            "local-app-build.js's operator prompt no longer defines ok as 'the run completed', so "
-            "'do not judge pass/fail' contradicts the required ok field again"
-        )
+    for forbidden in (
+        "localPolicyFindings",
+        "checked_matrix",
+        "webview_checked",
+        "frames_captured",
+        "frames_compared",
+        ".slice(0, 40)",
+        ".slice(0, 500)",
+    ):
+        if forbidden in build_js:
+            fail(f"local-app-build.js still trusts or truncates model QA data: {forbidden}")
+    for required in (
+        "const testerDisposition = finalizeDisposition(tester, 'tester', qaHandle)",
+        "verifier.result.previous_result_id !== tester.receipt.result_id",
+        "result.scenario_judgements.every",
+        "result.findings.every",
+        "input.operation === 'verify' || repairRounds >= repairBudget || qa.disposition !== 'candidate' || qa.source_findings.length === 0",
+        "QA pass reused the previous Host qa_handle",
+        "operation=stage, app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}",
+    ):
+        if required not in build_js:
+            fail(f"local-app-build.js is missing Host QA/authoring invariant: {required}")
 
     for name, titles in (
         ("local-app-use-test.js", ("Operate", "Test", "Verify")),

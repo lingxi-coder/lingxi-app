@@ -603,17 +603,17 @@ impl MobileWorkflowCheckpointStore {
                 );
                 continue;
             }
-            // Re-derive Local App build authority from Host-owned state
+            // Re-derive Local App workflow authority from Host-owned state
             // (the real script bytes on disk + the real app manifest),
             // never from `checkpoint.workflow_id`/`args` themselves -- see
-            // `resolve_adopted_local_app_build_scope`'s doc comment and
+            // `resolve_adopted_local_app_scope`'s doc comment and
             // `tasks::registry::AdoptedWorkflow`'s doc comment for why. A
             // checkpoint that fails re-validation (forged, unscaffolded,
             // wrong app, or simply not a Local App build at all) yields
             // `None`, which is exactly `register_adopted_workflow`'s
             // pre-existing, safe behavior.
             let scope = script.as_deref().and_then(|bytes| {
-                resolve_adopted_local_app_build_scope(
+                resolve_adopted_local_app_scope(
                     app_data_root,
                     &checkpoint.workflow_id,
                     bytes,
@@ -694,9 +694,109 @@ pub(crate) struct MobileWorkflowStatusSink {
     listener: Arc<dyn client_adapter::ClientEventListener>,
     checkpoints: Arc<MobileWorkflowCheckpointStore>,
     active_session_uuid: Arc<std::sync::Mutex<String>>,
+    /// Host-owned broker used to validate verified Local App build/use-test
+    /// workflows. A weak reference avoids a broker↔workflow ownership cycle.
+    local_apps_host:
+        Arc<std::sync::OnceLock<std::sync::Weak<crate::local_apps_host::LocalAppsHostBroker>>>,
+    /// The bound registry is needed to resolve verified launch metadata and
+    /// the handler-owned spool path without trusting workflow result JSON.
+    task_registry: Arc<std::sync::OnceLock<Arc<tasks::registry::TaskRegistry>>>,
+}
+
+/// Host work that was fully validated outside the registry lock and is ready
+/// for the short terminal commit section.  Keeping the broker with its opaque
+/// prepared value prevents the sink from reconstructing publication identity
+/// out of model-authored result JSON.
+struct PreparedMobileQaCommit {
+    host: Arc<crate::local_apps_host::LocalAppsHostBroker>,
+    publication: crate::local_apps_host::PreparedWorkflowQaPublication,
+}
+
+struct MobileQaCleanup {
+    host: Arc<crate::local_apps_host::LocalAppsHostBroker>,
+    app_id: String,
+    workflow_run_id: String,
+}
+
+fn workflow_verification_strategy(
+    args_json: Option<&str>,
+) -> Result<local_apps::QaVerificationStrategy, String> {
+    let Some(args_json) = args_json else {
+        return Ok(local_apps::QaVerificationStrategy::Balanced);
+    };
+    let args: Value = serde_json::from_str(args_json)
+        .map_err(|error| format!("authenticated workflow args are invalid JSON: {error}"))?;
+    let object = args
+        .as_object()
+        .ok_or_else(|| "authenticated workflow args are not an object".to_string())?;
+    match object.get("quality_level") {
+        None => Ok(local_apps::QaVerificationStrategy::Balanced),
+        Some(Value::String(value)) if value == "fast" => {
+            Ok(local_apps::QaVerificationStrategy::Fast)
+        }
+        Some(Value::String(value)) if value == "balanced" => {
+            Ok(local_apps::QaVerificationStrategy::Balanced)
+        }
+        Some(Value::String(value)) if value == "thorough" => {
+            Ok(local_apps::QaVerificationStrategy::Thorough)
+        }
+        Some(value) => Err(format!(
+            "authenticated workflow quality_level is invalid: {value}"
+        )),
+    }
 }
 
 impl MobileWorkflowStatusSink {
+    fn qa_cleanup_for_terminal_workflow(
+        &self,
+        workflow: &tasks::state::LocalWorkflowTaskState,
+    ) -> Option<MobileQaCleanup> {
+        let scope = workflow.scope.as_ref()?;
+        if !matches!(
+            scope.purpose(),
+            tasks::scope::LocalAppWorkflowPurpose::Build
+                | tasks::scope::LocalAppWorkflowPurpose::UseTest
+        ) {
+            return None;
+        }
+        let workflow_run_id = workflow
+            .run_id
+            .as_deref()
+            .filter(|value| !value.is_empty())?;
+        let host = self
+            .local_apps_host
+            .get()
+            .and_then(std::sync::Weak::upgrade)?;
+        Some(MobileQaCleanup {
+            host,
+            app_id: scope.app_id().to_string(),
+            workflow_run_id: workflow_run_id.to_string(),
+        })
+    }
+
+    /// Clean all Host-owned QA sessions for an authenticated app/run.  This
+    /// deliberately does not inspect the model result: failures, cancellation
+    /// and superseded sessions may have no result or stale/partial handles,
+    /// while the Host's app/run identity remains authoritative.
+    async fn cleanup_qa_for_terminal_task(&self, task_id: &str) {
+        let Some(registry) = self.task_registry.get() else {
+            return;
+        };
+        let Some(tasks::state::TaskState::LocalWorkflow(workflow)) = registry.get(task_id).await
+        else {
+            return;
+        };
+        let Some(cleanup) = self.qa_cleanup_for_terminal_workflow(&workflow) else {
+            return;
+        };
+        if let Err(error) = cleanup
+            .host
+            .cleanup_workflow_qa_run(&cleanup.app_id, &cleanup.workflow_run_id)
+        {
+            tracing::warn!(%error, "failed to clean workflow QA run");
+        }
+    }
+
     pub(crate) fn new(
         listener: Arc<dyn client_adapter::ClientEventListener>,
         checkpoints: Arc<MobileWorkflowCheckpointStore>,
@@ -708,11 +808,24 @@ impl MobileWorkflowStatusSink {
             listener,
             checkpoints,
             active_session_uuid,
+            local_apps_host: Arc::new(std::sync::OnceLock::new()),
+            task_registry: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
+    /// Attach the Host QA receipt validator. The composition root owns the
+    /// broker and therefore the app/run/build identity; the sink resolves the
+    /// verified app/run scope from the task registry.
+    pub(crate) fn attach_local_apps_host(
+        &self,
+        host: std::sync::Weak<crate::local_apps_host::LocalAppsHostBroker>,
+    ) -> Result<(), std::sync::Weak<crate::local_apps_host::LocalAppsHostBroker>> {
+        self.local_apps_host.set(host)
+    }
+
     pub(crate) fn bind(&self, registry: Arc<tasks::registry::TaskRegistry>) {
-        self.registry.bind(registry);
+        self.registry.bind(Arc::clone(&registry));
+        let _ = self.task_registry.set(registry);
     }
 
     fn is_active_origin(&self, origin_session_id: &str) -> bool {
@@ -811,6 +924,9 @@ impl MobileWorkflowStatusSink {
         error: Option<String>,
     ) {
         tasks::handlers::TaskStatusSink::set_status(&*self.registry, task_id, status).await;
+        if status.is_terminal() {
+            self.cleanup_qa_for_terminal_task(task_id).await;
+        }
         self.deliver_status(task_id, status, error).await;
     }
 
@@ -833,6 +949,220 @@ impl MobileWorkflowStatusSink {
         }
         self.emit_status_for_owner(task_id, status, origin_session_id, error)
             .await;
+    }
+
+    /// Replace the handler's raw terminal payload before publishing a
+    /// fail-closed Local App result. The task registry owns the spool path and
+    /// output-manager capability; callers never provide a path from workflow
+    /// result JSON.
+    async fn fail_local_app_completion(
+        registry: &tasks::registry::TaskRegistry,
+        output_file: &std::path::Path,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        reason: String,
+    ) -> (
+        platform_api::task_registry::WorkflowTerminalOutcome,
+        tasks::TaskStatus,
+    ) {
+        let terminal_payload = serde_json::json!({
+            "ok": false,
+            "error": reason,
+            "verified": false,
+        });
+        let payload = terminal_payload.to_string();
+        let error = match registry
+            .output_manager
+            .replace_terminal_result(output_file, &payload)
+            .await
+        {
+            Ok(()) => reason,
+            Err(replace_error) => {
+                format!("{reason}; terminal spool replacement failed: {replace_error}")
+            }
+        };
+        (
+            platform_api::task_registry::WorkflowTerminalOutcome {
+                result: None,
+                error: Some(error),
+                ..outcome
+            },
+            tasks::TaskStatus::Failed,
+        )
+    }
+
+    /// Gate verified Local App build/use-test success on a Host QA receipt.
+    /// Generic workflows and MCP-authoring results retain the existing sink
+    /// behavior. This runs before the registry's atomic outcome/status write,
+    /// so a raw script result cannot win a race with the checked result.
+    async fn validate_local_app_completion(
+        &self,
+        task_id: &str,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        status: tasks::TaskStatus,
+    ) -> (
+        platform_api::task_registry::WorkflowTerminalOutcome,
+        tasks::TaskStatus,
+        Option<PreparedMobileQaCommit>,
+    ) {
+        if status != tasks::TaskStatus::Completed {
+            return (outcome, status, None);
+        }
+        let Some(registry) = self.task_registry.get() else {
+            // An unbound sink is used by standalone/generic workflow tests and
+            // during composition handoff. Without task metadata there is no
+            // authenticated Local App scope to classify, so preserve the
+            // existing generic sink behavior.
+            return (outcome, status, None);
+        };
+        let Some(tasks::state::TaskState::LocalWorkflow(workflow)) = registry.get(task_id).await
+        else {
+            // Generic/custom workflows have no Local App scope and remain
+            // untouched. A missing state for a terminal callback is a normal
+            // teardown race, not evidence of a Local App build.
+            return (outcome, status, None);
+        };
+        let Some(scope) = workflow.scope.as_ref() else {
+            return (outcome, status, None);
+        };
+        let purpose = scope.purpose();
+        if !matches!(
+            purpose,
+            tasks::scope::LocalAppWorkflowPurpose::Build
+                | tasks::scope::LocalAppWorkflowPurpose::UseTest
+        ) {
+            return (outcome, status, None);
+        }
+        // A concurrent terminal transition (especially user kill) is already
+        // authoritative. Do not validate or publish a second Host receipt for
+        // a row that has left the running state.
+        if workflow.base.status.is_terminal() {
+            return (workflow.outcome.clone(), workflow.base.status, None);
+        }
+        let Some(run_id) = workflow.run_id.as_deref().filter(|value| !value.is_empty()) else {
+            let (outcome, status) = Self::fail_local_app_completion(
+                registry,
+                &workflow.base.output_file,
+                outcome,
+                "local_app_completion_unverified: verified workflow has no run id".into(),
+            )
+            .await;
+            return (outcome, status, None);
+        };
+        let Some(raw_result) = outcome.result.as_deref() else {
+            let (outcome, status) = Self::fail_local_app_completion(
+                registry,
+                &workflow.base.output_file,
+                outcome,
+                "local_app_completion_unverified: verified workflow returned no result".into(),
+            )
+            .await;
+            return (outcome, status, None);
+        };
+        let Ok(raw_value) = serde_json::from_str::<Value>(raw_result) else {
+            let (outcome, status) = Self::fail_local_app_completion(
+                registry,
+                &workflow.base.output_file,
+                outcome,
+                "local_app_completion_unverified: workflow result is not JSON".into(),
+            )
+            .await;
+            return (outcome, status, None);
+        };
+        let Some(raw_object) = raw_value.as_object() else {
+            let (outcome, status) = Self::fail_local_app_completion(
+                registry,
+                &workflow.base.output_file,
+                outcome,
+                "local_app_completion_unverified: workflow result is not an object".into(),
+            )
+            .await;
+            return (outcome, status, None);
+        };
+        // `ok:false` is a deliberate logical workflow result, not a transport
+        // failure. Preserve its existing Completed-with-result semantics; the
+        // plugin's own findings explain why no QA receipt was issued.
+        if raw_object.get("ok") == Some(&Value::Bool(false)) {
+            return (outcome, status, None);
+        }
+        if raw_object.get("ok") != Some(&Value::Bool(true)) {
+            let (outcome, status) = Self::fail_local_app_completion(
+                registry,
+                &workflow.base.output_file,
+                outcome,
+                "local_app_completion_unverified: verified workflow result has no boolean ok:true"
+                    .into(),
+            )
+            .await;
+            return (outcome, status, None);
+        }
+        let Some(host) = self
+            .local_apps_host
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        else {
+            let (outcome, status) = Self::fail_local_app_completion(
+                registry,
+                &workflow.base.output_file,
+                outcome,
+                "local_app_completion_validation_unavailable: Host broker is not attached".into(),
+            )
+            .await;
+            return (outcome, status, None);
+        };
+        let expected_strategy = match workflow_verification_strategy(workflow.args.as_deref()) {
+            Ok(strategy) => strategy,
+            Err(error) => {
+                let (outcome, status) = Self::fail_local_app_completion(
+                    registry,
+                    &workflow.base.output_file,
+                    outcome,
+                    format!("local_app_completion_unverified: {error}"),
+                )
+                .await;
+                return (outcome, status, None);
+            }
+        };
+        let prepared = match host
+            .prepare_workflow_qa_outcome(scope.app_id(), run_id, expected_strategy, raw_value)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                let (outcome, status) = Self::fail_local_app_completion(
+                    registry,
+                    &workflow.base.output_file,
+                    outcome,
+                    format!("local_app_completion_unverified: {error}"),
+                )
+                .await;
+                return (outcome, status, None);
+            }
+        };
+        let checked_json = match serde_json::to_string(&prepared.canonical_result()) {
+            Ok(value) => value,
+            Err(error) => {
+                let (outcome, status) = Self::fail_local_app_completion(
+                    registry,
+                    &workflow.base.output_file,
+                    outcome,
+                    format!(
+                        "local_app_completion_unverified: cannot serialize checked result: {error}"
+                    ),
+                )
+                .await;
+                return (outcome, status, None);
+            }
+        };
+        let mut checked_outcome = outcome;
+        checked_outcome.result = Some(checked_json);
+        (
+            checked_outcome,
+            tasks::TaskStatus::Completed,
+            Some(PreparedMobileQaCommit {
+                host,
+                publication: prepared,
+            }),
+        )
     }
 
     async fn flush_pending_events(&self, task_id: &str, pending: Vec<PendingWorkflowEvent>) {
@@ -871,12 +1201,8 @@ impl tasks::handlers::TaskStatusSink for MobileWorkflowStatusSink {
     /// Forward the failure reason so a `failed` transition reported through the
     /// dedicated `set_failed` seam reaches the client event, not just the log.
     async fn set_failed(&self, task_id: &str, error: &str) {
-        self.publish_status(
-            task_id,
-            tasks::TaskStatus::Failed,
-            Some(error.to_string()),
-        )
-        .await;
+        self.publish_status(task_id, tasks::TaskStatus::Failed, Some(error.to_string()))
+            .await;
     }
 
     /// Persist the workflow's terminal payload in the registry — the default
@@ -901,6 +1227,103 @@ impl tasks::handlers::TaskStatusSink for MobileWorkflowStatusSink {
         outcome: platform_api::task_registry::WorkflowTerminalOutcome,
         status: tasks::TaskStatus,
     ) {
+        // Local App Build/UseTest needs the concrete registry transition, not
+        // the RegistryStatusSink's fire-and-forget forwarding: a concurrent
+        // kill may have won while Host QA validation was running. Publish the
+        // status/outcome that the registry actually retained and make the
+        // spool agree with that authoritative terminal state.
+        if let Some(registry) = self.task_registry.get() {
+            if let Some(tasks::state::TaskState::LocalWorkflow(workflow)) =
+                registry.get(task_id).await
+            {
+                let is_local_app_build_or_use_test = workflow.scope.as_ref().is_some_and(|scope| {
+                    matches!(
+                        scope.purpose(),
+                        tasks::scope::LocalAppWorkflowPurpose::Build
+                            | tasks::scope::LocalAppWorkflowPurpose::UseTest
+                    )
+                });
+                if is_local_app_build_or_use_test {
+                    let output_file = workflow.base.output_file.clone();
+                    let cleanup = self.qa_cleanup_for_terminal_workflow(&workflow);
+                    let (candidate, candidate_status, prepared) = self
+                        .validate_local_app_completion(task_id, outcome, status)
+                        .await;
+                    let committed_publication = prepared
+                        .as_ref()
+                        .map(|prepared| (prepared.host.clone(), prepared.publication.clone()));
+                    let actual = match prepared {
+                        Some(prepared) if candidate_status == tasks::TaskStatus::Completed => {
+                            registry
+                                .commit_local_app_workflow_terminal(task_id, candidate, move || {
+                                    let PreparedMobileQaCommit { host, publication } = prepared;
+                                    async move {
+                                        host.commit_prepared_workflow_qa_publication(&publication)
+                                    }
+                                })
+                                .await
+                        }
+                        _ => registry
+                            .finish_workflow_terminal(task_id, candidate, candidate_status)
+                            .await
+                            .map(|state| (state, false)),
+                    };
+                    let Ok((tasks::state::TaskState::LocalWorkflow(actual), publication_committed)) =
+                        actual
+                    else {
+                        // A task removed during teardown is already terminal
+                        // from the client's perspective; do not re-emit the
+                        // caller-requested Completed status into that race.
+                        if let Some(cleanup) = cleanup {
+                            if let Err(error) = cleanup
+                                .host
+                                .cleanup_workflow_qa_run(&cleanup.app_id, &cleanup.workflow_run_id)
+                            {
+                                tracing::warn!(%error, "failed to clean workflow QA run");
+                            }
+                        }
+                        return;
+                    };
+                    if actual.base.status != tasks::TaskStatus::Completed {
+                        let reason = actual.outcome.error.clone().unwrap_or_else(|| {
+                            format!(
+                                "local_app_completion_not_published: task ended as {:?}",
+                                actual.base.status
+                            )
+                        });
+                        let payload = serde_json::json!({
+                            "ok": false,
+                            "error": reason,
+                            "verified": false,
+                            "status": format!("{:?}", actual.base.status).to_lowercase(),
+                        })
+                        .to_string();
+                        let _ = registry
+                            .output_manager
+                            .replace_terminal_result(&output_file, &payload)
+                            .await;
+                    }
+                    if publication_committed {
+                        if let Some((host, publication)) = committed_publication {
+                            host.emit_committed_workflow_qa_summary(&publication).await;
+                        }
+                    } else if let Some(cleanup) = cleanup {
+                        if let Err(error) = cleanup
+                            .host
+                            .cleanup_workflow_qa_run(&cleanup.app_id, &cleanup.workflow_run_id)
+                        {
+                            tracing::warn!(%error, "failed to clean workflow QA run");
+                        }
+                    }
+                    self.deliver_status(task_id, actual.base.status, actual.outcome.error.clone())
+                        .await;
+                    return;
+                }
+            }
+        }
+        let (outcome, status, _) = self
+            .validate_local_app_completion(task_id, outcome, status)
+            .await;
         let error = outcome.error.clone();
         // Keep the registry's ATOMIC payload+status publish (it closes the
         // outcome/status race a concurrent kill would otherwise win).
@@ -1154,10 +1577,24 @@ fn is_mcp_authoring_launch(
     expected_workflow_id: Option<&str>,
 ) -> bool {
     (verified_plugin_workflow
-        && spec_name
-            == Some(crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID))
+        && spec_name == Some(crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID))
         || expected_workflow_id
             == Some(crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID)
+}
+
+/// Return whether this launch is the Host-verified Local App use-test
+/// workflow.  The plugin bytes or host checkpoint provenance are the proof;
+/// neither a copied name nor an `app_id` in caller args can mint UseTest
+/// authority.
+fn is_use_test_launch(
+    spec_name: Option<&str>,
+    verified_plugin_workflow: bool,
+    expected_workflow_id: Option<&str>,
+) -> bool {
+    (verified_plugin_workflow
+        && spec_name == Some(crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID))
+        || expected_workflow_id
+            == Some(crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID)
 }
 
 /// External (model-supplied) argument keys the Host launch boundary accepts
@@ -1181,7 +1618,7 @@ fn is_mcp_authoring_launch(
 ///
 /// WP-MCP-intent: `mcp_intent` is the create-time MCP interview outcome the
 /// user already gave conversationally (absent = never asked,
-/// `{"status":"declined"}`, `{"status":"requested","services":[...]}`). It
+/// `{"status":"declined"}`, `{"status":"requested","capabilities":[...]}`). It
 /// belongs here for the same reason `name`/`brief` do: the launch boundary
 /// forwards ONLY the declared contract, so a key the script declares but this
 /// list omits is rejected before the script runs — which does not lose the
@@ -1189,7 +1626,7 @@ fn is_mcp_authoring_launch(
 pub(crate) const BUILD_EXTERNAL_ARG_KEYS: &[&str] = &[
     "operation",
     "app_id",
-    "spec",
+    "authoring_spec",
     "revision_prompt",
     "quality_level",
     "name",
@@ -1205,6 +1642,126 @@ pub(crate) const USE_TEST_EXTERNAL_ARG_KEYS: &[&str] =
 /// External argument keys accepted for the plugin MCP-authoring workflow.
 /// Same single-source-of-truth contract as [`BUILD_EXTERNAL_ARG_KEYS`].
 pub(crate) const MCP_AUTHORING_EXTERNAL_ARG_KEYS: &[&str] = &["app_id", "user_goal"];
+
+// These schemas are Plugin-owned inputs. Embed the checked-in JSON at build
+// time so a workflow launch never reads a workspace-provided schema or lets a
+// caller replace the contract after Plugin verification.
+const AUTHORING_SPEC_SCHEMA_JSON: &str =
+    include_str!("../../../plugins/lingxi-local-app/schemas/authoring-spec.schema.json");
+const DESIGN_SPEC_SCHEMA_JSON: &str =
+    include_str!("../../../plugins/lingxi-local-app/schemas/design-spec.schema.json");
+const QA_REPORT_SCHEMA_JSON: &str =
+    include_str!("../../../plugins/lingxi-local-app/schemas/qa-report.schema.json");
+const USE_TEST_REPORT_SCHEMA_JSON: &str =
+    include_str!("../../../plugins/lingxi-local-app/schemas/use-test-report.schema.json");
+const MCP_PROPOSAL_SCHEMA_JSON: &str =
+    include_str!("../../../plugins/lingxi-local-app/schemas/mcp-proposal.schema.json");
+const WORKFLOW_AGENT_RESULTS_SCHEMA_JSON: &str =
+    include_str!("../../../plugins/lingxi-local-app/schemas/workflow-agent-results.schema.json");
+
+fn checked_in_local_app_schemas() -> Result<Value, tool_workflow::WorkflowLaunchError> {
+    let parse = |name: &str, source: &str| {
+        serde_json::from_str::<Value>(source).map_err(|error| {
+            tool_workflow::WorkflowLaunchError(format!(
+                "cannot parse checked-in Local App {name} schema: {error}"
+            ))
+        })
+    };
+    let workflow_agent_results =
+        parse("workflow_agent_results", WORKFLOW_AGENT_RESULTS_SCHEMA_JSON)?;
+    let workflow_defs = workflow_agent_results
+        .get("$defs")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            tool_workflow::WorkflowLaunchError(
+                "checked-in workflow-agent-results schema has no $defs".into(),
+            )
+        })?;
+    let role_schema = |name: &str| {
+        let mut schema = workflow_defs.get(name).cloned().ok_or_else(|| {
+            tool_workflow::WorkflowLaunchError(format!(
+                "checked-in workflow-agent-results schema has no {name} definition"
+            ))
+        })?;
+        if let Some(object) = schema.as_object_mut() {
+            object.insert(
+                "$schema".into(),
+                workflow_agent_results
+                    .get("$schema")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            );
+            object.insert("$defs".into(), Value::Object(workflow_defs.clone()));
+        }
+        Ok(schema)
+    };
+    Ok(serde_json::json!({
+        "authoring_spec": parse("authoring_spec", AUTHORING_SPEC_SCHEMA_JSON)?,
+        "design_spec": parse("design_spec", DESIGN_SPEC_SCHEMA_JSON)?,
+        "design_subtree": role_schema("design_subtree")?,
+        "template_selection": role_schema("template_selection")?,
+        "create_preparer": role_schema("create_preparer")?,
+        "build_result": role_schema("build_result")?,
+        "operator_result": role_schema("operator_result")?,
+        "qa_review": role_schema("qa_review")?,
+        "qa_finalize": role_schema("qa_finalize")?,
+        "mcp_promoter": role_schema("mcp_promoter")?,
+        "qa_report": parse("qa_report", QA_REPORT_SCHEMA_JSON)?,
+        "use_test_report": parse("use_test_report", USE_TEST_REPORT_SCHEMA_JSON)?,
+        "mcp_proposal": parse("mcp_proposal", MCP_PROPOSAL_SCHEMA_JSON)?,
+    }))
+}
+
+fn authoring_spec_from_args(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Option<Value>, tool_workflow::WorkflowLaunchError> {
+    let Some(value) = object.get("authoring_spec") else {
+        return Ok(None);
+    };
+    let candidate = value.as_object().map_or_else(
+        || {
+            Err(tool_workflow::WorkflowLaunchError(
+                "local-app authoring_spec must be a structured object; legacy string spec is not accepted"
+                    .into(),
+            ))
+        },
+        |_| Ok(value.clone()),
+    )?;
+    let schema = serde_json::from_str::<Value>(AUTHORING_SPEC_SCHEMA_JSON).map_err(|error| {
+        tool_workflow::WorkflowLaunchError(format!("cannot parse authoring spec schema: {error}"))
+    })?;
+    if !local_apps::value_matches_schema(&candidate, &schema) {
+        return Err(tool_workflow::WorkflowLaunchError(
+            "local-app build workflow authoring spec does not satisfy the checked-in Plugin schema"
+                .into(),
+        ));
+    }
+    Ok(Some(candidate))
+}
+
+/// Return whether a Host-validated update changes any user-visible authoring
+/// surface.  This is deliberately derived from the active successful build
+/// contract and the incoming typed AuthoringSpec; a model-provided boolean is
+/// never an authority source for the workflow's QA/design branch.
+fn update_ui_impact(
+    active_contract: &local_apps::AppAuthoringContract,
+    incoming: &Value,
+) -> Result<bool, tool_workflow::WorkflowLaunchError> {
+    let incoming: local_apps::AppAuthoringSpec =
+        serde_json::from_value(incoming.clone()).map_err(|error| {
+            tool_workflow::WorkflowLaunchError(format!(
+                "local-app update authoring spec is not a Host-valid AuthoringSpec: {error}"
+            ))
+        })?;
+    incoming.validate().map_err(|error| {
+        tool_workflow::WorkflowLaunchError(format!(
+            "local-app update authoring spec is not a Host-valid AuthoringSpec: {error}"
+        ))
+    })?;
+    Ok(active_contract.spec.ui != incoming.ui
+        || active_contract.spec.targets != incoming.targets
+        || active_contract.spec.design != incoming.design)
+}
 
 /// Reject caller fields outside the narrow public workflow contract before
 /// the Host adds its private context.  Authority-bearing keys are accepted
@@ -1514,6 +2071,12 @@ fn apply_materialized_local_app_collections_with_identity(
             )
         }
         .map_err(tool_workflow::WorkflowLaunchError)?;
+        let authoring_spec = authoring_spec_from_args(object)?.ok_or_else(|| {
+            tool_workflow::WorkflowLaunchError(
+                "local-app create workflow requires a full structured authoring_spec".into(),
+            )
+        })?;
+        let schemas = checked_in_local_app_schemas()?;
         // r3-never-wired-11: `selector_capability` is also copied into
         // `host_context` below, which is the ONLY copy the build workflow
         // script reads (`context.selector_capability`, line ~123) -- it never
@@ -1541,6 +2104,8 @@ fn apply_materialized_local_app_collections_with_identity(
                 "app_id": app_id,
                 "workflow_run_id": workflow_run_id,
                 "selector_capability": selector_capability,
+                "authoring_spec": authoring_spec,
+                "schemas": schemas.clone(),
                 "template_catalog": {
                     "catalog_digest": catalog.catalog_digest,
                     "available_template_ids": catalog.templates.iter().map(|entry| entry.template_id.clone()).collect::<Vec<_>>(),
@@ -1588,6 +2153,24 @@ fn apply_materialized_local_app_collections_with_identity(
             "local-app build workflow requires app {app_id:?} to have a verified dependency snapshot"
         )));
     }
+    let active_authoring_contract = crate::local_apps_build::active_authoring_contract(&layout)
+        .map_err(|error| {
+            tool_workflow::WorkflowLaunchError(format!(
+                "cannot load active Local App authoring contract: {error}"
+            ))
+        })?;
+    let active_authoring_contract_sha256 =
+        crate::local_apps_build::active_build_authoring_contract_sha256(&layout).map_err(
+            |error| {
+                tool_workflow::WorkflowLaunchError(format!(
+                    "cannot load active Local App authoring contract digest: {error}"
+                ))
+            },
+        )?;
+    // The build receipt is the selector for the last successful Host build.
+    // Keep its exact digest separate from the contract payload: the payload
+    // intentionally has no digest field, while Plugin QA/update logic must
+    // bind to the immutable contract selected by that receipt.
     // The Host consumes a typed handle rather than picking or comparing a
     // workflow name itself: the binding resolves the build target's
     // authorized workflow and enforces it against the caller's selection,
@@ -1647,7 +2230,43 @@ fn apply_materialized_local_app_collections_with_identity(
         expected_writable_collections.clone(),
     );
     if is_plugin_workflow {
+        let active_authoring_contract = active_authoring_contract.as_ref().ok_or_else(|| {
+            tool_workflow::WorkflowLaunchError(format!(
+                "local-app {operation} workflow requires an active Host authoring contract"
+            ))
+        })?;
+        let active_authoring_contract_sha256 = active_authoring_contract_sha256
+            .as_deref()
+            .ok_or_else(|| {
+                tool_workflow::WorkflowLaunchError(format!(
+                    "local-app {operation} workflow requires an active Host authoring contract digest"
+                ))
+            })?;
         let invocation_capability = format!("mcpv_{}", uuid::Uuid::new_v4().simple());
+        let authoring_spec = authoring_spec_from_args(object)?;
+        if operation == "update" && authoring_spec.is_none() {
+            return Err(tool_workflow::WorkflowLaunchError(
+                "local-app update workflow requires a new full AuthoringSpec; freeform revision_prompt alone is not authoritative"
+                    .into(),
+            ));
+        }
+        if operation == "verify" && authoring_spec.is_some() {
+            return Err(tool_workflow::WorkflowLaunchError(
+                "local-app verify workflow accepts only the Host effective authoring contract"
+                    .into(),
+            ));
+        }
+        let update_ui_impact = if operation == "update" {
+            let incoming = authoring_spec.as_ref().ok_or_else(|| {
+                tool_workflow::WorkflowLaunchError(
+                    "local-app update workflow requires a full Host-valid AuthoringSpec".into(),
+                )
+            })?;
+            update_ui_impact(active_authoring_contract, incoming)?
+        } else {
+            false
+        };
+        let schemas = checked_in_local_app_schemas()?;
         let catalog = crate::local_app_template_catalog::catalog_view().map_err(|error| {
             tool_workflow::WorkflowLaunchError(format!(
                 "cannot read verified template catalog: {error}"
@@ -1660,7 +2279,13 @@ fn apply_materialized_local_app_collections_with_identity(
                 "operation": operation,
                 "app_id": app_id,
                 "runtime_profile": runtime_profile,
+                "authoring_contract": serde_json::to_value(active_authoring_contract)
+                    .unwrap_or(Value::Null),
+                "authoring_contract_sha256": active_authoring_contract_sha256,
+                "authoring_spec": authoring_spec.unwrap_or(Value::Null),
+                "update_ui_impact": update_ui_impact,
                 "invocation_capability": invocation_capability,
+                "schemas": schemas.clone(),
                 "template_catalog": {
                     "catalog_digest": catalog.catalog_digest,
                     "available_template_ids": catalog.templates.iter().map(|entry| entry.template_id.clone()).collect::<Vec<_>>(),
@@ -1763,6 +2388,63 @@ fn resolve_adopted_local_app_build_scope(
         .enforce(app_id, binding.family, workflow_id)
         .ok()?;
     tasks::scope::LocalAppWorkflowTaskScope::for_build(app_id).ok()
+}
+
+/// Re-mint the Host scope for a restart-recovered verified Local App
+/// workflow. Build and UseTest share the same authenticated checkpoint proof
+/// (verbatim plugin bytes, exact hash, real scaffold/profile/dependencies),
+/// but receive their distinct typed purposes. Custom checkpoints and forged
+/// app ids therefore remain unscoped.
+fn resolve_adopted_local_app_scope(
+    app_data_root: &std::path::Path,
+    workflow_id: &str,
+    script_bytes: &[u8],
+    script_sha256: Option<&str>,
+    script_is_verbatim_builtin: Option<bool>,
+    args_json: Option<&str>,
+) -> Option<tasks::scope::LocalAppWorkflowTaskScope> {
+    if workflow_id == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID {
+        return resolve_adopted_local_app_build_scope(
+            app_data_root,
+            workflow_id,
+            script_bytes,
+            script_sha256,
+            script_is_verbatim_builtin,
+            args_json,
+        );
+    }
+    if workflow_id != crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID
+        || script_is_verbatim_builtin != Some(true)
+    {
+        return None;
+    }
+    let expected_hash = script_sha256.filter(|hash| is_sha256_hex(hash))?;
+    if sha256_hex(script_bytes) != expected_hash {
+        return None;
+    }
+    let args_value: serde_json::Value = serde_json::from_str(args_json?).ok()?;
+    let app_id = args_value
+        .get("app_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|app_id| !app_id.trim().is_empty())?;
+    let layout = local_apps::AppLayout::new(app_data_root, app_id).ok()?;
+    let _build_target = crate::local_apps_build::detect_build_target(&layout).ok()?;
+    let manifest = local_apps::load_manifest(&layout).ok()?;
+    manifest.runtime_profile.as_ref()?;
+    manifest.dependency_snapshot.as_ref()?;
+    // UseTest is only meaningful against the successful build-selected
+    // contract; this also prevents a torn/scaffold-only app from borrowing
+    // the QA gate during restart adoption.
+    let active_digest = crate::local_apps_build::active_build_authoring_contract_sha256(&layout)
+        .ok()
+        .flatten()?;
+    if active_digest.is_empty() {
+        return None;
+    }
+    crate::local_apps_build::active_authoring_contract(&layout)
+        .ok()
+        .flatten()?;
+    tasks::scope::LocalAppWorkflowTaskScope::for_use_test(app_id).ok()
 }
 
 #[async_trait::async_trait]
@@ -1985,7 +2667,12 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             verified_plugin_workflow,
             expected_workflow_id,
         );
-        if local_app_scope.is_none() && is_mcp_authoring_launch {
+        let is_use_test_launch = is_use_test_launch(
+            spec.name.as_deref(),
+            verified_plugin_workflow,
+            expected_workflow_id,
+        );
+        if local_app_scope.is_none() && (is_mcp_authoring_launch || is_use_test_launch) {
             if let Some(app_id) = spec
                 .args
                 .as_ref()
@@ -1993,15 +2680,23 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 .and_then(|object| object.get("app_id"))
                 .and_then(Value::as_str)
             {
-                local_app_scope = Some(
+                local_app_scope = Some(if is_use_test_launch {
+                    tasks::scope::LocalAppWorkflowTaskScope::for_use_test(app_id).map_err(
+                        |error| {
+                            tool_workflow::WorkflowLaunchError(format!(
+                                "cannot authorize local-app use-test workflow: {error}"
+                            ))
+                        },
+                    )?
+                } else {
                     tasks::scope::LocalAppWorkflowTaskScope::for_mcp_authoring(app_id).map_err(
                         |error| {
                             tool_workflow::WorkflowLaunchError(format!(
                                 "cannot authorize local-app MCP authoring workflow: {error}"
                             ))
                         },
-                    )?,
-                );
+                    )?
+                });
             }
         }
         let workflow_name = workflow::meta_string_value(&script, "name");
@@ -2336,6 +3031,28 @@ fn enrich_persisted_plugin_workflow_context(
     let manifest = local_apps::load_manifest(&layout).map_err(|error| {
         tool_workflow::WorkflowLaunchError(format!("cannot load persisted app profile: {error}"))
     })?;
+    // Resolve the Host-owned scaffold/profile pair before any standalone
+    // plugin workflow can mint an app scope. A valid-looking app_id and
+    // manifest alone must not authorize a custom/torn shell.
+    let _build_target = crate::local_apps_build::detect_build_target(&layout).map_err(|error| {
+        tool_workflow::WorkflowLaunchError(format!(
+            "cannot validate persisted Local App runtime profile: {error}"
+        ))
+    })?;
+    let active_authoring_contract = crate::local_apps_build::active_authoring_contract(&layout)
+        .map_err(|error| {
+            tool_workflow::WorkflowLaunchError(format!(
+                "cannot load active Local App authoring contract: {error}"
+            ))
+        })?;
+    let active_authoring_contract_sha256 =
+        crate::local_apps_build::active_build_authoring_contract_sha256(&layout).map_err(
+            |error| {
+                tool_workflow::WorkflowLaunchError(format!(
+                    "cannot load active Local App authoring contract digest: {error}"
+                ))
+            },
+        )?;
     let catalog = crate::local_app_template_catalog::catalog_view().map_err(|error| {
         tool_workflow::WorkflowLaunchError(format!(
             "cannot read verified template catalog: {error}"
@@ -2357,6 +3074,7 @@ fn enrich_persisted_plugin_workflow_context(
             .map(|collection| Value::String(collection.id.clone()))
             .collect(),
     );
+    let schemas = checked_in_local_app_schemas()?;
     object.insert("workflow_run_id".into(), Value::String(run_id.into()));
     if let Some(runtime_profile) = runtime_profile.clone() {
         object.insert("runtime_profile".into(), runtime_profile);
@@ -2375,7 +3093,13 @@ fn enrich_persisted_plugin_workflow_context(
                 "app_id": app_id,
                 "workflow_run_id": run_id,
                 "invocation_capability": invocation_capability,
+                "schemas": schemas.clone(),
                 "runtime_profile": runtime_profile.unwrap_or(Value::Null),
+                "authoring_contract": active_authoring_contract
+                    .as_ref()
+                    .map(|contract| serde_json::to_value(contract).unwrap_or(Value::Null))
+                    .unwrap_or(Value::Null),
+                "authoring_contract_sha256": active_authoring_contract_sha256,
                 "template_catalog": {
                     "catalog_digest": catalog.catalog_digest,
                     "available_template_ids": catalog.templates.iter().map(|entry| entry.template_id.clone()).collect::<Vec<_>>(),
@@ -2387,6 +3111,12 @@ fn enrich_persisted_plugin_workflow_context(
         );
         return Ok(());
     }
+    let active_authoring_contract_sha256 =
+        active_authoring_contract_sha256.as_deref().ok_or_else(|| {
+            tool_workflow::WorkflowLaunchError(format!(
+                "{name} requires an active Host authoring contract digest"
+            ))
+        })?;
     let Some(binding) = binding else {
         return Err(tool_workflow::WorkflowLaunchError(format!(
             "{name} requires a persisted runtime profile"
@@ -2397,6 +3127,11 @@ fn enrich_persisted_plugin_workflow_context(
             "{name} requires a verified dependency snapshot"
         )));
     }
+    let active_authoring_contract = active_authoring_contract.as_ref().ok_or_else(|| {
+        tool_workflow::WorkflowLaunchError(format!(
+            "{name} requires an active Host authoring contract"
+        ))
+    })?;
     object.insert(
         "host_context".into(),
         serde_json::json!({
@@ -2404,12 +3139,16 @@ fn enrich_persisted_plugin_workflow_context(
             "operation": "verify",
             "app_id": app_id,
             "workflow_run_id": run_id,
+            "schemas": schemas,
             "runtime_profile": {
                 "family": binding.family.as_str(),
                 "revision": binding.revision,
                 "contract_sha256": binding.contract_sha256,
                 "surface": binding.family.surface().as_str(),
             },
+            "authoring_contract": serde_json::to_value(active_authoring_contract)
+                .unwrap_or(Value::Null),
+            "authoring_contract_sha256": active_authoring_contract_sha256,
             "template_catalog": {
                 "catalog_digest": catalog.catalog_digest,
                 "available_template_ids": catalog.templates.iter().map(|entry| entry.template_id.clone()).collect::<Vec<_>>(),
@@ -2451,8 +3190,7 @@ fn sanitize_namespaced_local_app_args(
         .name
         .as_deref()
         .is_some_and(crate::local_app_plugin_binding::is_plugin_workflow_id)
-        || expected_workflow_id
-            .is_some_and(crate::local_app_plugin_binding::is_plugin_workflow_id);
+        || expected_workflow_id.is_some_and(crate::local_app_plugin_binding::is_plugin_workflow_id);
     if !is_local_app_workflow {
         return;
     }
@@ -2467,6 +3205,14 @@ fn sanitize_namespaced_local_app_args(
         "validated_selection_handle",
         "template_selection",
         "workflow_run_id",
+        "authoring_contract",
+        "schemas",
+        "dependency_snapshot",
+        "template_catalog",
+        "active_catalog",
+        "invocation_capability",
+        "update_ui_impact",
+        "staging",
     ] {
         object.remove(key);
     }
@@ -2475,6 +3221,129 @@ fn sanitize_namespaced_local_app_args(
 #[cfg(test)]
 mod plugin_args_tests {
     use super::*;
+
+    #[test]
+    fn terminal_qa_strategy_comes_only_from_authenticated_workflow_args() {
+        assert_eq!(
+            workflow_verification_strategy(None).unwrap(),
+            local_apps::QaVerificationStrategy::Balanced
+        );
+        assert_eq!(
+            workflow_verification_strategy(Some(r#"{"app_id":"demo"}"#)).unwrap(),
+            local_apps::QaVerificationStrategy::Balanced
+        );
+        assert_eq!(
+            workflow_verification_strategy(Some(r#"{"app_id":"demo","quality_level":"thorough"}"#))
+                .unwrap(),
+            local_apps::QaVerificationStrategy::Thorough
+        );
+        assert!(workflow_verification_strategy(Some(
+            r#"{"app_id":"demo","quality_level":"forged"}"#
+        ))
+        .is_err());
+        assert!(workflow_verification_strategy(Some("not-json")).is_err());
+    }
+
+    fn valid_authoring_spec_fixture() -> Value {
+        serde_json::json!({
+            "product": {
+                "goal": "track chores",
+                "tasks": ["add a chore"],
+                "external_integrations": []
+            },
+            "targets": [{"id": "primary", "os": "ios", "form_factor": "iphone"}],
+            "ui": {
+                "structure": ["list"],
+                "theme": {"mode": "system", "accent": "blue"},
+                "style": {"direction": "calm", "density": "comfortable"},
+                "references": []
+            },
+            "design": {
+                "presentations": [{"target_id": "primary", "presentation": "single list", "navigation": "push detail"}],
+                "tokens": {"accent": "blue"},
+                "states": {"loading": "spinner", "empty": "no chores", "error": "retry", "success": "saved", "permission": "explain"},
+                "inputs": {"pointer_touch": ["tap"], "keyboard_mouse": ["enter"], "back": "navigate back", "reduced_motion": "remove transitions"},
+                "canvas": null
+            },
+            "acceptance_checks": [{
+                "id": "primary-action",
+                "target_ids": ["primary"],
+                "required": true,
+                "preconditions": ["list loaded"],
+                "steps": ["tap add"],
+                "expected": "chore appears",
+                "evidence": ["inspect", "ui_action"]
+            }]
+        })
+    }
+
+    #[test]
+    fn update_ui_impact_is_derived_from_active_and_incoming_specs() {
+        let spec_value = valid_authoring_spec_fixture();
+        let spec: local_apps::AppAuthoringSpec =
+            serde_json::from_value(spec_value.clone()).expect("fixture spec");
+        let active = local_apps::AppAuthoringContract {
+            version: local_apps::AUTHORING_SCHEMA_VERSION,
+            revision: 1,
+            app_id: "impact123".into(),
+            runtime_profile: crate::local_app_runtime_profiles::current_binding_for_family(
+                local_apps::AppRuntimeProfile::ReactDom,
+            )
+            .expect("runtime profile"),
+            spec: spec.clone(),
+        };
+        assert!(!update_ui_impact(&active, &spec_value).expect("same spec"));
+
+        let mut ui_changed = spec_value.clone();
+        ui_changed["ui"]["structure"] = serde_json::json!(["grid"]);
+        assert!(update_ui_impact(&active, &ui_changed).expect("ui change"));
+
+        let mut targets_changed = spec_value.clone();
+        targets_changed["targets"][0]["form_factor"] = serde_json::json!("ipad");
+        assert!(update_ui_impact(&active, &targets_changed).expect("target change"));
+
+        let mut design_changed = spec_value.clone();
+        design_changed["design"]["tokens"]["accent"] = serde_json::json!("green");
+        assert!(update_ui_impact(&active, &design_changed).expect("design change"));
+
+        let mut product_only = spec_value.clone();
+        product_only["product"]["goal"] = serde_json::json!("track household chores");
+        assert!(!update_ui_impact(&active, &product_only).expect("product-only change"));
+    }
+
+    #[test]
+    fn checked_in_schema_loader_exports_mcp_promoter_role() {
+        let schemas = checked_in_local_app_schemas().expect("checked-in schemas");
+        assert!(schemas
+            .get("mcp_promoter")
+            .and_then(Value::as_object)
+            .is_some_and(|schema| schema.get("$defs").is_some()));
+    }
+
+    #[test]
+    fn authoring_spec_requires_structured_schema_owned_intent() {
+        let fixture = valid_authoring_spec_fixture();
+        let args = serde_json::json!({"authoring_spec": fixture});
+        let parsed = authoring_spec_from_args(args.as_object().unwrap())
+            .expect("valid fixture")
+            .expect("structured spec");
+        assert_eq!(parsed, args["authoring_spec"]);
+
+        let legacy = serde_json::json!({"authoring_spec": "track chores"});
+        assert!(authoring_spec_from_args(legacy.as_object().unwrap()).is_err());
+
+        let forged = serde_json::json!({
+            "authoring_spec": {
+                "product": fixture["product"].clone(),
+                "targets": fixture["targets"].clone(),
+                "ui": fixture["ui"].clone(),
+                "design": fixture["design"].clone(),
+                "acceptance_checks": fixture["acceptance_checks"].clone(),
+                "runtime_profile": {"family": "babylon_3d"}
+            }
+        });
+        assert!(authoring_spec_from_args(forged.as_object().unwrap()).is_err());
+    }
 
     #[test]
     fn namespaced_local_app_authority_fields_are_host_owned() {
@@ -2487,7 +3356,14 @@ mod plugin_args_tests {
                 "host_context": {"source": "caller"},
                 "validated_selection_handle": "vsel_forged",
                 "expected_writable_collections": ["forged"],
-                "workflow_run_id": "wf_forged1"
+                "workflow_run_id": "wf_forged1",
+                "schemas": {"qa_report": {"type": "string"}},
+                "dependency_snapshot": {"verified": false},
+                "template_catalog": {"catalog_digest": "forged"},
+                "active_catalog": {"catalog_sha256": "forged"},
+                "invocation_capability": "forged",
+                "update_ui_impact": true,
+                "staging": {"isolated": false}
             })),
             ..Default::default()
         };
@@ -2507,6 +3383,13 @@ mod plugin_args_tests {
             "validated_selection_handle",
             "expected_writable_collections",
             "workflow_run_id",
+            "schemas",
+            "dependency_snapshot",
+            "template_catalog",
+            "active_catalog",
+            "invocation_capability",
+            "update_ui_impact",
+            "staging",
         ] {
             assert!(object.get(field).is_none(), "{field} must be stripped");
         }
@@ -2623,7 +3506,7 @@ mod plugin_args_tests {
         assert!(error.to_string().contains("validated_selection_handle"));
     }
 
-    /// WP5 drift gate: `local-app-build.js` maintains its own `ALLOWED_EXTERNAL`
+    /// WP5 drift gate: `local-app-build.js` maintains its own `EXTERNAL_KEYS`
     /// list, and the Host rejects any launch key outside the arm above. The two
     /// lists are written in different languages in different files, so a key
     /// added to the script alone silently becomes unreachable: `input.<key>` is
@@ -2635,12 +3518,12 @@ mod plugin_args_tests {
         let script = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
         let declaration = script
             .lines()
-            .find(|line| line.starts_with("const ALLOWED_EXTERNAL ="))
-            .expect("local-app-build.js must declare ALLOWED_EXTERNAL");
+            .find(|line| line.starts_with("const EXTERNAL_KEYS ="))
+            .expect("local-app-build.js must declare EXTERNAL_KEYS");
         let keys: Vec<String> = declaration
             .split_once('[')
             .and_then(|(_, rest)| rest.split_once(']'))
-            .expect("ALLOWED_EXTERNAL must be an array literal")
+            .expect("EXTERNAL_KEYS must be an array literal")
             .0
             .split(',')
             .map(|entry| entry.trim().trim_matches('\'').to_string())
@@ -2648,7 +3531,7 @@ mod plugin_args_tests {
             .collect();
         assert!(
             keys.contains(&"operation".to_string()) && keys.contains(&"app_id".to_string()),
-            "ALLOWED_EXTERNAL parse produced a list that does not even contain the \
+            "EXTERNAL_KEYS parse produced a list that does not even contain the \
              known-good keys, so this gate would pass vacuously: {keys:?}"
         );
         for key in &keys {
@@ -2667,7 +3550,7 @@ mod plugin_args_tests {
         // r2-fix-audit-09: the loop above only proves script -> Host
         // (every key the script declares external is accepted by the Host).
         // It says nothing about the other direction: a key the Host's launch
-        // boundary accepts but this script's own `ALLOWED_EXTERNAL` omits.
+        // boundary accepts but this script's own `EXTERNAL_KEYS` omits.
         // That is not merely inert -- the script's OWN `unknown` check
         // (local-app-build.js:26-27) throws on exactly that key, so a model
         // that sets a Host-accepted field the script forgot to list gets a
@@ -2689,7 +3572,7 @@ mod plugin_args_tests {
                 keys.iter().any(|declared| declared == key),
                 "the Host launch boundary accepts external field {key:?} for \
                  lingxi-local-app:local-app-build, but local-app-build.js's \
-                 ALLOWED_EXTERNAL omits it -- so a launch carrying it throws \
+                 EXTERNAL_KEYS omits it -- so a launch carrying it throws \
                  \"unknown external field(s)\": {keys:?}"
             );
         }
@@ -2727,7 +3610,7 @@ mod plugin_args_tests {
             (
                 crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID,
                 include_str!("../../../plugins/lingxi-local-app/workflows/local-app-use-test.js"),
-                "const allowed =",
+                "const ALLOWED =",
                 USE_TEST_EXTERNAL_ARG_KEYS,
             ),
             (
@@ -2827,6 +3710,73 @@ mod run_id_tests {
         });
     }
 
+    fn fixture_authoring_spec(
+        family: local_apps::AppRuntimeProfile,
+    ) -> local_apps::AppAuthoringSpec {
+        let mut spec: local_apps::AppAuthoringSpec = serde_json::from_str(include_str!(
+            "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+        ))
+        .expect("checked-in authoring fixture");
+        if family != local_apps::AppRuntimeProfile::ReactDom {
+            spec.design.canvas = Some(local_apps::AppCanvasDesign {
+                scene: "A deterministic fixture scene".into(),
+                phases: vec!["ready".into()],
+                controls: vec!["tap".into()],
+                hud: "Fixture status".into(),
+            });
+        }
+        spec
+    }
+
+    fn fixture_authoring_spec_value(family: local_apps::AppRuntimeProfile) -> serde_json::Value {
+        serde_json::to_value(fixture_authoring_spec(family)).expect("authoring fixture JSON")
+    }
+
+    /// Install a genuine immutable authoring document and select it through
+    /// the active build receipt, matching the production source of truth.
+    /// Tests that exercise persisted update/verify/use-test launches must not
+    /// synthesize an authoring contract directly in their input args.
+    fn install_active_authoring_contract(
+        layout: &local_apps::AppLayout,
+        manifest: &local_apps::AppManifest,
+    ) {
+        let binding = manifest
+            .runtime_profile
+            .clone()
+            .expect("profiled fixture has a runtime binding");
+        let contract = local_apps::AppAuthoringContract {
+            version: local_apps::AUTHORING_SCHEMA_VERSION,
+            revision: 1,
+            app_id: layout.app_id().to_string(),
+            runtime_profile: binding,
+            spec: fixture_authoring_spec(
+                manifest
+                    .runtime_profile
+                    .as_ref()
+                    .expect("profiled fixture")
+                    .family,
+            ),
+        };
+        let digest = local_apps::save_authoring_contract(layout, &contract)
+            .expect("save immutable authoring fixture");
+        let build_root = layout.root().join(layout.build_rel(false));
+        std::fs::create_dir_all(&build_root).expect("build fixture directory");
+        let receipt = serde_json::json!({
+            "version": 3,
+            "buildId": "a".repeat(64),
+            "buildKey": "workflow-support-fixture",
+            "runtimeContractSha256": manifest.runtime_contract_hash().expect("runtime contract hash"),
+            "dependencySnapshotSha256": manifest.dependency_snapshot_hash().expect("dependency snapshot hash"),
+            "outputSha256": "b".repeat(64),
+            "authoringContractSha256": digest,
+        });
+        std::fs::write(
+            build_root.join("build.json"),
+            serde_json::to_vec_pretty(&receipt).expect("serialize build fixture"),
+        )
+        .expect("write build fixture");
+    }
+
     fn stamp_record_mirror(layout: &local_apps::AppLayout, scaffolded: bool) {
         let mut record = local_apps::AppState::create_with_git(
             layout.app_id().to_string(),
@@ -2852,6 +3802,10 @@ mod run_id_tests {
 
     fn plugin_build_script() -> &'static str {
         "export const meta = { name: 'local-app-build', description: 'Plugin local app build' };\nreturn 1;\n"
+    }
+
+    fn plugin_use_test_script() -> &'static str {
+        "export const meta = { name: 'local-app-use-test', description: 'Plugin local app use test' };\nreturn 1;\n"
     }
 
     #[tokio::test]
@@ -3011,6 +3965,7 @@ mod run_id_tests {
             fields: Vec::new(),
         });
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        install_active_authoring_contract(&layout, &manifest);
         stamp_record_mirror(&layout, true);
 
         let script = plugin_build_script();
@@ -3019,6 +3974,7 @@ mod run_id_tests {
             args: Some(serde_json::json!({
                 "operation": "update",
                 "app_id": "demo1234",
+                "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::ReactDom),
                 "expected_writable_collections": [],
             })),
             ..Default::default()
@@ -3067,6 +4023,7 @@ mod run_id_tests {
             fields: Vec::new(),
         });
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        install_active_authoring_contract(&layout, &manifest);
         stamp_record_mirror(&layout, true);
 
         // A hostile caller-supplied runtime_profile: a different family, a
@@ -3079,6 +4036,7 @@ mod run_id_tests {
             args: Some(serde_json::json!({
                 "operation": "update",
                 "app_id": "demo1234",
+                "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::ReactDom),
                 "runtime_profile": {
                     "family": "three_3d",
                     "revision": 999,
@@ -3160,6 +4118,7 @@ mod run_id_tests {
             fields: Vec::new(),
         });
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        install_active_authoring_contract(&layout, &manifest);
         stamp_record_mirror(&layout, true);
 
         // A hostile caller-supplied collection the manifest never declared.
@@ -3172,6 +4131,7 @@ mod run_id_tests {
             args: Some(serde_json::json!({
                 "operation": "update",
                 "app_id": "demo1234",
+                "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::ReactDom),
                 "expected_writable_collections": ["attacker_secrets"],
             })),
             ..Default::default()
@@ -3239,12 +4199,13 @@ mod run_id_tests {
             fields: Vec::new(),
         });
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        install_active_authoring_contract(&layout, &manifest);
         stamp_record_mirror(&layout, true);
 
         let caller_args = serde_json::json!({
             "operation": "update",
             "app_id": "demo1234",
-            "spec": "a caller-authored spec",
+            "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::ReactDom),
             "revision_prompt": "a caller-authored revision prompt",
             "strategy": "balanced",
             "complexity": {"screens": 2},
@@ -3406,6 +4367,7 @@ mod run_id_tests {
             fields: Vec::new(),
         });
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        install_active_authoring_contract(&layout, &manifest);
         stamp_record_mirror(&layout, true);
 
         let mut resumed = tool_workflow::WorkflowLaunchSpec {
@@ -3415,6 +4377,7 @@ mod run_id_tests {
             args: Some(serde_json::json!({
                 "operation": "update",
                 "app_id": "demo1234",
+                "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::Canvas2d),
                 "expected_writable_collections": [],
             })),
             ..Default::default()
@@ -3651,11 +4614,16 @@ mod run_id_tests {
             let mut manifest = local_apps::AppManifest::for_new_app("demo1234", "Demo");
             stamp_profile(&mut manifest, family);
             local_apps::save_manifest(&layout, &manifest).expect("manifest");
+            install_active_authoring_contract(&layout, &manifest);
             stamp_record_mirror(&layout, true);
 
             let mut spec = tool_workflow::WorkflowLaunchSpec {
                 name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-                args: Some(serde_json::json!({"operation": "update", "app_id": "demo1234"})),
+                args: Some(serde_json::json!({
+                    "operation": "update",
+                    "app_id": "demo1234",
+                    "authoring_spec": fixture_authoring_spec_value(family),
+                })),
                 ..Default::default()
             };
             super::apply_materialized_local_app_collections(
@@ -3785,6 +4753,7 @@ mod run_id_tests {
             fields: Vec::new(),
         });
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        install_active_authoring_contract(&layout, &manifest);
         stamp_record_mirror(&layout, true);
 
         let session = "00000000-0000-0000-0000-000000000003";
@@ -3832,6 +4801,7 @@ mod run_id_tests {
             args: Some(serde_json::json!({
                 "operation": "update",
                 "app_id": "demo1234",
+                "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::ReactDom),
                 "expected_writable_collections": [],
             })),
             ..Default::default()
@@ -4514,6 +5484,7 @@ mod run_id_tests {
         let mut manifest = local_apps::AppManifest::for_new_app(app_id, "Fixture");
         stamp_profile(&mut manifest, family);
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        install_active_authoring_contract(&layout, &manifest);
         stamp_record_mirror(&layout, true);
     }
 
@@ -4543,6 +5514,440 @@ mod run_id_tests {
         Arc::new(registry)
     }
 
+    async fn register_terminal_test_workflow(
+        registry: &Arc<tasks::registry::TaskRegistry>,
+        scope: Option<tasks::scope::LocalAppWorkflowTaskScope>,
+        args: serde_json::Value,
+    ) -> String {
+        let task_id = registry
+            .spawn(
+                tasks::TaskType::LocalWorkflow,
+                tasks::TaskSpawnInput::LocalWorkflow {
+                    session_uuid: Some("session-terminal".into()),
+                    workflow_id: "terminal-test".into(),
+                    script: "return null".into(),
+                    resume_from_run_id: None,
+                    args: Some(args.to_string()),
+                    run_id: Some("wf_terminal-test".into()),
+                    parent_model: None,
+                    parent_model_profile: None,
+                    invocation_mode: Some("named".into()),
+                    workflow_source: Some("plugin".into()),
+                    script_is_verbatim_builtin: Some(true),
+                    transcript_subdir: None,
+                    launched_from_subagent: false,
+                    tool_use_id: None,
+                    creator_teammate_name: None,
+                    creator_team_name: None,
+                    creator_agent_id: None,
+                    scope,
+                },
+                "terminal test".into(),
+            )
+            .await
+            .expect("register terminal test workflow");
+        registry
+            .output_manager
+            .allocate(&task_id)
+            .await
+            .expect("stub handler does not allocate its spool");
+        task_id
+    }
+
+    fn terminal_test_sink(
+        root: &std::path::Path,
+        listener: Arc<FakeListener>,
+        registry: Arc<tasks::registry::TaskRegistry>,
+        task_id: &str,
+    ) -> super::MobileWorkflowStatusSink {
+        let checkpoints = Arc::new(super::MobileWorkflowCheckpointStore::new(
+            root.join(".claude"),
+            root.to_path_buf(),
+        ));
+        let sink = super::MobileWorkflowStatusSink::new(
+            listener,
+            checkpoints,
+            Arc::new(std::sync::Mutex::new("session-terminal".into())),
+        );
+        sink.bind(registry);
+        let _ = sink
+            .checkpoints
+            .track_task_owner(task_id, "session-terminal", "wf_terminal-test");
+        sink
+    }
+
+    fn terminal_events(
+        events: &[client_protocol::events::ClientEvent],
+        task_id: &str,
+    ) -> Vec<(String, Option<String>)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                client_protocol::events::ClientEvent::TaskStatusChanged {
+                    task_id: seen,
+                    status,
+                    error,
+                    ..
+                } if seen == task_id => Some((format!("{status:?}"), error.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn seed_terminal_qa_session(root: &std::path::Path, app_id: &str, qa_handle: &str) {
+        let layout = local_apps::AppLayout::new(root, app_id).expect("layout");
+        let manifest = local_apps::load_manifest(&layout).expect("manifest");
+        let authoring_contract_sha256 =
+            crate::local_apps_build::active_build_authoring_contract_sha256(&layout)
+                .expect("active build receipt")
+                .expect("active authoring contract digest");
+        let runtime_profile = manifest.runtime_profile.clone().expect("runtime profile");
+        let dependency_snapshot_sha256 = manifest
+            .dependency_snapshot_hash()
+            .expect("dependency snapshot digest");
+        local_apps::qa_begin(
+            &layout,
+            local_apps::QaIdentity {
+                app_id: app_id.into(),
+                workflow_run_id: "wf_terminal-test".into(),
+                qa_handle: qa_handle.into(),
+                build_id: "a".repeat(64),
+                runtime_profile,
+                verification_strategy: local_apps::QaVerificationStrategy::Balanced,
+                dependency_snapshot_sha256,
+                authoring_contract_sha256,
+                manifest_revision: manifest.revision.max(1),
+                runtime_generation: 1,
+            },
+            vec!["scenario-1".into()],
+            vec!["primary".into()],
+            vec![],
+            1,
+        )
+        .expect("seed in-flight QA session");
+    }
+
+    #[tokio::test]
+    async fn local_app_ok_false_remains_a_completed_logical_result() {
+        use tasks::handlers::TaskStatusSink as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let registry = scope_test_registry();
+        let task_id = register_terminal_test_workflow(
+            &registry,
+            Some(tasks::scope::LocalAppWorkflowTaskScope::for_build("qa-app").expect("scope")),
+            serde_json::json!({"app_id":"qa-app","quality_level":"balanced"}),
+        )
+        .await;
+        let raw = r#"{"ok":false,"status":"verification_failed"}"#;
+        registry
+            .output_manager
+            .append(&registry.output_manager.path_for(&task_id).unwrap(), raw)
+            .await
+            .unwrap();
+        let listener = Arc::new(FakeListener::default());
+        let sink = terminal_test_sink(root.path(), listener.clone(), registry.clone(), &task_id);
+
+        sink.finish_workflow_terminal(
+            &task_id,
+            platform_api::task_registry::WorkflowTerminalOutcome {
+                result: Some(raw.into()),
+                ..Default::default()
+            },
+            tasks::TaskStatus::Completed,
+        )
+        .await;
+
+        let tasks::state::TaskState::LocalWorkflow(actual) = registry.get(&task_id).await.unwrap()
+        else {
+            panic!("expected workflow")
+        };
+        assert_eq!(actual.base.status, tasks::TaskStatus::Completed);
+        assert_eq!(actual.outcome.result.as_deref(), Some(raw));
+        assert_eq!(
+            registry
+                .output_manager
+                .read(
+                    &registry.output_manager.path_for(&task_id).unwrap(),
+                    tasks::output_manager::OutputOptions::default(),
+                )
+                .await
+                .unwrap()
+                .content,
+            raw
+        );
+        assert_eq!(
+            terminal_events(&listener.received.lock().await, &task_id),
+            vec![("Completed".into(), None)]
+        );
+    }
+
+    #[tokio::test]
+    async fn local_app_missing_result_fails_closed_and_cleans_every_session_for_the_run() {
+        use tasks::handlers::TaskStatusSink as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let app_id = "qa-app";
+        scaffold_local_app(root.path(), app_id, local_apps::AppRuntimeProfile::ReactDom);
+        let layout = local_apps::AppLayout::new(root.path(), app_id).expect("layout");
+        let mut manifest = local_apps::load_manifest(&layout).expect("manifest");
+        manifest.revision = 1;
+        local_apps::save_manifest(&layout, &manifest).expect("revisioned QA manifest");
+        let handles = [
+            "qa_00000000000000000000000000000000",
+            "qa_11111111111111111111111111111111",
+        ];
+        for handle in handles {
+            seed_terminal_qa_session(root.path(), app_id, handle);
+        }
+
+        let registry = scope_test_registry();
+        let task_id = register_terminal_test_workflow(
+            &registry,
+            Some(tasks::scope::LocalAppWorkflowTaskScope::for_use_test(app_id).expect("scope")),
+            serde_json::json!({"app_id":app_id,"quality_level":"balanced"}),
+        )
+        .await;
+        let listener = Arc::new(FakeListener::default());
+        let sink = terminal_test_sink(root.path(), listener.clone(), registry.clone(), &task_id);
+        let host = crate::local_apps_host::LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            client_adapter::ListenerSink::arc(listener.clone()),
+            None,
+            false,
+            None,
+        );
+        sink.attach_local_apps_host(Arc::downgrade(&host))
+            .expect("attach host");
+
+        sink.finish_workflow_terminal(
+            &task_id,
+            platform_api::task_registry::WorkflowTerminalOutcome::default(),
+            tasks::TaskStatus::Completed,
+        )
+        .await;
+
+        let tasks::state::TaskState::LocalWorkflow(actual) = registry.get(&task_id).await.unwrap()
+        else {
+            panic!("expected workflow")
+        };
+        assert_eq!(actual.base.status, tasks::TaskStatus::Failed);
+        assert!(actual
+            .outcome
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("verified workflow returned no result")));
+        for handle in handles {
+            assert!(
+                local_apps::load_qa_session(&layout, handle).is_err(),
+                "terminal cleanup must remove every raw QA session for the authenticated run"
+            );
+        }
+        assert_eq!(
+            terminal_events(&listener.received.lock().await, &task_id),
+            vec![("Failed".into(), actual.outcome.error.clone(),)]
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_local_app_qa_receipt_fails_registry_spool_and_client_together() {
+        use tasks::handlers::TaskStatusSink as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let registry = scope_test_registry();
+        let task_id = register_terminal_test_workflow(
+            &registry,
+            Some(tasks::scope::LocalAppWorkflowTaskScope::for_use_test("qa-app").expect("scope")),
+            serde_json::json!({"app_id":"qa-app","quality_level":"thorough"}),
+        )
+        .await;
+        let listener = Arc::new(FakeListener::default());
+        let sink = terminal_test_sink(root.path(), listener.clone(), registry.clone(), &task_id);
+        let host = crate::local_apps_host::LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            client_adapter::ListenerSink::arc(listener.clone()),
+            None,
+            false,
+            None,
+        );
+        sink.attach_local_apps_host(Arc::downgrade(&host))
+            .expect("attach host");
+
+        sink.finish_workflow_terminal(
+            &task_id,
+            platform_api::task_registry::WorkflowTerminalOutcome {
+                result: Some(r#"{"ok":true,"receipt_id":"receipt_fake"}"#.into()),
+                ..Default::default()
+            },
+            tasks::TaskStatus::Completed,
+        )
+        .await;
+
+        let tasks::state::TaskState::LocalWorkflow(actual) = registry.get(&task_id).await.unwrap()
+        else {
+            panic!("expected workflow")
+        };
+        assert_eq!(actual.base.status, tasks::TaskStatus::Failed);
+        assert!(actual.outcome.result.is_none());
+        assert!(actual.outcome.error.as_deref().is_some_and(|error| {
+            error.contains("local_app_completion_unverified")
+                && !error.contains("terminal spool replacement failed")
+        }));
+        let spool = registry
+            .output_manager
+            .read(
+                &registry.output_manager.path_for(&task_id).unwrap(),
+                tasks::output_manager::OutputOptions::default(),
+            )
+            .await
+            .unwrap();
+        let spool: serde_json::Value = serde_json::from_str(&spool.content).unwrap();
+        assert_eq!(spool["ok"], false);
+        assert_eq!(spool["verified"], false);
+        let events = terminal_events(&listener.received.lock().await, &task_id);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "Failed");
+        assert!(events[0]
+            .1
+            .as_deref()
+            .is_some_and(|error| { error.contains("local_app_completion_unverified") }));
+    }
+
+    #[tokio::test]
+    async fn killed_local_app_callback_never_emits_candidate_completed() {
+        use tasks::handlers::TaskStatusSink as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let registry = scope_test_registry();
+        let task_id = register_terminal_test_workflow(
+            &registry,
+            Some(tasks::scope::LocalAppWorkflowTaskScope::for_build("qa-app").expect("scope")),
+            serde_json::json!({"app_id":"qa-app"}),
+        )
+        .await;
+        registry
+            .set_status(&task_id, tasks::TaskStatus::Killed)
+            .await
+            .expect("kill wins");
+        let listener = Arc::new(FakeListener::default());
+        let sink = terminal_test_sink(root.path(), listener.clone(), registry.clone(), &task_id);
+
+        sink.finish_workflow_terminal(
+            &task_id,
+            platform_api::task_registry::WorkflowTerminalOutcome {
+                result: Some(r#"{"ok":true,"receipt_id":"receipt_late"}"#.into()),
+                ..Default::default()
+            },
+            tasks::TaskStatus::Completed,
+        )
+        .await;
+
+        assert_eq!(
+            registry.get(&task_id).await.unwrap().base().status,
+            tasks::TaskStatus::Killed
+        );
+        let events = terminal_events(&listener.received.lock().await, &task_id);
+        assert_eq!(events, vec![("Cancelled".into(), None)]);
+        assert!(!events.iter().any(|(status, _)| status == "Completed"));
+        let spool = registry
+            .output_manager
+            .read(
+                &registry.output_manager.path_for(&task_id).unwrap(),
+                tasks::output_manager::OutputOptions::default(),
+            )
+            .await
+            .unwrap();
+        let spool: serde_json::Value = serde_json::from_str(&spool.content).unwrap();
+        assert_eq!(spool["ok"], false);
+        assert_eq!(spool["status"], "killed");
+    }
+
+    #[tokio::test]
+    async fn terminal_spool_failure_is_reported_as_failed_not_completed() {
+        use tasks::handlers::TaskStatusSink as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let registry = scope_test_registry();
+        let task_id = register_terminal_test_workflow(
+            &registry,
+            Some(tasks::scope::LocalAppWorkflowTaskScope::for_build("qa-app").expect("scope")),
+            serde_json::json!({"app_id":"qa-app"}),
+        )
+        .await;
+        let output_root = registry.output_manager.output_dir().to_path_buf();
+        let moved_root = output_root.with_extension("moved");
+        std::fs::rename(&output_root, &moved_root).expect("move pinned output root");
+        std::fs::create_dir(&output_root).expect("replace output root identity");
+        let listener = Arc::new(FakeListener::default());
+        let sink = terminal_test_sink(root.path(), listener.clone(), registry.clone(), &task_id);
+
+        sink.finish_workflow_terminal(
+            &task_id,
+            platform_api::task_registry::WorkflowTerminalOutcome {
+                result: Some(r#"{"ok":true,"receipt_id":"receipt_fake"}"#.into()),
+                ..Default::default()
+            },
+            tasks::TaskStatus::Completed,
+        )
+        .await;
+
+        let tasks::state::TaskState::LocalWorkflow(actual) = registry.get(&task_id).await.unwrap()
+        else {
+            panic!("expected workflow")
+        };
+        assert_eq!(actual.base.status, tasks::TaskStatus::Failed);
+        assert!(actual
+            .outcome
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("terminal spool replacement failed")));
+        let events = terminal_events(&listener.received.lock().await, &task_id);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "Failed");
+        assert!(events[0]
+            .1
+            .as_deref()
+            .is_some_and(|error| error.contains("terminal spool replacement failed")));
+    }
+
+    #[tokio::test]
+    async fn unscoped_workflow_terminal_behavior_is_unchanged() {
+        use tasks::handlers::TaskStatusSink as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let registry = scope_test_registry();
+        let task_id = register_terminal_test_workflow(
+            &registry,
+            None,
+            serde_json::json!({"app_id":"looks-like-an-app"}),
+        )
+        .await;
+        let listener = Arc::new(FakeListener::default());
+        let sink = terminal_test_sink(root.path(), listener.clone(), registry.clone(), &task_id);
+        let result = "ordinary custom workflow result";
+
+        sink.finish_workflow_terminal(
+            &task_id,
+            platform_api::task_registry::WorkflowTerminalOutcome {
+                result: Some(result.into()),
+                ..Default::default()
+            },
+            tasks::TaskStatus::Completed,
+        )
+        .await;
+
+        let tasks::state::TaskState::LocalWorkflow(actual) = registry.get(&task_id).await.unwrap()
+        else {
+            panic!("expected workflow")
+        };
+        assert_eq!(actual.base.status, tasks::TaskStatus::Completed);
+        assert_eq!(actual.outcome.result.as_deref(), Some(result));
+        assert_eq!(
+            terminal_events(&listener.received.lock().await, &task_id),
+            vec![("Completed".into(), None)]
+        );
+    }
+
     fn scope_test_launcher(
         root: &std::path::Path,
         registry: Arc<tasks::registry::TaskRegistry>,
@@ -4562,10 +5967,19 @@ mod run_id_tests {
         let plugin_workflows = workflow::PluginWorkflowRegistry::new();
         let plugin_script_path = root.join("plugin-local-app-build.js");
         std::fs::write(&plugin_script_path, plugin_build_script()).expect("plugin workflow script");
-        plugin_workflows.register(vec![workflow::PluginWorkflowEntry {
-            name: crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
-            script_path: plugin_script_path,
-        }]);
+        let plugin_use_test_script_path = root.join("plugin-local-app-use-test.js");
+        std::fs::write(&plugin_use_test_script_path, plugin_use_test_script())
+            .expect("plugin use-test workflow script");
+        plugin_workflows.register(vec![
+            workflow::PluginWorkflowEntry {
+                name: crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
+                script_path: plugin_script_path,
+            },
+            workflow::PluginWorkflowEntry {
+                name: crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID.into(),
+                script_path: plugin_use_test_script_path,
+            },
+        ]);
         super::MobileWorkflowLauncher {
             registry,
             project_cwd: root.to_path_buf(),
@@ -4614,7 +6028,11 @@ mod run_id_tests {
                         name: Some(
                             crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into(),
                         ),
-                        args: Some(serde_json::json!({ "operation": "update", "app_id": app_id })),
+                        args: Some(serde_json::json!({
+                            "operation": "update",
+                            "app_id": app_id,
+                            "authoring_spec": fixture_authoring_spec_value(family),
+                        })),
                         session_uuid: Some("session-scope".into()),
                         ..Default::default()
                     })
@@ -4640,7 +6058,11 @@ mod run_id_tests {
             // so the same run also takes that app's exclusive workspace lease.
             let mut genuine = tool_workflow::WorkflowLaunchSpec {
                 name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
-                args: Some(serde_json::json!({ "operation": "update", "app_id": app_id })),
+                args: Some(serde_json::json!({
+                    "operation": "update",
+                    "app_id": app_id,
+                    "authoring_spec": fixture_authoring_spec_value(family),
+                })),
                 ..Default::default()
             };
             let minted = super::apply_materialized_local_app_collections_with_identity(
@@ -4659,6 +6081,174 @@ mod run_id_tests {
                 "a build scope is what takes the app's exclusive workspace lease"
             );
         }
+    }
+
+    /// The real Plugin use-test launch must mint a UseTest scope and carry it
+    /// through the registry row. A custom script that copies the short meta
+    /// name remains unscoped, so an app id in caller args cannot borrow the QA
+    /// gate or the delete guard.
+    #[tokio::test]
+    async fn a_verified_use_test_launch_gets_use_test_scope_but_custom_name_does_not() {
+        use tool_workflow::WorkflowLauncher as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let app_id = "usetest123";
+        scaffold_local_app(root.path(), app_id, local_apps::AppRuntimeProfile::ReactDom);
+        let registry = scope_test_registry();
+        let launcher = scope_test_launcher(root.path(), registry.clone());
+
+        let launched = launcher
+            .launch(tool_workflow::WorkflowLaunchSpec {
+                name: Some(crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID.into()),
+                args: Some(serde_json::json!({
+                    "app_id": app_id,
+                    "scope": "acceptance",
+                    "scenarios": [],
+                    "quality_level": "balanced",
+                })),
+                session_uuid: Some("session-scope".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("verified use-test workflow must launch");
+        let row = registry
+            .get(&launched.task_id)
+            .await
+            .expect("verified use-test row");
+        let tasks::state::TaskState::LocalWorkflow(state) = row else {
+            panic!("expected LocalWorkflow row")
+        };
+        let scope = state.scope.as_ref().expect("verified use-test scope");
+        assert_eq!(scope.app_id(), app_id);
+        assert_eq!(
+            scope.purpose(),
+            tasks::scope::LocalAppWorkflowPurpose::UseTest
+        );
+        assert!(!scope.requires_workspace_lease());
+        assert_eq!(
+            registry.find_nonterminal_local_app_workflows(app_id).await,
+            vec![launched.task_id.clone()]
+        );
+
+        let custom = launcher
+            .launch(tool_workflow::WorkflowLaunchSpec {
+                name: Some(crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID.into()),
+                script: Some(
+                    "export const meta = { name: 'local-app-use-test', description: 'Custom lookalike' };\nreturn 1;\n".into(),
+                ),
+                args: Some(serde_json::json!({"app_id": app_id})),
+                session_uuid: Some("session-scope".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("custom workflow should still launch");
+        let custom_row = registry.get(&custom.task_id).await.expect("custom row");
+        let tasks::state::TaskState::LocalWorkflow(custom_state) = custom_row else {
+            panic!("expected custom LocalWorkflow row")
+        };
+        assert!(custom_state.scope.is_none());
+    }
+
+    #[tokio::test]
+    async fn verified_use_test_launch_reaches_host_terminal_gate_but_custom_script_does_not() {
+        use tasks::handlers::TaskStatusSink as _;
+        use tool_workflow::WorkflowLauncher as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let app_id = "usetestgate";
+        scaffold_local_app(root.path(), app_id, local_apps::AppRuntimeProfile::ReactDom);
+        let registry = scope_test_registry();
+        let launcher = scope_test_launcher(root.path(), registry.clone());
+        let host = crate::local_apps_host::LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            client_adapter::ListenerSink::arc(Arc::new(FakeListener::default())),
+            None,
+            false,
+            None,
+        );
+        launcher
+            .status_sink
+            .attach_local_apps_host(Arc::downgrade(&host))
+            .expect("attach Host terminal validator");
+
+        let genuine = launcher
+            .launch(tool_workflow::WorkflowLaunchSpec {
+                name: Some(crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID.into()),
+                args: Some(serde_json::json!({
+                    "app_id": app_id,
+                    "scope": "acceptance",
+                    "scenarios": [],
+                    "quality_level": "balanced",
+                })),
+                session_uuid: Some("session-scope".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("verified use-test launch");
+        registry
+            .output_manager
+            .allocate(&genuine.task_id)
+            .await
+            .expect("stub workflow spool");
+        let forged_result = r#"{"ok":true,"receipt_id":"receipt_fake"}"#;
+        launcher
+            .status_sink
+            .finish_workflow_terminal(
+                &genuine.task_id,
+                platform_api::task_registry::WorkflowTerminalOutcome {
+                    result: Some(forged_result.into()),
+                    ..Default::default()
+                },
+                tasks::TaskStatus::Completed,
+            )
+            .await;
+        let tasks::state::TaskState::LocalWorkflow(genuine_state) =
+            registry.get(&genuine.task_id).await.expect("genuine task")
+        else {
+            panic!("expected genuine LocalWorkflow row")
+        };
+        assert_eq!(genuine_state.base.status, tasks::TaskStatus::Failed);
+        assert!(genuine_state.outcome.error.as_deref().is_some_and(|error| {
+            error.contains("local_app_completion_unverified")
+                && !error.contains("terminal spool replacement failed")
+        }));
+
+        let custom = launcher
+            .launch(tool_workflow::WorkflowLaunchSpec {
+                name: Some(crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID.into()),
+                script: Some(
+                    "export const meta = { name: 'local-app-use-test', description: 'Custom lookalike' };\nreturn 1;\n".into(),
+                ),
+                args: Some(serde_json::json!({"app_id": app_id})),
+                session_uuid: Some("session-scope".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("same-name custom workflow launch");
+        registry
+            .output_manager
+            .allocate(&custom.task_id)
+            .await
+            .expect("custom stub workflow spool");
+        launcher
+            .status_sink
+            .finish_workflow_terminal(
+                &custom.task_id,
+                platform_api::task_registry::WorkflowTerminalOutcome {
+                    result: Some(forged_result.into()),
+                    ..Default::default()
+                },
+                tasks::TaskStatus::Completed,
+            )
+            .await;
+        let tasks::state::TaskState::LocalWorkflow(custom_state) =
+            registry.get(&custom.task_id).await.expect("custom task")
+        else {
+            panic!("expected custom LocalWorkflow row")
+        };
+        assert!(custom_state.scope.is_none());
+        assert_eq!(custom_state.base.status, tasks::TaskStatus::Completed);
+        assert_eq!(custom_state.outcome.result.as_deref(), Some(forged_result));
     }
 
     /// r2-tests-honesty-006's launcher-level companion to
@@ -4709,6 +6299,7 @@ mod run_id_tests {
                 let mut manifest = local_apps::AppManifest::for_new_app(app_id, "Fixture");
                 stamp_profile(&mut manifest, local_apps::AppRuntimeProfile::ReactDom);
                 local_apps::save_manifest(&layout, &manifest).expect("manifest");
+                install_active_authoring_contract(&layout, &manifest);
                 stamp_record_mirror(&layout, true);
             }
 
@@ -4718,6 +6309,7 @@ mod run_id_tests {
             let caller_args = serde_json::json!({
                 "app_id": app_id,
                 "operation": operation,
+                "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::ReactDom),
             });
             let caller_keys: std::collections::BTreeSet<String> = caller_args
                 .as_object()
@@ -4785,6 +6377,20 @@ mod run_id_tests {
                  `host_context` (persisted host_context: {:?})",
                 after_object.get("host_context")
             );
+            if operation == "update" {
+                let expected_digest =
+                    crate::local_apps_build::active_build_authoring_contract_sha256(&layout)
+                        .expect("active build receipt")
+                        .expect("active authoring contract digest");
+                assert_eq!(
+                    after_object
+                        .get("host_context")
+                        .and_then(|value| value.get("authoring_contract_sha256"))
+                        .and_then(serde_json::Value::as_str),
+                    Some(expected_digest.as_str()),
+                    "update host context must carry the digest selected by the active successful build receipt"
+                );
+            }
 
             let injected: std::collections::BTreeSet<String> = after_object
                 .keys()
@@ -4870,6 +6476,82 @@ mod run_id_tests {
         }
     }
 
+    #[test]
+    fn host_context_uses_the_active_build_digest_across_contract_revisions() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let app_id = "digest123";
+        let layout = local_apps::AppLayout::new(root.path(), app_id).expect("layout");
+        let mut manifest = local_apps::AppManifest::for_new_app(app_id, "Digest Fixture");
+        stamp_profile(&mut manifest, local_apps::AppRuntimeProfile::ReactDom);
+        local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        install_active_authoring_contract(&layout, &manifest);
+        stamp_record_mirror(&layout, true);
+
+        let launch_context_digest = |spec_value: serde_json::Value| {
+            let mut spec = tool_workflow::WorkflowLaunchSpec {
+                name: Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID.into()),
+                args: Some(serde_json::json!({
+                    "operation": "update",
+                    "app_id": app_id,
+                    "authoring_spec": spec_value,
+                })),
+                ..Default::default()
+            };
+            super::apply_materialized_local_app_collections(
+                root.path(),
+                &mut spec,
+                plugin_build_script(),
+            )
+            .expect("verified update launch");
+            spec.args
+                .as_ref()
+                .and_then(|args| args.pointer("/host_context/authoring_contract_sha256"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .expect("Host digest")
+        };
+
+        let old_digest = crate::local_apps_build::active_build_authoring_contract_sha256(&layout)
+            .expect("old receipt")
+            .expect("old digest");
+        let old_seen = launch_context_digest(fixture_authoring_spec_value(
+            local_apps::AppRuntimeProfile::ReactDom,
+        ));
+        assert_eq!(old_seen, old_digest);
+
+        let mut current =
+            local_apps::load_authoring_contract(&layout, &old_digest).expect("old contract");
+        current.revision += 1;
+        let current_digest =
+            local_apps::save_authoring_contract(&layout, &current).expect("current contract");
+        assert_ne!(current_digest, old_digest);
+
+        // A newer immutable contract file does not become active until the
+        // successful-build receipt selects its digest.
+        let still_old = launch_context_digest(fixture_authoring_spec_value(
+            local_apps::AppRuntimeProfile::ReactDom,
+        ));
+        assert_eq!(still_old, old_digest);
+
+        let receipt_path = layout
+            .root()
+            .join(layout.build_rel(false))
+            .join("build.json");
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&receipt_path).expect("receipt"))
+                .expect("receipt json");
+        receipt["authoringContractSha256"] = serde_json::Value::String(current_digest.clone());
+        std::fs::write(
+            &receipt_path,
+            serde_json::to_vec_pretty(&receipt).expect("receipt bytes"),
+        )
+        .expect("select current contract");
+        let current_seen = launch_context_digest(fixture_authoring_spec_value(
+            local_apps::AppRuntimeProfile::ReactDom,
+        ));
+        assert_eq!(current_seen, current_digest);
+    }
+
     /// r1-workflow-runtime-03 / r1-e2e-trace-005 / r1-backlog-workflow-runtime-04:
     /// the Workflow tool's OWN resume hint (workflow_support.rs's sibling
     /// `tools/workflow/src/lib.rs:1497`) tells the model to resume with
@@ -4891,6 +6573,7 @@ mod run_id_tests {
         let mut manifest = local_apps::AppManifest::for_new_app(app_id, "Resume Fixture");
         stamp_profile(&mut manifest, local_apps::AppRuntimeProfile::ReactDom);
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        install_active_authoring_contract(&layout, &manifest);
         stamp_record_mirror(&layout, true);
 
         let registry = scope_test_registry();
@@ -4917,7 +6600,12 @@ mod run_id_tests {
                     script_sha256: Some(super::sha256_hex(trusted_script.as_bytes())),
                     script_is_verbatim_builtin: Some(true),
                     args_json: Some(
-                        serde_json::json!({"app_id": app_id, "operation": "update"}).to_string(),
+                        serde_json::json!({
+                            "app_id": app_id,
+                            "operation": "update",
+                            "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::ReactDom),
+                        })
+                        .to_string(),
                     ),
                     description: "Resumed local app build".into(),
                     start_time: None,
@@ -4939,6 +6627,7 @@ mod run_id_tests {
                 args: Some(serde_json::json!({
                     "app_id": app_id,
                     "operation": "update",
+                    "authoring_spec": fixture_authoring_spec_value(local_apps::AppRuntimeProfile::ReactDom),
                 })),
                 ..Default::default()
             })
@@ -5035,6 +6724,7 @@ mod run_id_tests {
                 fields: Vec::new(),
             });
             local_apps::save_manifest(&layout, &manifest).expect("manifest");
+            install_active_authoring_contract(&layout, &manifest);
             stamp_record_mirror(&layout, true);
 
             let registry = scope_test_registry();
@@ -5150,7 +6840,10 @@ mod run_id_tests {
             let forged_layout =
                 local_apps::AppLayout::new(forged_root.path(), app_id).expect("layout");
             let mut forged_manifest = local_apps::AppManifest::for_new_app(app_id, "Forged");
-            stamp_profile(&mut forged_manifest, local_apps::AppRuntimeProfile::ReactDom);
+            stamp_profile(
+                &mut forged_manifest,
+                local_apps::AppRuntimeProfile::ReactDom,
+            );
             local_apps::save_manifest(&forged_layout, &forged_manifest).expect("manifest");
             stamp_record_mirror(&forged_layout, true);
             let forged_registry = scope_test_registry();
@@ -5449,6 +7142,89 @@ mod run_id_tests {
                 .is_empty(),
             "and must block ONLY its own app's delete"
         );
+    }
+
+    /// Restart adoption must preserve the Host-authenticated UseTest
+    /// purpose, while the same workflow id/app id with a custom script stays
+    /// unscoped. This exercises the persisted checkpoint path rather than
+    /// manually constructing a scope for the registry.
+    #[tokio::test]
+    async fn an_adopted_in_flight_use_test_gets_use_test_scope() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let app_id = "adoptusetest";
+        scaffold_local_app(root.path(), app_id, local_apps::AppRuntimeProfile::ReactDom);
+        let registry = scope_test_registry();
+        let checkpoints = super::MobileWorkflowCheckpointStore::new(
+            root.path().join(".claude"),
+            root.path().to_path_buf(),
+        );
+        persist_and_adopt_checkpoint(
+            &checkpoints,
+            &registry,
+            root.path(),
+            "session-adopt-use-test",
+            "wuadopt01",
+            "wf_useadopt1",
+            crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID,
+            app_id,
+            plugin_use_test_script().as_bytes(),
+            true,
+        )
+        .await;
+        let state = registry
+            .get("wuadopt01")
+            .await
+            .expect("adopted use-test row");
+        let tasks::state::TaskState::LocalWorkflow(state) = state else {
+            panic!("expected LocalWorkflow row")
+        };
+        let scope = state.scope.as_ref().expect("adopted UseTest scope");
+        assert_eq!(scope.app_id(), app_id);
+        assert_eq!(
+            scope.purpose(),
+            tasks::scope::LocalAppWorkflowPurpose::UseTest
+        );
+        assert_eq!(
+            registry.find_nonterminal_local_app_workflows(app_id).await,
+            vec!["wuadopt01".to_string()]
+        );
+
+        let forged_root = tempfile::tempdir().expect("forged tempdir");
+        scaffold_local_app(
+            forged_root.path(),
+            app_id,
+            local_apps::AppRuntimeProfile::ReactDom,
+        );
+        let forged_registry = scope_test_registry();
+        let forged_checkpoints = super::MobileWorkflowCheckpointStore::new(
+            forged_root.path().join(".claude"),
+            forged_root.path().to_path_buf(),
+        );
+        persist_and_adopt_checkpoint(
+            &forged_checkpoints,
+            &forged_registry,
+            forged_root.path(),
+            "session-adopt-use-test",
+            "wuforged1",
+            "wf_useforged",
+            crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID,
+            app_id,
+            b"export const meta = { name: 'local-app-use-test' }; return 1;",
+            false,
+        )
+        .await;
+        let forged_state = forged_registry
+            .get("wuforged1")
+            .await
+            .expect("forged adopted row");
+        let tasks::state::TaskState::LocalWorkflow(forged_state) = forged_state else {
+            panic!("expected forged LocalWorkflow row")
+        };
+        assert!(forged_state.scope.is_none());
+        assert!(forged_registry
+            .find_nonterminal_local_app_workflows(app_id)
+            .await
+            .is_empty());
     }
 
     /// P-1.12 residual 1, the other half. A checkpoint that carries a real

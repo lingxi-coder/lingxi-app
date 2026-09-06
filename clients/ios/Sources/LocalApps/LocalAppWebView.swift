@@ -1,3 +1,4 @@
+import CoreFoundation
 import SwiftUI
 import WebKit
 
@@ -15,6 +16,72 @@ struct LocalAppUIExecutionResult: Sendable {
 
     static func failure(_ message: String) -> Self {
         Self(resultJSON: nil, error: message)
+    }
+}
+
+/// Host-owned identity attached only to QA UI requests. Ordinary UI values
+/// remain opaque strings and never pass through this decoder.
+struct LocalAppQaEnvelope: Sendable {
+    let expectedRuntimeURL: URL
+    let actionValue: String?
+
+    enum DecodeError: Error, LocalizedError {
+        case invalid(String)
+
+        var errorDescription: String? {
+            if case let .invalid(message) = self { return message }
+            return nil
+        }
+    }
+
+    static func decode(_ value: String?, requestID: String) -> Result<Self?, DecodeError> {
+        // The request id is minted by the Host and cannot be supplied by page
+        // content. Without this discriminator, filling a text field with a
+        // literal JSON object containing `lingxi_qa` would become control data.
+        guard requestID.hasPrefix("qa-ui-") else { return .success(nil) }
+        guard let value else {
+            return .failure(.invalid("Invalid Local App QA request envelope"))
+        }
+        guard let data = value.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed) as? [String: Any]
+        else { return .failure(.invalid("Invalid Local App QA request envelope")) }
+        guard object.keys.count == 1,
+              let qa = object["lingxi_qa"] as? [String: Any],
+              let version = qa["version"] as? NSNumber,
+              CFGetTypeID(version) != CFBooleanGetTypeID(),
+              version.doubleValue == 1,
+              let expected = qa["expected_runtime_url"] as? String,
+              let expectedURL = URL(string: expected),
+              Self.isRuntimeURL(expectedURL),
+              qa.keys.allSatisfy({ ["version", "expected_runtime_url", "action_value"].contains($0) })
+        else { return .failure(.invalid("Invalid Local App QA request envelope")) }
+        let actionValue: String?
+        if let raw = qa["action_value"], !(raw is NSNull) {
+            guard let string = raw as? String else {
+                return .failure(.invalid("Local App QA action_value must be a string or null"))
+            }
+            actionValue = string
+        } else {
+            actionValue = nil
+        }
+        return .success(Self(expectedRuntimeURL: expectedURL, actionValue: actionValue))
+    }
+
+    static func isRuntimeURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http",
+              let host = url.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]")),
+              ["127.0.0.1", "localhost", "::1"].contains(host),
+              url.user == nil, url.password == nil, url.fragment == nil,
+              url.path == "/",
+              let port = url.port, (1 ... 65_535).contains(port),
+              let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+              queryItems.count == 1,
+              queryItems[0].name == "lingxi_runtime",
+              let marker = queryItems[0].value,
+              !marker.isEmpty,
+              marker.utf8.allSatisfy({ (48 ... 57).contains($0) })
+        else { return false }
+        return true
     }
 }
 
@@ -106,11 +173,26 @@ final class LocalAppWebViewRegistry {
 
     #if canImport(engine_mobileFFI)
         func execute(request: AppUiRequestDto) async -> LocalAppUIExecutionResult {
+            let qaExpectedURL: URL?
+            switch LocalAppQaEnvelope.decode(request.value, requestID: request.requestId) {
+            case let .success(envelope): qaExpectedURL = envelope?.expectedRuntimeURL
+            case .failure: qaExpectedURL = nil
+            }
             for _ in 0 ..< 50 {
-                if let controller = controllers[request.appId]?.value, controller.isReady {
-                    return await controller.execute(request: request)
+                if let controller = controllers[request.appId]?.value {
+                    if let qaExpectedURL {
+                        if controller.qaDocument(expectedURL: qaExpectedURL) != nil {
+                            return await controller.execute(request: request)
+                        }
+                    } else if controller.isReady {
+                        return await controller.execute(request: request)
+                    }
                 }
-                try? await Task.sleep(for: .milliseconds(200))
+                do {
+                    try await Task.sleep(for: .milliseconds(200))
+                } catch {
+                    return .failure(String(localized: "local_apps_error_ui_closed"))
+                }
             }
             return .failure(String(localized: "local_apps_error_ui_not_open"))
         }
@@ -330,8 +412,15 @@ final class LocalAppBridgeBroker: NSObject, WKScriptMessageHandler {
 
 @MainActor
 final class LocalAppWebViewController {
+    struct QaDocument: Equatable, Sendable {
+        let loadedURL: URL
+        let navigationGeneration: UInt64
+    }
+
     let appID: String
     let broker: LocalAppBridgeBroker
+    let platform: String
+    let formFactor: String
     weak var webView: WKWebView?
 
     /// A controller is routable only after WebKit has committed the page.
@@ -339,14 +428,22 @@ final class LocalAppWebViewController {
     /// engine request is not lost, therefore the registry must distinguish
     /// "mounted" from "ready".
     private(set) var isReady = true
+    private(set) var committedURL: URL?
+    private(set) var navigationGeneration: UInt64 = 0
+    private var expectedURL: URL?
+    private var isClosed = false
 
-    init(appID: String, broker: LocalAppBridgeBroker) {
+    init(appID: String, broker: LocalAppBridgeBroker, formFactor: String = "iphone") {
         self.appID = appID
         self.broker = broker
+        platform = "ios"
+        self.formFactor = formFactor
     }
 
     func close() {
+        isClosed = true
         isReady = false
+        committedURL = nil
         broker.detach()
         webView?.stopLoading()
         for name in LocalAppWebViewRepresentable.messageHandlerNames {
@@ -358,16 +455,158 @@ final class LocalAppWebViewController {
         webView = nil
     }
 
-    func markNotReady() {
+    func markNotReady(navigationGeneration: UInt64? = nil) {
+        if let navigationGeneration, navigationGeneration != self.navigationGeneration { return }
         isReady = false
+        committedURL = nil
     }
 
+    @discardableResult
+    func beginNavigation(expectedURL: URL) -> UInt64 {
+        navigationGeneration &+= 1
+        self.expectedURL = expectedURL
+        committedURL = nil
+        isReady = false
+        return navigationGeneration
+    }
+
+    /// A document navigation initiated by the page keeps the Host-selected
+    /// runtime identity while receiving a fresh callback generation.
+    @discardableResult
+    func beginSameRuntimeNavigation() -> UInt64 {
+        navigationGeneration &+= 1
+        committedURL = nil
+        isReady = false
+        return navigationGeneration
+    }
+
+    func markReady(committedURL: URL, navigationGeneration: UInt64? = nil) {
+        guard navigationGeneration == nil || navigationGeneration == self.navigationGeneration,
+              !isClosed,
+              let expectedURL,
+              Self.sameRuntimeIdentity(expectedURL, committedURL)
+        else {
+            // A late callback belongs to an older navigation. It must not
+            // clear or certify the newer navigation's state.
+            if navigationGeneration == nil || navigationGeneration == self.navigationGeneration {
+                isReady = false
+                self.committedURL = nil
+            }
+            return
+        }
+        self.committedURL = committedURL
+        isReady = true
+    }
+
+    /// Test/manual WebViews without a navigation delegate can still mark the
+    /// controller ready for ordinary (non-QA) UI actions. QA requests require
+    /// the committed-URL overload above and therefore cannot use this seam.
     func markReady() {
         isReady = true
     }
 
+    func qaDocument(
+        expectedURL: URL,
+        minimumNavigationGeneration: UInt64 = 0
+    ) -> QaDocument? {
+        guard !isClosed,
+              webView != nil,
+              isReady,
+              navigationGeneration >= minimumNavigationGeneration,
+              let committedURL,
+              Self.sameRuntimeIdentity(expectedURL, committedURL)
+        else { return nil }
+        return QaDocument(
+            loadedURL: committedURL,
+            navigationGeneration: navigationGeneration
+        )
+    }
+
+    func waitForQaDocument(
+        _ expectedURL: URL,
+        minimumNavigationGeneration: UInt64 = 0
+    ) async -> QaDocument? {
+        guard LocalAppQaEnvelope.isRuntimeURL(expectedURL) else { return nil }
+        for _ in 0 ..< 100 {
+            if let document = qaDocument(
+                expectedURL: expectedURL,
+                minimumNavigationGeneration: minimumNavigationGeneration
+            ) { return document }
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                return nil
+            }
+        }
+        return nil
+    }
+
+    static func sameRuntimeIdentity(_ expected: URL, _ committed: URL) -> Bool {
+        guard let expectedScheme = expected.scheme?.lowercased(),
+              let committedScheme = committed.scheme?.lowercased(),
+              expectedScheme == committedScheme,
+              let expectedHost = expected.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]")),
+              let committedHost = committed.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]")),
+              expectedHost == committedHost,
+              (expected.port ?? (expectedScheme == "http" ? 80 : 443)) == (committed.port ?? (committedScheme == "http" ? 80 : 443)),
+              committed.user == nil, committed.password == nil,
+              let expectedMarkers = URLComponents(url: expected, resolvingAgainstBaseURL: false)?.queryItems?.filter({ $0.name == "lingxi_runtime" }),
+              expectedMarkers.count == 1,
+              let expectedMarker = expectedMarkers[0].value,
+              let committedMarkers = URLComponents(url: committed, resolvingAgainstBaseURL: false)?.queryItems?.filter({ $0.name == "lingxi_runtime" }),
+              committedMarkers.count == 1,
+              let committedMarker = committedMarkers[0].value
+        else { return false }
+        return !expectedMarker.isEmpty && expectedMarker == committedMarker
+    }
+
     #if canImport(engine_mobileFFI)
         func execute(request: AppUiRequestDto) async -> LocalAppUIExecutionResult {
+            guard request.appId == appID else {
+                return .failure(String(localized: "local_apps_error_ui_appid_mismatch"))
+            }
+            guard let webView else {
+                return .failure(String(localized: "local_apps_error_ui_closed"))
+            }
+
+            let qa: LocalAppQaEnvelope?
+            switch LocalAppQaEnvelope.decode(request.value, requestID: request.requestId) {
+            case let .success(envelope):
+                qa = envelope
+            case let .failure(error):
+                return .failure(error.localizedDescription)
+            }
+            let actionValue = qa == nil ? request.value : qa?.actionValue
+            if let qa {
+                guard let before = await waitForQaDocument(qa.expectedRuntimeURL) else {
+                    return .failure("Local App QA document identity did not become ready")
+                }
+                let result = await execute(request: request, value: actionValue)
+                // Let synchronous page-triggered navigation enter its delegate
+                // callback before validating the post-action document.
+                do {
+                    try await Task.sleep(for: .milliseconds(50))
+                } catch {
+                    return .failure("Local App QA action was cancelled")
+                }
+                let navigationAction = request.action == .navigate
+                    || request.action == .back
+                    || request.action == .reload
+                let minimumGeneration = navigationAction
+                    ? before.navigationGeneration &+ 1
+                    : before.navigationGeneration
+                guard let after = await waitForQaDocument(
+                    qa.expectedRuntimeURL,
+                    minimumNavigationGeneration: minimumGeneration
+                ) else {
+                    return .failure("Local App QA document identity changed during the action")
+                }
+                return wrapQaResult(result, requestedURL: qa.expectedRuntimeURL, document: after)
+            }
+            return await execute(request: request, value: actionValue)
+        }
+
+        private func execute(request: AppUiRequestDto, value: String?) async -> LocalAppUIExecutionResult {
             guard request.appId == appID else {
                 return .failure(String(localized: "local_apps_error_ui_appid_mismatch"))
             }
@@ -387,13 +626,13 @@ final class LocalAppWebViewController {
                 return encodedResult(["ok": true, "action": "reload"])
             }
             if request.action == .captureView {
-                return await captureFrame(in: webView, value: request.value)
+                return await captureFrame(in: webView, value: value)
             }
 
             let payload: [String: Any] = [
                 "action": actionName(request.action),
                 "target": targetPayload(request.target),
-                "value": request.value ?? NSNull(),
+                "value": value ?? NSNull(),
             ]
             guard JSONSerialization.isValidJSONObject(payload),
                   let data = try? JSONSerialization.data(withJSONObject: payload),
@@ -418,6 +657,35 @@ final class LocalAppWebViewController {
                     ?? info["_WKJavaScriptExceptionMessage"] as? String
                 return .failure(thrown ?? error.localizedDescription)
             }
+        }
+
+        private func wrapQaResult(
+            _ result: LocalAppUIExecutionResult,
+            requestedURL: URL,
+            document: QaDocument
+        ) -> LocalAppUIExecutionResult {
+            guard let resultJSON = result.resultJSON,
+                  let resultData = resultJSON.data(using: .utf8),
+                  let original = try? JSONSerialization.jsonObject(with: resultData, options: .fragmentsAllowed),
+                  let data = try? JSONSerialization.data(withJSONObject: [
+                      "lingxi_qa": [
+                          "version": 1,
+                          "requested_runtime_url": requestedURL.absoluteString,
+                          "loaded_runtime_url": document.loadedURL.absoluteString,
+                          "platform": platform,
+                          "form_factor": formFactor,
+                          "navigation_generation": document.navigationGeneration,
+                          "width": webView?.bounds.width ?? 0,
+                          "height": webView?.bounds.height ?? 0,
+                          "device_pixel_ratio": webView?.traitCollection.displayScale ?? 1,
+                      ],
+                      "result": original,
+                  ], options: [])
+            else { return .failure("Local App QA result could not be attested") }
+            return LocalAppUIExecutionResult(
+                resultJSON: String(data: data, encoding: .utf8),
+                error: result.error
+            )
         }
 
         private func actionName(_ action: AppUiActionKindDto) -> String {
@@ -856,6 +1124,10 @@ final class LocalAppWebViewController {
             if (request.action === 'navigate') {
               const destination = new URL(request.value || '', location.href);
               if (destination.origin !== location.origin) throw new Error('Only same-origin navigation is allowed');
+              const runtimeMarker = new URL(location.href).searchParams.get('lingxi_runtime');
+              if (runtimeMarker && !destination.searchParams.has('lingxi_runtime')) {
+                destination.searchParams.set('lingxi_runtime', runtimeMarker);
+              }
               location.assign(destination.href);
               return JSON.stringify({ ok: true, action: 'navigate', url: destination.href });
             }
@@ -1089,22 +1361,19 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         webView.isInspectable = false
         context.coordinator.broker.webView = webView
         context.coordinator.controller.webView = webView
-        context.coordinator.controller.markNotReady()
+        context.coordinator.beginNavigation(to: url, in: webView)
         LocalAppWebViewRegistry.shared.register(context.coordinator.controller, appID: appID)
-        context.coordinator.loadedURL = url
-        webView.load(URLRequest(url: url, cachePolicy: .reloadRevalidatingCacheData))
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.onBridgeRequest = onBridgeRequest
         context.coordinator.onExternalNavigation = onExternalNavigation
-        // WebKit normalizes the committed url (a path-less loopback origin gains a
-        // trailing "/"), so the last REQUESTED url is what a reload must key on.
-        guard context.coordinator.loadedURL != url else { return }
-        context.coordinator.loadedURL = url
-        context.coordinator.controller.markNotReady()
-        webView.load(URLRequest(url: url, cachePolicy: .reloadRevalidatingCacheData))
+        // The runtime marker makes a same-port rebuild a new requested URL, so
+        // SwiftUI must drive a real navigation even when the loopback port is
+        // unchanged. Ordinary same-origin navigation remains untouched.
+        guard context.coordinator.requestedURL != url else { return }
+        context.coordinator.beginNavigation(to: url, in: webView)
     }
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
@@ -1117,8 +1386,10 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         let broker: LocalAppBridgeBroker
         let controller: LocalAppWebViewController
         private let allowedOrigin: URL
-        /// Last url handed to `webView.load`, mirroring the Android sibling's `view.tag`.
-        var loadedURL: URL?
+        /// Last URL handed to WebKit. It is not treated as proof of a loaded
+        /// document; `didFinish` validates the committed URL separately.
+        var requestedURL: URL?
+        private var navigationGenerations: [ObjectIdentifier: UInt64] = [:]
         var onExternalNavigation: (URL) -> Void
         var onBridgeRequest: ((LocalAppBridgeRequest) -> Void)? {
             didSet { broker.onRequest = onBridgeRequest }
@@ -1132,7 +1403,11 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         ) {
             let broker = LocalAppBridgeBroker(appID: appID, onRequest: onBridgeRequest)
             self.broker = broker
-            controller = LocalAppWebViewController(appID: appID, broker: broker)
+            controller = LocalAppWebViewController(
+                appID: appID,
+                broker: broker,
+                formFactor: LocalAppWebViewRepresentable.formFactor(for: UIDevice.current.userInterfaceIdiom)
+            )
             self.allowedOrigin = allowedOrigin
             self.onBridgeRequest = onBridgeRequest
             self.onExternalNavigation = onExternalNavigation
@@ -1155,20 +1430,51 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
             }
         }
 
+        func beginNavigation(to url: URL, in webView: WKWebView) {
+            requestedURL = url
+            let generation = controller.beginNavigation(expectedURL: url)
+            if let navigation = webView.load(URLRequest(url: url, cachePolicy: .reloadRevalidatingCacheData)) {
+                navigationGenerations[ObjectIdentifier(navigation)] = generation
+            }
+        }
+
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation?) {
-            controller.markNotReady()
+            guard let navigation else {
+                controller.markNotReady()
+                return
+            }
+            let key = ObjectIdentifier(navigation)
+            let generation = navigationGenerations[key] ?? controller.beginSameRuntimeNavigation()
+            navigationGenerations[key] = generation
+            controller.markNotReady(navigationGeneration: generation)
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
-            controller.markReady()
+            guard let navigation,
+                  let generation = navigationGenerations.removeValue(forKey: ObjectIdentifier(navigation)),
+                  let committedURL = webView.url
+            else {
+                controller.markNotReady()
+                return
+            }
+            controller.markReady(
+                committedURL: committedURL,
+                navigationGeneration: generation
+            )
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation?, withError error: Error) {
-            controller.markNotReady()
+            guard let navigation,
+                  let generation = navigationGenerations.removeValue(forKey: ObjectIdentifier(navigation))
+            else { return }
+            controller.markNotReady(navigationGeneration: generation)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation?, withError error: Error) {
-            controller.markNotReady()
+            guard let navigation,
+                  let generation = navigationGenerations.removeValue(forKey: ObjectIdentifier(navigation))
+            else { return }
+            controller.markNotReady(navigationGeneration: generation)
         }
 
         func webView(

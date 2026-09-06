@@ -1655,6 +1655,115 @@ impl TaskRegistry {
         Ok(updated)
     }
 
+    /// Atomically commit a Host-validated Local App Build/UseTest success.
+    ///
+    /// This is intentionally not a generic workflow terminal primitive.  It
+    /// accepts only a [`TaskState::LocalWorkflow`] row carrying an authenticated
+    /// Build or UseTest scope, and it exists because those two workflows have
+    /// two local durable publications that must linearize with the absorbing
+    /// task state: the canonical result spool and the Host's already-prepared
+    /// active QA receipt pointer.
+    ///
+    /// Expensive QA/evidence validation must happen before this method.  While
+    /// the registry write lock is held, this method performs only the bounded
+    /// rooted spool replacement and `publish_prepared`, then assigns the exact
+    /// resulting outcome/status.  A competing kill therefore wins before both
+    /// publications (and the closure is not called), or observes the committed
+    /// terminal state afterward.  `publish_prepared` must not call back into
+    /// this registry, perform UI/network work, scan QA artifacts, or do large
+    /// cleanup; those operations would introduce lock inversion or make the
+    /// critical section unbounded. The returned boolean is true only when
+    /// this call committed the prepared publication; an already-terminal row
+    /// is returned with false so callers cannot emit a success summary for a
+    /// publication closure that never ran.
+    pub async fn commit_local_app_workflow_terminal<F, Fut>(
+        &self,
+        task_id: &str,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        publish_prepared: F,
+    ) -> Result<(TaskState, bool), TaskError>
+    where
+        F: FnOnce() -> Fut + Send,
+        Fut: std::future::Future<Output = Result<(), String>> + Send,
+    {
+        let canonical_result = outcome.result.clone().ok_or_else(|| {
+            TaskError::Internal(
+                "Local App terminal commit requires a canonical result payload".into(),
+            )
+        })?;
+        let task_id = self.canonical_or_raw(task_id).await;
+        let (updated, publication_committed) = {
+            let mut map = self.tasks.write().await;
+            let entry = map
+                .get_mut(&task_id)
+                .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
+            let TaskState::LocalWorkflow(workflow) = entry else {
+                return Err(TaskError::Unsupported);
+            };
+            let eligible = workflow.scope.as_ref().is_some_and(|scope| {
+                matches!(
+                    scope.purpose(),
+                    crate::scope::LocalAppWorkflowPurpose::Build
+                        | crate::scope::LocalAppWorkflowPurpose::UseTest
+                )
+            });
+            if !eligible {
+                return Err(TaskError::Unsupported);
+            }
+            if workflow.base.status.is_terminal() {
+                return Ok((entry.clone(), false));
+            }
+
+            let output_file = workflow.base.output_file.clone();
+            let commit_error = match self
+                .output_manager
+                .replace_terminal_result(&output_file, &canonical_result)
+                .await
+            {
+                Ok(()) => publish_prepared().await.err().map(|error| {
+                    format!("local_app_completion_unverified: QA publication failed: {error}")
+                }),
+                Err(error) => Some(format!(
+                    "local_app_completion_unverified: terminal spool replacement failed: {error}"
+                )),
+            };
+
+            let publication_committed = commit_error.is_none();
+            if let Some(mut reason) = commit_error {
+                let failure_payload = serde_json::json!({
+                    "ok": false,
+                    "error": reason,
+                    "verified": false,
+                })
+                .to_string();
+                if let Err(error) = self
+                    .output_manager
+                    .replace_terminal_result(&output_file, &failure_payload)
+                    .await
+                {
+                    reason.push_str(&format!(
+                        "; terminal failure spool replacement failed: {error}"
+                    ));
+                }
+                workflow.outcome = platform_api::task_registry::WorkflowTerminalOutcome {
+                    result: None,
+                    error: Some(reason),
+                    ..outcome
+                };
+                workflow.base.status = TaskStatus::Failed;
+            } else {
+                workflow.outcome = outcome;
+                workflow.base.status = TaskStatus::Completed;
+            }
+            (entry.clone(), publication_committed)
+        };
+
+        let status = updated.base().status;
+        self.fire_task_completed_hook(&task_id, status, &updated)
+            .await;
+        Ok((updated, publication_committed))
+    }
+
     /// [`Self::kill`] with the stop initiator recorded (`"parent"` / `"user"`).
     ///
     /// The reason is stamped BEFORE the kill dispatch so a handler that flips
@@ -2608,11 +2717,13 @@ mod adopted_workflow_scope_test {
     // ---- Minimal in-memory FileSystem, just enough for `output_manager` ----
     struct InMemoryFs {
         files: tokio::sync::Mutex<HashMap<String, String>>,
+        fail_writes: std::sync::atomic::AtomicBool,
     }
     impl InMemoryFs {
         fn new() -> Self {
             Self {
                 files: tokio::sync::Mutex::new(HashMap::new()),
+                fail_writes: std::sync::atomic::AtomicBool::new(false),
             }
         }
     }
@@ -2634,6 +2745,9 @@ mod adopted_workflow_scope_test {
             })
         }
         async fn write_file(&self, path: &str, body: &str) -> Result<(), FsError> {
+            if self.fail_writes.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(FsError::Io("injected write failure".into()));
+            }
             self.files
                 .lock()
                 .await
@@ -2684,15 +2798,16 @@ mod adopted_workflow_scope_test {
         }
     }
 
-    fn make_registry() -> (tempfile::TempDir, TaskRegistry) {
+    fn make_registry() -> (tempfile::TempDir, Arc<InMemoryFs>, TaskRegistry) {
         let dir = tempfile::tempdir().unwrap();
-        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let in_memory_fs = Arc::new(InMemoryFs::new());
+        let fs: Arc<dyn FileSystem> = in_memory_fs.clone();
         let runtime = Arc::new(test_harness::mocks::MockRuntimeSpawner::default());
         let out_mgr = Arc::new(crate::output_manager::TaskOutputManager::new(
             std::path::PathBuf::from(dir.path()),
             fs.clone(),
         ));
-        (dir, TaskRegistry::new(runtime, fs, out_mgr))
+        (dir, in_memory_fs, TaskRegistry::new(runtime, fs, out_mgr))
     }
 
     fn adopted(task_id: &str, run_id: &str, args_app_id: &str) -> AdoptedWorkflow {
@@ -2722,7 +2837,7 @@ mod adopted_workflow_scope_test {
     /// it -- independent of how that scope was derived.
     #[tokio::test]
     async fn an_adopted_in_flight_build_still_blocks_its_apps_delete_at_the_registry_api() {
-        let (_dir, registry) = make_registry();
+        let (_dir, _fs, registry) = make_registry();
         let scope = crate::scope::LocalAppWorkflowTaskScope::for_build("resumed-app")
             .expect("well-formed app id");
 
@@ -2759,7 +2874,7 @@ mod adopted_workflow_scope_test {
     /// re-validation logic end to end.
     #[tokio::test]
     async fn an_adopted_forged_workflow_still_gets_no_scope_at_the_registry_api() {
-        let (_dir, registry) = make_registry();
+        let (_dir, _fs, registry) = make_registry();
 
         registry
             .register_adopted_workflow(adopted("wforged12", "wf_forged1", "victim-app"))
@@ -2777,7 +2892,264 @@ mod adopted_workflow_scope_test {
                 .await
                 .is_empty(),
             "a forged workflow_id/args.app_id pair must never block another \
-             app's delete just because it was adopted"
+            app's delete just because it was adopted"
+        );
+    }
+
+    async fn running_scoped_workflow(
+        registry: &TaskRegistry,
+        task_id: &str,
+        purpose: crate::scope::LocalAppWorkflowPurpose,
+    ) {
+        let scope = match purpose {
+            crate::scope::LocalAppWorkflowPurpose::Build => {
+                crate::scope::LocalAppWorkflowTaskScope::for_build("qa-app")
+            }
+            crate::scope::LocalAppWorkflowPurpose::UseTest => {
+                crate::scope::LocalAppWorkflowTaskScope::for_use_test("qa-app")
+            }
+            crate::scope::LocalAppWorkflowPurpose::McpAuthoring => {
+                crate::scope::LocalAppWorkflowTaskScope::for_mcp_authoring("qa-app")
+            }
+        }
+        .expect("well-formed app id");
+        registry
+            .register_adopted_workflow_with_scope(
+                adopted(task_id, "wf_terminal1", "qa-app"),
+                Some(scope),
+            )
+            .await
+            .expect("register workflow");
+        registry
+            .set_status(task_id, TaskStatus::Running)
+            .await
+            .expect("activate workflow");
+    }
+
+    fn checked_outcome() -> platform_api::task_registry::WorkflowTerminalOutcome {
+        platform_api::task_registry::WorkflowTerminalOutcome {
+            result: Some(r#"{"ok":true,"host_checked":true}"#.into()),
+            agent_count: 3,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn local_app_terminal_commit_publishes_spool_metadata_and_state_together() {
+        let (_dir, _fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit01",
+            crate::scope::LocalAppWorkflowPurpose::UseTest,
+        )
+        .await;
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = published.clone();
+
+        let (actual, committed) = registry
+            .commit_local_app_workflow_terminal(
+                "wcommit01",
+                checked_outcome(),
+                move || async move {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .expect("commit success");
+
+        assert_eq!(actual.base().status, TaskStatus::Completed);
+        assert!(committed);
+        assert!(published.load(std::sync::atomic::Ordering::SeqCst));
+        let output = registry
+            .output_manager
+            .read(
+                &registry.output_manager.path_for("wcommit01").unwrap(),
+                crate::output_manager::OutputOptions::default(),
+            )
+            .await
+            .expect("canonical spool");
+        assert_eq!(output.content, r#"{"ok":true,"host_checked":true}"#);
+    }
+
+    #[tokio::test]
+    async fn killed_local_app_never_runs_the_prepared_publication_commit() {
+        let (_dir, _fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit02",
+            crate::scope::LocalAppWorkflowPurpose::Build,
+        )
+        .await;
+        registry
+            .set_status("wcommit02", TaskStatus::Killed)
+            .await
+            .expect("kill wins");
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = published.clone();
+
+        let (actual, committed) = registry
+            .commit_local_app_workflow_terminal(
+                "wcommit02",
+                checked_outcome(),
+                move || async move {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .expect("return authoritative terminal row");
+
+        assert_eq!(actual.base().status, TaskStatus::Killed);
+        assert!(!committed);
+        assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn prior_completed_local_app_does_not_claim_a_skipped_publication_commit() {
+        let (_dir, _fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit06",
+            crate::scope::LocalAppWorkflowPurpose::Build,
+        )
+        .await;
+        registry
+            .finish_workflow_terminal("wcommit06", checked_outcome(), TaskStatus::Completed)
+            .await
+            .expect("competing completion wins");
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = published.clone();
+
+        let (actual, committed) = registry
+            .commit_local_app_workflow_terminal(
+                "wcommit06",
+                checked_outcome(),
+                move || async move {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .expect("return authoritative completed row");
+
+        assert_eq!(actual.base().status, TaskStatus::Completed);
+        assert!(!committed);
+        assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn local_app_publication_failure_is_one_canonical_failed_terminal() {
+        let (_dir, _fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit03",
+            crate::scope::LocalAppWorkflowPurpose::Build,
+        )
+        .await;
+
+        let (actual, committed) = registry
+            .commit_local_app_workflow_terminal("wcommit03", checked_outcome(), || async {
+                Err("injected pointer commit failure".into())
+            })
+            .await
+            .expect("commit returns failed row");
+
+        assert_eq!(actual.base().status, TaskStatus::Failed);
+        assert!(!committed);
+        let TaskState::LocalWorkflow(workflow) = actual else {
+            panic!("expected workflow")
+        };
+        assert!(workflow.outcome.result.is_none());
+        assert!(workflow
+            .outcome
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("pointer commit failure")));
+        let output = registry
+            .output_manager
+            .read(
+                &registry.output_manager.path_for("wcommit03").unwrap(),
+                crate::output_manager::OutputOptions::default(),
+            )
+            .await
+            .expect("failure spool");
+        let payload: serde_json::Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(payload["ok"], false);
+        assert_eq!(payload["verified"], false);
+        assert!(payload["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("pointer commit failure")));
+    }
+
+    #[tokio::test]
+    async fn local_app_spool_failure_never_publishes_or_completes() {
+        let (_dir, fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit04",
+            crate::scope::LocalAppWorkflowPurpose::UseTest,
+        )
+        .await;
+        fs.fail_writes
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = published.clone();
+
+        let (actual, committed) = registry
+            .commit_local_app_workflow_terminal(
+                "wcommit04",
+                checked_outcome(),
+                move || async move {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .expect("spool failure becomes task failure");
+
+        assert_eq!(actual.base().status, TaskStatus::Failed);
+        assert!(!committed);
+        assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
+        let TaskState::LocalWorkflow(workflow) = actual else {
+            panic!("expected workflow")
+        };
+        assert!(workflow
+            .outcome
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("terminal spool replacement failed")));
+    }
+
+    #[tokio::test]
+    async fn mcp_authoring_scope_cannot_use_the_qa_terminal_commit() {
+        let (_dir, _fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit05",
+            crate::scope::LocalAppWorkflowPurpose::McpAuthoring,
+        )
+        .await;
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = published.clone();
+
+        let error = registry
+            .commit_local_app_workflow_terminal(
+                "wcommit05",
+                checked_outcome(),
+                move || async move {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .expect_err("only Build/UseTest may commit QA publication");
+
+        assert!(matches!(error, TaskError::Unsupported));
+        assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            registry.get("wcommit05").await.unwrap().base().status,
+            TaskStatus::Running
         );
     }
 }

@@ -152,16 +152,12 @@ class LocalAppsContractTest {
 
     /**
      * The engine's verification `summary` is a fixed English sentence and
-     * `code` is the localization key for it. The engine emits FIVE codes today
-     * (the five `LocalAppVerificationSummaryDto` constructions in
-     * `local_apps_host.rs`: :1994 `needs_setup`, :2025 `active_state_corrupt`,
-     * :2072 `needs_revalidation`, :2078 ABSENCE with status Passed, :2123
-     * `verification_unavailable`). FOUR of them are localized here; the fifth,
-     * `active_state_corrupt`, deliberately has no client key — the engine's own
-     * comment at local_apps_host.rs:2031-2036 says so — and is covered by the
-     * fallback test below, the way iOS covers it in LocalAppsStoreTests.swift.
+     * `code` is the localization key for it. Existing MCP summary codes and
+     * the three Host UI-verification codes are localized here.
+     * `active_state_corrupt` deliberately has no client key and is covered by
+     * the fallback test below, the way iOS covers it in LocalAppsStoreTests.swift.
      *
-     * The distinctness assertion is a vacuity guard: four arms all resolving to
+     * The distinctness assertion is a vacuity guard: multiple arms resolving to
      * the same id (or to 0) would satisfy every equality below individually.
      */
     @Test
@@ -170,9 +166,12 @@ class LocalAppsContractTest {
             R.string.local_apps_verification_summary_needs_setup,
             R.string.local_apps_verification_summary_needs_revalidation,
             R.string.local_apps_verification_summary_verification_unavailable,
+            R.string.local_apps_verification_summary_ui_verification_required,
+            R.string.local_apps_verification_summary_ui_verification_passed,
+            R.string.local_apps_verification_summary_ui_verification_corrupt,
             R.string.local_apps_verification_summary_passed,
         )
-        assertEquals("vacuity guard: the four keys must be four distinct ids", 4, ids.toSet().size)
+        assertEquals("vacuity guard: all seven keys must be distinct ids", 7, ids.toSet().size)
 
         assertEquals(
             R.string.local_apps_verification_summary_needs_setup,
@@ -187,9 +186,26 @@ class LocalAppsContractTest {
             localAppVerificationSummaryRes(LocalAppVerificationStatus.Unavailable, "verification_unavailable"),
         )
         assertEquals(
-            "a null code with status Passed is the fourth value, not a missing one",
+            "a null code with status Passed is the legacy MCP pass, not a missing one",
             R.string.local_apps_verification_summary_passed,
             localAppVerificationSummaryRes(LocalAppVerificationStatus.Passed, null),
+        )
+        assertEquals(
+            R.string.local_apps_verification_summary_ui_verification_required,
+            localAppVerificationSummaryRes(LocalAppVerificationStatus.Unverified, "ui_verification_required"),
+        )
+        assertEquals(
+            R.string.local_apps_verification_summary_ui_verification_passed,
+            localAppVerificationSummaryRes(LocalAppVerificationStatus.Passed, "ui_verification_passed"),
+        )
+        assertEquals(
+            R.string.local_apps_verification_summary_ui_verification_corrupt,
+            localAppVerificationSummaryRes(LocalAppVerificationStatus.Failed, "ui_verification_corrupt"),
+        )
+        assertNotEquals(
+            "a UI QA pass must never use the nil-code MCP verification sentence",
+            R.string.local_apps_verification_summary_passed,
+            localAppVerificationSummaryRes(LocalAppVerificationStatus.Passed, "ui_verification_passed"),
         )
     }
 

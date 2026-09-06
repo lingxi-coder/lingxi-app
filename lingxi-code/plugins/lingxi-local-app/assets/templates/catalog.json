@@ -20,9 +20,9 @@
       "inventorySha256": "13ad59f15f1767688c507318611424b3157346ef53c3d22e1f053207e4b7dee7",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
-        "Start with a read-only search or lookup tool over the app's existing collections.",
-        "Render structuredContent in app/mcp-widget before adding mutating tools.",
-        "Use ui/message for follow-up prompts instead of encoding host-specific bridge calls."
+        "Post-create exposure: start with a read-only search or lookup tool over the app's existing collections.",
+        "Post-create exposure: render structuredContent in app/mcp-widget before adding mutating tools.",
+        "Post-create exposure: use ui/message for follow-up prompts instead of encoding host-specific bridge calls."
       ],
       "available": true
     },
@@ -44,9 +44,9 @@
       "inventorySha256": "9f6aae99d72b6e29384aa60980f6b8c08bf3c3b9c61a8421d4a6e74c3d488122",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
-        "Expose read-only scene or frame state before adding write paths.",
-        "Use the widget to inspect structuredContent snapshots alongside the canvas runtime.",
-        "Keep tool contracts semantic and app-scoped; do not encode transport details."
+        "Post-create exposure: expose read-only scene or frame state before adding write paths.",
+        "Post-create exposure: use the widget to inspect structuredContent snapshots alongside the canvas runtime.",
+        "Post-create exposure: keep tool contracts semantic and app-scoped; do not encode transport details."
       ],
       "available": true
     },
@@ -68,9 +68,9 @@
       "inventorySha256": "8a10ee6d98ff66cfe61f62936e07ccd437787554e2a9525171659caee6addc55",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
-        "Expose semantic scene queries such as selected object, camera, or asset inspection.",
-        "Use structuredContent for tool results and let the widget render comparison views.",
-        "Keep the widget bridge MCP-first, with no ChatGPT-only fallback path."
+        "Post-create exposure: expose semantic scene queries such as selected object, camera, or asset inspection.",
+        "Post-create exposure: use structuredContent for tool results and let the widget render comparison views.",
+        "Post-create exposure: keep the widget bridge MCP-first, with no ChatGPT-only fallback path."
       ],
       "available": true
     },
@@ -94,9 +94,9 @@
       "inventorySha256": "3b809779e2f661b2ed62c89cc97c1cabedb4209d8bb35146e8913f06e40f940b",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
-        "Start with read-only gameplay state or inventory lookups.",
-        "Use the widget to inspect structuredContent for debugging and moderation flows.",
-        "Add mutating tools only after the read-only semantic surface is stable."
+        "Post-create exposure: start with read-only gameplay state or inventory lookups.",
+        "Post-create exposure: use the widget to inspect structuredContent for debugging and moderation flows.",
+        "Post-create exposure: add mutating tools only after the read-only semantic surface is stable."
       ],
       "available": true
     },
@@ -118,7 +118,7 @@
       "inventorySha256": "12c7652fed18857d0693c1aa21e3bacc61c24183831a221eb99634c3d2807fab",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
-        "Unavailable until Babylon real-device validation is complete."
+        "Post-create exposure unavailable until Babylon real-device validation is complete."
       ],
       "available": false,
       "availabilityReason": "babylon_3d remains gated pending iOS/Android Babylon + glTF + Havok real-device validation"

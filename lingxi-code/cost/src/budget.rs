@@ -121,30 +121,6 @@ impl SettlementSlot {
     }
 }
 
-impl BudgetSessionLedger {
-    fn settlement_slot(
-        &self,
-        id: platform_api::BudgetReservationId,
-        actual_nano_usd: u64,
-    ) -> Result<Arc<SettlementSlot>, platform_api::BudgetError> {
-        let mut settlements = self
-            .settlements
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(slot) = settlements.get(&id.raw()) {
-            if slot.actual_nano_usd != actual_nano_usd {
-                return Err(platform_api::BudgetError::Internal(
-                    "reservation retry changed the realized amount".into(),
-                ));
-            }
-            return Ok(slot.clone());
-        }
-        let slot = Arc::new(SettlementSlot::new(actual_nano_usd));
-        settlements.insert(id.raw(), slot.clone());
-        Ok(slot)
-    }
-}
-
 /// Owned production settlement transfer. The receipt captures the same
 /// session ledger/tracker as the original reservation, so Fusion may disarm
 /// its RAII hold before the owned finalizer waits on queue capacity or WAL ack.
@@ -347,14 +323,6 @@ impl BudgetEnforcer {
             .cloned()
     }
 
-    fn settlement_slot(
-        &self,
-        id: platform_api::BudgetReservationId,
-        actual_nano_usd: u64,
-    ) -> Result<Arc<SettlementSlot>, platform_api::BudgetError> {
-        self.sessions.settlement_slot(id, actual_nano_usd)
-    }
-
     fn settled_result(
         &self,
         id: platform_api::BudgetReservationId,
@@ -390,8 +358,9 @@ impl BudgetEnforcer {
         use platform_api::budget::{BudgetError, BudgetReservationId};
         let session_id = self.session_id().await;
         let pinned_tracker = self.cost_tracker.scoped(session_id);
-        pinned_tracker
-            .preflight_durable()
+        let _durability_turn = pinned_tracker
+            .acquire_durable_preflight()
+            .await
             .map_err(|error| BudgetError::Internal(error.to_string()))?;
         let (session, state_cell) = self.session_context_for(session_id).await;
         // Lock the realized state before the reservation book. Commit uses
@@ -490,12 +459,38 @@ impl BudgetEnforcer {
         owner: ReservationOwner,
         id: platform_api::BudgetReservationId,
         actual_nano_usd: u64,
+        durability_turn: Result<
+            Option<crate::persistence::CostDurabilityTurn>,
+            crate::CostPersistError,
+        >,
     ) -> Result<(), platform_api::BudgetError> {
         // Queue capacity is acquired by the owned finalizer, before either
         // the cost state lock or reservation-book lock. If this fails, receipt
         // ownership still consumes the token, but unaccepted state is not
         // published and the exact error remains in the settlement slot.
         let tracker = owner.tracker;
+        let mut durability_turn = match durability_turn {
+            Ok(turn) => turn,
+            Err(error) => {
+                tracker.durability_gate().freeze(error.to_string());
+                owner
+                    .session
+                    .reservations
+                    .lock()
+                    .await
+                    .active
+                    .remove(&id.raw());
+                sessions
+                    .owners
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&id.raw());
+                return Err(platform_api::BudgetError::Internal(error.to_string()));
+            }
+        };
+        if let Some(turn) = durability_turn.as_mut() {
+            turn.wait().await;
+        }
         let permit = match tracker.acquire_persist_permit(owner.session_id).await {
             Ok(permit) => permit,
             Err(error) => {
@@ -520,9 +515,9 @@ impl BudgetEnforcer {
         let (snapshot, enqueue) = {
             let mut book = owner.session.reservations.lock().await;
             if !book.active.contains_key(&id.raw()) {
-                return Err(platform_api::BudgetError::Internal(
-                    "accepted reservation token disappeared before settlement".into(),
-                ));
+                let message = "accepted reservation token disappeared before settlement";
+                tracker.durability_gate().freeze(message);
+                return Err(platform_api::BudgetError::Internal(message.into()));
             }
             let snapshot = match CostTracker::record_external_cost_in_state(&state, actual_nano_usd)
             {
@@ -569,7 +564,7 @@ impl BudgetEnforcer {
         };
         drop(state);
 
-        if let Some(snapshot) = snapshot {
+        let result = if let Some(snapshot) = snapshot {
             match enqueue {
                 Some(Ok((mutation_id, revision, ack_rx))) => tracker
                     .await_persistence_ack(owner.session_id, mutation_id, revision, ack_rx)
@@ -590,7 +585,11 @@ impl BudgetEnforcer {
             }
         } else {
             Ok(())
+        };
+        if let Some(turn) = durability_turn {
+            turn.finish();
         }
+        result
     }
 
     /// Transfer ownership of a known Fusion settlement before waiting for a
@@ -626,30 +625,49 @@ impl BudgetEnforcer {
                 "budget settlement requires an async runtime".into(),
             )
         })?;
-        let slot = self.settlement_slot(id, actual_nano_usd)?;
-        if !slot.started.swap(true, Ordering::AcqRel) {
-            let sessions = self.sessions.clone();
-            let worker_slot = slot.clone();
-            let panic_gate = owner.tracker.durability_gate();
-            handle.spawn(async move {
-                let worker = tokio::spawn(async move {
-                    Self::commit_owned(&sessions, owner, id, actual_nano_usd).await
-                });
-                let result = match worker.await {
-                    Ok(result) => result,
-                    Err(error) => {
-                        let message = format!("budget settlement worker failed: {error}");
-                        panic_gate.freeze(message.clone());
-                        Err(platform_api::BudgetError::Internal(message))
-                    }
-                };
-                *worker_slot
-                    .result
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
-                worker_slot.notify.notify_waiters();
+        let (slot, durability_turn) = {
+            let mut settlements = self
+                .sessions
+                .settlements
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(slot) = settlements.get(&id.raw()) {
+                if slot.actual_nano_usd != actual_nano_usd {
+                    return Err(platform_api::BudgetError::Internal(
+                        "reservation retry changed the realized amount".into(),
+                    ));
+                }
+                return Ok(Some(Box::new(CostBudgetCommitReceipt {
+                    slot: slot.clone(),
+                })));
+            }
+            let durability_turn = owner.tracker.register_durable_mutation();
+            let slot = Arc::new(SettlementSlot::new(actual_nano_usd));
+            slot.started.store(true, Ordering::Release);
+            settlements.insert(id.raw(), slot.clone());
+            (slot, durability_turn)
+        };
+        let sessions = self.sessions.clone();
+        let worker_slot = slot.clone();
+        let panic_gate = owner.tracker.durability_gate();
+        handle.spawn(async move {
+            let worker = tokio::spawn(async move {
+                Self::commit_owned(&sessions, owner, id, actual_nano_usd, durability_turn).await
             });
-        }
+            let result = match worker.await {
+                Ok(result) => result,
+                Err(error) => {
+                    let message = format!("budget settlement worker failed: {error}");
+                    panic_gate.freeze(message.clone());
+                    Err(platform_api::BudgetError::Internal(message))
+                }
+            };
+            *worker_slot
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+            worker_slot.notify.notify_waiters();
+        });
         Ok(Some(Box::new(CostBudgetCommitReceipt { slot })))
     }
 
@@ -692,11 +710,14 @@ impl BudgetEnforcer {
     pub async fn check_pre_api_call(&self, estimated_cost_nano_usd: u64) -> BudgetCheckResult {
         let session_id = self.session_id().await;
         let tracker = self.cost_tracker.scoped(session_id);
-        if let Err(error) = tracker.preflight_durable() {
-            return BudgetCheckResult::Unavailable {
-                reason: error.to_string(),
-            };
-        }
+        let _durability_turn = match tracker.acquire_durable_preflight().await {
+            Ok(turn) => turn,
+            Err(error) => {
+                return BudgetCheckResult::Unavailable {
+                    reason: error.to_string(),
+                };
+            }
+        };
         let (session, state_cell) = self.session_context_for(session_id).await;
         if let Err(error) = tracker.preflight_durable() {
             return BudgetCheckResult::Unavailable {
@@ -1368,6 +1389,166 @@ mod tests {
             enforcer.reserve_nano_usd(1).await,
             Err(platform_api::BudgetError::Internal(reason)) if reason.contains("synthetic WAL failure")
         ));
+    }
+
+    #[tokio::test]
+    async fn unacked_ordinary_charge_blocks_a_dependent_fusion_reservation() {
+        let session_id = SessionId::new();
+        let (requests, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tracker = make_durable_tracker(session_id, requests, CostDurabilityGate::default());
+        let scope = tracker.session_scope(session_id);
+        let response = scope.submit_model_response(crate::CostModelResponse {
+            model_ref: ModelRef {
+                provider: ProviderId::Anthropic,
+                model: "claude-opus-4-6".into(),
+            },
+            usage: Usage {
+                tokens: TokenUsage {
+                    input: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            duration: Duration::from_millis(1),
+            retries: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            is_batch_request: false,
+            bus: None,
+        });
+        let request = requests_rx.recv().await.expect("ordinary durable charge");
+        let enforcer = BudgetEnforcer::new(
+            BudgetConfig {
+                max_session_nano_usd: Some(1_000_000_000),
+                max_turn_nano_usd: None,
+                max_turn_tokens: None,
+                warning_thresholds: vec![],
+                on_exceed: BudgetExceedPolicy::Halt,
+            },
+            tracker,
+        );
+        let reservation = enforcer.reserve_nano_usd(10);
+        tokio::pin!(reservation);
+        tokio::select! {
+            biased;
+            result = &mut reservation => panic!("reservation bypassed an unacked charge: {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+
+        request
+            .ack
+            .send(Ok(crate::CostPersistAck {
+                mutation_id: request.mutation_id.clone(),
+                journal_revision: 1,
+                cost_revision: request.cost_revision,
+            }))
+            .unwrap();
+        let reservation_id = reservation.await.expect("ack releases reservation");
+        assert!(response.settle().await.persistence_result().is_ok());
+        enforcer.release_reservation(reservation_id).await;
+    }
+
+    #[tokio::test]
+    async fn failed_ordinary_ack_rejects_the_waiting_fusion_reservation() {
+        let session_id = SessionId::new();
+        let (requests, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let gate = CostDurabilityGate::default();
+        let tracker = make_durable_tracker(session_id, requests, gate.clone());
+        let response =
+            tracker
+                .session_scope(session_id)
+                .submit_model_response(crate::CostModelResponse {
+                    model_ref: ModelRef {
+                        provider: ProviderId::Anthropic,
+                        model: "claude-opus-4-6".into(),
+                    },
+                    usage: Usage {
+                        tokens: TokenUsage {
+                            input: 1,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    duration: Duration::from_millis(1),
+                    retries: 0,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    is_batch_request: false,
+                    bus: None,
+                });
+        let request = requests_rx.recv().await.expect("ordinary durable charge");
+        let enforcer = BudgetEnforcer::new(
+            BudgetConfig {
+                max_session_nano_usd: Some(1_000_000_000),
+                max_turn_nano_usd: None,
+                max_turn_tokens: None,
+                warning_thresholds: vec![],
+                on_exceed: BudgetExceedPolicy::Halt,
+            },
+            tracker,
+        );
+        let reservation = enforcer.reserve_nano_usd(10);
+        tokio::pin!(reservation);
+        tokio::select! {
+            biased;
+            result = &mut reservation => panic!("reservation bypassed an unacked charge: {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+
+        request
+            .ack
+            .send(Err(CostPersistError::Storage("append failed".into())))
+            .unwrap();
+        assert!(matches!(
+            reservation.await,
+            Err(platform_api::BudgetError::Internal(message)) if message.contains("append failed")
+        ));
+        assert!(response.settle().await.persistence_result().is_err());
+        assert!(gate.frozen_reason().is_some());
+        assert_eq!(enforcer.active_reservation_nano_usd().await, 0);
+    }
+
+    #[tokio::test]
+    async fn accepted_fusion_handoff_synchronously_blocks_ordinary_preflight_until_ack() {
+        let session_id = SessionId::new();
+        let (requests, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tracker = make_durable_tracker(session_id, requests, CostDurabilityGate::default());
+        let scope = tracker.session_scope(session_id);
+        let enforcer = BudgetEnforcer::new(
+            BudgetConfig {
+                max_session_nano_usd: Some(1_000),
+                max_turn_nano_usd: None,
+                max_turn_tokens: None,
+                warning_thresholds: vec![],
+                on_exceed: BudgetExceedPolicy::Halt,
+            },
+            tracker,
+        );
+        let reservation_id = enforcer.reserve_nano_usd(800).await.unwrap();
+        let receipt = enforcer
+            .begin_commit_reservation(reservation_id, 400)
+            .unwrap()
+            .expect("known Fusion cost transfers to an owned receipt");
+        let preflight = scope.preflight();
+        tokio::pin!(preflight);
+        tokio::select! {
+            biased;
+            result = &mut preflight => panic!("preflight bypassed synchronous settlement transfer: {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+
+        let request = requests_rx.recv().await.expect("Fusion durable charge");
+        request
+            .ack
+            .send(Ok(crate::CostPersistAck {
+                mutation_id: request.mutation_id.clone(),
+                journal_revision: 1,
+                cost_revision: request.cost_revision,
+            }))
+            .unwrap();
+        preflight.await.expect("ack releases ordinary preflight");
+        receipt.finish().await.unwrap();
+        assert_eq!(enforcer.active_reservation_nano_usd().await, 0);
     }
 
     #[tokio::test]

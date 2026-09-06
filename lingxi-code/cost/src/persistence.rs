@@ -11,6 +11,7 @@ use crate::ModelRef;
 use async_trait::async_trait;
 use protocol::SessionId;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -294,30 +295,193 @@ pub trait CostHydrator: Send + Sync {
     async fn hydrate(&self, session_id: SessionId) -> Result<CostHydration, CostPersistError>;
 }
 
-/// Shared per-session freeze latch. A WAL/recovery failure freezes paid
-/// operations for this session while leaving other sessions healthy.
-#[derive(Clone, Default)]
+/// Shared per-session durability authority. A WAL/recovery failure freezes
+/// paid operations for this session while leaving other sessions healthy;
+/// the FIFO turnstile also keeps provisional mutations from authorizing
+/// dependent paid work before their durable acknowledgement.
+#[derive(Clone)]
 pub struct CostDurabilityGate {
-    state: Arc<std::sync::Mutex<Option<String>>>,
+    inner: Arc<CostDurabilityGateInner>,
+}
+
+struct CostDurabilityGateInner {
+    state: std::sync::Mutex<CostDurabilityGateState>,
+    changed: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct CostDurabilityGateState {
+    frozen_reason: Option<String>,
+    next_ticket: u64,
+    serving_ticket: u64,
+    abandoned_tickets: BTreeSet<u64>,
+}
+
+/// One FIFO position in a session's durability authority. Mutation turns
+/// freeze on unexpected drop; preflight turns simply yield their position.
+pub(crate) struct CostDurabilityTurn {
+    inner: Arc<CostDurabilityGateInner>,
+    ticket: u64,
+    freeze_on_drop: bool,
+    released: bool,
+}
+
+impl Default for CostDurabilityGate {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(CostDurabilityGateInner {
+                state: std::sync::Mutex::new(CostDurabilityGateState::default()),
+                changed: tokio::sync::Notify::new(),
+            }),
+        }
+    }
 }
 
 impl CostDurabilityGate {
     /// Return the current freeze reason, if any.
     pub fn frozen_reason(&self) -> Option<String> {
-        self.state
+        self.inner
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .frozen_reason
             .clone()
     }
 
     /// Freeze once; later failures preserve the first actionable reason.
     pub fn freeze(&self, reason: impl Into<String>) {
         let mut state = self
+            .inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.is_none() {
-            *state = Some(reason.into());
+        if state.frozen_reason.is_none() {
+            state.frozen_reason = Some(reason.into());
+        }
+        drop(state);
+        self.inner.changed.notify_waiters();
+    }
+
+    /// Whether two handles refer to the exact same session authority.
+    pub(crate) fn shares_authority(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// Reserve a mutation's FIFO position synchronously. Callers use this at
+    /// the provider-response/settlement ownership boundary, before spawning a
+    /// worker, so a newly dependent preflight cannot overtake known usage.
+    pub(crate) fn register_mutation(&self) -> Result<CostDurabilityTurn, CostPersistError> {
+        self.reserve_turn(true)
+    }
+
+    /// Wait until every earlier mutation is durably acknowledged, then retain
+    /// an exclusive turn while the caller evaluates its paid authorization.
+    pub(crate) async fn acquire_preflight(&self) -> Result<CostDurabilityTurn, CostPersistError> {
+        let mut turn = self.reserve_turn(false)?;
+        turn.wait().await;
+        if let Some(reason) = self.frozen_reason() {
+            turn.finish();
+            return Err(CostPersistError::Frozen(reason));
+        }
+        Ok(turn)
+    }
+
+    fn reserve_turn(&self, freeze_on_drop: bool) -> Result<CostDurabilityTurn, CostPersistError> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(reason) = &state.frozen_reason {
+            return Err(CostPersistError::Frozen(reason.clone()));
+        }
+        let ticket = state.next_ticket;
+        let Some(next_ticket) = state.next_ticket.checked_add(1) else {
+            let message = "cost durability sequence overflow".to_string();
+            state.frozen_reason = Some(message.clone());
+            drop(state);
+            self.inner.changed.notify_waiters();
+            return Err(CostPersistError::Storage(message));
+        };
+        state.next_ticket = next_ticket;
+        Ok(CostDurabilityTurn {
+            inner: self.inner.clone(),
+            ticket,
+            freeze_on_drop,
+            released: false,
+        })
+    }
+}
+
+impl CostDurabilityTurn {
+    /// Wait for this exact FIFO position. `Notify::enable` closes the gap
+    /// between inspecting the synchronous ticket state and awaiting a wakeup.
+    pub(crate) async fn wait(&mut self) {
+        loop {
+            let notified = self.inner.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .serving_ticket
+                == self.ticket
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Release a successfully or explicitly failed turn. Error paths freeze
+    /// the gate before calling this; unexpected unwinding freezes in `Drop`.
+    pub(crate) fn finish(mut self) {
+        self.release(false);
+    }
+
+    fn release(&mut self, freeze: bool) {
+        if self.released {
+            return;
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if freeze && state.frozen_reason.is_none() {
+            state.frozen_reason =
+                Some("durable cost mutation owner dropped before acknowledgement".to_string());
+        }
+        if self.ticket == state.serving_ticket {
+            state.serving_ticket = state
+                .serving_ticket
+                .checked_add(1)
+                .expect("allocated cost durability ticket can advance");
+            loop {
+                let serving_ticket = state.serving_ticket;
+                if !state.abandoned_tickets.remove(&serving_ticket) {
+                    break;
+                }
+                state.serving_ticket = state
+                    .serving_ticket
+                    .checked_add(1)
+                    .expect("allocated cost durability ticket can advance");
+            }
+        } else if self.ticket > state.serving_ticket {
+            state.abandoned_tickets.insert(self.ticket);
+        }
+        self.released = true;
+        drop(state);
+        self.inner.changed.notify_waiters();
+    }
+}
+
+impl Drop for CostDurabilityTurn {
+    fn drop(&mut self) {
+        if !self.released {
+            self.release(self.freeze_on_drop);
         }
     }
 }
@@ -397,5 +561,44 @@ mod tests {
         assert_eq!(restored.total_nano_usd, 17);
         assert_eq!(restored.legacy_opening_balance_nano_usd, 0);
         assert!(!restored.legacy_import_evaluated);
+    }
+
+    #[tokio::test]
+    async fn dropped_mutation_freezes_before_releasing_a_queued_preflight() {
+        let gate = CostDurabilityGate::default();
+        let mut mutation = gate.register_mutation().unwrap();
+        mutation.wait().await;
+        let mut preflight = Box::pin(gate.acquire_preflight());
+        tokio::select! {
+            biased;
+            _ = &mut preflight => panic!("preflight bypassed active mutation"),
+            () = tokio::task::yield_now() => {}
+        }
+
+        drop(mutation);
+
+        assert!(matches!(
+            preflight.await,
+            Err(CostPersistError::Frozen(message)) if message.contains("dropped before acknowledgement")
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_queued_preflight_does_not_wedge_the_fifo_turnstile() {
+        let gate = CostDurabilityGate::default();
+        let mut mutation = gate.register_mutation().unwrap();
+        mutation.wait().await;
+        let mut cancelled = Box::pin(gate.acquire_preflight());
+        tokio::select! {
+            biased;
+            _ = &mut cancelled => panic!("preflight bypassed active mutation"),
+            () = tokio::task::yield_now() => {}
+        }
+        drop(cancelled);
+        mutation.finish();
+
+        let next = gate.acquire_preflight().await.unwrap();
+        next.finish();
+        assert!(gate.frozen_reason().is_none());
     }
 }

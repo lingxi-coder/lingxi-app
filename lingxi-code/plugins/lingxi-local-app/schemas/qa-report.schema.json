@@ -12,11 +12,12 @@
     "scenario_judgements": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "$ref": "#/$defs/judgement" } },
     "findings": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/finding" } },
     "evidence": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/evidence" } },
+    "verification_scope": { "$ref": "#/$defs/verification_scope" },
     "previous_result_id": { "anyOf": [{ "$ref": "#/$defs/token" }, { "type": "null" }] },
     "finalized_at_ms": { "$ref": "#/$defs/positive_integer" },
     "result_sha256": { "$ref": "#/$defs/digest" }
   },
-  "required": ["schema_version", "status", "identity", "scenario_judgements", "findings", "evidence", "previous_result_id", "finalized_at_ms", "result_sha256"],
+  "required": ["schema_version", "status", "identity", "scenario_judgements", "findings", "evidence", "verification_scope", "previous_result_id", "finalized_at_ms", "result_sha256"],
   "$defs": {
     "token": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9_.:-]+$" },
     "qa_handle": { "type": "string", "pattern": "^qa_[A-Za-z0-9]{32}$" },
@@ -49,6 +50,17 @@
         "runtime_generation": { "$ref": "#/$defs/positive_integer" }
       },
       "required": ["app_id", "workflow_run_id", "qa_handle", "build_id", "runtime_profile", "verification_strategy", "dependency_snapshot_sha256", "authoring_contract_sha256", "manifest_revision", "runtime_generation"]
+    },
+    "verification_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "declared_target_ids": { "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } },
+        "in_scope_target_ids": { "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } },
+        "unverified_target_ids": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } },
+        "unverified_scenario_ids": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } }
+      },
+      "required": ["declared_target_ids", "in_scope_target_ids", "unverified_target_ids", "unverified_scenario_ids"]
     },
     "artifact": {
       "type": "object",

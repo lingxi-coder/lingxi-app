@@ -972,7 +972,7 @@ impl MobileWorkflowStatusSink {
         let payload = terminal_payload.to_string();
         let error = match registry
             .output_manager
-            .replace_terminal_result(output_file, &payload)
+            .replace_terminal_result_fail_closed(output_file, &payload)
             .await
         {
             Ok(()) => reason,
@@ -1300,7 +1300,7 @@ impl tasks::handlers::TaskStatusSink for MobileWorkflowStatusSink {
                         .to_string();
                         let _ = registry
                             .output_manager
-                            .replace_terminal_result(&output_file, &payload)
+                            .replace_terminal_result_fail_closed(&output_file, &payload)
                             .await;
                     }
                     if publication_committed {

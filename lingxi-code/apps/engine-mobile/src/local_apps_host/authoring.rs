@@ -5,6 +5,7 @@ use base64::Engine;
 use platform_api::rooted_fs::{self, AtomicWriteOptions};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::Path;
 use url::Url;
 
@@ -192,6 +193,7 @@ fn normalize_qa_findings(value: Value) -> Result<Vec<local_apps::QaFinding>, Str
 pub(crate) struct AuthoringBuildInput {
     pub(crate) handle: String,
     pub(crate) workflow_run_id: String,
+    pub(crate) base_contract_sha256: Option<String>,
     pub(crate) contract: local_apps::AppAuthoringContract,
     pub(crate) contract_sha256: String,
 }
@@ -365,6 +367,78 @@ fn sanitize_untrusted_qa_result(result: Value) -> Value {
     }
 }
 
+fn qa_query_matches_bridge_write(
+    layout: &local_apps::AppLayout,
+    session: &local_apps::QaSession,
+    query: &Value,
+    write: &local_apps::QaEvidence,
+    collection: &str,
+) -> Result<bool, String> {
+    let write_content =
+        match local_apps::qa_read_evidence(layout, &session.identity.qa_handle, &write.evidence_id)
+            .map_err(|error| error.to_string())?
+        {
+            local_apps::QaEvidenceBlock::Json { content, .. } => content,
+            _ => return Ok(false),
+        };
+    let rows = qa_changed_rows(&write_content, collection);
+    if rows.is_empty() {
+        return Ok(false);
+    }
+    Ok(rows.iter().any(|(record_id, revision)| {
+        qa_query_contains_row(query, collection, record_id, *revision)
+    }))
+}
+
+fn qa_query_collection(input: &Value, content: &Value) -> Option<String> {
+    input
+        .get("collection")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| {
+            content
+                .get("records")
+                .and_then(Value::as_array)
+                .and_then(|records| records.first())
+                .and_then(|record| record.get("collection"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+}
+
+fn qa_changed_rows(value: &Value, collection: &str) -> Vec<(String, u64)> {
+    value
+        .get("results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|result| {
+            result.get("collection").and_then(Value::as_str) == Some(collection)
+                && result.get("deleted").and_then(Value::as_bool) == Some(false)
+        })
+        .filter_map(|result| {
+            Some((
+                result.get("recordId")?.as_str()?.to_string(),
+                result.get("revision")?.as_u64()?,
+            ))
+        })
+        .filter(|(record_id, revision)| !record_id.is_empty() && *revision > 0)
+        .collect()
+}
+
+fn qa_query_contains_row(value: &Value, collection: &str, record_id: &str, revision: u64) -> bool {
+    value
+        .get("records")
+        .and_then(Value::as_array)
+        .is_some_and(|records| {
+            records.iter().any(|record| {
+                record.get("collection").and_then(Value::as_str) == Some(collection)
+                    && record.get("recordId").and_then(Value::as_str) == Some(record_id)
+                    && record.get("revision").and_then(Value::as_u64) == Some(revision)
+            })
+        })
+}
+
 pub(super) fn qa_observation_id(value: &Value) -> Option<String> {
     value
         .get("evidence")
@@ -462,6 +536,100 @@ fn active_contract_optional(
     Ok(Some((digest, contract)))
 }
 
+/// Derive the only QA surface this Host can honestly exercise. The complete
+/// authoring target matrix remains immutable in the scope; only targets whose
+/// declared OS/form-factor pair matches the attached native device enter the
+/// current run.
+fn qa_scope_for_contract(
+    contract: &local_apps::AppAuthoringContract,
+    current_device: &local_apps::DeviceContext,
+) -> Result<
+    (
+        local_apps::QaVerificationScope,
+        Vec<local_apps::QaScenarioRequirement>,
+    ),
+    String,
+> {
+    let declared_target_ids = contract
+        .spec
+        .targets
+        .iter()
+        .map(|target| target.id.clone())
+        .collect::<Vec<_>>();
+    let in_scope_target_ids = contract
+        .spec
+        .targets
+        .iter()
+        .filter(|target| {
+            target.os == current_device.os && target.form_factor == current_device.form_factor
+        })
+        .map(|target| target.id.clone())
+        .collect::<Vec<_>>();
+    if in_scope_target_ids.is_empty() {
+        return Err(format!(
+            "qa_begin_unavailable: no authoring target matches current Host device {}/{}",
+            current_device.os, current_device.form_factor
+        ));
+    }
+    let in_scope = in_scope_target_ids.iter().collect::<BTreeSet<_>>();
+    let unverified_target_ids = declared_target_ids
+        .iter()
+        .filter(|target| !in_scope.contains(target))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut unverified_scenario_ids = Vec::new();
+    let scenario_requirements = contract
+        .spec
+        .acceptance_checks
+        .iter()
+        .map(|check| {
+            let in_scope_scenario_targets = check
+                .target_ids
+                .iter()
+                .filter(|target| in_scope.contains(target))
+                .cloned()
+                .collect::<Vec<_>>();
+            if check.required && in_scope_scenario_targets.is_empty() {
+                unverified_scenario_ids.push(check.id.clone());
+            }
+            local_apps::QaScenarioRequirement {
+                scenario_id: check.id.clone(),
+                required: check.required,
+                // Preserve the complete authoring requirement. Core derives
+                // effective current-device coverage from verification_scope;
+                // intersecting here would erase declared targets from the
+                // immutable QA contract.
+                target_ids: check.target_ids.clone(),
+                evidence_kinds: check
+                    .evidence
+                    .iter()
+                    .map(|kind| match kind {
+                        local_apps::AcceptanceEvidence::Inspect => {
+                            local_apps::QaEvidenceKind::Inspect
+                        }
+                        local_apps::AcceptanceEvidence::UiAction => {
+                            local_apps::QaEvidenceKind::UiAction
+                        }
+                        local_apps::AcceptanceEvidence::Capture => {
+                            local_apps::QaEvidenceKind::Capture
+                        }
+                    })
+                    .collect(),
+                motion_required: check.motion_required,
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok((
+        local_apps::QaVerificationScope {
+            declared_target_ids,
+            in_scope_target_ids,
+            unverified_target_ids,
+            unverified_scenario_ids,
+        },
+        scenario_requirements,
+    ))
+}
+
 fn checked_binding(
     manifest: &local_apps::AppManifest,
     app_id: &str,
@@ -556,6 +724,16 @@ impl LocalAppsHostBroker {
             .any(|candidate| candidate == target_id)
         {
             return Err("qa_target_invalid: target is not bound to this QA run".into());
+        }
+        if !session
+            .verification_scope
+            .in_scope_target_ids
+            .iter()
+            .any(|candidate| candidate == target_id)
+        {
+            return Err(
+                "qa_target_unavailable: target is outside the current Host device scope".into(),
+            );
         }
         let event_id = self.request_id("qa-action");
         let mut actions = self.qa_inflight_actions.lock().await;
@@ -875,6 +1053,34 @@ impl LocalAppsHostBroker {
         Ok(())
     }
 
+    pub(crate) fn verify_authoring_candidate_identity(
+        &self,
+        layout: &local_apps::AppLayout,
+        expected: &crate::local_apps_build::AuthoringCandidateIdentity,
+    ) -> Result<(), String> {
+        let candidate = local_apps::load_authoring_candidate(layout)
+            .map_err(|error| format!("authoring_candidate_invalid: {error}"))?;
+        if candidate.handle != expected.handle
+            || candidate.workflow_run_id != expected.workflow_run_id
+            || candidate.contract_sha256 != expected.contract_sha256
+            || candidate.base_contract_sha256 != expected.base_contract_sha256
+        {
+            return Err(
+                "authoring_contract_stale: candidate identity changed while the build was running"
+                    .into(),
+            );
+        }
+        self.verify_authoring_candidate_digest(layout, &expected.contract_sha256)?;
+        let manifest = load_manifest(layout).map_err(|error| error.to_string())?;
+        if manifest.runtime_profile.as_ref() != Some(&candidate.contract.runtime_profile) {
+            return Err(
+                "authoring_contract_stale: candidate runtime profile no longer matches the committed manifest"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) async fn local_app_contract(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
         let operation = input
@@ -991,6 +1197,7 @@ impl LocalAppsHostBroker {
         Ok(Some(AuthoringBuildInput {
             handle: candidate.handle,
             workflow_run_id: candidate.workflow_run_id,
+            base_contract_sha256: candidate.base_contract_sha256,
             contract: candidate.contract,
             contract_sha256: candidate.contract_sha256,
         }))
@@ -1063,6 +1270,11 @@ impl LocalAppsHostBroker {
         let (authoring_contract_sha256, contract) = active_contract(&layout)?;
         let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
         let verification_strategy = verification_strategy(&input)?;
+        let current_device = self.host_device_context().ok_or_else(|| {
+            "qa_begin_unavailable: current Host device context is unavailable".to_string()
+        })?;
+        let (verification_scope, scenario_requirements) =
+            qa_scope_for_contract(&contract, &current_device)?;
         let identity = local_apps::QaIdentity {
             app_id: app_id.clone(),
             workflow_run_id: workflow_run_id.clone(),
@@ -1077,50 +1289,15 @@ impl LocalAppsHostBroker {
             manifest_revision: manifest.revision,
             runtime_generation,
         };
-        let scenario_requirements = contract
-            .spec
-            .acceptance_checks
-            .iter()
-            .map(|check| local_apps::QaScenarioRequirement {
-                scenario_id: check.id.clone(),
-                required: check.required,
-                target_ids: check.target_ids.clone(),
-                evidence_kinds: check
-                    .evidence
-                    .iter()
-                    .map(|kind| match kind {
-                        local_apps::AcceptanceEvidence::Inspect => {
-                            local_apps::QaEvidenceKind::Inspect
-                        }
-                        local_apps::AcceptanceEvidence::UiAction => {
-                            local_apps::QaEvidenceKind::UiAction
-                        }
-                        local_apps::AcceptanceEvidence::Capture => {
-                            local_apps::QaEvidenceKind::Capture
-                        }
-                    })
-                    .collect(),
-                // Explicit structured acceptance policy only. Natural-language
-                // reduced-motion prose is never interpreted with substring
-                // heuristics; omitted/false allows identical static frames.
-                motion_required: check.motion_required,
-            })
-            .collect::<Vec<_>>();
-        let target_ids = contract
-            .spec
-            .targets
-            .iter()
-            .map(|target| target.id.clone())
-            .collect::<Vec<_>>();
         // Upstream failures are a Host-owned ledger, never caller-supplied
         // proof.  A workflow may report findings at finalization, but it
         // cannot inject or erase the durable failures that bind this run.
         let upstream_failures = Vec::new();
-        let session = local_apps::qa_begin_with_requirements(
+        let session = local_apps::qa_begin_with_scope(
             &layout,
             identity,
             scenario_requirements,
-            target_ids,
+            verification_scope,
             upstream_failures,
             now_ms(),
         )
@@ -1133,7 +1310,25 @@ impl LocalAppsHostBroker {
             "build_id": session.identity.build_id,
             "runtime_generation": session.identity.runtime_generation,
             "scenario_ids": session.required_scenario_ids,
-            "target_ids": session.target_ids,
+            "target_ids": session.verification_scope.in_scope_target_ids,
+            "declared_target_ids": session.verification_scope.declared_target_ids,
+            "unverified_target_ids": session.verification_scope.unverified_target_ids,
+            "unverified_scenario_ids": session.verification_scope.unverified_scenario_ids,
+            "verification_scope": session.verification_scope,
+            // The durable Host ledger is part of the repair contract. A fresh
+            // tester/verifier must receive the exact IDs and messages so it
+            // can resolve source blockers with newer Host evidence instead of
+            // accidentally dropping them from its findings projection.
+            "upstream_failures": session.upstream_failures,
+            "upstream_findings": session
+                .upstream_failures
+                .iter()
+                .map(|failure| json!({
+                    "id": failure.id.clone(),
+                    "message": failure.message.clone(),
+                    "blocking": true,
+                }))
+                .collect::<Vec<_>>(),
         }))
     }
 
@@ -1145,7 +1340,47 @@ impl LocalAppsHostBroker {
         let layout = self.layout(app_id)?;
         let session =
             local_apps::load_qa_session(&layout, handle).map_err(|error| error.to_string())?;
-        self.validate_qa_identity(&session.identity).await
+        self.validate_qa_identity(&session.identity).await?;
+        let target_id = input
+            .get("target_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "qa_target_required: target_id is required".to_string())?;
+        let scenario_id = input
+            .get("scenario_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "qa_scenario_required: scenario_id is required".to_string())?;
+        if !session
+            .required_scenario_ids
+            .iter()
+            .any(|candidate| candidate == scenario_id)
+        {
+            return Err("qa_scenario_invalid: scenario is not required by this QA run".into());
+        }
+        if !session
+            .verification_scope
+            .in_scope_target_ids
+            .iter()
+            .any(|candidate| candidate == target_id)
+        {
+            return Err(
+                "qa_target_unavailable: target is outside the current Host device scope".into(),
+            );
+        }
+        let requirement = session
+            .scenario_requirements
+            .iter()
+            .find(|requirement| requirement.scenario_id == scenario_id)
+            .ok_or_else(|| {
+                "qa_scenario_invalid: scenario requirement is unavailable".to_string()
+            })?;
+        if !requirement
+            .target_ids
+            .iter()
+            .any(|candidate| candidate == target_id)
+        {
+            return Err("qa_target_invalid: target is not declared for this QA scenario".into());
+        }
+        Ok(())
     }
 
     pub(crate) async fn record_qa_observation(
@@ -1180,23 +1415,57 @@ impl LocalAppsHostBroker {
             "query_data" => local_apps::QaEvidenceKind::Query,
             _ => local_apps::QaEvidenceKind::Console,
         };
+        let query_collection = (kind == local_apps::QaEvidenceKind::Query)
+            .then(|| qa_query_collection(input, &content))
+            .flatten();
         let caused_by = match kind {
             // Only the Host action window may supply this id. Never fall back
             // to an older action: normal/background writes intentionally have
             // no way to enter this branch.
             local_apps::QaEvidenceKind::BridgeWrite => causal_event_id,
-            // Query input carries no model-authored causal id. Bind it to the
-            // latest actual page write for the same Host scenario/target.
-            local_apps::QaEvidenceKind::Query => session
-                .evidence
-                .iter()
-                .rev()
-                .find(|evidence| {
-                    evidence.kind == local_apps::QaEvidenceKind::BridgeWrite
-                        && evidence.scenario_id == scenario_id
-                        && evidence.target_id == target_id
-                })
-                .map(|evidence| evidence.event_id.clone()),
+            // Query input carries no model-authored causal id. Match the
+            // actual query page against the exact collection/record/revision
+            // tuple returned by a Host-recorded page write. This is important
+            // when one click writes collection A and then B in separate bridge
+            // calls: an A query must point at A's write, never merely B's
+            // latest timestamp.
+            local_apps::QaEvidenceKind::Query => {
+                let Some(collection) = query_collection.as_deref() else {
+                    return Err(
+                        "qa_query_causality_unresolved: query has no collection identity".into(),
+                    );
+                };
+                let write = session
+                    .evidence
+                    .iter()
+                    .rev()
+                    .filter(|evidence| {
+                        evidence.kind == local_apps::QaEvidenceKind::BridgeWrite
+                            && evidence.scenario_id == scenario_id
+                            && evidence.target_id == target_id
+                    })
+                    .find_map(|write| {
+                        match qa_query_matches_bridge_write(
+                            &layout,
+                            &session,
+                            &content,
+                            write,
+                            collection,
+                        ) {
+                            Ok(true) => Some(Ok(write)),
+                            Ok(false) => None,
+                            Err(error) => Some(Err(error)),
+                        }
+                    })
+                    .transpose()
+                    .map_err(|error| format!("qa_query_causality_unresolved: {error}"))?
+                    .ok_or_else(|| {
+                        format!(
+                            "qa_query_causality_unresolved: query collection {collection:?} does not match a recorded page write"
+                        )
+                    })?;
+                Some(write.event_id.clone())
+            }
             _ => None,
         };
         let recorded_at_ms = caused_by
@@ -1383,6 +1652,16 @@ impl LocalAppsHostBroker {
             .iter()
             .find(|target| target.id == target_id)
             .ok_or_else(|| "qa_target_invalid: target is not in the active contract".to_string())?;
+        let current_device = self.host_device_context().ok_or_else(|| {
+            "qa_native_attestation_unavailable: current Host device context is unavailable"
+                .to_string()
+        })?;
+        if target.os != current_device.os || target.form_factor != current_device.form_factor {
+            return Err(
+                "qa_native_attestation_invalid: target is outside the current Host device scope"
+                    .into(),
+            );
+        }
         if attestation.get("platform").and_then(Value::as_str) != Some(target.os.as_str())
             || attestation.get("form_factor").and_then(Value::as_str)
                 != Some(target.form_factor.as_str())
@@ -1579,6 +1858,17 @@ impl LocalAppsHostBroker {
                 "qa_terminal_rejected: candidate is not the latest finalized QA result".into(),
             );
         }
+        if session.verification_scope != result_record.verification_scope {
+            return Err("qa_terminal_rejected: candidate verification scope changed".into());
+        }
+        let current_device = self.host_device_context().ok_or_else(|| {
+            "qa_terminal_rejected: current Host device context is unavailable".to_string()
+        })?;
+        let (_, contract) = active_contract(&layout)?;
+        let (current_scope, _) = qa_scope_for_contract(&contract, &current_device)?;
+        if current_scope != result_record.verification_scope {
+            return Err("qa_terminal_rejected: current Host device scope changed since QA".into());
+        }
         if !result_is_passing(&result_record) {
             return Err(
                 "qa_terminal_rejected: candidate contains failed scenarios or blocking findings"
@@ -1603,8 +1893,20 @@ impl LocalAppsHostBroker {
         // The model packet is retained only as an explicitly untrusted
         // diagnostic. Every identity, finding and verification field consumed
         // by the terminal UI comes from the immutable Host result/receipt.
+        let partial_scope = !result_record
+            .verification_scope
+            .unverified_target_ids
+            .is_empty()
+            || !result_record
+                .verification_scope
+                .unverified_scenario_ids
+                .is_empty();
         let host_verification = json!({
-            "status": "validated",
+            "status": if partial_scope {
+                "validated_current_device"
+            } else {
+                "validated"
+            },
             "receipt": receipt,
             "result": result_record,
         });
@@ -1612,7 +1914,7 @@ impl LocalAppsHostBroker {
             "ok": true,
             "checked": true,
             "host_checked": true,
-            "status": "verified",
+            "status": if partial_scope { "verified_current_device" } else { "verified" },
             "app_id": result_record.identity.app_id,
             "workflow_run_id": result_record.identity.workflow_run_id,
             "qa_handle": result_record.identity.qa_handle,
@@ -1624,6 +1926,14 @@ impl LocalAppsHostBroker {
             "manifest_revision": result_record.identity.manifest_revision,
             "runtime_generation": result_record.identity.runtime_generation,
             "findings": result_record.findings,
+            "verification_scope": result_record.verification_scope,
+            "unverified_target_ids": result_record.verification_scope.unverified_target_ids,
+            "unverified_scenario_ids": result_record.verification_scope.unverified_scenario_ids,
+            "summary": if partial_scope {
+                "Host QA passed on the current device; remaining authoring targets/scenarios are unverified."
+            } else {
+                "Host QA passed for the complete authoring target matrix."
+            },
             "verification": host_verification,
             "host_verification": host_verification,
             "workflow_result_diagnostic": result,
@@ -1765,6 +2075,11 @@ impl LocalAppsHostBroker {
             // The immutable published result remains valid history for its old
             // build, but it is not proof for the app's current active identity.
             return Ok(None);
+        }
+        if !result.verification_scope.unverified_target_ids.is_empty()
+            || !result.verification_scope.unverified_scenario_ids.is_empty()
+        {
+            return Ok(Some(partial_ui_summary(&result.verification_scope)));
         }
         Ok(Some(LocalAppVerificationSummaryDto {
             status: LocalAppVerificationStatusDto::Passed,
@@ -1952,6 +2267,30 @@ fn unverified_ui_summary() -> LocalAppVerificationSummaryDto {
     }
 }
 
+fn partial_ui_summary(scope: &local_apps::QaVerificationScope) -> LocalAppVerificationSummaryDto {
+    let mut surfaces = Vec::new();
+    if !scope.unverified_target_ids.is_empty() {
+        surfaces.push(format!(
+            "targets {}",
+            scope.unverified_target_ids.join(", ")
+        ));
+    }
+    if !scope.unverified_scenario_ids.is_empty() {
+        surfaces.push(format!(
+            "scenarios {}",
+            scope.unverified_scenario_ids.join(", ")
+        ));
+    }
+    LocalAppVerificationSummaryDto {
+        status: LocalAppVerificationStatusDto::Unverified,
+        summary: format!(
+            "Host UI/data verification passed on the current device; {} remain unverified.",
+            surfaces.join(" and ")
+        ),
+        code: Some("ui_verification_partial".into()),
+    }
+}
+
 fn failed_ui_summary(error: String) -> LocalAppVerificationSummaryDto {
     LocalAppVerificationSummaryDto {
         status: LocalAppVerificationStatusDto::Failed,
@@ -2040,6 +2379,83 @@ mod tests {
     }
 
     #[test]
+    fn qa_scope_preserves_declared_matrix_and_marks_other_platforms_unverified() {
+        let mut fixture: Value = serde_json::from_str(include_str!(
+            "../../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+        ))
+        .expect("authoring fixture");
+        fixture["targets"]
+            .as_array_mut()
+            .expect("targets")
+            .push(json!({"id": "android-tablet", "os": "android", "form_factor": "tablet"}));
+        fixture["design"]["presentations"]
+            .as_array_mut()
+            .expect("presentations")
+            .push(json!({
+                "target_id": "android-tablet",
+                "presentation": "tablet list",
+                "navigation": "split",
+            }));
+        fixture["acceptance_checks"][0]["target_ids"]
+            .as_array_mut()
+            .expect("acceptance targets")
+            .push(Value::String("android-tablet".into()));
+        fixture["acceptance_checks"]
+            .as_array_mut()
+            .expect("acceptance checks")
+            .push(json!({
+                "id": "android-only",
+                "target_ids": ["android-tablet"],
+                "required": true,
+                "preconditions": [],
+                "steps": ["open tablet view"],
+                "expected": "tablet view appears",
+                "evidence": ["inspect"],
+            }));
+        let spec: local_apps::AppAuthoringSpec =
+            serde_json::from_value(fixture).expect("expanded authoring fixture");
+        let contract = local_apps::AppAuthoringContract {
+            version: local_apps::AUTHORING_SCHEMA_VERSION,
+            revision: 1,
+            app_id: "scope-test".into(),
+            runtime_profile: local_apps::AppRuntimeProfileBinding {
+                family: local_apps::AppRuntimeProfile::ReactDom,
+                revision: 1,
+                contract_sha256: "c".repeat(64),
+            },
+            spec,
+        };
+        let (scope, requirements) = qa_scope_for_contract(
+            &contract,
+            &local_apps::DeviceContext {
+                os: "ios".into(),
+                form_factor: "iphone".into(),
+            },
+        )
+        .expect("derive current-device scope");
+        assert_eq!(scope.declared_target_ids, vec!["primary", "android-tablet"]);
+        assert_eq!(scope.in_scope_target_ids, vec!["primary"]);
+        assert_eq!(scope.unverified_target_ids, vec!["android-tablet"]);
+        assert_eq!(scope.unverified_scenario_ids, vec!["android-only"]);
+        assert_eq!(
+            requirements[0].target_ids,
+            vec!["primary", "android-tablet"]
+        );
+        let unavailable = qa_scope_for_contract(
+            &contract,
+            &local_apps::DeviceContext {
+                os: "android".into(),
+                form_factor: "phone".into(),
+            },
+        )
+        .expect_err("a device without a declared target must be unavailable");
+        assert!(
+            unavailable.contains("qa_begin_unavailable"),
+            "{unavailable}"
+        );
+    }
+
+    #[test]
     fn passing_requires_a_non_empty_all_pass_result() {
         assert!(!result_is_passing(&local_apps::QaResult {
             schema_version: local_apps::QA_SCHEMA_VERSION,
@@ -2063,6 +2479,7 @@ mod tests {
             scenario_judgements: Vec::new(),
             findings: Vec::new(),
             evidence: Vec::new(),
+            verification_scope: local_apps::QaVerificationScope::default(),
             previous_result_id: None,
             finalized_at_ms: 1,
             result_sha256: "f".repeat(64),

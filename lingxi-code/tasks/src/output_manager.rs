@@ -37,12 +37,24 @@ pub struct TaskOutputManager {
     caps: Mutex<HashMap<PathBuf, CapState>>,
     /// Per-spool serialization for append/terminal replacement operations. A
     /// terminal Local App result must replace its raw payload as one
-    /// indivisible write; unrelated task spools must remain independent.
+    /// indivisible write; reads also take this lock so a fail-closed terminal
+    /// override cannot race a stale filesystem read. Unrelated task spools
+    /// remain independent.
     write_locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
     /// Spools whose terminal payload has been replaced. Further handler
     /// appends are ignored so a late raw chunk cannot follow the canonical
     /// result back into the externally readable spool.
     terminal: Mutex<HashSet<PathBuf>>,
+    /// Authoritative terminal payloads. These are recorded before attempting
+    /// the best-effort on-disk rewrite, so a failed rewrite cannot leave stale
+    /// bytes readable through this manager or advertise them as canonical.
+    terminal_overrides: Mutex<HashMap<PathBuf, TerminalOverride>>,
+}
+
+#[derive(Debug, Clone)]
+struct TerminalOverride {
+    content: String,
+    physical_spool_authoritative: bool,
 }
 
 /// Per-spool write-side cap state (claude-code `DiskTaskOutput` `#bytesWritten`
@@ -95,10 +107,12 @@ pub struct OutputOptions {
 pub struct TaskOutput {
     /// Raw text content (already trimmed by `limit`).
     pub content: String,
-    /// Total line count of the underlying file.
+    /// Total line count of the authoritative output projection.
     pub total_lines: u64,
-    /// True if `content` is a prefix of the spool file.
+    /// True if `content` is a prefix of the authoritative output projection.
     pub truncated: bool,
+    /// Whether the physical spool contains the same authoritative bytes.
+    pub physical_spool_authoritative: bool,
 }
 
 impl TaskOutputManager {
@@ -112,6 +126,7 @@ impl TaskOutputManager {
             caps: Mutex::new(HashMap::new()),
             write_locks: Mutex::new(HashMap::new()),
             terminal: Mutex::new(HashSet::new()),
+            terminal_overrides: Mutex::new(HashMap::new()),
         }
     }
 
@@ -286,7 +301,8 @@ impl TaskOutputManager {
     /// path is validated against this manager's output root, the root identity
     /// is pinned before and after the rooted atomic write, and replacement is
     /// serialized with appends so raw handler output cannot win a race with
-    /// the checked terminal payload.
+    /// the checked terminal payload. Once a fail-closed failure override has
+    /// been installed, this method refuses a late success replacement.
     pub async fn replace_terminal_result(
         &self,
         output_file: &Path,
@@ -296,11 +312,17 @@ impl TaskOutputManager {
         let write_lock = self.write_lock_for(output_file).await;
         let _writes = write_lock.lock().await;
         let _root_identity = self.check_output_root().await?;
-        if content.len() as u64 > MAX_TASK_OUTPUT_BYTES {
-            return Err(OutputError::Io(format!(
-                "terminal output exceeds {MAX_TASK_OUTPUT_BYTES_DISPLAY} disk cap"
-            )));
+        if self
+            .terminal_overrides
+            .lock()
+            .await
+            .contains_key(output_file)
+        {
+            return Err(OutputError::Io(
+                "terminal override is already authoritative".into(),
+            ));
         }
+        self.validate_terminal_result(output_file, content)?;
         self.fs
             .write_file_rooted_atomic(&self.output_dir, &relative, content)
             .await
@@ -309,6 +331,7 @@ impl TaskOutputManager {
         // check also rejects a directory swap that raced the operation before
         // the next append/read can proceed.
         self.check_output_root().await?;
+        self.terminal.lock().await.insert(output_file.to_path_buf());
         let mut caps = self.caps.lock().await;
         caps.insert(
             output_file.to_path_buf(),
@@ -317,8 +340,94 @@ impl TaskOutputManager {
                 capped: false,
             },
         );
-        self.terminal.lock().await.insert(output_file.to_path_buf());
         Ok(())
+    }
+
+    pub(crate) fn validate_terminal_result(
+        &self,
+        output_file: &Path,
+        content: &str,
+    ) -> Result<(), OutputError> {
+        self.relative_path_for(output_file)?;
+        if content.len() as u64 > MAX_TASK_OUTPUT_BYTES {
+            return Err(OutputError::Io(format!(
+                "terminal output exceeds {MAX_TASK_OUTPUT_BYTES_DISPLAY} disk cap"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Make a bounded terminal payload authoritative before best-effort disk
+    /// persistence. An error from this method means the in-memory projection is
+    /// still authoritative but the physical spool must not be exposed as such.
+    pub(crate) async fn replace_terminal_result_authoritative(
+        &self,
+        output_file: &Path,
+        content: &str,
+    ) -> Result<(), OutputError> {
+        let relative = self.relative_path_for(output_file)?;
+        let write_lock = self.write_lock_for(output_file).await;
+        let _writes = write_lock.lock().await;
+        self.validate_terminal_result(output_file, content)?;
+
+        self.terminal_overrides.lock().await.insert(
+            output_file.to_path_buf(),
+            TerminalOverride {
+                content: content.to_string(),
+                physical_spool_authoritative: false,
+            },
+        );
+        self.terminal.lock().await.insert(output_file.to_path_buf());
+
+        self.check_output_root().await?;
+        self.fs
+            .write_file_rooted_atomic(&self.output_dir, &relative, content)
+            .await
+            .map_err(|error| self.map_rooted_error(error))?;
+        self.check_output_root().await?;
+
+        if let Some(terminal_override) = self.terminal_overrides.lock().await.get_mut(output_file) {
+            terminal_override.physical_spool_authoritative = true;
+        }
+        let mut caps = self.caps.lock().await;
+        caps.insert(
+            output_file.to_path_buf(),
+            CapState {
+                bytes_written: content.len() as u64,
+                capped: false,
+            },
+        );
+        Ok(())
+    }
+
+    /// Publish a terminal failure with a fail-closed read path.
+    ///
+    /// The in-memory override becomes authoritative before the filesystem
+    /// write. If the write fails (for example, because the disk is full), all
+    /// subsequent reads still return this failure payload instead of stale
+    /// success bytes left in the spool. The override also makes late handler
+    /// appends terminal and is intentionally absorbing for this spool.
+    pub async fn replace_terminal_result_fail_closed(
+        &self,
+        output_file: &Path,
+        content: &str,
+    ) -> Result<(), OutputError> {
+        self.replace_terminal_result_authoritative(output_file, content)
+            .await
+    }
+
+    pub(crate) async fn physical_output_is_authoritative(&self, output_file: &Path) -> bool {
+        let override_state = self
+            .terminal_overrides
+            .lock()
+            .await
+            .get(output_file)
+            .map(|terminal_override| terminal_override.physical_spool_authoritative);
+        match override_state {
+            None => true,
+            Some(false) => false,
+            Some(true) => self.check_output_root().await.is_ok(),
+        }
     }
 
     /// Test-only accessor for the backing filesystem (so M5-01 tests can
@@ -339,12 +448,37 @@ impl TaskOutputManager {
     }
 
     /// Read a window of the task's spool file.
+    ///
+    /// The per-spool lock is intentional: terminal publication records its
+    /// authoritative override before attempting the filesystem rewrite, and a
+    /// read must observe either that override or the pre-terminal file, never
+    /// stale physical bytes after the registry has committed a terminal task.
     pub async fn read(
         &self,
         output_file: &Path,
         opts: OutputOptions,
     ) -> Result<TaskOutput, OutputError> {
         let relative = self.relative_path_for(output_file)?;
+        let write_lock = self.write_lock_for(output_file).await;
+        let _writes = write_lock.lock().await;
+        if let Some(terminal_override) = self
+            .terminal_overrides
+            .lock()
+            .await
+            .get(output_file)
+            .cloned()
+        {
+            let physical_spool_authoritative = terminal_override.physical_spool_authoritative
+                && self.check_output_root().await.is_ok();
+            let fc =
+                platform_api::apply_line_window(terminal_override.content, opts.offset, opts.limit);
+            return Ok(TaskOutput {
+                content: fc.content,
+                total_lines: fc.total_lines,
+                truncated: fc.truncated,
+                physical_spool_authoritative,
+            });
+        }
         let root_identity = self.check_output_root().await?;
         let fc = self
             .fs
@@ -361,6 +495,7 @@ impl TaskOutputManager {
             content: fc.content,
             total_lines: fc.total_lines,
             truncated: fc.truncated,
+            physical_spool_authoritative: true,
         })
     }
 }
@@ -585,6 +720,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fail_closed_terminal_override_absorbs_a_late_success_replacement() {
+        let (_fs, mgr) = manager();
+        let path = mgr.allocate("bterminal2").await.unwrap();
+
+        mgr.replace_terminal_result_fail_closed(&path, "{\"ok\":false}\n")
+            .await
+            .unwrap();
+        let error = mgr
+            .replace_terminal_result(&path, "{\"ok\":true}\n")
+            .await
+            .expect_err("a late success must not replace an authoritative failure");
+        assert!(error.to_string().contains("already authoritative"));
+        assert_eq!(
+            mgr.read(&path, OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "{\"ok\":false}\n"
+        );
+    }
+
+    #[tokio::test]
     async fn different_spools_progress_during_terminal_replacement() {
         let (_fs, mgr) = manager();
         let left = mgr.allocate("bleft0001").await.unwrap();
@@ -656,7 +813,11 @@ mod tests {
         let manager = TaskOutputManager::new(output_dir.clone(), fs.clone());
 
         // The first operation pins the real task-output directory identity.
-        manager.allocate("bpin0001").await.unwrap();
+        let terminal_path = manager.allocate("bpin0001").await.unwrap();
+        manager
+            .replace_terminal_result_fail_closed(&terminal_path, "authoritative\n")
+            .await
+            .unwrap();
         std::fs::rename(&output_dir, parent.path().join("tasks-moved")).unwrap();
         std::os::unix::fs::symlink(victim.path(), &output_dir).unwrap();
 
@@ -676,5 +837,20 @@ mod tests {
             .lock()
             .await
             .contains_key(&output_dir.join("bpin0002.output").display().to_string()));
+
+        let terminal = manager
+            .read(&terminal_path, OutputOptions::default())
+            .await
+            .expect("the authoritative in-memory terminal result remains readable");
+        assert_eq!(terminal.content, "authoritative\n");
+        assert!(
+            !terminal.physical_spool_authoritative,
+            "a replaced output root makes the previously written path stale"
+        );
+        assert!(
+            !manager
+                .physical_output_is_authoritative(&terminal_path)
+                .await
+        );
     }
 }

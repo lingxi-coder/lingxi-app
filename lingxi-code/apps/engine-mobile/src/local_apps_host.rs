@@ -6117,6 +6117,7 @@ impl LocalAppsHostBroker {
 
     async fn request_ui(&self, request: AppUiRequestDto) -> Result<Value, String> {
         let request_id = request.request_id.clone();
+        let is_qa_request = request.request_id.starts_with("qa-ui-");
         let (sender, receiver) = oneshot::channel();
         self.pending_ui
             .lock()
@@ -6139,6 +6140,31 @@ impl LocalAppsHostBroker {
             return Err("user denied the WebView action".into());
         }
         if let Some(error) = resolution.error {
+            // Native QA clients preserve an authenticated envelope even when
+            // the page action itself fails. Keep that envelope on the normal
+            // result channel and localize the failure inside `result`; the
+            // Host can then validate `lingxi_qa`, persist failed UiAction
+            // evidence, and return its Host-issued evidence IDs. A transport
+            // or identity failure has no such envelope and must remain a
+            // top-level error.
+            if is_qa_request {
+                if let Some(result_json) = resolution.result_json {
+                    if let Ok(Value::Object(mut envelope)) = serde_json::from_str(&result_json) {
+                        if envelope.get("lingxi_qa").is_some() {
+                            let failed_result = match envelope.remove("result") {
+                                Some(Value::Object(mut result)) => {
+                                    result.insert("ok".into(), Value::Bool(false));
+                                    result.insert("error".into(), Value::String(error));
+                                    Value::Object(result)
+                                }
+                                _ => json!({"ok": false, "error": error}),
+                            };
+                            envelope.insert("result".into(), failed_result);
+                            return Ok(Value::Object(envelope));
+                        }
+                    }
+                }
+            }
             return Err(error);
         }
         let result = resolution.result_json.unwrap_or_else(|| "{}".into());
@@ -10596,15 +10622,17 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         builder
             .build_workspace_with_authoring(
                 &layout,
-                authoring_candidate
-                    .as_ref()
-                    .map(|candidate| candidate.contract_sha256.as_str()),
+                authoring_candidate.as_ref().map(|candidate| {
+                    crate::local_apps_build::AuthoringCandidateIdentity {
+                        handle: candidate.handle.clone(),
+                        workflow_run_id: candidate.workflow_run_id.clone(),
+                        contract_sha256: candidate.contract_sha256.clone(),
+                        base_contract_sha256: candidate.base_contract_sha256.clone(),
+                    }
+                }),
             )
             .await
             .map_err(|e| e.to_string())?;
-        if authoring_candidate.is_some() {
-            let _ = local_apps::authoring::delete_authoring_candidate(&layout);
-        }
         // "Ready" means SERVABLE, not "the build tool exited 0". The static
         // preview server refuses to start without `build/store/dist/index.html`
         // (see `start_reserved_runtime`), and a build whose output landed
@@ -14752,21 +14780,40 @@ mod tests {
             None,
         );
         assert!(broker.attach_service(service.clone()).is_ok());
+        assert!(broker
+            .attach_host_environment(host_environment(
+                platform_api::MobileHostOs::Ios,
+                platform_api::MobileDeviceClass::Phone,
+            ))
+            .is_ok());
         let app_id = create_app_fixture(&root, &service, "Host QA").await;
         let layout = AppLayout::new(root.path(), &app_id).expect("layout");
         let mut manifest = load_manifest(&layout).expect("manifest");
         manifest.revision = manifest.revision.saturating_add(1).max(1);
-        manifest.collections = vec![local_apps::DataCollectionSchema {
-            id: "chores".into(),
-            name: "Chores".into(),
-            fields: vec![local_apps::DataFieldSchema {
-                id: "title".into(),
-                label: "Title".into(),
-                kind: local_apps::DataFieldKind::Text,
-                required: true,
-                enum_options: Vec::new(),
-            }],
-        }];
+        manifest.collections = vec![
+            local_apps::DataCollectionSchema {
+                id: "chores".into(),
+                name: "Chores".into(),
+                fields: vec![local_apps::DataFieldSchema {
+                    id: "title".into(),
+                    label: "Title".into(),
+                    kind: local_apps::DataFieldKind::Text,
+                    required: true,
+                    enum_options: Vec::new(),
+                }],
+            },
+            local_apps::DataCollectionSchema {
+                id: "notes".into(),
+                name: "Notes".into(),
+                fields: vec![local_apps::DataFieldSchema {
+                    id: "title".into(),
+                    label: "Title".into(),
+                    kind: local_apps::DataFieldKind::Text,
+                    required: true,
+                    enum_options: Vec::new(),
+                }],
+            },
+        ];
         local_apps::save_manifest(&layout, &manifest).expect("save QA manifest");
         AppDataStore::with_cached(layout.clone(), |store| {
             store
@@ -14829,6 +14876,196 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn qa_begin_exposes_durable_upstream_ledger_for_a_fresh_handle() {
+        let fixture = host_qa_fixture().await;
+        let original = local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle)
+            .expect("initial QA session");
+        local_apps::qa_cleanup_session(&fixture.layout, &fixture.qa_handle)
+            .expect("cleanup initial QA session");
+        let mut ledger_identity = original.identity.clone();
+        ledger_identity.qa_handle = local_apps::ids::generate_qa_handle();
+        local_apps::qa_begin_with_scope(
+            &fixture.layout,
+            ledger_identity.clone(),
+            original.scenario_requirements,
+            original.verification_scope,
+            vec![local_apps::QaUpstreamFailure {
+                id: "source:build-smoke".into(),
+                message: "source smoke failure must be repaired".into(),
+                introduced_at_ms: now_ms().saturating_sub(1).max(1),
+            }],
+            now_ms(),
+        )
+        .expect("persist upstream finding in Host ledger");
+        local_apps::qa_cleanup_session(&fixture.layout, &ledger_identity.qa_handle)
+            .expect("cleanup seeded ledger session");
+
+        let begun = fixture
+            .broker
+            .qa_begin(json!({
+                "app_id": fixture.app_id,
+                "workflow_run_id": fixture.workflow_run_id,
+                "verification_strategy": "balanced",
+            }))
+            .await
+            .expect("fresh QA begin reads the durable ledger");
+        assert_eq!(begun["upstream_failures"][0]["id"], "source:build-smoke");
+        assert_eq!(
+            begun["upstream_failures"][0]["message"],
+            "source smoke failure must be repaired"
+        );
+        assert_eq!(begun["upstream_findings"][0]["id"], "source:build-smoke");
+        let fresh_handle = begun["qa_handle"].as_str().expect("fresh handle");
+        local_apps::qa_cleanup_session(&fixture.layout, fresh_handle)
+            .expect("cleanup fresh QA session");
+    }
+
+    #[tokio::test]
+    async fn host_qa_terminal_rejects_current_device_scope_changes_before_publication() {
+        let fixture = host_qa_fixture().await;
+        let candidate = finalize_passing_host_qa(&fixture).await;
+        let original_contract_sha256 =
+            crate::local_apps_build::active_build_authoring_contract_sha256(&fixture.layout)
+                .expect("active authoring selector")
+                .expect("active authoring contract");
+        let mut changed_contract = local_apps::authoring::load_authoring_contract(
+            &fixture.layout,
+            &original_contract_sha256,
+        )
+        .expect("load active authoring contract");
+        changed_contract.spec.targets[0].form_factor = "tablet".into();
+        let mut current_target = changed_contract.spec.targets[0].clone();
+        current_target.id = "current-device".into();
+        current_target.form_factor = "iphone".into();
+        changed_contract.spec.targets.push(current_target);
+        let mut current_presentation = changed_contract.spec.design.presentations[0].clone();
+        current_presentation.target_id = "current-device".into();
+        changed_contract
+            .spec
+            .design
+            .presentations
+            .push(current_presentation);
+        changed_contract.spec.acceptance_checks[0]
+            .target_ids
+            .push("current-device".into());
+        let changed_contract_sha256 =
+            local_apps::authoring::save_authoring_contract(&fixture.layout, &changed_contract)
+                .expect("persist changed authoring contract");
+        let build_path = fixture
+            .layout
+            .root()
+            .join(fixture.layout.build_rel(false))
+            .join("build.json");
+        let mut build: Value =
+            serde_json::from_slice(&fs::read(&build_path).expect("build receipt"))
+                .expect("parse build receipt");
+        build["authoringContractSha256"] = Value::String(changed_contract_sha256);
+        fs::write(
+            &build_path,
+            serde_json::to_vec_pretty(&build).expect("serialize changed build receipt"),
+        )
+        .expect("select changed authoring contract");
+
+        let error = fixture
+            .broker
+            .prepare_workflow_qa_outcome(
+                &fixture.app_id,
+                &fixture.workflow_run_id,
+                local_apps::QaVerificationStrategy::Balanced,
+                workflow_result_for(&candidate),
+            )
+            .await
+            .expect_err("terminal publication must revalidate current Host scope");
+        assert!(
+            error.contains("current Host device scope changed since QA"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn qa_requests_reject_out_of_scope_targets_before_native_or_data_side_effects() {
+        let fixture = host_qa_fixture().await;
+        fixture
+            .broker
+            .session_permissions
+            .lock()
+            .await
+            .grant(&fixture.app_id, AppCapability::UiControl);
+        let before = fixture
+            .broker
+            .query_data_value(json!({
+                "app_id": fixture.app_id,
+                "collection": "chores",
+            }))
+            .await
+            .expect("read initial collection");
+        let wrong_target_write = fixture
+            .broker
+            .mutate_data_value(
+                json!({
+                    "app_id": fixture.app_id,
+                    "qa_handle": fixture.qa_handle,
+                    "scenario_id": "primary-action",
+                    "target_id": "android-tablet",
+                    "collection": "chores",
+                    "operations": [{
+                        "kind": "upsert",
+                        "recordId": "must-not-write",
+                        "document": {"title": "blocked"},
+                    }],
+                }),
+                false,
+                None,
+            )
+            .await
+            .expect_err("out-of-scope target must fail before data mutation");
+        assert!(
+            wrong_target_write.contains("qa_target_unavailable"),
+            "{wrong_target_write}"
+        );
+        let after = fixture
+            .broker
+            .query_data_value(json!({
+                "app_id": fixture.app_id,
+                "collection": "chores",
+            }))
+            .await
+            .expect("read collection after rejected mutation");
+        assert_eq!(after["records"], before["records"]);
+
+        let wrong_scenario = fixture
+            .broker
+            .act_on_ui(json!({
+                "app_id": fixture.app_id,
+                "qa_handle": fixture.qa_handle,
+                "scenario_id": "android-only",
+                "target_id": "primary",
+                "action": "click",
+                "target": {"element_id": "submit"},
+            }))
+            .await
+            .expect_err("unknown scenario must fail before native UI dispatch");
+        assert!(
+            wrong_scenario.contains("qa_scenario_invalid"),
+            "{wrong_scenario}"
+        );
+        assert!(
+            fixture
+                .sink
+                .events()
+                .await
+                .into_iter()
+                .all(|event| !matches!(
+                    event,
+                    ClientEvent::AppEvent {
+                        event: AppEventDto::AppUiRequest { .. }
+                    }
+                )),
+            "rejected QA requests must not dispatch native UI"
+        );
+    }
+
     async fn finalize_passing_host_qa(fixture: &HostQaFixture) -> Value {
         let input = json!({
             "app_id": fixture.app_id,
@@ -14860,6 +15097,24 @@ mod tests {
             .expect("perform page bridge mutation");
         assert_eq!(bridge_result["results"][0]["recordId"], "row-1");
         assert_eq!(bridge_result["results"][0]["revision"], 1);
+        let second_bridge_result = fixture
+            .broker
+            .execute_bridge_inner(&AppBridgeRequestDto {
+                request_id: "qa-fixture-write-notes".into(),
+                app_id: fixture.app_id.clone(),
+                operation: AppBridgeOperationDto::MutateData,
+                payload_json: Some(
+                    json!({
+                        "collection": "notes",
+                        "operations": [{"kind": "upsert", "recordId": "note-1", "document": {"title": "Remember"}}],
+                    })
+                    .to_string(),
+                ),
+            })
+            .await
+            .expect("perform second page bridge mutation");
+        assert_eq!(second_bridge_result["results"][0]["recordId"], "note-1");
+        assert_eq!(second_bridge_result["results"][0]["revision"], 1);
         let after_write = fixture
             .broker
             .query_data_value(json!({"app_id": fixture.app_id, "collection": "chores"}))
@@ -14967,6 +15222,18 @@ mod tests {
             }))
             .await
             .expect("record matching query evidence");
+        fixture
+            .broker
+            .query_data_value(json!({
+                "app_id": fixture.app_id,
+                "qa_handle": fixture.qa_handle,
+                "scenario_id": "primary-action",
+                "target_id": "primary",
+                "collection": "notes",
+                "filters": [{"fieldId": "title", "operator": "equal", "value": "Remember"}],
+            }))
+            .await
+            .expect("record second matching query evidence");
         let session = local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle)
             .expect("load QA session");
         let evidence_ids = session
@@ -15069,6 +15336,63 @@ mod tests {
         let candidate = finalize_passing_host_qa(&fixture).await;
         assert_eq!(candidate["ok"], true, "canonical Host result must pass");
         assert_eq!(candidate["status"], "candidate");
+
+        let session = local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle)
+            .expect("load QA session for causal assertions");
+        let writes = session
+            .evidence
+            .iter()
+            .filter(|evidence| evidence.kind == local_apps::QaEvidenceKind::BridgeWrite)
+            .collect::<Vec<_>>();
+        let queries = session
+            .evidence
+            .iter()
+            .filter(|evidence| evidence.kind == local_apps::QaEvidenceKind::Query)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            writes.len(),
+            2,
+            "one UI click should retain both page writes"
+        );
+        assert_eq!(
+            queries.len(),
+            2,
+            "both collection queries should be retained"
+        );
+        for query in queries {
+            let content = match local_apps::qa_read_evidence(
+                &fixture.layout,
+                &fixture.qa_handle,
+                &query.evidence_id,
+            )
+            .expect("read query evidence")
+            {
+                local_apps::QaEvidenceBlock::Json { content, .. } => content,
+                _ => panic!("query evidence must be JSON"),
+            };
+            let query_collection = content["records"][0]["collection"]
+                .as_str()
+                .expect("query collection");
+            let caused_by = query.caused_by.as_deref().expect("query causal write");
+            let write = writes
+                .iter()
+                .find(|write| write.event_id == caused_by)
+                .expect("causal write exists");
+            let write_content = match local_apps::qa_read_evidence(
+                &fixture.layout,
+                &fixture.qa_handle,
+                &write.evidence_id,
+            )
+            .expect("read bridge evidence")
+            {
+                local_apps::QaEvidenceBlock::Json { content, .. } => content,
+                _ => panic!("bridge evidence must be JSON"),
+            };
+            assert_eq!(
+                write_content["results"][0]["collection"], query_collection,
+                "query causality must follow the returned collection, not latest write"
+            );
+        }
 
         let capture_id = local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle)
             .expect("QA session remains readable through verifier")
@@ -16424,6 +16748,118 @@ mod tests {
                 gate.gate_id
             );
         }
+    }
+
+    #[tokio::test]
+    async fn failed_native_qa_action_is_authenticated_and_persisted_without_roundtrip_credit() {
+        let fixture = host_qa_fixture().await;
+        fixture
+            .broker
+            .session_permissions
+            .lock()
+            .await
+            .grant(&fixture.app_id, AppCapability::UiControl);
+        let input = json!({
+            "app_id": fixture.app_id,
+            "qa_handle": fixture.qa_handle,
+            "scenario_id": "primary-action",
+            "target_id": "primary",
+            "action": "click",
+            "target": {"element_id": "submit"},
+        });
+        let action_task = tokio::spawn({
+            let broker = fixture.broker.clone();
+            let input = input.clone();
+            async move { broker.act_on_ui(input).await }
+        });
+        let request_id = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(request_id) =
+                    fixture
+                        .sink
+                        .events()
+                        .await
+                        .into_iter()
+                        .find_map(|event| match event {
+                            ClientEvent::AppEvent {
+                                event: AppEventDto::AppUiRequest { request },
+                            } if request.app_id == fixture.app_id => Some(request.request_id),
+                            _ => None,
+                        })
+                {
+                    break request_id;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed QA action reaches its native request");
+        let runtime = fixture
+            .broker
+            .service()
+            .expect("service")
+            .runtime_record(&fixture.app_id)
+            .await
+            .expect("runtime record");
+        let runtime_url =
+            crate::local_apps_bridge::runtime_preview_url(&runtime).expect("runtime preview URL");
+        assert!(
+            fixture
+                .broker
+                .resolve_ui(
+                    &request_id,
+                    AppAuthorizationDecisionDto::AllowOnce,
+                    Some(
+                        json!({
+                            "lingxi_qa": {
+                                "version": 1,
+                                "requested_runtime_url": runtime_url,
+                                "loaded_runtime_url": runtime_url,
+                                "platform": "ios",
+                                "form_factor": "iphone",
+                                "navigation_generation": 1,
+                                "device_model": "iPhone fixture",
+                            },
+                            "result": {"ok": false, "error": "submit rejected by app"},
+                        })
+                        .to_string(),
+                    ),
+                    None,
+                )
+                .await,
+            "native error envelope resolves the real tool request"
+        );
+        let action_result = action_task
+            .await
+            .expect("join failed QA action")
+            .expect("authenticated failure remains a structured result");
+        assert_eq!(action_result["ok"], false);
+        assert_eq!(action_result["error"], "submit rejected by app");
+        let evidence_ids = action_result["qa_evidence_ids"]
+            .as_array()
+            .expect("failed action evidence IDs");
+        assert!(
+            evidence_ids.len() >= 2,
+            "native provenance and failed UI evidence"
+        );
+        let session = local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle)
+            .expect("QA session remains readable");
+        let ui = session
+            .evidence
+            .iter()
+            .find(|evidence| evidence.kind == local_apps::QaEvidenceKind::UiAction)
+            .expect("failed UI attempt is persisted");
+        let content = match local_apps::qa_read_evidence(
+            &fixture.layout,
+            &fixture.qa_handle,
+            &ui.evidence_id,
+        )
+        .expect("read failed UI evidence")
+        {
+            local_apps::QaEvidenceBlock::Json { content, .. } => content,
+            _ => panic!("UI evidence must be JSON"),
+        };
+        assert_eq!(content["ok"], false);
     }
 
     /// r3-failure-paths-02: a native approval was announced exactly once, so

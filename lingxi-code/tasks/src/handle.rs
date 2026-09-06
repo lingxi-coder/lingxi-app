@@ -631,6 +631,10 @@ impl TaskRegistryHandle for TaskRegistry {
             }
             _ => (None, None, None),
         };
+        let output_path = out
+            .physical_spool_authoritative
+            .then(|| output_file.to_str().map(str::to_string))
+            .flatten();
         Ok(TaskOutputChunk {
             task_id: state.base().id.clone(),
             content: out.content,
@@ -642,10 +646,10 @@ impl TaskRegistryHandle for TaskRegistry {
             error,
             prompt,
             result,
-            // The absolute on-disk spool path (claude-code
-            // `getTaskOutputPath(taskId)`), surfaced so `TaskOutputTool` can show
-            // the real path in its `[Truncated. Full output: <path>]` header.
-            output_path: output_file.to_str().map(str::to_string),
+            // Surface the absolute spool path only while its bytes agree with
+            // the authoritative projection. A terminal in-memory override can
+            // remain authoritative after a best-effort disk rewrite fails.
+            output_path,
         })
     }
 

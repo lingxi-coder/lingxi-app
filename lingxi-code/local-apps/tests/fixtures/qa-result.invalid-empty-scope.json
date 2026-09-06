@@ -27,8 +27,8 @@
     "artifact": { "artifact_id": "artifact-1", "format": "json", "byte_len": 80, "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "created_at_ms": 101 }
   }],
   "verification_scope": {
-    "declared_target_ids": ["primary"],
-    "in_scope_target_ids": ["primary"],
+    "declared_target_ids": [],
+    "in_scope_target_ids": [],
     "unverified_target_ids": [],
     "unverified_scenario_ids": []
   },

@@ -264,6 +264,124 @@ pub struct QaScenarioRequirement {
     pub motion_required: bool,
 }
 
+/// Host-authenticated verification scope for a QA run.
+///
+/// `declared_target_ids` and the scenario requirements retain the complete
+/// authoring matrix. `in_scope_target_ids` is the current device matrix that
+/// this run actually exercises; every other declared target must be listed in
+/// `unverified_target_ids`. The explicit partition is persisted with the
+/// session and result so a partial device run cannot be presented as a global
+/// verification.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct QaVerificationScope {
+    pub declared_target_ids: Vec<String>,
+    pub in_scope_target_ids: Vec<String>,
+    pub unverified_target_ids: Vec<String>,
+    pub unverified_scenario_ids: Vec<String>,
+}
+
+impl QaVerificationScope {
+    fn all(target_ids: Vec<String>) -> Self {
+        Self {
+            declared_target_ids: target_ids.clone(),
+            in_scope_target_ids: target_ids,
+            unverified_target_ids: Vec::new(),
+            unverified_scenario_ids: Vec::new(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), AppError> {
+        list(&self.declared_target_ids, "declared_target_ids", 128)?;
+        list(&self.in_scope_target_ids, "in_scope_target_ids", 128)?;
+        list(&self.unverified_target_ids, "unverified_target_ids", 128)?;
+        list(
+            &self.unverified_scenario_ids,
+            "unverified_scenario_ids",
+            256,
+        )?;
+        if self.declared_target_ids.is_empty() {
+            return Err(AppError::InvalidRequest(
+                "QA verification scope must declare at least one target".into(),
+            ));
+        }
+        if self.in_scope_target_ids.is_empty() {
+            return Err(AppError::InvalidRequest(
+                "QA verification scope must include at least one current target".into(),
+            ));
+        }
+        let mut declared = BTreeSet::new();
+        for target in &self.declared_target_ids {
+            token(target, "declared target_id")?;
+            if !declared.insert(target.as_str()) {
+                return Err(AppError::InvalidRequest(
+                    "QA verification scope repeats a declared target".into(),
+                ));
+            }
+        }
+        let mut in_scope = BTreeSet::new();
+        for target in &self.in_scope_target_ids {
+            token(target, "in-scope target_id")?;
+            if !declared.contains(target.as_str()) || !in_scope.insert(target.as_str()) {
+                return Err(AppError::InvalidRequest(
+                    "QA in-scope target is unknown or repeated".into(),
+                ));
+            }
+        }
+        let mut unverified = BTreeSet::new();
+        for target in &self.unverified_target_ids {
+            token(target, "unverified target_id")?;
+            if !declared.contains(target.as_str())
+                || !unverified.insert(target.as_str())
+                || in_scope.contains(target.as_str())
+            {
+                return Err(AppError::InvalidRequest(
+                    "QA unverified target is unknown, repeated, or in scope".into(),
+                ));
+            }
+        }
+        if in_scope
+            .union(&unverified)
+            .copied()
+            .collect::<BTreeSet<_>>()
+            != declared
+        {
+            return Err(AppError::InvalidRequest(
+                "QA verification scope must partition every declared target".into(),
+            ));
+        }
+        let mut unverified_scenarios = BTreeSet::new();
+        for scenario in &self.unverified_scenario_ids {
+            token(scenario, "unverified scenario_id")?;
+            if !unverified_scenarios.insert(scenario.as_str()) {
+                return Err(AppError::InvalidRequest(
+                    "QA verification scope repeats an unverified scenario".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_scenarios(&self, requirements: &[QaScenarioRequirement]) -> Result<(), AppError> {
+        self.validate()?;
+        let required = requirements
+            .iter()
+            .filter(|requirement| requirement.required)
+            .map(|requirement| requirement.scenario_id.as_str())
+            .collect::<BTreeSet<_>>();
+        if self
+            .unverified_scenario_ids
+            .iter()
+            .any(|scenario| !required.contains(scenario.as_str()))
+        {
+            return Err(AppError::InvalidRequest(
+                "QA scope lists an unknown or optional unverified scenario".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Durable metadata for one evidence artifact; raw bytes are temporary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -370,6 +488,8 @@ pub struct QaSession {
     pub required_scenario_ids: Vec<String>,
     pub scenario_requirements: Vec<QaScenarioRequirement>,
     pub target_ids: Vec<String>,
+    /// Full authoring target/scenario matrix plus current-device scope.
+    pub verification_scope: QaVerificationScope,
     pub started_at_ms: u64,
     /// Every writable native collection from the bound manifest. An empty
     /// list means the app is stateless and therefore has no persistence gate.
@@ -399,6 +519,9 @@ pub struct QaResult {
     pub scenario_judgements: Vec<QaScenarioJudgement>,
     pub findings: Vec<QaFinding>,
     pub evidence: Vec<QaEvidence>,
+    /// Immutable scope explaining which declared targets/scenarios this
+    /// candidate actually verified.
+    pub verification_scope: QaVerificationScope,
     /// Previous immutable candidate created from this same evidence session.
     /// Thorough verification appends a candidate instead of rewriting the
     /// tester's result.
@@ -527,19 +650,38 @@ fn artifact_path(
     artifact: &QaArtifactRef,
 ) -> Result<PathBuf, AppError> {
     ids::validate_qa_handle(handle)?;
-    token(&artifact.artifact_id, "artifact_id")?;
-    let suffix = match artifact.format.as_str() {
-        "json" | "txt" | "png" | "jpg" | "webp" => artifact.format.as_str(),
-        other => {
-            return Err(AppError::StorageCorrupt(format!(
-                "unknown QA artifact format {other:?}"
-            )));
-        }
-    };
+    validate_artifact_ref(artifact)?;
+    let suffix = artifact.format.as_str();
     Ok(qa_root(layout)
         .join(handle)
         .join(ARTIFACTS_DIR)
         .join(format!("{}.{}", artifact.artifact_id, suffix)))
+}
+
+fn artifact_limit(format: &str) -> Result<u64, AppError> {
+    match format {
+        "json" | "txt" => Ok(MAX_QA_JSON_ARTIFACT_BYTES as u64),
+        "png" | "jpg" | "webp" => Ok(MAX_QA_IMAGE_ARTIFACT_BYTES as u64),
+        other => Err(AppError::StorageCorrupt(format!(
+            "unknown QA artifact format {other:?}"
+        ))),
+    }
+}
+
+fn validate_artifact_ref(artifact: &QaArtifactRef) -> Result<(), AppError> {
+    token(&artifact.artifact_id, "artifact_id")?;
+    if artifact.byte_len == 0 || artifact.byte_len > artifact_limit(&artifact.format)? {
+        return Err(AppError::StorageCorrupt(
+            "QA artifact byte length is outside its format limit".into(),
+        ));
+    }
+    digest(&artifact.sha256, "artifact sha256")?;
+    if artifact.created_at_ms == 0 {
+        return Err(AppError::StorageCorrupt(
+            "QA artifact creation time must be non-zero".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn result_path(layout: &AppLayout, result_id: &str) -> Result<PathBuf, AppError> {
@@ -918,15 +1060,37 @@ pub fn qa_begin_with_requirements(
     upstream_failures: Vec<QaUpstreamFailure>,
     started_at_ms: u64,
 ) -> Result<QaSession, AppError> {
+    qa_begin_with_scope(
+        layout,
+        identity,
+        scenario_requirements,
+        QaVerificationScope::all(target_ids),
+        upstream_failures,
+        started_at_ms,
+    )
+}
+
+/// Begin QA with a complete authoring matrix and an authenticated
+/// current-device verification scope. The Host owns this scope; callers may
+/// not replace it during finalization.
+pub fn qa_begin_with_scope(
+    layout: &AppLayout,
+    identity: QaIdentity,
+    scenario_requirements: Vec<QaScenarioRequirement>,
+    verification_scope: QaVerificationScope,
+    upstream_failures: Vec<QaUpstreamFailure>,
+    started_at_ms: u64,
+) -> Result<QaSession, AppError> {
     identity.validate(layout)?;
+    verification_scope.validate()?;
     if started_at_ms == 0 {
         return Err(AppError::InvalidRequest(
             "QA start time must be non-zero".into(),
         ));
     }
     list(&scenario_requirements, "scenario_requirements", 256)?;
-    list(&target_ids, "target_ids", 128)?;
     list(&upstream_failures, "upstream_failures", 256)?;
+    let target_ids = verification_scope.declared_target_ids.clone();
     if scenario_requirements.is_empty() {
         return Err(AppError::InvalidRequest(
             "QA requires at least one scenario".into(),
@@ -984,6 +1148,7 @@ pub fn qa_begin_with_requirements(
             ));
         }
     }
+    verification_scope.validate_scenarios(&scenario_requirements)?;
     let manifest = crate::manifest::load_manifest(layout)?;
     if manifest.revision != identity.manifest_revision
         || manifest.runtime_profile.as_ref() != Some(&identity.runtime_profile)
@@ -1012,9 +1177,36 @@ pub fn qa_begin_with_requirements(
         Err(FsError::NotFound(_)) => {}
         Err(error) => return Err(AppError::from_fs("inspect QA session", &error)),
     }
+    let unavailable_required_scenario_ids = scenario_requirements
+        .iter()
+        .filter(|requirement| {
+            requirement.required
+                && !requirement.target_ids.iter().any(|target| {
+                    verification_scope
+                        .in_scope_target_ids
+                        .iter()
+                        .any(|in_scope| in_scope == target)
+                })
+        })
+        .map(|requirement| requirement.scenario_id.clone())
+        .collect::<BTreeSet<_>>();
+    let declared_unverified_scenarios = verification_scope
+        .unverified_scenario_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if declared_unverified_scenarios != unavailable_required_scenario_ids {
+        return Err(AppError::InvalidRequest(
+            "QA scope must explicitly list exactly the required scenarios unavailable on the current target"
+                .into(),
+        ));
+    }
     let required_scenario_ids = scenario_requirements
         .iter()
-        .filter(|requirement| requirement.required)
+        .filter(|requirement| {
+            requirement.required
+                && !unavailable_required_scenario_ids.contains(&requirement.scenario_id)
+        })
         .map(|requirement| requirement.scenario_id.clone())
         .collect::<Vec<_>>();
     if required_scenario_ids.is_empty() {
@@ -1042,6 +1234,7 @@ pub fn qa_begin_with_requirements(
         required_scenario_ids,
         scenario_requirements,
         target_ids,
+        verification_scope,
         started_at_ms,
         required_collections,
         upstream_failures,
@@ -1083,10 +1276,27 @@ pub fn load_qa_session(layout: &AppLayout, qa_handle: &str) -> Result<QaSession,
             "QA session has invalid durable bounds".into(),
         ));
     }
+    session
+        .verification_scope
+        .validate_scenarios(&session.scenario_requirements)?;
+    if session.verification_scope.declared_target_ids != session.target_ids {
+        return Err(AppError::StorageCorrupt(
+            "QA session target matrix does not match its verification scope".into(),
+        ));
+    }
     let required = session
         .scenario_requirements
         .iter()
-        .filter(|requirement| requirement.required)
+        .filter(|requirement| {
+            requirement.required
+                && requirement.target_ids.iter().any(|target| {
+                    session
+                        .verification_scope
+                        .in_scope_target_ids
+                        .iter()
+                        .any(|in_scope| in_scope == target)
+                })
+        })
         .map(|requirement| requirement.scenario_id.as_str())
         .collect::<BTreeSet<_>>();
     if required
@@ -1130,8 +1340,8 @@ pub fn load_qa_session(layout: &AppLayout, qa_handle: &str) -> Result<QaSession,
         })?;
         token(&evidence.event_id, "event_id")
             .map_err(|error| AppError::StorageCorrupt(format!("invalid QA event id: {error}")))?;
-        digest(&evidence.artifact.sha256, "artifact sha256").map_err(|error| {
-            AppError::StorageCorrupt(format!("invalid QA artifact digest: {error}"))
+        validate_artifact_ref(&evidence.artifact).map_err(|error| {
+            AppError::StorageCorrupt(format!("invalid QA artifact metadata: {error}"))
         })?;
     }
     if let Some(result_id) = &session.finalized_result_id {
@@ -1186,9 +1396,14 @@ pub fn qa_record_host_evidence(
             "evidence scenario is not required by this QA session".into(),
         ));
     }
-    if !session.target_ids.iter().any(|id| id == &input.target_id) {
+    if !session
+        .verification_scope
+        .in_scope_target_ids
+        .iter()
+        .any(|id| id == &input.target_id)
+    {
         return Err(AppError::InvalidRequest(
-            "evidence target is not bound to this QA session".into(),
+            "evidence target is outside the current QA verification scope".into(),
         ));
     }
     let requirement = session
@@ -1374,9 +1589,25 @@ pub fn qa_read_evidence(
         .into_iter()
         .find(|item| item.evidence_id == evidence_id)
         .ok_or_else(|| AppError::NotFound("QA evidence not found".into()))?;
+    read_evidence_artifact(layout, qa_handle, &evidence)
+}
+
+fn read_evidence_artifact(
+    layout: &AppLayout,
+    qa_handle: &str,
+    evidence: &QaEvidence,
+) -> Result<QaEvidenceBlock, AppError> {
+    validate_artifact_ref(&evidence.artifact)?;
     let path = artifact_path(layout, qa_handle, &evidence.artifact)?;
-    let bytes = rooted_fs::read_tail_bytes(layout.root(), &path, evidence.artifact.byte_len)
-        .map_err(|error| AppError::from_fs("read QA evidence artifact", &error))?;
+    // Read one byte beyond the declared length. `read_tail_bytes` is a log-tail
+    // primitive and otherwise accepts a file with an untrusted prefix; exact
+    // length plus digest validation is required before a candidate is sealed.
+    let bytes = rooted_fs::read_tail_bytes(
+        layout.root(),
+        &path,
+        evidence.artifact.byte_len.saturating_add(1),
+    )
+    .map_err(|error| AppError::from_fs("read QA evidence artifact", &error))?;
     if bytes.len() as u64 != evidence.artifact.byte_len
         || raw_sha256(&bytes) != evidence.artifact.sha256
     {
@@ -1388,25 +1619,31 @@ pub fn qa_read_evidence(
         "json" => {
             let content = serde_json::from_slice(&bytes)
                 .map_err(|error| AppError::StorageCorrupt(format!("QA JSON evidence: {error}")))?;
-            Ok(QaEvidenceBlock::Json { evidence, content })
+            Ok(QaEvidenceBlock::Json {
+                evidence: evidence.clone(),
+                content,
+            })
         }
         "txt" => {
             let content = String::from_utf8(bytes)
                 .map_err(|error| AppError::StorageCorrupt(format!("QA text evidence: {error}")))?;
-            Ok(QaEvidenceBlock::Text { evidence, content })
+            Ok(QaEvidenceBlock::Text {
+                evidence: evidence.clone(),
+                content,
+            })
         }
         "png" => Ok(QaEvidenceBlock::Image {
-            evidence,
+            evidence: evidence.clone(),
             format: QaImageFormat::Png,
             bytes,
         }),
         "jpg" => Ok(QaEvidenceBlock::Image {
-            evidence,
+            evidence: evidence.clone(),
             format: QaImageFormat::Jpeg,
             bytes,
         }),
         "webp" => Ok(QaEvidenceBlock::Image {
-            evidence,
+            evidence: evidence.clone(),
             format: QaImageFormat::Webp,
             bytes,
         }),
@@ -1417,6 +1654,7 @@ pub fn qa_read_evidence(
 }
 
 fn validate_scenario_coverage(
+    layout: &AppLayout,
     session: &QaSession,
     judgements: &[QaScenarioJudgement],
 ) -> Result<(), AppError> {
@@ -1491,7 +1729,32 @@ fn validate_scenario_coverage(
         } else {
             &requirement.target_ids
         };
+        // A failed judgement is an authenticated report of observed failure,
+        // not a claim that every success artifact exists. Native provenance
+        // and referenced Host evidence are still required below; success-only
+        // evidence kinds (write/query/capture) are enforced only for Passed.
+        if judgement.status == QaScenarioStatus::Failed {
+            continue;
+        }
+        for action in referenced
+            .iter()
+            .filter(|item| item.kind == QaEvidenceKind::UiAction)
+        {
+            if ui_action_failed(layout, session, action)? {
+                return Err(AppError::InvalidRequest(
+                    "passed QA scenario references a failed Host UI action".into(),
+                ));
+            }
+        }
         for target in required_targets {
+            if !session
+                .verification_scope
+                .in_scope_target_ids
+                .iter()
+                .any(|in_scope| in_scope == target)
+            {
+                continue;
+            }
             for kind in &requirement.evidence_kinds {
                 if !referenced
                     .iter()
@@ -1513,6 +1776,30 @@ fn validate_scenario_coverage(
     Ok(())
 }
 
+/// Seal-time integrity pass for every model-referenced evidence artifact. The
+/// scenario metadata is not sufficient: the raw artifact must still exist,
+/// have the exact declared length, and hash to the Host-recorded digest.
+fn validate_referenced_artifacts(
+    layout: &AppLayout,
+    session: &QaSession,
+    judgements: &[QaScenarioJudgement],
+) -> Result<(), AppError> {
+    let mut checked = BTreeSet::new();
+    for judgement in judgements {
+        for evidence_id in &judgement.evidence_ids {
+            let evidence = session
+                .evidence
+                .iter()
+                .find(|evidence| evidence.evidence_id == *evidence_id)
+                .ok_or_else(|| AppError::StorageCorrupt("missing referenced QA evidence".into()))?;
+            if checked.insert(evidence_id.as_str()) {
+                let _ = read_evidence_artifact(layout, &session.identity.qa_handle, evidence)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_native_targets(
     layout: &AppLayout,
     session: &QaSession,
@@ -1523,11 +1810,25 @@ fn validate_native_targets(
         .iter()
         .filter(|requirement| requirement.required)
     {
+        if session
+            .verification_scope
+            .unverified_scenario_ids
+            .iter()
+            .any(|scenario| scenario == &requirement.scenario_id)
+        {
+            continue;
+        }
         let judgement = judgements
             .iter()
             .find(|judgement| judgement.scenario_id == requirement.scenario_id)
             .ok_or_else(|| AppError::StorageCorrupt("missing QA judgement".into()))?;
-        for target in &requirement.target_ids {
+        for target in requirement.target_ids.iter().filter(|target| {
+            session
+                .verification_scope
+                .in_scope_target_ids
+                .iter()
+                .any(|in_scope| in_scope == *target)
+        }) {
             let evidence = session.evidence.iter().find(|item| {
                 item.kind == QaEvidenceKind::NativeTargetProvenance
                     && item.scenario_id == requirement.scenario_id
@@ -1541,7 +1842,7 @@ fn validate_native_targets(
                 )));
             };
             let QaEvidenceBlock::Json { content, .. } =
-                qa_read_evidence(layout, &session.identity.qa_handle, &evidence.evidence_id)?
+                read_evidence_artifact(layout, &session.identity.qa_handle, evidence)?
             else {
                 return Err(AppError::StorageCorrupt(
                     "native target provenance is not JSON".into(),
@@ -1577,6 +1878,19 @@ fn json_evidence(
             evidence.kind
         ))),
     }
+}
+
+/// A Host UI action may return a logical failure as a valid, authenticated
+/// result. It is useful evidence for a Failed judgement, but it cannot prove
+/// a Passed judgement. Absence of "ok" remains compatible with successful
+/// native action payloads; only an explicit "ok: false" is failure.
+fn ui_action_failed(
+    layout: &AppLayout,
+    session: &QaSession,
+    evidence: &QaEvidence,
+) -> Result<bool, AppError> {
+    let content = json_evidence(layout, session, evidence)?;
+    Ok(content.get("ok") == Some(&Value::Bool(false)))
 }
 
 fn changed_rows(value: &Value, collection: &str) -> Vec<(String, u64)> {
@@ -1634,6 +1948,9 @@ fn validate_roundtrip(layout: &AppLayout, session: &QaSession) -> Result<(), App
             }) else {
                 continue;
             };
+            if ui_action_failed(layout, session, action)? {
+                continue;
+            }
             let rows = changed_rows(&json_evidence(layout, session, write)?, collection);
             if rows.is_empty() {
                 continue;
@@ -1675,6 +1992,11 @@ fn validate_canvas_captures(
     }
     for requirement in session.scenario_requirements.iter().filter(|requirement| {
         requirement.required
+            && !session
+                .verification_scope
+                .unverified_scenario_ids
+                .iter()
+                .any(|scenario| scenario == &requirement.scenario_id)
             && (requirement.motion_required
                 || requirement
                     .evidence_kinds
@@ -1684,7 +2006,16 @@ fn validate_canvas_captures(
             .iter()
             .find(|judgement| judgement.scenario_id == requirement.scenario_id)
             .ok_or_else(|| AppError::StorageCorrupt("missing QA judgement".into()))?;
-        for target in &requirement.target_ids {
+        if judgement.status == QaScenarioStatus::Failed {
+            continue;
+        }
+        for target in requirement.target_ids.iter().filter(|target| {
+            session
+                .verification_scope
+                .in_scope_target_ids
+                .iter()
+                .any(|in_scope| in_scope == *target)
+        }) {
             let mut captures = session
                 .evidence
                 .iter()
@@ -1751,11 +2082,21 @@ fn record_failed_scenarios(
             .iter()
             .find(|requirement| requirement.scenario_id == judgement.scenario_id)
             .ok_or_else(|| AppError::StorageCorrupt("missing Host scenario requirement".into()))?;
-        let targets = if requirement.target_ids.is_empty() {
+        let all_targets = if requirement.target_ids.is_empty() {
             &session.target_ids
         } else {
             &requirement.target_ids
         };
+        let targets = all_targets
+            .iter()
+            .filter(|target| {
+                session
+                    .verification_scope
+                    .in_scope_target_ids
+                    .iter()
+                    .any(|in_scope| in_scope == *target)
+            })
+            .collect::<Vec<_>>();
         for target in targets {
             let evidence_ids = session
                 .evidence
@@ -2070,7 +2411,10 @@ pub fn qa_finalize(
         .map(|result_id| load_qa_result(layout, result_id))
         .transpose()?;
     if let Some(previous) = &previous {
-        if previous.identity != session.identity || previous.evidence != session.evidence {
+        if previous.identity != session.identity
+            || previous.evidence != session.evidence
+            || previous.verification_scope != session.verification_scope
+        {
             return Err(AppError::StorageCorrupt(
                 "previous QA candidate does not match its sealed session".into(),
             ));
@@ -2106,9 +2450,15 @@ pub fn qa_finalize(
             });
         }
     }
-    validate_scenario_coverage(&session, &scenario_judgements)?;
+    validate_scenario_coverage(layout, &session, &scenario_judgements)?;
+    validate_referenced_artifacts(layout, &session, &scenario_judgements)?;
     validate_native_targets(layout, &session, &scenario_judgements)?;
-    validate_roundtrip(layout, &session)?;
+    if scenario_judgements
+        .iter()
+        .all(|judgement| judgement.status == QaScenarioStatus::Passed)
+    {
+        validate_roundtrip(layout, &session)?;
+    }
     validate_canvas_captures(&session, &scenario_judgements)?;
     record_failed_scenarios(&mut ledger, &session, &scenario_judgements, finalized_at_ms)?;
     resolve_scenario_findings(&mut ledger, &session, &scenario_judgements);
@@ -2136,6 +2486,7 @@ pub fn qa_finalize(
         scenario_judgements,
         findings,
         evidence: session.evidence.clone(),
+        verification_scope: session.verification_scope.clone(),
         previous_result_id: session.finalized_result_id.clone(),
         finalized_at_ms,
         result_sha256: String::new(),
@@ -2452,6 +2803,9 @@ pub fn load_qa_result(layout: &AppLayout, result_id: &str) -> Result<QaResult, A
             "QA result has invalid durable bounds or status".into(),
         ));
     }
+    result.verification_scope.validate().map_err(|error| {
+        AppError::StorageCorrupt(format!("invalid QA verification scope: {error}"))
+    })?;
     if let Some(previous_result_id) = &result.previous_result_id {
         token(previous_result_id, "previous_result_id").map_err(|error| {
             AppError::StorageCorrupt(format!("invalid previous QA result id: {error}"))
@@ -3105,6 +3459,61 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("distinct frames"));
+    }
+
+    #[test]
+    fn failed_canvas_scenario_seals_without_success_captures() {
+        let root = TempDir::new().unwrap();
+        let layout = layout(&root);
+        install_manifest(&layout, AppRuntimeProfile::Canvas2d, vec![]);
+        qa_begin_with_requirements(
+            &layout,
+            identity(&layout, AppRuntimeProfile::Canvas2d),
+            vec![QaScenarioRequirement {
+                scenario_id: "motion".into(),
+                required: true,
+                target_ids: vec!["primary".into()],
+                evidence_kinds: vec![QaEvidenceKind::Capture],
+                motion_required: true,
+            }],
+            vec!["primary".into()],
+            vec![],
+            100,
+        )
+        .unwrap();
+        record_native(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            "motion",
+            "primary",
+            "native",
+            110,
+        );
+
+        let output = qa_finalize(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            vec![QaScenarioJudgement {
+                scenario_id: "motion".into(),
+                status: QaScenarioStatus::Failed,
+                evidence_ids: vec!["native".into()],
+                summary: "motion never rendered".into(),
+            }],
+            vec![],
+            120,
+        )
+        .expect("authenticated Canvas failure must seal without success captures");
+
+        assert_eq!(output.result.status, QaResultStatus::Candidate);
+        assert_eq!(
+            output.result.scenario_judgements[0].status,
+            QaScenarioStatus::Failed
+        );
+        assert!(output
+            .result
+            .findings
+            .iter()
+            .any(|finding| finding.blocking));
     }
 
     #[test]
@@ -3839,6 +4248,751 @@ mod tests {
         )
         .unwrap();
         assert!(resolved.result.findings.is_empty());
+    }
+
+    #[test]
+    fn failed_ui_attempt_can_finalize_without_success_roundtrip() {
+        let root = TempDir::new().unwrap();
+        let layout = layout(&root);
+        install_manifest(&layout, AppRuntimeProfile::ReactDom, vec!["chores"]);
+        qa_begin_with_requirements(
+            &layout,
+            identity(&layout, AppRuntimeProfile::ReactDom),
+            vec![QaScenarioRequirement {
+                scenario_id: "scenario-1".into(),
+                required: true,
+                target_ids: vec!["primary".into()],
+                evidence_kinds: vec![
+                    QaEvidenceKind::Inspect,
+                    QaEvidenceKind::UiAction,
+                    QaEvidenceKind::BridgeWrite,
+                    QaEvidenceKind::Query,
+                ],
+                motion_required: false,
+            }],
+            vec!["primary".into()],
+            vec![],
+            100,
+        )
+        .unwrap();
+        record_native(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            "scenario-1",
+            "primary",
+            "native",
+            110,
+        );
+        for (id, kind, at, value) in [
+            (
+                "inspect",
+                QaEvidenceKind::Inspect,
+                120,
+                serde_json::json!({"ready": true}),
+            ),
+            (
+                "action",
+                QaEvidenceKind::UiAction,
+                130,
+                serde_json::json!({"ok": false, "error": "Save handler did not respond"}),
+            ),
+        ] {
+            qa_record_host_evidence(
+                &layout,
+                "qa_00000000000000000000000000000000",
+                evidence(
+                    id,
+                    "scenario-1",
+                    "primary",
+                    kind,
+                    at,
+                    id,
+                    None,
+                    QaHostEvidenceContent::Json(value),
+                ),
+            )
+            .unwrap();
+        }
+
+        let output = qa_finalize(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            vec![QaScenarioJudgement {
+                scenario_id: "scenario-1".into(),
+                status: QaScenarioStatus::Failed,
+                evidence_ids: vec!["native".into(), "inspect".into(), "action".into()],
+                summary: "Save handler did not produce a bridge write".into(),
+            }],
+            vec![],
+            200,
+        )
+        .unwrap();
+        assert_eq!(
+            output.result.scenario_judgements[0].status,
+            QaScenarioStatus::Failed
+        );
+        assert!(output
+            .result
+            .findings
+            .iter()
+            .any(|finding| finding.blocking));
+    }
+
+    #[test]
+    fn passed_judgement_rejects_an_explicitly_failed_ui_action() {
+        let root = TempDir::new().unwrap();
+        let layout = layout(&root);
+        install_manifest(&layout, AppRuntimeProfile::ReactDom, vec![]);
+        qa_begin_with_requirements(
+            &layout,
+            identity(&layout, AppRuntimeProfile::ReactDom),
+            vec![QaScenarioRequirement {
+                scenario_id: "scenario-1".into(),
+                required: true,
+                target_ids: vec!["primary".into()],
+                evidence_kinds: vec![QaEvidenceKind::UiAction],
+                motion_required: false,
+            }],
+            vec!["primary".into()],
+            vec![],
+            100,
+        )
+        .unwrap();
+        record_native(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            "scenario-1",
+            "primary",
+            "native",
+            110,
+        );
+        qa_record_host_evidence(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            evidence(
+                "failed-action",
+                "scenario-1",
+                "primary",
+                QaEvidenceKind::UiAction,
+                120,
+                "failed-action",
+                None,
+                QaHostEvidenceContent::Json(serde_json::json!({
+                    "ok": false,
+                    "error": "Save handler rejected the request",
+                })),
+            ),
+        )
+        .unwrap();
+
+        let error = qa_finalize(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            vec![QaScenarioJudgement {
+                scenario_id: "scenario-1".into(),
+                status: QaScenarioStatus::Passed,
+                evidence_ids: vec!["native".into(), "failed-action".into()],
+                summary: "claimed pass".into(),
+            }],
+            vec![],
+            200,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("passed QA scenario references a failed Host UI action"));
+    }
+
+    #[test]
+    fn failed_ui_action_cannot_prove_a_persistence_roundtrip() {
+        let root = TempDir::new().unwrap();
+        let layout = layout(&root);
+        install_manifest(&layout, AppRuntimeProfile::ReactDom, vec!["chores"]);
+        qa_begin_with_requirements(
+            &layout,
+            identity(&layout, AppRuntimeProfile::ReactDom),
+            vec![QaScenarioRequirement {
+                scenario_id: "scenario-1".into(),
+                required: true,
+                target_ids: vec!["primary".into()],
+                evidence_kinds: vec![QaEvidenceKind::Inspect],
+                motion_required: false,
+            }],
+            vec!["primary".into()],
+            vec![],
+            100,
+        )
+        .unwrap();
+        record_native(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            "scenario-1",
+            "primary",
+            "native",
+            110,
+        );
+        qa_record_host_evidence(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            evidence(
+                "failed-action",
+                "scenario-1",
+                "primary",
+                QaEvidenceKind::UiAction,
+                120,
+                "failed-action",
+                None,
+                QaHostEvidenceContent::Json(serde_json::json!({
+                    "ok": false,
+                    "error": "Save handler rejected the request",
+                })),
+            ),
+        )
+        .unwrap();
+        qa_record_host_evidence(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            evidence(
+                "write",
+                "scenario-1",
+                "primary",
+                QaEvidenceKind::BridgeWrite,
+                130,
+                "write",
+                Some("failed-action"),
+                QaHostEvidenceContent::Json(serde_json::json!({
+                    "results":[{
+                        "collection":"chores",
+                        "recordId":"row-1",
+                        "revision":1,
+                        "deleted":false
+                    }]
+                })),
+            ),
+        )
+        .unwrap();
+        qa_record_host_evidence(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            evidence(
+                "query",
+                "scenario-1",
+                "primary",
+                QaEvidenceKind::Query,
+                140,
+                "query",
+                Some("write"),
+                QaHostEvidenceContent::Json(serde_json::json!({
+                    "records":[{
+                        "collection":"chores",
+                        "recordId":"row-1",
+                        "revision":1
+                    }]
+                })),
+            ),
+        )
+        .unwrap();
+        qa_record_host_evidence(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            evidence(
+                "inspect",
+                "scenario-1",
+                "primary",
+                QaEvidenceKind::Inspect,
+                150,
+                "inspect",
+                None,
+                QaHostEvidenceContent::Json(serde_json::json!({"visible": true})),
+            ),
+        )
+        .unwrap();
+
+        let error = qa_finalize(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            vec![QaScenarioJudgement {
+                scenario_id: "scenario-1".into(),
+                status: QaScenarioStatus::Passed,
+                evidence_ids: vec!["native".into(), "inspect".into()],
+                summary: "claimed persistence pass".into(),
+            }],
+            vec![],
+            200,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("lacks an actual UI action"));
+    }
+
+    #[test]
+    fn passed_scenario_still_requires_success_roundtrip_when_failed_policy_is_used() {
+        let root = TempDir::new().unwrap();
+        let layout = layout(&root);
+        install_manifest(&layout, AppRuntimeProfile::ReactDom, vec!["chores"]);
+        qa_begin_with_requirements(
+            &layout,
+            identity(&layout, AppRuntimeProfile::ReactDom),
+            vec![QaScenarioRequirement {
+                scenario_id: "scenario-1".into(),
+                required: true,
+                target_ids: vec!["primary".into()],
+                evidence_kinds: vec![
+                    QaEvidenceKind::Inspect,
+                    QaEvidenceKind::UiAction,
+                    QaEvidenceKind::BridgeWrite,
+                    QaEvidenceKind::Query,
+                ],
+                motion_required: false,
+            }],
+            vec!["primary".into()],
+            vec![],
+            100,
+        )
+        .unwrap();
+        record_native(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            "scenario-1",
+            "primary",
+            "native",
+            110,
+        );
+        for (id, kind, at) in [
+            ("inspect", QaEvidenceKind::Inspect, 120),
+            ("action", QaEvidenceKind::UiAction, 130),
+        ] {
+            qa_record_host_evidence(
+                &layout,
+                "qa_00000000000000000000000000000000",
+                evidence(
+                    id,
+                    "scenario-1",
+                    "primary",
+                    kind,
+                    at,
+                    id,
+                    None,
+                    QaHostEvidenceContent::Json(serde_json::json!({"id": id})),
+                ),
+            )
+            .unwrap();
+        }
+
+        let error = qa_finalize(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            vec![QaScenarioJudgement {
+                scenario_id: "scenario-1".into(),
+                status: QaScenarioStatus::Passed,
+                evidence_ids: vec!["native".into(), "inspect".into(), "action".into()],
+                summary: "claimed pass without persistence proof".into(),
+            }],
+            vec![],
+            200,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("lacks") || error.to_string().contains("roundtrip"));
+    }
+
+    #[test]
+    fn mixed_stateful_scenarios_seal_a_failed_candidate_without_global_roundtrip() {
+        let root = TempDir::new().unwrap();
+        let layout = layout(&root);
+        install_manifest(&layout, AppRuntimeProfile::ReactDom, vec!["chores"]);
+        qa_begin_with_requirements(
+            &layout,
+            identity(&layout, AppRuntimeProfile::ReactDom),
+            vec![
+                QaScenarioRequirement {
+                    scenario_id: "render".into(),
+                    required: true,
+                    target_ids: vec!["primary".into()],
+                    evidence_kinds: vec![QaEvidenceKind::Inspect],
+                    motion_required: false,
+                },
+                QaScenarioRequirement {
+                    scenario_id: "save".into(),
+                    required: true,
+                    target_ids: vec!["primary".into()],
+                    evidence_kinds: vec![QaEvidenceKind::BridgeWrite, QaEvidenceKind::Query],
+                    motion_required: false,
+                },
+            ],
+            vec!["primary".into()],
+            vec![],
+            100,
+        )
+        .unwrap();
+        record_native(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            "render",
+            "primary",
+            "native-render",
+            110,
+        );
+        record_native(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            "save",
+            "primary",
+            "native-save",
+            111,
+        );
+        qa_record_host_evidence(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            evidence(
+                "inspect-render",
+                "render",
+                "primary",
+                QaEvidenceKind::Inspect,
+                120,
+                "inspect-render",
+                None,
+                QaHostEvidenceContent::Json(serde_json::json!({"visible": true})),
+            ),
+        )
+        .unwrap();
+        qa_record_host_evidence(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            evidence(
+                "save-error",
+                "save",
+                "primary",
+                QaEvidenceKind::RuntimeError,
+                130,
+                "save-error",
+                None,
+                QaHostEvidenceContent::Text("save failed before bridge write".into()),
+            ),
+        )
+        .unwrap();
+
+        let output = qa_finalize(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            vec![
+                QaScenarioJudgement {
+                    scenario_id: "render".into(),
+                    status: QaScenarioStatus::Passed,
+                    evidence_ids: vec!["native-render".into(), "inspect-render".into()],
+                    summary: "render passed".into(),
+                },
+                QaScenarioJudgement {
+                    scenario_id: "save".into(),
+                    status: QaScenarioStatus::Failed,
+                    evidence_ids: vec!["native-save".into(), "save-error".into()],
+                    summary: "save failed before persistence".into(),
+                },
+            ],
+            vec![],
+            200,
+        )
+        .expect("mixed authenticated QA must seal an authoritative failed candidate");
+
+        assert_eq!(output.result.status, QaResultStatus::Candidate);
+        assert!(output
+            .result
+            .scenario_judgements
+            .iter()
+            .any(|judgement| judgement.status == QaScenarioStatus::Failed));
+        assert!(output
+            .result
+            .findings
+            .iter()
+            .any(|finding| finding.blocking));
+    }
+
+    #[test]
+    fn referenced_inspect_artifact_must_still_exist_and_match_before_sealing() {
+        let root = TempDir::new().unwrap();
+        let layout = layout(&root);
+        install_manifest(&layout, AppRuntimeProfile::ReactDom, vec![]);
+        qa_begin_with_requirements(
+            &layout,
+            identity(&layout, AppRuntimeProfile::ReactDom),
+            vec![QaScenarioRequirement {
+                scenario_id: "scenario-1".into(),
+                required: true,
+                target_ids: vec!["primary".into()],
+                evidence_kinds: vec![QaEvidenceKind::Inspect],
+                motion_required: false,
+            }],
+            vec!["primary".into()],
+            vec![],
+            100,
+        )
+        .unwrap();
+        record_native(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            "scenario-1",
+            "primary",
+            "native",
+            110,
+        );
+        qa_record_host_evidence(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            evidence(
+                "inspect",
+                "scenario-1",
+                "primary",
+                QaEvidenceKind::Inspect,
+                120,
+                "inspect",
+                None,
+                QaHostEvidenceContent::Json(serde_json::json!({"visible": true})),
+            ),
+        )
+        .unwrap();
+        let session = load_qa_session(&layout, "qa_00000000000000000000000000000000").unwrap();
+        let inspect = session
+            .evidence
+            .iter()
+            .find(|item| item.evidence_id == "inspect")
+            .unwrap();
+        let path = layout
+            .root()
+            .join(artifact_path(&layout, &session.identity.qa_handle, &inspect.artifact).unwrap());
+        std::fs::write(path, b"tampered").unwrap();
+
+        let error = qa_finalize(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            vec![QaScenarioJudgement {
+                scenario_id: "scenario-1".into(),
+                status: QaScenarioStatus::Passed,
+                evidence_ids: vec!["native".into(), "inspect".into()],
+                summary: "pass".into(),
+            }],
+            vec![],
+            200,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("integrity"));
+    }
+
+    #[test]
+    fn every_referenced_nonvisual_artifact_must_match_before_sealing() {
+        for tampered_id in ["write", "query", "console", "runtime-error"] {
+            let root = TempDir::new().unwrap();
+            let layout = layout(&root);
+            install_manifest(&layout, AppRuntimeProfile::ReactDom, vec![]);
+            qa_begin_with_requirements(
+                &layout,
+                identity(&layout, AppRuntimeProfile::ReactDom),
+                vec![QaScenarioRequirement {
+                    scenario_id: "scenario-1".into(),
+                    required: true,
+                    target_ids: vec!["primary".into()],
+                    evidence_kinds: vec![
+                        QaEvidenceKind::UiAction,
+                        QaEvidenceKind::BridgeWrite,
+                        QaEvidenceKind::Query,
+                        QaEvidenceKind::Console,
+                        QaEvidenceKind::RuntimeError,
+                    ],
+                    motion_required: false,
+                }],
+                vec!["primary".into()],
+                vec![],
+                100,
+            )
+            .unwrap();
+            record_native(
+                &layout,
+                "qa_00000000000000000000000000000000",
+                "scenario-1",
+                "primary",
+                "native",
+                105,
+            );
+            for input in [
+                evidence(
+                    "action",
+                    "scenario-1",
+                    "primary",
+                    QaEvidenceKind::UiAction,
+                    110,
+                    "action",
+                    None,
+                    QaHostEvidenceContent::Json(serde_json::json!({"ok": true})),
+                ),
+                evidence(
+                    "write",
+                    "scenario-1",
+                    "primary",
+                    QaEvidenceKind::BridgeWrite,
+                    120,
+                    "write",
+                    Some("action"),
+                    QaHostEvidenceContent::Json(serde_json::json!({"results": []})),
+                ),
+                evidence(
+                    "query",
+                    "scenario-1",
+                    "primary",
+                    QaEvidenceKind::Query,
+                    130,
+                    "query",
+                    Some("write"),
+                    QaHostEvidenceContent::Json(serde_json::json!({"records": []})),
+                ),
+                evidence(
+                    "console",
+                    "scenario-1",
+                    "primary",
+                    QaEvidenceKind::Console,
+                    140,
+                    "console",
+                    None,
+                    QaHostEvidenceContent::Text("console output".into()),
+                ),
+                evidence(
+                    "runtime-error",
+                    "scenario-1",
+                    "primary",
+                    QaEvidenceKind::RuntimeError,
+                    150,
+                    "runtime-error",
+                    None,
+                    QaHostEvidenceContent::Text("runtime error".into()),
+                ),
+            ] {
+                qa_record_host_evidence(&layout, "qa_00000000000000000000000000000000", input)
+                    .unwrap();
+            }
+            let session = load_qa_session(&layout, "qa_00000000000000000000000000000000").unwrap();
+            let tampered = session
+                .evidence
+                .iter()
+                .find(|item| item.evidence_id == tampered_id)
+                .unwrap();
+            let path = layout.root().join(
+                artifact_path(&layout, &session.identity.qa_handle, &tampered.artifact).unwrap(),
+            );
+            std::fs::write(path, vec![b'x'; tampered.artifact.byte_len as usize]).unwrap();
+
+            let error = qa_finalize(
+                &layout,
+                "qa_00000000000000000000000000000000",
+                vec![QaScenarioJudgement {
+                    scenario_id: "scenario-1".into(),
+                    status: QaScenarioStatus::Passed,
+                    evidence_ids: vec![
+                        "native".into(),
+                        "action".into(),
+                        "write".into(),
+                        "query".into(),
+                        "console".into(),
+                        "runtime-error".into(),
+                    ],
+                    summary: "pass".into(),
+                }],
+                vec![],
+                200,
+            )
+            .expect_err("tampered nonvisual evidence must block sealing");
+            assert!(
+                error.to_string().contains("integrity"),
+                "unexpected error for {tampered_id}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_device_run_preserves_unverified_targets_and_scenarios() {
+        let root = TempDir::new().unwrap();
+        let layout = layout(&root);
+        install_manifest(&layout, AppRuntimeProfile::ReactDom, vec![]);
+        let session = qa_begin_with_scope(
+            &layout,
+            identity(&layout, AppRuntimeProfile::ReactDom),
+            vec![
+                QaScenarioRequirement {
+                    scenario_id: "phone-flow".into(),
+                    required: true,
+                    target_ids: vec!["phone".into(), "tablet".into()],
+                    evidence_kinds: vec![QaEvidenceKind::Inspect],
+                    motion_required: false,
+                },
+                QaScenarioRequirement {
+                    scenario_id: "tablet-only".into(),
+                    required: true,
+                    target_ids: vec!["tablet".into()],
+                    evidence_kinds: vec![QaEvidenceKind::Inspect],
+                    motion_required: false,
+                },
+            ],
+            QaVerificationScope {
+                declared_target_ids: vec!["phone".into(), "tablet".into()],
+                in_scope_target_ids: vec!["phone".into()],
+                unverified_target_ids: vec!["tablet".into()],
+                unverified_scenario_ids: vec!["tablet-only".into()],
+            },
+            vec![],
+            100,
+        )
+        .unwrap();
+        assert_eq!(session.required_scenario_ids, vec!["phone-flow"]);
+        record_native(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            "phone-flow",
+            "phone",
+            "native-phone",
+            110,
+        );
+        qa_record_host_evidence(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            evidence(
+                "inspect-phone",
+                "phone-flow",
+                "phone",
+                QaEvidenceKind::Inspect,
+                120,
+                "inspect-phone",
+                None,
+                QaHostEvidenceContent::Json(serde_json::json!({"visible": true})),
+            ),
+        )
+        .unwrap();
+        let output = qa_finalize(
+            &layout,
+            "qa_00000000000000000000000000000000",
+            vec![QaScenarioJudgement {
+                scenario_id: "phone-flow".into(),
+                status: QaScenarioStatus::Passed,
+                evidence_ids: vec!["native-phone".into(), "inspect-phone".into()],
+                summary: "phone verified".into(),
+            }],
+            vec![],
+            200,
+        )
+        .unwrap();
+        assert_eq!(
+            output.result.verification_scope.unverified_target_ids,
+            vec!["tablet"]
+        );
+        assert_eq!(
+            output.result.verification_scope.unverified_scenario_ids,
+            vec!["tablet-only"]
+        );
+    }
+
+    #[test]
+    fn scoped_device_run_rejects_empty_current_target_scope() {
+        let scope = QaVerificationScope {
+            declared_target_ids: vec!["phone".into()],
+            in_scope_target_ids: vec![],
+            unverified_target_ids: vec!["phone".into()],
+            unverified_scenario_ids: vec![],
+        };
+        assert!(scope.validate().is_err());
     }
 
     #[test]

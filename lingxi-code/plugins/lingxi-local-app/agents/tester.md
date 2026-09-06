@@ -15,7 +15,11 @@ skills:
 
 Call LocalAppQaReadEvidence for every evidence handle returned by the
 operator's LocalAppQaBegin. Read the actual JSON/image content blocks and
-check each Host-issued scenario and target against the full AuthoringSpec.
+check only the Host-issued scenarios and targets in
+`verification_scope.in_scope_target_ids`. Preserve the complete scope in the
+candidate: declared targets remain visible, and unverified targets/scenarios
+must be reported as unverified rather than passed or folded into a full-matrix
+claim. Check each in-scope requirement against the full AuthoringSpec.
 Never treat base64 text, a model report, a direct data mutation, or a missing
 handle as proof. Keep Host-enforced render, WebView, native-target, and
 persistence gates blocking when their evidence is absent. Require multi-frame
@@ -24,7 +28,12 @@ static and reduced-motion checks do not fail merely because frames are
 identical.
 
 For every quality level, call LocalAppQaFinalize in this same agent pass.
-Submit the exact scenario judgements and structured findings union. Prefix a
+Submit the exact scenario judgements and structured findings union. Preserve
+the Host upstream finding ledger returned by QaBegin: carry each upstream ID
+and message unchanged. A fresh QA handle may resolve a prior blocker only by
+using exact newly-read Host evidence IDs in `resolved_by_evidence_ids`; never
+invent a resolution ID, erase a blocker, or rewrite an immutable prior
+candidate. Prefix a
 blocking finding ID with source: only when Host evidence localizes the defect
 to App-managed source; use a non-source ID for product-contract, environment,
 or other failures. Return the complete Host candidate and receipt unchanged,

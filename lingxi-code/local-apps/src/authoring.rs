@@ -944,6 +944,46 @@ pub fn delete_authoring_candidate(layout: &AppLayout) -> Result<(), AppError> {
     }
 }
 
+/// Consume a candidate only when the complete identity captured by a build
+/// still names the candidate on disk.
+///
+/// The caller must hold the app/build lock while invoking this helper.  A
+/// staged candidate is a single mutable slot, so comparing every identity
+/// component under that lock prevents an older successful build from deleting
+/// a newer candidate that happens to contain the same contract bytes.
+pub fn consume_authoring_candidate_if_matches(
+    layout: &AppLayout,
+    handle: &str,
+    workflow_run_id: &str,
+    contract_sha256: &str,
+    base_contract_sha256: Option<&str>,
+) -> Result<bool, AppError> {
+    ids::validate_authoring_handle(handle)?;
+    validate_workflow_run_id(workflow_run_id)?;
+    verify_sha256(
+        contract_sha256,
+        contract_sha256,
+        "authoring candidate contract",
+    )?;
+    if let Some(base) = base_contract_sha256 {
+        verify_sha256(base, base, "base authoring contract")?;
+    }
+    let candidate = match load_authoring_candidate(layout) {
+        Ok(candidate) => candidate,
+        Err(AppError::NotFound(_)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if candidate.handle != handle
+        || candidate.workflow_run_id != workflow_run_id
+        || candidate.contract_sha256 != contract_sha256
+        || candidate.base_contract_sha256.as_deref() != base_contract_sha256
+    {
+        return Ok(false);
+    }
+    delete_authoring_candidate(layout)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1251,6 +1291,42 @@ mod tests {
             Err(AppError::StorageCorrupt(_))
         ));
         assert!(commit_staged_authoring(&layout, &stage.handle, "run-other").is_err());
+    }
+
+    #[test]
+    fn candidate_consumption_is_identity_bound_across_replacement() {
+        let root = TempDir::new().unwrap();
+        let layout = layout(&root);
+        let first = stage_authoring(&layout, "run-1", contract(layout.app_id()), None).unwrap();
+        let replacement =
+            stage_authoring(&layout, "run-2", contract(layout.app_id()), None).unwrap();
+        assert_ne!(first.handle, replacement.handle);
+        assert_eq!(first.contract_sha256, replacement.contract_sha256);
+
+        assert!(!consume_authoring_candidate_if_matches(
+            &layout,
+            &first.handle,
+            &first.workflow_run_id,
+            &first.contract_sha256,
+            None,
+        )
+        .unwrap());
+        assert_eq!(
+            load_authoring_candidate(&layout).unwrap().handle,
+            replacement.handle
+        );
+        assert!(consume_authoring_candidate_if_matches(
+            &layout,
+            &replacement.handle,
+            &replacement.workflow_run_id,
+            &replacement.contract_sha256,
+            None,
+        )
+        .unwrap());
+        assert!(matches!(
+            load_authoring_candidate(&layout),
+            Err(AppError::NotFound(_))
+        ));
     }
 
     #[test]

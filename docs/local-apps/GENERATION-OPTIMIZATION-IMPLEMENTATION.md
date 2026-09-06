@@ -4,6 +4,109 @@ Approved baseline: `21771b43a`, 2026-09-05. This is the execution ledger for the
 user-approved quality, latency, and isolation plan. No general Plugin/MCP/Agent/
 Workflow protocol changes, dependency additions, or runtime-profile version edits.
 
+## Second review repair pass — 2026-09-06
+
+Review baseline: `f81c57261`. This pass addresses the twelve newly confirmed
+integration defects; the earlier green counts below do not verify these paths.
+Implementation uses bounded Luna xhigh lanes and independent Sol xhigh review.
+No general Plugin/MCP contract, UniFFI field, runtime-profile version, or dependency
+change was made. Existing unrelated work and published-build history are retained.
+
+Repair plan (regression first, then the smallest owning-layer change):
+
+- [x] R2-1: carry safe capture/evidence identity through actual model image output.
+- [x] R2-2: accept authenticated failed QA candidates without requiring the broken
+  operation to succeed; keep passing evidence gates strict.
+- [x] R2-3: expose the durable unresolved-finding ledger to each fresh tester.
+- [x] R2-4: bind native QA to Host-observed current-device targets and report the
+  remaining design targets/scenarios as unverified.
+- [x] R2-5: derive query causality from matching recorded writes and returned rows.
+- [x] R2-6: prevent non-navigation evidence from being retagged after navigation.
+- [x] R2-7: fence Android captures on the current visual state and rendered frame.
+- [x] R2-8: handle same-document Android navigation without losing QA readiness.
+- [x] R2-9: preserve native operation errors inside authenticated failure evidence.
+- [x] R2-10: validate and consume the exact authoring candidate under the build lock.
+- [x] R2-11: validate all referenced artifact bytes before sealing QA results.
+- [x] R2-12: prevent trusted-success task output after QA publication fails, even
+  if writing the failure spool also fails.
+
+Cross-layer decisions: the full product/design target matrix remains unchanged.
+Only Host device context determines this run's native verification scope. A scoped
+pass must retain explicit unverified targets/scenarios and cannot become a global
+UI-passed summary. A run with no matching device target is unavailable, not an
+empty success. Failed native operations may be recorded only with valid native
+identity; transport/identity failures are not authenticated UI evidence. Neither
+kind of failure is successful persistence proof.
+
+### Implementation and verification
+
+The owning changes are in `local-apps/src/{qa,authoring}.rs`, mobile Host/build/tool
+projection, the two Local App workflows and QA guides, both native WebView
+controllers, and the existing Local App terminal adapter in `tasks`. The ordinary
+task/output protocol is unchanged. No dependency manifest, lockfile, Runtime
+Profile bundle, general Plugin/MCP contract, or UniFFI DTO was changed.
+
+Sol's independent review tightened three additional boundaries: failed Canvas or
+mixed passed/failed scenarios can produce failed candidates without success-only
+proof; every referenced artifact kind is integrity-checked; and Host QA publication
+is the terminal commit point. A failed publication never exposes canonical success.
+A successful publication followed by a spool-write failure retains the canonical
+result through TaskOutput/notifications and suppresses the stale physical path.
+Normal tasks and cancellation retain their existing behavior.
+
+Integration follow-ups preserve ordinary Android captures on API 26–28 while
+requiring a fresh, tokenized visual-state/frame-commit fence for each QA capture.
+Routed/fragment captures validate against canonical Host identity and retain the
+exact observed route. Both clients now require navigation advancement only for
+accepted navigation: failed Back/rejected Navigate preserve their original error
+only when pre/post document identity is unchanged.
+Use-test retains caller-requested scope/scenarios in both initial and resample
+agent prompts, as advisory intent subordinate to Host-required coverage. The unused
+use-test summary helper was removed. The QA skills now explicitly distinguish
+diagnostic failure evidence from success proof and current-device coverage from
+full-platform coverage; the checked root mirrors remain byte-identical.
+
+Current verification evidence, 2026-09-06:
+
+| Check | Result |
+|---|---|
+| `cargo +stable test -p engine-mobile --features uniffi --lib --locked`, four test threads | 721 passed |
+| `local-apps`, including integration fixtures | 301 unit + 5 integration passed |
+| `tasks`, including integration tests | 366 unit + 1 integration passed |
+| Executed Local App workflow scripts | 38 passed |
+| `skill-api --lib` | 38 passed |
+| Workspace `--all-targets --locked` check | Passed |
+| Scoped Local Apps/tasks/mobile Clippy | Completed with warnings, no errors |
+| Plugin Phase 2/6/7 and optimization guards | Passed |
+| Six JSON metaschemas and QA positive/empty-scope negative fixtures | Passed |
+| `quick_validate.py`, changed frontend-qa and local-app-test skills | Passed using the existing Anaconda Python environment |
+| Android LocalAppWebViewTest / LocalAppsContractTest | 43 + 11 JVM tests passed |
+| iOS three selected QA helper tests in simulator | 3 passed; not WebView end-to-end tests |
+
+Verification limits and unrelated gates retained:
+
+- Android `lintDirectDebug` reports 73 errors outside `LocalAppWebView.kt` (first:
+  `ConversationSource.kt` uses an API 30 method below its API level). The changed
+  WebView file has no lint errors. This is not a green full-project lint result.
+- Full iOS test compilation remains blocked by the unrelated
+  `BackgroundTasksPanelTests.swift` `stage:` error. Only the selected helper tests
+  were run with `EXCLUDED_SOURCE_FILE_NAMES=BackgroundTasksPanelTests.swift`; no
+  source or project configuration was changed to bypass it.
+- `clients/translations/generate.py --check` still reports drift in the existing
+  iOS catalog and five Android generated locale files. Translation sources and
+  generated resources were not changed by this pass.
+- No physical-device create/approval/Canvas WebView end-to-end run was performed.
+  JVM lifecycle tests and simulator envelope/state helpers do not establish real
+  compositor timing or multi-device visual acceptance.
+- These checks do not measure on-device latency. Guide-size gates remain structural
+  source-byte measurements, not a claimed runtime speed-up.
+
+The final Sol closeout independently confirmed routed Android capture, failed
+Android navigation, and failed iOS navigation are fixed in their production
+callers, with no remaining scoped blocker. It retained the native-test limitations
+above. All changed Rust files pass targeted rustfmt checks; `git diff --check` is
+clean. No commit or merge was performed.
+
 ## Review repair pass — 2026-09-06
 
 The earlier suite counts below are historical measurements, not proof that the

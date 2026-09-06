@@ -4,9 +4,11 @@ import com.lingxi.code.bindings.AppBridgeOperationDto
 import com.lingxi.code.bindings.AppUiActionKindDto
 import com.lingxi.code.bindings.AppUiRequestDto
 import com.lingxi.code.bindings.AppUiTargetDto
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -81,6 +83,11 @@ class LocalAppWebViewTest {
         assertNull("finish without a matching start is not a loaded document", state.document(URI(runtimeA)))
         state.onPageStarted(runtimeA)
         state.onPageFinished(runtimeA)
+        assertNull(
+            "page finish is not visual readiness",
+            state.document(URI(runtimeA), requireVisualFrame = true),
+        )
+        state.onVisualFrame(runtimeA, generationA)
         assertEquals(generationA, state.document(URI(runtimeA))?.navigationGeneration)
 
         val generationB = state.beginNavigation(runtimeB)
@@ -88,11 +95,13 @@ class LocalAppWebViewTest {
         state.onPageFinished("http://127.0.0.1:43123/stale?lingxi_runtime=41")
         assertNull("runtime A must not certify B merely because the port matches", state.document(URI(runtimeB)))
         state.onPageFinished(runtimeB)
+        state.onVisualFrame(runtimeB, generationB)
         assertEquals(generationB, state.document(URI(runtimeB))?.navigationGeneration)
 
         val routeB = "http://127.0.0.1:43123/settings?tab=qa&lingxi_runtime=42"
         state.onPageStarted(routeB)
         state.onPageFinished(routeB)
+        state.onVisualFrame(routeB, generationB + 1)
         val current = state.document(URI(runtimeB))
         assertNotNull(current)
         assertEquals(generationB + 1, current?.navigationGeneration)
@@ -106,6 +115,7 @@ class LocalAppWebViewTest {
         val initialGeneration = state.beginNavigation(runtime)
         state.onPageStarted(runtime)
         state.onPageFinished(runtime)
+        state.onVisualFrame(runtime, initialGeneration)
         assertNotNull(state.document(URI(runtime)))
 
         val firstRoute = "http://127.0.0.1:43123/first?lingxi_runtime=42"
@@ -115,12 +125,149 @@ class LocalAppWebViewTest {
         state.onPageFinished(firstRoute)
         assertNull("a late same-marker route finish cannot certify the newer navigation", state.document(URI(runtime)))
         state.onPageFinished(currentRoute)
+        state.onVisualFrame(currentRoute, initialGeneration + 2)
         assertEquals(initialGeneration + 2, state.document(URI(runtime))?.navigationGeneration)
 
         state.detach()
         state.onPageStarted(runtime)
         state.onPageFinished(runtime)
         assertNull("late callbacks cannot revive a detached controller", state.document(URI(runtime)))
+    }
+
+    @Test
+    fun `routed and fragment captures use canonical host identity and fresh fences`() {
+        val runtime = "http://127.0.0.1:43123/?lingxi_runtime=42"
+        val routedUrls = listOf(
+            "http://127.0.0.1:43123/settings?lingxi_runtime=42",
+            "http://127.0.0.1:43123/?lingxi_runtime=42#menu",
+        )
+        val state = LocalAppQaDocumentState(runtime)
+
+        routedUrls.forEach { routedUrl ->
+            val generation = state.beginNavigation(routedUrl)
+            state.onPageStarted(routedUrl)
+            assertEquals(generation, state.onPageFinished(routedUrl))
+            assertNull(
+                "a routed URL is observed content, not the canonical Host identity",
+                state.document(URI(routedUrl)),
+            )
+            val document = state.currentDocument()
+            assertEquals(routedUrl, document?.loadedRuntimeUrl)
+
+            val token = state.beginVisualFrameFence(routedUrl, generation)
+            assertNotNull(token)
+            assertNull(state.currentDocument(requireVisualFrame = true))
+            assertTrue(state.onVisualFrame(routedUrl, generation, token))
+            assertEquals(routedUrl, state.currentDocument(requireVisualFrame = true)?.loadedRuntimeUrl)
+        }
+
+        val wrongMarker = "http://127.0.0.1:43123/settings?lingxi_runtime=41"
+        state.beginNavigation(wrongMarker)
+        state.onPageStarted(wrongMarker)
+        assertNull(state.onPageFinished(wrongMarker))
+        assertNull("a different runtime marker cannot certify a capture", state.currentDocument())
+    }
+
+    @Test
+    fun `non-navigation QA requires exact pre-post document while navigation advances generation`() {
+        val before = LocalAppQaDocument("http://127.0.0.1:43123/?lingxi_runtime=42", 7)
+        val route = LocalAppQaDocument("http://127.0.0.1:43123/settings?lingxi_runtime=42", 8)
+        val same = LocalAppQaDocument("http://127.0.0.1:43123/?lingxi_runtime=42", 7)
+
+        assertFalse(sameLocalAppQaDocument(before, route, intentionalNavigation = false))
+        assertTrue(sameLocalAppQaDocument(before, route, intentionalNavigation = true))
+        assertTrue(sameLocalAppQaDocument(before, same, intentionalNavigation = false))
+    }
+
+    @Test
+    fun `failed QA navigation keeps exact document while accepted navigation advances`() {
+        val before = LocalAppQaDocument("http://127.0.0.1:43123/?lingxi_runtime=42", 7)
+        val route = LocalAppQaDocument("http://127.0.0.1:43123/settings?lingxi_runtime=42", 8)
+        val rejectedNavigate = LocalAppUiAutomationAction.Navigate("https://evil.example/blocked")
+        val failedBack = LocalAppUiAutomationAction.Back
+        val acceptedNavigate = LocalAppUiAutomationAction.Navigate("/settings")
+        val failedNavigateResult = LocalAppUiExecutionResult(null, "Only trusted loopback navigation is allowed")
+        val failedBackResult = LocalAppUiExecutionResult(null, "WebView cannot navigate back")
+        val acceptedResult = LocalAppUiExecutionResult("{\"ok\":true}", null)
+
+        assertFalse(localAppQaNavigationWasAccepted(rejectedNavigate, failedNavigateResult))
+        assertFalse(localAppQaNavigationWasAccepted(failedBack, failedBackResult))
+        assertTrue(localAppQaNavigationWasAccepted(acceptedNavigate, acceptedResult))
+        assertTrue(sameLocalAppQaDocument(before, before, intentionalNavigation = false))
+        assertFalse("a failed navigation cannot certify a different document", sameLocalAppQaDocument(before, route, intentionalNavigation = false))
+        assertTrue(sameLocalAppQaDocument(before, route, intentionalNavigation = true))
+    }
+
+    @Test
+    fun `capture frame fence is unavailable below API 29 or without a hardware surface`() {
+        assertFalse(localAppFrameCommitFenceAvailable(28, attached = true, hardwareAccelerated = true))
+        assertFalse(localAppFrameCommitFenceAvailable(29, attached = false, hardwareAccelerated = true))
+        assertFalse(localAppFrameCommitFenceAvailable(29, attached = true, hardwareAccelerated = false))
+        assertTrue(localAppFrameCommitFenceAvailable(29, attached = true, hardwareAccelerated = true))
+        // Ordinary CaptureView predates QA visual attestation and must retain
+        // its API 26-28 PixelCopy/software fallback behavior.
+        assertFalse(
+            localAppCaptureFrameFenceUnavailable(
+                qaCapture = false,
+                sdkInt = 28,
+                attached = true,
+                hardwareAccelerated = true,
+            ),
+        )
+        assertTrue(
+            localAppCaptureFrameFenceUnavailable(
+                qaCapture = true,
+                sdkInt = 28,
+                attached = true,
+                hardwareAccelerated = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `each same-document QA capture requires a distinct fresh frame fence`() {
+        val runtime = "http://127.0.0.1:43123/?lingxi_runtime=42"
+        val state = LocalAppQaDocumentState(runtime)
+        val generation = state.beginNavigation(runtime)
+        state.onPageStarted(runtime)
+        state.onPageFinished(runtime)
+
+        val firstToken = state.beginVisualFrameFence(runtime, generation)
+        assertNotNull(firstToken)
+        assertNull(state.document(URI(runtime), requireVisualFrame = true))
+        assertTrue(state.onVisualFrame(runtime, generation, firstToken))
+        assertNotNull(state.document(URI(runtime), requireVisualFrame = true))
+
+        val secondToken = state.beginVisualFrameFence(runtime, generation)
+        assertNotNull(secondToken)
+        assertNotEquals(firstToken, secondToken)
+        assertNull("a previous frame cannot certify a new capture", state.document(URI(runtime), requireVisualFrame = true))
+        assertFalse("the stale callback must not revive the second capture", state.onVisualFrame(runtime, generation, firstToken))
+        assertTrue(state.onVisualFrame(runtime, generation, secondToken))
+        assertNotNull(state.document(URI(runtime), requireVisualFrame = true))
+    }
+
+    @Test
+    fun `fragment back sequence commits the history destination without page started`() {
+        val runtime = "http://127.0.0.1:43123/?lingxi_runtime=42"
+        val routeA = "http://127.0.0.1:43123/?lingxi_runtime=42#a"
+        val routeB = "http://127.0.0.1:43123/?lingxi_runtime=42#b"
+        val state = LocalAppQaDocumentState(runtime)
+
+        state.beginNavigation(routeA)
+        assertNotNull(state.onSameDocumentNavigationObserved(routeA))
+        state.onVisualFrame(routeA, state.navigationGeneration)
+        state.beginNavigation(routeB)
+        assertNotNull(state.onSameDocumentNavigationObserved(routeB))
+        state.onVisualFrame(routeB, state.navigationGeneration)
+
+        // This mirrors LocalAppWebViewController.Back: it begins the
+        // destination from WebBackForwardList, then observes the fragment
+        // callback without relying on onPageStarted.
+        val backGeneration = state.beginNavigation(routeA)
+        assertNotNull(state.onSameDocumentNavigationObserved(routeA))
+        state.onVisualFrame(routeA, backGeneration)
+        assertEquals(routeA, state.document(URI(runtime))?.loadedRuntimeUrl)
     }
 
     @Test
@@ -213,6 +360,24 @@ class LocalAppWebViewTest {
         assertEquals("base64-image", objectValue.getJSONObject("result").getJSONObject("image").getString("data"))
         assertEquals(loaded, objectValue.getJSONObject("lingxi_qa").getString("loaded_runtime_url"))
         assertEquals(7L, objectValue.getJSONObject("lingxi_qa").getLong("navigation_generation"))
+    }
+
+    @Test
+    fun `QA attestation preserves native operation errors inside authenticated result`() {
+        val wrapped = buildLocalAppQaExecutionResult(
+            originalResultJson = null,
+            operationError = "target was not found",
+            requested = URI("http://127.0.0.1:43123/?lingxi_runtime=42"),
+            document = LocalAppQaDocument("http://127.0.0.1:43123/?lingxi_runtime=42", 3),
+            platform = "android",
+            formFactor = "phone",
+            width = 393,
+            height = 852,
+            devicePixelRatio = 3f,
+        )
+        val result = JSONObject(wrapped).getJSONObject("result")
+        assertFalse(result.getBoolean("ok"))
+        assertEquals("target was not found", result.getString("error"))
     }
 
     @Test

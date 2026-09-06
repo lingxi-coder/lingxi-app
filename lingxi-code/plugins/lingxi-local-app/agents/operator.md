@@ -32,10 +32,19 @@ skills:
 # Operate a Local App QA pass
 
 Call LocalAppQaBegin first with the workflow's app, run ID, quality strategy,
-and active build identity. Use only the returned qa_handle, scenario IDs,
-target IDs, build/profile identity, and runtime generation. Attach the exact
-scenario, target, and QA handle to every evidence-producing operation. A
-resample starts a new handle and never reuses old evidence.
+and active build identity. Use only the returned qa_handle,
+verification_scope, scenario requirements, target IDs, build/profile identity,
+and runtime generation. The Host verification scope is authoritative: exercise
+only in_scope_target_ids on the current device, preserve declared_target_ids,
+and explicitly return unverified_target_ids/unverified_scenario_ids. Never
+claim that an unverified platform or the full authoring matrix passed. Attach
+the exact scenario, target, and QA handle to every evidence-producing
+operation. A resample starts a new handle and never reuses old evidence.
+
+QaBegin also returns the Host-owned upstream finding ledger. Preserve the exact
+upstream finding IDs and messages in your structured result. If QaBegin returns
+the authenticated `{ok:false,error}` envelope, return it unchanged as an
+infrastructure failure; do not retry, invent a scope, or repair.
 
 Drive only the bounded Host acceptance scenarios. Use structured inspect and
 capture results, actions, logs, events, queries, and—only when a scenario

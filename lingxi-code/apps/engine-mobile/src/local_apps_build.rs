@@ -40,6 +40,17 @@ const LSP_DIAGNOSTIC_SETTLE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Vite's default deployment directory, relative to the isolated project root.
 pub(crate) const VITE_OUTPUT_DIR: &str = "dist";
 
+/// Immutable Host identity captured when a staged authoring candidate is
+/// selected for a build. The candidate itself remains on disk until the
+/// successful build consumes this exact identity under the app/build lock.
+#[derive(Debug, Clone)]
+pub(crate) struct AuthoringCandidateIdentity {
+    pub(crate) handle: String,
+    pub(crate) workflow_run_id: String,
+    pub(crate) contract_sha256: String,
+    pub(crate) base_contract_sha256: Option<String>,
+}
+
 /// Host-derived health of a scaffolded Local App runtime profile.
 ///
 /// This is deliberately a state classification rather than an error string.
@@ -212,6 +223,31 @@ fn source_files(target: LocalAppBuildTarget) -> &'static [(&'static str, &'stati
         LocalAppBuildTarget::Phaser2dR2 => PHASER_2D_R2_EDITABLE_FILES,
         LocalAppBuildTarget::Babylon3dR1 => BABYLON_3D_EDITABLE_FILES,
     }
+}
+
+fn preserve_committed_build_result(
+    build_result: Result<(), AppError>,
+    cleanup_result: Result<bool, AppError>,
+    app_id: &str,
+    handle: &str,
+) -> Result<(), AppError> {
+    if build_result.is_ok() {
+        match cleanup_result {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                %app_id,
+                %handle,
+                "authoring candidate was not consumed after a committed build; it remains available for retry"
+            ),
+            Err(error) => tracing::warn!(
+                %app_id,
+                %handle,
+                %error,
+                "authoring candidate cleanup failed after a committed build; preserving build success"
+            ),
+        }
+    }
+    build_result
 }
 
 fn is_app_managed_javascript_file(relative: &str) -> bool {
@@ -1308,13 +1344,14 @@ impl LocalAppBuilder<'_> {
             .await
     }
 
-    /// Build with a staged Host authoring contract. The digest is written into
-    /// validated staging before promotion, so a failed build leaves the
-    /// previous build receipt and contract identity authoritative.
+    /// Build with a staged Host authoring candidate. Its complete identity is
+    /// revalidated while the build locks are held and consumed only after
+    /// successful promotion, so a failed build leaves the candidate and the
+    /// previous build receipt authoritative.
     pub(crate) async fn build_workspace_with_authoring(
         &self,
         layout: &AppLayout,
-        authoring_contract_sha256: Option<&str>,
+        authoring_candidate: Option<AuthoringCandidateIdentity>,
     ) -> Result<(), AppError> {
         self.assert_build_runtime_available()?;
         let dependency = match self
@@ -1338,8 +1375,12 @@ impl LocalAppBuilder<'_> {
         let _build_guard = build_lock.lock().await;
         let _process_build_guard =
             local_apps::storage::lock_app_build(layout.root(), layout.app_id())?;
-        self.build_workspace_locked_with_authoring(layout, &dependency, authoring_contract_sha256)
-            .await
+        self.build_workspace_locked_with_authoring(
+            layout,
+            &dependency,
+            authoring_candidate.as_ref(),
+        )
+        .await
     }
 
     /// Build while the caller already owns both the broker-wide build mutex
@@ -1362,7 +1403,7 @@ impl LocalAppBuilder<'_> {
         &self,
         layout: &AppLayout,
         dependency: &local_apps::AppDependencyRecord,
-        authoring_contract_sha256: Option<&str>,
+        authoring_candidate: Option<&AuthoringCandidateIdentity>,
     ) -> Result<(), AppError> {
         let _perf = crate::local_apps_host::LocalAppPerfDiagnosticTimer::start("build_total");
         self.assert_build_runtime_available()?;
@@ -1377,6 +1418,11 @@ impl LocalAppBuilder<'_> {
         let workspace = layout.root().join(layout.workspace_rel());
         let target = detect_build_target(layout)?;
         validate_dependency_snapshot_files(layout, &workspace)?;
+        if let Some(candidate) = authoring_candidate {
+            self.host
+                .verify_authoring_candidate_identity(layout, candidate)
+                .map_err(AppError::InvalidRequest)?;
+        }
         // Re-pin the host-managed files from the compiled-in templates on
         // EVERY build before Vite touches the workspace.
         restore_host_managed_files(&workspace, target)?;
@@ -1386,15 +1432,10 @@ impl LocalAppBuilder<'_> {
         let runtime_contract_sha256 = manifest.runtime_contract_hash()?;
         let dependency_snapshot_sha256 = manifest.dependency_snapshot_hash()?;
         let build_key = workspace_build_key(layout, &workspace)?;
-        let effective_authoring_contract_sha256 = match authoring_contract_sha256 {
-            Some(digest) => Some(digest.to_owned()),
+        let effective_authoring_contract_sha256 = match authoring_candidate {
+            Some(candidate) => Some(candidate.contract_sha256.clone()),
             None => active_build_authoring_contract_sha256(layout)?,
         };
-        if let Some(digest) = authoring_contract_sha256 {
-            self.host
-                .verify_authoring_candidate_digest(layout, digest)
-                .map_err(AppError::InvalidRequest)?;
-        }
         if build_cache_hit_with_authoring(
             &build_root,
             &build_key,
@@ -1402,12 +1443,21 @@ impl LocalAppBuilder<'_> {
             &dependency_snapshot_sha256,
             effective_authoring_contract_sha256.as_deref(),
         )? {
+            if let Some(candidate) = authoring_candidate {
+                let _ = local_apps::authoring::consume_authoring_candidate_if_matches(
+                    layout,
+                    &candidate.handle,
+                    &candidate.workflow_run_id,
+                    &candidate.contract_sha256,
+                    candidate.base_contract_sha256.as_deref(),
+                )?;
+            }
             return Ok(());
         }
         self.gate_lsp_diagnostics_before_build(&workspace).await?;
         let artifact_root = workspace_build_artifact_root(&workspace);
         let artifact_output_rel = workspace_build_output_rel();
-        let build_result = async {
+        let mut build_result = async {
             let prepare_artifact_root = artifact_root.clone();
             tokio::task::spawn_blocking(move || remove_path_if_exists(&prepare_artifact_root))
                 .await
@@ -1416,9 +1466,9 @@ impl LocalAppBuilder<'_> {
                 })??;
             self.run_vite_build(layout, &workspace, &artifact_output_rel)
                 .await?;
-            if let Some(digest) = authoring_contract_sha256 {
+            if let Some(candidate) = authoring_candidate {
                 self.host
-                    .verify_authoring_candidate_digest(layout, digest)
+                    .verify_authoring_candidate_identity(layout, candidate)
                     .map_err(AppError::InvalidRequest)?;
             }
             let validate_artifact_root = artifact_root.clone();
@@ -1451,6 +1501,23 @@ impl LocalAppBuilder<'_> {
         .await;
         if build_result.is_err() {
             let _ = std::fs::remove_dir_all(&artifact_root);
+        }
+        if build_result.is_ok() {
+            if let Some(candidate) = authoring_candidate {
+                let cleanup_result = local_apps::authoring::consume_authoring_candidate_if_matches(
+                    layout,
+                    &candidate.handle,
+                    &candidate.workflow_run_id,
+                    &candidate.contract_sha256,
+                    candidate.base_contract_sha256.as_deref(),
+                );
+                build_result = preserve_committed_build_result(
+                    build_result,
+                    cleanup_result,
+                    layout.app_id(),
+                    &candidate.handle,
+                );
+            }
         }
         build_result
     }
@@ -3745,6 +3812,17 @@ mod tests {
             "new"
         );
         assert!(!staging_root.exists());
+    }
+
+    #[test]
+    fn committed_build_success_survives_candidate_cleanup_failure() {
+        let result = preserve_committed_build_result(
+            Ok(()),
+            Err(AppError::Io("candidate cleanup failed".into())),
+            "aaaa1111",
+            "contract_test",
+        );
+        assert!(result.is_ok(), "post-commit cleanup cannot undo promotion");
     }
 
     #[test]

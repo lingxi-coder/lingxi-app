@@ -52,10 +52,12 @@ still needs a real design and motion check even at the lowest tier.
 
 ## Reading the report
 
-The workflow returns a structured report, not prose: which scenario passed
+The workflow returns a structured report, not prose: which in-scope scenario passed
 or failed and why, render/motion evidence when the surface is a canvas,
 logs/console/errors it captured along the way, and whether a bridge/data
-round-trip behaved. Relay findings by what the report actually says —
+round-trip behaved. Preserve the Host verification scope and explicitly relay
+declared but unverified targets/scenarios; a current-device pass is not a
+full-matrix pass. Relay findings by what the report actually says —
 quote the failing scenario and the evidence field that failed it, not a
 paraphrase — rather than summarizing a run as "looks good" when the report
 named a specific failure.

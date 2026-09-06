@@ -589,10 +589,11 @@ final class LocalAppWebViewController {
                 } catch {
                     return .failure("Local App QA action was cancelled")
                 }
-                let navigationAction = request.action == .navigate
-                    || request.action == .back
-                    || request.action == .reload
-                let minimumGeneration = navigationAction
+                let intentionalNavigation = Self.qaNavigationWasAccepted(
+                    action: request.action,
+                    result: result
+                )
+                let minimumGeneration = intentionalNavigation
                     ? before.navigationGeneration &+ 1
                     : before.navigationGeneration
                 guard let after = await waitForQaDocument(
@@ -601,9 +602,36 @@ final class LocalAppWebViewController {
                 ) else {
                     return .failure("Local App QA document identity changed during the action")
                 }
+                guard Self.qaDocumentMatches(
+                    before: before,
+                    after: after,
+                    intentionalNavigation: intentionalNavigation
+                ) else {
+                    return .failure("Local App QA document changed during the action")
+                }
                 return wrapQaResult(result, requestedURL: qa.expectedRuntimeURL, document: after)
             }
             return await execute(request: request, value: actionValue)
+        }
+
+        static func qaNavigationWasAccepted(
+            action: AppUiActionKindDto,
+            result: LocalAppUIExecutionResult
+        ) -> Bool {
+            result.error == nil
+                && (action == .navigate || action == .back || action == .reload)
+        }
+
+        static func qaDocumentMatches(
+            before: QaDocument,
+            after: QaDocument,
+            intentionalNavigation: Bool
+        ) -> Bool {
+            if intentionalNavigation {
+                return after.navigationGeneration > before.navigationGeneration
+            }
+            return after.navigationGeneration == before.navigationGeneration
+                && after.loadedURL == before.loadedURL
         }
 
         private func execute(request: AppUiRequestDto, value: String?) async -> LocalAppUIExecutionResult {
@@ -659,32 +687,48 @@ final class LocalAppWebViewController {
             }
         }
 
-        private func wrapQaResult(
+        func wrapQaResult(
             _ result: LocalAppUIExecutionResult,
             requestedURL: URL,
             document: QaDocument
         ) -> LocalAppUIExecutionResult {
-            guard let resultJSON = result.resultJSON,
-                  let resultData = resultJSON.data(using: .utf8),
-                  let original = try? JSONSerialization.jsonObject(with: resultData, options: .fragmentsAllowed),
-                  let data = try? JSONSerialization.data(withJSONObject: [
-                      "lingxi_qa": [
-                          "version": 1,
-                          "requested_runtime_url": requestedURL.absoluteString,
-                          "loaded_runtime_url": document.loadedURL.absoluteString,
-                          "platform": platform,
-                          "form_factor": formFactor,
-                          "navigation_generation": document.navigationGeneration,
-                          "width": webView?.bounds.width ?? 0,
-                          "height": webView?.bounds.height ?? 0,
-                          "device_pixel_ratio": webView?.traitCollection.displayScale ?? 1,
-                      ],
-                      "result": original,
-                  ], options: [])
-            else { return .failure("Local App QA result could not be attested") }
+            let original: Any
+            if let resultJSON = result.resultJSON,
+               let resultData = resultJSON.data(using: .utf8),
+               let parsed = try? JSONSerialization.jsonObject(with: resultData, options: .fragmentsAllowed) {
+                if let error = result.error {
+                    if var object = parsed as? [String: Any] {
+                        object["ok"] = false
+                        object["error"] = error
+                        original = object
+                    } else {
+                        original = ["ok": false, "error": error]
+                    }
+                } else {
+                    original = parsed
+                }
+            } else if let error = result.error {
+                original = ["ok": false, "error": error]
+            } else {
+                original = NSNull()
+            }
+            guard let data = try? JSONSerialization.data(withJSONObject: [
+                "lingxi_qa": [
+                    "version": 1,
+                    "requested_runtime_url": requestedURL.absoluteString,
+                    "loaded_runtime_url": document.loadedURL.absoluteString,
+                    "platform": platform,
+                    "form_factor": formFactor,
+                    "navigation_generation": document.navigationGeneration,
+                    "width": webView?.bounds.width ?? 0,
+                    "height": webView?.bounds.height ?? 0,
+                    "device_pixel_ratio": webView?.traitCollection.displayScale ?? 1,
+                ],
+                "result": original,
+            ], options: []) else { return .failure("Local App QA result could not be attested") }
             return LocalAppUIExecutionResult(
                 resultJSON: String(data: data, encoding: .utf8),
-                error: result.error
+                error: nil
             )
         }
 

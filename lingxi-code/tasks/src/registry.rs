@@ -1660,16 +1660,17 @@ impl TaskRegistry {
     /// This is intentionally not a generic workflow terminal primitive.  It
     /// accepts only a [`TaskState::LocalWorkflow`] row carrying an authenticated
     /// Build or UseTest scope, and it exists because those two workflows have
-    /// two local durable publications that must linearize with the absorbing
-    /// task state: the canonical result spool and the Host's already-prepared
+    /// two local publications that must linearize with the absorbing task
+    /// state: the canonical result projection and the Host's already-prepared
     /// active QA receipt pointer.
     ///
     /// Expensive QA/evidence validation must happen before this method.  While
-    /// the registry write lock is held, this method performs only the bounded
-    /// rooted spool replacement and `publish_prepared`, then assigns the exact
-    /// resulting outcome/status.  A competing kill therefore wins before both
+    /// the registry write lock is held, this method writes a bounded unverified
+    /// spool placeholder, runs `publish_prepared`, makes canonical success
+    /// authoritative only after publication, then assigns the exact resulting
+    /// outcome/status. A competing kill therefore wins before these
     /// publications (and the closure is not called), or observes the committed
-    /// terminal state afterward.  `publish_prepared` must not call back into
+    /// terminal state afterward. `publish_prepared` must not call back into
     /// this registry, perform UI/network work, scan QA artifacts, or do large
     /// cleanup; those operations would introduce lock inversion or make the
     /// critical section unbounded. The returned boolean is true only when
@@ -1715,20 +1716,58 @@ impl TaskRegistry {
             }
 
             let output_file = workflow.base.output_file.clone();
-            let commit_error = match self
+            let canonical_result_error = self
                 .output_manager
-                .replace_terminal_result(&output_file, &canonical_result)
-                .await
-            {
-                Ok(()) => publish_prepared().await.err().map(|error| {
-                    format!("local_app_completion_unverified: QA publication failed: {error}")
-                }),
-                Err(error) => Some(format!(
-                    "local_app_completion_unverified: terminal spool replacement failed: {error}"
-                )),
+                .validate_terminal_result(&output_file, &canonical_result)
+                .err()
+                .map(|error| {
+                    format!(
+                        "local_app_completion_unverified: terminal spool replacement failed: {error}"
+                    )
+                });
+            let publication_pending = serde_json::json!({
+                "ok": false,
+                "error": "local_app_completion_unverified: QA publication pending",
+                "verified": false,
+            })
+            .to_string();
+            let mut publication_committed = false;
+            let commit_error = match canonical_result_error {
+                Some(error) => Some(error),
+                None => match self
+                    .output_manager
+                    .replace_terminal_result(&output_file, &publication_pending)
+                    .await
+                {
+                    Ok(()) => match publish_prepared().await {
+                        Ok(()) => {
+                            publication_committed = true;
+                            if let Err(error) = self
+                                .output_manager
+                                .replace_terminal_result_authoritative(
+                                    &output_file,
+                                    &canonical_result,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    %error,
+                                    "canonical Local App result is authoritative in memory; physical spool persistence failed after Host publication"
+                                );
+                            }
+                            None
+                        }
+                        Err(error) => Some(format!(
+                            "local_app_completion_unverified: QA publication failed: {error}"
+                        )),
+                    },
+                    Err(error) => Some(format!(
+                        "local_app_completion_unverified: terminal spool replacement failed: {error}"
+                    )),
+                },
             };
 
-            let publication_committed = commit_error.is_none();
             if let Some(mut reason) = commit_error {
                 let failure_payload = serde_json::json!({
                     "ok": false,
@@ -1736,9 +1775,12 @@ impl TaskRegistry {
                     "verified": false,
                 })
                 .to_string();
+                // Make the failed projection authoritative before retrying
+                // the filesystem rewrite. The physical spool still contains
+                // only an unverified placeholder if this retry also fails.
                 if let Err(error) = self
                     .output_manager
-                    .replace_terminal_result(&output_file, &failure_payload)
+                    .replace_terminal_result_fail_closed(&output_file, &failure_payload)
                     .await
                 {
                     reason.push_str(&format!(
@@ -1850,13 +1892,18 @@ impl TaskRegistry {
                 _ => None,
             };
             let fusion_final_text = fusion_state.as_ref().and_then(|f| f.final_text.clone());
+            let output_path = self
+                .output_manager
+                .physical_output_is_authoritative(&b.output_file)
+                .await
+                .then(|| b.output_file.to_string_lossy().into_owned());
             out.push(platform_api::task_registry::TaskNotification {
                 task_id: b.id.clone(),
                 task_type: task_type_to_wire(b.task_type).to_string(),
                 status: status_to_wire(b.status).to_string(),
                 description: b.description.clone(),
                 tool_use_id: b.tool_use_id.clone(),
-                output_path: Some(b.output_file.to_string_lossy().into_owned()),
+                output_path,
                 exit_code,
                 error,
                 // `local_agent` `<result>` / `<usage>`: the terminating run's
@@ -2718,12 +2765,16 @@ mod adopted_workflow_scope_test {
     struct InMemoryFs {
         files: tokio::sync::Mutex<HashMap<String, String>>,
         fail_writes: std::sync::atomic::AtomicBool,
+        write_count: std::sync::atomic::AtomicUsize,
+        fail_write_at: std::sync::atomic::AtomicUsize,
     }
     impl InMemoryFs {
         fn new() -> Self {
             Self {
                 files: tokio::sync::Mutex::new(HashMap::new()),
                 fail_writes: std::sync::atomic::AtomicBool::new(false),
+                write_count: std::sync::atomic::AtomicUsize::new(0),
+                fail_write_at: std::sync::atomic::AtomicUsize::new(0),
             }
         }
     }
@@ -2745,7 +2796,13 @@ mod adopted_workflow_scope_test {
             })
         }
         async fn write_file(&self, path: &str, body: &str) -> Result<(), FsError> {
-            if self.fail_writes.load(std::sync::atomic::Ordering::SeqCst) {
+            let write_number = self
+                .write_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if self.fail_writes.load(std::sync::atomic::Ordering::SeqCst)
+                || self.fail_write_at.load(std::sync::atomic::Ordering::SeqCst) == write_number
+            {
                 return Err(FsError::Io("injected write failure".into()));
             }
             self.files
@@ -2973,6 +3030,96 @@ mod adopted_workflow_scope_test {
     }
 
     #[tokio::test]
+    async fn published_local_app_stays_completed_when_final_spool_write_fails() {
+        let (_dir, fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit08",
+            crate::scope::LocalAppWorkflowPurpose::UseTest,
+        )
+        .await;
+        registry
+            .tasks
+            .write()
+            .await
+            .get_mut("wcommit08")
+            .expect("registered workflow")
+            .base_mut()
+            .notified = false;
+
+        // The pending placeholder succeeds, Host publication succeeds, and
+        // only the subsequent canonical spool write fails.
+        let placeholder_write = fs.write_count.load(std::sync::atomic::Ordering::SeqCst) + 1;
+        fs.fail_write_at
+            .store(placeholder_write + 1, std::sync::atomic::Ordering::SeqCst);
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = published.clone();
+
+        let (actual, committed) = registry
+            .commit_local_app_workflow_terminal(
+                "wcommit08",
+                checked_outcome(),
+                move || async move {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .expect("Host publication is the commit point");
+
+        assert!(published.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(committed);
+        assert_eq!(actual.base().status, TaskStatus::Completed);
+        let TaskState::LocalWorkflow(workflow) = actual else {
+            panic!("expected workflow")
+        };
+        assert_eq!(workflow.outcome, checked_outcome());
+
+        let handle: &dyn platform_api::task_registry::TaskRegistryHandle = &registry;
+        let chunk = handle
+            .output("wcommit08", None)
+            .await
+            .expect("public TaskOutput projection");
+        assert_eq!(chunk.status.as_deref(), Some("completed"));
+        assert!(chunk.done);
+        assert_eq!(chunk.content, r#"{"ok":true,"host_checked":true}"#);
+        assert_eq!(
+            chunk.output_path, None,
+            "the stale pending spool is not an authoritative output path"
+        );
+
+        let notifications = registry.take_pending_task_notifications().await;
+        let notification = notifications
+            .iter()
+            .find(|notification| notification.task_id == "wcommit08")
+            .expect("completed terminal notification");
+        assert_eq!(notification.status, "completed");
+        assert_eq!(
+            notification.result.as_deref(),
+            Some(r#"{"ok":true,"host_checked":true}"#)
+        );
+        assert!(notification.error.is_none());
+        assert_eq!(
+            notification.output_path, None,
+            "the notification must not advertise stale physical bytes"
+        );
+
+        let physical_path = registry.output_manager.path_for("wcommit08").unwrap();
+        let physical = fs
+            .files
+            .lock()
+            .await
+            .get(physical_path.to_str().unwrap())
+            .cloned()
+            .expect("pending spool remains on disk");
+        let physical: serde_json::Value = serde_json::from_str(&physical).unwrap();
+        assert_eq!(physical["verified"], false);
+        assert!(physical["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("publication pending")));
+    }
+
+    #[tokio::test]
     async fn killed_local_app_never_runs_the_prepared_publication_commit() {
         let (_dir, _fs, registry) = make_registry();
         running_scoped_workflow(
@@ -3083,6 +3230,131 @@ mod adopted_workflow_scope_test {
     }
 
     #[tokio::test]
+    async fn local_app_publication_failure_fails_closed_when_failure_spool_rewrite_fails() {
+        let (_dir, fs, registry) = make_registry();
+        running_scoped_workflow(
+            &registry,
+            "wcommit07",
+            crate::scope::LocalAppWorkflowPurpose::Build,
+        )
+        .await;
+        registry
+            .tasks
+            .write()
+            .await
+            .get_mut("wcommit07")
+            .expect("registered workflow")
+            .base_mut()
+            .notified = false;
+
+        // The unverified publication placeholder is the next write. The
+        // following failure-payload rewrite fails, leaving the placeholder on
+        // disk while the drained notification suppresses that stale path.
+        let placeholder_write = fs.write_count.load(std::sync::atomic::Ordering::SeqCst) + 1;
+        fs.fail_write_at
+            .store(placeholder_write + 1, std::sync::atomic::Ordering::SeqCst);
+
+        let (actual, committed) = registry
+            .commit_local_app_workflow_terminal("wcommit07", checked_outcome(), || async {
+                Err("injected pointer commit failure".into())
+            })
+            .await
+            .expect("commit returns failed row");
+
+        assert_eq!(actual.base().status, TaskStatus::Failed);
+        assert!(!committed);
+        let TaskState::LocalWorkflow(workflow) = actual else {
+            panic!("expected workflow")
+        };
+        assert!(workflow.outcome.result.is_none());
+        assert!(workflow
+            .outcome
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("pointer commit failure")));
+
+        let notifications = registry.take_pending_task_notifications().await;
+        let notification = notifications
+            .iter()
+            .find(|notification| notification.task_id == "wcommit07")
+            .expect("failed terminal notification");
+        assert_eq!(notification.status, "failed");
+        assert!(notification
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("pointer commit failure")));
+        assert!(notification.result.is_none());
+        assert_eq!(
+            notification.output_path, None,
+            "the failed rewrite leaves no authoritative physical spool"
+        );
+        let physical_path = registry.output_manager.path_for("wcommit07").unwrap();
+        let physical = fs
+            .files
+            .lock()
+            .await
+            .get(physical_path.to_str().unwrap())
+            .cloned()
+            .expect("pending physical spool must still exist");
+        let physical_payload: serde_json::Value = serde_json::from_str(&physical).unwrap();
+        assert_eq!(physical_payload["ok"], false);
+        assert_eq!(physical_payload["verified"], false);
+        assert!(physical_payload["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("publication")));
+
+        let output = registry
+            .output_manager
+            .read(
+                &registry.output_manager.path_for("wcommit07").unwrap(),
+                crate::output_manager::OutputOptions::default(),
+            )
+            .await
+            .expect("fail-closed failure spool");
+        let payload: serde_json::Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(payload["ok"], false);
+        assert_eq!(payload["verified"], false);
+        assert!(payload["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("pointer commit failure")));
+
+        let path = registry.output_manager.path_for("wcommit07").unwrap();
+        registry
+            .output_manager
+            .append(&path, "late raw handler output")
+            .await
+            .expect("late terminal appends are absorbed");
+        let offset = registry
+            .output_manager
+            .read(
+                &path,
+                crate::output_manager::OutputOptions {
+                    offset: Some(1),
+                    limit: None,
+                },
+            )
+            .await
+            .expect("post-failure offset read");
+        assert!(offset.content.is_empty());
+        assert_eq!(offset.total_lines, 1);
+
+        // Exercise the public TaskOutput projection as well as the backing
+        // manager: the failed registry row and the fail-closed payload must
+        // agree even when the rewrite itself was rejected.
+        let handle: &dyn platform_api::task_registry::TaskRegistryHandle = &registry;
+        let chunk = handle
+            .output("wcommit07", None)
+            .await
+            .expect("TaskOutput projection");
+        assert_eq!(chunk.status.as_deref(), Some("failed"));
+        assert!(chunk.done);
+        assert_eq!(chunk.output_path, None);
+        let chunk_payload: serde_json::Value = serde_json::from_str(&chunk.content).unwrap();
+        assert_eq!(chunk_payload["ok"], false);
+        assert_eq!(chunk_payload["verified"], false);
+    }
+
+    #[tokio::test]
     async fn local_app_spool_failure_never_publishes_or_completes() {
         let (_dir, fs, registry) = make_registry();
         running_scoped_workflow(
@@ -3119,6 +3391,17 @@ mod adopted_workflow_scope_test {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("terminal spool replacement failed")));
+        let output = registry
+            .output_manager
+            .read(
+                &registry.output_manager.path_for("wcommit04").unwrap(),
+                crate::output_manager::OutputOptions::default(),
+            )
+            .await
+            .expect("fail-closed initial spool failure");
+        let payload: serde_json::Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(payload["ok"], false);
+        assert_eq!(payload["verified"], false);
     }
 
     #[tokio::test]

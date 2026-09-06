@@ -100,6 +100,67 @@ fn workflow_schemas() -> serde_json::Value {
 }
 
 #[test]
+fn verification_scope_schema_rejects_empty_required_target_lists() {
+    let workflow_root = workflow_dir();
+    let plugin_root = workflow_root.parent().expect("plugin root");
+    let invalid_fixture: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../local-apps/tests/fixtures/qa-result.invalid-empty-scope.json"),
+        )
+        .expect("read the negative empty verification scope fixture"),
+    )
+    .expect("parse the negative empty verification scope fixture");
+    let fixture_scope = invalid_fixture["verification_scope"]
+        .as_object()
+        .expect("negative fixture verification scope");
+
+    for schema_name in [
+        "schemas/workflow-agent-results.schema.json",
+        "schemas/qa-report.schema.json",
+        "schemas/use-test-report.schema.json",
+    ] {
+        let schema: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(plugin_root.join(schema_name))
+                .unwrap_or_else(|error| panic!("read {schema_name}: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("parse {schema_name}: {error}"));
+        let properties = schema["$defs"]["verification_scope"]["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{schema_name} verification scope properties"));
+
+        for field in ["declared_target_ids", "in_scope_target_ids"] {
+            assert_eq!(
+                properties[field]["minItems"].as_u64(),
+                Some(1),
+                "{schema_name} must reject an empty {field}"
+            );
+            assert!(
+                fixture_scope[field]
+                    .as_array()
+                    .expect("negative fixture target list")
+                    .is_empty(),
+                "negative fixture must exercise the empty {field} case"
+            );
+        }
+        for field in ["unverified_target_ids", "unverified_scenario_ids"] {
+            assert_eq!(
+                properties[field].get("minItems"),
+                None,
+                "{schema_name} must allow an empty {field}"
+            );
+            assert!(
+                fixture_scope[field]
+                    .as_array()
+                    .expect("negative fixture unverified list")
+                    .is_empty(),
+                "negative fixture should keep {field} empty"
+            );
+        }
+    }
+}
+
+#[test]
 fn every_checked_in_plugin_workflow_passes_the_runtime_validators() {
     let dir = workflow_dir();
     assert!(
@@ -2263,6 +2324,123 @@ fn valid_host_evidence_ids_are_not_truncated_from_tester_prompt() {
 }
 
 #[test]
+fn post_repair_qa_carries_host_ledger_resolution_and_partial_scope_into_tester() {
+    let source = build_workflow_script();
+    let tester_prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let tester_prompts_for_run = Arc::clone(&tester_prompts);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |prompts, options| {
+            prompts
+                .iter()
+                .zip(options.iter())
+                .map(|(prompt, options)| {
+                    let label = stage_label(options);
+                    if label == "tester-1" {
+                        tester_prompts_for_run
+                            .lock()
+                            .expect("tester prompts")
+                            .push(prompt.clone());
+                    }
+                    if let Some(canned) = canned_stage_reply(&label) {
+                        return canned;
+                    }
+                    if label.starts_with("operator-") {
+                        let evidence = if label == "operator-1" {
+                            vec!["repair-evidence"]
+                        } else {
+                            vec!["native-1"]
+                        };
+                        let mut report = operator_report(&qa_handle_for_label(&label));
+                        report["evidence_ids"] = serde_json::json!(evidence);
+                        if label == "operator-1" {
+                            report["verification_scope"] = serde_json::json!({
+                                "declared_target_ids": ["primary", "ipad"],
+                                "in_scope_target_ids": ["primary"],
+                                "unverified_target_ids": ["ipad"],
+                                "unverified_scenario_ids": ["ipad-layout"]
+                            });
+                            report["declared_target_ids"] = serde_json::json!(["primary", "ipad"]);
+                            report["target_ids"] = serde_json::json!(["primary"]);
+                            report["unverified_target_ids"] = serde_json::json!(["ipad"]);
+                            report["unverified_scenario_ids"] = serde_json::json!(["ipad-layout"]);
+                            report["upstream_findings"] = serde_json::json!([{
+                                "id": "source:acceptance-save",
+                                "message": "the save action produced no bridge write",
+                                "blocking": true
+                            }]);
+                            report["upstream_failures"] = serde_json::json!([{
+                                "id": "source:acceptance-save",
+                                "message": "the save action produced no bridge write",
+                                "introduced_at_ms": 10
+                            }]);
+                        }
+                        return report.to_string();
+                    }
+                    if label == "tester-0" {
+                        return failing_qa_reply(&label, "wf_regression", "balanced");
+                    }
+                    if label == "tester-1" {
+                        let mut report = qa_candidate_report(
+                            "wf_regression",
+                            "balanced",
+                            true,
+                            false,
+                            "qa_00000000000000000000000000000001",
+                        );
+                        report["result"]["verification_scope"] = serde_json::json!({
+                            "declared_target_ids": ["primary", "ipad"],
+                            "in_scope_target_ids": ["primary"],
+                            "unverified_target_ids": ["ipad"],
+                            "unverified_scenario_ids": ["ipad-layout"]
+                        });
+                        report["result"]["findings"] = serde_json::json!([{
+                            "id": "source:acceptance-save",
+                            "message": "the save action produced no bridge write",
+                            "blocking": false,
+                            "resolved_by_evidence_ids": ["repair-evidence"]
+                        }]);
+                        return report.to_string();
+                    }
+                    passing_qa_reply(&label, "wf_regression", "balanced")
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    )
+    .expect("post-repair Host ledger flow should execute");
+
+    let result = outcome.result.expect("workflow result");
+    assert!(result.contains("\"repair_rounds\":1"), "{result}");
+    assert!(
+        result.contains("\"unverified_target_ids\":[\"ipad\"]"),
+        "{result}"
+    );
+    let prompts = tester_prompts.lock().expect("tester prompts");
+    let prompt = prompts.first().expect("post-repair tester prompt");
+    assert!(
+        prompt.contains("source:acceptance-save"),
+        "ledger finding lost: {prompt}"
+    );
+    assert!(
+        prompt.contains("the save action produced no bridge write"),
+        "ledger message lost: {prompt}"
+    );
+    assert!(
+        prompt.contains("repair-evidence"),
+        "exact resolution evidence path lost: {prompt}"
+    );
+    assert!(
+        prompt.contains("unverified_target_ids"),
+        "partial scope lost: {prompt}"
+    );
+}
+
+#[test]
 fn use_test_reads_persisted_authoring_spec_and_rejects_overrides() {
     let source = std::fs::read_to_string(workflow_dir().join("local-app-use-test.js"))
         .expect("read use-test workflow");
@@ -2374,6 +2552,82 @@ fn use_test_qa_prompts_do_not_echo_host_schemas_or_catalog_capabilities() {
         assert!(
             prompt.contains("primary-action"),
             "use-test prompt lost the persisted acceptance identity: {prompt}"
+        );
+    }
+}
+
+#[test]
+fn use_test_carries_bounded_requested_intent_through_initial_and_resample_prompts() {
+    let source = std::fs::read_to_string(workflow_dir().join("local-app-use-test.js"))
+        .expect("read use-test workflow");
+    let prompts_seen = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let prompts_for_run = Arc::clone(&prompts_seen);
+    let mut args = use_test_args("balanced");
+    args["scope"] = serde_json::Value::String("focus-on-distinct-user-journey".into());
+    args["scenarios"] = serde_json::json!(["distinct-scenario-alpha", "distinct-scenario-beta"]);
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |prompts, options| {
+            prompts
+                .iter()
+                .zip(options.iter())
+                .map(|(prompt, options)| {
+                    let label = stage_label(options);
+                    prompts_for_run
+                        .lock()
+                        .expect("prompt capture")
+                        .push((label.clone(), prompt.clone()));
+                    if label.starts_with("operator-") {
+                        return operator_report(&qa_handle_for_label(&label)).to_string();
+                    }
+                    if label == "tester-0" {
+                        return serde_json::json!({
+                            "status": "evidence_resample_required",
+                            "qa_handle": "qa_00000000000000000000000000000000",
+                            "findings": [],
+                            "summary": "capture was incomplete"
+                        })
+                        .to_string();
+                    }
+                    passing_qa_reply(&label, "wf_use_test", "balanced")
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(args.to_string()),
+        None,
+    )
+    .expect("use-test requested intent flow should execute");
+    assert!(outcome
+        .result
+        .expect("use-test result")
+        .contains("\"ok\":true"));
+
+    let prompts = prompts_seen.lock().expect("prompts");
+    for label in [
+        "operator-0",
+        "tester-0",
+        "operator-resample",
+        "tester-resample",
+    ] {
+        let prompt = prompts
+            .iter()
+            .find(|(seen_label, _)| seen_label == label)
+            .map(|(_, prompt)| prompt)
+            .unwrap_or_else(|| panic!("missing {label} prompt: {prompts:?}"));
+        assert!(
+            prompt.contains("focus-on-distinct-user-journey"),
+            "{label} prompt lost requested scope: {prompt}"
+        );
+        assert!(
+            prompt.contains("distinct-scenario-alpha") && prompt.contains("distinct-scenario-beta"),
+            "{label} prompt lost requested scenarios: {prompt}"
+        );
+        assert!(
+            prompt.contains("untrusted") && prompt.contains("Host"),
+            "{label} prompt must subordinate requested intent to Host authority: {prompt}"
         );
     }
 }

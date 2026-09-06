@@ -67,6 +67,112 @@ final class LocalAppsStoreTests: XCTestCase {
         XCTAssertNil(controller.qaDocument(expectedURL: runtimeB), "a detached controller cannot be revived")
     }
 
+    func testQaNonNavigationRequiresExactPrePostDocumentAndIntentionalNavigationAdvancesGeneration() throws {
+        let firstURL = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/?lingxi_runtime=42"))
+        let routeURL = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/settings?lingxi_runtime=42"))
+        let before = LocalAppWebViewController.QaDocument(loadedURL: firstURL, navigationGeneration: 7)
+        let routeAfter = LocalAppWebViewController.QaDocument(loadedURL: routeURL, navigationGeneration: 8)
+        let sameDocument = LocalAppWebViewController.QaDocument(loadedURL: firstURL, navigationGeneration: 7)
+
+        XCTAssertFalse(
+            LocalAppWebViewController.qaDocumentMatches(
+                before: before,
+                after: routeAfter,
+                intentionalNavigation: false
+            ),
+            "inspect/capture must not attest a later same-runtime route"
+        )
+        XCTAssertTrue(
+            LocalAppWebViewController.qaDocumentMatches(
+                before: before,
+                after: routeAfter,
+                intentionalNavigation: true
+            )
+        )
+        XCTAssertTrue(
+            LocalAppWebViewController.qaDocumentMatches(
+                before: before,
+                after: sameDocument,
+                intentionalNavigation: false
+            )
+        )
+    }
+
+    func testQaFailedNavigationPreservesErrorWithoutAdvancingGeneration() throws {
+        let runtimeURL = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/?lingxi_runtime=42"))
+        let routeURL = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/settings?lingxi_runtime=42"))
+        let before = LocalAppWebViewController.QaDocument(loadedURL: runtimeURL, navigationGeneration: 7)
+        let routeAfter = LocalAppWebViewController.QaDocument(loadedURL: routeURL, navigationGeneration: 8)
+        let controller = LocalAppWebViewController(
+            appID: "tracker",
+            broker: LocalAppBridgeBroker(appID: "tracker")
+        )
+
+        let failedBack = LocalAppUIExecutionResult.failure("no history")
+        let failedNavigate = LocalAppUIExecutionResult.failure("Only trusted loopback navigation is allowed")
+        let acceptedNavigate = LocalAppUIExecutionResult(resultJSON: "{\"ok\":true}", error: nil)
+        XCTAssertFalse(LocalAppWebViewController.qaNavigationWasAccepted(action: .back, result: failedBack))
+        XCTAssertFalse(LocalAppWebViewController.qaNavigationWasAccepted(action: .navigate, result: failedNavigate))
+        XCTAssertTrue(LocalAppWebViewController.qaNavigationWasAccepted(action: .navigate, result: acceptedNavigate))
+
+        XCTAssertTrue(
+            LocalAppWebViewController.qaDocumentMatches(
+                before: before,
+                after: before,
+                intentionalNavigation: false
+            )
+        )
+        XCTAssertFalse(
+            LocalAppWebViewController.qaDocumentMatches(
+                before: before,
+                after: routeAfter,
+                intentionalNavigation: false
+            ),
+            "a failed navigation cannot certify a different document"
+        )
+        XCTAssertTrue(
+            LocalAppWebViewController.qaDocumentMatches(
+                before: before,
+                after: routeAfter,
+                intentionalNavigation: true
+            )
+        )
+
+        for (failure, message) in [(failedBack, "no history"), (failedNavigate, "Only trusted loopback navigation is allowed")] {
+            let wrapped = controller.wrapQaResult(failure, requestedURL: runtimeURL, document: before)
+            let data = try XCTUnwrap(wrapped.resultJSON?.data(using: .utf8))
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let result = try XCTUnwrap(object["result"] as? [String: Any])
+            XCTAssertEqual(result["ok"] as? Bool, false)
+            XCTAssertEqual(result["error"] as? String, message)
+            XCTAssertNil(wrapped.error)
+        }
+    }
+
+    func testQaResultWrapPreservesNativeOperationErrorInsideAuthenticatedEnvelope() throws {
+        let requested = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/?lingxi_runtime=42"))
+        let controller = LocalAppWebViewController(
+            appID: "tracker",
+            broker: LocalAppBridgeBroker(appID: "tracker")
+        )
+        let document = LocalAppWebViewController.QaDocument(
+            loadedURL: requested,
+            navigationGeneration: 3
+        )
+        let wrapped = controller.wrapQaResult(
+            .failure("target was not found"),
+            requestedURL: requested,
+            document: document
+        )
+
+        XCTAssertNil(wrapped.error)
+        let data = try XCTUnwrap(wrapped.resultJSON?.data(using: .utf8))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let result = try XCTUnwrap(object["result"] as? [String: Any])
+        XCTAssertEqual(result["ok"] as? Bool, false)
+        XCTAssertEqual(result["error"] as? String, "target was not found")
+    }
+
     func testFilteringUsesLocalizedSearch() {
         let store = LocalAppsStore()
         #if canImport(engine_mobileFFI)

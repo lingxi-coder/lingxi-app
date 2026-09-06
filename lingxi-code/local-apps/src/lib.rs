@@ -115,13 +115,13 @@ pub use permissions::{
 };
 pub use qa::{
     load_qa_publication_marker, load_qa_receipt, load_qa_result, load_qa_session, prune_qa_history,
-    publish_qa_result, qa_begin, qa_begin_with_requirements, qa_cleanup_run, qa_cleanup_session,
-    qa_finalize, qa_read_evidence, qa_record_host_evidence, QaArtifactRef, QaEvidence,
-    QaEvidenceBlock, QaEvidenceKind, QaEvidenceSource, QaFinalizeOutput, QaFinding,
+    publish_qa_result, qa_begin, qa_begin_with_requirements, qa_begin_with_scope, qa_cleanup_run,
+    qa_cleanup_session, qa_finalize, qa_read_evidence, qa_record_host_evidence, QaArtifactRef,
+    QaEvidence, QaEvidenceBlock, QaEvidenceKind, QaEvidenceSource, QaFinalizeOutput, QaFinding,
     QaHostEvidenceContent, QaHostEvidenceInput, QaIdentity, QaImageFormat,
     QaNativeTargetProvenance, QaPublicationMarker, QaReceipt, QaResult, QaResultStatus,
     QaScenarioJudgement, QaScenarioRequirement, QaScenarioStatus, QaSession, QaUpstreamFailure,
-    QaVerificationStrategy, MAX_QA_HISTORY_RESULTS, QA_SCHEMA_VERSION,
+    QaVerificationScope, QaVerificationStrategy, MAX_QA_HISTORY_RESULTS, QA_SCHEMA_VERSION,
 };
 pub use runtime_migration::{
     delete_runtime_profile_migration_journal, load_runtime_profile_migration_journal,

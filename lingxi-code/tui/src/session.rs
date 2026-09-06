@@ -360,7 +360,7 @@ mod tests {
                 "~anthropic/claude-opus-latest",
                 "openrouter",
                 false,
-            ), // non-curated alias — hidden
+            ), // shared curated alias — kept (the whole `~` alias namespace)
             row("OR GPT passthrough", "openai/gpt-4o", "openrouter", false), // paid non-alias — HIDDEN
             row("DeepSeek V4 Flash", "deepseek-v4-flash", "deepseek", false), // curated but UNCONNECTED
         ];
@@ -383,7 +383,8 @@ mod tests {
             "non-curated curated-provider model hidden"
         );
         // OpenRouter uses the same shared curated shortlist as all clients:
-        // auto + a few stable latest aliases. Free/versioned/pass-through rows
+        // auto/free plus its whole `~…-latest` alias namespace (a bounded set
+        // the aggregator maintains). Free/versioned/pass-through rows
         // from the several-hundred-model aggregator catalog stay hidden.
         assert!(ids.contains(&"openrouter/auto"), "meta-router kept");
         assert!(
@@ -403,8 +404,8 @@ mod tests {
             "arbitrary versioned model hidden"
         );
         assert!(
-            !ids.contains(&"~anthropic/claude-opus-latest"),
-            "non-curated latest alias hidden"
+            ids.contains(&"~anthropic/claude-opus-latest"),
+            "every `~` alias is curated, not a hardcoded subset of them"
         );
         assert!(
             !ids.contains(&"openai/gpt-4o"),

@@ -30,7 +30,7 @@ pub struct TokenUsage {
 
 /// Composite usage record: tokens plus optional non-token counters and
 /// optional speed hint.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     /// Per-class token counts.
     pub tokens: TokenUsage,
@@ -41,7 +41,7 @@ pub struct Usage {
 }
 
 /// Counters for server-side tools that bill per-request rather than per-token.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerToolUsage {
     /// Number of server-side web search requests.
     pub web_search_requests: u32,

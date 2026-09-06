@@ -825,6 +825,60 @@ mod imp {
         })
     }
 
+    pub(super) fn lock_exclusive_pinned(
+        root: &Path,
+        relative: &Path,
+        _dir_mode: u32,
+        _file_mode: u32,
+        expected: Option<&RootIdentity>,
+    ) -> Result<RootedFileLock, FsError> {
+        let (parent, file_name) = open_parent_checked(root, relative, true, expected)?;
+        let file = open_regular(
+            &parent,
+            &file_name,
+            relative,
+            GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN_IF,
+            FILE_ATTRIBUTE_NORMAL,
+        )?;
+        file.lock_exclusive()
+            .map_err(|error| map_io(relative, error))?;
+        Ok(RootedFileLock {
+            _file: file,
+            path: root.join(relative).display().to_string(),
+        })
+    }
+
+    pub(super) fn try_lock_exclusive(
+        root: &Path,
+        relative: &Path,
+        _dir_mode: u32,
+        _file_mode: u32,
+    ) -> Result<RootedFileLock, FsError> {
+        let (parent, file_name) = open_parent(root, relative, true)?;
+        let file = open_regular(
+            &parent,
+            &file_name,
+            relative,
+            GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN_IF,
+            FILE_ATTRIBUTE_NORMAL,
+        )?;
+        file.try_lock_exclusive().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                FsError::AlreadyExists(relative.display().to_string())
+            } else {
+                map_io(relative, error)
+            }
+        })?;
+        Ok(RootedFileLock {
+            _file: file,
+            path: root.join(relative).display().to_string(),
+        })
+    }
+
     pub(super) fn read_to_string(root: &Path, relative: &Path) -> Result<String, FsError> {
         let (parent, file_name) = open_parent(root, relative, false)?;
         let mut file = open_regular(
@@ -967,6 +1021,32 @@ mod imp {
         )
     }
 
+    pub(super) fn open_read_file_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<std::fs::File, FsError> {
+        let (parent, file_name) = open_parent_checked(root, relative, false, expected)?;
+        open_regular(
+            &parent,
+            &file_name,
+            relative,
+            GENERIC_READ | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN,
+            FILE_ATTRIBUTE_NORMAL,
+        )
+    }
+
+    pub(super) fn sync_parent_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        let (parent, _file_name) = open_parent_checked(root, relative, false, expected)?;
+        parent.sync_all().map_err(|error| map_io(relative, error))
+    }
+
     pub(super) fn read_to_string_pinned(
         root: &Path,
         relative: &Path,
@@ -1022,6 +1102,55 @@ mod imp {
         options: AtomicWriteOptions,
     ) -> Result<(), FsError> {
         atomic_write_inner(root, relative, bytes, options, || {})
+    }
+
+    pub(super) fn atomic_write_pinned(
+        root: &Path,
+        relative: &Path,
+        bytes: &[u8],
+        options: AtomicWriteOptions,
+        expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        let (parent, file_name) = open_parent_checked(
+            root,
+            relative,
+            options.create_parents,
+            expected,
+        )?;
+        validate_optional_regular(&parent, &file_name, relative)?;
+        let mut temp = create_temp(&parent, &file_name, relative)?;
+        let result = (|| {
+            temp.write_all(bytes)
+                .map_err(|error| map_io(relative, error))?;
+            temp.sync_all().map_err(|error| map_io(relative, error))?;
+            validate_optional_regular(&parent, &file_name, relative)?;
+            rename_relative(&temp, &parent, &file_name, relative, options.overwrite)
+        })();
+        if result.is_err() {
+            let _ = mark_delete(&temp, relative);
+        }
+        result
+    }
+
+    pub(super) fn truncate_file_pinned(
+        root: &Path,
+        relative: &Path,
+        length: u64,
+        expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        let (parent, file_name) = open_parent_checked(root, relative, false, expected)?;
+        let mut file = open_regular(
+            &parent,
+            &file_name,
+            relative,
+            GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN,
+            FILE_ATTRIBUTE_NORMAL,
+        )?;
+        file.set_len(length)
+            .map_err(|error| map_io(relative, error))?;
+        file.sync_all().map_err(|error| map_io(relative, error))
     }
 
     fn read_file_after_permission_inner<F>(
@@ -1284,6 +1413,25 @@ pub struct RootedFileLock {
     path: String,
 }
 
+impl RootedFileLock {
+    /// Write the owner marker through the exact locked handle. This avoids
+    /// reopening the lock pathname after acquisition.
+    pub fn write_owner(&mut self, owner: &str) -> Result<(), FsError> {
+        self._file
+            .set_len(0)
+            .and_then(|_| self._file.seek(SeekFrom::Start(0)))
+            .and_then(|_| self._file.write_all(owner.as_bytes()))
+            .and_then(|_| self._file.sync_all())
+            .map_err(|error| FsError::Io(format!("{}: {error}", self.path)))
+    }
+
+    /// Transfer the exact locked file handle to a higher-level RAII owner.
+    #[must_use]
+    pub fn into_file(self) -> std::fs::File {
+        self._file
+    }
+}
+
 impl FlockGuard for RootedFileLock {
     fn path(&self) -> &str {
         &self.path
@@ -1335,6 +1483,32 @@ pub fn lock_exclusive(
     file_mode: u32,
 ) -> Result<RootedFileLock, FsError> {
     imp::lock_exclusive(root, relative, dir_mode, file_mode)
+}
+
+/// Acquire an exclusive lock below a root whose already-opened identity must
+/// still match `expected`. The lock and its parent chain are opened without
+/// following symlinks.
+pub fn lock_exclusive_pinned(
+    root: &Path,
+    relative: &Path,
+    dir_mode: u32,
+    file_mode: u32,
+    expected: Option<&RootIdentity>,
+) -> Result<RootedFileLock, FsError> {
+    imp::lock_exclusive_pinned(root, relative, dir_mode, file_mode, expected)
+}
+
+/// Try to acquire an exclusive root-confined lock without waiting on lock
+/// contention. Path traversal/opening is still synchronous filesystem work;
+/// callers that run on Tokio must perform the whole operation on a blocking
+/// worker rather than assuming this helper makes every syscall nonblocking.
+pub fn try_lock_exclusive(
+    root: &Path,
+    relative: &Path,
+    dir_mode: u32,
+    file_mode: u32,
+) -> Result<RootedFileLock, FsError> {
+    imp::try_lock_exclusive(root, relative, dir_mode, file_mode)
 }
 
 /// Read a UTF-8 file without following any component below `root`.
@@ -1420,6 +1594,29 @@ pub fn open_append_file_pinned(
     imp::open_append_file_pinned(root, relative, expected)
 }
 
+/// Open a regular file for streaming reads through a no-follow rooted handle.
+/// The returned descriptor stays bound to the verified inode even if a path is
+/// replaced later, and `expected` rejects replacement of the pinned root.
+pub fn open_read_file_pinned(
+    root: &Path,
+    relative: &Path,
+    expected: Option<&RootIdentity>,
+) -> Result<std::fs::File, FsError> {
+    imp::open_read_file_pinned(root, relative, expected)
+}
+
+/// Flush the directory containing `relative` through the same pinned root.
+/// Call this after the first durable creation of an append-only file so its
+/// directory entry, not only its contents, crosses the acknowledgement
+/// boundary.
+pub fn sync_parent_pinned(
+    root: &Path,
+    relative: &Path,
+    expected: Option<&RootIdentity>,
+) -> Result<(), FsError> {
+    imp::sync_parent_pinned(root, relative, expected)
+}
+
 /// Read UTF-8 only if the opened root still has `expected` identity.
 pub fn read_to_string_pinned(
     root: &Path,
@@ -1475,6 +1672,32 @@ pub fn atomic_write(
     options: AtomicWriteOptions,
 ) -> Result<(), FsError> {
     imp::atomic_write(root, relative, bytes, options)
+}
+
+/// Atomically write bytes only if the opened root still has `expected`
+/// identity. The temporary file, replacement, and directory fsync all use
+/// the same no-follow parent handle; callers do not need a pathname check
+/// followed by an unpinned replacement.
+pub fn atomic_write_pinned(
+    root: &Path,
+    relative: &Path,
+    bytes: &[u8],
+    options: AtomicWriteOptions,
+    expected: Option<&RootIdentity>,
+) -> Result<(), FsError> {
+    imp::atomic_write_pinned(root, relative, bytes, options, expected)
+}
+
+/// Truncate and fsync a regular file only if the opened root still has
+/// `expected` identity. This is used solely for a recoverable malformed final
+/// WAL tail; interior corruption must remain untouched.
+pub fn truncate_file_pinned(
+    root: &Path,
+    relative: &Path,
+    length: u64,
+    expected: Option<&RootIdentity>,
+) -> Result<(), FsError> {
+    imp::truncate_file_pinned(root, relative, length, expected)
 }
 
 /// Remove a file without following any component below `root`.
@@ -1828,6 +2051,61 @@ mod imp {
         })
     }
 
+    pub(super) fn lock_exclusive_pinned(
+        root: &Path,
+        relative: &Path,
+        dir_mode: u32,
+        file_mode: u32,
+        expected: Option<&RootIdentity>,
+    ) -> Result<RootedFileLock, FsError> {
+        let (parent, file_name) =
+            open_parent_checked(root, relative, true, dir_mode, expected)?;
+        let fd = fs::openat(
+            &parent,
+            &file_name,
+            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            mode(file_mode, relative)?,
+        )
+        .map_err(|error| map_unix_io(relative, error))?;
+        ensure_opened_regular(&fd, relative)?;
+        let file = std::fs::File::from(fd);
+        file.lock_exclusive()
+            .map_err(|error| map_io(relative, error))?;
+        Ok(RootedFileLock {
+            _file: file,
+            path: root.join(relative).display().to_string(),
+        })
+    }
+
+    pub(super) fn try_lock_exclusive(
+        root: &Path,
+        relative: &Path,
+        dir_mode: u32,
+        file_mode: u32,
+    ) -> Result<RootedFileLock, FsError> {
+        let (parent, file_name) = open_parent(root, relative, true, dir_mode)?;
+        let fd = fs::openat(
+            &parent,
+            &file_name,
+            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            mode(file_mode, relative)?,
+        )
+        .map_err(|error| map_unix_io(relative, error))?;
+        ensure_opened_regular(&fd, relative)?;
+        let file = std::fs::File::from(fd);
+        file.try_lock_exclusive().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                FsError::AlreadyExists(relative.display().to_string())
+            } else {
+                map_io(relative, error)
+            }
+        })?;
+        Ok(RootedFileLock {
+            _file: file,
+            path: root.join(relative).display().to_string(),
+        })
+    }
+
     pub(super) fn read_to_string(root: &Path, relative: &Path) -> Result<String, FsError> {
         let (parent, file_name) = open_parent(root, relative, false, PRIVATE_DIR_MODE)?;
         let fd = fs::openat(
@@ -1975,6 +2253,34 @@ mod imp {
         Ok(std::fs::File::from(fd))
     }
 
+    pub(super) fn open_read_file_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<std::fs::File, FsError> {
+        let (parent, file_name) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
+        let fd = fs::openat(
+            &parent,
+            &file_name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| map_unix_io(relative, error))?;
+        ensure_opened_regular(&fd, relative)?;
+        Ok(std::fs::File::from(fd))
+    }
+
+    pub(super) fn sync_parent_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        let (parent, _file_name) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
+        fs::fsync(&parent).map_err(|error| map_unix_io(relative, error))
+    }
+
     pub(super) fn read_to_string_pinned(
         root: &Path,
         relative: &Path,
@@ -2043,6 +2349,68 @@ mod imp {
             let _ = fs::unlinkat(&parent, &temp_name, AtFlags::empty());
         }
         result
+    }
+
+    pub(super) fn atomic_write_pinned(
+        root: &Path,
+        relative: &Path,
+        bytes: &[u8],
+        options: AtomicWriteOptions,
+        expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        let (parent, file_name) =
+            open_parent_checked(root, relative, options.create_parents, options.dir_mode, expected)?;
+        validate_optional_regular(&parent, &file_name, relative)?;
+        let temp_name = temp_name(&file_name);
+        let temp_fd = fs::openat(
+            &parent,
+            &temp_name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            mode(options.file_mode, relative)?,
+        )
+        .map_err(|error| map_unix_io(relative, error))?;
+        let mut temp = std::fs::File::from(temp_fd);
+        let result = (|| {
+            temp.write_all(bytes)
+                .map_err(|error| map_io(relative, error))?;
+            temp.sync_all().map_err(|error| map_io(relative, error))?;
+            validate_optional_regular(&parent, &file_name, relative)?;
+            if options.overwrite {
+                fs::renameat(&parent, &temp_name, &parent, &file_name)
+                    .map_err(|error| map_unix_io(relative, error))?;
+            } else {
+                fs::linkat(&parent, &temp_name, &parent, &file_name, AtFlags::empty())
+                    .map_err(|error| map_unix_io(relative, error))?;
+                let _ = fs::unlinkat(&parent, &temp_name, AtFlags::empty());
+            }
+            fs::fsync(&parent).map_err(|error| map_unix_io(relative, error))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::unlinkat(&parent, &temp_name, AtFlags::empty());
+        }
+        result
+    }
+
+    pub(super) fn truncate_file_pinned(
+        root: &Path,
+        relative: &Path,
+        length: u64,
+        expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        let (parent, file_name) = open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
+        let fd = fs::openat(
+            &parent,
+            &file_name,
+            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| map_unix_io(relative, error))?;
+        ensure_opened_regular(&fd, relative)?;
+        let file = std::fs::File::from(fd);
+        file.set_len(length)
+            .map_err(|error| map_io(relative, error))?;
+        file.sync_all().map_err(|error| map_io(relative, error))
     }
 
     fn read_file_after_permission_inner<F>(
@@ -2327,6 +2695,25 @@ mod imp {
         Err(unsupported())
     }
 
+    pub(super) fn lock_exclusive_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _dir_mode: u32,
+        _file_mode: u32,
+        _expected: Option<&RootIdentity>,
+    ) -> Result<RootedFileLock, FsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn try_lock_exclusive(
+        _root: &Path,
+        _relative: &Path,
+        _dir_mode: u32,
+        _file_mode: u32,
+    ) -> Result<RootedFileLock, FsError> {
+        Err(unsupported())
+    }
+
     pub(super) fn read_file_after_permission(
         _root: &Path,
         _relative: &Path,
@@ -2388,6 +2775,25 @@ mod imp {
         Err(unsupported())
     }
 
+    pub(super) fn atomic_write_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _bytes: &[u8],
+        _options: AtomicWriteOptions,
+        _expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn truncate_file_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _length: u64,
+        _expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        Err(unsupported())
+    }
+
     pub(super) fn create_new_file(_root: &Path, _relative: &Path) -> Result<(), FsError> {
         Err(unsupported())
     }
@@ -2430,6 +2836,22 @@ mod imp {
         _relative: &Path,
         _expected: Option<&RootIdentity>,
     ) -> Result<std::fs::File, FsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn open_read_file_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _expected: Option<&RootIdentity>,
+    ) -> Result<std::fs::File, FsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn sync_parent_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
         Err(unsupported())
     }
 

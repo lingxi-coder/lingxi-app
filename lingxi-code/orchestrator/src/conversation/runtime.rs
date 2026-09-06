@@ -838,6 +838,10 @@ pub(crate) struct ModelRuntime {
     /// this so production `lingxi-cli` reports real cost; library callers
     /// (e.g. unit tests) may leave it `None`.
     pub(crate) cost_tracker: Option<Arc<cost::CostTracker>>,
+    /// Session-pinned response finalizer scope captured before provider work.
+    /// It remains fixed across hot-session switches until the switch
+    /// publishes a hydrated destination.
+    pub(crate) cost_scope: std::sync::Mutex<Option<cost::CostSessionScope>>,
     /// Optional analytics bus wired by [`Self::with_analytics_bus`] (M7). When
     /// present (desktop composition root), the live turn loop fires
     /// `tengu_api_success` per completed API response — 1:1 with claude-code
@@ -912,6 +916,7 @@ impl ModelRuntime {
             refusal_episode: Mutex::new(crate::refusal_notice::RefusalEpisode::default()),
             refusal_notice_queue: Mutex::new(crate::refusal_notice::NoticeQueue::new()),
             cost_tracker: None,
+            cost_scope: std::sync::Mutex::new(None),
             analytics_bus: None,
             session_started_at: std::sync::Mutex::new(std::time::Instant::now()),
             api_calls_recorded: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -938,9 +943,17 @@ impl ModelRuntime {
     /// Move the active cost projection to the session that has just been
     /// mounted. Existing session cells remain available to scoped background
     /// work and are never reset here.
-    pub(crate) async fn switch_cost_session(&self, session_id: protocol::SessionId) {
+    pub(crate) async fn switch_cost_session(
+        &self,
+        session_id: protocol::SessionId,
+    ) -> Result<(), cost::CostPersistError> {
         if let Some(tracker) = self.cost_tracker.as_ref() {
-            tracker.switch_session(session_id).await;
+            tracker.switch_session(session_id).await?;
+            *self
+                .cost_scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(tracker.session_scope(session_id));
         }
         self.api_calls_recorded
             .store(0, std::sync::atomic::Ordering::SeqCst);
@@ -950,6 +963,7 @@ impl ModelRuntime {
             .session_started_at
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = std::time::Instant::now();
+        Ok(())
     }
 
     /// Reset refusal routing after compaction token accounting is cleared.

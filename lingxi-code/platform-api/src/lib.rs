@@ -158,6 +158,7 @@ pub use http::{
 };
 pub use ide::{IdeEndpointInfo, IdeHandle, IdeStatus, IdeTransport};
 pub use location::{LocationError, LocationFix, LocationProvider};
+pub use live_sessions::{SessionIdClaim, SessionWriterLease, SharedSessionWriterLease};
 pub use lsp::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
     NewDiagnosticsSource,
@@ -210,7 +211,10 @@ pub use prompting_gate::{
     PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,
 };
 pub use repo_root_reload::{RepoRootReloadOutcome, RepoRootReloadRequest, RepoRootReloader};
-pub use rooted_fs::{AtomicWriteOptions, RootedFileLock};
+pub use rooted_fs::{
+    atomic_write_pinned, lock_exclusive_pinned, open_read_file_pinned, sync_parent_pinned,
+    truncate_file_pinned, AtomicWriteOptions, RootedFileLock, RootIdentity,
+};
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 pub use sandbox::{
     BackendPlanHandle, NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend,

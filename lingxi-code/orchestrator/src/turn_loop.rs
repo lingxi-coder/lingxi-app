@@ -639,6 +639,23 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // #5: wall-clock the API round-trip (incl. any in-adapter retries + the PTL
     // reactive-recovery tail) so the CostTracker records a REAL duration instead
     // of `Duration::ZERO`. Paired with `orch.api.last_retry_count()` below.
+    let mut cost_scope = orch
+        .model_runtime
+        .cost_scope
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if cost_scope.is_none() {
+        if let Some(tracker) = orch.model_runtime.cost_tracker.as_ref() {
+            let session_id = orch.session.lock().await.session_id;
+            cost_scope = Some(tracker.session_scope(session_id));
+        }
+    }
+    if let Some(scope) = cost_scope.as_ref() {
+        scope.preflight().await.map_err(|error| {
+            OrchestratorError::Internal(format!("cost durability preflight failed: {error}"))
+        })?;
+    }
     let api_call_started = std::time::Instant::now();
     // tengu_api_success `messageCount:n` / `messageTokens:r`: capture from the
     // input snapshot BEFORE it is moved into `call_api_with_ptl_recovery`.
@@ -657,6 +674,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         deferred_tools_reminder,
         date_change_reminder,
         &turn_reminders,
+        cost_scope.as_ref(),
     )
     .await
     {
@@ -782,6 +800,38 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         }
     };
 
+    // Transfer the known provider response into its session-owned accounting
+    // supervisor before any tool/cache/progress/telemetry await below.
+    let owned_cost_response = orch.model_runtime.cost_tracker.as_ref().map(|_| {
+        let usage = crate::cost_wiring::llm_usage_to_cost_usage(&response.usage);
+        let cache_read = response.usage.billable_tokens.cache_read;
+        let cache_create = response.usage.billable_tokens.cache_write;
+        let model_ref = crate::cost_wiring::model_ref_from_string(&model, model_profile.as_deref());
+        let elapsed = api_call_started.elapsed();
+        let retries = orch.api.last_retry_count();
+        let scope = cost_scope
+            .clone()
+            .expect("a wired cost tracker captured its scope before provider dispatch");
+        let receipt = scope.submit_model_response(cost::CostModelResponse {
+            model_ref: model_ref.clone(),
+            usage,
+            duration: elapsed,
+            retries,
+            cache_read_input_tokens: cache_read,
+            cache_creation_input_tokens: cache_create,
+            is_batch_request: false,
+            bus: orch.model_runtime.analytics_bus.clone(),
+        });
+        (
+            receipt,
+            model_ref,
+            elapsed,
+            retries,
+            cache_read,
+            cache_create,
+        )
+    });
+
     // Inline tool descriptions may grow after MCP/plugin discovery. Commit an
     // append-only replacement only after a successful non-API-error response;
     // deferred entries are excluded and existing descriptions are immutable.
@@ -823,25 +873,19 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // round-trip and the REAL retry count (`last_retry_count()`, the adapter's
     // `RetryState::attempt`) instead of the previous hardcoded `Duration::ZERO`
     // / `0`. claude-code's cost recorder receives both.
-    if let Some(tracker) = orch.model_runtime.cost_tracker.as_ref() {
-        let usage = crate::cost_wiring::llm_usage_to_cost_usage(&response.usage);
-        let cache_read = response.usage.billable_tokens.cache_read;
-        let cache_create = response.usage.billable_tokens.cache_write;
-        let model_ref = crate::cost_wiring::model_ref_from_string(&model, model_profile.as_deref());
-        let elapsed = api_call_started.elapsed();
-        let retries = orch.api.last_retry_count();
-        let cost_for_this_call = tracker
-            .record_api_response_v2(
-                model_ref.clone(),
-                usage,
-                elapsed,
-                retries,
-                cache_read,
-                cache_create,
-                false, // is_batch_request — M6 always false
-                orch.model_runtime.analytics_bus.as_ref(),
-            )
-            .await;
+    if let Some((receipt, model_ref, elapsed, retries, cache_read, cache_create)) =
+        owned_cost_response
+    {
+        let settlement = receipt.settle().await;
+        let cost_for_this_call = settlement.observed_nano_usd();
+        orch.model_runtime
+            .api_calls_recorded
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Err(error) = settlement.persistence_result() {
+            return Err(OrchestratorError::Internal(format!(
+                "cost settlement failed after provider response: {error}"
+            )));
+        }
         // strict-parity (2.1.195): fire `tengu_api_success` on the per-request
         // success path (claude `j("tengu_api_success", {...})`). The port-only
         // `tengu_cost_recorded` event was dropped. request id / stop reason /
@@ -885,9 +929,6 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             )
             .await;
         }
-        orch.model_runtime
-            .api_calls_recorded
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     // 2. Translate `LlmResponse.content` -> `ContentBlock` history entry.
@@ -1342,6 +1383,10 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // of the session. Re-appended below wherever the request is rebuilt from
     // raw `session.history`.
     turn_reminders: &[ConversationMessage],
+    // Exact originating-session accounting authority captured before the
+    // first provider dispatch. Explicit recovery calls reuse it rather than
+    // resolving whichever session happens to be active later.
+    cost_scope: Option<&cost::CostSessionScope>,
 ) -> Result<PtlCallOutcome, OrchestratorError> {
     // A first request after resume may overflow before any successful call
     // has populated the summary fork's cache-safe slot.
@@ -1467,6 +1512,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
         .as_mut()
         .and_then(|c| c.build_request_params(&history_snapshot));
 
+    if let Some(scope) = cost_scope {
+        scope.preflight().await.map_err(|error| {
+            OrchestratorError::Internal(format!("cost durability preflight failed: {error}"))
+        })?;
+    }
     let first = if let Some(params) = hint_params {
         // The controller is live: take the hint-carrying seam. `params.body` is
         // `None` when the estimated savings are under the floor — the oracle
@@ -1565,6 +1615,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         turn_reminders,
                     )
                     .await;
+                    if let Some(scope) = cost_scope {
+                        scope.preflight().await.map_err(|error| {
+                            OrchestratorError::Internal(format!(
+                                "cost durability preflight failed: {error}"
+                            ))
+                        })?;
+                    }
                     return match orch
                         .api
                         .messages_create(model, profile, system, retry, tools.clone())
@@ -1606,6 +1663,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     turn_reminders,
                 )
                 .await;
+                if let Some(scope) = cost_scope {
+                    scope.preflight().await.map_err(|error| {
+                        OrchestratorError::Internal(format!(
+                            "cost durability preflight failed: {error}"
+                        ))
+                    })?;
+                }
                 match orch
                     .api
                     .messages_create(model, profile, system, retry, tools.clone())
@@ -1652,6 +1716,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
         // pre-hooks) is the boundary durationMs clock. Folding hook wall-time
         // into `record_compaction_usage` would inflate /cost's API duration.
         orch.output.emit_compaction_phase("summarizing").await;
+        let reactive_cost_scope = orch.compaction_cost_scope().await.map_err(|error| {
+            OrchestratorError::Internal(format!(
+                "reactive compaction cost preflight failed: {error}"
+            ))
+        })?;
         let api_started = std::time::Instant::now();
         let compact_result = {
             let mut tracking = orch.compaction_runtime.compaction_tracking.lock().await;
@@ -1664,6 +1733,12 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 )
                 .await
         };
+        let compact_duration = api_started.elapsed();
+        // A successful summarizer response is owned before the failure-detail,
+        // telemetry, or output awaits below.
+        let compact_cost_receipt = compact_result.as_ref().ok().and_then(|result| {
+            orch.begin_compaction_usage(reactive_cost_scope.as_ref(), result, compact_duration)
+        });
         // SC-04 (oracle `Fol`, cc-238.js @228433532): a FAILED rescue compact is
         // what upgrades the bare `Prompt is too long` into
         // `Prompt is too long · automatic compaction failed: <detail>`. Stash the
@@ -1682,9 +1757,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 .await;
         }
         if let Ok(result) = compact_result {
-            let compact_duration = api_started.elapsed();
-            orch.record_compaction_usage(&result, compact_duration)
-                .await;
+            orch.settle_compaction_usage(compact_cost_receipt)
+                .await
+                .map_err(|error| {
+                    OrchestratorError::Internal(format!(
+                        "reactive compaction cost settlement failed: {error}"
+                    ))
+                })?;
             // #54 reactive rapid-refill (thrashing) breaker: if the reactive
             // compact tripped the breaker, re-compacting cannot help (a single
             // file/tool output is too large). Emit telemetry + surface the
@@ -1739,6 +1818,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     turn_reminders,
                 )
                 .await;
+                if let Some(scope) = cost_scope {
+                    scope.preflight().await.map_err(|error| {
+                        OrchestratorError::Internal(format!(
+                            "cost durability preflight failed: {error}"
+                        ))
+                    })?;
+                }
                 match orch
                     .api
                     .messages_create(model, profile, system, history, tools)

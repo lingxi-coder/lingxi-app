@@ -327,6 +327,12 @@ impl ConversationOrchestrator {
             .expect("with_cost_tracker runs at construction")
             .session_id;
         tracker.adopt_active_session_for_builder(session_id);
+        *self
+            .model_runtime
+            .cost_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(tracker.session_scope(session_id));
         self.model_runtime.cost_tracker = Some(tracker);
         self
     }

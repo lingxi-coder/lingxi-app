@@ -18,6 +18,9 @@ mod prompt_snapshot_tests;
 #[path = "conversation/tests/bounded_post_compact_read_tests.rs"]
 mod bounded_post_compact_read_tests;
 
+#[path = "conversation/tests/durable_cost_handoff_tests.rs"]
+mod durable_cost_handoff_tests;
+
 impl ConversationOrchestrator {
     async fn restore_post_compact_attachments(&self) -> Vec<protocol::ConversationMessage> {
         self.restore_post_compact_attachments_against(&[]).await

@@ -17,10 +17,11 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::env::{is_env_defined_falsy, is_env_truthy};
+use protocol::SessionId;
 
 use crate::live_session_words::{ADJECTIVES, NOUNS};
 
@@ -238,6 +239,53 @@ pub struct LiveSessionDir {
 #[derive(Debug)]
 pub struct SessionIdClaim {
     file: fs::File,
+    session_id: String,
+}
+
+/// Narrow ownership seam for components that must keep a session writer claim
+/// alive without depending on the concrete live-session registry. The claim
+/// itself remains the only owner of the OS lock; cloning the shared handle does
+/// not reacquire a second lock.
+pub trait SessionWriterLease: Send + Sync {
+    /// Canonical session id protected by this lease.
+    fn session_id(&self) -> &str;
+
+    /// Parse the claim's stable UUID without relying on a display prefix.
+    fn canonical_session_id(&self) -> Option<SessionId> {
+        SessionId::parse_prefixed(self.session_id())
+    }
+}
+
+/// Ref-counted writer claim shared by Bridge, cost views, and durable outbox
+/// work. The final clone drop releases the underlying OS lock.
+pub type SharedSessionWriterLease = Arc<dyn SessionWriterLease>;
+
+impl SessionWriterLease for SessionIdClaim {
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
+impl SessionIdClaim {
+    /// Convert an acquired claim into one shared ownership handle. This is
+    /// intentionally a move: callers must pass the Bridge's existing claim,
+    /// never call `claim_session_id` again for a scoped background view.
+    #[must_use]
+    pub fn into_shared(self) -> SharedSessionWriterLease {
+        Arc::new(self)
+    }
+
+    /// Canonical session id protected by this claim.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Canonical protocol identity protected by this claim.
+    #[must_use]
+    pub fn canonical_session_id(&self) -> Option<SessionId> {
+        SessionId::parse_prefixed(&self.session_id)
+    }
 }
 
 impl Drop for SessionIdClaim {
@@ -303,24 +351,20 @@ impl LiveSessionDir {
             self.sweep_dead()?;
         }
 
-        let claim_path = self.session_claim_path(session_id);
-        let mut claim = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&claim_path)?;
-        claim.try_lock_exclusive().map_err(|error| {
-            if error.kind() == io::ErrorKind::WouldBlock {
-                io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "session id is already claimed by a live writer",
-                )
-            } else {
-                error
-            }
-        })?;
-        claim.set_len(0)?;
-        writeln!(claim, "{pid}")?;
+        let claim_relative = PathBuf::from(format!("{session_id}{SESSION_CLAIM_SUFFIX}"));
+        let mut rooted_claim =
+            crate::rooted_fs::try_lock_exclusive(&self.root, &claim_relative, 0o700, 0o600)
+                .map_err(|error| match error {
+                    crate::FsError::AlreadyExists(_) => io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "session id is already claimed by a live writer",
+                    ),
+                    other => io::Error::other(other.to_string()),
+                })?;
+        rooted_claim
+            .write_owner(&pid.to_string())
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let claim = rooted_claim.into_file();
 
         // The lock closes the check-then-create race between two processes.
         // Re-read centrally filtered live records after taking it so a legacy
@@ -335,7 +379,10 @@ impl LiveSessionDir {
                 "session id is already active",
             ));
         }
-        Ok(SessionIdClaim { file: claim })
+        Ok(SessionIdClaim {
+            file: claim,
+            session_id: session_id.to_string(),
+        })
     }
 
     /// Legacy cleanup hook. Writer ownership is released by dropping the

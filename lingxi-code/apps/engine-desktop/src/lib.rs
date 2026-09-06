@@ -37,6 +37,7 @@ pub mod fork_resume;
 mod fusion_command;
 pub mod ide;
 pub mod session_agents;
+mod session_state;
 pub mod settings_watch;
 mod skill_loader;
 

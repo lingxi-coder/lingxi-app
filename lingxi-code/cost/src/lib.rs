@@ -12,6 +12,7 @@ pub mod budget;
 pub mod calculator;
 pub mod events;
 pub mod handle;
+pub mod persistence;
 pub mod pricing;
 pub mod render;
 pub mod summary;
@@ -25,6 +26,11 @@ pub use budget::{
 };
 pub use calculator::CostCalculator;
 pub use events::{emit_api_success, ApiSuccessFields, EVENT_NAME_API_SUCCESS};
+pub use persistence::{
+    CostDurabilityGate, CostHydration, CostHydrator, CostMutationId, CostMutationRecord,
+    CostMutationSource, CostPersistAck, CostPersistError, CostPersistPermit, CostPersistRequest,
+    CostPersistResult, CostPersistence, CostStateVector,
+};
 pub use pricing::{
     nano_usd_to_dollars_format, CostError, ModelPricing, ModelRef, MoneyPerToken,
     NonTokenBillableUnit, PricingCatalog, PricingResolution, PricingSource, ProviderId, TokenClass,
@@ -35,5 +41,8 @@ pub use token_usage_replay::{
     latest_token_usage_turn_id, latest_token_usage_turn_id_from_events, ReplayTurn,
     ReplayTurnStatus,
 };
-pub use tracker::{CostState, CostTracker, ModelUsage};
+pub use tracker::{
+    CostModelResponse, CostResponseObservation, CostResponseReceipt, CostResponseSettlement,
+    CostSessionScope, CostState, CostTracker, ModelUsage, RetainedCostResponse,
+};
 pub use usage::{ApiSpeed, ServerToolUsage, TokenUsage, Usage};

@@ -65,7 +65,98 @@ pub struct BudgetEnforcer {
 struct BudgetSessionLedger {
     sessions: Mutex<HashMap<protocol::SessionId, Arc<BudgetSessionState>>>,
     next_reservation_id: AtomicU64,
-    owners: std::sync::Mutex<HashMap<u64, protocol::SessionId>>,
+    owners: std::sync::Mutex<HashMap<u64, ReservationOwner>>,
+    settlements: std::sync::Mutex<HashMap<u64, Arc<SettlementSlot>>>,
+}
+
+/// Shared state for an owned settlement.  A receipt can be dropped while its
+/// finalizer is waiting for a persistence permit; a later retry must wait for
+/// that same owned operation instead of treating the consumed token as an
+/// unrelated no-op.
+struct SettlementSlot {
+    started: AtomicBool,
+    actual_nano_usd: u64,
+    result: std::sync::Mutex<Option<Result<(), platform_api::BudgetError>>>,
+    notify: tokio::sync::Notify,
+}
+
+#[derive(Clone)]
+struct ReservationOwner {
+    session_id: protocol::SessionId,
+    tracker: Arc<CostTracker>,
+    session: Arc<BudgetSessionState>,
+}
+
+impl SettlementSlot {
+    fn new(actual_nano_usd: u64) -> Self {
+        Self {
+            started: AtomicBool::new(false),
+            actual_nano_usd,
+            result: std::sync::Mutex::new(None),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    async fn wait_result(&self) -> Result<(), platform_api::BudgetError> {
+        loop {
+            if let Some(result) = self
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                return result;
+            }
+            let notified = self.notify.notified();
+            if let Some(result) = self
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                return result;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl BudgetSessionLedger {
+    fn settlement_slot(
+        &self,
+        id: platform_api::BudgetReservationId,
+        actual_nano_usd: u64,
+    ) -> Result<Arc<SettlementSlot>, platform_api::BudgetError> {
+        let mut settlements = self
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(slot) = settlements.get(&id.raw()) {
+            if slot.actual_nano_usd != actual_nano_usd {
+                return Err(platform_api::BudgetError::Internal(
+                    "reservation retry changed the realized amount".into(),
+                ));
+            }
+            return Ok(slot.clone());
+        }
+        let slot = Arc::new(SettlementSlot::new(actual_nano_usd));
+        settlements.insert(id.raw(), slot.clone());
+        Ok(slot)
+    }
+}
+
+/// Owned production settlement transfer. The receipt captures the same
+/// session ledger/tracker as the original reservation, so Fusion may disarm
+/// its RAII hold before the owned finalizer waits on queue capacity or WAL ack.
+struct CostBudgetCommitReceipt {
+    slot: Arc<SettlementSlot>,
+}
+
+#[async_trait::async_trait]
+impl platform_api::BudgetSettlementReceipt for CostBudgetCommitReceipt {
+    async fn finish(self: Box<Self>) -> Result<(), platform_api::BudgetError> {
+        self.slot.wait_result().await
+    }
 }
 
 struct BudgetSessionState {
@@ -105,6 +196,18 @@ impl ReservationBook {
     }
 }
 
+fn reservation_id_seed() -> u64 {
+    let session = protocol::SessionId::new();
+    let uuid = session.as_uuid();
+    let bytes = uuid.as_bytes();
+    u64::from_le_bytes(
+        bytes[..8]
+            .try_into()
+            .expect("UUID prefix is exactly eight bytes"),
+    )
+    .max(1)
+}
+
 /// Result of a [`BudgetEnforcer::check_pre_api_call`].
 #[derive(Debug, Clone)]
 pub enum BudgetCheckResult {
@@ -141,6 +244,11 @@ pub enum BudgetCheckResult {
         /// Configured maximum session cost in nano-USD.
         limit: u64,
     },
+    /// Durable cost state is unavailable or frozen. Paid work must not start.
+    Unavailable {
+        /// Stable storage/authority diagnostic.
+        reason: String,
+    },
 }
 
 impl BudgetEnforcer {
@@ -165,8 +273,9 @@ impl BudgetEnforcer {
             cost_tracker,
             sessions: Arc::new(BudgetSessionLedger {
                 sessions: Mutex::new(HashMap::new()),
-                next_reservation_id: AtomicU64::new(1),
+                next_reservation_id: AtomicU64::new(reservation_id_seed()),
                 owners: std::sync::Mutex::new(HashMap::new()),
+                settlements: std::sync::Mutex::new(HashMap::new()),
             }),
             session_scope: None,
         }
@@ -229,13 +338,38 @@ impl BudgetEnforcer {
         (session, state)
     }
 
-    fn owner_for(&self, id: platform_api::BudgetReservationId) -> Option<protocol::SessionId> {
+    fn owner_for(&self, id: platform_api::BudgetReservationId) -> Option<ReservationOwner> {
         self.sessions
             .owners
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&id.raw())
-            .copied()
+            .cloned()
+    }
+
+    fn settlement_slot(
+        &self,
+        id: platform_api::BudgetReservationId,
+        actual_nano_usd: u64,
+    ) -> Result<Arc<SettlementSlot>, platform_api::BudgetError> {
+        self.sessions.settlement_slot(id, actual_nano_usd)
+    }
+
+    fn settled_result(
+        &self,
+        id: platform_api::BudgetReservationId,
+    ) -> Option<Result<(), platform_api::BudgetError>> {
+        self.sessions
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id.raw())
+            .and_then(|slot| {
+                slot.result
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            })
     }
 
     /// Sum of active reservation holds.
@@ -255,12 +389,19 @@ impl BudgetEnforcer {
     ) -> Result<platform_api::BudgetReservationId, platform_api::budget::BudgetError> {
         use platform_api::budget::{BudgetError, BudgetReservationId};
         let session_id = self.session_id().await;
+        let pinned_tracker = self.cost_tracker.scoped(session_id);
+        pinned_tracker
+            .preflight_durable()
+            .map_err(|error| BudgetError::Internal(error.to_string()))?;
         let (session, state_cell) = self.session_context_for(session_id).await;
         // Lock the realized state before the reservation book. Commit uses
         // this same order, so cancellation cannot consume a token while an
         // awaited state lock is still pending.
         let state = state_cell.read().await;
         let mut book = session.reservations.lock().await;
+        pinned_tracker
+            .preflight_durable()
+            .map_err(|error| BudgetError::Internal(error.to_string()))?;
         let realized = state.total_nano_usd;
         let held = book.held();
         if let Some(max) = self.config.max_session_nano_usd {
@@ -274,10 +415,22 @@ impl BudgetEnforcer {
         // Reservation ids are process-global, not per-session. This keeps a
         // late token unambiguous even when two sessions both have active
         // zero-hold (uncapped) settlements.
-        let id = self
-            .sessions
-            .next_reservation_id
-            .fetch_add(1, Ordering::Relaxed);
+        let id = loop {
+            let candidate = self
+                .sessions
+                .next_reservation_id
+                .fetch_add(1, Ordering::Relaxed);
+            if candidate != 0
+                && !self
+                    .sessions
+                    .owners
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .contains_key(&candidate)
+            {
+                break candidate;
+            }
+        };
         // An uncapped run still needs a unique settlement token, but it does
         // not occupy a finite-capacity hold.
         let held_amount = self.config.max_session_nano_usd.map_or(0, |_| nano_usd);
@@ -286,7 +439,14 @@ impl BudgetEnforcer {
             .owners
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id, session_id);
+            .insert(
+                id,
+                ReservationOwner {
+                    session_id,
+                    tracker: pinned_tracker,
+                    session: session.clone(),
+                },
+            );
         Ok(BudgetReservationId::from_raw(id))
     }
 
@@ -295,11 +455,21 @@ impl BudgetEnforcer {
         if id.is_noop() {
             return;
         }
+        if self
+            .sessions
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id.raw())
+            .is_some_and(|slot| slot.started.load(Ordering::Acquire))
+        {
+            return;
+        }
         let Some(owner) = self.owner_for(id) else {
             return;
         };
-        let session = self.session_state_for(owner).await;
-        let removed = session
+        let removed = owner
+            .session
             .reservations
             .lock()
             .await
@@ -313,6 +483,174 @@ impl BudgetEnforcer {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&id.raw());
         }
+    }
+
+    async fn commit_owned(
+        sessions: &Arc<BudgetSessionLedger>,
+        owner: ReservationOwner,
+        id: platform_api::BudgetReservationId,
+        actual_nano_usd: u64,
+    ) -> Result<(), platform_api::BudgetError> {
+        // Queue capacity is acquired by the owned finalizer, before either
+        // the cost state lock or reservation-book lock. If this fails, receipt
+        // ownership still consumes the token, but unaccepted state is not
+        // published and the exact error remains in the settlement slot.
+        let tracker = owner.tracker;
+        let permit = match tracker.acquire_persist_permit(owner.session_id).await {
+            Ok(permit) => permit,
+            Err(error) => {
+                tracker.durability_gate().freeze(error.to_string());
+                owner
+                    .session
+                    .reservations
+                    .lock()
+                    .await
+                    .active
+                    .remove(&id.raw());
+                sessions
+                    .owners
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&id.raw());
+                return Err(platform_api::BudgetError::Internal(error.to_string()));
+            }
+        };
+        let state_cell = tracker.selected_state_cell().await;
+        let mut state = state_cell.write().await;
+        let (snapshot, enqueue) = {
+            let mut book = owner.session.reservations.lock().await;
+            if !book.active.contains_key(&id.raw()) {
+                return Err(platform_api::BudgetError::Internal(
+                    "accepted reservation token disappeared before settlement".into(),
+                ));
+            }
+            let snapshot = match CostTracker::record_external_cost_in_state(&state, actual_nano_usd)
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    tracker.durability_gate().freeze(error.to_string());
+                    book.active.remove(&id.raw());
+                    sessions
+                        .owners
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&id.raw());
+                    return Err(platform_api::BudgetError::Internal(error.to_string()));
+                }
+            };
+            let enqueue = match (snapshot.as_ref(), permit) {
+                (Some(snapshot), Some(permit)) => Some(tracker.enqueue_snapshot_locked_with_id(
+                    snapshot,
+                    permit,
+                    crate::CostMutationSource::FusionAggregate,
+                    crate::CostMutationId::new(format!(
+                        "fusion-reservation:v1:{}:{}",
+                        owner.session_id,
+                        id.raw()
+                    )),
+                )),
+                _ => None,
+            };
+            match &enqueue {
+                Some(Ok(_)) | None => {
+                    if let Some(snapshot) = &snapshot {
+                        *state = snapshot.clone();
+                    }
+                }
+                Some(Err(_)) => {}
+            }
+            book.active.remove(&id.raw());
+            sessions
+                .owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id.raw());
+            (snapshot, enqueue)
+        };
+        drop(state);
+
+        if let Some(snapshot) = snapshot {
+            match enqueue {
+                Some(Ok((mutation_id, revision, ack_rx))) => tracker
+                    .await_persistence_ack(owner.session_id, mutation_id, revision, ack_rx)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| platform_api::BudgetError::Internal(error.to_string())),
+                Some(Err(error)) => {
+                    tracker.durability_gate().freeze(error.to_string());
+                    Err(platform_api::BudgetError::Internal(error.to_string()))
+                }
+                None => {
+                    // Ephemeral/test trackers retain their legacy snapshot
+                    // channel. Durable scopes never reach this branch: a
+                    // missing permit is surfaced as `preflight_error` above.
+                    tracker.persist_snapshot(snapshot).await;
+                    Ok(())
+                }
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Transfer ownership of a known Fusion settlement before waiting for a
+    /// durable queue permit.  `None` is retained for legacy/ephemeral callers.
+    pub fn begin_commit_reservation(
+        &self,
+        id: platform_api::BudgetReservationId,
+        actual_nano_usd: u64,
+    ) -> Result<Option<platform_api::BudgetCommitReceipt>, platform_api::BudgetError> {
+        if id.is_noop() {
+            return Ok(None);
+        }
+        let existing = self
+            .sessions
+            .settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id.raw())
+            .cloned();
+        if let Some(slot) = existing {
+            if slot.actual_nano_usd != actual_nano_usd {
+                return Err(platform_api::BudgetError::Internal(
+                    "reservation retry changed the realized amount".into(),
+                ));
+            }
+            return Ok(Some(Box::new(CostBudgetCommitReceipt { slot })));
+        }
+        let Some(owner) = self.owner_for(id) else {
+            return Ok(None);
+        };
+        let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+            platform_api::BudgetError::Internal(
+                "budget settlement requires an async runtime".into(),
+            )
+        })?;
+        let slot = self.settlement_slot(id, actual_nano_usd)?;
+        if !slot.started.swap(true, Ordering::AcqRel) {
+            let sessions = self.sessions.clone();
+            let worker_slot = slot.clone();
+            let panic_gate = owner.tracker.durability_gate();
+            handle.spawn(async move {
+                let worker = tokio::spawn(async move {
+                    Self::commit_owned(&sessions, owner, id, actual_nano_usd).await
+                });
+                let result = match worker.await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let message = format!("budget settlement worker failed: {error}");
+                        panic_gate.freeze(message.clone());
+                        Err(platform_api::BudgetError::Internal(message))
+                    }
+                };
+                *worker_slot
+                    .result
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+                worker_slot.notify.notify_waiters();
+            });
+        }
+        Ok(Some(Box::new(CostBudgetCommitReceipt { slot })))
     }
 
     /// Release the hold after work completed AND record `actual_nano_usd`
@@ -342,42 +680,29 @@ impl BudgetEnforcer {
         if id.is_noop() {
             return Ok(());
         }
-        let Some(owner) = self.owner_for(id) else {
-            return Ok(());
-        };
-        let (session, state_cell) = self.session_context_for(owner).await;
-        // Hold the reservation-book mutex across the in-memory transition,
-        // but not across persistence. Resolve/acquire the state write lock
-        // first; after both guards are held, token consumption and actual
-        // charge are synchronous and cancellation-safe.
-        let mut state = state_cell.write().await;
-        let snapshot = {
-            let mut book = session.reservations.lock().await;
-            if book.active.remove(&id.raw()).is_none() {
-                // Reservation ids are once-only settlement tokens. A retry
-                // after a successful commit is a harmless no-op, including
-                // when the actual amount is non-zero.
-                return Ok(());
-            }
-            self.sessions
-                .owners
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&id.raw());
-            CostTracker::record_external_cost_in_state(&mut state, actual_nano_usd)
-        };
-        drop(state);
-        if let Some(snapshot) = snapshot {
-            self.cost_tracker.persist_snapshot(snapshot).await;
+        if let Some(receipt) = self.begin_commit_reservation(id, actual_nano_usd)? {
+            return receipt.finish().await;
         }
-        Ok(())
+        self.settled_result(id).unwrap_or(Ok(()))
     }
 
     /// Pre-API call gate. After the call returns, call
     /// [`Self::check_post_api_call`] to latch the realized-exceeded flag if
     /// the actual cost overran.
     pub async fn check_pre_api_call(&self, estimated_cost_nano_usd: u64) -> BudgetCheckResult {
-        let (session, state_cell) = self.session_context().await;
+        let session_id = self.session_id().await;
+        let tracker = self.cost_tracker.scoped(session_id);
+        if let Err(error) = tracker.preflight_durable() {
+            return BudgetCheckResult::Unavailable {
+                reason: error.to_string(),
+            };
+        }
+        let (session, state_cell) = self.session_context_for(session_id).await;
+        if let Err(error) = tracker.preflight_durable() {
+            return BudgetCheckResult::Unavailable {
+                reason: error.to_string(),
+            };
+        }
         if session.realized_exceeded.load(Ordering::Acquire) {
             let current = state_cell.read().await.total_nano_usd;
             let limit = self.config.max_session_nano_usd.unwrap_or(0);
@@ -587,8 +912,12 @@ mod tests {
     use super::*;
     use crate::pricing::{nano_usd_to_dollars_format, CostError, PricingCatalog, ProviderId};
     use crate::usage::{TokenUsage, Usage};
-    use crate::ModelRef;
+    use crate::{
+        CostDurabilityGate, CostHydration, CostPersistError, CostPersistPermit, CostPersistRequest,
+        CostPersistence, CostState, ModelRef,
+    };
     use async_trait::async_trait;
+    use platform_api::live_sessions::{SessionWriterLease, SharedSessionWriterLease};
     use protocol::SessionId;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -602,6 +931,62 @@ mod tests {
             Arc::new(PricingCatalog::builtin_reference()),
             tx,
         ))
+    }
+
+    struct TestLease(String);
+
+    impl SessionWriterLease for TestLease {
+        fn session_id(&self) -> &str {
+            &self.0
+        }
+    }
+
+    struct RequestPersistence {
+        requests: tokio::sync::mpsc::UnboundedSender<CostPersistRequest>,
+    }
+
+    #[async_trait]
+    impl CostPersistence for RequestPersistence {
+        async fn acquire_permit(
+            &self,
+            _session_id: SessionId,
+        ) -> Result<CostPersistPermit, CostPersistError> {
+            let requests = self.requests.clone();
+            Ok(CostPersistPermit::new(move |request| {
+                requests
+                    .send(request)
+                    .map_err(|_| CostPersistError::Rejected("test receiver dropped".into()))
+            }))
+        }
+    }
+
+    fn make_durable_tracker(
+        session_id: SessionId,
+        requests: tokio::sync::mpsc::UnboundedSender<CostPersistRequest>,
+        gate: CostDurabilityGate,
+    ) -> Arc<CostTracker> {
+        let (legacy_tx, _legacy_rx) = mpsc::channel(1);
+        let lease: SharedSessionWriterLease = Arc::new(TestLease(session_id.to_string()));
+        Arc::new(
+            CostTracker::new(
+                session_id,
+                Arc::new(PricingCatalog::builtin_reference()),
+                legacy_tx,
+            )
+            .try_with_durable_persistence(
+                CostHydration {
+                    state: CostState {
+                        session_id,
+                        ..Default::default()
+                    },
+                    journal_revision: 0,
+                },
+                Arc::new(RequestPersistence { requests }),
+                lease,
+                gate,
+            )
+            .unwrap(),
+        )
     }
 
     #[tokio::test]
@@ -958,6 +1343,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn frozen_durable_session_blocks_checks_and_new_reservations() {
+        let session_id = SessionId::new();
+        let (requests, _requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let gate = CostDurabilityGate::default();
+        let tracker = make_durable_tracker(session_id, requests, gate.clone());
+        let enforcer = BudgetEnforcer::new(
+            BudgetConfig {
+                max_session_nano_usd: Some(1_000),
+                max_turn_nano_usd: None,
+                max_turn_tokens: None,
+                warning_thresholds: vec![],
+                on_exceed: BudgetExceedPolicy::Halt,
+            },
+            tracker,
+        );
+        gate.freeze("synthetic WAL failure");
+
+        assert!(matches!(
+            enforcer.check_pre_api_call(1).await,
+            BudgetCheckResult::Unavailable { reason } if reason.contains("synthetic WAL failure")
+        ));
+        assert!(matches!(
+            enforcer.reserve_nano_usd(1).await,
+            Err(platform_api::BudgetError::Internal(reason)) if reason.contains("synthetic WAL failure")
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropped_commit_receipt_still_owns_and_finishes_the_charge() {
+        let tracker = make_tracker();
+        let enforcer = BudgetEnforcer::new(
+            BudgetConfig {
+                max_session_nano_usd: Some(1_000),
+                max_turn_nano_usd: None,
+                max_turn_tokens: None,
+                warning_thresholds: vec![],
+                on_exceed: BudgetExceedPolicy::Halt,
+            },
+            tracker.clone(),
+        );
+        let id = enforcer.reserve_nano_usd(800).await.unwrap();
+        let receipt = enforcer
+            .begin_commit_reservation(id, 400)
+            .unwrap()
+            .expect("production cost enforcer returns an owned receipt");
+        drop(receipt);
+
+        for _ in 0..100 {
+            if tracker.total_nano_usd().await == 400 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(tracker.total_nano_usd().await, 400);
+        assert_eq!(enforcer.active_reservation_nano_usd().await, 0);
+        enforcer.commit_reservation(id, 400).await.unwrap();
+        assert_eq!(tracker.total_nano_usd().await, 400);
+    }
+
+    #[tokio::test]
+    async fn settlement_retry_rejects_a_changed_realized_amount() {
+        let tracker = make_tracker();
+        let enforcer = BudgetEnforcer::new(
+            BudgetConfig {
+                max_session_nano_usd: Some(1_000),
+                max_turn_nano_usd: None,
+                max_turn_tokens: None,
+                warning_thresholds: vec![],
+                on_exceed: BudgetExceedPolicy::Halt,
+            },
+            tracker,
+        );
+        let id = enforcer.reserve_nano_usd(800).await.unwrap();
+        let receipt = enforcer.begin_commit_reservation(id, 400).unwrap().unwrap();
+
+        assert!(matches!(
+            enforcer.begin_commit_reservation(id, 401),
+            Err(platform_api::BudgetError::Internal(message)) if message.contains("changed")
+        ));
+        receipt.finish().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn accepted_wal_failure_is_cached_and_never_releases_or_rebills() {
+        let session_id = SessionId::new();
+        let (requests, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let gate = CostDurabilityGate::default();
+        let tracker = make_durable_tracker(session_id, requests, gate.clone());
+        let enforcer = BudgetEnforcer::new(
+            BudgetConfig {
+                max_session_nano_usd: Some(1_000),
+                max_turn_nano_usd: None,
+                max_turn_tokens: None,
+                warning_thresholds: vec![],
+                on_exceed: BudgetExceedPolicy::Halt,
+            },
+            tracker.clone(),
+        );
+        let id = enforcer.reserve_nano_usd(800).await.unwrap();
+        let receipt = enforcer.begin_commit_reservation(id, 400).unwrap().unwrap();
+        let request = requests_rx.recv().await.unwrap();
+        request
+            .ack
+            .send(Err(CostPersistError::Storage("fsync failed".into())))
+            .unwrap();
+
+        let first = receipt.finish().await.unwrap_err().to_string();
+        let retry = enforcer
+            .commit_reservation(id, 400)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(first, retry);
+        assert_eq!(tracker.total_nano_usd().await, 400);
+        assert_eq!(enforcer.active_reservation_nano_usd().await, 0);
+        assert!(gate.frozen_reason().is_some());
+    }
+
+    #[tokio::test]
     async fn reservation_is_visible_to_positive_pre_api_estimates() {
         let cfg = BudgetConfig {
             max_session_nano_usd: Some(1_000),
@@ -1140,14 +1645,14 @@ mod tests {
         let origin = active.scoped_for_session(session_a);
         let origin_id = origin.reserve_nano_usd(800).await.unwrap();
 
-        tracker.switch_session(session_b).await;
+        tracker.switch_session(session_b).await.unwrap();
         let b_id = active.reserve_nano_usd(800).await.unwrap();
         assert_ne!(origin_id, b_id, "settlement tokens are globally unique");
         active.release_reservation(b_id).await;
         origin.commit_reservation(origin_id, 400).await.unwrap();
 
         assert_eq!(tracker.total_nano_usd().await, 0);
-        tracker.switch_session(session_a).await;
+        tracker.switch_session(session_a).await.unwrap();
         assert_eq!(tracker.total_nano_usd().await, 400);
         assert_eq!(origin.active_reservation_nano_usd().await, 0);
     }
@@ -1182,7 +1687,7 @@ mod tests {
             BudgetCheckResult::Halt { .. }
         ));
 
-        tracker.switch_session(session_b).await;
+        tracker.switch_session(session_b).await.unwrap();
         assert!(matches!(
             e.check_pre_api_call(0).await,
             BudgetCheckResult::Ok
@@ -1193,7 +1698,7 @@ mod tests {
             BudgetCheckResult::ThresholdWarning { pct: 80, .. }
         ));
 
-        tracker.switch_session(session_a).await;
+        tracker.switch_session(session_a).await.unwrap();
         assert!(matches!(
             e.check_pre_api_call(0).await,
             BudgetCheckResult::Halt { .. }

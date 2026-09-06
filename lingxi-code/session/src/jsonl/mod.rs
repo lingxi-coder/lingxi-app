@@ -44,6 +44,8 @@ impl SessionMode {
 }
 
 pub mod djb2;
+pub mod durable_writer;
+pub mod journal;
 pub mod loader;
 pub mod path;
 pub mod re_append;
@@ -59,6 +61,15 @@ pub mod writer;
 pub use recover::{read_recover, RecoveryResult, StorageError};
 
 // New M5-07 public surface.
+pub use durable_writer::{
+    DurableTranscriptTransaction, DurableTranscriptWriter, TranscriptAppendOutcome,
+    TranscriptWriterError, DEFAULT_MAX_TRANSCRIPT_SCAN_BYTES, TRANSCRIPT_LOCK_FILE_NAME,
+};
+pub use journal::{
+    DurableJournal, JournalAppend, JournalEntry, JournalEnvelope, JournalError, JournalReplay,
+    JournalSnapshot, JOURNAL_FILE_NAME, JOURNAL_LOCK_FILE_NAME, JOURNAL_SCHEMA_VERSION,
+    SNAPSHOT_FILE_NAME,
+};
 pub use path::{project_dir_name, session_path, tool_results_dir};
 // `reader::SessionMetadata` (lite head-only struct) is intentionally NOT
 // re-exported as `jsonl::SessionMetadata`; M5-08 introduces a different

@@ -147,6 +147,25 @@ impl ModelCallPreparer for VisionModelCallPreparer {
             delegate.request_model,
             uncovered.len()
         );
+        let mut cost_scope = orch
+            .model_runtime
+            .cost_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if cost_scope.is_none() {
+            if let Some(tracker) = orch.model_runtime.cost_tracker.as_ref() {
+                let session_id = orch.session.lock().await.session_id;
+                cost_scope = Some(tracker.session_scope(session_id));
+            }
+        }
+        if let Some(scope) = cost_scope.as_ref() {
+            scope.preflight().await.map_err(|error| {
+                OrchestratorError::Internal(format!(
+                    "vision cost durability preflight failed: {error}"
+                ))
+            })?;
+        }
         orch.output
             .emit_hook_progress_started(
                 &progress_id,
@@ -156,6 +175,16 @@ impl ModelCallPreparer for VisionModelCallPreparer {
             )
             .await;
         let progress = VisionProgressGuard::new(orch.output.clone(), progress_id);
+        // The progress sink may itself await. Re-check the captured session
+        // immediately before the paid delegation so a freeze that landed
+        // while opening progress cannot leak one more provider request.
+        if let Some(scope) = cost_scope.as_ref() {
+            scope.preflight().await.map_err(|error| {
+                OrchestratorError::Internal(format!(
+                    "vision cost durability preflight failed: {error}"
+                ))
+            })?;
+        }
         let analyzed = if let Some(cancel) = cancel {
             tokio::select! {
                 result = orch.api.analyze_vision_delegation(packet) => {
@@ -169,45 +198,91 @@ impl ModelCallPreparer for VisionModelCallPreparer {
                 .await
                 .map_err(OrchestratorError::ApiCall)
         };
+        let owned_cost_response = match &analyzed {
+            Ok(result) if result.api_calls > 0 => cost_scope.as_ref().map(|scope| {
+                (
+                    scope.submit_model_response(cost::CostModelResponse {
+                        model_ref: crate::cost_wiring::model_ref_from_string(
+                            &delegate.request_model,
+                            Some(delegate.profile_name.as_str()),
+                        ),
+                        usage: result.usage,
+                        duration: result.elapsed,
+                        retries: result.retry_count,
+                        cache_read_input_tokens: result.usage.tokens.cache_read,
+                        cache_creation_input_tokens: result
+                            .usage
+                            .tokens
+                            .cache_write
+                            .saturating_add(result.usage.tokens.cache_write_1h),
+                        is_batch_request: false,
+                        bus: orch.model_runtime.analytics_bus.clone(),
+                    }),
+                    result.api_calls,
+                )
+            }),
+            Err(OrchestratorError::ApiCall(LlmError::MediaDelegationPartial {
+                accounting,
+                ..
+            })) if accounting.api_calls > 0 => cost_scope.as_ref().map(|scope| {
+                let usage = cost::Usage {
+                    tokens: cost::TokenUsage {
+                        input: accounting.input_tokens,
+                        output: accounting.output_tokens,
+                        cache_write: accounting.cache_write,
+                        cache_read: accounting.cache_read,
+                        reasoning_output: accounting.reasoning_output,
+                        cache_write_1h: accounting.cache_write_1h,
+                    },
+                    server_tool_use: None,
+                    speed: None,
+                };
+                (
+                    scope.submit_model_response(cost::CostModelResponse {
+                        model_ref: crate::cost_wiring::model_ref_from_string(
+                            &delegate.request_model,
+                            Some(delegate.profile_name.as_str()),
+                        ),
+                        usage,
+                        duration: accounting.elapsed(),
+                        retries: accounting.retry_count,
+                        cache_read_input_tokens: usage.tokens.cache_read,
+                        cache_creation_input_tokens: usage
+                            .tokens
+                            .cache_write
+                            .saturating_add(usage.tokens.cache_write_1h),
+                        is_batch_request: false,
+                        bus: orch.model_runtime.analytics_bus.clone(),
+                    }),
+                    accounting.api_calls,
+                )
+            }),
+            _ => None,
+        };
         progress.finish().await;
+        if let Some((receipt, api_calls)) = owned_cost_response {
+            let settlement = receipt.settle().await;
+            orch.model_runtime
+                .api_calls_recorded
+                .fetch_add(api_calls, std::sync::atomic::Ordering::SeqCst);
+            if let Err(error) = settlement.persistence_result() {
+                return Err(OrchestratorError::Internal(format!(
+                    "vision cost settlement failed after provider response: {error}"
+                )));
+            }
+        }
         let analyzed = match analyzed {
             Ok(analyzed) => analyzed,
             Err(OrchestratorError::ApiCall(LlmError::MediaDelegationPartial {
                 message,
                 accounting,
             })) => {
-                orch.record_vision_delegation_accounting(
-                    &delegate.request_model,
-                    Some(delegate.profile_name.as_str()),
-                    cost::Usage {
-                        tokens: cost::TokenUsage {
-                            input: accounting.input_tokens,
-                            output: accounting.output_tokens,
-                            cache_write: accounting.cache_write,
-                            cache_read: accounting.cache_read,
-                            reasoning_output: accounting.reasoning_output,
-                            cache_write_1h: accounting.cache_write_1h,
-                        },
-                        server_tool_use: None,
-                        speed: None,
-                    },
-                    accounting.elapsed(),
-                    accounting.retry_count,
-                    accounting.api_calls,
-                )
-                .await;
                 return Err(OrchestratorError::ApiCall(
                     LlmError::MediaDelegationUnavailable { message },
                 ));
             }
             Err(error) => return Err(error),
         };
-        orch.record_vision_delegation_usage(
-            &delegate.request_model,
-            Some(delegate.profile_name.as_str()),
-            &analyzed,
-        )
-        .await;
         ensure_not_cancelled(cancel)?;
 
         let appended = maybe_append_analysis(

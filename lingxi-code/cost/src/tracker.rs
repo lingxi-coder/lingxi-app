@@ -8,6 +8,10 @@
 
 use crate::{
     calculator::CostCalculator,
+    persistence::{
+        CostDurabilityGate, CostHydration, CostHydrator, CostMutationId, CostMutationSource,
+        CostPersistAck, CostPersistError, CostPersistRequest, CostPersistence,
+    },
     pricing::{PricingCatalog, PricingResolution},
     usage::Usage,
     ModelRef,
@@ -22,10 +26,13 @@ use telemetry::AnalyticsBus;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 /// Persisted snapshot of one session's cumulative cost and usage.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CostState {
     /// Owning session.
     pub session_id: SessionId,
+    /// Monotonic revision assigned to each accepted mutation.
+    #[serde(default)]
+    pub cost_revision: u64,
     /// Cumulative cost across all models, in nano-USD.
     pub total_nano_usd: u64,
     /// Per-model usage and cost breakdown.
@@ -65,6 +72,320 @@ pub struct CostState {
     /// per-model breakdown with no attributable source.
     #[serde(default)]
     pub external_nano_usd: u64,
+    /// One-time `lastCost` opening balance imported from the pre-V1 aggregate
+    /// store. This is included in [`Self::total_nano_usd`] but deliberately
+    /// kept separate from both new per-model rows and Fusion aggregates.
+    #[serde(default)]
+    pub legacy_opening_balance_nano_usd: u64,
+    /// Durable marker that legacy `lastCost` matching has been evaluated,
+    /// including the no-match case. This prevents a later shadow edit from
+    /// importing the same opening balance twice.
+    #[serde(default)]
+    pub legacy_import_evaluated: bool,
+}
+
+/// Provider usage transferred to an owned cost finalizer immediately after a
+/// response is observed.  Keeping this DTO independent from provider/client
+/// crates lets streaming, vision, and compaction paths use the same seam.
+#[derive(Clone)]
+pub struct CostModelResponse {
+    /// Provider model identity.
+    pub model_ref: ModelRef,
+    /// Exact usage observed from the provider.
+    pub usage: Usage,
+    /// End-to-end provider duration.
+    pub duration: Duration,
+    /// Retry count preceding the successful response.
+    pub retries: u32,
+    /// Prompt-cache read tokens.
+    pub cache_read_input_tokens: u64,
+    /// Prompt-cache creation tokens.
+    pub cache_creation_input_tokens: u64,
+    /// Batch request marker retained for compatibility telemetry.
+    pub is_batch_request: bool,
+    /// Optional shared analytics bus.
+    pub bus: Option<Arc<AnalyticsBus>>,
+}
+
+/// Immutable provider facts captured before accounting performs its first
+/// await. The owning session retains this record even if every waiter drops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CostResponseObservation {
+    /// Provider model identity.
+    pub model_ref: ModelRef,
+    /// Exact provider usage.
+    pub usage: Usage,
+    /// Price computed from the captured catalog.
+    pub observed_nano_usd: u64,
+    /// Provider wall time.
+    pub duration: Duration,
+    /// Adapter retry count.
+    pub retries: u32,
+    /// Prompt-cache read tokens.
+    pub cache_read_input_tokens: u64,
+    /// Prompt-cache creation tokens.
+    pub cache_creation_input_tokens: u64,
+    /// Batch marker retained for compatibility.
+    pub is_batch_request: bool,
+}
+
+/// Session-owned observation and its stable settlement result.
+#[derive(Debug, Clone)]
+pub struct RetainedCostResponse {
+    /// Stable id used for durable enqueue/retry.
+    pub mutation_id: CostMutationId,
+    /// Facts captured synchronously at provider-response handoff.
+    pub observation: CostResponseObservation,
+    /// `None` while the owned finalizer is pending.
+    pub settlement: Option<Result<Option<CostPersistAck>, CostPersistError>>,
+}
+
+struct CostResponseSlot {
+    mutation_id: CostMutationId,
+    observation: CostResponseObservation,
+    result: std::sync::Mutex<Option<Result<Option<CostPersistAck>, CostPersistError>>>,
+    notify: tokio::sync::Notify,
+}
+
+impl CostResponseSlot {
+    async fn wait(&self) -> Result<Option<CostPersistAck>, CostPersistError> {
+        loop {
+            if let Some(result) = self
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                return result;
+            }
+            let notified = self.notify.notified();
+            if let Some(result) = self
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                return result;
+            }
+            notified.await;
+        }
+    }
+
+    fn complete(&self, result: Result<Option<CostPersistAck>, CostPersistError>) {
+        *self
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+        self.notify.notify_waiters();
+    }
+
+    fn retained(&self) -> RetainedCostResponse {
+        RetainedCostResponse {
+            mutation_id: self.mutation_id.clone(),
+            observation: self.observation.clone(),
+            settlement: self
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        }
+    }
+}
+
+/// Exact outcome of one observed provider response. The observed price remains
+/// available even when durability fails; callers must not reinterpret a
+/// storage failure as a zero-cost response.
+#[derive(Debug, Clone)]
+pub struct CostResponseSettlement {
+    observed_nano_usd: u64,
+    persistence: Result<Option<CostPersistAck>, CostPersistError>,
+}
+
+impl CostResponseSettlement {
+    /// Price calculated from the response, independent of persistence status.
+    #[must_use]
+    pub fn observed_nano_usd(&self) -> u64 {
+        self.observed_nano_usd
+    }
+
+    /// Mutation-specific durable result. `Ok(None)` is the explicit ephemeral
+    /// compatibility path; durable sessions return `Ok(Some(ack))` or the exact
+    /// retained failure for this mutation.
+    #[must_use]
+    pub fn persistence_result(&self) -> &Result<Option<CostPersistAck>, CostPersistError> {
+        &self.persistence
+    }
+
+    /// Consume the outcome while preserving the observed price on failure.
+    pub fn into_parts(self) -> (u64, Result<Option<CostPersistAck>, CostPersistError>) {
+        (self.observed_nano_usd, self.persistence)
+    }
+}
+
+/// Owned response-settlement handle. Dropping the handle detaches the
+/// supervisor; it does not cancel already-observed provider usage.
+pub struct CostResponseReceipt {
+    slot: Arc<CostResponseSlot>,
+}
+
+impl CostResponseReceipt {
+    /// Wait for this exact finalizer. A worker panic freezes the captured
+    /// session and returns a mutation-specific failure with the known price.
+    pub async fn settle(self) -> CostResponseSettlement {
+        let persistence = self.slot.wait().await;
+        CostResponseSettlement {
+            observed_nano_usd: self.slot.observation.observed_nano_usd,
+            persistence,
+        }
+    }
+
+    /// Durable-aware settlement result. A storage/freeze failure is returned
+    /// separately from the observed charge; it is never represented as a
+    /// successful zero-cost bill.
+    pub async fn settle_checked(self) -> Result<u64, crate::persistence::CostPersistError> {
+        let outcome = self.settle().await;
+        match outcome.persistence {
+            Ok(_) => Ok(outcome.observed_nano_usd),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether the finalizer has already completed.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.slot
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// Stable mutation identity retained by the owning session.
+    #[must_use]
+    pub fn mutation_id(&self) -> &CostMutationId {
+        &self.slot.mutation_id
+    }
+}
+
+/// Session-pinned accounting scope passed into provider/streaming paths.
+#[derive(Clone)]
+pub struct CostSessionScope {
+    tracker: Arc<CostTracker>,
+}
+
+impl CostSessionScope {
+    /// Pin one tracker view to its canonical originating session.
+    #[must_use]
+    pub fn new(tracker: Arc<CostTracker>) -> Self {
+        let authority = tracker.selected_entry();
+        Self {
+            tracker: Arc::new(CostTracker {
+                ledger: tracker.ledger.clone(),
+                scope: Some(authority),
+                catalog: tracker.catalog.clone(),
+                persist_tx: tracker.persist_tx.clone(),
+            }),
+        }
+    }
+
+    /// Check that a production durable scope is hydrated and writable before
+    /// dispatching a provider request. Ephemeral `CostTracker::new` scopes
+    /// remain available for tests/legacy embedders.
+    pub async fn preflight(&self) -> Result<(), crate::persistence::CostPersistError> {
+        self.tracker.preflight_durable()
+    }
+
+    /// Submit observed usage synchronously to an owned finalizer. The first
+    /// operation after this call is task transfer; queue capacity/state locks
+    /// are awaited only by the detached owner.
+    pub fn submit_model_response(&self, response: CostModelResponse) -> CostResponseReceipt {
+        let tracker = self.tracker.clone();
+        let (pricing, _) = tracker.resolve_pricing_with_default(&response.model_ref);
+        let observed_nano_usd = CostCalculator::calculate_nano_usd(&response.usage, &pricing);
+        let gate = tracker.durability_gate();
+        let observation = CostResponseObservation {
+            model_ref: response.model_ref.clone(),
+            usage: response.usage,
+            observed_nano_usd,
+            duration: response.duration,
+            retries: response.retries,
+            cache_read_input_tokens: response.cache_read_input_tokens,
+            cache_creation_input_tokens: response.cache_creation_input_tokens,
+            is_batch_request: response.is_batch_request,
+        };
+        let authority = tracker.selected_entry();
+        let slot = loop {
+            let mutation_id = CostMutationId::new(format!(
+                "model-response:v1:{}:{}",
+                authority.session_id,
+                protocol::SessionId::new().as_uuid()
+            ));
+            let mut retained = authority
+                .response_settlements
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !retained.contains_key(&mutation_id) {
+                let slot = Arc::new(CostResponseSlot {
+                    mutation_id: mutation_id.clone(),
+                    observation: observation.clone(),
+                    result: std::sync::Mutex::new(None),
+                    notify: tokio::sync::Notify::new(),
+                });
+                retained.insert(mutation_id, slot.clone());
+                break slot;
+            }
+        };
+        let worker_slot = slot.clone();
+        let mutation_id = slot.mutation_id.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            let error = CostPersistError::Rejected(
+                "cost response ownership requires an async runtime".into(),
+            );
+            gate.freeze(error.to_string());
+            slot.complete(Err(error));
+            return CostResponseReceipt { slot };
+        };
+        handle.spawn(async move {
+            let inner = tokio::spawn(async move {
+                tracker
+                    .record_api_response_v2_inner_checked(
+                        mutation_id,
+                        response.model_ref,
+                        response.usage,
+                        response.duration,
+                        response.retries,
+                        response.cache_read_input_tokens,
+                        response.cache_creation_input_tokens,
+                        response.is_batch_request,
+                        response.bus,
+                    )
+                    .await
+            });
+            let persistence = match inner.await {
+                Ok(outcome) => outcome.persistence,
+                Err(error) => {
+                    let error =
+                        CostPersistError::Storage(format!("cost finalizer worker failed: {error}"));
+                    gate.freeze(error.to_string());
+                    Err(error)
+                }
+            };
+            worker_slot.complete(persistence);
+        });
+        CostResponseReceipt { slot }
+    }
+
+    /// Retrieve the session-owned observation/result after a waiter drops.
+    #[must_use]
+    pub fn retained_response(&self, mutation_id: &CostMutationId) -> Option<RetainedCostResponse> {
+        self.tracker
+            .selected_entry()
+            .response_settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(mutation_id)
+            .map(|slot| slot.retained())
+    }
 }
 
 /// Per-model usage and cost slice of a [`CostState`].
@@ -78,7 +399,7 @@ pub struct CostState {
 /// `#[serde(default)]` on the new fields preserves on-disk compatibility:
 /// previously persisted [`CostState`] JSON without these fields deserializes
 /// with zeros, so an upgrade does not invalidate existing session files.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelUsage {
     /// Which model this slice belongs to.
     pub model_ref: ModelRef,
@@ -101,8 +422,15 @@ pub struct ModelUsage {
 /// this map means a clear/resume can move the active projection without
 /// destroying a previous session's unfinished or completed settlement.
 struct SessionLedger {
-    active_session: RwLock<SessionId>,
-    states: Mutex<HashMap<SessionId, Arc<RwLock<CostState>>>>,
+    active_session: std::sync::RwLock<SessionId>,
+    /// One ref-counted authority per canonical session. State, persistence,
+    /// freeze latch, and writer lease move together so a scoped view cannot
+    /// accidentally pin A's authority while reading B's state.
+    entries: std::sync::Mutex<HashMap<SessionId, Arc<SessionEntry>>>,
+    /// Once production durability is installed, unknown scoped sessions are
+    /// represented as missing-authority entries and fail closed rather than
+    /// lazily falling back to the legacy snapshot channel.
+    requires_durable: std::sync::atomic::AtomicBool,
     /// Persisted resume baselines already merged into each session. The
     /// marker is separate from the state cell because a cell can receive
     /// late in-memory settlement before the resume loader supplies its saved
@@ -110,40 +438,122 @@ struct SessionLedger {
     hydrated_sessions: Mutex<HashMap<SessionId, u64>>,
 }
 
+struct SessionEntry {
+    session_id: SessionId,
+    state: Arc<RwLock<CostState>>,
+    persistence: Option<Arc<dyn CostPersistence>>,
+    writer_lease: Option<platform_api::live_sessions::SharedSessionWriterLease>,
+    durability_gate: CostDurabilityGate,
+    missing_durable_authority: bool,
+    response_settlements: std::sync::Mutex<HashMap<CostMutationId, Arc<CostResponseSlot>>>,
+}
+
+impl SessionEntry {
+    fn ephemeral(session_id: SessionId) -> Arc<Self> {
+        Arc::new(Self {
+            session_id,
+            state: Arc::new(RwLock::new(CostState {
+                session_id,
+                ..Default::default()
+            })),
+            persistence: None,
+            writer_lease: None,
+            durability_gate: CostDurabilityGate::default(),
+            missing_durable_authority: false,
+            response_settlements: std::sync::Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn missing(session_id: SessionId) -> Arc<Self> {
+        Arc::new(Self {
+            session_id,
+            state: Arc::new(RwLock::new(CostState {
+                session_id,
+                ..Default::default()
+            })),
+            persistence: None,
+            writer_lease: None,
+            durability_gate: CostDurabilityGate::default(),
+            missing_durable_authority: true,
+            response_settlements: std::sync::Mutex::new(HashMap::new()),
+        })
+    }
+}
+
 impl SessionLedger {
     fn new(session_id: SessionId, state: CostState) -> Self {
         let mut states = HashMap::new();
-        states.insert(session_id, Arc::new(RwLock::new(state)));
+        states.insert(
+            session_id,
+            Arc::new(SessionEntry {
+                session_id,
+                state: Arc::new(RwLock::new(state)),
+                persistence: None,
+                writer_lease: None,
+                durability_gate: CostDurabilityGate::default(),
+                missing_durable_authority: false,
+                response_settlements: std::sync::Mutex::new(HashMap::new()),
+            }),
+        );
         Self {
-            active_session: RwLock::new(session_id),
-            states: Mutex::new(states),
+            active_session: std::sync::RwLock::new(session_id),
+            entries: std::sync::Mutex::new(states),
+            requires_durable: std::sync::atomic::AtomicBool::new(false),
             hydrated_sessions: Mutex::new(HashMap::new()),
         }
     }
 
-    async fn state_for(&self, session_id: SessionId) -> Arc<RwLock<CostState>> {
-        let mut states = self.states.lock().await;
-        states
+    fn entry_for(&self, session_id: SessionId) -> Arc<SessionEntry> {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        entries
             .entry(session_id)
             .or_insert_with(|| {
-                Arc::new(RwLock::new(CostState {
-                    session_id,
-                    ..Default::default()
-                }))
+                if self
+                    .requires_durable
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    SessionEntry::missing(session_id)
+                } else {
+                    SessionEntry::ephemeral(session_id)
+                }
             })
             .clone()
     }
 
-    async fn active_state(&self) -> (SessionId, Arc<RwLock<CostState>>) {
-        let session_id = *self.active_session.read().await;
-        (session_id, self.state_for(session_id).await)
+    fn install_entry(&self, entry: Arc<SessionEntry>) {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(entry.session_id, entry);
+    }
+
+    fn existing_entry(&self, session_id: SessionId) -> Option<Arc<SessionEntry>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .cloned()
+    }
+
+    async fn active_entry(&self) -> Arc<SessionEntry> {
+        let session_id = *self
+            .active_session
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.entry_for(session_id)
     }
 
     async fn switch_active(&self, session_id: SessionId) {
         // Create the destination before publishing it as active. A live turn
         // that starts after the switch always sees a real state cell.
-        self.state_for(session_id).await;
-        let previous = *self.active_session.read().await;
+        self.entry_for(session_id);
+        let previous = *self
+            .active_session
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if previous != session_id {
             // Leaving a live session establishes its zero persisted baseline:
             // any later resume of that in-process ledger must not add the same
@@ -155,7 +565,10 @@ impl SessionLedger {
                 .entry(previous)
                 .or_insert(0);
         }
-        *self.active_session.write().await = session_id;
+        *self
+            .active_session
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = session_id;
     }
 }
 
@@ -164,9 +577,10 @@ impl SessionLedger {
 /// `CostTracker::scoped` creates a fixed-origin view over the same ledger for
 /// delayed work such as Fusion. The ordinary tracker follows the active
 /// session projection switched by the orchestrator at clear/resume boundaries.
+#[derive(Clone)]
 pub struct CostTracker {
     ledger: Arc<SessionLedger>,
-    scope: Option<SessionId>,
+    scope: Option<Arc<SessionEntry>>,
     catalog: Arc<PricingCatalog>,
     persist_tx: mpsc::Sender<CostState>,
 }
@@ -195,6 +609,66 @@ impl CostTracker {
         }
     }
 
+    /// Install the app-owned durable coordinator and shared writer lease.
+    /// Existing `new` callers remain ephemeral and keep their snapshot
+    /// channel behavior.
+    #[must_use]
+    pub fn with_durable_persistence(
+        self,
+        hydration: CostHydration,
+        persistence: Arc<dyn CostPersistence>,
+        writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
+        durability_gate: CostDurabilityGate,
+    ) -> Self {
+        self.try_with_durable_persistence(hydration, persistence, writer_lease, durability_gate)
+            .expect("durable cost authority must use a canonical matching session claim")
+    }
+
+    /// Fallible durable constructor for production composition roots.  A
+    /// malformed/bare claim that does not parse to the tracker session is
+    /// rejected before any persistence authority is installed.
+    pub fn try_with_durable_persistence(
+        mut self,
+        hydration: CostHydration,
+        persistence: Arc<dyn CostPersistence>,
+        writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
+        durability_gate: CostDurabilityGate,
+    ) -> Result<Self, crate::persistence::CostPersistError> {
+        let session_id = *self
+            .ledger
+            .active_session
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if writer_lease.canonical_session_id() != Some(session_id) {
+            return Err(crate::persistence::CostPersistError::Rejected(
+                "durable cost authority claim does not match canonical session".into(),
+            ));
+        }
+        if hydration.state.session_id != session_id {
+            return Err(crate::persistence::CostPersistError::Rejected(
+                "durable cost hydration does not match canonical session".into(),
+            ));
+        }
+        self.ledger
+            .requires_durable
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.ledger.install_entry(Arc::new(SessionEntry {
+            session_id,
+            state: Arc::new(RwLock::new(hydration.state)),
+            persistence: Some(persistence),
+            writer_lease: Some(writer_lease),
+            durability_gate,
+            missing_durable_authority: false,
+            response_settlements: std::sync::Mutex::new(HashMap::new()),
+        }));
+        self.ledger
+            .hydrated_sessions
+            .try_lock()
+            .expect("durable construction precedes concurrent turns")
+            .insert(session_id, 0);
+        Ok(self)
+    }
+
     /// Return a view permanently bound to `session_id`.
     ///
     /// Unlike the active tracker, this view never follows a later clear or
@@ -202,29 +676,130 @@ impl CostTracker {
     /// to the originating session.
     #[must_use]
     pub fn scoped(&self, session_id: SessionId) -> Arc<Self> {
+        let entry = self.selected_entry_for(session_id).unwrap_or_else(|_| {
+            if self
+                .ledger
+                .requires_durable
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                SessionEntry::missing(session_id)
+            } else {
+                SessionEntry::ephemeral(session_id)
+            }
+        });
         Arc::new(Self {
             ledger: self.ledger.clone(),
-            scope: Some(session_id),
+            scope: Some(entry),
             catalog: self.catalog.clone(),
             persist_tx: self.persist_tx.clone(),
         })
     }
 
+    /// Build the pinned response-accounting scope used by provider paths.
+    #[must_use]
+    pub fn session_scope(&self, session_id: SessionId) -> CostSessionScope {
+        CostSessionScope::new(self.scoped(session_id))
+    }
+
+    /// Shared per-session durability latch used by ordinary and Fusion paid
+    /// prechecks.
+    #[must_use]
+    pub fn durability_gate(&self) -> CostDurabilityGate {
+        self.selected_entry().durability_gate.clone()
+    }
+
+    /// Keep the claim alive for callers that need to prove the scope remains
+    /// writable. The concrete lease deliberately exposes no filesystem API.
+    #[must_use]
+    pub fn writer_lease(&self) -> Option<platform_api::live_sessions::SharedSessionWriterLease> {
+        self.selected_entry().writer_lease.clone()
+    }
+
+    fn scope_or_active(&self) -> SessionId {
+        self.scope.as_ref().map_or_else(
+            || {
+                *self
+                    .ledger
+                    .active_session
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            },
+            |entry| entry.session_id,
+        )
+    }
+
+    pub(crate) fn preflight_durable(&self) -> Result<(), CostPersistError> {
+        let authority = self.selected_entry();
+        if authority.missing_durable_authority {
+            return Err(CostPersistError::Rejected(
+                "durable session scope has not been hydrated".into(),
+            ));
+        }
+        if self
+            .ledger
+            .requires_durable
+            .load(std::sync::atomic::Ordering::Acquire)
+            && authority.persistence.is_none()
+        {
+            return Err(CostPersistError::Rejected(
+                "durable session scope has no persistence authority".into(),
+            ));
+        }
+        if let Some(reason) = authority.durability_gate.frozen_reason() {
+            return Err(CostPersistError::Frozen(reason));
+        }
+        Ok(())
+    }
+
+    /// Return the authority captured by this tracker view. A scoped tracker
+    /// must never re-resolve its session id through the mutable ledger map:
+    /// hot-switch hydration may replace that map entry while delayed work for
+    /// the old session is still finishing.
+    fn selected_entry(&self) -> Arc<SessionEntry> {
+        self.scope
+            .clone()
+            .unwrap_or_else(|| self.ledger.entry_for(self.scope_or_active()))
+    }
+
+    fn selected_entry_for(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Arc<SessionEntry>, crate::persistence::CostPersistError> {
+        if let Some(entry) = &self.scope {
+            if entry.session_id != session_id {
+                return Err(crate::persistence::CostPersistError::Rejected(
+                    "scoped cost authority session mismatch".into(),
+                ));
+            }
+            return Ok(entry.clone());
+        }
+        Ok(self.ledger.entry_for(session_id))
+    }
+
     /// Current active session id. Scoped views return their fixed origin id.
     pub async fn session_id(&self) -> SessionId {
-        if let Some(session_id) = self.scope {
-            session_id
+        if let Some(entry) = &self.scope {
+            entry.session_id
         } else {
-            *self.ledger.active_session.read().await
+            *self
+                .ledger
+                .active_session
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         }
     }
 
     async fn selected_state(&self) -> Arc<RwLock<CostState>> {
-        if let Some(session_id) = self.scope {
-            self.ledger.state_for(session_id).await
+        if let Some(entry) = &self.scope {
+            entry.state.clone()
         } else {
-            self.ledger.active_state().await.1
+            self.ledger.active_entry().await.state.clone()
         }
+    }
+
+    async fn selected_state_with_session(&self) -> (SessionId, Arc<RwLock<CostState>>) {
+        let entry = self.selected_entry();
+        (entry.session_id, entry.state.clone())
     }
 
     /// Resolve the state cell for a budget operation. The caller may acquire
@@ -235,10 +810,127 @@ impl CostTracker {
     }
 
     /// Switch the active projection while preserving every session cell.
-    pub async fn switch_session(&self, session_id: SessionId) {
-        if self.scope.is_none() {
-            self.ledger.switch_active(session_id).await;
+    pub async fn switch_session(&self, session_id: SessionId) -> Result<(), CostPersistError> {
+        if self.scope.is_some() {
+            return Err(CostPersistError::Rejected(
+                "a scoped cost view cannot switch sessions".into(),
+            ));
         }
+        if self
+            .ledger
+            .requires_durable
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            let Some(entry) = self.ledger.existing_entry(session_id) else {
+                return Err(CostPersistError::Rejected(
+                    "durable destination has not been hydrated".into(),
+                ));
+            };
+            if entry.missing_durable_authority || entry.persistence.is_none() {
+                return Err(CostPersistError::Rejected(
+                    "durable destination has no persistence authority".into(),
+                ));
+            }
+        }
+        self.ledger.switch_active(session_id).await;
+        Ok(())
+    }
+
+    /// Hydrate and validate a complete durable state before publishing a hot
+    /// session switch. The active projection is not changed on load failure.
+    pub async fn switch_session_hydrated(
+        &self,
+        session_id: SessionId,
+        hydrator: &dyn CostHydrator,
+    ) -> Result<(), crate::persistence::CostPersistError> {
+        if self.scope.is_some() {
+            return Err(crate::persistence::CostPersistError::Rejected(
+                "a scoped cost view cannot switch sessions".into(),
+            ));
+        }
+        let hydration = hydrator.hydrate(session_id).await?;
+        if hydration.state.session_id != session_id {
+            return Err(crate::persistence::CostPersistError::Storage(
+                "hydrated cost state belongs to a different session".into(),
+            ));
+        }
+        let entry = self.ledger.entry_for(session_id);
+        if self
+            .ledger
+            .requires_durable
+            .load(std::sync::atomic::Ordering::Acquire)
+            && entry.persistence.is_none()
+        {
+            return Err(crate::persistence::CostPersistError::Rejected(
+                "durable session switch has no hydrated persistence authority".into(),
+            ));
+        }
+        let replacement = Arc::new(SessionEntry {
+            session_id,
+            state: Arc::new(RwLock::new(hydration.state)),
+            persistence: entry.persistence.clone(),
+            writer_lease: entry.writer_lease.clone(),
+            durability_gate: entry.durability_gate.clone(),
+            missing_durable_authority: false,
+            response_settlements: std::sync::Mutex::new(HashMap::new()),
+        });
+        self.ledger.install_entry(replacement);
+        self.ledger
+            .hydrated_sessions
+            .lock()
+            .await
+            .insert(session_id, 0);
+        self.ledger.switch_active(session_id).await;
+        Ok(())
+    }
+
+    /// Hydrate a session and install its own queue/lease/freeze authority
+    /// before publishing it active. This is the production hot-switch seam;
+    /// the simpler method above remains for ephemeral hydrators that share
+    /// one process authority.
+    pub async fn switch_session_hydrated_with_durable(
+        &self,
+        session_id: SessionId,
+        hydrator: &dyn CostHydrator,
+        persistence: Arc<dyn CostPersistence>,
+        writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
+        durability_gate: CostDurabilityGate,
+    ) -> Result<(), crate::persistence::CostPersistError> {
+        if self.scope.is_some() {
+            return Err(crate::persistence::CostPersistError::Rejected(
+                "a scoped cost view cannot switch sessions".into(),
+            ));
+        }
+        let hydration = hydrator.hydrate(session_id).await?;
+        if hydration.state.session_id != session_id {
+            return Err(crate::persistence::CostPersistError::Storage(
+                "hydrated cost state belongs to a different session".into(),
+            ));
+        }
+        if writer_lease.canonical_session_id() != Some(session_id) {
+            return Err(crate::persistence::CostPersistError::Rejected(
+                "durable hot-switch claim does not match canonical session".into(),
+            ));
+        }
+        self.ledger
+            .requires_durable
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.ledger.install_entry(Arc::new(SessionEntry {
+            session_id,
+            state: Arc::new(RwLock::new(hydration.state)),
+            persistence: Some(persistence),
+            writer_lease: Some(writer_lease),
+            durability_gate,
+            missing_durable_authority: false,
+            response_settlements: std::sync::Mutex::new(HashMap::new()),
+        }));
+        self.ledger
+            .hydrated_sessions
+            .lock()
+            .await
+            .insert(session_id, 0);
+        self.ledger.switch_active(session_id).await;
+        Ok(())
     }
 
     /// Adopt the orchestrator's construction-time session id without an
@@ -260,37 +952,54 @@ impl CostTracker {
         let mut active = self
             .ledger
             .active_session
-            .try_write()
-            .expect("cost tracker builder adoption must run before concurrent turns");
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = *active;
         if previous == session_id {
             return;
         }
+        assert!(
+            !self
+                .ledger
+                .requires_durable
+                .load(std::sync::atomic::Ordering::Acquire),
+            "durable cost authority must be constructed with the canonical session id"
+        );
         assert_eq!(
             Arc::strong_count(&self.ledger),
             1,
             "cost tracker builder adoption cannot remap published scoped views"
         );
-        let mut states = self
+        let mut entries = self
             .ledger
-            .states
+            .entries
             .try_lock()
             .expect("cost tracker builder adoption must run before concurrent turns");
         assert_eq!(
-            states.len(),
+            entries.len(),
             1,
             "cost tracker builder adoption requires one construction-time session"
         );
-        let source = states
+        let source = entries
             .remove(&previous)
             .expect("active cost session state exists");
         {
             let mut state = source
+                .state
                 .try_write()
                 .expect("cost tracker builder adoption source is not in use");
             state.session_id = session_id;
         }
-        assert!(states.insert(session_id, source).is_none());
+        let replacement = Arc::new(SessionEntry {
+            session_id,
+            state: source.state.clone(),
+            persistence: source.persistence.clone(),
+            writer_lease: source.writer_lease.clone(),
+            durability_gate: source.durability_gate.clone(),
+            missing_durable_authority: source.missing_durable_authority,
+            response_settlements: std::sync::Mutex::new(HashMap::new()),
+        });
+        assert!(entries.insert(session_id, replacement).is_none());
         let mut hydrated = self
             .ledger
             .hydrated_sessions
@@ -307,7 +1016,19 @@ impl CostTracker {
     /// added to the current cell rather than replacing it. Repeated resume
     /// hydration is a no-op, including after switching away and back.
     pub async fn restore_total_for_session(&self, session_id: SessionId, nano_usd: u64) {
-        let state = self.ledger.state_for(session_id).await;
+        if self
+            .ledger
+            .requires_durable
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            if let Ok(authority) = self.selected_entry_for(session_id) {
+                authority
+                    .durability_gate
+                    .freeze("legacy total restore attempted after durable authority was installed");
+            }
+            return;
+        }
+        let state = self.ledger.entry_for(session_id).state.clone();
         let mut hydrated = self.ledger.hydrated_sessions.lock().await;
         if hydrated.contains_key(&session_id) {
             return;
@@ -360,6 +1081,38 @@ impl CostTracker {
             .await;
     }
 
+    /// Record a provider response through an owned finalizer.  Once a durable
+    /// scope exists, the finalizer task owns the observed usage before it
+    /// waits for queue capacity, so cancellation of the caller cannot lose a
+    /// known bill.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_api_response_v2(
+        &self,
+        model_ref: ModelRef,
+        usage: Usage,
+        duration: Duration,
+        retries: u32,
+        cache_read_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+        is_batch_request: bool,
+        bus: Option<&Arc<AnalyticsBus>>,
+    ) -> u64 {
+        CostSessionScope::new(Arc::new(self.clone()))
+            .submit_model_response(CostModelResponse {
+                model_ref,
+                usage,
+                duration,
+                retries,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+                is_batch_request,
+                bus: bus.cloned(),
+            })
+            .settle()
+            .await
+            .observed_nano_usd()
+    }
+
     /// M3-05 entry point: record one successful API response. Returns the
     /// recorded cost in nano-USD for this single call.
     ///
@@ -381,8 +1134,9 @@ impl CostTracker {
     /// session total). Callers that need the cumulative total can call
     /// [`Self::total_nano_usd`].
     #[allow(clippy::too_many_arguments)]
-    pub async fn record_api_response_v2(
+    async fn record_api_response_v2_inner_checked(
         &self,
+        mutation_id: CostMutationId,
         model_ref: ModelRef,
         usage: Usage,
         duration: Duration,
@@ -390,8 +1144,8 @@ impl CostTracker {
         cache_read_input_tokens: u64,
         cache_creation_input_tokens: u64,
         is_batch_request: bool,
-        bus: Option<&Arc<AnalyticsBus>>,
-    ) -> u64 {
+        bus: Option<Arc<AnalyticsBus>>,
+    ) -> CostResponseSettlement {
         // Resolve pricing. On a catalog miss we do NOT bill zero: mirroring
         // claude-code's getModelCosts (`utils/modelCost.ts:155-163`), the
         // tokens are billed at the DEFAULT_UNKNOWN_MODEL_COST tier ($5/$25,
@@ -408,19 +1162,54 @@ impl CostTracker {
         let cost = CostCalculator::calculate_nano_usd(&usage, &pricing);
 
         // ----- update in-memory state -----
-        let state_cell = self.selected_state().await;
-        let (session_id, snap) = {
+        // Durable production callers reserve queue capacity before taking the
+        // state lock.  The permit is then consumed synchronously while the
+        // mutation lock is held, so cancellation cannot leave an accepted
+        // in-memory charge with no WAL request.
+        let authority = self.selected_entry();
+        let session_id = authority.session_id;
+        let state_cell = authority.state.clone();
+        let preflight_permit = match self.acquire_persist_permit(session_id).await {
+            Ok(permit) => permit,
+            Err(error) => {
+                authority.durability_gate.freeze(error.to_string());
+                return CostResponseSettlement {
+                    observed_nano_usd: cost,
+                    persistence: Err(error),
+                };
+            }
+        };
+        enum Transfer {
+            Durable {
+                mutation_id: CostMutationId,
+                revision: u64,
+                ack_rx: tokio::sync::oneshot::Receiver<crate::persistence::CostPersistResult>,
+            },
+            Ephemeral(CostState),
+            Rejected(CostPersistError),
+        }
+        let transfer = {
             let mut state = state_cell.write().await;
-            state.total_nano_usd = state.total_nano_usd.saturating_add(cost);
+            let Some(next_revision) = state.cost_revision.checked_add(1) else {
+                let error = CostPersistError::Storage("cost revision overflow".into());
+                authority.durability_gate.freeze(error.to_string());
+                return CostResponseSettlement {
+                    observed_nano_usd: cost,
+                    persistence: Err(error),
+                };
+            };
+            let mut staged = state.clone();
+            staged.cost_revision = next_revision;
+            staged.total_nano_usd = staged.total_nano_usd.saturating_add(cost);
             #[allow(clippy::cast_possible_truncation)]
             let dur_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
-            state.total_api_duration_ms = state.total_api_duration_ms.saturating_add(dur_ms);
+            staged.total_api_duration_ms = staged.total_api_duration_ms.saturating_add(dur_ms);
             if retries == 0 {
-                state.total_api_duration_without_retries_ms = state
+                staged.total_api_duration_without_retries_ms = staged
                     .total_api_duration_without_retries_ms
                     .saturating_add(dur_ms);
             }
-            let entry = state
+            let entry = staged
                 .per_model_usage
                 .entry(model_ref.clone())
                 .or_insert_with(|| ModelUsage {
@@ -439,19 +1228,57 @@ impl CostTracker {
                 .cache_creation_input_tokens
                 .saturating_add(cache_creation_input_tokens);
             if matches!(resolution, PricingResolution::UnpricedModel { .. }) {
-                state.unpriced_models.insert(model_ref.clone());
+                staged.unpriced_models.insert(model_ref.clone());
             }
             if let Some(s) = usage.server_tool_use {
-                state.total_web_search_requests = state
+                staged.total_web_search_requests = staged
                     .total_web_search_requests
                     .saturating_add(s.web_search_requests);
             }
-            state.last_usage = Some(usage);
-            state.last_cache_read_input_tokens = cache_read_input_tokens;
-            state.last_cache_creation_input_tokens = cache_creation_input_tokens;
-            (state.session_id, state.clone())
+            staged.last_usage = Some(usage);
+            staged.last_cache_read_input_tokens = cache_read_input_tokens;
+            staged.last_cache_creation_input_tokens = cache_creation_input_tokens;
+            match preflight_permit {
+                Some(permit) => match self.enqueue_snapshot_locked_with_id(
+                    &staged,
+                    permit,
+                    CostMutationSource::ModelResponse,
+                    mutation_id,
+                ) {
+                    Ok((mutation_id, revision, ack_rx)) => {
+                        *state = staged;
+                        Transfer::Durable {
+                            mutation_id,
+                            revision,
+                            ack_rx,
+                        }
+                    }
+                    Err(error) => Transfer::Rejected(error),
+                },
+                None => {
+                    *state = staged.clone();
+                    Transfer::Ephemeral(staged)
+                }
+            }
         };
-        self.persist_snapshot(snap).await;
+        let persistence = match transfer {
+            Transfer::Durable {
+                mutation_id,
+                revision,
+                ack_rx,
+            } => self
+                .await_persistence_ack(session_id, mutation_id, revision, ack_rx)
+                .await
+                .map(Some),
+            Transfer::Ephemeral(snapshot) => {
+                let _ = self.persist_tx.send(snapshot).await;
+                Ok(None)
+            }
+            Transfer::Rejected(error) => {
+                authority.durability_gate.freeze(error.to_string());
+                Err(error)
+            }
+        };
 
         // `tengu_cost_recorded` was a PORT-ONLY event (0 hits in claude-code
         // 2.1.195) — dropped under strict parity. The per-request success
@@ -460,7 +1287,10 @@ impl CostTracker {
         // from here. Cost ACCOUNTING above is untouched.
         let _ = (&bus, is_batch_request, &session_id);
 
-        cost
+        CostResponseSettlement {
+            observed_nano_usd: cost,
+            persistence,
+        }
     }
 
     /// Cumulative cost across all models in nano-USD.
@@ -479,8 +1309,22 @@ impl CostTracker {
     /// Does NOT emit on the persist channel — this is a hydrate, not a new
     /// charge, and the on-resume value is already the persisted truth.
     pub async fn restore_total_nano_usd(&self, nano_usd: u64) {
+        if self
+            .ledger
+            .requires_durable
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.selected_entry()
+                .durability_gate
+                .freeze("legacy total restore attempted after durable authority was installed");
+            return;
+        }
         let session_id = self.session_id().await;
-        let state = self.ledger.state_for(session_id).await;
+        let state = self
+            .selected_entry_for(session_id)
+            .expect("scoped cost session id remains immutable")
+            .state
+            .clone();
         let mut hydrated = self.ledger.hydrated_sessions.lock().await;
         state.write().await.total_nano_usd = nano_usd;
         hydrated.insert(session_id, nano_usd);
@@ -495,40 +1339,202 @@ impl CostTracker {
     /// post-settlement realized spend, never both. The persistence send must
     /// happen after that lock is released; a bounded persistence channel must
     /// not hold budget capacity hostage.
-    pub(crate) async fn record_external_cost_snapshot(&self, nano_usd: u64) -> Option<CostState> {
+    pub(crate) async fn record_external_cost_snapshot(
+        &self,
+        nano_usd: u64,
+    ) -> Result<Option<CostState>, CostPersistError> {
         if nano_usd == 0 {
-            return None;
+            return Ok(None);
         }
         let state_cell = self.selected_state().await;
         let mut state = state_cell.write().await;
-        Self::record_external_cost_in_state(&mut state, nano_usd)
+        let staged = Self::record_external_cost_in_state(&state, nano_usd)?;
+        if let Some(staged) = &staged {
+            *state = staged.clone();
+        }
+        Ok(staged)
     }
 
-    /// Apply one external charge to an already-held state guard. No await is
-    /// performed, which lets BudgetEnforcer consume a reservation and charge
-    /// the tracker as one cancellation-safe in-memory transition.
+    /// Stage one external charge from an already-held state guard. The caller
+    /// publishes the returned clone only after synchronous queue acceptance.
+    /// No await is performed, so budget settlement can preserve its atomic
+    /// state/reservation transition.
     pub(crate) fn record_external_cost_in_state(
-        state: &mut CostState,
+        state: &CostState,
         nano_usd: u64,
-    ) -> Option<CostState> {
+    ) -> Result<Option<CostState>, CostPersistError> {
         if nano_usd == 0 {
-            return None;
+            return Ok(None);
         }
-        state.total_nano_usd = state.total_nano_usd.saturating_add(nano_usd);
+        let next_revision = state
+            .cost_revision
+            .checked_add(1)
+            .ok_or_else(|| CostPersistError::Storage("cost revision overflow".into()))?;
+        let mut staged = state.clone();
+        staged.cost_revision = next_revision;
+        staged.total_nano_usd = staged.total_nano_usd.saturating_add(nano_usd);
         // Track this addition separately from `per_model_usage` (which
         // this call never touches — there is no single `ModelRef` for a
         // Fusion run's several priced components) so a summary can tell
         // "unattributed but accounted-for" apart from a `by_model`
         // breakdown that has silently fallen behind the total.
-        state.external_nano_usd = state.external_nano_usd.saturating_add(nano_usd);
-        Some(state.clone())
+        staged.external_nano_usd = staged.external_nano_usd.saturating_add(nano_usd);
+        Ok(Some(staged))
     }
 
     /// Persist a snapshot produced by one of the lock-only accounting
     /// operations. The sender is intentionally awaited outside any budget
     /// reservation lock.
+    pub(crate) async fn acquire_persist_permit(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<crate::persistence::CostPersistPermit>, crate::persistence::CostPersistError>
+    {
+        let authority = self.selected_entry_for(session_id)?;
+        if authority.missing_durable_authority {
+            return Err(crate::persistence::CostPersistError::Rejected(
+                "durable session scope has not been hydrated".into(),
+            ));
+        }
+        let Some(persistence) = authority.persistence.clone() else {
+            if self
+                .ledger
+                .requires_durable
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(crate::persistence::CostPersistError::Rejected(
+                    "durable session scope has no persistence authority".into(),
+                ));
+            }
+            return Ok(None);
+        };
+        if let Some(reason) = authority.durability_gate.frozen_reason() {
+            return Err(crate::persistence::CostPersistError::Frozen(reason));
+        }
+        let permit = persistence.acquire_permit(session_id).await?;
+        if let Some(reason) = authority.durability_gate.frozen_reason() {
+            return Err(crate::persistence::CostPersistError::Frozen(reason));
+        }
+        Ok(Some(permit))
+    }
+
+    /// Enqueue an already-mutated snapshot through a permit acquired before
+    /// the caller's state/reservation locks. The acknowledgement is awaited
+    /// before returning, while no state lock is held.
+    pub(crate) fn enqueue_snapshot_locked(
+        &self,
+        snapshot: &CostState,
+        permit: crate::persistence::CostPersistPermit,
+        source: CostMutationSource,
+    ) -> Result<
+        (
+            CostMutationId,
+            u64,
+            tokio::sync::oneshot::Receiver<crate::persistence::CostPersistResult>,
+        ),
+        crate::persistence::CostPersistError,
+    > {
+        let session_id = snapshot.session_id;
+        let mutation_id =
+            CostMutationId::new(format!("cost:v1:{}:{}", session_id, snapshot.cost_revision));
+        self.enqueue_snapshot_locked_with_id(snapshot, permit, source, mutation_id)
+    }
+
+    pub(crate) fn enqueue_snapshot_locked_with_id(
+        &self,
+        snapshot: &CostState,
+        permit: crate::persistence::CostPersistPermit,
+        source: CostMutationSource,
+        mutation_id: CostMutationId,
+    ) -> Result<
+        (
+            CostMutationId,
+            u64,
+            tokio::sync::oneshot::Receiver<crate::persistence::CostPersistResult>,
+        ),
+        crate::persistence::CostPersistError,
+    > {
+        let session_id = snapshot.session_id;
+        let expected_revision = snapshot.cost_revision;
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        permit.enqueue(CostPersistRequest {
+            session_id,
+            cost_revision: snapshot.cost_revision,
+            mutation_id: mutation_id.clone(),
+            state: crate::persistence::CostStateVector::from(snapshot),
+            source,
+            ack: ack_tx,
+        })?;
+        Ok((mutation_id, expected_revision, ack_rx))
+    }
+
+    pub(crate) async fn await_persistence_ack(
+        &self,
+        session_id: SessionId,
+        expected_mutation_id: CostMutationId,
+        expected_cost_revision: u64,
+        ack_rx: tokio::sync::oneshot::Receiver<crate::persistence::CostPersistResult>,
+    ) -> Result<crate::persistence::CostPersistAck, crate::persistence::CostPersistError> {
+        let gate = self.selected_entry_for(session_id)?.durability_gate.clone();
+        let result = match ack_rx.await {
+            Ok(Ok(ack))
+                if ack.mutation_id == expected_mutation_id
+                    && ack.cost_revision == expected_cost_revision
+                    && ack.journal_revision > 0 =>
+            {
+                Ok(ack)
+            }
+            Ok(Ok(_)) => Err(crate::persistence::CostPersistError::Storage(
+                "durable cost acknowledgment identity/revision mismatch".into(),
+            )),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(crate::persistence::CostPersistError::Storage(
+                "durable cost acknowledgment dropped".into(),
+            )),
+        };
+        if let Err(error) = &result {
+            gate.freeze(error.to_string());
+        }
+        result
+    }
+
+    pub(crate) async fn persist_snapshot_with_permit(
+        &self,
+        snapshot: CostState,
+        permit: crate::persistence::CostPersistPermit,
+    ) {
+        let session_id = snapshot.session_id;
+        match self.enqueue_snapshot_locked(&snapshot, permit, CostMutationSource::ModelResponse) {
+            Ok((mutation_id, revision, ack_rx)) => {
+                let _ = self
+                    .await_persistence_ack(session_id, mutation_id, revision, ack_rx)
+                    .await;
+            }
+            Err(error) => {
+                self.selected_entry_for(session_id)
+                    .expect("ack session authority remains immutable")
+                    .durability_gate
+                    .freeze(error.to_string());
+            }
+        }
+    }
+
+    /// Compatibility path for callers that already hold no budget lock. New
+    /// production accounting acquires the permit before its mutation lock;
+    /// this fallback keeps test/mobile constructors and older callers working.
     pub(crate) async fn persist_snapshot(&self, snapshot: CostState) {
-        let _ = self.persist_tx.send(snapshot).await;
+        match self.acquire_persist_permit(snapshot.session_id).await {
+            Ok(Some(permit)) => self.persist_snapshot_with_permit(snapshot, permit).await,
+            Ok(None) => {
+                let _ = self.persist_tx.send(snapshot).await;
+            }
+            Err(error) => {
+                self.selected_entry_for(snapshot.session_id)
+                    .expect("snapshot session authority remains immutable")
+                    .durability_gate
+                    .freeze(error.to_string());
+            }
+        }
     }
 
     /// Add externally-priced spend directly onto the cumulative total.
@@ -560,8 +1566,57 @@ impl CostTracker {
     /// usage per-model at the spawner/side-query layer instead — a larger,
     /// separate task.
     pub async fn record_external_cost(&self, nano_usd: u64) {
-        if let Some(snapshot) = self.record_external_cost_snapshot(nano_usd).await {
-            self.persist_snapshot(snapshot).await;
+        if nano_usd == 0 {
+            return;
+        }
+        let authority = self.selected_entry();
+        let session_id = authority.session_id;
+        let state_cell = authority.state.clone();
+        let permit = match self.acquire_persist_permit(session_id).await {
+            Ok(permit) => permit,
+            Err(error) => {
+                authority.durability_gate.freeze(error.to_string());
+                return;
+            }
+        };
+        let (snapshot, ack, rejected) = {
+            let mut state = state_cell.write().await;
+            let staged = match Self::record_external_cost_in_state(&state, nano_usd) {
+                Ok(staged) => staged,
+                Err(error) => {
+                    authority.durability_gate.freeze(error.to_string());
+                    return;
+                }
+            };
+            let Some(staged) = staged else {
+                return;
+            };
+            match permit {
+                Some(permit) => match self.enqueue_snapshot_locked(
+                    &staged,
+                    permit,
+                    CostMutationSource::FusionAggregate,
+                ) {
+                    Ok(ack) => {
+                        *state = staged;
+                        (None, Some(ack), None)
+                    }
+                    Err(error) => (None, None, Some(error)),
+                },
+                None => {
+                    *state = staged.clone();
+                    (Some(staged), None, None)
+                }
+            }
+        };
+        if let Some(error) = rejected {
+            authority.durability_gate.freeze(error.to_string());
+        } else if let Some((mutation_id, revision, ack_rx)) = ack {
+            let _ = self
+                .await_persistence_ack(session_id, mutation_id, revision, ack_rx)
+                .await;
+        } else if let Some(snapshot) = snapshot {
+            let _ = self.persist_tx.send(snapshot).await;
         }
     }
 
@@ -587,24 +1642,111 @@ impl CostTracker {
     /// `yJe`, which mutates the in-process cost singleton only (the prior
     /// session's totals are saved separately, before the reset).
     pub async fn reset(&self) {
-        let mut hydrated = self.ledger.hydrated_sessions.lock().await;
-        let state_cell = self.selected_state().await;
-        let mut state = state_cell.write().await;
-        let session_id = state.session_id;
-        *state = CostState {
-            session_id,
-            ..Default::default()
+        let authority = self.selected_entry();
+        let session_id = authority.session_id;
+        let state_cell = authority.state.clone();
+        let permit = match self.acquire_persist_permit(session_id).await {
+            Ok(permit) => permit,
+            Err(error) => {
+                authority.durability_gate.freeze(error.to_string());
+                return;
+            }
         };
-        hydrated.remove(&session_id);
+        let (ack, rejected) = {
+            let mut state = state_cell.write().await;
+            let Some(next_revision) = state.cost_revision.checked_add(1) else {
+                authority.durability_gate.freeze("cost revision overflow");
+                return;
+            };
+            let snapshot = CostState {
+                session_id,
+                cost_revision: next_revision,
+                ..Default::default()
+            };
+            match permit {
+                Some(permit) => match self.enqueue_snapshot_locked(
+                    &snapshot,
+                    permit,
+                    CostMutationSource::Administrative,
+                ) {
+                    Ok(ack) => {
+                        *state = snapshot;
+                        (Some(ack), None)
+                    }
+                    Err(error) => (None, Some(error)),
+                },
+                None => {
+                    *state = snapshot;
+                    (None, None)
+                }
+            }
+        };
+        if let Some(error) = rejected {
+            authority.durability_gate.freeze(error.to_string());
+            return;
+        }
+        self.ledger
+            .hydrated_sessions
+            .lock()
+            .await
+            .remove(&session_id);
+        if let Some((mutation_id, revision, ack_rx)) = ack {
+            let _ = self
+                .await_persistence_ack(session_id, mutation_id, revision, ack_rx)
+                .await;
+        }
     }
 
     /// Accumulate one edit's line changes (claude-code `Bhn(added, removed)`:
     /// `Pt.totalLinesAdded += added; Pt.totalLinesRemoved += removed`).
     pub async fn record_code_change(&self, added: u64, removed: u64) {
-        let state_cell = self.selected_state().await;
-        let mut state = state_cell.write().await;
-        state.total_lines_added = state.total_lines_added.saturating_add(added);
-        state.total_lines_removed = state.total_lines_removed.saturating_add(removed);
+        let authority = self.selected_entry();
+        let session_id = authority.session_id;
+        let state_cell = authority.state.clone();
+        let permit = match self.acquire_persist_permit(session_id).await {
+            Ok(permit) => permit,
+            Err(error) => {
+                authority.durability_gate.freeze(error.to_string());
+                return;
+            }
+        };
+        let (snapshot, ack, rejected) = {
+            let mut state = state_cell.write().await;
+            let Some(next_revision) = state.cost_revision.checked_add(1) else {
+                authority.durability_gate.freeze("cost revision overflow");
+                return;
+            };
+            let mut staged = state.clone();
+            staged.cost_revision = next_revision;
+            staged.total_lines_added = staged.total_lines_added.saturating_add(added);
+            staged.total_lines_removed = staged.total_lines_removed.saturating_add(removed);
+            match permit {
+                Some(permit) => match self.enqueue_snapshot_locked(
+                    &staged,
+                    permit,
+                    CostMutationSource::Administrative,
+                ) {
+                    Ok(ack) => {
+                        *state = staged;
+                        (None, Some(ack), None)
+                    }
+                    Err(error) => (None, None, Some(error)),
+                },
+                None => {
+                    *state = staged.clone();
+                    (Some(staged), None, None)
+                }
+            }
+        };
+        if let Some(error) = rejected {
+            authority.durability_gate.freeze(error.to_string());
+        } else if let Some((mutation_id, revision, ack_rx)) = ack {
+            let _ = self
+                .await_persistence_ack(session_id, mutation_id, revision, ack_rx)
+                .await;
+        } else if let Some(snapshot) = snapshot {
+            let _ = self.persist_tx.send(snapshot).await;
+        }
     }
 
     /// Snapshot the current state. Cloned, safe to inspect off-thread.
@@ -616,8 +1758,78 @@ impl CostTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::{CostHydration, CostPersistAck, CostPersistError, CostPersistPermit};
     use crate::pricing::ProviderId;
     use crate::usage::TokenUsage;
+    use async_trait::async_trait;
+    use platform_api::live_sessions::{SessionWriterLease, SharedSessionWriterLease};
+
+    struct TestLease(String);
+
+    impl SessionWriterLease for TestLease {
+        fn session_id(&self) -> &str {
+            &self.0
+        }
+    }
+
+    struct TestPersistence {
+        requests: tokio::sync::mpsc::UnboundedSender<CostPersistRequest>,
+    }
+
+    struct RejectingPersistence;
+
+    struct StaticHydrator(CostHydration);
+
+    #[async_trait]
+    impl CostHydrator for StaticHydrator {
+        async fn hydrate(&self, session_id: SessionId) -> Result<CostHydration, CostPersistError> {
+            if self.0.state.session_id != session_id {
+                return Err(CostPersistError::Rejected(
+                    "test hydration session mismatch".into(),
+                ));
+            }
+            Ok(self.0.clone())
+        }
+    }
+
+    #[async_trait]
+    impl CostPersistence for RejectingPersistence {
+        async fn acquire_permit(
+            &self,
+            _session_id: SessionId,
+        ) -> Result<CostPersistPermit, CostPersistError> {
+            Ok(CostPersistPermit::new(|_request| {
+                Err(CostPersistError::Rejected(
+                    "synthetic enqueue rejection".into(),
+                ))
+            }))
+        }
+    }
+
+    fn hydration(session_id: SessionId) -> CostHydration {
+        CostHydration {
+            state: CostState {
+                session_id,
+                ..Default::default()
+            },
+            journal_revision: 0,
+        }
+    }
+
+    #[async_trait]
+    impl CostPersistence for TestPersistence {
+        async fn acquire_permit(
+            &self,
+            _session_id: SessionId,
+        ) -> Result<CostPersistPermit, CostPersistError> {
+            let requests = self.requests.clone();
+            Ok(CostPersistPermit::new(move |request| {
+                requests
+                    .send(request)
+                    .map_err(|_| CostPersistError::Rejected("test receiver dropped".into()))
+            }))
+        }
+    }
 
     #[tokio::test]
     async fn record_accumulates_cost() {
@@ -649,6 +1861,455 @@ mod tests {
         let snap = rx.recv().await.unwrap();
         // 1000 * 5000 + 500 * 25000 = 5_000_000 + 12_500_000 = 17_500_000 nano-USD = $0.0175
         assert_eq!(snap.total_nano_usd, 17_500_000);
+    }
+
+    #[tokio::test]
+    async fn durable_record_waits_for_ack_and_freezes_on_append_failure() {
+        let (persist_tx, _legacy_rx) = mpsc::channel(8);
+        let session_id = SessionId::new();
+        let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let lease: SharedSessionWriterLease = Arc::new(TestLease(session_id.to_string()));
+        let tracker = CostTracker::new(
+            session_id,
+            Arc::new(PricingCatalog::builtin_reference()),
+            persist_tx,
+        )
+        .try_with_durable_persistence(
+            hydration(session_id),
+            Arc::new(TestPersistence {
+                requests: requests_tx,
+            }),
+            lease,
+            CostDurabilityGate::default(),
+        )
+        .expect("matching session lease");
+        let task = tokio::spawn(async move {
+            tracker
+                .record_api_response(
+                    ModelRef {
+                        provider: ProviderId::Anthropic,
+                        model: "claude-opus-4-6".into(),
+                    },
+                    Usage {
+                        tokens: TokenUsage {
+                            input: 1,
+                            output: 1,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    Duration::from_millis(1),
+                    0,
+                )
+                .await;
+            tracker
+                .durability_gate()
+                .frozen_reason()
+                .expect("append failure freezes the session");
+        });
+        let request = requests_rx.recv().await.expect("durable request");
+        request
+            .ack
+            .send(Err(CostPersistError::Storage("append failed".into())))
+            .expect("caller is still awaiting the ack");
+        task.await.expect("record task");
+    }
+
+    #[tokio::test]
+    async fn enqueue_rejection_retains_observed_bill_without_publishing_state() {
+        let (legacy_tx, _legacy_rx) = mpsc::channel(1);
+        let session_id = SessionId::new();
+        let lease: SharedSessionWriterLease = Arc::new(TestLease(session_id.to_string()));
+        let tracker = Arc::new(
+            CostTracker::new(
+                session_id,
+                Arc::new(PricingCatalog::builtin_reference()),
+                legacy_tx,
+            )
+            .try_with_durable_persistence(
+                hydration(session_id),
+                Arc::new(RejectingPersistence),
+                lease,
+                CostDurabilityGate::default(),
+            )
+            .unwrap(),
+        );
+        let receipt = tracker
+            .session_scope(session_id)
+            .submit_model_response(CostModelResponse {
+                model_ref: ModelRef {
+                    provider: ProviderId::Anthropic,
+                    model: "claude-opus-4-6".into(),
+                },
+                usage: Usage {
+                    tokens: TokenUsage {
+                        input: 1,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                duration: Duration::from_millis(1),
+                retries: 0,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                is_batch_request: false,
+                bus: None,
+            });
+
+        let outcome = receipt.settle().await;
+
+        assert!(outcome.observed_nano_usd() > 0);
+        assert!(matches!(
+            outcome.persistence_result(),
+            Err(CostPersistError::Rejected(message)) if message.contains("synthetic")
+        ));
+        assert_eq!(tracker.snapshot().await.total_nano_usd, 0);
+        assert!(tracker.durability_gate().frozen_reason().is_some());
+    }
+
+    #[tokio::test]
+    async fn dropped_waiter_keeps_exact_failed_response_in_the_session_owner() {
+        let (legacy_tx, _legacy_rx) = mpsc::channel(1);
+        let session_id = SessionId::new();
+        let lease: SharedSessionWriterLease = Arc::new(TestLease(session_id.to_string()));
+        let tracker = Arc::new(
+            CostTracker::new(
+                session_id,
+                Arc::new(PricingCatalog::builtin_reference()),
+                legacy_tx,
+            )
+            .try_with_durable_persistence(
+                hydration(session_id),
+                Arc::new(RejectingPersistence),
+                lease,
+                CostDurabilityGate::default(),
+            )
+            .unwrap(),
+        );
+        let scope = tracker.session_scope(session_id);
+        let model_ref = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-opus-4-6".into(),
+        };
+        let usage = Usage {
+            tokens: TokenUsage {
+                input: 7,
+                output: 3,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let receipt = scope.submit_model_response(CostModelResponse {
+            model_ref: model_ref.clone(),
+            usage,
+            duration: Duration::from_millis(3),
+            retries: 1,
+            cache_read_input_tokens: 2,
+            cache_creation_input_tokens: 1,
+            is_batch_request: false,
+            bus: None,
+        });
+        let mutation_id = receipt.mutation_id().clone();
+        drop(receipt);
+
+        let retained = loop {
+            let retained = scope
+                .retained_response(&mutation_id)
+                .expect("observation is installed synchronously");
+            if retained.settlement.is_some() {
+                break retained;
+            }
+            tokio::task::yield_now().await;
+        };
+
+        assert_eq!(retained.mutation_id, mutation_id);
+        assert_eq!(retained.observation.model_ref, model_ref);
+        assert_eq!(retained.observation.usage, usage);
+        assert!(retained.observation.observed_nano_usd > 0);
+        assert!(matches!(
+            retained.settlement,
+            Some(Err(CostPersistError::Rejected(message))) if message.contains("synthetic")
+        ));
+        assert!(tracker.durability_gate().frozen_reason().is_some());
+    }
+
+    #[tokio::test]
+    async fn each_response_receipt_keeps_its_own_durable_result() {
+        let (legacy_tx, _legacy_rx) = mpsc::channel(1);
+        let session_id = SessionId::new();
+        let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let lease: SharedSessionWriterLease = Arc::new(TestLease(session_id.to_string()));
+        let tracker = Arc::new(
+            CostTracker::new(
+                session_id,
+                Arc::new(PricingCatalog::builtin_reference()),
+                legacy_tx,
+            )
+            .try_with_durable_persistence(
+                hydration(session_id),
+                Arc::new(TestPersistence {
+                    requests: requests_tx,
+                }),
+                lease,
+                CostDurabilityGate::default(),
+            )
+            .unwrap(),
+        );
+        let scope = tracker.session_scope(session_id);
+        let response = || CostModelResponse {
+            model_ref: ModelRef {
+                provider: ProviderId::Anthropic,
+                model: "claude-opus-4-6".into(),
+            },
+            usage: Usage {
+                tokens: TokenUsage {
+                    input: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            duration: Duration::from_millis(1),
+            retries: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            is_batch_request: false,
+            bus: None,
+        };
+        let first = scope.submit_model_response(response());
+        let first_request = requests_rx.recv().await.unwrap();
+        let second = scope.submit_model_response(response());
+        let second_request = requests_rx.recv().await.unwrap();
+        first_request
+            .ack
+            .send(Ok(CostPersistAck {
+                mutation_id: first_request.mutation_id,
+                journal_revision: 1,
+                cost_revision: first_request.cost_revision,
+            }))
+            .unwrap();
+        second_request
+            .ack
+            .send(Err(CostPersistError::Storage("second failed".into())))
+            .unwrap();
+
+        let second_outcome = second.settle().await;
+        let first_outcome = first.settle().await;
+
+        assert!(matches!(
+            second_outcome.persistence_result(),
+            Err(CostPersistError::Storage(message)) if message == "second failed"
+        ));
+        assert!(
+            matches!(first_outcome.persistence_result(), Ok(Some(ack)) if ack.journal_revision == 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_already_in_flight_second_response_retains_exact_facts_after_first_failure_freezes()
+    {
+        let (legacy_tx, _legacy_rx) = mpsc::channel(1);
+        let session_id = SessionId::new();
+        let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let lease: SharedSessionWriterLease = Arc::new(TestLease(session_id.to_string()));
+        let tracker = Arc::new(
+            CostTracker::new(
+                session_id,
+                Arc::new(PricingCatalog::builtin_reference()),
+                legacy_tx,
+            )
+            .try_with_durable_persistence(
+                hydration(session_id),
+                Arc::new(TestPersistence {
+                    requests: requests_tx,
+                }),
+                lease,
+                CostDurabilityGate::default(),
+            )
+            .unwrap(),
+        );
+        let scope = tracker.session_scope(session_id);
+        let response = |input| CostModelResponse {
+            model_ref: ModelRef {
+                provider: ProviderId::Anthropic,
+                model: "claude-opus-4-6".into(),
+            },
+            usage: Usage {
+                tokens: TokenUsage {
+                    input,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            duration: Duration::from_millis(input),
+            retries: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            is_batch_request: false,
+            bus: None,
+        };
+
+        let first = scope.submit_model_response(response(3));
+        let first_request = requests_rx.recv().await.unwrap();
+        let second = scope.submit_model_response(response(11));
+        let second_mutation_id = second.mutation_id().clone();
+        let second_request = requests_rx.recv().await.unwrap();
+        drop(second);
+
+        first_request
+            .ack
+            .send(Err(CostPersistError::Storage("first append failed".into())))
+            .unwrap();
+        second_request
+            .ack
+            .send(Err(CostPersistError::Frozen("first append failed".into())))
+            .unwrap();
+        assert!(matches!(
+            first.settle().await.persistence_result(),
+            Err(CostPersistError::Storage(message)) if message == "first append failed"
+        ));
+
+        let retained = loop {
+            let retained = scope
+                .retained_response(&second_mutation_id)
+                .expect("second observation was synchronously retained");
+            if retained.settlement.is_some() {
+                break retained;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert_eq!(retained.observation.usage.tokens.input, 11);
+        assert!(retained.observation.observed_nano_usd > 0);
+        assert!(matches!(
+            retained.settlement,
+            Some(Err(CostPersistError::Frozen(message))) if message == "first append failed"
+        ));
+        assert!(tracker.durability_gate().frozen_reason().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_epoch_one_scope_survives_b_and_a_epoch_two_with_its_exact_authority() {
+        let (legacy_tx, _legacy_rx) = mpsc::channel(1);
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let (a1_tx, mut a1_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (b_tx, _b_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (a2_tx, mut a2_rx) = tokio::sync::mpsc::unbounded_channel();
+        let lease_a1: SharedSessionWriterLease = Arc::new(TestLease(session_a.to_string()));
+        let lease_b: SharedSessionWriterLease = Arc::new(TestLease(session_b.to_string()));
+        let lease_a2: SharedSessionWriterLease = Arc::new(TestLease(session_a.to_string()));
+        let gate_a1 = CostDurabilityGate::default();
+        let gate_b = CostDurabilityGate::default();
+        let gate_a2 = CostDurabilityGate::default();
+        let tracker = Arc::new(
+            CostTracker::new(
+                session_a,
+                Arc::new(PricingCatalog::builtin_reference()),
+                legacy_tx,
+            )
+            .try_with_durable_persistence(
+                hydration(session_a),
+                Arc::new(TestPersistence { requests: a1_tx }),
+                lease_a1.clone(),
+                gate_a1.clone(),
+            )
+            .unwrap(),
+        );
+        let a1_tracker = tracker.scoped(session_a);
+        let a1_scope = CostSessionScope::new(a1_tracker.clone());
+
+        tracker
+            .switch_session_hydrated_with_durable(
+                session_b,
+                &StaticHydrator(hydration(session_b)),
+                Arc::new(TestPersistence { requests: b_tx }),
+                lease_b,
+                gate_b,
+            )
+            .await
+            .unwrap();
+        let mut a2_hydration = hydration(session_a);
+        a2_hydration.state.total_nano_usd = 100;
+        tracker
+            .switch_session_hydrated_with_durable(
+                session_a,
+                &StaticHydrator(a2_hydration),
+                Arc::new(TestPersistence { requests: a2_tx }),
+                lease_a2.clone(),
+                gate_a2.clone(),
+            )
+            .await
+            .unwrap();
+
+        let response = || CostModelResponse {
+            model_ref: ModelRef {
+                provider: ProviderId::Anthropic,
+                model: "claude-opus-4-6".into(),
+            },
+            usage: Usage {
+                tokens: TokenUsage {
+                    input: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            duration: Duration::from_millis(1),
+            retries: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            is_batch_request: false,
+            bus: None,
+        };
+        let late_a1 = a1_scope.submit_model_response(response());
+        let a1_request = a1_rx.recv().await.unwrap();
+        assert_eq!(a1_request.cost_revision, 1);
+        a1_request
+            .ack
+            .send(Err(CostPersistError::Storage("epoch one failed".into())))
+            .unwrap();
+        assert!(late_a1.settle().await.persistence_result().is_err());
+        assert!(a1_tracker.preflight_durable().is_err());
+        assert!(gate_a2.frozen_reason().is_none());
+
+        let active_a2 = tracker.session_scope(session_a);
+        active_a2.preflight().await.unwrap();
+        let current = active_a2.submit_model_response(response());
+        let current_observed = active_a2
+            .retained_response(current.mutation_id())
+            .unwrap()
+            .observation
+            .observed_nano_usd;
+        let a2_request = a2_rx.recv().await.unwrap();
+        assert_eq!(a2_request.cost_revision, 1);
+        assert_eq!(a2_request.state.total_nano_usd, 100 + current_observed);
+        a2_request
+            .ack
+            .send(Ok(CostPersistAck {
+                mutation_id: a2_request.mutation_id,
+                journal_revision: 1,
+                cost_revision: a2_request.cost_revision,
+            }))
+            .unwrap();
+        assert!(current.settle().await.persistence_result().is_ok());
+        assert!(Arc::ptr_eq(&a1_tracker.writer_lease().unwrap(), &lease_a1));
+        assert!(Arc::ptr_eq(&tracker.writer_lease().unwrap(), &lease_a2));
+    }
+
+    #[test]
+    fn external_cost_revision_overflow_is_a_byte_for_byte_noop() {
+        let mut state = CostState {
+            session_id: SessionId::new(),
+            cost_revision: u64::MAX,
+            total_nano_usd: 17,
+            external_nano_usd: 9,
+            ..Default::default()
+        };
+        let original = state.clone();
+
+        assert!(matches!(
+            CostTracker::record_external_cost_in_state(&mut state, 5),
+            Err(CostPersistError::Storage(message)) if message.contains("overflow")
+        ));
+        assert_eq!(state, original);
     }
 
     #[tokio::test]
@@ -1106,12 +2767,12 @@ gap had no explanation at all"
         let origin = tracker.scoped(session_a);
         origin.record_external_cost(125).await;
 
-        tracker.switch_session(session_b).await;
+        tracker.switch_session(session_b).await.unwrap();
         assert_eq!(tracker.total_nano_usd().await, 0);
         origin.record_external_cost(75).await;
         assert_eq!(tracker.total_nano_usd().await, 0);
 
-        tracker.switch_session(session_a).await;
+        tracker.switch_session(session_a).await.unwrap();
         assert_eq!(tracker.total_nano_usd().await, 200);
         assert_eq!(origin.snapshot().await.session_id, session_a);
     }
@@ -1131,6 +2792,51 @@ gap had no explanation at all"
     }
 
     #[tokio::test]
+    async fn legacy_restore_for_b_never_freezes_active_durable_session_a() {
+        let (legacy_tx, _legacy_rx) = mpsc::channel(1);
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let (a_tx, _a_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (b_tx, _b_rx) = tokio::sync::mpsc::unbounded_channel();
+        let gate_a = CostDurabilityGate::default();
+        let gate_b = CostDurabilityGate::default();
+        let tracker = CostTracker::new(
+            session_a,
+            Arc::new(PricingCatalog::builtin_reference()),
+            legacy_tx,
+        )
+        .try_with_durable_persistence(
+            hydration(session_a),
+            Arc::new(TestPersistence { requests: a_tx }),
+            Arc::new(TestLease(session_a.to_string())),
+            gate_a.clone(),
+        )
+        .unwrap();
+        tracker
+            .switch_session_hydrated_with_durable(
+                session_b,
+                &StaticHydrator(hydration(session_b)),
+                Arc::new(TestPersistence { requests: b_tx }),
+                Arc::new(TestLease(session_b.to_string())),
+                gate_b.clone(),
+            )
+            .await
+            .unwrap();
+        tracker.switch_session(session_a).await.unwrap();
+
+        tracker.restore_total_for_session(session_b, 500).await;
+
+        tracker.preflight_durable().unwrap();
+        assert!(gate_a.frozen_reason().is_none());
+        assert!(matches!(
+            tracker.scoped(session_b).preflight_durable(),
+            Err(CostPersistError::Frozen(message))
+                if message.contains("legacy total restore")
+        ));
+        assert!(gate_b.frozen_reason().is_some());
+    }
+
+    #[tokio::test]
     async fn leaving_a_live_session_marks_its_zero_baseline_before_revisit() {
         let (tx, _rx) = mpsc::channel(16);
         let session_a = SessionId::new();
@@ -1138,9 +2844,9 @@ gap had no explanation at all"
         let tracker =
             CostTracker::new(session_a, Arc::new(PricingCatalog::builtin_reference()), tx);
         tracker.record_external_cost(100).await;
-        tracker.switch_session(session_b).await;
+        tracker.switch_session(session_b).await.unwrap();
         tracker.restore_total_for_session(session_a, 100).await;
-        tracker.switch_session(session_a).await;
+        tracker.switch_session(session_a).await.unwrap();
         assert_eq!(tracker.total_nano_usd().await, 100);
     }
 
@@ -1196,7 +2902,7 @@ gap had no explanation at all"
             Arc::new(PricingCatalog::builtin_reference()),
             tx,
         );
-        tracker.switch_session(SessionId::new()).await;
+        tracker.switch_session(SessionId::new()).await.unwrap();
 
         tracker.adopt_active_session_for_builder(SessionId::new());
     }

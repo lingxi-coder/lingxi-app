@@ -182,6 +182,17 @@ impl OrchestratorHandle for ConversationOrchestrator {
         if let Err(err) = self.api.close_responses_websocket_session().await {
             tracing::warn!(error = %err, "failed to close responses websocket session during clear_session");
         }
+        let new_session_id_value = protocol::SessionId::new();
+        // Validate and activate the destination cost authority before any
+        // conversation identity/state is published. Durable composition must
+        // hydrate/install this destination first; otherwise clear fails closed
+        // with the old session still intact.
+        self.model_runtime
+            .switch_cost_session(new_session_id_value)
+            .await
+            .map_err(|error| {
+                HandleError::ActionFailed(format!("Cost session activation failed: {error}"))
+            })?;
         self.reset_session_scoped_runtime().await;
         let mut s = self.session.lock().await;
         let old_session_id = s.session_id;
@@ -191,8 +202,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         s.model_context_excluded_messages.clear();
         s.active_goal = None;
         s.message_timing = lingxi_core::session::MessageTimingState::default();
-        s.session_id = protocol::SessionId::new();
-        let new_session_id_value = s.session_id;
+        s.session_id = new_session_id_value;
         let new_session_id = new_session_id_value.to_string();
         self.compaction_runtime
             .compaction_cumulative_dropped_tokens
@@ -202,12 +212,6 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // session's last entry.
         *self.transcript.last_jsonl_uuid.lock().await = None;
         drop(s);
-        // Publish the new active cost projection only after the session id is
-        // mounted. Any Fusion budget view captured before clear remains bound
-        // to `old_session_id` and can settle into that archived ledger.
-        self.model_runtime
-            .switch_cost_session(new_session_id_value)
-            .await;
         self.invoked_skill_session_guard.replace(new_session_id);
         // (review #8) Reset the autocompact circuit-breaker / rapid-refill
         // tracking. claude-code's clearConversation restarts the query loop with
@@ -257,11 +261,23 @@ impl OrchestratorHandle for ConversationOrchestrator {
         if let Err(err) = self.api.close_responses_websocket_session().await {
             tracing::warn!(error = %err, "failed to close responses websocket session during resume_session");
         }
-        let (from_model, from_profile) = {
+        let (old_session_id, from_model, from_profile) = {
             let session = self.session.lock().await;
-            (session.model.clone(), session.model_profile.clone())
+            (
+                session.session_id,
+                session.model.clone(),
+                session.model_profile.clone(),
+            )
         };
         let requested_model = (!runtime.model.is_empty()).then(|| runtime.model.clone());
+        // The destination ledger must already be hydrated with its own claim.
+        // Reject before resetting or publishing any live session state.
+        self.model_runtime
+            .switch_cost_session(session_id)
+            .await
+            .map_err(|error| {
+                HandleError::ActionFailed(format!("Cost session activation failed: {error}"))
+            })?;
         self.reset_session_scoped_runtime().await;
         // A hot resume must adopt a persisted prompt snapshot when present,
         // but never create one if the transcript did not carry it.
@@ -270,7 +286,6 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .store(true, std::sync::atomic::Ordering::Release);
         *self.prompt_runtime.prompt_snapshot.lock().await = runtime.prompt_snapshot.clone();
         let mut s = self.session.lock().await;
-        let old_session_id = s.session_id;
         s.history = history;
         if !runtime.model.is_empty() {
             // `session.model` is the WIRE model id; the provider profile rides
@@ -320,11 +335,6 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // Adopt the NAMED id (clear_session mints a fresh one; resume does NOT).
         s.session_id = session_id;
         drop(s);
-        // Resume adopts the named id. Switch the live projection after the
-        // adoption so a late run from `old_session_id` cannot charge the
-        // resumed session, while an in-memory ledger for `session_id` is
-        // preserved when returning to it.
-        self.model_runtime.switch_cost_session(session_id).await;
         self.invoked_skill_session_guard
             .replace(session_id.to_string());
         if let Some(selection) = resumed_reasoning {

@@ -76,6 +76,7 @@ struct PreparedStreamingIteration {
     partial_finalize_notice_id: Option<MessageId>,
     turn_id: String,
     display_hook_active: bool,
+    cost_scope: Option<cost::CostSessionScope>,
 }
 
 enum PrepareStreamingOutcome {
@@ -107,6 +108,8 @@ struct OpenedStreamingIteration<'a> {
     api_success_message_count: u32,
     api_success_message_tokens: u64,
     did_fall_back_to_non_streaming: bool,
+    cost_scope: Option<cost::CostSessionScope>,
+    cost_receipt: Option<cost::CostResponseReceipt>,
 }
 
 enum OpenStreamingOutcome<'a> {
@@ -130,6 +133,7 @@ struct PumpedStreamingIteration<'a> {
     api_success_message_tokens: u64,
     did_fall_back_to_non_streaming: bool,
     pre_batch_mcp_tool_count: usize,
+    cost_receipt: Option<cost::CostResponseReceipt>,
 }
 
 enum PumpStreamingOutcome<'a> {
@@ -149,6 +153,31 @@ struct FinalizedStreamingIteration {
 }
 
 impl StreamingTurnDriver<'_> {
+    fn begin_stream_cost_response(
+        orch: &ConversationOrchestrator,
+        cost_scope: Option<&cost::CostSessionScope>,
+        model: &str,
+        model_profile: Option<&str>,
+        pumped: &crate::streaming_loop::PumpedTurn,
+        duration: std::time::Duration,
+    ) -> Option<cost::CostResponseReceipt> {
+        let usage = pumped.usage.as_ref()?;
+        orch.model_runtime.cost_tracker.as_ref()?;
+        let scope =
+            cost_scope.expect("a wired cost tracker captured its scope before stream dispatch");
+        let cost_usage = crate::cost_wiring::llm_usage_to_cost_usage(usage);
+        Some(scope.submit_model_response(cost::CostModelResponse {
+            model_ref: crate::cost_wiring::model_ref_from_string(model, model_profile),
+            usage: cost_usage,
+            duration,
+            retries: orch.streaming_api.last_retry_count(),
+            cache_read_input_tokens: usage.billable_tokens.cache_read,
+            cache_creation_input_tokens: usage.billable_tokens.cache_write,
+            is_batch_request: false,
+            bus: orch.model_runtime.analytics_bus.clone(),
+        }))
+    }
+
     async fn collect_turn_reminders(orch: &ConversationOrchestrator) -> Vec<ConversationMessage> {
         let mut turn_reminders: Vec<ConversationMessage> = Vec::new();
 
@@ -426,7 +455,21 @@ impl StreamingTurnDriver<'_> {
         // before the outgoing snapshot is cloned from history.
         let _ = orch.drain_peer_inbox(false).await;
 
-        // 2. Open the stream for this turn.
+        // 2. Open the stream for this turn. Capture the originating cost scope
+        // before any provider work so a later session switch cannot redirect
+        // observed usage to the active session.
+        let mut cost_scope = orch
+            .model_runtime
+            .cost_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if cost_scope.is_none() {
+            if let Some(tracker) = orch.model_runtime.cost_tracker.as_ref() {
+                let session_id = orch.session.lock().await.session_id;
+                cost_scope = Some(tracker.session_scope(session_id));
+            }
+        }
         let prepared_call = orch
             .prepare_model_call_snapshot(
                 ModelCallPath::Streaming,
@@ -591,6 +634,7 @@ impl StreamingTurnDriver<'_> {
             partial_finalize_notice_id,
             turn_id,
             display_hook_active,
+            cost_scope,
         }))
     }
 
@@ -615,6 +659,7 @@ impl StreamingTurnDriver<'_> {
             partial_finalize_notice_id,
             turn_id,
             display_hook_active,
+            cost_scope,
         } = prepared;
 
         let mut exec = match &user_cancel {
@@ -641,6 +686,13 @@ impl StreamingTurnDriver<'_> {
         let api_success_message_count = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
         let api_success_message_tokens = compaction::grouping::estimate_tokens_for_range(&snapshot);
         let did_fall_back_to_non_streaming = false;
+
+        if let Some(scope) = cost_scope.as_ref() {
+            scope.preflight().await.map_err(|error| {
+                OrchestratorError::Internal(format!("cost durability preflight failed: {error}"))
+            })?;
+        }
+        let mut cost_receipt = None;
 
         // Either an open stream to pump, or a turn already RECOVERED from a
         // connect-phase prompt-too-long (#1, see the ContextOverflow arm).
@@ -709,6 +761,7 @@ impl StreamingTurnDriver<'_> {
                     deferred_reminder.clone(),
                     date_change_reminder.clone(),
                     &turn_reminders,
+                    cost_scope.as_ref(),
                 )
                 .await?
                 {
@@ -718,6 +771,14 @@ impl StreamingTurnDriver<'_> {
                         // a fresh executor, register its tool_uses, and flow on
                         // as the turn's `pumped` result.
                         let pumped_from_recovery = llm_response_to_pumped_turn(&resp);
+                        cost_receipt = Self::begin_stream_cost_response(
+                            orch,
+                            cost_scope.as_ref(),
+                            &model,
+                            model_profile.as_deref(),
+                            &pumped_from_recovery,
+                            api_call_started.elapsed(),
+                        );
                         // P2-04: when a `MessageDisplay` hook is active the
                         // completed-message pass below is the single on-screen
                         // render (with `displayContent` substitution) — skip the
@@ -855,6 +916,8 @@ impl StreamingTurnDriver<'_> {
             api_success_message_count,
             api_success_message_tokens,
             did_fall_back_to_non_streaming,
+            cost_scope,
+            cost_receipt,
         }))
     }
 
@@ -871,10 +934,13 @@ impl StreamingTurnDriver<'_> {
         user_cancel: &Option<CancellationToken>,
         display_hook_active: bool,
         assistant_id: MessageId,
+        cost_scope: Option<&cost::CostSessionScope>,
+        api_call_started: std::time::Instant,
     ) -> Result<
         (
             crate::streaming_loop::PumpedTurn,
             crate::streaming_executor::StreamingToolExecutor<'a>,
+            Option<cost::CostResponseReceipt>,
         ),
         OrchestratorError,
     > {
@@ -913,6 +979,12 @@ impl StreamingTurnDriver<'_> {
         .await;
         let tools_for_fallback = wire_tools.to_vec();
 
+        if let Some(scope) = cost_scope {
+            scope.preflight().await.map_err(|error| {
+                OrchestratorError::Internal(format!("cost durability preflight failed: {error}"))
+            })?;
+        }
+
         let resp = orch
             .api
             .messages_create_seeded(
@@ -929,6 +1001,14 @@ impl StreamingTurnDriver<'_> {
         // Convert LlmResponse → PumpedTurn so the rest of the streaming
         // turn loop can proceed identically.
         let pumped_from_fallback = llm_response_to_pumped_turn(&resp);
+        let cost_receipt = Self::begin_stream_cost_response(
+            orch,
+            cost_scope,
+            &non_stream_model,
+            non_stream_profile.as_deref(),
+            &pumped_from_fallback,
+            api_call_started.elapsed(),
+        );
 
         // Emit text blocks from the non-streaming response to the output
         // stream, mirroring the batched path (turn_loop.rs step 4:
@@ -985,7 +1065,7 @@ impl StreamingTurnDriver<'_> {
             );
         }
 
-        Ok((pumped_from_fallback, exec))
+        Ok((pumped_from_fallback, exec, cost_receipt))
     }
 
     async fn pump_iteration<'a>(
@@ -1014,6 +1094,8 @@ impl StreamingTurnDriver<'_> {
             api_success_message_count,
             api_success_message_tokens,
             mut did_fall_back_to_non_streaming,
+            cost_scope,
+            mut cost_receipt,
         } = match Self::open_iteration(orch, prepared, system_prompt, user_cancel, loop_state)
             .await?
         {
@@ -1129,6 +1211,13 @@ impl StreamingTurnDriver<'_> {
                                 &turn_reminders,
                             )
                             .await;
+                            if let Some(scope) = cost_scope.as_ref() {
+                                scope.preflight().await.map_err(|error| {
+                                    OrchestratorError::Internal(format!(
+                                        "cost durability preflight failed: {error}"
+                                    ))
+                                })?;
+                            }
                             match orch
                                 .streaming_api
                                 .stream(
@@ -1192,6 +1281,14 @@ impl StreamingTurnDriver<'_> {
                             "tool_use"
                         };
                         partial.stop_reason = Some(synthesized_stop_reason.to_string());
+                        cost_receipt = Self::begin_stream_cost_response(
+                            orch,
+                            cost_scope.as_ref(),
+                            &model,
+                            model_profile.as_deref(),
+                            &partial,
+                            api_call_started.elapsed(),
+                        );
                         // cc `_r.length`: one yielded message per completed content block.
                         let blocks_yielded =
                             partial.assistant_blocks.len() + partial.tool_uses.len();
@@ -1245,7 +1342,7 @@ impl StreamingTurnDriver<'_> {
                         ) =>
                     {
                         did_fall_back_to_non_streaming = true;
-                        let (pumped_from_fallback, replacement_exec) =
+                        let (pumped_from_fallback, replacement_exec, fallback_cost_receipt) =
                             Self::fallback_after_stream_error(
                                 orch,
                                 f.error,
@@ -1258,9 +1355,12 @@ impl StreamingTurnDriver<'_> {
                                 user_cancel,
                                 display_hook_active,
                                 assistant_id,
+                                cost_scope.as_ref(),
+                                api_call_started,
                             )
                             .await?;
                         exec = replacement_exec;
+                        cost_receipt = fallback_cost_receipt;
                         pumped_from_fallback
                     }
                     // #10: RateLimited/Overloaded/RepeatedOverloaded keep dedicated
@@ -1292,6 +1392,16 @@ impl StreamingTurnDriver<'_> {
                 }
             }
         };
+        if cost_receipt.is_none() {
+            cost_receipt = Self::begin_stream_cost_response(
+                orch,
+                cost_scope.as_ref(),
+                &model,
+                model_profile.as_deref(),
+                &pumped,
+                api_call_started.elapsed(),
+            );
+        }
         Ok(PumpStreamingOutcome::Pumped(PumpedStreamingIteration {
             pumped,
             exec,
@@ -1308,6 +1418,7 @@ impl StreamingTurnDriver<'_> {
             api_success_message_tokens,
             did_fall_back_to_non_streaming,
             pre_batch_mcp_tool_count,
+            cost_receipt,
         }))
     }
 
@@ -1317,7 +1428,7 @@ impl StreamingTurnDriver<'_> {
         system_prompt: &Option<String>,
         user_cancel: &Option<CancellationToken>,
         loop_state: &mut StreamingTurnState,
-    ) -> FinalizedStreamingIteration {
+    ) -> Result<FinalizedStreamingIteration, OrchestratorError> {
         let PumpedStreamingIteration {
             pumped,
             mut exec,
@@ -1334,6 +1445,7 @@ impl StreamingTurnDriver<'_> {
             api_success_message_tokens,
             did_fall_back_to_non_streaming,
             pre_batch_mcp_tool_count,
+            cost_receipt,
         } = pumped_iteration;
 
         // Inline tool descriptions are committed only after a complete,
@@ -1359,85 +1471,77 @@ impl StreamingTurnDriver<'_> {
             // last-usage snapshot) for the fixed-prefix overflow guard.
             orch.record_response_input_tokens(usage);
         }
-        if let Some(tracker) = orch.model_runtime.cost_tracker.as_ref() {
-            if let Some(ref usage) = pumped.usage {
-                let cost_usage = crate::cost_wiring::llm_usage_to_cost_usage(usage);
-                let cache_read = usage.billable_tokens.cache_read;
-                let cache_create = usage.billable_tokens.cache_write;
-                let model_ref =
-                    crate::cost_wiring::model_ref_from_string(&model, model_profile.as_deref());
-                let elapsed = api_call_started.elapsed();
-                let retries = orch.streaming_api.last_retry_count();
-                let cost_for_this_call = tracker
-                    .record_api_response_v2(
-                        model_ref.clone(),
-                        cost_usage,
-                        elapsed,
-                        retries,
-                        cache_read,
-                        cache_create,
-                        false, // is_batch_request — streaming is never batch
-                        orch.model_runtime.analytics_bus.as_ref(),
-                    )
-                    .await;
-                // strict-parity (2.1.195): fire `tengu_api_success` on the
-                // streaming per-request success path (claude
-                // `j("tengu_api_success", {...})`). `tengu_cost_recorded`
-                // was port-only and dropped.
-                //
-                // P1-04: a partial-stream finalize is NOT a per-request success —
-                // cc records cost (`Ae+=zhe`, kept above) but does NOT emit
-                // `tengu_api_success` (it already fired `tengu_streaming_partial_finalized`).
-                // Skip the success emit when this turn was finalized from a partial.
-                if let Some(bus) = orch
-                    .model_runtime
-                    .analytics_bus
-                    .as_ref()
-                    .filter(|_| partial_finalize.is_none())
-                {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let dur_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-                    cost::emit_api_success(
-                        bus,
-                        &cost::ApiSuccessFields {
-                            model: model.clone(),
-                            input_tokens: usage.billable_tokens.input,
-                            output_tokens: usage.billable_tokens.output,
-                            cached_input_tokens: cache_read,
-                            uncached_input_tokens: cache_create,
-                            duration_ms: dur_ms,
-                            duration_ms_including_retries: dur_ms,
-                            attempt: retries + 1,
-                            cost_nano_usd: cost_for_this_call,
-                            provider: crate::cost_wiring::provider_tag(&model_ref.provider),
-                            stop_reason: pumped.stop_reason.clone(),
-                            request_id: orch.api.last_request_id(),
-                            message_count: api_success_message_count,
-                            message_tokens: api_success_message_tokens,
-                            did_fall_back_to_non_streaming,
-                            is_non_interactive_session: !orch.prompt_is_interactive(),
-                            print: orch.config.print,
-                            is_tty: orch.config.is_tty,
-                            query_source: crate::config::sanitize_query_source(
-                                &orch.config.query_source,
-                            )
-                            .to_string(),
-                            permission_mode: if orch.session.lock().await.plan_mode {
-                                "plan"
-                            } else {
-                                "default"
-                            }
-                            .to_string(),
-                            ttft_ms: None,
-                            fast_mode: usage.speed.as_deref() == Some("fast"),
-                            time_since_last_api_call_ms: orch.record_api_call_gap_ms(),
-                        },
-                    )
-                    .await;
-                }
-                orch.model_runtime
-                    .api_calls_recorded
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let (Some(ref usage), Some(cost_receipt)) = (pumped.usage.as_ref(), cost_receipt) {
+            let cache_read = usage.billable_tokens.cache_read;
+            let cache_create = usage.billable_tokens.cache_write;
+            let model_ref =
+                crate::cost_wiring::model_ref_from_string(&model, model_profile.as_deref());
+            let elapsed = api_call_started.elapsed();
+            let retries = orch.streaming_api.last_retry_count();
+            let settlement = cost_receipt.settle().await;
+            let cost_for_this_call = settlement.observed_nano_usd();
+            orch.model_runtime
+                .api_calls_recorded
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Err(error) = settlement.persistence_result() {
+                return Err(OrchestratorError::Internal(format!(
+                    "cost settlement failed after streaming provider response: {error}"
+                )));
+            }
+            // strict-parity (2.1.195): fire `tengu_api_success` on the
+            // streaming per-request success path (claude
+            // `j("tengu_api_success", {...})`). `tengu_cost_recorded`
+            // was port-only and dropped.
+            //
+            // P1-04: a partial-stream finalize is NOT a per-request success —
+            // cc records cost (`Ae+=zhe`, kept above) but does NOT emit
+            // `tengu_api_success` (it already fired `tengu_streaming_partial_finalized`).
+            // Skip the success emit when this turn was finalized from a partial.
+            if let Some(bus) = orch
+                .model_runtime
+                .analytics_bus
+                .as_ref()
+                .filter(|_| partial_finalize.is_none())
+            {
+                #[allow(clippy::cast_possible_truncation)]
+                let dur_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+                cost::emit_api_success(
+                    bus,
+                    &cost::ApiSuccessFields {
+                        model: model.clone(),
+                        input_tokens: usage.billable_tokens.input,
+                        output_tokens: usage.billable_tokens.output,
+                        cached_input_tokens: cache_read,
+                        uncached_input_tokens: cache_create,
+                        duration_ms: dur_ms,
+                        duration_ms_including_retries: dur_ms,
+                        attempt: retries + 1,
+                        cost_nano_usd: cost_for_this_call,
+                        provider: crate::cost_wiring::provider_tag(&model_ref.provider),
+                        stop_reason: pumped.stop_reason.clone(),
+                        request_id: orch.api.last_request_id(),
+                        message_count: api_success_message_count,
+                        message_tokens: api_success_message_tokens,
+                        did_fall_back_to_non_streaming,
+                        is_non_interactive_session: !orch.prompt_is_interactive(),
+                        print: orch.config.print,
+                        is_tty: orch.config.is_tty,
+                        query_source: crate::config::sanitize_query_source(
+                            &orch.config.query_source,
+                        )
+                        .to_string(),
+                        permission_mode: if orch.session.lock().await.plan_mode {
+                            "plan"
+                        } else {
+                            "default"
+                        }
+                        .to_string(),
+                        ttft_ms: None,
+                        fast_mode: usage.speed.as_deref() == Some("fast"),
+                        time_since_last_api_call_ms: orch.record_api_call_gap_ms(),
+                    },
+                )
+                .await;
             }
         }
 
@@ -1605,7 +1709,7 @@ impl StreamingTurnDriver<'_> {
             .drive_streaming_tools(&mut exec, &pumped, &tool_use_parent_uuids, &assistant_uuid)
             .await;
 
-        FinalizedStreamingIteration {
+        Ok(FinalizedStreamingIteration {
             pumped,
             assistant_id,
             tool_prevent_continuation,
@@ -1614,7 +1718,7 @@ impl StreamingTurnDriver<'_> {
             partial_finalize,
             partial_finalize_notice_id,
             aborted_during_stream,
-        }
+        })
     }
 
     async fn run(self) -> Result<ConversationOutcome, OrchestratorError> {
@@ -1778,6 +1882,21 @@ impl StreamingTurnDriver<'_> {
                 }
             };
 
+            let finalized = match Self::finalize_iteration(
+                orch,
+                pumped_iteration,
+                &system_prompt,
+                &user_cancel,
+                &mut loop_state,
+            )
+            .await
+            {
+                Ok(finalized) => finalized,
+                Err(error) => {
+                    orch.set_tool_frame_buffering(false).await;
+                    return Err(error);
+                }
+            };
             let FinalizedStreamingIteration {
                 pumped,
                 assistant_id,
@@ -1787,14 +1906,7 @@ impl StreamingTurnDriver<'_> {
                 partial_finalize,
                 partial_finalize_notice_id,
                 aborted_during_stream,
-            } = Self::finalize_iteration(
-                orch,
-                pumped_iteration,
-                &system_prompt,
-                &user_cancel,
-                &mut loop_state,
-            )
-            .await;
+            } = finalized;
 
             // DEFERRED-3 / esc-interrupt FIX: "we were aborted" — the single
             // post-drive abort checkpoint. Once the user-interrupt token has fired,

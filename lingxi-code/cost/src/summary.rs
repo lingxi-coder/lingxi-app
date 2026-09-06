@@ -63,13 +63,9 @@ pub struct SessionCostSummary {
     /// `ModelRef` to attribute inside `by_model` (a Fusion run prices
     /// several models' usage into one already-computed total at the
     /// reservation-commit seam). On a session whose money was never touched
-    /// by [`crate::tracker::CostTracker::restore_total_nano_usd`] (a
-    /// `--resume` hydrate, which sets `total_nano_usd` directly with no
-    /// per-model rows and no external attribution — a documented,
-    /// pre-existing gap, not this field's concern), `by_model`'s totals plus
-    /// this field should reconcile to `total_nano_usd`; a residual gap
-    /// beyond this field on such a session is an actual bug. A resumed
-    /// session's gap is expected and this field cannot close it.
+    /// by the legacy compatibility restore, `by_model`'s totals plus this
+    /// field and `legacy_opening_balance_nano_usd` should reconcile to
+    /// `total_nano_usd`; a residual gap beyond those fields is an actual bug.
     ///
     /// NOTE: this is the [`CostTracker::summary`] projection, which has no
     /// production caller today — the live `/usage`/`/cost` rendering path is
@@ -77,6 +73,10 @@ pub struct SessionCostSummary {
     /// `platform_api::CostSnapshot`, which does not yet read this field (see
     /// [`crate::tracker::CostTracker::record_external_cost`] doc comment).
     pub external_nano_usd: u64,
+    /// Pre-V1 totals-only opening balance included in `total_nano_usd` but not
+    /// attributable to any new model row or Fusion aggregate.
+    #[serde(default)]
+    pub legacy_opening_balance_nano_usd: u64,
 }
 
 /// Period-scope rollup (day or month).
@@ -149,6 +149,7 @@ impl CostTracker {
                 total_nano_usd: state.total_nano_usd,
                 total_tokens,
                 external_nano_usd: state.external_nano_usd,
+                legacy_opening_balance_nano_usd: state.legacy_opening_balance_nano_usd,
             },
             day: PeriodCostSummary {
                 label: day_label,

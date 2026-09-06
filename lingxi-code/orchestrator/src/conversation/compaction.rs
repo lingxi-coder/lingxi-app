@@ -394,6 +394,11 @@ impl ConversationOrchestrator {
         // separate from `compact_started` (pre-hooks), which feeds the
         // boundary's durationMs.
         self.output.emit_compaction_phase("summarizing").await;
+        let cost_scope = self.compaction_cost_scope().await.map_err(|error| {
+            platform_api::HandleError::ActionFailed(format!(
+                "Compaction cost preflight failed: {error}"
+            ))
+        })?;
         let api_started = std::time::Instant::now();
         let result = tokio::select! {
             biased;
@@ -428,6 +433,9 @@ impl ConversationOrchestrator {
                     other => platform_api::HandleError::ActionFailed(format!("Error during compaction: {other}")),
                 })?,
         };
+        let compact_duration = api_started.elapsed();
+        let cost_receipt =
+            self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration);
         // CC re-checks `signal.aborted` between compaction phases: an Esc that
         // lands while the summarizer response was already resolving must still
         // abort BEFORE the post-compact transition (file re-reads, SessionStart
@@ -442,9 +450,13 @@ impl ConversationOrchestrator {
         // (above, pre-hooks) feeds the boundary's user-visible durationMs;
         // feeding it here would fold PreCompact hook wall-time into
         // /cost's total_api_duration_ms.
-        let compact_duration = api_started.elapsed();
-        self.record_compaction_usage(&result, compact_duration)
-            .await;
+        self.settle_compaction_usage(cost_receipt)
+            .await
+            .map_err(|error| {
+                platform_api::HandleError::ActionFailed(format!(
+                    "Compaction cost settlement failed: {error}"
+                ))
+            })?;
 
         // Apply the post-compact transition (boundary marker + history swap +
         // CompactionCompleted emit) via the shared helper reused by the
@@ -1354,37 +1366,67 @@ impl ConversationOrchestrator {
         );
     }
 
-    /// Record the real LLM usage incurred by a successful summary side-query.
-    /// Compaction is an API call and contributes to Claude Code's session cost
-    /// and API-duration totals even though it is not a normal conversation turn.
-    pub(crate) async fn record_compaction_usage(
+    pub(crate) async fn compaction_cost_scope(
         &self,
+    ) -> Result<Option<cost::CostSessionScope>, cost::CostPersistError> {
+        let Some(tracker) = self.model_runtime.cost_tracker.as_ref() else {
+            return Ok(None);
+        };
+        let mut scope = self
+            .model_runtime
+            .cost_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if scope.is_none() {
+            let session_id = self.session.lock().await.session_id;
+            scope = Some(tracker.session_scope(session_id));
+        }
+        if let Some(scope) = scope.as_ref() {
+            scope.preflight().await?;
+        }
+        Ok(scope)
+    }
+
+    /// Transfer a known compaction response before any post-response await.
+    pub(crate) fn begin_compaction_usage(
+        &self,
+        scope: Option<&cost::CostSessionScope>,
         result: &compaction::IterationCompactionResult,
         duration: std::time::Duration,
-    ) {
-        let (Some(tracker), Some(usage), Some(model)) = (
-            self.model_runtime.cost_tracker.as_ref(),
+    ) -> Option<cost::CostResponseReceipt> {
+        let (Some(scope), Some(usage), Some(model)) = (
+            scope,
             result.compaction_usage,
             result.compaction_model.as_deref(),
         ) else {
-            return;
+            return None;
         };
         let model_ref = crate::cost_wiring::model_ref_from_string(model, None);
-        tracker
-            .record_api_response_v2(
-                model_ref,
-                usage,
-                duration,
-                0,
-                usage.tokens.cache_read,
-                usage.tokens.cache_write,
-                false,
-                self.model_runtime.analytics_bus.as_ref(),
-            )
-            .await;
+        Some(scope.submit_model_response(cost::CostModelResponse {
+            model_ref,
+            usage,
+            duration,
+            retries: 0,
+            cache_read_input_tokens: usage.tokens.cache_read,
+            cache_creation_input_tokens: usage.tokens.cache_write,
+            is_batch_request: false,
+            bus: self.model_runtime.analytics_bus.clone(),
+        }))
+    }
+
+    pub(crate) async fn settle_compaction_usage(
+        &self,
+        receipt: Option<cost::CostResponseReceipt>,
+    ) -> Result<(), cost::CostPersistError> {
+        let Some(receipt) = receipt else {
+            return Ok(());
+        };
+        let settlement = receipt.settle().await;
         self.model_runtime
             .api_calls_recorded
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        settlement.persistence_result().clone().map(|_| ())
     }
 
     /// The shared output-token pool backing a launched workflow's
@@ -1671,12 +1713,25 @@ impl ConversationOrchestrator {
             return;
         }
 
-        // Run the orchestrator pass under the per-conversation tracking lock so
-        // the circuit-breaker state is read + written atomically for this turn.
-        let mut tracking = self.compaction_runtime.compaction_tracking.lock().await;
         // API duration = the summarizer pass only; `compact_started` (above,
         // pre-hooks) is the boundary durationMs clock.
         self.output.emit_compaction_phase("summarizing").await;
+        let cost_scope = match self.compaction_cost_scope().await {
+            Ok(scope) => scope,
+            Err(error) => {
+                tracing::error!(%error, "proactive compaction cost preflight failed");
+                self.output
+                    .emit_compaction_finished(Some(&format!(
+                        "Compaction cost preflight failed: {error}"
+                    )))
+                    .await;
+                return;
+            }
+        };
+        // Run the orchestrator pass under the per-conversation tracking lock so
+        // the circuit-breaker state is read + written atomically for this turn.
+        // Cost preflight above is deliberately outside this guard.
+        let mut tracking = self.compaction_runtime.compaction_tracking.lock().await;
         let api_started = std::time::Instant::now();
         let result = match compactor
             .process_iteration_tracked_with_instructions_and_timing(
@@ -1706,6 +1761,21 @@ impl ConversationOrchestrator {
             }
         };
         let compact_duration = api_started.elapsed();
+        // The response facts become session-owned before any telemetry,
+        // output, or cancellation-sensitive await below.
+        let cost_receipt =
+            self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration);
+        let turns_since = i64::from(tracking.turn_counter);
+        drop(tracking);
+        if let Err(error) = self.settle_compaction_usage(cost_receipt).await {
+            tracing::error!(%error, "proactive compaction cost settlement failed");
+            self.output
+                .emit_compaction_finished(Some(&format!(
+                    "Compaction cost settlement failed: {error}"
+                )))
+                .await;
+            return;
+        }
 
         // #54 rapid-refill (thrashing) breaker (proactive trip): when the
         // breaker tripped, the orchestrator SKIPPED the summarizer (history
@@ -1717,9 +1787,6 @@ impl ConversationOrchestrator {
             let consecutive = result.consecutive_rapid_refills;
             // `turnsSincePreviousCompact` = the tracking turn counter (the
             // binary reports `oe?.turnCounter ?? -1`).
-            let turns_since = i64::from(tracking.turn_counter);
-            // Drop the tracking lock before the async telemetry emit.
-            drop(tracking);
             tracing::warn!(
                 consecutive_rapid_refills = consecutive,
                 turns_since_previous_compact = turns_since,
@@ -1741,16 +1808,9 @@ impl ConversationOrchestrator {
             // no-op whenever autocompact itself did not run — matching the
             // manual-path contract that only the autocompact transition emits a
             // boundary marker.
-            drop(tracking);
             self.output.emit_compaction_skipped().await;
             return;
         }
-
-        // Drop the tracking guard before the apply so the history-swap lock and
-        // the tracking lock are never both held (avoid lock-ordering surprises).
-        drop(tracking);
-        self.record_compaction_usage(&result, compact_duration)
-            .await;
 
         // `cancel: None` — the proactive trigger has no user-cancellable
         // surface, so the apply is infallible.

@@ -1021,58 +1021,6 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         *last = Some(raw);
     }
 
-    pub(crate) async fn record_vision_delegation_usage(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        result: &sidequery::VisionDelegationResult,
-    ) {
-        self.record_vision_delegation_accounting(
-            model,
-            profile,
-            result.usage.clone(),
-            result.elapsed,
-            result.retry_count,
-            result.api_calls,
-        )
-        .await;
-    }
-
-    pub(crate) async fn record_vision_delegation_accounting(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        usage: cost::Usage,
-        elapsed: std::time::Duration,
-        retry_count: u32,
-        api_calls: u32,
-    ) {
-        if api_calls == 0 {
-            return;
-        }
-        let model_ref = crate::cost_wiring::model_ref_from_string(model, profile);
-        if let Some(tracker) = self.model_runtime.cost_tracker.as_ref() {
-            tracker
-                .record_api_response_v2(
-                    model_ref,
-                    usage.clone(),
-                    elapsed,
-                    retry_count,
-                    usage.tokens.cache_read,
-                    usage
-                        .tokens
-                        .cache_write
-                        .saturating_add(usage.tokens.cache_write_1h),
-                    false,
-                    self.model_runtime.analytics_bus.as_ref(),
-                )
-                .await;
-        }
-        self.model_runtime
-            .api_calls_recorded
-            .fetch_add(api_calls, std::sync::atomic::Ordering::SeqCst);
-    }
-
     /// Read the current cost state from the wired tracker, if any.
     /// Returns `None` if no tracker was attached. Exposed so future M7
     /// renderers (per-model breakdown view) can access

@@ -25,6 +25,7 @@ impl BudgetEnforcerHandle for BudgetEnforcer {
             | BudgetCheckResult::AskUser { current, .. } => Err(BudgetError::Exceeded {
                 current_nano_usd: current,
             }),
+            BudgetCheckResult::Unavailable { reason } => Err(BudgetError::Internal(reason)),
         }
     }
 
@@ -57,6 +58,14 @@ impl BudgetEnforcerHandle for BudgetEnforcer {
         actual_nano_usd: u64,
     ) -> Result<(), BudgetError> {
         BudgetEnforcer::commit_reservation(self, id, actual_nano_usd).await
+    }
+
+    fn begin_commit_reservation(
+        &self,
+        id: platform_api::BudgetReservationId,
+        actual_nano_usd: u64,
+    ) -> Result<Option<platform_api::BudgetCommitReceipt>, BudgetError> {
+        BudgetEnforcer::begin_commit_reservation(self, id, actual_nano_usd)
     }
 
     async fn release_reservation(&self, id: platform_api::BudgetReservationId) {

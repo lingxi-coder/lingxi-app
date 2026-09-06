@@ -4,7 +4,7 @@
 
 use crate::multiagent::adapter::MultiAgentFeed;
 use crate::multiagent::event::MultiAgentEvent;
-use crate::multiagent::state::{TaskRow, WorkflowRow};
+use crate::multiagent::state::{sanitize_task_text, TaskRow, WorkflowRow};
 use async_trait::async_trait;
 use platform_api::task_registry::{TaskListFilter, TaskRecord, TaskRegistryHandle, WorkflowRecord};
 use std::sync::Arc;
@@ -19,6 +19,32 @@ pub fn task_row_from_record(r: TaskRecord) -> TaskRow {
         status: r.status,
         description: r.description,
         command: r.command,
+        stage: r.stage.as_deref().map(sanitize_task_text),
+        error: r
+            .error
+            .as_deref()
+            .map(sanitize_task_text)
+            .filter(|value| !value.is_empty()),
+    }
+}
+
+/// Borrowing variant used by polling loops that still need the full records
+/// for other projections. This avoids cloning every `TaskRecord` merely to
+/// extract the smaller presentation row.
+#[must_use]
+pub fn task_row_from_record_ref(r: &TaskRecord) -> TaskRow {
+    TaskRow {
+        task_id: r.task_id.clone(),
+        task_type: r.task_type.clone(),
+        status: r.status.clone(),
+        description: r.description.clone(),
+        command: r.command.clone(),
+        stage: r.stage.as_deref().map(sanitize_task_text),
+        error: r
+            .error
+            .as_deref()
+            .map(sanitize_task_text)
+            .filter(|value| !value.is_empty()),
     }
 }
 
@@ -179,15 +205,26 @@ mod tests {
                 command: None,
                 ..Default::default()
             },
+            TaskRecord {
+                task_id: "f00000003".into(),
+                task_type: "local_fusion".into(),
+                status: "running".into(),
+                description: "compare sources".into(),
+                stage: Some("Running panels 2/3".into()),
+                error: Some("provider\nfailed".into()),
+                ..Default::default()
+            },
         ]));
         let feed = PollerFeed::new(stub);
         match feed.poll().await.as_slice() {
             [MultiAgentEvent::TasksRefreshed(rows)] => {
-                assert_eq!(rows.len(), 2);
+                assert_eq!(rows.len(), 3);
                 assert_eq!(rows[0].task_id, "b00000001");
                 assert_eq!(rows[0].task_type, "local_bash");
                 assert_eq!(rows[1].status, "completed");
                 assert_eq!(rows[1].description, "explore");
+                assert_eq!(rows[2].stage.as_deref(), Some("Running panels 2/3"));
+                assert_eq!(rows[2].error.as_deref(), Some("provider failed"));
             }
             other => panic!("unexpected: {other:?}"),
         }

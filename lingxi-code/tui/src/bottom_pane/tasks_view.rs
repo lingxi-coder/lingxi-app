@@ -7,11 +7,14 @@
 //! `x`/`d`/Delete on a RUNNING row asks the owner to stop that task OFF-LOOP
 //! ([`ViewOutcome::RunTaskAction`] → `TaskRegistryHandle::kill`); the row is
 //! marked `killed` optimistically and the picker stays open so several tasks can
-//! be stopped in one visit. `Esc`/`Enter`/`q` closes it.
+//! be stopped in one visit. Mounted views also accept `TasksRefreshed` events,
+//! preserving the selected task by ID across each replacement. `Esc`/`Enter`/
+//! `q` closes it.
 //!
 //! Faithful SUBSET of claude-code's `BackgroundTasksDialog` (list + stop). The
-//! per-task-type DETAIL/output sub-dialogs and live re-polling are deferred: the
-//! list is a snapshot at open time (re-run `/tasks` to refresh).
+//! per-task-type DETAIL/output sub-dialogs are deferred. The opening snapshot
+//! remains useful when no live feed is available; the normal multi-agent event
+//! path refreshes a mounted picker when wired.
 
 use std::any::Any;
 
@@ -21,7 +24,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
-use tui_core::multiagent::TaskRow;
+use tui_core::multiagent::{sanitize_task_text, MultiAgentEvent, TaskRow};
 use tui_core::theme::Theme;
 
 use crate::bottom_pane::view::{BottomPaneView, TaskAction, ViewOutcome};
@@ -29,8 +32,7 @@ use crate::renderable::Renderable;
 
 /// The `/tasks` interactive background-task picker.
 pub struct TasksView {
-    /// Snapshot of the live registry rows (newest-first as the registry orders
-    /// them), taken when the picker was opened.
+    /// Current registry rows (newest-first as the registry orders them).
     rows: Vec<TaskRow>,
     /// Index of the highlighted row.
     selected: usize,
@@ -47,6 +49,19 @@ impl TasksView {
             selected: 0,
             theme,
         }
+    }
+
+    /// Replace the current task snapshot while keeping the same task selected
+    /// when it is still present. If the selected task disappeared, retain its
+    /// old position as closely as possible and clamp it to the new list.
+    pub fn refresh_rows(&mut self, rows: Vec<TaskRow>) {
+        let selected_id = self.rows.get(self.selected).map(|row| row.task_id.clone());
+        let old_selected = self.selected;
+        self.rows = rows;
+        self.selected = selected_id
+            .as_deref()
+            .and_then(|task_id| self.rows.iter().position(|row| row.task_id == task_id))
+            .unwrap_or_else(|| old_selected.min(self.rows.len().saturating_sub(1)));
     }
 
     /// Whether `status` denotes a still-running task that can be stopped.
@@ -98,11 +113,34 @@ impl TasksView {
             };
             let short: String = r.task_id.chars().take(9).collect();
             let label = r.command.clone().unwrap_or_else(|| r.description.clone());
-            let text = format!(
+            let mut text = format!(
                 "{marker}{} {short}  {:<9}  {label}",
                 Self::glyph(&r.status),
                 r.status,
             );
+            if r.task_type == "local_fusion" && r.status == "running" {
+                if let Some(stage) = r
+                    .stage
+                    .as_deref()
+                    .map(sanitize_task_text)
+                    .filter(|stage| !stage.is_empty())
+                {
+                    text.push_str("  [");
+                    text.push_str(&stage);
+                    text.push(']');
+                }
+            }
+            if r.task_type == "local_fusion" && r.status == "failed" {
+                if let Some(error) = r
+                    .error
+                    .as_deref()
+                    .map(sanitize_task_text)
+                    .filter(|error| !error.is_empty())
+                {
+                    text.push_str("  — ");
+                    text.push_str(&error);
+                }
+            }
             let style = if i == self.selected {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {
@@ -203,6 +241,12 @@ impl BottomPaneView for TasksView {
         false
     }
 
+    fn apply_multiagent_event(&mut self, event: &MultiAgentEvent) {
+        if let MultiAgentEvent::TasksRefreshed(rows) = event {
+            self.refresh_rows(rows.clone());
+        }
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -224,6 +268,8 @@ mod tests {
             status: status.to_string(),
             description: desc.to_string(),
             command: None,
+            stage: None,
+            error: None,
         }
     }
 
@@ -297,6 +343,122 @@ mod tests {
         assert_eq!(v.selected, 1);
         v.handle_key(press(KeyCode::Up));
         assert_eq!(v.selected, 0);
+    }
+
+    #[test]
+    fn refresh_preserves_selected_task_id_across_reorder_and_removal() {
+        let mut v = view(vec![
+            row("a", "running", "1"),
+            row("b", "running", "2"),
+            row("c", "running", "3"),
+        ]);
+        v.handle_key(press(KeyCode::Down));
+        assert_eq!(v.rows()[v.selected].task_id, "b");
+
+        v.apply_multiagent_event(&MultiAgentEvent::TasksRefreshed(vec![
+            row("c", "running", "3"),
+            row("a", "running", "1"),
+            row("b", "completed", "2 done"),
+        ]));
+        assert_eq!(v.rows()[v.selected].task_id, "b");
+        assert_eq!(v.rows()[v.selected].status, "completed");
+
+        v.apply_multiagent_event(&MultiAgentEvent::TasksRefreshed(vec![
+            row("c", "running", "3"),
+            row("a", "running", "1"),
+        ]));
+        assert_eq!(
+            v.selected, 1,
+            "removed selection should clamp to a valid row"
+        );
+        assert_eq!(v.rows()[v.selected].task_id, "a");
+    }
+
+    #[test]
+    fn refresh_during_an_optimistic_stop_keeps_the_same_task_selected() {
+        let mut v = view(vec![
+            row("a", "running", "first"),
+            row("b", "running", "second"),
+        ]);
+        v.handle_key(press(KeyCode::Down));
+        assert!(matches!(
+            v.handle_key(press(KeyCode::Char('x'))),
+            ViewOutcome::RunTaskAction(TaskAction::Kill { task_id }) if task_id == "b"
+        ));
+
+        // An unrelated task may settle while the off-loop kill is still in
+        // flight. That refresh can carry the pre-kill status for `b`, but it
+        // must not move the user's selection to a different task.
+        v.apply_multiagent_event(&MultiAgentEvent::TasksRefreshed(vec![
+            row("b", "running", "second"),
+            row("a", "completed", "first done"),
+        ]));
+        assert_eq!(v.rows()[v.selected].task_id, "b");
+    }
+
+    #[test]
+    fn mounted_tasks_view_applies_poller_refresh_events() {
+        let mut stack = crate::bottom_pane::ViewStack::new();
+        stack.push(Box::new(view(vec![row("a", "running", "old")])));
+        stack.apply_multiagent_event(&MultiAgentEvent::TasksRefreshed(vec![row(
+            "a",
+            "completed",
+            "new",
+        )]));
+
+        let mounted = stack
+            .active()
+            .and_then(|view| view.as_any().downcast_ref::<TasksView>())
+            .expect("tasks view remains mounted");
+        assert_eq!(mounted.rows()[0].status, "completed");
+        assert_eq!(mounted.rows()[0].description, "new");
+    }
+
+    #[test]
+    fn renders_fusion_stage_and_sanitized_failure_text() {
+        let mut running = row("f00000001", "running", "compare sources");
+        running.task_type = "local_fusion".into();
+        running.stage = Some("Running panels 2/3".into());
+        let mut failed = row("f00000002", "failed", "compare sources");
+        failed.task_type = "local_fusion".into();
+        failed.error = Some("provider\n\u{1b}[31mfailed\u{1b}[0m".into());
+
+        let v = view(vec![running, failed]);
+        let body: Vec<String> = v
+            .lines()
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        let rendered = body.join("\n");
+        assert!(rendered.contains("Running panels 2/3"), "{rendered}");
+        assert!(rendered.contains("provider failed"), "{rendered}");
+        assert!(
+            !rendered.contains('\u{1b}'),
+            "ANSI escape leaked: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("provider\n"),
+            "failure remained multiline: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn ordinary_failed_rows_keep_the_existing_compact_rendering() {
+        let mut ordinary = row("a00000001", "failed", "agent task");
+        ordinary.task_type = "local_agent".into();
+        ordinary.error = Some("ordinary detail".into());
+        let rendered = view(vec![ordinary])
+            .lines()
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+            .collect::<Vec<_>>();
+        assert!(rendered.iter().any(|line| line.contains("agent task")));
+        assert!(!rendered.iter().any(|line| line.contains("ordinary detail")));
     }
 
     #[test]

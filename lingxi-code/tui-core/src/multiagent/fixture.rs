@@ -48,6 +48,8 @@ mod tests {
                     status: "running".into(),
                     description: "x".into(),
                     command: None,
+                    stage: None,
+                    error: None,
                 })
                 .collect(),
         )]

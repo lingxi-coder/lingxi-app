@@ -22,6 +22,51 @@ pub struct TaskRow {
     /// this (not `description`) for non-monitor local-shell rows. `None`
     /// for every other task type.
     pub command: Option<String>,
+    /// `local_fusion` only: the host-owned current progress-stage label.
+    /// Values from the registry are sanitized before they reach the TUI.
+    pub stage: Option<String>,
+    /// Host-owned terminal failure detail, when one was reported. Values from
+    /// the registry are sanitized before they reach the TUI.
+    pub error: Option<String>,
+}
+
+/// Maximum number of display characters retained for a task stage/error line.
+/// Task detail is intentionally short because it is rendered into one picker
+/// row and may originate outside the TUI process.
+pub const MAX_TASK_TEXT_CHARS: usize = 160;
+
+/// Keep ANSI parsing bounded even when a malformed OSC sequence never closes.
+const MAX_TASK_TEXT_INPUT_CHARS: usize = MAX_TASK_TEXT_CHARS * 8;
+
+/// Remove terminal control sequences and force task detail onto one bounded
+/// display line. This is a presentation boundary, not a substitute for the
+/// host-side error sanitization performed before a task is persisted.
+#[must_use]
+pub fn sanitize_task_text(value: &str) -> String {
+    let input = value
+        .char_indices()
+        .nth(MAX_TASK_TEXT_INPUT_CHARS)
+        .map_or(value, |(byte, _)| &value[..byte]);
+    let parsed = crate::render::ansi::parse_ansi(input);
+    let mut plain = String::new();
+    for line in parsed {
+        if !plain.is_empty() {
+            plain.push(' ');
+        }
+        plain.push_str(&line.plain_text());
+    }
+    let cleaned = plain
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = collapsed.chars();
+    let mut output = chars.by_ref().take(MAX_TASK_TEXT_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        output.pop();
+        output.push('\u{2026}');
+    }
+    output
 }
 
 /// One agent within a workflow phase, parsed from the run's output spool
@@ -138,5 +183,27 @@ mod tests {
         let s = MultiAgentState::default();
         assert!(s.tasks.is_empty());
         assert!(s.workers.is_empty());
+    }
+
+    #[test]
+    fn task_detail_sanitizes_terminal_controls_and_bounds_text() {
+        let detail = format!("provider\n\u{1b}[31mfailed\u{1b}[0m\t{}", "x".repeat(256));
+        let sanitized = sanitize_task_text(&detail);
+        assert!(!sanitized.contains('\u{1b}'));
+        assert!(!sanitized.contains('\n'));
+        assert!(!sanitized.contains('\t'));
+        assert!(sanitized.contains("provider failed"));
+        assert!(sanitized.chars().count() <= MAX_TASK_TEXT_CHARS);
+    }
+
+    #[test]
+    fn task_detail_bounds_an_unterminated_osc_sequence() {
+        let detail = format!(
+            "\u{1b}]0;{}visible-after-bound",
+            "x".repeat(MAX_TASK_TEXT_INPUT_CHARS * 4)
+        );
+        let sanitized = sanitize_task_text(&detail);
+        assert!(sanitized.is_empty());
+        assert!(sanitized.chars().count() <= MAX_TASK_TEXT_CHARS);
     }
 }

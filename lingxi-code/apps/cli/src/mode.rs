@@ -1549,6 +1549,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut previous = Vec::new();
+        let mut previous_tasks: Vec<tui_core::multiagent::TaskRow> = Vec::new();
         let mut custom_by_id = std::collections::HashMap::<String, String>::new();
         let mut custom_default: Option<String> = None;
         let mut custom_active = false;
@@ -1563,6 +1564,24 @@ pub(crate) async fn run_ratatui_with_initial_state(
             else {
                 continue;
             };
+            // The mounted `/tasks` picker consumes the same authoritative
+            // snapshot as the footer; emitting only changed rows keeps its
+            // selection stable without adding a second registry poller.
+            let task_rows = records
+                .iter()
+                .map(tui_core::multiagent::task_row_from_record_ref)
+                .collect::<Vec<_>>();
+            if task_rows != previous_tasks {
+                previous_tasks.clone_from(&task_rows);
+                if agent_status_turn_tx
+                    .send(tui_core::orchestrator_bridge::TurnEvent::MultiAgent(
+                        tui_core::multiagent::MultiAgentEvent::TasksRefreshed(task_rows),
+                    ))
+                    .is_err()
+                {
+                    break;
+                }
+            }
             let mut records = records
                 .into_iter()
                 .filter(|record| {

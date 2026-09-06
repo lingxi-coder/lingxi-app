@@ -17,10 +17,12 @@ pub use adapter::{pump_once, MultiAgentFeed};
 pub use event::{apply_workflow_progress, MultiAgentEvent, WorkflowProgressEvent};
 pub use fixture::FixtureFeed;
 pub use poller::{
-    sort_workflows_newest_first, task_row_from_record, workflow_row_from_record, PollerFeed,
+    sort_workflows_newest_first, task_row_from_record, task_row_from_record_ref,
+    workflow_row_from_record, PollerFeed,
 };
 pub use state::{
-    MultiAgentState, TaskRow, WorkerRow, WorkflowAgentRow, WorkflowPhase, WorkflowRow,
+    sanitize_task_text, MultiAgentState, TaskRow, WorkerRow, WorkflowAgentRow, WorkflowPhase,
+    WorkflowRow,
 };
 pub use workflow_size_warning::{
     workflow_size_warning, WorkflowSizeWarning, WorkflowSizeWarningAxis, WorkflowSizeWarningInput,

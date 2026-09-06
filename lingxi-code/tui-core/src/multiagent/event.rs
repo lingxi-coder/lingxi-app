@@ -177,6 +177,8 @@ mod tests {
             status: "running".into(),
             description: "build".into(),
             command: None,
+            stage: None,
+            error: None,
         }]);
         let b = a.clone();
         assert_eq!(a, b);

@@ -11024,6 +11024,46 @@ mod tests {
     }
 
     #[test]
+    fn task_events_reach_an_already_open_picker() {
+        let mut widget = widget();
+        widget
+            .bottom_pane
+            .show_tasks(vec![tui_core::multiagent::TaskRow {
+                task_id: "f-live".into(),
+                task_type: "local_fusion".into(),
+                status: "running".into(),
+                description: "Compare sources".into(),
+                stage: Some("Running panels 1/3".into()),
+                ..tui_core::multiagent::TaskRow::default()
+            }]);
+
+        widget.apply_turn_event(TurnEvent::MultiAgent(
+            tui_core::multiagent::MultiAgentEvent::TasksRefreshed(vec![
+                tui_core::multiagent::TaskRow {
+                    task_id: "f-live".into(),
+                    task_type: "local_fusion".into(),
+                    status: "failed".into(),
+                    description: "Compare sources".into(),
+                    error: Some("analyst failed".into()),
+                    ..tui_core::multiagent::TaskRow::default()
+                },
+            ]),
+        ));
+
+        let tasks = widget
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|view| {
+                view.as_any()
+                    .downcast_ref::<crate::bottom_pane::tasks_view::TasksView>()
+            })
+            .expect("task picker remains mounted");
+        assert_eq!(tasks.rows()[0].status, "failed");
+        assert_eq!(tasks.rows()[0].error.as_deref(), Some("analyst failed"));
+    }
+
+    #[test]
     fn activity_label_maps_known_tools_to_gerunds() {
         assert_eq!(activity_label("Bash"), "Running Bash");
         assert_eq!(activity_label("BashOutput"), "Running Bash");

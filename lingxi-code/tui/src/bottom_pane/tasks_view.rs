@@ -25,7 +25,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use tui_core::multiagent::{sanitize_task_text, MultiAgentEvent, TaskRow};
+use tui_core::render::truncate_to_width_ellipsis;
 use tui_core::theme::Theme;
+use unicode_width::UnicodeWidthStr;
 
 use crate::bottom_pane::view::{BottomPaneView, TaskAction, ViewOutcome};
 use crate::renderable::Renderable;
@@ -80,8 +82,74 @@ impl TasksView {
         }
     }
 
+    /// Render one row, optionally reserving the actual viewport width for the
+    /// lower-priority description. `None` preserves the full inspection/test
+    /// line while `Some` keeps Fusion state/error visible in the real pane.
+    fn row_line(&self, row: &TaskRow, index: usize, width: Option<u16>) -> Line<'static> {
+        let marker = if index == self.selected {
+            "\u{276f} "
+        } else {
+            "  "
+        };
+        let short: String = row.task_id.chars().take(9).collect();
+        let label = row.command.as_deref().unwrap_or(&row.description);
+        let prefix = format!(
+            "{marker}{} {short}  {:<9}",
+            Self::glyph(&row.status),
+            row.status,
+        );
+
+        let detail = if row.task_type == "local_fusion" && row.status == "running" {
+            row.stage
+                .as_deref()
+                .map(sanitize_task_text)
+                .filter(|stage| !stage.is_empty())
+                .map(|stage| format!("[{stage}]"))
+        } else if row.task_type == "local_fusion" && row.status == "failed" {
+            row.error
+                .as_deref()
+                .map(sanitize_task_text)
+                .filter(|error| !error.is_empty())
+                .map(|error| format!("— {error}"))
+        } else {
+            None
+        };
+
+        let text = match detail {
+            Some(detail) => {
+                let priority = format!("{prefix}  {detail}");
+                let label_separator_width = 2;
+                let available = width
+                    .map(usize::from)
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(priority.width())
+                    .saturating_sub(label_separator_width);
+                if available == 0 {
+                    priority
+                } else {
+                    format!(
+                        "{priority}  {}",
+                        truncate_to_width_ellipsis(&label, available)
+                    )
+                }
+            }
+            None => format!("{prefix}  {label}"),
+        };
+
+        let style = if index == self.selected {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Line::from(Span::styled(text, style))
+    }
+
     /// Rendered body lines: header, spacer, one line per row, spacer, hint.
     fn lines(&self) -> Vec<Line<'static>> {
+        self.lines_at_width(None)
+    }
+
+    fn lines_at_width(&self, width: Option<u16>) -> Vec<Line<'static>> {
         let dim = crate::style_adapter::to_ratatui(self.theme.dim);
         let accent = crate::style_adapter::to_ratatui(self.theme.suggestion);
         let dim_style = Style::default().fg(dim);
@@ -106,47 +174,7 @@ impl TasksView {
             return lines;
         }
         for (i, r) in self.rows.iter().enumerate() {
-            let marker = if i == self.selected {
-                "\u{276f} "
-            } else {
-                "  "
-            };
-            let short: String = r.task_id.chars().take(9).collect();
-            let label = r.command.clone().unwrap_or_else(|| r.description.clone());
-            let mut text = format!(
-                "{marker}{} {short}  {:<9}  {label}",
-                Self::glyph(&r.status),
-                r.status,
-            );
-            if r.task_type == "local_fusion" && r.status == "running" {
-                if let Some(stage) = r
-                    .stage
-                    .as_deref()
-                    .map(sanitize_task_text)
-                    .filter(|stage| !stage.is_empty())
-                {
-                    text.push_str("  [");
-                    text.push_str(&stage);
-                    text.push(']');
-                }
-            }
-            if r.task_type == "local_fusion" && r.status == "failed" {
-                if let Some(error) = r
-                    .error
-                    .as_deref()
-                    .map(sanitize_task_text)
-                    .filter(|error| !error.is_empty())
-                {
-                    text.push_str("  — ");
-                    text.push_str(&error);
-                }
-            }
-            let style = if i == self.selected {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::from(Span::styled(text, style)));
+            lines.push(self.row_line(r, i, width));
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -191,7 +219,7 @@ impl Renderable for TasksView {
         if inner.width == 0 || inner.height == 0 {
             return;
         }
-        let lines = self.lines();
+        let lines = self.lines_at_width(Some(inner.width));
         let total = u16::try_from(lines.len()).unwrap_or(u16::MAX);
         let scroll = self.scroll_offset(total, inner.height);
         Paragraph::new(lines).scroll((scroll, 0)).render(inner, buf);
@@ -275,6 +303,24 @@ mod tests {
 
     fn view(rows: Vec<TaskRow>) -> TasksView {
         TasksView::new(rows, Theme::dark())
+    }
+
+    fn rendered_buffer(v: &TasksView, width: u16, height: u16) -> String {
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        v.render(area, &mut buf);
+        (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| {
+                        buf.cell(ratatui::layout::Position::new(x, y))
+                            .map_or(" ", ratatui::buffer::Cell::symbol)
+                            .to_string()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// The agents-view entry opens this picker with nothing running, so the
@@ -485,5 +531,126 @@ mod tests {
             .collect();
         assert!(text.contains("Background Tasks"), "{text}");
         assert!(text.contains("cargo build"), "{text}");
+    }
+
+    #[test]
+    fn fusion_state_and_failure_prefix_survive_long_descriptions_at_real_widths() {
+        let descriptions = [
+            "a very long ASCII description ".repeat(12),
+            "长描述 ".repeat(80),
+        ];
+
+        for width in [80, 100] {
+            for description in &descriptions {
+                let mut running = row("f00000001", "running", description);
+                running.task_type = "local_fusion".into();
+                running.stage = Some("Running panels 2/3".into());
+                let running_text = rendered_buffer(&view(vec![running]), width, 8);
+                assert!(
+                    running_text.contains("Running panels 2/3"),
+                    "running Fusion state clipped at {width} columns: {running_text:?}"
+                );
+
+                let mut failed = row("f00000002", "failed", description);
+                failed.task_type = "local_fusion".into();
+                failed.error = Some("provider\n\u{1b}[31mfailed\u{1b}[0m".into());
+                let failed_text = rendered_buffer(&view(vec![failed]), width, 8);
+                assert!(
+                    failed_text.contains("— provider failed"),
+                    "sanitized Fusion failure clipped at {width} columns: {failed_text:?}"
+                );
+                assert!(
+                    !failed_text.contains('\u{1b}'),
+                    "ANSI escape leaked into the Buffer: {failed_text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fusion_refresh_updates_selected_stage_in_the_rendered_buffer() {
+        let mut first = row("a00000001", "running", "ordinary task");
+        first.task_type = "local_agent".into();
+        let mut fusion = row("f00000002", "running", "long Fusion description");
+        fusion.task_type = "local_fusion".into();
+        fusion.stage = Some("Running panels 1/3".into());
+        let mut v = view(vec![first, fusion]);
+        v.handle_key(press(KeyCode::Down));
+
+        assert!(rendered_buffer(&v, 80, 8).contains("Running panels 1/3"));
+        v.apply_multiagent_event(&MultiAgentEvent::TasksRefreshed(vec![
+            row("a00000001", "running", "ordinary task"),
+            TaskRow {
+                task_id: "f00000002".into(),
+                task_type: "local_fusion".into(),
+                status: "running".into(),
+                description: "long Fusion description".into(),
+                command: None,
+                stage: Some("Running panels 2/3".into()),
+                error: None,
+            },
+        ]));
+
+        assert_eq!(v.rows()[v.selected].task_id, "f00000002");
+        let rendered = rendered_buffer(&v, 80, 8);
+        assert!(rendered.contains("Running panels 2/3"), "{rendered:?}");
+        assert!(!rendered.contains("Running panels 1/3"), "{rendered:?}");
+    }
+
+    #[test]
+    fn fusion_rendering_is_safe_for_narrow_buffers() {
+        let mut running = row("f00000001", "running", "narrow");
+        running.task_type = "local_fusion".into();
+        running.stage = Some("Running panels 2/3".into());
+        let mut failed = row("f00000002", "failed", "narrow");
+        failed.task_type = "local_fusion".into();
+        failed.error = Some("provider\n\u{1b}[31mfailed\u{1b}[0m".into());
+        for width in [0, 1, 2, 3, 4, 5] {
+            let _ = rendered_buffer(&view(vec![running.clone(), failed.clone()]), width, 8);
+        }
+    }
+
+    #[test]
+    fn fusion_label_keeps_command_precedence_and_whole_graphemes() {
+        let mut fusion = row(
+            "f00000001",
+            "running",
+            "description-must-not-replace-command",
+        );
+        fusion.task_type = "local_fusion".into();
+        fusion.command =
+            Some("e\u{301}e\u{301}e\u{301} \u{1f469}\u{200d}\u{1f4bb} command tail".into());
+        fusion.stage = Some("P".into());
+
+        let v = view(vec![fusion]);
+        let priority_line = v.row_line(&v.rows[0], 0, Some(0));
+        let priority_width = priority_line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+            .width();
+        let viewport = u16::try_from(priority_width + 2 + 7).expect("small fixture width");
+        let line = v.row_line(&v.rows[0], 0, Some(viewport));
+        let line_text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(
+            line_text.ends_with("e\u{301}e\u{301}e\u{301} \u{1f469}\u{200d}\u{1f4bb}\u{2026}"),
+            "truncation split a grapheme cluster: {line_text:?}"
+        );
+        assert!(
+            line_text.width() <= usize::from(viewport),
+            "row exceeded its viewport: {line_text:?}"
+        );
+
+        let rendered = rendered_buffer(&v, viewport.saturating_add(2), 8);
+        assert!(rendered.contains("[P]"), "{rendered:?}");
+        assert!(
+            !rendered.contains("description-must-not-replace-command"),
+            "command precedence changed: {rendered:?}"
+        );
     }
 }

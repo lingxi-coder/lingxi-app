@@ -136,10 +136,11 @@ pub use fusion::{
     EvidenceKind, FusionAgentSurface, FusionAnalysis, FusionCompletionSink, FusionContradiction,
     FusionCostClass, FusionDecision, FusionError, FusionExecutor, FusionInheritance,
     FusionLatencyClass, FusionModelHints, FusionModelRef, FusionNeedsParentReason, FusionOrigin,
-    FusionPreset, FusionProgress, FusionRecommendation, FusionRequest, FusionResult, FusionStage,
+    FusionPreset, FusionProgress, FusionPublicationReceipt, FusionPublicationState,
+    FusionPublicationStatus, FusionRecommendation, FusionRequest, FusionResult, FusionStage,
     FusionStatus, FusionTiming, FusionUniqueInsight, FusionUsage, NoopFusionCompletionSink,
-    PanelClaim, PanelEvidence, PanelOutcome, PanelPosition, PanelReport, PanelRisk,
-    PanelRunStatus, RiskSeverity, DEFAULT_FUSION_DIMENSIONS, DEFAULT_FUSION_DIMENSION_DESCRIPTIONS,
+    PanelClaim, PanelEvidence, PanelOutcome, PanelPosition, PanelReport, PanelRisk, PanelRunStatus,
+    RiskSeverity, DEFAULT_FUSION_DIMENSIONS, DEFAULT_FUSION_DIMENSION_DESCRIPTIONS,
     FUSION_MAX_PANEL, FUSION_MIN_PANEL, FUSION_PANEL_TYPE, FUSION_SCHEMA_VERSION,
     FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT,
 };
@@ -228,7 +229,9 @@ pub use task_registry::{
 };
 pub use team_registry::{TeamRegistryHandle, WorkerInfo};
 pub use team_spawn::{TeamSpawnError, TeamSpawnSeam};
-pub use tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+pub use tool_invoker::{
+    SubagentInvocationContext, ToolExecutionPolicy, ToolInvoker, ToolInvokerError,
+};
 pub use tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
 pub use voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
 pub use web_search::{WebSearchConfigProvider, WebSearchRuntimeConfig};

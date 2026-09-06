@@ -1555,6 +1555,25 @@ impl TaskRegistry {
         }
     }
 
+    /// Record the typed publication receipt for a Fusion result. The
+    /// computational answer and terminal task status are intentionally kept
+    /// even when publication fails, while the legacy boolean is derived only
+    /// from the one receipt that proves a durable append.
+    pub async fn set_fusion_publication(
+        &self,
+        task_id: &str,
+        receipt: platform_api::FusionPublicationReceipt,
+    ) {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        if let Some(TaskState::LocalFusion(fusion)) = map.get_mut(&task_id) {
+            let is_published = receipt.is_published();
+            fusion.publication_status = receipt.status;
+            fusion.publication_error = receipt.error;
+            fusion.result_published = is_published;
+        }
+    }
+
     /// Record a Fusion run's egress profiles and usage summary alongside its
     /// terminal payload, before the terminal status opens it to the
     /// notification drain.
@@ -1584,11 +1603,8 @@ impl TaskRegistry {
     /// polling a `Completed` run until this flips. Best-effort: a
     /// since-evicted task is a benign no-op.
     pub async fn mark_fusion_result_published(&self, task_id: &str) {
-        let task_id = self.canonical_or_raw(task_id).await;
-        let mut map = self.tasks.write().await;
-        if let Some(TaskState::LocalFusion(fusion)) = map.get_mut(&task_id) {
-            fusion.result_published = true;
-        }
+        self.set_fusion_publication(task_id, platform_api::FusionPublicationReceipt::published())
+            .await;
     }
 
     /// Atomically publish a Fusion run's terminal payload and terminal status.
@@ -1705,7 +1721,10 @@ impl TaskRegistry {
             let error = match state {
                 TaskState::LocalAgent(agent) => agent.error.clone(),
                 TaskState::LocalWorkflow(workflow) => workflow.outcome.error.clone(),
-                TaskState::LocalFusion(fusion) => fusion.error.clone(),
+                TaskState::LocalFusion(fusion) => fusion
+                    .error
+                    .clone()
+                    .or_else(|| fusion.publication_error.clone()),
                 _ => None,
             };
             let workflow_outcome = match state {
@@ -2369,6 +2388,8 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             usage: None,
             stage: None,
             effective_timeout_ms: None,
+            publication_status: platform_api::FusionPublicationStatus::Pending,
+            publication_error: None,
             result_published: false,
         }),
     }

@@ -22,7 +22,8 @@ use crate::stream_json_input::{
 use command_api::format_description_with_source;
 use permission;
 use platform_api::{
-    FileSystem, McpStatus, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult,
+    FileSystem, FusionPublicationStatus, McpStatus, OrchestratorHandle, SlashCommandDispatcher,
+    SlashDispatchResult,
 };
 use serde_json::{json, Value};
 use session::jsonl::loader::{
@@ -2932,6 +2933,12 @@ impl FusionTaskLookup for tasks::registry::TaskRegistry {
 enum FusionPrintOutcome {
     /// `Completed` — the run's sanitized final text.
     FinalText(String),
+    /// The answer is durable in an outbox and can be returned successfully,
+    /// with a warning that transcript delivery remains pending.
+    Queued(String),
+    /// The computation produced an answer, but publication failed. Keep the
+    /// answer visible while returning a non-zero process result.
+    PublicationFailed { answer: String, reason: String },
     /// `Failed` — the recorded failure reason (falls back to a generic
     /// message when the reason was never recorded).
     Failed(String),
@@ -2941,38 +2948,48 @@ enum FusionPrintOutcome {
 }
 
 /// Map a terminal (or absent — evicted, or the print-mode wait timed out)
-/// `local_fusion` outcome to print mode's process exit code. Only
-/// `FinalText` means the run actually produced an answer for the user; a
-/// recorded `Failed`, any other terminal status (`Killed`, …), a task that
-/// vanished mid-wait, and the 20-minute print-mode timeout must all be
-/// non-zero so a script gating on `$?` can tell "produced an answer" from
-/// "produced nothing" — the failure is already reported to the user on
-/// `sink.error`, but until this the process itself always reported success.
+/// `local_fusion` outcome to print mode's process exit code. A directly
+/// `Published` answer and a durably `Queued` answer succeed. A publication
+/// failure may still carry the computed answer, but must be non-zero alongside
+/// compute failures, kills, eviction, and timeout so scripts can distinguish a
+/// durable result from an answer that exists only in this process.
 fn fusion_result_exit_code(outcome: Option<&FusionPrintOutcome>) -> i32 {
     match outcome {
-        Some(FusionPrintOutcome::FinalText(_)) => exit_codes::SUCCESS,
-        Some(FusionPrintOutcome::Failed(_) | FusionPrintOutcome::Other(_)) | None => {
-            exit_codes::RUNTIME_ERROR
+        Some(FusionPrintOutcome::FinalText(_) | FusionPrintOutcome::Queued(_)) => {
+            exit_codes::SUCCESS
         }
+        Some(
+            FusionPrintOutcome::PublicationFailed { .. }
+            | FusionPrintOutcome::Failed(_)
+            | FusionPrintOutcome::Other(_),
+        )
+        | None => exit_codes::RUNTIME_ERROR,
     }
 }
 
 /// Whether `state` is DONE for print mode's purposes — terminal, AND (for a
-/// `Completed` run specifically) its durable `<fusion-result>` session
-/// append has actually landed. `finish_fusion_terminal` flips the task to
-/// `Completed` before the handler's worker awaits
-/// `FusionCompletionSink::publish` (the registry's own notification drain
-/// needs that ordering and it cannot flip), so a waiter that stopped at
-/// terminal status alone could return — and let the print-mode process
-/// exit — while the append was still in flight, silently dropping it
-/// (review finding #17). `Failed`/`Killed` never call `publish`, so they
-/// are ready the instant they go terminal, same as before.
+/// `Completed` run specifically) its publication attempt has a terminal typed
+/// receipt. `finish_fusion_terminal` flips the task to `Completed` before the
+/// handler awaits `FusionCompletionSink::publish`, so a waiter must remain on
+/// `Pending`; `Published`, durable `Queued`, and explicit publication failures
+/// are all ready to report with their distinct exit semantics. `Failed` and
+/// `Killed` runs never invoke the completion sink.
 fn fusion_result_ready(state: &tasks::state::TaskState) -> bool {
     let tasks::state::TaskState::LocalFusion(fusion) = state else {
         return state.base().status.is_terminal();
     };
-    fusion.base.status.is_terminal()
-        && (fusion.base.status != tasks::state::TaskStatus::Completed || fusion.result_published)
+    if !fusion.base.status.is_terminal() {
+        return false;
+    }
+    if fusion.base.status != tasks::state::TaskStatus::Completed {
+        // Failed/Killed runs never invoke the completion sink, so they are
+        // ready as soon as their computational terminal status lands.
+        return true;
+    }
+    // `result_published` is retained as a compatibility read for task rows
+    // written before the typed status existed. New rows use the enum as the
+    // source of truth, and every state other than Pending is terminal.
+    fusion.result_published || fusion.publication_status.is_terminal()
 }
 
 fn fusion_print_outcome(state: &tasks::state::TaskState) -> Option<FusionPrintOutcome> {
@@ -2981,7 +2998,34 @@ fn fusion_print_outcome(state: &tasks::state::TaskState) -> Option<FusionPrintOu
     };
     Some(match fusion.base.status {
         tasks::state::TaskStatus::Completed => {
-            FusionPrintOutcome::FinalText(fusion.final_text.clone().unwrap_or_default())
+            let answer = fusion.final_text.clone().unwrap_or_default();
+            match effective_fusion_publication_status(fusion) {
+                FusionPublicationStatus::Published => FusionPrintOutcome::FinalText(answer),
+                FusionPublicationStatus::Queued => FusionPrintOutcome::Queued(answer),
+                FusionPublicationStatus::NotRequired => FusionPrintOutcome::PublicationFailed {
+                    answer,
+                    reason: fusion
+                        .publication_error
+                        .clone()
+                        .unwrap_or_else(|| {
+                            "fusion result publication was not required; no durable transcript was recorded"
+                                .to_string()
+                        }),
+                },
+                FusionPublicationStatus::OutboxFailed
+                | FusionPublicationStatus::StorageFailure => {
+                    FusionPrintOutcome::PublicationFailed {
+                        answer,
+                        reason: fusion
+                            .publication_error
+                            .clone()
+                            .unwrap_or_else(|| "fusion result could not be published".to_string()),
+                    }
+                }
+                FusionPublicationStatus::Pending => {
+                    FusionPrintOutcome::Other("publication pending".to_string())
+                }
+            }
         }
         tasks::state::TaskStatus::Failed => FusionPrintOutcome::Failed(
             fusion
@@ -2991,6 +3035,18 @@ fn fusion_print_outcome(state: &tasks::state::TaskState) -> Option<FusionPrintOu
         ),
         other => FusionPrintOutcome::Other(format!("{other:?}")),
     })
+}
+
+/// Read the typed publication status while accepting old task rows whose
+/// only publication signal was the legacy boolean.
+fn effective_fusion_publication_status(
+    fusion: &tasks::state::LocalFusionTaskState,
+) -> FusionPublicationStatus {
+    if fusion.result_published {
+        FusionPublicationStatus::Published
+    } else {
+        fusion.publication_status
+    }
 }
 
 /// Poll interval while print mode waits for a background `/fusion` run.
@@ -3102,6 +3158,21 @@ where
             match &outcome {
                 Some(FusionPrintOutcome::FinalText(text)) => {
                     sink.command_output("fusion", text).await;
+                }
+                Some(FusionPrintOutcome::Queued(text)) => {
+                    sink.command_output("fusion", text).await;
+                    sink.error(
+                        "fusion",
+                        "fusion answer was durably queued; transcript delivery is still pending",
+                    )
+                    .await;
+                }
+                Some(FusionPrintOutcome::PublicationFailed { answer, reason }) => {
+                    // Preserve the computational answer for the caller even
+                    // though the process must fail: the storage error is a
+                    // publication problem, not a computation failure.
+                    sink.command_output("fusion", answer).await;
+                    sink.error("fusion", reason).await;
                 }
                 Some(FusionPrintOutcome::Failed(reason)) => {
                     sink.error("fusion", reason).await;
@@ -7049,6 +7120,8 @@ mod tests {
             usage: None,
             stage: None,
             effective_timeout_ms: None,
+            publication_status: platform_api::FusionPublicationStatus::Published,
+            publication_error: None,
             // Every existing caller of this helper wants "the run is fully
             // done, print it now" — the one test that cares about the
             // publish-not-landed-yet window builds its own
@@ -7201,6 +7274,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn legacy_published_boolean_overrides_the_new_pending_default() {
+        let state = tasks::state::TaskState::LocalFusion(tasks::state::LocalFusionTaskState {
+            publication_status: platform_api::FusionPublicationStatus::Pending,
+            result_published: true,
+            ..completed_fusion_state("legacy answer")
+        });
+
+        assert!(fusion_result_ready(&state));
+        assert_eq!(
+            fusion_print_outcome(&state),
+            Some(FusionPrintOutcome::FinalText("legacy answer".to_string()))
+        );
+    }
+
+    #[test]
+    fn unsupported_publication_is_ready_but_fails_with_the_answer_retained() {
+        let mut state = fusion_state(
+            tasks::state::TaskStatus::Completed,
+            Some("computed answer"),
+            None,
+        );
+        let tasks::state::TaskState::LocalFusion(fusion) = &mut state else {
+            unreachable!("fusion_state always builds a LocalFusion state");
+        };
+        fusion.publication_status = platform_api::FusionPublicationStatus::NotRequired;
+        fusion.result_published = false;
+
+        assert!(fusion_result_ready(&state));
+        let outcome = fusion_print_outcome(&state);
+        assert!(matches!(
+            outcome,
+            Some(FusionPrintOutcome::PublicationFailed { ref answer, .. })
+                if answer == "computed answer"
+        ));
+        assert_eq!(
+            fusion_result_exit_code(outcome.as_ref()),
+            exit_codes::RUNTIME_ERROR
+        );
+    }
+
     #[tokio::test]
     async fn await_local_fusion_result_prints_final_text_when_already_completed() {
         let lookup = ScriptedLookup::new(vec![Some(fusion_state(
@@ -7235,6 +7349,93 @@ mod tests {
             fusion_result_exit_code(outcome.as_ref()),
             exit_codes::SUCCESS,
             "a produced answer must exit 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn await_local_fusion_result_reports_durable_queue_without_failing() {
+        let mut queued = fusion_state(
+            tasks::state::TaskStatus::Completed,
+            Some("queued answer"),
+            None,
+        );
+        let tasks::state::TaskState::LocalFusion(fusion) = &mut queued else {
+            unreachable!("fusion_state always builds a LocalFusion state");
+        };
+        fusion.publication_status = platform_api::FusionPublicationStatus::Queued;
+        fusion.result_published = false;
+        let lookup = ScriptedLookup::new(vec![Some(queued)]);
+        let sink = RecordingFusionSink::default();
+
+        let outcome = await_local_fusion_result_bounded(
+            "ftest0001",
+            &lookup,
+            &sink,
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            Some(FusionPrintOutcome::Queued("queued answer".to_string()))
+        );
+        assert_eq!(fusion_result_exit_code(outcome.as_ref()), exit_codes::SUCCESS);
+        assert_eq!(
+            sink.outputs.lock().await.as_slice(),
+            &[("fusion".to_string(), "queued answer".to_string())]
+        );
+        assert!(sink.errors.lock().await.iter().any(|(_, message)| {
+            message.contains("durably queued")
+        }));
+    }
+
+    #[tokio::test]
+    async fn await_local_fusion_result_keeps_answer_but_fails_on_storage_error() {
+        let mut failed_publication = fusion_state(
+            tasks::state::TaskStatus::Completed,
+            Some("answer despite append failure"),
+            None,
+        );
+        let tasks::state::TaskState::LocalFusion(fusion) = &mut failed_publication else {
+            unreachable!("fusion_state always builds a LocalFusion state");
+        };
+        fusion.publication_status = platform_api::FusionPublicationStatus::StorageFailure;
+        fusion.publication_error = Some("append failed".to_string());
+        fusion.result_published = false;
+        let lookup = ScriptedLookup::new(vec![Some(failed_publication)]);
+        let sink = RecordingFusionSink::default();
+
+        let outcome = await_local_fusion_result_bounded(
+            "ftest0001",
+            &lookup,
+            &sink,
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            Some(FusionPrintOutcome::PublicationFailed {
+                answer: "answer despite append failure".to_string(),
+                reason: "append failed".to_string(),
+            })
+        );
+        assert_eq!(
+            fusion_result_exit_code(outcome.as_ref()),
+            exit_codes::RUNTIME_ERROR
+        );
+        assert_eq!(
+            sink.outputs.lock().await.as_slice(),
+            &[(
+                "fusion".to_string(),
+                "answer despite append failure".to_string()
+            )]
+        );
+        assert_eq!(
+            sink.errors.lock().await.as_slice(),
+            &[("fusion".to_string(), "append failed".to_string())]
         );
     }
 
@@ -7288,10 +7489,12 @@ mod tests {
         let unpublished =
             tasks::state::TaskState::LocalFusion(tasks::state::LocalFusionTaskState {
                 result_published: false,
+                publication_status: platform_api::FusionPublicationStatus::Pending,
                 ..completed_fusion_state("not yet on disk")
             });
         let published = tasks::state::TaskState::LocalFusion(tasks::state::LocalFusionTaskState {
             result_published: true,
+            publication_status: platform_api::FusionPublicationStatus::Published,
             ..completed_fusion_state("not yet on disk")
         });
         let lookup = ScriptedLookup::new(vec![

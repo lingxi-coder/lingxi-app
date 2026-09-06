@@ -600,6 +600,139 @@ pub struct FusionResult {
     pub egress_profiles: Vec<String>,
 }
 
+/// Publication state for the sanitized result produced by a Fusion run.
+///
+/// Publication is deliberately independent from [`FusionStatus`]. A run can
+/// have a perfectly usable answer while its parent-session append is still in
+/// flight or has failed. In particular, `Queued` means that a durable outbox
+/// accepted the item; an in-memory hand-off must not use that state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FusionPublicationStatus {
+    /// No parent-session publication is required for this run.
+    NotRequired,
+    /// Publication has been requested but has not reached a terminal state.
+    Pending,
+    /// A durable outbox accepted the result; delivery may happen later.
+    Queued,
+    /// The result was appended to the parent session.
+    Published,
+    /// An outbox was expected but rejected the item.
+    OutboxFailed,
+    /// The result could not be durably stored.
+    StorageFailure,
+}
+
+impl Default for FusionPublicationStatus {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
+impl FusionPublicationStatus {
+    /// Whether this state is final for a publication attempt.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        !matches!(self, Self::Pending)
+    }
+
+    /// Whether this state provides a durable publication outcome suitable for
+    /// a successful one-shot CLI exit.
+    #[must_use]
+    pub const fn is_success(self) -> bool {
+        matches!(self, Self::Queued | Self::Published)
+    }
+}
+
+/// Typed acknowledgement returned by a [`FusionCompletionSink`].
+///
+/// The optional error is sanitized, host-owned context. It is retained on the
+/// task state so callers can report a storage/outbox failure without dropping
+/// the already-computed answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FusionPublicationReceipt {
+    /// Result of the publication attempt.
+    #[serde(default)]
+    pub status: FusionPublicationStatus,
+    /// Short failure detail, when the status is `OutboxFailed` or
+    /// `StorageFailure`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl Default for FusionPublicationReceipt {
+    fn default() -> Self {
+        Self::pending()
+    }
+}
+
+impl FusionPublicationReceipt {
+    /// Construct a pending receipt.
+    #[must_use]
+    pub const fn pending() -> Self {
+        Self {
+            status: FusionPublicationStatus::Pending,
+            error: None,
+        }
+    }
+
+    /// Construct a no-publication-required receipt.
+    #[must_use]
+    pub const fn not_required() -> Self {
+        Self {
+            status: FusionPublicationStatus::NotRequired,
+            error: None,
+        }
+    }
+
+    /// Construct a durable-queue acknowledgement.
+    #[must_use]
+    pub const fn queued() -> Self {
+        Self {
+            status: FusionPublicationStatus::Queued,
+            error: None,
+        }
+    }
+
+    /// Construct a successful append acknowledgement.
+    #[must_use]
+    pub const fn published() -> Self {
+        Self {
+            status: FusionPublicationStatus::Published,
+            error: None,
+        }
+    }
+
+    /// Construct an outbox failure receipt.
+    #[must_use]
+    pub fn outbox_failed(error: impl Into<String>) -> Self {
+        Self {
+            status: FusionPublicationStatus::OutboxFailed,
+            error: Some(error.into()),
+        }
+    }
+
+    /// Construct a storage failure receipt.
+    #[must_use]
+    pub fn storage_failure(error: impl Into<String>) -> Self {
+        Self {
+            status: FusionPublicationStatus::StorageFailure,
+            error: Some(error.into()),
+        }
+    }
+
+    /// Whether the receipt proves that the append landed.
+    #[must_use]
+    pub const fn is_published(&self) -> bool {
+        matches!(self.status, FusionPublicationStatus::Published)
+    }
+}
+
+/// Compatibility alias used by callers that describe the field as a state
+/// rather than a status. Keep both spellings available while the durable
+/// outbox work remains a later package.
+pub type FusionPublicationState = FusionPublicationStatus;
+
 /// Progress stage names shared by Agent / slash / TUI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "stage", rename_all = "snake_case")]
@@ -1039,8 +1172,15 @@ pub trait FusionExecutor: Send + Sync {
 #[async_trait]
 pub trait FusionCompletionSink: Send + Sync {
     /// Publish one sanitized Fusion result. Implementations must be idempotent
-    /// on `(conversation_id, run_id)`.
-    async fn publish(&self, conversation_id: &str, result: &FusionResult);
+    /// on `(conversation_id, run_id)` and return a truthful receipt. In
+    /// particular, a sink must return [`FusionPublicationStatus::Published`]
+    /// only after the append is durable; failures must not be represented as
+    /// an empty successful response.
+    async fn publish(
+        &self,
+        conversation_id: &str,
+        result: &FusionResult,
+    ) -> FusionPublicationReceipt;
 }
 
 /// Test / unwired sink.
@@ -1048,7 +1188,15 @@ pub struct NoopFusionCompletionSink;
 
 #[async_trait]
 impl FusionCompletionSink for NoopFusionCompletionSink {
-    async fn publish(&self, _conversation_id: &str, _result: &FusionResult) {}
+    async fn publish(
+        &self,
+        _conversation_id: &str,
+        _result: &FusionResult,
+    ) -> FusionPublicationReceipt {
+        // A no-op sink is useful in standalone/unit-test hosts, but it never
+        // proves that a parent transcript was written.
+        FusionPublicationReceipt::not_required()
+    }
 }
 
 /// Normalize and validate dimension names.
@@ -1238,6 +1386,49 @@ mod tests {
         let result: FusionResult = serde_json::from_value(json).unwrap();
         assert_eq!(result.final_text, "ok");
         assert_eq!(result.status, FusionStatus::Completed);
+    }
+
+    #[test]
+    fn publication_receipt_roundtrips_and_only_published_is_durable() {
+        let receipts = [
+            (FusionPublicationReceipt::not_required(), "not_required"),
+            (FusionPublicationReceipt::pending(), "pending"),
+            (FusionPublicationReceipt::queued(), "queued"),
+            (FusionPublicationReceipt::published(), "published"),
+            (
+                FusionPublicationReceipt::outbox_failed("queue unavailable"),
+                "outbox_failed",
+            ),
+            (
+                FusionPublicationReceipt::storage_failure("append failed"),
+                "storage_failure",
+            ),
+        ];
+        for (receipt, wire_status) in receipts {
+            let json = serde_json::to_value(&receipt).unwrap();
+            assert_eq!(json["status"], serde_json::json!(wire_status));
+            let back: FusionPublicationReceipt = serde_json::from_value(json).unwrap();
+            assert_eq!(back, receipt);
+            assert_eq!(back.is_published(), back.status == FusionPublicationStatus::Published);
+        }
+
+        let legacy: FusionPublicationReceipt =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(legacy, FusionPublicationReceipt::pending());
+    }
+
+    #[tokio::test]
+    async fn noop_completion_sink_never_claims_published() {
+        let result: FusionResult = serde_json::from_value(serde_json::json!({
+            "run_id": "fu_noop",
+            "status": "completed",
+            "decision": {"type": "merged"},
+            "final_text": "answer"
+        }))
+        .unwrap();
+        let receipt = NoopFusionCompletionSink.publish("conversation", &result).await;
+        assert_eq!(receipt.status, FusionPublicationStatus::NotRequired);
+        assert!(!receipt.is_published());
     }
 
     /// G011: `PanelOutcome::error_detail` is additive — a result serialized

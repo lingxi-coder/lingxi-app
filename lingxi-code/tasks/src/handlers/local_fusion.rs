@@ -13,8 +13,8 @@ use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput
 use async_trait::async_trait;
 use platform_api::{
     BackgroundTaskHandle, BudgetEnforcerHandle, FusionCompletionSink, FusionError, FusionExecutor,
-    FusionInheritance, FusionResult, FusionStatus, RuntimeSpawner, SubagentInheritance,
-    ToolInvoker,
+    FusionInheritance, FusionPublicationReceipt, FusionResult, FusionStatus, RuntimeSpawner,
+    SubagentInheritance, ToolInvoker,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -166,6 +166,9 @@ async fn finalize_fusion_outcome(
                 )
                 .await;
             status_sink
+                .set_fusion_publication(worker_task_id, FusionPublicationReceipt::pending())
+                .await;
+            status_sink
                 .finish_fusion_terminal(
                     worker_task_id,
                     result.run_id.clone(),
@@ -173,18 +176,22 @@ async fn finalize_fusion_outcome(
                     TaskStatus::Completed,
                 )
                 .await;
-            sink.publish(conversation_id, result).await;
-            // Review finding #17: `await_local_fusion_result_bounded` (print
-            // mode) polls terminal status alone and can return — and the
-            // process can exit — between `finish_fusion_terminal` above and
-            // `publish` finishing its durable session append. Flip this
-            // AFTER `publish` resolves (never before finish_fusion_terminal:
-            // the notification drain is terminal-status-gated the other way)
-            // so a one-shot host can wait for the append to actually land
-            // instead of racing it.
+            // Publication is independent from computation. The terminal
+            // answer is retained even when the append fails; only the typed
+            // receipt decides readiness and the legacy `result_published`
+            // compatibility flag.
+            let receipt = sink.publish(conversation_id, result).await;
             status_sink
-                .mark_fusion_result_published(worker_task_id)
+                .set_fusion_publication(worker_task_id, receipt.clone())
                 .await;
+            if receipt.is_published() {
+                // Keep the old narrow hook for standalone sinks and older
+                // status adapters; its registry implementation now writes a
+                // typed `Published` receipt as well.
+                status_sink
+                    .mark_fusion_result_published(worker_task_id)
+                    .await;
+            }
         }
         Err(FusionError::Cancelled) => {
             // [Finding 14] Same ordering rule as the `Ok` arm above: write

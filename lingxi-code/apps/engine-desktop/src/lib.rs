@@ -14106,9 +14106,10 @@ pub async fn build(
     // (6) Command registry through the desktop composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();
     fusion_completion_sink
-        .bind(Arc::new(fusion_command::DesktopFusionCompletionSink::new(
-            handle.clone(),
-        )))
+        .bind(Arc::new(
+            fusion_command::DesktopFusionCompletionSink::new(handle.clone())
+                .with_durable_storage_enabled(cfg.session_persistence),
+        ))
         .await;
     // FIX (B-agent-model-inheritance): now that the orchestrator exists, wire the
     // subagent spawner's LIVE default-model source to read the orchestrator's LIVE
@@ -14319,15 +14320,18 @@ pub async fn build(
         // permission loop and invoke the same validated cron tools directly.
         reg.register_builtin_handler(cron_command_handler);
     }
-    reg.register_builtin_handler(Arc::new(fusion_command::DesktopFusionCommandHandler::new(
-        task_registry.clone(),
-        fusion_executor.clone(),
-        handle.clone(),
-        model_providers
-            .iter()
-            .map(|(model, (profile, _))| (model.clone(), profile.clone()))
-            .collect(),
-    )));
+    reg.register_builtin_handler(Arc::new(
+        fusion_command::DesktopFusionCommandHandler::new(
+            task_registry.clone(),
+            fusion_executor.clone(),
+            handle.clone(),
+            model_providers
+                .iter()
+                .map(|(model, (profile, _))| (model.clone(), profile.clone()))
+                .collect(),
+        )
+        .with_durable_publication_available(cfg.session_persistence),
+    ));
 
     // WIZARD-06: re-register `/auto-mode-setup` WITH its runners attached.
     // `register_all_builtin_commands` wires the handle-free shape (grammar,
@@ -21373,6 +21377,39 @@ must be filtered out: got {after:?}"
                 "session_persistence={persist} must {}wire the JsonlWriter",
                 if want_writer { "" } else { "NOT " }
             );
+            if !persist {
+                let before = rt
+                    .task_registry
+                    .list()
+                    .await
+                    .into_iter()
+                    .filter(|state| state.base().task_type == tasks::TaskType::LocalFusion)
+                    .count();
+                let dispatched = platform_api::SlashCommandDispatcher::dispatch(
+                    &rt.dispatcher,
+                    "/fusion compare these approaches",
+                )
+                .await;
+                let platform_api::SlashDispatchResult::Handled { display } = dispatched else {
+                    panic!("expected handled /fusion preflight, got {dispatched:?}");
+                };
+                assert!(
+                    display.starts_with("fusion failed to start: ")
+                        && display.contains("requires session persistence"),
+                    "ephemeral /fusion must fail before dispatch, got: {display}"
+                );
+                let after = rt
+                    .task_registry
+                    .list()
+                    .await
+                    .into_iter()
+                    .filter(|state| state.base().task_type == tasks::TaskType::LocalFusion)
+                    .count();
+                assert_eq!(
+                    after, before,
+                    "the persistence preflight must reject before spawning a task that can reserve budget or call a provider"
+                );
+            }
         }
     }
 

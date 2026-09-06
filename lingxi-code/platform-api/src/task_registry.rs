@@ -858,7 +858,10 @@ mod tests {
         async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
             unimplemented!("not exercised by this test")
         }
-        async fn list(&self, _filter: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+        async fn list(
+            &self,
+            _filter: TaskListFilter,
+        ) -> Result<Vec<TaskRecord>, TaskRegistryError> {
             Ok(self.tasks.clone())
         }
         async fn update(
@@ -868,7 +871,11 @@ mod tests {
         ) -> Result<TaskRecord, TaskRegistryError> {
             unimplemented!("not exercised by this test")
         }
-        async fn set_status(&self, _id: &str, _status: &str) -> Result<TaskRecord, TaskRegistryError> {
+        async fn set_status(
+            &self,
+            _id: &str,
+            _status: &str,
+        ) -> Result<TaskRecord, TaskRegistryError> {
             unimplemented!("not exercised by this test")
         }
         async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {

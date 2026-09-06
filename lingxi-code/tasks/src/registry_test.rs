@@ -1868,6 +1868,8 @@ fn local_fusion_state_for_test(id: &str, output_dir: &std::path::Path) -> TaskSt
         usage: None,
         stage: None,
         effective_timeout_ms: None,
+        publication_status: platform_api::FusionPublicationStatus::Pending,
+        publication_error: None,
         result_published: false,
     })
 }
@@ -2063,6 +2065,54 @@ async fn mark_fusion_result_published_flips_the_flag_in_place() {
     // An unknown/evicted task id is a benign no-op, same as the other
     // best-effort fusion status-sink writes above (set_fusion_stage etc).
     sink.mark_fusion_result_published("fu_does_not_exist").await;
+}
+
+#[tokio::test]
+async fn fusion_publication_failure_keeps_answer_and_never_sets_legacy_published() {
+    use crate::handlers::TaskStatusSink;
+    use crate::registry_status_sink::RegistryStatusSink;
+
+    let (dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    let id = "fu_publish_fail";
+    registry
+        .insert_state_for_test(local_fusion_state_for_test(id, dir.path()))
+        .await;
+
+    let sink = RegistryStatusSink::new();
+    sink.bind(registry.clone());
+    sink.finish_fusion_terminal(
+        id,
+        "fu_run_fail".to_string(),
+        "answer survives storage failure".to_string(),
+        TaskStatus::Completed,
+    )
+    .await;
+    sink.set_fusion_publication(
+        id,
+        platform_api::FusionPublicationReceipt::storage_failure("append failed"),
+    )
+    .await;
+
+    let state = registry.get(id).await.expect("task exists");
+    let TaskState::LocalFusion(fusion) = state else {
+        panic!("expected local fusion state");
+    };
+    assert_eq!(fusion.final_text.as_deref(), Some("answer survives storage failure"));
+    assert_eq!(
+        fusion.publication_status,
+        platform_api::FusionPublicationStatus::StorageFailure
+    );
+    assert_eq!(fusion.publication_error.as_deref(), Some("append failed"));
+    assert!(!fusion.result_published);
+
+    let notifications = registry.take_pending_task_notifications().await;
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(
+        notifications[0].result.as_deref(),
+        Some("answer survives storage failure")
+    );
+    assert_eq!(notifications[0].error.as_deref(), Some("append failed"));
 }
 
 #[test]

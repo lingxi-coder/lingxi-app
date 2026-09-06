@@ -211,6 +211,17 @@ pub trait TaskStatusSink: Send + Sync {
     /// change.
     async fn set_fusion_stage(&self, _task_id: &str, _stage: String) {}
 
+    /// Record the typed parent-session publication receipt for a Fusion run.
+    /// The legacy `result_published` boolean is updated only for an actual
+    /// `Published` receipt; `Queued`, `NotRequired`, and failures remain
+    /// distinguishable to readiness callers.
+    async fn set_fusion_publication(
+        &self,
+        _task_id: &str,
+        _receipt: platform_api::FusionPublicationReceipt,
+    ) {
+    }
+
     /// Record that a `Completed` Fusion run's durable `<fusion-result>`
     /// session append (`FusionCompletionSink::publish`) has finished. Call
     /// this AFTER `publish` resolves — necessarily after

@@ -8,7 +8,8 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use command_core::{fusion_request_from_slash, parse_fusion_slash};
 use platform_api::{
-    FusionCompletionSink, FusionExecutor, FusionResult, FusionStatus, OrchestratorHandle,
+    FusionCompletionSink, FusionExecutor, FusionPublicationReceipt, FusionResult, FusionStatus,
+    OrchestratorHandle,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
@@ -16,11 +17,14 @@ use tasks::{TaskSpawnInput, TaskType};
 use tokio::sync::Mutex;
 
 const FUSION_ARGUMENT_HINT: &str = "[--quality|--fast] [--same-provider|--cross-provider] PROMPT";
+const FUSION_PERSISTENCE_REQUIRED: &str =
+    "durable session storage is disabled; /fusion requires session persistence (remove --no-session-persistence)";
 
 /// Idempotent parent-history sink for Fusion results.
 pub struct DesktopFusionCompletionSink {
     handle: Arc<dyn OrchestratorHandle>,
     published: Mutex<HashSet<(String, String)>>,
+    durable_storage_enabled: bool,
 }
 
 impl DesktopFusionCompletionSink {
@@ -30,17 +34,33 @@ impl DesktopFusionCompletionSink {
         Self {
             handle,
             published: Mutex::new(HashSet::new()),
+            durable_storage_enabled: true,
         }
+    }
+
+    /// Declare whether the composition root wired durable session storage.
+    /// The default remains enabled for existing hosts and test doubles.
+    #[must_use]
+    pub fn with_durable_storage_enabled(mut self, enabled: bool) -> Self {
+        self.durable_storage_enabled = enabled;
+        self
     }
 }
 
 #[async_trait]
 impl FusionCompletionSink for DesktopFusionCompletionSink {
-    async fn publish(&self, conversation_id: &str, result: &FusionResult) {
+    async fn publish(
+        &self,
+        conversation_id: &str,
+        result: &FusionResult,
+    ) -> FusionPublicationReceipt {
+        if !self.durable_storage_enabled {
+            return FusionPublicationReceipt::storage_failure(FUSION_PERSISTENCE_REQUIRED);
+        }
         let key = (conversation_id.to_string(), result.run_id.clone());
         let mut seen = self.published.lock().await;
         if seen.contains(&key) {
-            return;
+            return FusionPublicationReceipt::published();
         }
         let xml = tasks::fusion_result_xml(result);
         if let Err(err) = self
@@ -60,7 +80,7 @@ impl FusionCompletionSink for DesktopFusionCompletionSink {
             self.handle
                 .emit_background_system_notice(&fusion_completion_notice_unrecorded())
                 .await;
-            return;
+            return FusionPublicationReceipt::storage_failure(err.to_string());
         }
         // F006: before this, a finished background run's only trace was the
         // meta-message row above — nothing live ever told the user it had
@@ -88,6 +108,7 @@ impl FusionCompletionSink for DesktopFusionCompletionSink {
         };
         self.handle.emit_background_system_notice(&body).await;
         seen.insert(key);
+        FusionPublicationReceipt::published()
     }
 }
 
@@ -128,8 +149,10 @@ fn fusion_completion_notice_other_session(result: &FusionResult, conversation_id
     // `parse_prefixed` accepts both the prefixed display form and a bare uuid,
     // so this stays correct if a caller ever hands over an unprefixed id; a
     // string that is neither falls back to being truncated as-is.
-    let body = protocol::SessionId::parse_prefixed(conversation_id)
-        .map_or_else(|| conversation_id.to_string(), |id| id.as_uuid().to_string());
+    let body = protocol::SessionId::parse_prefixed(conversation_id).map_or_else(
+        || conversation_id.to_string(),
+        |id| id.as_uuid().to_string(),
+    );
     let short: String = body.chars().take(8).collect();
     let what = match result.status {
         FusionStatus::Completed => "its result",
@@ -161,8 +184,6 @@ pub struct DeferredFusionCompletionSink {
 #[derive(Default)]
 struct DeferredFusionCompletionState {
     inner: Option<Arc<dyn FusionCompletionSink>>,
-    pending_keys: HashSet<(String, String)>,
-    pending: Vec<(String, FusionResult)>,
 }
 
 impl DeferredFusionCompletionSink {
@@ -174,17 +195,10 @@ impl DeferredFusionCompletionSink {
         }
     }
 
-    /// Bind the live sink and flush anything queued before it existed.
+    /// Bind the live sink. The production composition root completes this
+    /// before its dispatcher escapes to a caller.
     pub async fn bind(&self, sink: Arc<dyn FusionCompletionSink>) {
-        let (sink, pending) = {
-            let mut state = self.state.lock().await;
-            let sink = state.inner.get_or_insert_with(|| sink.clone()).clone();
-            state.pending_keys.clear();
-            (sink, std::mem::take(&mut state.pending))
-        };
-        for (conversation_id, result) in pending {
-            sink.publish(&conversation_id, &result).await;
-        }
+        self.state.lock().await.inner.get_or_insert(sink);
     }
 }
 
@@ -196,23 +210,22 @@ impl Default for DeferredFusionCompletionSink {
 
 #[async_trait]
 impl FusionCompletionSink for DeferredFusionCompletionSink {
-    async fn publish(&self, conversation_id: &str, result: &FusionResult) {
-        let inner = {
-            let mut state = self.state.lock().await;
-            if let Some(sink) = state.inner.clone() {
-                Some(sink)
-            } else {
-                let key = (conversation_id.to_string(), result.run_id.clone());
-                if state.pending_keys.insert(key) {
-                    state
-                        .pending
-                        .push((conversation_id.to_string(), result.clone()));
-                }
-                None
-            }
-        };
+    async fn publish(
+        &self,
+        conversation_id: &str,
+        result: &FusionResult,
+    ) -> FusionPublicationReceipt {
+        let inner = self.state.lock().await.inner.clone();
         if let Some(sink) = inner {
-            sink.publish(conversation_id, result).await;
+            sink.publish(conversation_id, result).await
+        } else {
+            // There is deliberately no in-memory replay here: returning a
+            // terminal failure and later appending behind the task registry's
+            // back would make its publication state untruthful. PR-05 owns the
+            // durable outbox/retry path.
+            FusionPublicationReceipt::outbox_failed(
+                "fusion completion sink is not bound; result was not durably queued",
+            )
         }
     }
 }
@@ -237,6 +250,7 @@ pub struct DesktopFusionCommandHandler {
     executor: Arc<dyn FusionExecutor>,
     handle: Arc<dyn OrchestratorHandle>,
     parent_profiles: BTreeMap<String, String>,
+    durable_publication_available: bool,
 }
 
 impl DesktopFusionCommandHandler {
@@ -253,7 +267,17 @@ impl DesktopFusionCommandHandler {
             executor,
             handle,
             parent_profiles,
+            durable_publication_available: true,
         }
+    }
+
+    /// Declare whether completed Fusion answers can be durably published.
+    /// Production sets this from the immutable session-persistence mode before
+    /// the command handler is registered.
+    #[must_use]
+    pub fn with_durable_publication_available(mut self, available: bool) -> Self {
+        self.durable_publication_available = available;
+        self
     }
 }
 
@@ -266,6 +290,15 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
                 return CommandResult::Done { display: Some(msg) };
             }
         };
+        // Reject before status/catalog reads and, critically, before spawning
+        // the task that can reserve budget or issue provider requests. An
+        // ephemeral session cannot truthfully satisfy Fusion's publication
+        // contract.
+        if !self.durable_publication_available {
+            return CommandResult::Done {
+                display: Some(format!("fusion failed to start: {FUSION_PERSISTENCE_REQUIRED}")),
+            };
+        }
         let snapshot = self.handle.get_status_snapshot().await;
         let conversation_id = self.handle.current_session_id().await.to_string();
         let surface = self.executor.agent_surface();
@@ -360,8 +393,13 @@ mod tests {
 
     #[async_trait]
     impl FusionCompletionSink for CountingSink {
-        async fn publish(&self, _conversation_id: &str, _result: &FusionResult) {
+        async fn publish(
+            &self,
+            _conversation_id: &str,
+            _result: &FusionResult,
+        ) -> FusionPublicationReceipt {
             self.0.fetch_add(1, Ordering::SeqCst);
+            FusionPublicationReceipt::published()
         }
     }
 
@@ -387,7 +425,10 @@ mod tests {
     fn description_truncates_a_long_first_line_at_eighty_chars() {
         let long_line = "x".repeat(200);
         let desc = fusion_task_description("fast", "same-provider", &long_line);
-        assert_eq!(desc, format!("Fusion fast same-provider: {}…", "x".repeat(80)));
+        assert_eq!(
+            desc,
+            format!("Fusion fast same-provider: {}…", "x".repeat(80))
+        );
     }
 
     #[test]
@@ -397,15 +438,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deferred_sink_replays_prebind_result_once_after_bind() {
+    async fn deferred_sink_fails_closed_before_bind_and_does_not_replay() {
         let deferred = DeferredFusionCompletionSink::new();
         let result = dummy_result("fu_1");
-        deferred.publish("c", &result).await;
-        deferred.publish("c", &result).await;
+        let first = deferred.publish("c", &result).await;
+        let duplicate = deferred.publish("c", &result).await;
+        assert_eq!(
+            first.status,
+            platform_api::FusionPublicationStatus::OutboxFailed
+        );
+        assert_eq!(duplicate, first);
+        assert!(first
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("not durably queued")));
+
         let counter = Arc::new(CountingSink(AtomicUsize::new(0)));
         deferred.bind(counter.clone()).await;
-        deferred.publish("c", &result).await;
-        assert_eq!(counter.0.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            counter.0.load(Ordering::SeqCst),
+            0,
+            "binding must not silently publish an item whose task already recorded OutboxFailed"
+        );
+
+        let published = deferred.publish("c", &result).await;
+        assert_eq!(
+            published.status,
+            platform_api::FusionPublicationStatus::Published
+        );
+        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
     }
 
     // ---- F006/WP6 item 3: before this, a finished background run's only
@@ -481,7 +542,10 @@ mod tests {
             session_id: &str,
             _text: &str,
         ) -> Result<(), platform_api::HandleError> {
-            self.appended_to.lock().unwrap().push(session_id.to_string());
+            self.appended_to
+                .lock()
+                .unwrap()
+                .push(session_id.to_string());
             Ok(())
         }
         async fn emit_background_system_notice(&self, body: &str) {
@@ -638,13 +702,40 @@ mod tests {
         let mut result = dummy_result("fu_same_session");
         result.status = FusionStatus::Completed;
 
-        sink.publish(&current, &result).await;
+        let receipt = sink.publish(&current, &result).await;
+        assert_eq!(
+            receipt.status,
+            platform_api::FusionPublicationStatus::Published
+        );
 
         let notices = mock.background_notices();
         assert_eq!(notices.len(), 1, "exactly one notice: {notices:?}");
         assert!(
             notices[0].contains("see the result appended to this conversation"),
             "got: {notices:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_session_persistence_never_claims_published() {
+        let mock = Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
+        let current = mock.current_session_id().await.to_string();
+        let sink =
+            DesktopFusionCompletionSink::new(mock.clone()).with_durable_storage_enabled(false);
+
+        let receipt = sink.publish(&current, &dummy_result("fu_ephemeral")).await;
+
+        assert_eq!(
+            receipt.status,
+            platform_api::FusionPublicationStatus::StorageFailure
+        );
+        assert!(receipt
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("requires session persistence")));
+        assert!(
+            mock.background_notices().is_empty(),
+            "the defensive guard returns before attempting append/notification work"
         );
     }
 
@@ -669,8 +760,14 @@ mod tests {
         // straight into its `Err(ActionFailed(...))` arm — the same shape a
         // real desktop handle returns once the target session is no longer
         // current (e.g. after `/clear`) or the JSONL append itself fails.
-        sink.publish("some-other-session-that-is-not-current", &result)
+        let receipt = sink
+            .publish("some-other-session-that-is-not-current", &result)
             .await;
+        assert_eq!(
+            receipt.status,
+            platform_api::FusionPublicationStatus::StorageFailure,
+            "an append error must never be reported as Published"
+        );
 
         let notices = mock.background_notices();
         assert_eq!(

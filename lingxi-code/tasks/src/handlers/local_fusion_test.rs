@@ -379,8 +379,13 @@ struct CountingCompletionSink(AtomicUsize);
 
 #[async_trait]
 impl FusionCompletionSink for CountingCompletionSink {
-    async fn publish(&self, _conversation_id: &str, _result: &FusionResult) {
+    async fn publish(
+        &self,
+        _conversation_id: &str,
+        _result: &FusionResult,
+    ) -> platform_api::FusionPublicationReceipt {
         self.0.fetch_add(1, Ordering::SeqCst);
+        platform_api::FusionPublicationReceipt::published()
     }
 }
 
@@ -709,8 +714,13 @@ struct PublishOrderCompletionSink(Arc<StdMutex<Vec<String>>>);
 
 #[async_trait]
 impl FusionCompletionSink for PublishOrderCompletionSink {
-    async fn publish(&self, _conversation_id: &str, _result: &FusionResult) {
+    async fn publish(
+        &self,
+        _conversation_id: &str,
+        _result: &FusionResult,
+    ) -> platform_api::FusionPublicationReceipt {
         self.0.lock().unwrap().push("publish".to_string());
+        platform_api::FusionPublicationReceipt::published()
     }
 }
 
@@ -1867,12 +1877,17 @@ async fn a_sink_that_never_publishes_does_not_revert_a_completed_run_to_failed()
 
     #[async_trait]
     impl FusionCompletionSink for FailingCompletionSink {
-        async fn publish(&self, _conversation_id: &str, _result: &FusionResult) {
+        async fn publish(
+            &self,
+            _conversation_id: &str,
+            _result: &FusionResult,
+        ) -> platform_api::FusionPublicationReceipt {
             self.calls.fetch_add(1, Ordering::SeqCst);
             *self.status_at_publish.lock().unwrap() = self.status_sink.last_status();
             // Simulate a sink that fails to reach the client (e.g.
             // `DesktopFusionCompletionSink::publish`'s real `append_meta_..`
             // erroring) — it logs and returns, touching nothing else.
+            platform_api::FusionPublicationReceipt::storage_failure("test completion sink failure")
         }
     }
 

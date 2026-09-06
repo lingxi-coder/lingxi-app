@@ -133,12 +133,13 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
     };
     // Terminal failure reason. `local_workflow` records the fatal script/engine
     // error on its `WorkflowTerminalOutcome`; `local_agent` stores the runner's
-    // reason on the state directly (registry `set_agent_outcome`). Every other
-    // task type has no reason seam and stays `None`.
+    // reason on the state directly (registry `set_agent_outcome`). Fusion also
+    // preserves a publication/storage error independently from its computed
+    // answer. Every other task type has no reason seam and stays `None`.
     let error = match s {
         TaskState::LocalWorkflow(w) => w.outcome.error.clone(),
         TaskState::LocalAgent(a) => a.error.clone(),
-        TaskState::LocalFusion(f) => f.error.clone(),
+        TaskState::LocalFusion(f) => f.error.clone().or_else(|| f.publication_error.clone()),
         _ => None,
     };
     // F005: `local_fusion` carries its current progress-stage label (the same
@@ -1334,6 +1335,8 @@ mod tests {
             usage: None,
             stage: None,
             effective_timeout_ms: None,
+            publication_status: platform_api::FusionPublicationStatus::Pending,
+            publication_error: None,
             result_published: false,
         });
         registry.insert_state_for_test(state).await;
@@ -1401,6 +1404,8 @@ mod tests {
                 usage: None,
                 stage: None,
                 effective_timeout_ms: None,
+                publication_status: platform_api::FusionPublicationStatus::Pending,
+                publication_error: None,
                 result_published: false,
             }))
             .await;

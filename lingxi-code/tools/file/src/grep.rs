@@ -809,6 +809,10 @@ impl Tool for GrepTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
+
+    fn evidence_capability(&self) -> Option<platform_api::EvidenceCapability> {
+        Some(platform_api::EvidenceCapability::Grep)
+    }
     /// 2.1.206 tool-definition `searchHint` (byte-verified against the
     /// binary, 2 hits).
     fn search_hint(&self) -> Option<&str> {
@@ -1406,6 +1410,17 @@ mod tests {
     #[test]
     fn tool_name_is_grep() {
         assert_eq!(TOOL_NAME, "Grep");
+    }
+
+    #[test]
+    fn grep_exposes_only_its_reviewed_evidence_capability() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        assert_eq!(
+            tool.evidence_capability(),
+            Some(platform_api::EvidenceCapability::Grep)
+        );
     }
 
     #[tokio::test]

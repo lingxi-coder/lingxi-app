@@ -11,6 +11,7 @@ mod analyst;
 mod budget;
 mod config;
 mod decision;
+pub mod evidence;
 mod model_resolver;
 mod orchestrator;
 mod packing;

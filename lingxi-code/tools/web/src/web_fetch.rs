@@ -839,6 +839,10 @@ impl Tool for WebFetchTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
+
+    fn evidence_capability(&self) -> Option<platform_api::EvidenceCapability> {
+        Some(platform_api::EvidenceCapability::WebFetch)
+    }
     /// 2.1.206 tool-definition `searchHint` (byte-verified).
     fn search_hint(&self) -> Option<&str> {
         Some("fetch and extract content from a URL")

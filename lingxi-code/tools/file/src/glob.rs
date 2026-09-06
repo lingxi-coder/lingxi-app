@@ -205,6 +205,10 @@ impl Tool for GlobTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
+
+    fn evidence_capability(&self) -> Option<platform_api::EvidenceCapability> {
+        Some(platform_api::EvidenceCapability::Glob)
+    }
     /// 2.1.206 tool-definition `searchHint` (byte-verified against the
     /// binary, 2 hits).
     fn search_hint(&self) -> Option<&str> {
@@ -751,6 +755,17 @@ mod tests {
     #[test]
     fn tool_name_is_glob() {
         assert_eq!(TOOL_NAME, "Glob");
+    }
+
+    #[test]
+    fn glob_exposes_only_its_reviewed_evidence_capability() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        assert_eq!(
+            tool.evidence_capability(),
+            Some(platform_api::EvidenceCapability::Glob)
+        );
     }
 
     #[test]

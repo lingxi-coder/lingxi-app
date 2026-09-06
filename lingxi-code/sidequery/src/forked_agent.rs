@@ -397,6 +397,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_preserves_each_parent_provider_route() {
+        for (profile, model) in [
+            ("anthropic-profile", "claude-model"),
+            ("openai-profile", "openai-model"),
+            ("google-profile", "gemini-model"),
+            ("custom-profile", "custom-model"),
+        ] {
+            let client = Arc::new(MockClient {
+                seen: Mutex::new(None),
+                canned_text: "SUMMARY".into(),
+                canned_usage: Usage::default(),
+            });
+            let runner = ForkedAgentRunner::new()
+                .with_side_query_client(client.clone(), "startup-model".into());
+            let mut req =
+                request_with(vec![user_msg("history")], vec![user_msg("summarize")], None);
+            req.cache_safe_params.tool_use_options.main_loop_model = model.into();
+            req.cache_safe_params.tool_use_options.model_profile = Some(profile.into());
+            runner.run(req).await.expect("provider-routed summary");
+            let sent = client
+                .seen
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("summary request");
+            assert_eq!(sent.model, model);
+            assert_eq!(sent.profile.as_deref(), Some(profile));
+        }
+    }
+
+    #[tokio::test]
     async fn run_with_client_builds_prefix_first_request_and_maps_result() {
         let mut canned_usage = Usage::default();
         canned_usage.tokens.input = 11;

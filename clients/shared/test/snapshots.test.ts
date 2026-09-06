@@ -1796,6 +1796,10 @@ function validateEvent(name: string, v: unknown): void {
     case 'cost_update':
       validateCost(o);
       break;
+    case 'compaction_status':
+      assert.ok(isString(o['phase']));
+      if ('error' in o) assert.ok(isString(o['error']));
+      break;
     case 'compaction_completed':
       assert.ok(
         isNumber(o['messages_before']) &&

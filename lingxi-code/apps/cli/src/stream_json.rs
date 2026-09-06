@@ -2597,6 +2597,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skipped_compaction_retains_legacy_success_sequence() {
+        let stream = StreamJsonStream::new(make_params("compact-skipped"));
+        let mut receiver = stream.drain_rx.lock().await.take().unwrap();
+        stream.emit_compaction_started().await;
+        stream.emit_compaction_skipped().await;
+        let mut frames = Vec::new();
+        while let Ok(OutboundMsg::Line(line)) = receiver.try_recv() {
+            frames.push(serde_json::from_str::<Value>(&line).unwrap());
+        }
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0]["status"], "compacting");
+        assert_eq!(frames[1]["compact_result"], "success");
+    }
+
+    #[tokio::test]
     async fn compact_events_reach_the_stream_and_json_mode_suppresses_them() {
         for suppressed in [false, true] {
             let stream =

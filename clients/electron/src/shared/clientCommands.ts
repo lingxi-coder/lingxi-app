@@ -113,6 +113,7 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   turn_event_replay: 'host_private',
   cost_update: 'exposed',
   compaction_completed: 'exposed',
+  compaction_status: 'exposed',
   session_started: 'exposed',
   session_ended: 'exposed',
   session_resumed: 'exposed',

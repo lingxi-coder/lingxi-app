@@ -262,15 +262,25 @@ import XCTest
             let token = try XCTUnwrap(source.send("/compact"))
             await flushTasks()
 
-            guard case let .running(startedAt) = source.model.compactionStatus else {
+            XCTAssertEqual(source.model.compactionStatus, .queued)
+            source.applyForTesting(.compactionStatus(phase: "summarizing", error: nil))
+            guard case let .running(_, startedAt, phaseStartedAt, _) = source.model.compactionStatus else {
                 return XCTFail("expected running compaction status")
             }
             XCTAssertTrue(source.model.requiresBackgroundExecution)
             XCTAssertLessThanOrEqual(abs(startedAt.timeIntervalSinceNow), 1)
-            XCTAssertEqual(ConversationCompactionProgress.percent(elapsed: 0), 0)
-            XCTAssertEqual(ConversationCompactionProgress.percent(elapsed: 4), 4)
-            XCTAssertEqual(ConversationCompactionProgress.percent(elapsed: 90), 63)
-            XCTAssertEqual(ConversationCompactionProgress.percent(elapsed: 10_000), 95)
+            XCTAssertEqual(ConversationCompactionProgress.percent(phase: "summarizing", elapsed: 0), 10)
+            XCTAssertEqual(ConversationCompactionProgress.percent(phase: "summarizing", elapsed: 4), 13)
+            XCTAssertEqual(ConversationCompactionProgress.percent(phase: "summarizing", elapsed: 90), 57)
+            XCTAssertEqual(ConversationCompactionProgress.percent(phase: "summarizing", elapsed: 10_000), 84)
+            source.applyForTesting(.compactionStatus(phase: "summarizing", error: nil))
+            XCTAssertEqual(source.model.compactionStatus, .running(phase: "summarizing", startedAt: startedAt, phaseStartedAt: phaseStartedAt))
+            source.applyForTesting(.compactionStatus(phase: "restoring", error: nil))
+            guard case let .running(phase, operationStart, _, _) = source.model.compactionStatus else {
+                return XCTFail("Expected restoring progress")
+            }
+            XCTAssertEqual(phase, "restoring")
+            XCTAssertEqual(operationStart, startedAt)
 
             source.applyForTesting(.compactionCompleted(
                 messagesBefore: 20,

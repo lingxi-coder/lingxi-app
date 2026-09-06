@@ -2251,31 +2251,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "正在整理上下文：%1$d%（%2$d 秒）"
+            "value": "预计进度：%1$d%%（%2$d 秒）"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "正在整理上下文：%1$d%（%2$d 秒）"
+            "value": "預計進度：%1$d%%（%2$d 秒）"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Organizing context: %1$d% (%2$d s)"
+            "value": "Estimated progress: %1$d%% (%2$d s)"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "コンテキストを整理中：%1$d%（%2$d 秒）"
+            "value": "推定進捗：%1$d%%（%2$d 秒）"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "컨텍스트 정리 중: %1$d%(%2$d초)"
+            "value": "예상 진행률: %1$d%%(%2$d초)"
           }
         }
       }
@@ -71456,6 +71456,176 @@
           "stringUnit": {
             "state": "translated",
             "value": "권한 대기 중"
+          }
+        }
+      }
+    },
+    "chat_compaction_waiting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待压缩引擎"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待壓縮引擎"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for compaction engine"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "圧縮エンジンを待機中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "압축 엔진 대기 중"
+          }
+        }
+      }
+    },
+    "chat_compaction_preparing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "准备压缩"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "準備壓縮"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparing compaction"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "圧縮を準備中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "압축 준비 중"
+          }
+        }
+      }
+    },
+    "chat_compaction_summarizing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "生成摘要"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "產生摘要"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Summarizing conversation"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話を要約中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대화 요약 중"
+          }
+        }
+      }
+    },
+    "chat_compaction_restoring": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢复上下文"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢復上下文"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restoring context"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "コンテキストを復元中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컨텍스트 복원 중"
+          }
+        }
+      }
+    },
+    "chat_compaction_skipped": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无需压缩"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無需壓縮"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No compaction needed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "圧縮は不要です"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "압축이 필요하지 않습니다"
           }
         }
       }

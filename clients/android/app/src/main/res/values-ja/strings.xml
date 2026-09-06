@@ -54,7 +54,7 @@
     <string name="chat_compacted_label">会話を圧縮しました</string>
     <string name="chat_compacting_context">コンテキストを圧縮中</string>
     <string name="chat_compaction_failed">コンテキストの圧縮に失敗しました</string>
-    <string name="chat_compaction_progress">コンテキストを整理中：%1$d%%（%2$d 秒）</string>
+    <string name="chat_compaction_progress">推定進捗：%1$d%%（%2$d 秒）</string>
     <string name="chat_compaction_status">コンテキストを圧縮しました：%1$d → %2$d 件、%3$s を解放</string>
     <string name="chat_completed">完了</string>
     <string name="chat_computer_use_dismiss">Computer Use 設定の案内を閉じる</string>
@@ -1974,4 +1974,9 @@
     <string name="voice_turn_max_turns">Agent が最大ターン数に達しました。タップして再試行してください</string>
     <string name="voice_voice_name">音声</string>
     <string name="voice_waiting_permission">権限待ち</string>
+    <string name="chat_compaction_waiting">圧縮エンジンを待機中</string>
+    <string name="chat_compaction_preparing">圧縮を準備中</string>
+    <string name="chat_compaction_summarizing">会話を要約中</string>
+    <string name="chat_compaction_restoring">コンテキストを復元中</string>
+    <string name="chat_compaction_skipped">圧縮は不要です</string>
 </resources>

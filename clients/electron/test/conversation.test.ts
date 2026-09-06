@@ -420,6 +420,59 @@ test('an unrelated error does not falsely fail an active compaction', () => {
   assert.equal(after.items.at(-1)?.type, 'narration');
 });
 
+test('compaction phases follow engine events without an automatic command echo', () => {
+  let s = reduceEvent(emptyConversation(), { type: 'compaction_status', phase: 'preparing' }, 1_000);
+  assert.equal(s.items.length, 1);
+  const id = s.activeCompactionId;
+  assert.equal((s.items[0] as Compaction).startedAt, 1_000);
+  assert.equal((s.items[0] as Compaction).phaseStartedAt, 1_000);
+  for (const phase of ['summarizing', 'restoring']) {
+    s = reduceEvent(s, { type: 'compaction_status', phase }, 5_000);
+    assert.equal(s.activeCompactionId, id);
+    assert.equal((s.items[0] as Compaction).phase, phase);
+    assert.equal((s.items[0] as Compaction).startedAt, 1_000);
+    assert.equal((s.items[0] as Compaction).phaseStartedAt, 5_000);
+    const duplicate = reduceEvent(s, { type: 'compaction_status', phase }, 8_000);
+    assert.equal(duplicate, s, 'repeated starts must neither reset time nor rerender');
+  }
+  assert.equal(reduceEvent(s, { type: 'compaction_status', phase: 'preparing' }, 8_500), s);
+  s = reduceEvent(s, { type: 'compaction_status', phase: 'complete' }, 9_000);
+  assert.equal(s.activeCompactionId, null);
+  assert.equal((s.items[0] as Compaction).status, 'complete');
+  assert.equal((s.items[0] as Compaction).finishedAt, 9_000);
+  s = reduceEvent(s, { type: 'system_notice', message: 'Restoration notice', level: 'info' });
+  s = reduceEvent(s, { type: 'compaction_completed', messages_before: 42, messages_after: 8, bytes_saved: 1024, summary: 'Summary' });
+  assert.equal(s.items.length, 2, 'the data-bearing completion enriches the existing terminal row');
+  assert.equal((s.items[0] as Compaction).messagesBefore, 42);
+});
+
+test('manual compaction reuses its optimistic row and cancels without claiming success', () => {
+  let s = beginCompaction(emptyConversation(), 1_000);
+  s = reduceEvent(s, { type: 'compaction_status', phase: 'preparing' }, 2_000);
+  assert.equal(s.items.length, 2);
+  assert.equal((s.items[1] as Compaction).startedAt, 1_000);
+  s = reduceEvent(s, { type: 'compaction_status', phase: 'cancelled', error: 'Compaction canceled.' }, 3_000);
+  assert.equal((s.items[1] as Compaction).status, 'cancelled');
+  assert.equal(s.activeCompactionId, null);
+  assert.equal(s.pendingSlashName, null);
+  assert.equal(s.summaries.length, 0);
+});
+
+test('a compact slash failure before engine startup settles the optimistic progress', () => {
+  let s = beginCompaction(beginLocalSlashCommand(emptyConversation(), '/compact keep the tests'));
+  s = reduceEvent(s, { type: 'slash_command_result', display: 'No messages to compact', is_error: true });
+  assert.equal(s.activeCompactionId, null);
+  assert.equal((s.items.find((item) => item.type === 'compaction') as Compaction).status, 'error');
+});
+
+test('a duplicate force-compact error after an engine failure does not add another row', () => {
+  let s = beginCompaction(emptyConversation());
+  s = reduceEvent(s, { type: 'compaction_status', phase: 'error', error: 'provider unavailable' });
+  const count = s.items.length;
+  s = reduceEvent(s, { type: 'error', message: 'force_compact failed: handle action failed: provider unavailable' });
+  assert.equal(s.items.length, count);
+});
+
 test('submitted prompt reserves the turn slot before turn_started arrives', () => {
   let s = appendPendingUserPrompt(emptyConversation(), 'fix the race');
   assert.equal(s.running, true);
@@ -793,4 +846,22 @@ test('an unpaired FAILING result upserts the card and still surfaces the error l
   assert.equal(tool.status, 'error');
   assert.equal(tool.note, 'boom');
   assert.equal(s.lastError, 'Bash failed');
+});
+
+
+test('skipped and unknown compaction stages do not claim successful compaction', () => {
+  let state = reduceEvent(emptyConversation(), { type: 'compaction_status', phase: 'future-stage' }, 100);
+  assert.equal((state.items[0] as Compaction).phase, 'future-stage');
+  state = reduceEvent(state, { type: 'compaction_status', phase: 'skipped' }, 200);
+  assert.equal((state.items[0] as Compaction).status, 'skipped');
+  assert.equal(state.activeCompactionId, null);
+});
+
+
+test('unknown phases preserve the known stage high-water mark and clock', () => {
+  let state = reduceEvent(emptyConversation(), { type: 'compaction_status', phase: 'restoring' }, 100);
+  state = reduceEvent(state, { type: 'compaction_status', phase: 'future-stage' }, 200);
+  assert.equal(reduceEvent(state, { type: 'compaction_status', phase: 'summarizing' }, 300), state);
+  state = reduceEvent(state, { type: 'compaction_status', phase: 'restoring' }, 400);
+  assert.equal((state.items[0] as Compaction).phaseStartedAt, 100);
 });

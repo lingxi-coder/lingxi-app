@@ -946,16 +946,63 @@ struct ConversationCompactionSnapshot: Identifiable, Equatable {
 }
 
 enum ConversationCompactionStatus: Equatable {
-    case running(startedAt: Date)
+    case queued
+    case running(phase: String, startedAt: Date, phaseStartedAt: Date, unknownPhase: Bool = false)
     case completed(messagesBefore: UInt32?, messagesAfter: UInt32?, bytesSaved: UInt64?)
+    case skipped
     case failed(detail: String)
+
+    var isActive: Bool {
+        switch self {
+        case .queued, .running: true
+        case .completed, .skipped, .failed: false
+        }
+    }
+
+    static func reducing(
+        _ previous: Self?, phase: String, error: String?, now: Date = Date()
+    ) -> Self? {
+        switch phase {
+        case "preparing", "summarizing", "restoring":
+            let phases = ["preparing", "summarizing", "restoring"]
+            if case let .running(current, startedAt, phaseStartedAt, _) = previous {
+                if (phases.firstIndex(of: phase) ?? -1) <= (phases.firstIndex(of: current) ?? -1) {
+                    return .running(phase: current, startedAt: startedAt, phaseStartedAt: phaseStartedAt)
+                }
+                return .running(phase: phase, startedAt: startedAt, phaseStartedAt: now)
+            }
+            return .running(phase: phase, startedAt: now, phaseStartedAt: now)
+        case "complete":
+            if case .skipped = previous { return previous }
+            if case .completed = previous { return previous }
+            return .completed(messagesBefore: nil, messagesAfter: nil, bytesSaved: nil)
+        case "skipped":
+            return .skipped
+        case "error":
+            return .failed(detail: error ?? "")
+        case "cancelled":
+            return nil
+        default:
+            if case let .running(current, startedAt, phaseStartedAt, _) = previous {
+                return .running(phase: current, startedAt: startedAt, phaseStartedAt: phaseStartedAt, unknownPhase: true)
+            }
+            return previous ?? .running(phase: phase, startedAt: now, phaseStartedAt: now, unknownPhase: true)
+        }
+    }
 }
 
 enum ConversationCompactionProgress {
-    /// Matches the CLI's exponential time estimate; the summarizer exposes no real percent.
-    static func percent(elapsed: TimeInterval) -> Int {
-        let value = (1 - exp(-max(0, elapsed) / 90)) * 100
-        return min(95, max(0, Int(value.rounded())))
+    /// Phase-bounded estimate; only engine-confirmed completion reaches 100%.
+    static func percent(phase: String, elapsed: TimeInterval) -> Int? {
+        if phase == "complete" { return 100 }
+        let base: Double, span: Double, tau: Double, cap: Int
+        switch phase {
+        case "preparing": (base, span, tau, cap) = (0, 10, 5, 9)
+        case "summarizing": (base, span, tau, cap) = (10, 75, 90, 84)
+        case "restoring": (base, span, tau, cap) = (85, 14, 10, 99)
+        default: return nil
+        }
+        return min(cap, Int(base) + Int((span * (1 - exp(-max(0, elapsed) / tau))).rounded()))
     }
 }
 

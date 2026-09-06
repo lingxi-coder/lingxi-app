@@ -133,6 +133,11 @@ async fn proactive_compacts_over_threshold_and_next_call_carries_compacted_histo
         "the model call's messages must include the compaction boundary marker"
     );
 
+    assert_eq!(
+        output.compaction_phase_snapshot().await,
+        ["preparing", "summarizing", "restoring", "complete"]
+    );
+
     // CompactionCompleted must have been emitted.
     let events = output.snapshot().await;
     assert!(
@@ -154,6 +159,7 @@ async fn under_threshold_is_strict_noop() {
 
     orch.run_turn("hello").await.expect("turn ok");
 
+    assert!(output.compaction_phase_snapshot().await.is_empty());
     let after = history(&orch).await;
     // No boundary marker anywhere.
     assert!(
@@ -190,6 +196,7 @@ async fn no_compactor_wired_is_strict_noop() {
 
     orch.run_turn("hello").await.expect("turn ok");
 
+    assert!(output.compaction_phase_snapshot().await.is_empty());
     let after = history(&orch).await;
     assert!(
         !after.iter().any(|m| matches!(

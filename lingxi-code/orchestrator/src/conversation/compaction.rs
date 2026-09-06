@@ -393,6 +393,7 @@ impl ConversationOrchestrator {
         // The API-duration clock starts HERE (summarizer round-trip only) —
         // separate from `compact_started` (pre-hooks), which feeds the
         // boundary's durationMs.
+        self.output.emit_compaction_phase("summarizing").await;
         let api_started = std::time::Instant::now();
         let result = tokio::select! {
             biased;
@@ -991,6 +992,7 @@ impl ConversationOrchestrator {
         compact_started: std::time::Instant,
         cancel: Option<&tokio_util::sync::CancellationToken>,
     ) -> Option<platform_api::CompactionSummary> {
+        self.output.emit_compaction_phase("restoring").await;
         // Preserve the transcript-only summary before `result.messages` is
         // consumed into the replacement history. The TUI carries this on the
         // compact boundary so Ctrl-O can reveal the same summary sent to the
@@ -1674,6 +1676,7 @@ impl ConversationOrchestrator {
         let mut tracking = self.compaction_runtime.compaction_tracking.lock().await;
         // API duration = the summarizer pass only; `compact_started` (above,
         // pre-hooks) is the boundary durationMs clock.
+        self.output.emit_compaction_phase("summarizing").await;
         let api_started = std::time::Instant::now();
         let result = match compactor
             .process_iteration_tracked_with_instructions_and_timing(
@@ -1739,7 +1742,7 @@ impl ConversationOrchestrator {
             // manual-path contract that only the autocompact transition emits a
             // boundary marker.
             drop(tracking);
-            self.output.emit_compaction_finished(None).await;
+            self.output.emit_compaction_skipped().await;
             return;
         }
 

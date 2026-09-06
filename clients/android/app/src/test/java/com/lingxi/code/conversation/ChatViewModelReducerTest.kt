@@ -44,6 +44,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -288,11 +289,18 @@ class ChatViewModelReducerTest {
         assertTrue(source.commands.single() is ClientCommand.ForceCompact)
         assertEquals("/compact", vm.state.value.messages.single().text)
         assertEquals(CompactionProgressStatus.Running, vm.state.value.compaction?.status)
+        assertNull(vm.state.value.compaction?.startedAtMillis)
+        vm.reduceClientEvent(ClientEvent.CompactionStatus("summarizing", null))
+        val summaryStart = vm.state.value.compaction?.startedAtMillis
+        assertNotNull(summaryStart)
+        vm.reduceClientEvent(ClientEvent.CompactionStatus("summarizing", null))
+        vm.reduceClientEvent(ClientEvent.CompactionStatus("restoring", null))
+        assertEquals(summaryStart, vm.state.value.compaction?.startedAtMillis)
         assertTrue(vm.state.value.requiresBackgroundExecution)
-        assertEquals(0, compactProgressPercent(0))
-        assertEquals(4, compactProgressPercent(4_000))
-        assertEquals(63, compactProgressPercent(90_000))
-        assertEquals(95, compactProgressPercent(10_000_000))
+        assertEquals(10, compactProgressPercent("summarizing", 0))
+        assertEquals(13, compactProgressPercent("summarizing", 4_000))
+        assertEquals(57, compactProgressPercent("summarizing", 90_000))
+        assertEquals(84, compactProgressPercent("summarizing", 10_000_000))
         vm.send("must not overlap compaction")
         assertEquals(1, vm.state.value.messages.size)
 

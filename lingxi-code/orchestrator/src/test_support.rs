@@ -307,6 +307,8 @@ pub struct MockOutputStream {
     /// inherit the no-op and every attachment test would pass whether or not
     /// the orchestrator emitted anything.
     attachments: Arc<Mutex<Vec<platform_api::AttachmentKind>>>,
+    /// Compaction lifecycle is separate from transcript events.
+    compaction_phases: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockOutputStream {
@@ -317,7 +319,13 @@ impl MockOutputStream {
             events: Arc::new(Mutex::new(Vec::new())),
             denials: Arc::new(Mutex::new(Vec::new())),
             attachments: Arc::new(Mutex::new(Vec::new())),
+            compaction_phases: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Snapshot observed compaction phases, including start and terminal status.
+    pub async fn compaction_phase_snapshot(&self) -> Vec<String> {
+        self.compaction_phases.lock().await.clone()
     }
 
     /// Snapshot the attachments emitted so far, in emission order.
@@ -460,6 +468,27 @@ impl OutputStream for MockOutputStream {
             cost: cost.clone(),
         });
     }
+    async fn emit_compaction_started(&self) {
+        self.emit_compaction_phase("preparing").await;
+    }
+
+    async fn emit_compaction_phase(&self, phase: &str) {
+        self.compaction_phases.lock().await.push(phase.to_string());
+    }
+
+    async fn emit_compaction_skipped(&self) {
+        self.emit_compaction_phase("skipped").await;
+    }
+
+    async fn emit_compaction_finished(&self, error: Option<&str>) {
+        self.emit_compaction_phase(match error {
+            None => "complete",
+            Some("Compaction canceled.") => "cancelled",
+            Some(_) => "error",
+        })
+        .await;
+    }
+
     async fn emit_compaction_completed(
         &self,
         messages_before: u32,

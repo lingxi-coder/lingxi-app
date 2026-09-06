@@ -1366,6 +1366,10 @@ export function useBridge(): UseBridge {
           };
         }
         if (shouldClearPendingPermissions(state)) {
+          next.conversation = reduceEvent(current.conversation, {
+            type: 'compaction_status', phase: 'error',
+            error: 'Connection lost during compaction',
+          });
           next.permissionQueue = [];
           next.computerAccessQueue = [];
           next.askUserQuestionQueue = [];

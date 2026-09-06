@@ -416,6 +416,11 @@ async fn blocking_pre_compact_hook_skips_compaction_but_not_the_turn() {
     // Turn must still succeed despite the blocked PreCompact pass.
     orch.run_turn("hello").await.expect("turn must not fail");
 
+    assert_eq!(
+        output.compaction_phase_snapshot().await,
+        ["preparing", "error"]
+    );
+
     // The hook fired ...
     assert!(
         probe.pre_fired.load(Ordering::SeqCst),

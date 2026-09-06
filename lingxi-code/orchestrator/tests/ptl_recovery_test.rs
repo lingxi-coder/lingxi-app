@@ -182,6 +182,10 @@ async fn reactive_summary_success_retries_once_below_the_local_auto_threshold() 
     let oldest = orch.session().lock().await.history[0].clone();
     orch.run_turn("trigger").await.unwrap();
     assert_eq!(
+        output.compaction_phase_snapshot().await,
+        ["preparing", "summarizing", "restoring", "complete"]
+    );
+    assert_eq!(
         api.call_lens().await.len(),
         2,
         "one request after a successful summary"
@@ -213,6 +217,10 @@ async fn failed_reactive_summary_keeps_all_original_messages_and_does_not_retry(
     seed_rounds(&orch, 8).await;
     let before = orch.session().lock().await.history.clone();
     orch.run_turn("trigger").await.unwrap();
+    assert_eq!(
+        output.compaction_phase_snapshot().await,
+        ["preparing", "summarizing", "error"]
+    );
     assert_eq!(summary.requests.lock().unwrap().len(), 1);
     assert_eq!(api.call_lens().await.len(), 1);
     assert_eq!(orch.session().lock().await.history[..before.len()], before);

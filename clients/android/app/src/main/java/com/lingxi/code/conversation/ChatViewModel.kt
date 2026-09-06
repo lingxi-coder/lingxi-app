@@ -569,6 +569,9 @@ class ChatViewModel(
             is ClientEvent.SessionEnded -> _state.update {
                 it.copy(pendingQuestions = emptyList(), compaction = null)
             }
+            is ClientEvent.CompactionStatus -> _state.update {
+                it.copy(compaction = reduceCompactionStatus(it.compaction, event.phase, event.error))
+            }
             is ClientEvent.CompactionCompleted -> _state.update { state ->
                 val previous = state.compaction
                 state.copy(
@@ -583,10 +586,8 @@ class ChatViewModel(
             }
             is ClientEvent.Error -> _state.update { state ->
                 val previous = state.compaction
-                if (
-                    previous?.status != CompactionProgressStatus.Running ||
-                    !event.message.startsWith("force_compact failed:", ignoreCase = true)
-                ) {
+                if (previous?.status != CompactionProgressStatus.Running ||
+                    !event.message.startsWith("force_compact failed:", ignoreCase = true)) {
                     state
                 } else {
                     state.copy(
@@ -1983,7 +1984,6 @@ class ChatViewModel(
 
         if (isManualCompactCommand(trimmed)) {
             if (images.isNotEmpty() || _state.value.streaming) return
-            val startedAt = compactionClockMillis()
             if (_sourceScope.value !is ConversationScope.LocalApp) savedState?.set(KEY_DRAFT, "")
             _state.update {
                 it.copy(
@@ -1993,7 +1993,6 @@ class ChatViewModel(
                     messages = it.messages + Message(role = Role.User, text = trimmed),
                     compaction = CompactionProgressUi(
                         status = CompactionProgressStatus.Running,
-                        startedAtMillis = startedAt,
                     ),
                 )
             }

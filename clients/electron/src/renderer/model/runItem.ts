@@ -92,27 +92,34 @@ export interface CommandRunItem {
   readonly isError: boolean;
 }
 
-/** User-visible lifecycle for a manual `/compact` operation. */
+/** User-visible lifecycle for manual and automatic compaction. */
 export interface CompactionRunItem {
   readonly type: 'compaction';
   readonly id: string;
-  readonly status: 'running' | 'complete' | 'error';
+  readonly status: 'running' | 'complete' | 'error' | 'cancelled' | 'skipped';
+  readonly phase?: string;
+  /** High-water mark survives unrecognized future protocol phases. */
+  readonly lastKnownPhase?: string;
+  /** Stored on receipt, so remounting or switching sessions cannot reset the clock. */
+  readonly startedAt?: number;
+  /** Starts once per forward engine phase, independently of total elapsed time. */
+  readonly phaseStartedAt?: number;
+  readonly finishedAt?: number;
   readonly messagesBefore?: number;
   readonly messagesAfter?: number;
   readonly bytesSaved?: number;
   readonly detail?: string;
 }
 
-/**
- * CLI-compatible time estimate for context compaction.
- *
- * The summarizer exposes no token-level progress, so the TUI uses
- * `min(95, round((1 - e^(-t/90)) * 100))`. Keeping the 95% ceiling prevents a
- * time estimate from claiming completion before the terminal engine event.
- */
-export function compactProgressPercent(elapsedMs: number): number {
-  const elapsedSeconds = Math.max(0, elapsedMs) / 1_000;
-  return Math.min(95, Math.round((1 - Math.exp(-elapsedSeconds / 90)) * 100));
+/** Provider-neutral estimate bounded by engine-confirmed stage transitions. */
+export function compactProgressPercent(phase: string | undefined, elapsedMs: number): number | null {
+  if (phase === 'complete') return 100;
+  const parameters = phase === 'preparing' ? [0, 10, 5, 9]
+    : phase === 'summarizing' ? [10, 75, 90, 84]
+      : phase === 'restoring' ? [85, 14, 10, 99] : null;
+  if (!parameters) return null;
+  const [base, span, seconds, cap] = parameters as [number, number, number, number];
+  return Math.min(cap, base + Math.round(span * (1 - Math.exp(-Math.max(0, elapsedMs) / 1_000 / seconds))));
 }
 
 export type CommandPresentationKind =

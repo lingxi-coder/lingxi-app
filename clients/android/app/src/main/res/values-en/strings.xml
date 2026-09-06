@@ -54,7 +54,7 @@
     <string name="chat_compacted_label">Conversation compacted</string>
     <string name="chat_compacting_context">Compacting context</string>
     <string name="chat_compaction_failed">Context compaction failed</string>
-    <string name="chat_compaction_progress">Organizing context: %1$d%% (%2$d s)</string>
+    <string name="chat_compaction_progress">Estimated progress: %1$d%% (%2$d s)</string>
     <string name="chat_compaction_status">Context compacted: %1$d → %2$d messages, freed %3$s</string>
     <string name="chat_completed">Completed</string>
     <string name="chat_computer_use_dismiss">Dismiss the Computer Use setup notice</string>
@@ -1980,4 +1980,9 @@
     <string name="voice_turn_max_turns">The agent reached the maximum number of turns; please tap retry</string>
     <string name="voice_voice_name">Voice</string>
     <string name="voice_waiting_permission">Waiting for Permission</string>
+    <string name="chat_compaction_waiting">Waiting for compaction engine</string>
+    <string name="chat_compaction_preparing">Preparing compaction</string>
+    <string name="chat_compaction_summarizing">Summarizing conversation</string>
+    <string name="chat_compaction_restoring">Restoring context</string>
+    <string name="chat_compaction_skipped">No compaction needed</string>
 </resources>

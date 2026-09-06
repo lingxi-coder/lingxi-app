@@ -252,7 +252,7 @@ export function beginLocalSlashCommand(state: ConversationState, raw: string): C
  * have not. The pending slash name distinguishes those paths so every entry
  * point gets exactly one command echo and one status row.
  */
-export function beginCompaction(state: ConversationState): ConversationState {
+export function beginCompaction(state: ConversationState, now = Date.now()): ConversationState {
   if (state.activeCompactionId !== null) {
     const active = state.items.find((item) => item.id === state.activeCompactionId);
     if (active?.type === 'compaction' && active.status === 'running') return state;
@@ -263,11 +263,29 @@ export function beginCompaction(state: ConversationState): ConversationState {
   const id = itemId(base.nextId);
   return {
     ...base,
-    items: [...base.items, { type: 'compaction', id, status: 'running' }],
+    items: [...base.items, { type: 'compaction', id, status: 'running', phase: 'queued', startedAt: now }],
     pendingSlashName: '/compact',
     activeCompactionId: id,
     lastError: null,
     nextId: base.nextId + 1,
+  };
+}
+
+/** Settle only the active compact operation, leaving any model turn alone. */
+function finishCompaction(
+  state: ConversationState,
+  status: 'complete' | 'error' | 'cancelled' | 'skipped',
+  detail: string | undefined,
+  now: number,
+): ConversationState {
+  const index = state.items.findIndex((item) => item.id === state.activeCompactionId && item.type === 'compaction');
+  if (index < 0) return state;
+  const items = state.items.slice();
+  items[index] = { ...items[index], status, detail, finishedAt: now } as RunItem;
+  const manual = state.pendingSlashName?.toLowerCase() === '/compact';
+  return {
+    ...state, items, activeCompactionId: null,
+    ...(manual ? { pendingSlashName: null, running: false } : {}),
   };
 }
 
@@ -293,7 +311,7 @@ export function appendPendingUserPrompt(state: ConversationState, text: string, 
  * (never mutates the input) so React change-detection stays correct — EXCEPT
  * when nothing changed, where it returns the identical object on purpose.
  */
-export function reduceEvent(state: ConversationState, event: ClientEvent): ConversationState {
+export function reduceEvent(state: ConversationState, event: ClientEvent, now = Date.now()): ConversationState {
   switch (event.type) {
     case 'session_started':
       // A brand-new transcript whose ids restart at `i1`. The session id goes
@@ -494,9 +512,38 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
         },
       };
 
+    case 'compaction_status': {
+      const phase = event.phase;
+      if (phase === 'complete' || phase === 'error' || phase === 'cancelled' || phase === 'skipped') {
+        return finishCompaction(state, phase, event.error, now);
+      }
+      const index = state.items.findIndex((item) => item.id === state.activeCompactionId && item.type === 'compaction');
+      if (index >= 0) {
+        const previous = state.items[index];
+        if (previous?.type !== 'compaction' || previous.phase === phase) return state;
+        const stages = ['queued', 'preparing', 'summarizing', 'restoring'];
+        const previousKnownPhase = previous.lastKnownPhase ?? previous.phase;
+        if (stages.includes(phase) && stages.indexOf(phase) < stages.indexOf(previousKnownPhase ?? '')) return state;
+        const items = state.items.slice();
+        items[index] = {
+          ...previous, phase,
+          lastKnownPhase: stages.includes(phase) ? phase : previousKnownPhase,
+          phaseStartedAt: stages.includes(phase) && phase !== previousKnownPhase ? now : previous.phaseStartedAt,
+        };
+        return { ...state, items };
+      }
+      const id = itemId(state.nextId);
+      return {
+        ...state,
+        items: [...state.items, { type: 'compaction', id, status: 'running', phase, startedAt: now, phaseStartedAt: now }],
+        activeCompactionId: id,
+        nextId: state.nextId + 1,
+      };
+    }
+
     case 'compaction_completed': {
       const content = event.summary?.trim() ?? '';
-      const lastItem = state.items.at(-1);
+      const lastItem = [...state.items].reverse().find((item) => item.type === 'compaction');
       const lastSummary = state.summaries.at(-1);
       if (
         state.activeCompactionId === null
@@ -510,7 +557,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
 
       const items = state.items.slice();
       const index = state.activeCompactionId === null
-        ? -1
+        ? (lastItem?.type === 'compaction' && lastItem.status === 'complete' && lastItem.messagesBefore === undefined ? items.findIndex((item) => item.id === lastItem.id) : -1)
         : items.findIndex((item) => item.id === state.activeCompactionId && item.type === 'compaction');
       const completed = {
         type: 'compaction' as const,
@@ -518,6 +565,8 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
         messagesBefore: event.messages_before,
         messagesAfter: event.messages_after,
         bytesSaved: event.bytes_saved,
+        finishedAt: index >= 0 && items[index]?.type === 'compaction' ? (items[index] as Extract<RunItem, { type: 'compaction' }>).finishedAt ?? now : now,
+        detail: undefined,
       };
       let nextId = state.nextId;
       if (index >= 0) {
@@ -559,6 +608,12 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
       return pushNotice(state, event.message);
 
     case 'slash_command_result': {
+      // A validation failure can precede the engine's first lifecycle event.
+      if (state.activeCompactionId !== null && state.pendingSlashName === '/compact') {
+        const cancelled = /\bcancell?ed\b/i.test(event.display);
+        const failed = event.is_error === true || /^(?:Error|No messages|Not enough messages|Compaction (?:failed|blocked))/i.test(event.display);
+        return finishCompaction(state, cancelled ? 'cancelled' : failed ? 'error' : 'complete', event.display, now);
+      }
       const items = state.items.slice();
       closeThinking(items, state.openThinkingIndex);
       items.push({
@@ -586,31 +641,13 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
     }
 
     case 'error': {
-      if (/^force_compact failed:\s*/i.test(event.message) && state.activeCompactionId !== null) {
-        const index = state.items.findIndex((item) => (
-          item.id === state.activeCompactionId && item.type === 'compaction'
-        ));
-        if (index >= 0) {
-          const items = state.items.slice();
-          const previous = items[index];
-          items[index] = {
-            ...previous,
-            type: 'compaction',
-            status: 'error',
-            detail: event.message
-              .replace(/^force_compact failed:\s*/i, '')
-              .replace(/^handle action failed:\s*/i, '')
-              .trim() || 'Unknown error',
-          };
-          return {
-            ...state,
-            items,
-            activeCompactionId: null,
-            pendingSlashName: state.pendingSlashName?.trim().toLocaleLowerCase() === '/compact'
-              ? null
-              : state.pendingSlashName,
-          };
+      if (/^force_compact failed:\s*/i.test(event.message)) {
+        const detail = event.message.replace(/^force_compact failed:\s*/i, '').replace(/^handle action failed:\s*/i, '').trim() || 'Unknown error';
+        if (state.activeCompactionId !== null) {
+          return finishCompaction(state, /\bcancell?ed\b/i.test(detail) ? 'cancelled' : 'error', detail, now);
         }
+        const last = state.items.at(-1);
+        if (last?.type === 'compaction' && (last.status === 'error' || last.status === 'cancelled')) return state;
       }
       // Error is shared by turn failures and unrelated commands/listings. A
       // hard turn failure is followed by an explicit turn_ended from the
@@ -789,7 +826,7 @@ function isRenderableMessageImage(image: MessageImageDto): boolean {
 
 /** Fold a whole event sequence (handy for tests + re-hydration). */
 export function reduceEvents(state: ConversationState, events: readonly ClientEvent[]): ConversationState {
-  return events.reduce(reduceEvent, state);
+  return events.reduce((current, event) => reduceEvent(current, event), state);
 }
 
 // ── internals ────────────────────────────────────────────────────────────────

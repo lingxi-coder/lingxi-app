@@ -312,6 +312,10 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::CostUpdate.session_duration_secs", "u64");
     put("ClientEvent::CostUpdate.formatted", "String");
 
+    put("ClientEvent::CompactionStatus", "compaction_status");
+    put("ClientEvent::CompactionStatus.phase", "String");
+    put("ClientEvent::CompactionStatus.error", "Option<String>");
+
     put("ClientEvent::CompactionCompleted", "compaction_completed");
     put("ClientEvent::CompactionCompleted.messages_before", "u32");
     put("ClientEvent::CompactionCompleted.messages_after", "u32");

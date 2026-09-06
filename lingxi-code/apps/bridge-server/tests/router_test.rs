@@ -2594,12 +2594,32 @@ async fn force_compact_completion_routes_over_ws_without_an_active_turn() {
         .bind(gate, Arc::new(NoopTurnDriver))
         .bind_router(router);
 
+    let output = client_adapter::AdapterOutputStream::new(connection.event_sink());
     let endpoint = McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(connection))
         .await
         .expect("endpoint must start");
     endpoint.set_auth_token(E2E_TOKEN.to_string());
     let mut ws = connect(endpoint.port()).await;
     send_hello(&mut ws).await;
+
+    // The production orchestrator emits to this owned sink. Idle compaction
+    // phases must still reach the wire while no conversation turn is active.
+    platform_api::OutputStream::emit_compaction_started(&output).await;
+    platform_api::OutputStream::emit_compaction_phase(&output, "summarizing").await;
+    platform_api::OutputStream::emit_compaction_phase(&output, "restoring").await;
+    platform_api::OutputStream::emit_compaction_finished(&output, None).await;
+    for phase in ["preparing", "summarizing", "restoring", "complete"] {
+        match next_frame(&mut ws).await {
+            Frame::Event(ClientEvent::CompactionStatus {
+                phase: actual,
+                error,
+            }) => {
+                assert_eq!(actual, phase);
+                assert!(error.is_none());
+            }
+            other => panic!("expected idle CompactionStatus over WS, got {other:?}"),
+        }
+    }
 
     send_command(&mut ws, &ClientCommand::ForceCompact).await;
 

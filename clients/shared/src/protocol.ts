@@ -1999,6 +1999,7 @@ export type ClientEvent =
   // ── Listing / screen events ─────────────────────────────────────────────────
   | { type: 'model_list'; models: string[]; current: string; details?: ModelDetailsDto[] }
   | { type: 'provider_model_catalog'; providers: ProviderModelCatalogEntryDto[] }
+  | { type: 'compaction_status'; phase: string; error?: string }
   | { type: 'model_changed'; model: string }
   | { type: 'permission_mode_changed'; mode: PermissionModeId }
   | {

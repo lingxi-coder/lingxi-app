@@ -906,7 +906,7 @@ final class ConversationModel: ObservableObject {
         if streaming || backgroundTasks.contains(where: { $0.status.requiresExecutionLease }) {
             return true
         }
-        if case .running = compactionStatus {
+        if compactionStatus?.isActive == true {
             return true
         }
         return items.contains { item in
@@ -2638,7 +2638,8 @@ final class MockConversationSource: ConversationSource {
         private func acceptTurnEvent(_ event: ClientEvent) -> Bool {
             switch event {
             case .askUserQuestion, .askUserQuestionResolved, .permissionRequestResolved,
-                 .taskStatusChanged, .taskRow, .workflowResumed, .planUpdated, .coordinatorStatus:
+                 .taskStatusChanged, .taskRow, .workflowResumed, .planUpdated, .coordinatorStatus,
+                 .compactionStatus, .compactionCompleted:
                 // Deliberately OUTSIDE the turn gate: the engine's broker
                 // replays a still-pending AskUserQuestion (and resolves it)
                 // after a foreground re-connect, a background task's status
@@ -2838,7 +2839,7 @@ final class MockConversationSource: ConversationSource {
             model.isCancelling = false
             model.slashCommandPending = true
             model.compactionStatus = Self.isCompactSlash(raw)
-                ? .running(startedAt: Date())
+                ? .queued
                 : nil
             model.turnCompletion = nil
             turnSpeechSequence = 0
@@ -4821,6 +4822,10 @@ final class MockConversationSource: ConversationSource {
                 guard acceptTurnEvent(event) else { return }
                 updateActiveRun { $0.costFormatted = formatted }
 
+            case let .compactionStatus(phase, error):
+                guard acceptTurnEvent(event) else { return }
+                model.compactionStatus = .reducing(model.compactionStatus, phase: phase, error: error)
+
             case let .compactionCompleted(messagesBefore, messagesAfter, bytesSaved, _):
                 guard acceptTurnEvent(event) else { return }
                 model.compactionStatus = .completed(
@@ -5196,9 +5201,13 @@ final class MockConversationSource: ConversationSource {
                 )
                 print("[LingxiCode] turn error kind=\(kind) accepted=\(accepted) message=\(message)")
                 guard accepted else { return }
-                if case .running = model.compactionStatus,
+                if model.compactionStatus?.isActive == true,
                    message.lowercased().hasPrefix("force_compact failed:") {
-                    let detail = message.dropFirst("force_compact failed:".count)
+                    let detail = message
+                        .replacingOccurrences(
+                            of: "^force_compact failed:\\s*", with: "",
+                            options: [.regularExpression, .caseInsensitive]
+                        )
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                         .replacingOccurrences(
                             of: "^handle action failed:\\s*",

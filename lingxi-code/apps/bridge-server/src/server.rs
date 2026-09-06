@@ -1605,6 +1605,11 @@ mod tests {
         assert!(is_owned_turn_event(&ClientEvent::TextDelta {
             text: "late".to_string(),
         }));
+        // Manual /compact runs while idle; progress must bypass turn ownership.
+        assert!(!is_owned_turn_event(&ClientEvent::CompactionStatus {
+            phase: "summarizing".to_string(),
+            error: None,
+        }));
         assert!(is_owned_turn_event(&ClientEvent::CompactionCompleted {
             messages_before: 2,
             messages_after: 1,

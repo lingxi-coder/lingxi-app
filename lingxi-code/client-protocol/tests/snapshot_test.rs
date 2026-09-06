@@ -79,10 +79,10 @@ use client_protocol::local_apps::{
     LocalAppCreateConfirmationRequestDto, LocalAppGateStatusDto,
     LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto, LocalAppMcpToolDiffDto,
     LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto, LocalAppPluginComponentCountsDto,
-    LocalAppPluginErrorCodeDto, LocalAppPluginInventoryDto,
-    LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto, LocalAppVerificationStatusDto,
-    LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto, ManagedLocalAppMcpStatusDto,
-    McpAppWidgetDto, PluginActivationStateDto, PluginCommandDto, PluginStatusDto,
+    LocalAppPluginErrorCodeDto, LocalAppPluginInventoryDto, LocalAppRejectedCandidateDto,
+    LocalAppTemplateSummaryDto, LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto,
+    ManagedLocalAppMcpServerDto, ManagedLocalAppMcpStatusDto, McpAppWidgetDto,
+    PluginActivationStateDto, PluginCommandDto, PluginStatusDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use client_protocol::permission::{
@@ -345,6 +345,13 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 api_calls: 3,
                 session_duration_secs: 42,
                 formatted: "$0.0123".to_string(),
+            },
+        ),
+        (
+            "event/compaction_status.json",
+            ClientEvent::CompactionStatus {
+                phase: "summarizing".to_string(),
+                error: None,
             },
         ),
         (

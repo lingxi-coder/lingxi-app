@@ -600,6 +600,9 @@ impl platform_api::OutputStream for CompactLifecycleOutput {
     async fn emit_compaction_started(&self) {
         self.0.lock().unwrap().push("started".into());
     }
+    async fn emit_compaction_phase(&self, phase: &str) {
+        self.0.lock().unwrap().push(phase.into());
+    }
     async fn emit_compaction_finished(&self, error: Option<&str>) {
         self.0
             .lock()
@@ -615,7 +618,7 @@ impl platform_api::OutputStream for CompactLifecycleOutput {
     }
 }
 
-struct LifecycleSummaryClient(&'static str);
+struct LifecycleSummaryClient(&'static str, Option<tokio_util::sync::CancellationToken>);
 
 #[async_trait::async_trait]
 impl sidequery::SideQueryClient for LifecycleSummaryClient {
@@ -623,6 +626,9 @@ impl sidequery::SideQueryClient for LifecycleSummaryClient {
         &self,
         _request: sidequery::SideQueryRequest,
     ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+        if let Some(cancel) = &self.1 {
+            cancel.cancel();
+        }
         Ok(sidequery::SideQueryResponse {
             text: Some(self.0.into()),
             structured: None,
@@ -636,33 +642,51 @@ impl sidequery::SideQueryClient for LifecycleSummaryClient {
 
 #[tokio::test]
 async fn manual_status_lifecycle_matches_success_empty_and_too_short_oracles() {
-    for (count, summary, expected) in [
-        (0, "ok", Vec::<&str>::new()),
+    for (count, summary, cancel_after_summary, expected) in [
+        (0, "ok", false, Vec::<&str>::new()),
         (
             2,
             "ok",
-            vec!["started", "failed:Not enough messages to compact."],
+            false,
+            vec![
+                "started",
+                "summarizing",
+                "failed:Not enough messages to compact.",
+            ],
         ),
         (
             4,
             "\u{feff} \n\t",
+            false,
             vec![
                 "started",
+                "summarizing",
                 "failed:Error during compaction: summarization produced empty response",
             ],
         ),
         (
             4,
             "<summary>ok</summary>",
-            vec!["started", "success", "boundary"],
+            false,
+            vec!["started", "summarizing", "restoring", "success", "boundary"],
+        ),
+        (
+            4,
+            "<summary>ok</summary>",
+            true,
+            vec!["started", "summarizing", "failed:Compaction canceled."],
         ),
     ] {
+        let cancel = tokio_util::sync::CancellationToken::new();
         let output = Arc::new(CompactLifecycleOutput::default());
         let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
-        let runner = Arc::new(
-            sidequery::ForkedAgentRunner::new()
-                .with_side_query_client(Arc::new(LifecycleSummaryClient(summary)), "test".into()),
-        );
+        let runner = Arc::new(sidequery::ForkedAgentRunner::new().with_side_query_client(
+            Arc::new(LifecycleSummaryClient(
+                summary,
+                cancel_after_summary.then(|| cancel.clone()),
+            )),
+            "test".into(),
+        ));
         let compact = Arc::new(CompactionOrchestrator::with_autocompactor(
             compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
             u64::MAX,
@@ -681,7 +705,7 @@ async fn manual_status_lifecycle_matches_success_empty_and_too_short_oracles() {
         .with_compaction(compact);
         seed_history(&orch, count).await;
         let before = orch.session().lock().await.history.clone();
-        let result = orch.force_compact().await;
+        let result = orch.force_compact_with_cancel(cancel).await;
         assert_eq!(
             *output.0.lock().unwrap(),
             expected,

@@ -876,15 +876,28 @@ private struct CompactionRuntimeFooter: View {
 
     var body: some View {
         switch status {
-        case let .running(startedAt):
+        case .queued:
+            row(
+                title: String(localized: "chat_compaction_waiting"),
+                detail: nil,
+                icon: .book,
+                color: t.accent,
+                progress: nil,
+                preparing: true
+            )
+        case let .running(phase, startedAt, phaseStartedAt, unknownPhase):
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let elapsed = max(0, context.date.timeIntervalSince(startedAt))
+                let percent = ConversationCompactionProgress.percent(phase: unknownPhase ? "unknown" : phase, elapsed: context.date.timeIntervalSince(phaseStartedAt))
                 row(
-                    title: String(localized: "chat_compacting_context"),
-                    detail: "\(ConversationCompactionProgress.percent(elapsed: elapsed))% · \(Int(elapsed))s",
+                    title: unknownPhase ? String(localized: "chat_compacting_context") : phase == "preparing" ? String(localized: "chat_compaction_preparing")
+                        : phase == "summarizing" ? String(localized: "chat_compaction_summarizing")
+                        : String(localized: "chat_compaction_restoring"),
+                    detail: percent.map { String(format: String(localized: "chat_compaction_progress"), $0, Int(elapsed)) },
                     icon: .book,
                     color: t.accent,
-                    progress: ConversationCompactionProgress.percent(elapsed: elapsed)
+                    progress: percent,
+                    preparing: unknownPhase
                 )
             }
         case let .completed(messagesBefore, messagesAfter, bytesSaved):
@@ -894,11 +907,13 @@ private struct CompactionRuntimeFooter: View {
                     messagesBefore: messagesBefore,
                     messagesAfter: messagesAfter,
                     bytesSaved: bytesSaved
-                ),
+                ).map { "100% · " + $0 } ?? "100%",
                 icon: .check,
                 color: t.ok,
                 progress: nil
             )
+        case .skipped:
+            row(title: String(localized: "chat_compaction_skipped"), detail: nil, icon: .check, color: t.ok, progress: nil)
         case let .failed(detail):
             row(
                 title: String(localized: "chat_compaction_failed"),
@@ -930,7 +945,8 @@ private struct CompactionRuntimeFooter: View {
         detail: String?,
         icon: LXIconName,
         color: Color,
-        progress: Int?
+        progress: Int?,
+        preparing: Bool = false
     ) -> some View {
         HStack(alignment: .top, spacing: 9) {
             LXIcon(
@@ -951,6 +967,9 @@ private struct CompactionRuntimeFooter: View {
                 }
                 if let progress {
                     ProgressView(value: Double(progress), total: 100)
+                        .tint(color)
+                } else if preparing {
+                    ProgressView()
                         .tint(color)
                 }
             }

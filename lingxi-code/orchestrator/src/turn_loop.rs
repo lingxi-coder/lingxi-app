@@ -1651,6 +1651,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
         // API duration = the summarizer pass only; `compact_started` (above,
         // pre-hooks) is the boundary durationMs clock. Folding hook wall-time
         // into `record_compaction_usage` would inflate /cost's API duration.
+        orch.output.emit_compaction_phase("summarizing").await;
         let api_started = std::time::Instant::now();
         let compact_result = {
             let mut tracking = orch.compaction_runtime.compaction_tracking.lock().await;
@@ -1703,6 +1704,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     .emit_compaction_finished(Some(compaction::RAPID_REFILL_THRASHING_MESSAGE))
                     .await;
                 return Ok(PtlCallOutcome::RapidRefillBreaker);
+            }
+            if !result.was_compacted {
+                // Close progress-aware clients even when the reactive pass was
+                // skipped. This callback leaves the legacy SDK sequence intact.
+                orch.output.emit_compaction_phase("skipped").await;
             }
             if result.was_compacted {
                 // Apply the post-compact transition (history swap + boundary

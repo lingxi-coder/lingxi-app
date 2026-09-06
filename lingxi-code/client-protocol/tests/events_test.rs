@@ -25,9 +25,9 @@ use client_protocol::local_apps::{
     AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto, LocalAppCreateConfirmationRequestDto,
     LocalAppGateStatusDto, LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto,
     LocalAppMcpToolDiffDto, LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto,
-    LocalAppPluginErrorCodeDto, LocalAppRejectedCandidateDto,
-    LocalAppTemplateSummaryDto, LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto,
-    ManagedLocalAppMcpServerDto, ManagedLocalAppMcpStatusDto, McpAppWidgetDto,
+    LocalAppPluginErrorCodeDto, LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto,
+    LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto,
+    ManagedLocalAppMcpStatusDto, McpAppWidgetDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use client_protocol::permission::PermissionResolutionDto;
@@ -1067,5 +1067,29 @@ fn audio_op_variants_round_trip_with_expected_tags() {
         assert_eq!(json["type"], tag, "AudioOpDto::{op:?} tag mismatch");
         let back: AudioOpDto = serde_json::from_value(json).expect("deserialize AudioOpDto");
         assert_eq!(back, op);
+    }
+}
+
+/// Progress is independent of successful compaction counts and survives idle commands.
+#[test]
+fn compaction_status_round_trips_with_optional_error() {
+    for (phase, error) in [
+        ("preparing", None),
+        ("summarizing", None),
+        ("restoring", None),
+        ("complete", None),
+        ("error", Some("summary failed")),
+        ("cancelled", Some("Compaction canceled.")),
+    ] {
+        let event = ClientEvent::CompactionStatus {
+            phase: phase.into(),
+            error: error.map(str::to_string),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "compaction_status");
+        assert_eq!(json["phase"], phase);
+        assert_eq!(json.get("error").and_then(serde_json::Value::as_str), error);
+        let decoded: ClientEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, event);
     }
 }

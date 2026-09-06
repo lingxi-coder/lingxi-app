@@ -2991,6 +2991,11 @@ pub trait OutputStream: Send + Sync {
     /// during the compaction wait.
     async fn emit_compaction_started(&self) {}
 
+    /// Report an observed compaction phase (`summarizing` or `restoring`).
+    /// Default no-op preserves existing CLI/SDK event sequences. Progress-aware
+    /// clients use this together with started/finished, never a timer estimate.
+    async fn emit_compaction_phase(&self, _phase: &str) {}
+
     /// Emit the committed compact boundary with its persistent UUID and metadata.
     /// SDK transports use this to preserve resume/relink information.
     async fn emit_compact_boundary(
@@ -3003,6 +3008,13 @@ pub trait OutputStream: Send + Sync {
     /// End the compaction status lifecycle on success or failure. Unlike
     /// `emit_compaction_completed`, this also clears status after failed attempts.
     async fn emit_compaction_finished(&self, _error: Option<&str>) {}
+
+    /// A started attempt did not need a compaction transition. Legacy streams
+    /// retain their successful finish event; progress-aware clients can label
+    /// this outcome without claiming that summary/restoration completed.
+    async fn emit_compaction_skipped(&self) {
+        self.emit_compaction_finished(None).await;
+    }
 
     /// Emit a transcript-only synthetic summary after its compact boundary.
     async fn emit_compact_summary(&self, _summary_uuid: &str, _summary: &str) {}

@@ -129,6 +129,7 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   turn_event_replay: true,
   cost_update: true,
   compaction_completed: true,
+  compaction_status: true,
   session_started: true,
   session_ended: true,
   session_resumed: true,

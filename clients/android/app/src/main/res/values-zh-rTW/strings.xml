@@ -54,7 +54,7 @@
     <string name="chat_compacted_label">對話已壓縮</string>
     <string name="chat_compacting_context">正在壓縮上下文</string>
     <string name="chat_compaction_failed">上下文壓縮失敗</string>
-    <string name="chat_compaction_progress">正在整理上下文：%1$d%%（%2$d 秒）</string>
+    <string name="chat_compaction_progress">預計進度：%1$d%%（%2$d 秒）</string>
     <string name="chat_compaction_status">上下文已壓縮：%1$d → %2$d 條，釋放 %3$s</string>
     <string name="chat_completed">已完成</string>
     <string name="chat_computer_use_dismiss">關閉 Computer Use 配置提示</string>
@@ -1974,4 +1974,9 @@
     <string name="voice_turn_max_turns">Agent 已達到最大輪數，請輕點重試</string>
     <string name="voice_voice_name">聲音</string>
     <string name="voice_waiting_permission">等待權限</string>
+    <string name="chat_compaction_waiting">等待壓縮引擎</string>
+    <string name="chat_compaction_preparing">準備壓縮</string>
+    <string name="chat_compaction_summarizing">產生摘要</string>
+    <string name="chat_compaction_restoring">恢復上下文</string>
+    <string name="chat_compaction_skipped">無需壓縮</string>
 </resources>

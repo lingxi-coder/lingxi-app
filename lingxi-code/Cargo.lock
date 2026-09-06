@@ -1172,6 +1172,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "uniffi",
+ "uniffi_meta",
 ]
 
 [[package]]
@@ -2240,6 +2241,7 @@ dependencies = [
  "async-trait",
  "core",
  "cost",
+ "llm-client",
  "platform-api",
  "protocol",
  "serde",
@@ -6377,6 +6379,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "telemetry",
  "thiserror 2.0.18",
  "tokio",
  "tool-api",

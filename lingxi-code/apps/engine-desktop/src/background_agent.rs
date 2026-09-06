@@ -200,6 +200,53 @@ impl SubagentSpawner for BackgroundAgentSpawner {
         self.inner.spawn(request, inherit).await
     }
 
+    /// Forwarded explicitly. The trait's default chain would collapse this
+    /// onto [`SubagentSpawner::spawn`] and silently DROP `progress`, so a
+    /// caller that asked for nested-step progress would get none the moment
+    /// this decorator is in the chain.
+    async fn spawn_with_progress(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<String>>,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.inner.spawn_with_progress(request, inherit, progress).await
+    }
+
+    /// Forwarded explicitly — see [`Self::spawn_with_progress`]; the default
+    /// chain would drop the typed live-event `observer` as well.
+    async fn spawn_with_observer(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<String>>,
+        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.inner
+            .spawn_with_observer(request, inherit, progress, observer)
+            .await
+    }
+
+    /// Forwarded explicitly, and the load-bearing one: Fusion spawns every
+    /// panel through this method and passes a `PanelAllocationObserver` that
+    /// records whether the pool really handed the panel a child. If the
+    /// default chain ate the observer, every bar-aborted panel would be
+    /// classified `"not_dispatched"` and the Agent tool would release spawn
+    /// slots for subagents that really exist. The workflow idle `watchdog`
+    /// rides the same method and would be dropped with it.
+    async fn spawn_workflow_with_observer(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<String>>,
+        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        watchdog: platform_api::subagent_spawn::WorkflowQueryWatchdog,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.inner
+            .spawn_workflow_with_observer(request, inherit, progress, observer, watchdog)
+            .await
+    }
+
     async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
         self.inner.agent_listing().await
     }
@@ -255,7 +302,7 @@ mod tests {
     use std::future::Future;
     use std::path::PathBuf;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
@@ -407,6 +454,96 @@ mod tests {
         }
     }
 
+    /// Records WHICH `SubagentSpawner` trait method the decorator actually
+    /// reached on the wrapped spawner, and whether the observer/watchdog
+    /// arguments survived the hop. A decorator that overrides only `spawn`
+    /// silently drops both through the trait's default chain.
+    #[derive(Default)]
+    struct ForwardingProbeSpawner {
+        /// Method names, in call order: "spawn" | "spawn_with_progress" |
+        /// "spawn_with_observer" | "spawn_workflow_with_observer".
+        calls: StdMutex<Vec<&'static str>>,
+        /// `true` once a call arrived carrying `Some(observer)`.
+        saw_observer: AtomicBool,
+        /// The `stall_timeout_ms` of the watchdog that arrived, if any.
+        saw_watchdog_ms: AtomicU64,
+        /// `true` once a call arrived carrying `Some(progress)`.
+        saw_progress: AtomicBool,
+    }
+
+    #[async_trait]
+    impl SubagentSpawner for ForwardingProbeSpawner {
+        async fn spawn(
+            &self,
+            _request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            self.calls.lock().unwrap().push("spawn");
+            Err(SubagentSpawnError::Internal("probe".into()))
+        }
+
+        async fn spawn_with_progress(
+            &self,
+            _request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+            progress: Option<tokio::sync::mpsc::Sender<String>>,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            self.calls.lock().unwrap().push("spawn_with_progress");
+            if progress.is_some() {
+                self.saw_progress.store(true, Ordering::SeqCst);
+            }
+            Err(SubagentSpawnError::Internal("probe".into()))
+        }
+
+        async fn spawn_with_observer(
+            &self,
+            _request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+            progress: Option<tokio::sync::mpsc::Sender<String>>,
+            observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            self.calls.lock().unwrap().push("spawn_with_observer");
+            if progress.is_some() {
+                self.saw_progress.store(true, Ordering::SeqCst);
+            }
+            if observer.is_some() {
+                self.saw_observer.store(true, Ordering::SeqCst);
+            }
+            Err(SubagentSpawnError::Internal("probe".into()))
+        }
+
+        async fn spawn_workflow_with_observer(
+            &self,
+            _request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+            progress: Option<tokio::sync::mpsc::Sender<String>>,
+            observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+            watchdog: platform_api::subagent_spawn::WorkflowQueryWatchdog,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push("spawn_workflow_with_observer");
+            if progress.is_some() {
+                self.saw_progress.store(true, Ordering::SeqCst);
+            }
+            if observer.is_some() {
+                self.saw_observer.store(true, Ordering::SeqCst);
+            }
+            self.saw_watchdog_ms
+                .store(watchdog.stall_timeout_ms, Ordering::SeqCst);
+            Err(SubagentSpawnError::Internal("probe".into()))
+        }
+    }
+
+    /// An observer that only has to exist — the assertion is that the wrapped
+    /// spawner SEES one, not what it publishes.
+    struct InertObserver;
+    #[async_trait]
+    impl platform_api::subagent_spawn::SubagentSpawnObserver for InertObserver {
+        async fn on_event(&self, _event: platform_api::subagent_spawn::SubagentObservation) {}
+    }
+
     struct MockInvoker;
     #[async_trait]
     impl ToolInvoker for MockInvoker {
@@ -456,6 +593,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -540,6 +678,118 @@ mod tests {
             launch.output_file.contains("a-bg-test-1"),
             "output_file is the spawned task's spool path: {}",
             launch.output_file
+        );
+    }
+
+    /// The decorator must FORWARD the observer/watchdog spawn paths to `inner`
+    /// rather than letting the trait's default chain collapse them onto
+    /// `spawn`. Fusion passes a `PanelAllocationObserver` through
+    /// `spawn_workflow_with_observer` to learn whether a panel was really
+    /// allocated a child; if this decorator ever wraps the spawner fusion is
+    /// built with, a dropped observer makes every bar-aborted panel misreport
+    /// as never-dispatched and the Agent tool over-releases the spawn quota.
+    /// The workflow watchdog is dropped by the same default chain.
+    #[tokio::test]
+    async fn workflow_spawn_forwards_the_observer_and_watchdog_to_inner() {
+        let runtime: Arc<dyn RuntimeSpawner> = Arc::new(MockRuntimeSpawner::default());
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(PosixFileSystem::new(PathBuf::from(dir.path())));
+        let output_manager = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
+        let probe = Arc::new(ForwardingProbeSpawner::default());
+        let deco = BackgroundAgentSpawner {
+            inner: probe.clone(),
+            registry: Arc::new(TaskRegistry::new(runtime.clone(), fs, output_manager)),
+            mailbox_router: Arc::new(MailboxRouter::new()),
+            runtime,
+            subagents_dir: None,
+        };
+        let observer: Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver> =
+            Arc::new(InertObserver);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(4);
+
+        let _ = deco
+            .spawn_workflow_with_observer(
+                request(None),
+                SubagentInheritance {
+                    tool_invoker: Arc::new(MockInvoker),
+                    budget: Arc::new(MockBudget),
+                },
+                Some(tx),
+                Some(observer),
+                platform_api::subagent_spawn::WorkflowQueryWatchdog {
+                    stall_timeout_ms: 4321,
+                    max_retries: 2,
+                },
+            )
+            .await;
+
+        assert_eq!(
+            probe.calls.lock().unwrap().as_slice(),
+            &["spawn_workflow_with_observer"],
+            "the decorator must reach the wrapped spawner's workflow path, not \
+             collapse onto plain `spawn` through the trait default chain"
+        );
+        assert!(
+            probe.saw_observer.load(Ordering::SeqCst),
+            "the observer argument must survive the decorator hop"
+        );
+        assert!(
+            probe.saw_progress.load(Ordering::SeqCst),
+            "the progress channel must survive the decorator hop"
+        );
+        assert_eq!(
+            probe.saw_watchdog_ms.load(Ordering::SeqCst),
+            4321,
+            "the workflow watchdog must survive the decorator hop"
+        );
+    }
+
+    /// Same forwarding requirement for the two intermediate paths.
+    #[tokio::test]
+    async fn observer_and_progress_spawn_paths_forward_to_inner() {
+        let runtime: Arc<dyn RuntimeSpawner> = Arc::new(MockRuntimeSpawner::default());
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(PosixFileSystem::new(PathBuf::from(dir.path())));
+        let output_manager = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
+        let probe = Arc::new(ForwardingProbeSpawner::default());
+        let deco = BackgroundAgentSpawner {
+            inner: probe.clone(),
+            registry: Arc::new(TaskRegistry::new(runtime.clone(), fs, output_manager)),
+            mailbox_router: Arc::new(MailboxRouter::new()),
+            runtime,
+            subagents_dir: None,
+        };
+        let inherit = || SubagentInheritance {
+            tool_invoker: Arc::new(MockInvoker),
+            budget: Arc::new(MockBudget),
+        };
+        let observer: Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver> =
+            Arc::new(InertObserver);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(4);
+
+        let _ = deco
+            .spawn_with_progress(request(None), inherit(), Some(tx))
+            .await;
+        let (tx2, _rx2) = tokio::sync::mpsc::channel::<String>(4);
+        let _ = deco
+            .spawn_with_observer(request(None), inherit(), Some(tx2), Some(observer))
+            .await;
+        let _ = deco.spawn(request(None), inherit()).await;
+
+        assert_eq!(
+            probe.calls.lock().unwrap().as_slice(),
+            &["spawn_with_progress", "spawn_with_observer", "spawn"],
+            "each decorator method must land on the SAME method of `inner`"
+        );
+        assert!(
+            probe.saw_observer.load(Ordering::SeqCst),
+            "`spawn_with_observer` must carry the observer through to `inner`"
         );
     }
 

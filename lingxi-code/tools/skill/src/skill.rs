@@ -369,6 +369,7 @@ impl SkillTool {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
             system_prompt_override: None,

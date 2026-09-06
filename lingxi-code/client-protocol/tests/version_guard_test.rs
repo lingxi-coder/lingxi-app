@@ -1545,6 +1545,7 @@ fn current_contract_index() -> ContractIndex {
     put("TaskRowDto.can_resume", "bool");
     put("TaskRowDto.started_at_ms", "Option<u64>");
     put("TaskRowDto.error", "Option<String>");
+    put("TaskRowDto.stage", "Option<String>");
 
     put("TaskStatusDto::Pending", "pending");
     put("TaskStatusDto::Running", "running");
@@ -3169,6 +3170,7 @@ fn contract_index_covers_every_dto() {
             can_resume: false,
             started_at_ms: None,
             error: None,
+            stage: None,
         },
         CoordinatorWorkerDto {
             agent_id: String::new(),

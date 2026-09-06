@@ -110,6 +110,59 @@ struct PermissionOwnerScope {
     wire: PermissionOwnerDto,
 }
 
+/// Cancel-safety guard for [`AdapterPermissionGate::check_with_context_impl`]
+/// (G007).
+///
+/// The awaiting `check()` future is not always polled to completion: a caller
+/// can drop it mid-flight (a panel task hard-aborted, a subagent tool
+/// dispatch cancelled, ...) while its permission ask is still parked. Nothing
+/// else then removes that `pending` entry or notifies the transport — the
+/// per-request timeout that would eventually resolve it lives INSIDE the very
+/// future that just got dropped, so it never fires either. This guard,
+/// constructed right after the entry is parked, removes it and emits a
+/// `Cancelled` resolution on early drop. It is disarmed once the parked
+/// oneshot resolves through the normal path (an explicit `resolve()`,
+/// `cancel_owner`, `drain`, or `check_with_context_impl`'s own timeout
+/// branch), all of which already own the entry's removal/notification.
+struct ParkedRequestGuard {
+    pending: Arc<Mutex<HashMap<u64, ParkedRequest>>>,
+    event_sink: Option<Arc<dyn ClientEventSink>>,
+    request_id: u64,
+    armed: bool,
+}
+
+impl Drop for ParkedRequestGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Cleanup is async (the map is a tokio Mutex and the sink emit is
+        // itself async); hand it to the current runtime best-effort. If no
+        // runtime is active (shutdown) there is nothing left to notify.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let pending = self.pending.clone();
+            let event_sink = self.event_sink.clone();
+            let request_id = self.request_id;
+            handle.spawn(async move {
+                // Best-effort: the entry may already be gone (raced by a
+                // concurrent `resolve()`/`drain()`/`cancel_owner()`), in
+                // which case that caller already emitted its own resolution
+                // and this is a no-op.
+                let removed = pending.lock().await.remove(&request_id).is_some();
+                if removed {
+                    if let Some(sink) = event_sink {
+                        sink.emit(ClientEvent::PermissionRequestResolved {
+                            request_id,
+                            resolution: PermissionResolutionDto::Cancelled,
+                        })
+                        .await;
+                    }
+                }
+            });
+        }
+    }
+}
+
 /// The id-keyed, fail-closed permission gate the orchestrator binds as its
 /// `Arc<dyn PermissionGate>` on a client connection.
 ///
@@ -306,7 +359,20 @@ impl AdapterPermissionGate {
         // The parked receiver is the turn-ownership proof. A cancellation drain
         // or timeout drops it; in that case a late AllowAlways must not create a
         // session or durable rule for a tool call that no longer exists.
+        //
+        // [round-2 review, finding 8] This branch already removed the
+        // `pending` entry (the `remove` above) before discovering the
+        // receiver is dead, so `ParkedRequestGuard`'s backstop (armed only
+        // while the entry is still IN the map) finds nothing to clean up and
+        // emits nothing either. Without an explicit emit here, a resolve()
+        // that races a dropped asker produces NO
+        // `PermissionRequestResolved` event at all — on a client that does
+        // not optimistically dequeue (Android), the permission card is then
+        // stuck on screen until connection-teardown `drain()`. Emit the same
+        // terminal event the guard would have.
         if sender.send(mapped).is_err() {
+            self.emit_resolution(request_id, PermissionResolutionDto::Cancelled)
+                .await;
             return false;
         }
 
@@ -512,6 +578,16 @@ impl AdapterPermissionGate {
                 },
             );
         }
+        // G007: from here on the entry is parked in `self.pending`. If this
+        // whole `check_with_context_impl` future gets dropped before reaching
+        // the normal resolution below, nothing else ever cleans it up —
+        // this guard's `Drop` is the backstop.
+        let mut parked_guard = ParkedRequestGuard {
+            pending: self.pending.clone(),
+            event_sink: self.event_sink.clone(),
+            request_id,
+            armed: true,
+        };
         let request = PermissionRequestDto {
             request_id,
             kind,
@@ -537,15 +613,36 @@ impl AdapterPermissionGate {
         // A dropped sender (drain / vanished resolver) OR a timeout both fail
         // closed to `Deny`. On timeout we also evict the now-stale parked entry
         // so a late `resolve()` is a no-op (and the map does not leak).
-        let response = match tokio::time::timeout(self.timeout, rx).await {
-            Ok(Ok(response)) => response,
+        let timeout_result = tokio::time::timeout(self.timeout, rx).await;
+        // The oneshot resolved (or the deadline elapsed). Disarm the guard
+        // separately in each arm below, no earlier than the point where the
+        // entry is actually gone from `self.pending` — NOT unconditionally
+        // here, before the `Err(_elapsed)` arm's own eviction has run. This
+        // future can still be dropped between here and that arm's
+        // `self.pending.lock().await` (a genuine suspension point when
+        // another parked/resolving request contends the same map); an early
+        // disarm would leave that window uncovered by both the timeout
+        // eviction (never reached) and the guard (already disarmed) alike.
+        let response = match timeout_result {
+            Ok(Ok(response)) => {
+                // A normal `resolve()` already removed the entry before
+                // sending on `tx`.
+                parked_guard.armed = false;
+                response
+            }
             Ok(Err(_dropped)) => {
+                // The sender was dropped by `drain()`/`cancel_owner()`,
+                // which also already removed the entry.
+                parked_guard.armed = false;
                 return PermissionOutcome::Deny {
                     reason: "permission request dropped (connection closed)".to_string(),
                 };
             }
             Err(_elapsed) => {
                 let expired = self.pending.lock().await.remove(&request_id).is_some();
+                // Only now is the entry provably gone — disarm after the
+                // removal, not before it.
+                parked_guard.armed = false;
                 if expired {
                     self.emit_resolution(request_id, PermissionResolutionDto::Expired)
                         .await;
@@ -1138,6 +1235,62 @@ mod tests {
         }
     }
 
+    /// G007: dropping the AWAITER's own future — not the gate — while its
+    /// permission ask is still parked (a panel task hard-aborted, a subagent
+    /// tool dispatch cancelled, ...) must not leak the entry forever. Nothing
+    /// else would ever remove it or notify the transport: the per-request
+    /// timeout that would eventually resolve it lives INSIDE the very future
+    /// that was just dropped, so it never fires either.
+    #[tokio::test]
+    async fn dropped_asker_evicts_parked_request_and_emits_cancelled() {
+        let sink = MockRequestSink::arc();
+        let events = MockSink::arc();
+        let gate =
+            Arc::new(AdapterPermissionGate::new(sink.clone()).with_event_sink(events.clone()));
+
+        let g = gate.clone();
+        let task = tokio::spawn(async move { g.check("Bash", &json!({"command": "ls"})).await });
+
+        wait_for_pending(&gate, 1).await;
+        let req = sink.last().await;
+
+        // The asker vanishes mid-flight instead of ever resolving normally —
+        // e.g. a Fusion panel task hard-aborted while a Bash ask was parked.
+        task.abort();
+        let _ = task.await;
+
+        for _ in 0..2000 {
+            if gate.pending_count().await == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            gate.pending_count().await,
+            0,
+            "an aborted asker must not leak its parked permission request forever"
+        );
+
+        for _ in 0..2000 {
+            if !events.events().await.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let seen = events.events().await;
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [ClientEvent::PermissionRequestResolved {
+                    request_id,
+                    resolution: PermissionResolutionDto::Cancelled,
+                }] if *request_id == req.request_id
+            ),
+            "expected exactly one Cancelled resolution for request {}; got: {seen:?}",
+            req.request_id
+        );
+    }
+
     /// A response whose parked receiver has already disappeared must not
     /// convert a stale AllowAlways tap into a session or durable grant.
     #[tokio::test]
@@ -1166,6 +1319,56 @@ mod tests {
         assert!(gate.session_allow_rules.lock().await.is_empty());
     }
 
+    /// [round-2 review, finding 8] `resolve()` already removes the `pending`
+    /// entry (proven by `late_allow_always_does_not_write_rule` above)
+    /// before discovering the receiver is dead. Before the fix it then
+    /// returned `false` with NO terminal event at all — the entry was gone,
+    /// so `ParkedRequestGuard`'s backstop (armed only while the entry is
+    /// still in the map) finds nothing to clean up either, and the id's
+    /// `PermissionRequestResolved` is lost forever. On a client that does
+    /// not optimistically dequeue (Android), that stranded the permission
+    /// card on screen until connection teardown. `resolve()` must still emit
+    /// exactly one terminal event on this branch.
+    #[tokio::test]
+    async fn resolve_on_dead_receiver_still_emits_one_resolution_event() {
+        let sink = MockRequestSink::arc();
+        let events = MockSink::arc();
+        let gate = AdapterPermissionGate::new(sink).with_event_sink(events.clone());
+        let (sender, receiver) = oneshot::channel();
+        drop(receiver);
+        gate.pending.lock().await.insert(
+            77,
+            ParkedRequest {
+                sender,
+                input: json!({"command": "dangerous"}),
+                tool_name: "Bash".to_string(),
+                owner: None,
+                suppress_always_allow_rule: false,
+                auto_mode_prompt: None,
+            },
+        );
+
+        let resolved = gate
+            .resolve(77, PermissionResponseDto::AllowOnce, "Bash")
+            .await;
+        assert!(
+            !resolved,
+            "no live asker remains, so resolve() must still report false"
+        );
+
+        let seen = events.events().await;
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [ClientEvent::PermissionRequestResolved {
+                    request_id: 77,
+                    resolution: PermissionResolutionDto::Cancelled,
+                }]
+            ),
+            "resolve() racing a dropped asker must still emit exactly one terminal event; got: {seen:?}"
+        );
+    }
+
     /// `timeout_resolves_deny` — a `check()` parked past the per-request timeout
     /// resolves `Deny` even if nobody ever resolves it.
     #[tokio::test]
@@ -1192,6 +1395,85 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    /// Finding 14: `ParkedRequestGuard` used to be disarmed unconditionally
+    /// right after `tokio::time::timeout(...)` resolves — BEFORE the
+    /// `Err(_elapsed)` arm's own `self.pending.lock().await.remove(...)`
+    /// eviction ran. If the asker's future was dropped exactly while
+    /// suspended on that (contended) lock acquire, the entry stayed parked
+    /// forever: the guard was already disarmed (no backstop) and the
+    /// in-future eviction that would have removed it never got to run
+    /// (the future that contained it is gone). Reproduced deterministically
+    /// by holding the `pending` map lock from outside the checking task
+    /// across its timeout elapsing, then aborting it while it is blocked
+    /// trying to acquire that same lock — the exact window described by
+    /// finding 14 (a sibling parked/resolving request contending the map).
+    #[tokio::test]
+    async fn dropped_asker_after_timeout_evicts_parked_request_via_guard_backstop() {
+        let sink = MockRequestSink::arc();
+        let events = MockSink::arc();
+        let gate = Arc::new(
+            AdapterPermissionGate::new(sink.clone())
+                .with_event_sink(events.clone())
+                .with_timeout(Duration::from_millis(30)),
+        );
+
+        let g = gate.clone();
+        let task = tokio::spawn(async move { g.check("Bash", &json!({"command": "ls"})).await });
+
+        wait_for_pending(&gate, 1).await;
+        let req = sink.last().await;
+
+        // Hold the `pending` map lock from OUTSIDE the checking task so its
+        // own timeout-eviction (`self.pending.lock().await.remove(...)`) is
+        // forced to actually suspend on a genuinely contended lock, rather
+        // than resolving on first poll.
+        let held = gate.pending.lock().await;
+
+        // Real wall-clock wait for the checking task's `tokio::time::timeout`
+        // to elapse and for it to reach (and block on) that lock acquire.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // The asker vanishes exactly in that window — e.g. the panel-bar
+        // `join_set.abort_all()` racing a parked ask whose deadline just
+        // fired.
+        task.abort();
+        let _ = task.await;
+
+        drop(held);
+
+        for _ in 0..2000 {
+            if gate.pending_count().await == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            gate.pending_count().await,
+            0,
+            "a parked request whose asker was dropped exactly as its own timeout eviction \
+             was about to run must not be leaked forever"
+        );
+
+        for _ in 0..2000 {
+            if !events.events().await.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let seen = events.events().await;
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [ClientEvent::PermissionRequestResolved {
+                    request_id,
+                    resolution: PermissionResolutionDto::Cancelled,
+                }] if *request_id == req.request_id
+            ),
+            "expected exactly one Cancelled resolution for request {}; got: {seen:?}",
+            req.request_id
+        );
     }
 
     /// `tool_use_confirm_constructed_with_default_allow` — the `tool_default` →

@@ -33,6 +33,86 @@ const statusRank: Record<string, number> = {
   completed: 6,
 };
 
+const IN_FLIGHT_TASK_STATUSES: ReadonlySet<string> = new Set(['pending', 'running', 'paused']);
+
+/**
+ * [Finding 5] True when any listed task is still in flight. The desktop
+ * client's `TaskRow` (and `task.stage`/`status`/`description`, read by
+ * `TaskDetail` and the overview subtitle) is pull-only -- only as fresh as
+ * the last `task_list` refresh -- so this drives whether a caller needs to
+ * keep re-pulling it. Exported so the wiring below (into
+ * `bridge.refreshTasks()`) can be unit-tested without mounting React.
+ */
+export function hasInFlightTask(tasks: readonly { status: { type: string } }[]): boolean {
+  return tasks.some((task) => IN_FLIGHT_TASK_STATUSES.has(task.status.type));
+}
+
+/**
+ * [R5-14] Whether the OVERVIEW panel should keep pulling `task_list`.
+ *
+ * The round-3 fix gated that pull on `hasInFlightTask(orderedTasks(...))`
+ * -- i.e. on rows the client ALREADY has. That is the wrong question for a
+ * panel that is on screen: with a pull-only task map and no server-pushed
+ * row (`emit_task_rows` fires only in reply to `RefreshListings{Tasks}` /
+ * `TaskList`, and the lone `TaskStatusChanged` push is dropped by the
+ * reducer for an id the map does not know), an empty or all-completed list
+ * is exactly the state in which nothing can ever re-arm the poll. Open the
+ * Runtime Center with no task running, then type `/fusion ...`: the engine
+ * spawns the task and drives its stage, every 1.5s tick reads
+ * `isActive() === false` and issues nothing, and the panel says "No
+ * background tasks." for the whole multi-minute run.
+ *
+ * So while the overview is OPEN the answer is unconditionally yes -- a task
+ * can appear at any moment and only a pull can discover it. The in-flight
+ * term is kept for the closed case (the effect early-returns then, and the
+ * interval is torn down on close, so it is belt-and-braces rather than a
+ * live path). Exported so this predicate can be unit-tested, and asserted
+ * by name from `runtime-center-state.test.ts` so a future edit cannot
+ * quietly put the "already have a row" gate back.
+ */
+export function shouldPollOverviewTasks(
+  overviewOpen: boolean,
+  tasks: readonly { status: { type: string } }[],
+): boolean {
+  return overviewOpen || hasInFlightTask(tasks);
+}
+
+/**
+ * [Finding 5] Starts (and returns a stopper for) the interval that keeps a
+ * pull-only desktop resource fresh while it is in flight. Before this
+ * existed, nothing re-delivered `TaskRow` while a task ran -- a running
+ * `/fusion` task's stage line (and the overview subtitle beside it) froze
+ * at whatever it read the instant the pane opened, for the task's entire
+ * remaining lifetime, no matter how many `set_fusion_stage` updates the
+ * engine emitted in the meantime.
+ *
+ * [Finding 5, rework round 2] `isActive` is a GETTER, read fresh on every
+ * tick, not a snapshot captured when the interval was created. The earlier
+ * shape took a plain `boolean` and was wired straight from a `useEffect`
+ * dependency (`[..., hasActiveTask, ...]`); because `refresh()` cleared the
+ * task map before repopulating it (see `requestTaskList`'s now-`preserve`d
+ * wipe), `hasActiveTask` flipped false for one render on every single
+ * poll, which re-ran the effect and issued another poll -- a
+ * self-amplifying `task_list` storm with no interval ticks required at
+ * all. Reading `isActive()` per tick, from a ref the caller updates every
+ * render, means the interval itself never needs to be torn down and
+ * restarted just because the in-flight flag flickered, so nothing about
+ * this refresh can ever retrigger the effect that started it. `refresh` is
+ * always called with `{ preserve: true }`: a background poll must merge
+ * fresh rows over the existing map, never blank it first.
+ */
+export function startPollingWhileActive(
+  isActive: () => boolean,
+  refresh: (options?: { preserve?: boolean }) => Promise<void>,
+  intervalMs = 1_500,
+): () => void {
+  const timer = setInterval(() => {
+    if (!isActive()) return;
+    void refresh({ preserve: true }).catch(() => undefined);
+  }, intervalMs);
+  return () => clearInterval(timer);
+}
+
 function statusColor(t: ReturnType<typeof useT>, status: string): string {
   if (status === 'completed') return t.ok;
   if (status === 'failed' || status === 'killed' || status === 'cancelled') return t.danger;
@@ -129,6 +209,19 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
     .sort((left, right) => (statusRank[left.status] ?? 99) - (statusRank[right.status] ?? 99) || (right.updated_at_ms ?? 0) - (left.updated_at_ms ?? 0)), [center.agents]);
   const plan = center.plan.length > 0 ? center.plan : bridge.conversation.plan;
   const openerRef = useRef<HTMLElement | null>(null);
+  // [Finding 5, rework round 2] Read every poll tick, never a `useEffect`
+  // dependency -- see `startPollingWhileActive`'s doc comment for why
+  // putting this value in the effect's own dependency array storms.
+  //
+  // [R5-14] The ref holds the overview's POLL PREDICATE
+  // (`shouldPollOverviewTasks`), not merely "is a row I already have in
+  // flight": gating on the current map contents meant a task started AFTER
+  // the panel opened -- the common `/fusion` case, since the panel is
+  // usually opened before there is anything to watch -- was never pulled
+  // and never appeared. (The ref keeps its name so the poll-wiring guards
+  // in `runtime-center-poll.test.ts` still recognize the call site.)
+  const hasActiveTaskRef = useRef(shouldPollOverviewTasks(center.overviewOpen, tasks));
+  hasActiveTaskRef.current = shouldPollOverviewTasks(center.overviewOpen, tasks);
 
   const closeOverview = useCallback((restoreFocus: boolean) => {
     bridge.setRuntimeCenterOverviewOpen(false);
@@ -183,6 +276,28 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
     };
   }, [center.overviewOpen, closeOverview]);
 
+  // [Finding 5] The desktop client has no server-pushed `TaskRow` update --
+  // `bridge.desktop.tasks` (and therefore the `task.stage`/`status`
+  // subtitle rendered above) is only as fresh as the last `task_list`
+  // pull. Some entry points (the toolbar `+` button, `onClick={() =>
+  // bridge.setRuntimeCenterOverviewOpen(true)}`) open this panel without
+  // issuing that pull at all, so without this it can render whatever
+  // stale row an unrelated earlier refresh happened to leave behind, then
+  // stay frozen on it for the rest of a multi-minute run. Fetch once on
+  // open, then keep polling while any listed task is still
+  // pending/running/paused.
+  //
+  // [Finding 5, rework round 2] `hasActiveTask` is deliberately NOT a
+  // dependency here -- see `hasActiveTaskRef` and
+  // `startPollingWhileActive` above. The effect is keyed only on whether
+  // the overview is open, so it mounts exactly one interval per open and
+  // never tears it down and restarts mid-poll.
+  useEffect(() => {
+    if (!center.overviewOpen) return undefined;
+    void bridge.refreshTasks().catch(() => undefined);
+    return startPollingWhileActive(() => hasActiveTaskRef.current, bridge.refreshTasks);
+  }, [center.overviewOpen, bridge.refreshTasks]);
+
   if (!center.overviewOpen) return null;
   const open = (item: RuntimeCenterItemRef) => {
     const key = runtimeCenterItemKey(item);
@@ -212,7 +327,7 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
       </div>
       <OverviewSection section="tasks" open={section('tasks')} onToggle={() => bridge.toggleRuntimeCenterSection('tasks')} count={tasks.length}>
         {tasks.length === 0 ? <EmptyRow>No background tasks.</EmptyRow> : tasks.map((task) => (
-          <OverviewRow key={task.task_id} icon="activity" title={task.task_type} subtitle={shorten(task.description)} status={task.status.type} onClick={() => open({ kind: 'task', id: task.task_id })} />
+          <OverviewRow key={task.task_id} icon="activity" title={task.task_type} subtitle={shorten(task.status.type === 'running' && task.stage ? task.stage : task.description)} status={task.status.type} onClick={() => open({ kind: 'task', id: task.task_id })} />
         ))}
       </OverviewSection>
       <OverviewSection section="agents" open={section('agents')} onToggle={() => bridge.toggleRuntimeCenterSection('agents')} count={agents.length}>
@@ -295,13 +410,14 @@ function InspectorTabs({ bridge }: { bridge: UseBridge }) {
   );
 }
 
-function TaskDetail({ task, bridge }: { task: TaskRowDto | undefined; bridge: UseBridge }) {
+export function TaskDetail({ task, bridge }: { task: TaskRowDto | undefined; bridge: UseBridge }) {
   const t = useT();
   const output = task ? bridge.desktop.taskOutput[task.task_id] : undefined;
   if (!task) return <EmptyRow>Task is no longer available.</EmptyRow>;
   return (
     <div style={{ padding: 15, overflowY: 'auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: statusColor(t, task.status.type), fontSize: 11 }}><Icon name="activity" size={14} /><span>{task.status.type}</span></div>
+      {task.stage && <div style={{ marginTop: 6, color: t.text3, fontSize: 11 }}>{task.stage}</div>}
       <p style={{ margin: '12px 0', color: t.text, fontSize: 13, lineHeight: 1.55 }}>{task.description}</p>
       {output ? <pre className="mono" style={{ margin: 0, padding: 11, borderRadius: 9, background: t.windowBg, border: `0.5px solid ${t.border}`, color: t.text2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 10.5, lineHeight: 1.55 }}>{output.content || '(No output yet)'}{output.truncated ? `\n\n…${output.totalLines} lines total` : ''}</pre> : <EmptyRow>Loading task output…</EmptyRow>}
     </div>
@@ -375,6 +491,13 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
   const task = active?.kind === 'task' ? bridge.desktop.tasks[active.id] : undefined;
   const agent = active?.kind === 'agent' ? center.agents[active.id] : undefined;
   const selectedPlan = active?.kind === 'plan' ? plan.find((taskEntry, index) => planRuntimeItemId(taskEntry, index, plan) === active.id) : undefined;
+  // [Finding 5, rework round 2] Same ref treatment as the overview panel's
+  // `hasActiveTaskRef` -- `task?.status.type` must not sit in the
+  // row-refresh effect's dependency array below, or a background poll
+  // that ever wiped the map (the pre-`preserve` shape) flips this every
+  // cycle and storms. Read fresh on every poll tick instead.
+  const taskInFlightRef = useRef(false);
+  taskInFlightRef.current = !!task && hasInFlightTask([task]);
 
   useEffect(() => {
     if (!active || active.kind !== 'agent' || agent?.status !== 'running') return undefined;
@@ -388,10 +511,40 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
     if (!active || active.kind !== 'task' || !task) return undefined;
     const refresh = () => { void bridge.taskOutput(active.id).catch(() => undefined); };
     refresh();
-    if (!['pending', 'running', 'paused'].includes(task.status.type)) return undefined;
+    if (!hasInFlightTask([task])) return undefined;
     const timer = setInterval(refresh, 1_500);
     return () => clearInterval(timer);
   }, [active?.kind, active?.id, bridge.taskOutput, task?.status.type]);
+
+  // [Finding 5] `task.stage`/`task.status`/`task.description` (rendered by
+  // `TaskDetail` and the overview subtitle) only ever change when a fresh
+  // `TaskRow` arrives, and the desktop client has no server-pushed row
+  // update while a task runs -- `bridge.desktop.tasks[id]` is only as
+  // fresh as the last `task_list` pull. Without this, opening a running
+  // task's detail pane freezes its stage line at whatever it read on open
+  // for the task's entire remaining lifetime, even though the output pane
+  // right next to it (the effect above) keeps ticking.
+  //
+  // [Finding 5, rework round 2] `task?.status.type` is deliberately NOT a
+  // dependency here (see `taskInFlightRef` above) -- the effect mounts
+  // once per selected task and the interval itself decides per tick
+  // whether to poll, so a background refresh flipping the status can never
+  // retrigger the effect that issued it.
+  //
+  // [Finding 22] `!!task` IS a dependency, unlike `task?.status.type`
+  // above: the effect body early-returns on `!task`, so if the row is
+  // still absent from `bridge.desktop.tasks` the moment this effect last
+  // ran (e.g. a task tab selected during the one round-trip window a
+  // non-preserve `task_list` refresh empties that map), no interval is
+  // ever started, and nothing re-runs this effect when the row lands --
+  // `task.stage` then freezes for the rest of the run while the output
+  // poll effect above keeps ticking. `!!task` only flips on that one
+  // arrival (or a genuine non-preserve wipe), so it cannot reintroduce the
+  // per-tick storm `task?.status.type` was excluded to prevent.
+  useEffect(() => {
+    if (!active || active.kind !== 'task' || !task) return undefined;
+    return startPollingWhileActive(() => taskInFlightRef.current, bridge.refreshTasks);
+  }, [active?.kind, active?.id, !!task, bridge.refreshTasks]);
 
   if (!center.inspectorOpen || !active) return null;
   const subtitle = active.kind === 'agent' ? agent?.agent_type : active.kind === 'task' ? task?.status.type : active.kind === 'resource' ? resource?.path : undefined;

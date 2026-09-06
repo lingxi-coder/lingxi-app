@@ -1,7 +1,13 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { ClientEvent, MessageDto, PlanTaskDto } from '@lingxi/bridge-client';
 
+import {
+  shouldPollOverviewTasks,
+  startPollingWhileActive,
+} from '../src/renderer/components/RuntimeCenter';
 import {
   addRuntimeResources,
   closeRuntimeCenterItem,
@@ -131,5 +137,195 @@ test('legacy plan ids survive unrelated insertion and explicit ids stay namespac
   assert.equal(
     planRuntimeItemId({ id: '42', subject: 'Ship', state: 'pending' }, 0, []),
     'id:42',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// [Finding 22] `RuntimeCenterInspector`'s stage-poll effect
+// (`startPollingWhileActive(() => taskInFlightRef.current,
+// bridge.refreshTasks)`) reads `task` (`bridge.desktop.tasks[active.id]`)
+// in its body to decide whether to run at all, but its dependency array
+// named only `[active?.kind, active?.id, bridge.refreshTasks]` -- nothing
+// derived from `task`. If the effect ever ran while the row was still
+// absent (e.g. a task tab selected during the one-round-trip window a
+// non-preserve `task_list` refresh empties `bridge.desktop.tasks`), it
+// permanently no-ops: no interval starts, and nothing re-runs the effect
+// when the row lands, so `task.stage` freezes for the rest of the run
+// while the sibling output-poll effect right above it (which DOES carry
+// `task?.status.type`) keeps ticking. This reads the component source
+// directly rather than mounting React (this package ships neither jsdom
+// nor react-test-renderer) -- the same technique
+// `runtime-center-poll.test.ts`'s storm guard uses for the sibling effect.
+// ---------------------------------------------------------------------------
+
+const runtimeCenterSource = readFileSync(
+  join(import.meta.dirname, '../src/renderer/components/RuntimeCenter.tsx'),
+  'utf8',
+);
+
+function functionBody(source: string, name: string): string {
+  const signature = source.indexOf(`function ${name}(`);
+  assert.ok(signature !== -1, `function ${name} must exist in RuntimeCenter.tsx`);
+  const parenOpen = source.indexOf('(', signature);
+  assert.ok(parenOpen !== -1, `function ${name} must have a parameter list`);
+  let parenDepth = 0;
+  let parenClose = -1;
+  for (let index = parenOpen; index < source.length; index += 1) {
+    if (source[index] === '(') parenDepth += 1;
+    else if (source[index] === ')') {
+      parenDepth -= 1;
+      if (parenDepth === 0) { parenClose = index; break; }
+    }
+  }
+  assert.ok(parenClose !== -1, `function ${name}'s parameter list never closes`);
+  const open = source.indexOf('{', parenClose);
+  assert.ok(open !== -1, `function ${name} must have a body`);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    else if (source[index] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(open, index + 1);
+    }
+  }
+  throw new Error(`function ${name}'s body never closes its braces`);
+}
+
+function effectEntries(source: string): { body: string; deps: string }[] {
+  const entries: { body: string; deps: string }[] = [];
+  for (let index = source.indexOf('useEffect('); index !== -1; index = source.indexOf('useEffect(', index + 1)) {
+    const open = source.indexOf('{', index);
+    if (open === -1) continue;
+    let depth = 0;
+    let bodyEnd = -1;
+    for (let cursor = open; cursor < source.length; cursor += 1) {
+      if (source[cursor] === '{') depth += 1;
+      else if (source[cursor] === '}') {
+        depth -= 1;
+        if (depth === 0) { bodyEnd = cursor; break; }
+      }
+    }
+    if (bodyEnd === -1) continue;
+    const body = source.slice(open, bodyEnd + 1);
+    const bracketOpen = source.indexOf('[', bodyEnd);
+    if (bracketOpen === -1) continue;
+    let bracketDepth = 0;
+    let bracketClose = -1;
+    for (let cursor = bracketOpen; cursor < source.length; cursor += 1) {
+      if (source[cursor] === '[') bracketDepth += 1;
+      else if (source[cursor] === ']') {
+        bracketDepth -= 1;
+        if (bracketDepth === 0) { bracketClose = cursor; break; }
+      }
+    }
+    if (bracketClose === -1) continue;
+    entries.push({ body, deps: source.slice(bracketOpen, bracketClose + 1) });
+  }
+  return entries;
+}
+
+test('the effect scanner can actually find the stage-poll effect before asserting on its deps', () => {
+  const inspectorBody = functionBody(runtimeCenterSource, 'RuntimeCenterInspector');
+  const stagePoll = effectEntries(inspectorBody).filter((entry) =>
+    entry.body.includes('startPollingWhileActive(() => taskInFlightRef.current, bridge.refreshTasks)'));
+  assert.equal(
+    stagePoll.length, 1,
+    'if the scanner cannot find the stage-poll effect, the assertion below proves nothing',
+  );
+});
+
+test('RuntimeCenterInspector\'s stage-poll effect deps include task presence so a row that lands after mount is not missed forever', () => {
+  const inspectorBody = functionBody(runtimeCenterSource, 'RuntimeCenterInspector');
+  const stagePoll = effectEntries(inspectorBody).find((entry) =>
+    entry.body.includes('startPollingWhileActive(() => taskInFlightRef.current, bridge.refreshTasks)'));
+  assert.ok(stagePoll, 'RuntimeCenterInspector must contain the stage-poll effect');
+  const hasTaskPresenceDep = /(^|[^\w.])!!task([^\w]|$)/.test(stagePoll!.deps)
+    || /(^|[^\w.])task\?\.task_id([^\w]|$)/.test(stagePoll!.deps);
+  assert.ok(
+    hasTaskPresenceDep,
+    `the stage-poll effect's dependency array (${stagePoll!.deps}) must include a task-presence `
+    + 'dependency (e.g. `!!task`) -- the effect body reads `task` (bridge.desktop.tasks[active.id]) '
+    + 'to decide whether to run, so if it first runs while the row is absent it can never recover '
+    + 'when the row arrives, leaving task.stage frozen for the rest of the run',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// [R5-14] The overview's task poll used to be gated on
+// `hasInFlightTask(orderedTasks(bridge.desktop))` -- rows the client
+// ALREADY has. Nothing pushes a new row (`emit_task_rows` answers only the
+// `RefreshListings{Tasks}`/`TaskList` commands, and the single
+// `TaskStatusChanged` push is dropped by the reducer for an unknown id), so
+// with an empty or all-completed list the gate was permanently closed: open
+// the Runtime Center first, then run `/fusion ...`, and the panel showed
+// "No background tasks." for the entire run. The predicate now asks whether
+// the PANEL is open, which is the only question a pull-only list can act
+// on.
+// ---------------------------------------------------------------------------
+
+test('shouldPollOverviewTasks keeps polling while the overview is open even with no task in the map yet', () => {
+  assert.equal(
+    shouldPollOverviewTasks(true, []), true,
+    'an open overview with an empty task map must still poll -- this is exactly the state a '
+    + '/fusion task started after the panel opened lands in, and no push can fill it',
+  );
+  assert.equal(
+    shouldPollOverviewTasks(true, [{ status: { type: 'completed' } }]), true,
+    'an open overview whose only rows are terminal must still poll: the next task has not been '
+    + 'pulled yet',
+  );
+  assert.equal(shouldPollOverviewTasks(true, [{ status: { type: 'running' } }]), true);
+  assert.equal(
+    shouldPollOverviewTasks(false, []), false,
+    'a closed overview polls nothing',
+  );
+});
+
+test('an open overview with an empty task map still issues task_list ticks (a /fusion task started after the panel opened is discovered)', () => {
+  mock.timers.enable({ apis: ['setInterval'] });
+  try {
+    // Mirrors RuntimeCenterOverview: the ref is recomputed on every render
+    // from the same predicate the component uses, and the interval reads it
+    // fresh per tick.
+    let tasks: { status: { type: string } }[] = [];
+    const overviewOpen = true;
+    const ref = { current: shouldPollOverviewTasks(overviewOpen, tasks) };
+    let refreshes = 0;
+    const refresh = async () => {
+      refreshes += 1;
+      // The engine spawned a `local_fusion` task after the panel opened; the
+      // FIRST poll is what delivers its row.
+      tasks = [{ status: { type: 'running' } }];
+      ref.current = shouldPollOverviewTasks(overviewOpen, tasks);
+    };
+    const stop = startPollingWhileActive(() => ref.current, refresh);
+    mock.timers.tick(1_500);
+    assert.equal(
+      refreshes, 1,
+      'the first tick after opening the panel on an empty task map must issue a task_list; '
+      + `got ${refreshes} -- the row of a task started after the panel opened can never arrive`,
+    );
+    mock.timers.tick(1_500);
+    assert.equal(refreshes, 2, 'polling must continue once the row has landed');
+    stop();
+    mock.timers.tick(3_000);
+    assert.equal(refreshes, 2, 'the interval must stop on cleanup');
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('RuntimeCenterOverview feeds its poll ref from shouldPollOverviewTasks, not from the task map alone', () => {
+  const overviewBody = functionBody(runtimeCenterSource, 'RuntimeCenterOverview');
+  assert.ok(
+    overviewBody.includes('hasActiveTaskRef.current = shouldPollOverviewTasks(center.overviewOpen, tasks)'),
+    'RuntimeCenterOverview must assign its poll ref from '
+    + 'shouldPollOverviewTasks(center.overviewOpen, tasks) on every render; assigning it from '
+    + 'hasInFlightTask(tasks)/hasActiveTask alone closes the poll for good whenever the task map '
+    + 'is empty or all-terminal, which is precisely when a newly started task needs to be pulled',
+  );
+  assert.ok(
+    !/hasActiveTaskRef\.current = hasActiveTask\b/.test(overviewBody),
+    'the poll ref must not be fed the raw in-flight flag again',
   );
 });

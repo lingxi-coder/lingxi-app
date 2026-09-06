@@ -1521,6 +1521,67 @@ impl TaskRegistry {
         }
     }
 
+    /// Record a Fusion run's failure reason before the terminal `Failed`
+    /// status opens it to the notification drain. Without this a failed
+    /// `local_fusion` task notified as bare "failed" with no `<error>`
+    /// section and no reason folded into the summary.
+    pub async fn set_fusion_error(&self, task_id: &str, error: String) {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        if let Some(TaskState::LocalFusion(fusion)) = map.get_mut(&task_id) {
+            fusion.error = Some(error);
+        }
+    }
+
+    /// Record a Fusion run's current progress-stage label (F005) — e.g.
+    /// "Running panels 2/3" — surfaced on the `local_fusion` task DTO so a
+    /// UI polling task state sees the same progress the Agent-tool path
+    /// forwards as `subagent_activity`. Best-effort: a since-evicted task is
+    /// a benign no-op.
+    pub async fn set_fusion_stage(&self, task_id: &str, stage: String) {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        if let Some(TaskState::LocalFusion(fusion)) = map.get_mut(&task_id) {
+            fusion.stage = Some(stage);
+        }
+    }
+
+    /// Record a Fusion run's egress profiles and usage summary alongside its
+    /// terminal payload, before the terminal status opens it to the
+    /// notification drain.
+    pub async fn set_fusion_egress_and_usage(
+        &self,
+        task_id: &str,
+        egress_profiles: Vec<String>,
+        usage: Option<platform_api::task_registry::AgentRunUsage>,
+    ) {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        if let Some(TaskState::LocalFusion(fusion)) = map.get_mut(&task_id) {
+            fusion.egress_profiles = egress_profiles;
+            fusion.usage = usage;
+        }
+    }
+
+    /// Record that [`platform_api::FusionCompletionSink::publish`]'s durable
+    /// `<fusion-result>` session append has completed for a `Completed` run
+    /// — called from `local_fusion`'s worker AFTER `sink.publish` resolves,
+    /// necessarily after [`Self::finish_fusion_terminal`] already flipped the
+    /// status (the notification drain's ordering requirement runs the other
+    /// way and is unaffected). A one-shot host (print mode) that returns the
+    /// instant it observes `Completed` can otherwise exit the process while
+    /// the append is still in flight and lose the row entirely (review
+    /// finding #17) — `apps/cli`'s `await_local_fusion_result_bounded` keeps
+    /// polling a `Completed` run until this flips. Best-effort: a
+    /// since-evicted task is a benign no-op.
+    pub async fn mark_fusion_result_published(&self, task_id: &str) {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        if let Some(TaskState::LocalFusion(fusion)) = map.get_mut(&task_id) {
+            fusion.result_published = true;
+        }
+    }
+
     /// Atomically publish a Fusion run's terminal payload and terminal status.
     pub async fn finish_fusion_terminal(
         &self,
@@ -1635,6 +1696,7 @@ impl TaskRegistry {
             let error = match state {
                 TaskState::LocalAgent(agent) => agent.error.clone(),
                 TaskState::LocalWorkflow(workflow) => workflow.outcome.error.clone(),
+                TaskState::LocalFusion(fusion) => fusion.error.clone(),
                 _ => None,
             };
             let workflow_outcome = match state {
@@ -1665,10 +1727,11 @@ impl TaskRegistry {
                 _ => None,
             };
             let agent_outcome = agent_outcome.unwrap_or_default();
-            let fusion_final_text = match state {
-                TaskState::LocalFusion(fusion) => fusion.final_text.clone(),
+            let fusion_state = match state {
+                TaskState::LocalFusion(fusion) => Some(fusion.clone()),
                 _ => None,
             };
+            let fusion_final_text = fusion_state.as_ref().and_then(|f| f.final_text.clone());
             out.push(platform_api::task_registry::TaskNotification {
                 task_id: b.id.clone(),
                 task_type: task_type_to_wire(b.task_type).to_string(),
@@ -1682,8 +1745,11 @@ impl TaskRegistry {
                 // final text and usage rollup, reported through
                 // `set_agent_outcome` before its terminal status. `None` stays
                 // the byte-faithful "no result" case (a run that produced no
-                // text, or a non-agent task).
-                usage: agent_outcome.usage,
+                // text, or a non-agent task). `local_fusion` reports its own
+                // usage summary through `set_fusion_egress_and_usage`.
+                usage: agent_outcome
+                    .usage
+                    .or_else(|| fusion_state.as_ref().and_then(|f| f.usage.clone())),
                 // `killed_by` (the by-Claude/by-user split, from
                 // `kill_with_reason`) + the isolation `<worktree>` section (the
                 // KEPT worktree's path/branch, from the handler's terminal
@@ -1745,6 +1811,10 @@ impl TaskRegistry {
                             .map(|outcome| outcome.agents_empty_result)
                     })
                     .flatten(),
+                egress_profiles: fusion_state
+                    .as_ref()
+                    .map(|f| f.egress_profiles.clone())
+                    .unwrap_or_default(),
             });
             // Mark notified so the completion surfaces exactly once. The task
             // itself stays addressable until an explicit cleanup/delete removes
@@ -1823,6 +1893,9 @@ impl TaskRegistry {
                 workflow_agents_error: None,
                 workflow_agents_skipped: None,
                 workflow_agents_empty_result: None,
+                // A rest notification only ever fires for a `local_agent`,
+                // which has no egress-profile concept.
+                egress_profiles: Vec::new(),
             });
         }
         drop(map);
@@ -2282,6 +2355,11 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             },
             cross_provider: request.cross_provider,
             final_text: None,
+            error: None,
+            egress_profiles: Vec::new(),
+            usage: None,
+            stage: None,
+            result_published: false,
         }),
     }
 }

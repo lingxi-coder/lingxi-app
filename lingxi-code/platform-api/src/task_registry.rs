@@ -145,6 +145,14 @@ pub struct TaskRecord {
     /// failed background task is not a bare id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// `local_fusion` only (F005): the run's current progress-stage label —
+    /// e.g. "Running panels 2/3" — the SAME text `FusionStage::label()`
+    /// produces for the Agent-tool path's `subagent_activity` forwarding, so
+    /// a `/fusion` task's DTO/list entry can render identical progress.
+    /// `None` for every other task type, and for a `local_fusion` task before
+    /// its first `FusionProgress` event lands. Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
 }
 
 /// A `local_workflow` run projected for the interactive `/workflows` picker
@@ -399,6 +407,12 @@ pub struct TaskNotification {
     /// `local_workflow`: number of terminal agent calls with empty results.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_agents_empty_result: Option<u64>,
+    /// `local_fusion`: provider profiles that received prompt data on this
+    /// run (parent's profile plus any cross-provider panels) → the optional
+    /// `<egress-profiles>` line. Never includes model names, only profile
+    /// ids. Empty ⇒ the section is omitted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress_profiles: Vec<String>,
 }
 
 /// One chunk of a task's accumulated stdout/stderr spool.
@@ -581,6 +595,12 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// registry boundary so the print and stream-json turn drivers cannot drift
     /// from one another.
     ///
+    /// `local_fusion` has no claude-code analogue but is added here
+    /// unconditionally (LingXi-specific, finding G003(b)): before this, a
+    /// running Fusion run was invisible to `_ => false` and kept spending
+    /// past `--max-budget-usd` — the one runtime kill switch for background
+    /// spend never reached it.
+    ///
     /// `before_stop` is called exactly once, after at least one matching task is
     /// found and before any cancellation begins. The print driver uses that
     /// seam to preserve Claude's observable ordering: write the budget notice,
@@ -602,7 +622,7 @@ pub trait TaskRegistryHandle: Send + Sync {
             .into_iter()
             .filter(|task| match task.task_type.as_str() {
                 "local_agent" => task.is_backgrounded != Some(false),
-                "local_workflow" => true,
+                "local_workflow" | "local_fusion" => true,
                 _ => false,
             })
             .map(|task| task.task_id)
@@ -815,10 +835,100 @@ pub trait TaskRegistryHandle: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn trait_is_object_safe() {
         let _: Option<Arc<dyn TaskRegistryHandle>> = None;
+    }
+
+    /// Fixed roster of running tasks, one of each `task_type` the ceiling
+    /// teardown must decide about, plus the two it must leave alone.
+    struct FixedRoster {
+        tasks: Vec<TaskRecord>,
+        killed: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl TaskRegistryHandle for FixedRoster {
+        async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn list(&self, _filter: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+            Ok(self.tasks.clone())
+        }
+        async fn update(
+            &self,
+            _id: &str,
+            _patch: TaskUpdatePatch,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn set_status(&self, _id: &str, _status: &str) -> Result<TaskRecord, TaskRegistryError> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {
+            self.killed.lock().unwrap().push(id.to_string());
+            self.tasks
+                .iter()
+                .find(|t| t.task_id == id)
+                .cloned()
+                .ok_or_else(|| TaskRegistryError::NotFound(id.to_string()))
+        }
+        async fn output(
+            &self,
+            _id: &str,
+            _offset: Option<u64>,
+        ) -> Result<TaskOutputChunk, TaskRegistryError> {
+            unimplemented!("not exercised by this test")
+        }
+    }
+
+    fn running(task_id: &str, task_type: &str) -> TaskRecord {
+        TaskRecord {
+            task_id: task_id.into(),
+            task_type: task_type.into(),
+            status: "running".into(),
+            description: "d".into(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn ceiling_teardown_stops_local_fusion_alongside_agent_and_workflow() {
+        // Finding G003(b): before `local_fusion` was added to this match, the
+        // `_ => false` arm made a running Fusion run invisible to
+        // `--max-budget-usd`'s ceiling teardown — it kept spending past the
+        // cap while `local_agent`/`local_workflow` tasks correctly stopped.
+        let registry = FixedRoster {
+            tasks: vec![
+                running("a1", "local_agent"),
+                running("w1", "local_workflow"),
+                running("f1", "local_fusion"),
+                running("b1", "local_bash"),
+                running("m1", "mcp_task"),
+            ],
+            killed: Mutex::new(Vec::new()),
+        };
+        let before_stop_calls = AtomicUsize::new(0);
+        let count = registry
+            .stop_background_agents_for_budget(&|| {
+                before_stop_calls.fetch_add(1, Ordering::SeqCst);
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 3, "local_agent + local_workflow + local_fusion");
+        assert_eq!(before_stop_calls.load(Ordering::SeqCst), 1);
+        let mut killed = registry.killed.lock().unwrap().clone();
+        killed.sort();
+        assert_eq!(
+            killed,
+            vec!["a1".to_string(), "f1".to_string(), "w1".to_string()],
+            "local_bash and mcp_task must be left alone; local_fusion must be stopped"
+        );
     }
 }

@@ -69,6 +69,17 @@ pub enum SubagentEvent {
         /// Cross-turn summed usage. Distinct from [`Self::Completed::usage`].
         #[serde(default)]
         cumulative_usage: llm_client::Usage,
+        /// `false` only on the CC 2.1.207 `api_error_partial` SALVAGE path
+        /// (Finding [9]): a mid-stream provider error whose already-produced
+        /// text is recovered as a `Completed` result instead of discarding
+        /// it. On that path `usage`/`cumulative_usage` above are the STALE
+        /// values from the last turn that completed successfully BEFORE the
+        /// error — the failing turn's own (real, provider-billed) tokens are
+        /// not included, because they were never captured. `true` on every
+        /// other path (clean stop, max-turns exhaustion, stub) where the
+        /// usage fields are the real, complete totals.
+        #[serde(default = "usage_complete_default")]
+        usage_complete: bool,
     },
     /// Agent terminated due to an error.
     Failed {
@@ -76,6 +87,17 @@ pub enum SubagentEvent {
         agent_id: AgentId,
         /// Human-readable error message.
         error: String,
+        /// Cross-turn summed usage from every SUCCESSFUL turn before the one
+        /// that failed (same accumulation [`Self::Completed::cumulative_usage`]
+        /// carries). Finding [9]/[11]: a `Failed` termination (provider
+        /// error, idle-timeout watchdog, max-turns/structured-output
+        /// exhaustion) still reflects real, already-billed provider spend
+        /// from any turn that succeeded before it — this lets a caller price
+        /// that spend instead of settling it at $0. `Usage::default()` on
+        /// every path that made no real round-trip (spawn-time failure, the
+        /// legacy stub).
+        #[serde(default)]
+        cumulative_usage: llm_client::Usage,
     },
     /// Agent was cancelled by the host.
     Killed {
@@ -89,6 +111,14 @@ pub enum SubagentEvent {
         /// Free-form message payload (full schema lands in Plan 09+).
         message: serde_json::Value,
     },
+}
+
+/// `#[serde(default = ...)]` for [`SubagentEvent::Completed::usage_complete`]
+/// / [`platform_api::subagent_spawn::SubagentResult::Completed::usage_complete`]
+/// — an older wire payload with no such field must decode as `true` (a
+/// normal complete usage rollup), not `bool::default()`'s `false`.
+fn usage_complete_default() -> bool {
+    true
 }
 
 fn completed_result_text(result: &serde_json::Value) -> Option<String> {
@@ -763,32 +793,43 @@ async fn build_preload_messages(ctx: &SubagentContext) -> Vec<protocol::Conversa
     // An empty collection produces NO message (messages.ts:4118 early return).
     // We match those bytes exactly: one message, the `SubagentStart hook
     // additional context: ` prefix, the `\n`-join of all contexts.
+    // G008: a Fusion panel is not an ordinary `Agent` tool spawn — it is one of
+    // N concurrent provider round-trips the orchestrator's own subagent-hook
+    // chokepoint (turn_loop.rs) already accounts for as a SINGLE `fusion` node
+    // (see `fusion_tool_result`'s `subagentHooksFired` marker below). Firing a
+    // real per-panel `SubagentStart` here — with no matching `SubagentStop`,
+    // since a panel definition carries no frontmatter `Stop` hook — would leave
+    // N starts and zero stops for every Fusion run. Skip it for this
+    // `agent_type` on EVERY entrypoint (Agent tool, `/fusion`, workflow), so a
+    // Fusion run's hook activity is exactly the chokepoint's one pair.
     if let Some(hooks) = &ctx.hook_executor {
-        let hook_ctx = hooks::registry::HookContext {
-            session_id: ctx.hook_session_id,
-            agent_id: Some(ctx.agent_id),
-            cwd: ctx.hook_cwd.clone(),
-            agent_type: Some(agent_type.clone()),
-            ..Default::default()
-        };
-        let agg = hooks
-            .execute(
-                hooks::events::HookEvent::SubagentStart {
-                    agent_id: ctx.agent_id,
-                    agent_type: agent_type.clone(),
-                    parent_agent_id: ctx.parent_agent_id,
-                },
-                hook_ctx,
-            )
-            .await;
-        if !agg.additional_contexts.is_empty() {
-            let joined = agg.additional_contexts.join("\n");
-            out.push(ConversationMessage::user(
-                MessageId::new(),
-                format!(
-                    "<system-reminder>\nSubagentStart hook additional context: {joined}\n</system-reminder>"
-                ),
-            ));
+        if agent_type != platform_api::FUSION_PANEL_TYPE {
+            let hook_ctx = hooks::registry::HookContext {
+                session_id: ctx.hook_session_id,
+                agent_id: Some(ctx.agent_id),
+                cwd: ctx.hook_cwd.clone(),
+                agent_type: Some(agent_type.clone()),
+                ..Default::default()
+            };
+            let agg = hooks
+                .execute(
+                    hooks::events::HookEvent::SubagentStart {
+                        agent_id: ctx.agent_id,
+                        agent_type: agent_type.clone(),
+                        parent_agent_id: ctx.parent_agent_id,
+                    },
+                    hook_ctx,
+                )
+                .await;
+            if !agg.additional_contexts.is_empty() {
+                let joined = agg.additional_contexts.join("\n");
+                out.push(ConversationMessage::user(
+                    MessageId::new(),
+                    format!(
+                        "<system-reminder>\nSubagentStart hook additional context: {joined}\n</system-reminder>"
+                    ),
+                ));
+            }
         }
     }
 
@@ -962,12 +1003,19 @@ async fn emit_failed(
     written: &mut usize,
     agent_id: AgentId,
     error: String,
+    cumulative_usage: llm_client::Usage,
 ) {
     flush_transcript(transcript, history, written).await;
     if let Some(writer) = transcript {
         let _ = writer.record_terminal("failed", Some(&error)).await;
     }
-    let _ = out_tx.send(SubagentEvent::Failed { agent_id, error }).await;
+    let _ = out_tx
+        .send(SubagentEvent::Failed {
+            agent_id,
+            error,
+            cumulative_usage,
+        })
+        .await;
 }
 
 async fn emit_killed(
@@ -1125,10 +1173,20 @@ async fn run_subagent_loop(
     // `force_tool_choice_for_api` is computed ONCE, HERE, before the turn loop
     // is entered, from the advertised-tool count alone; the nudge path below
     // deliberately does NOT re-arm it, and there is no other assignment to this
-    // binding anywhere in the loop (it is a `let`, not a `let mut`). A run that
-    // advertises tools besides StructuredOutput sends `tool_choice = None` on
-    // every round-trip, before AND after the nudge. Believe this comment and
-    // the shipped test, not the commit message.
+    // binding anywhere in the loop (it is a `let`, not a `let mut`). Under
+    // `StructuredOutputMode::Forced` (the byte-parity default this comment was
+    // originally written about), a run that advertises tools besides
+    // StructuredOutput sends `tool_choice = None` on every round-trip, before
+    // AND after the nudge — this binding alone is the whole story there.
+    //
+    // Round-3 review items 3/7/9/20 fix: under `StructuredOutputMode::WhenDone`
+    // (Fusion panels), this binding is NOT the whole story any more — the wire
+    // call below additionally pins on the run's designated last-chance turn
+    // (final turn, or two consecutive idle turns) even when `tool_schemas.len()
+    // != 1`, because that turn is the one place WhenDone's "forced only on the
+    // last turn" contract (`platform-api/src/subagent_spawn.rs`) cannot be
+    // honored by this binding's single-tool gate alone — see the wire call's
+    // own comment below for the mode-aware condition.
     let force_tool_choice_for_api: Option<&'static str> =
         if force_structured_tool.is_some() && tool_schemas.len() == 1 {
             force_structured_tool
@@ -1146,6 +1204,16 @@ async fn run_subagent_loop(
     let mut structured_failed_count: u32 = 0;
     let mut structured_nudge_count: u32 = 0;
     let structured_retry_cap = structured_output_retry_cap();
+    // `StructuredOutputMode::WhenDone` (Fusion panels — WP2a item 1): counts
+    // CONSECUTIVE turns that produced no tool_use block at all (not even a
+    // `StructuredOutput` call). Reset to 0 the moment any tool is called.
+    // Reaching 2 forces `StructuredOutput` on the very next turn, same as
+    // being on the run's last turn — see `force_this_turn` below.
+    let mut whendone_idle_turns: u32 = 0;
+    let force_every_turn = matches!(
+        ctx.structured_output_mode,
+        platform_api::subagent_spawn::StructuredOutputMode::Forced
+    );
     // Per-agent tool allow-list enforced at dispatch (see below). Empty = no
     // restriction (the resolver has not filtered, e.g. `AgentToolPolicy::All`).
     // This is the dispatch-time guard the advertised set relies on: the
@@ -1216,6 +1284,7 @@ async fn run_subagent_loop(
             Some(resolve_model(&ctx)),
             ctx.model_profile.clone(),
         )
+        .with_correlation_id(ctx.correlation_id.clone())
     });
     // Mark a child as live before its first round-trip. A persistent child may
     // later transition to `idle` without terminating; the lifecycle records
@@ -1285,7 +1354,7 @@ async fn run_subagent_loop(
         // already emitted its `Completed`). Stays `false` if the loop instead falls
         // through by exhausting `max_turns`, which needs the max-turns `Completed`.
         let mut terminated_cleanly = false;
-        for _turn in 0..max_turns {
+        for turn_idx in 0..max_turns {
             // Per-turn budget gate. This is the achievable analog of
             // `QueryEngine.ts`'s `error_max_budget_usd` loop-terminator, built on
             // the same frozen seam `AgentTool`'s pre-spawn gate uses
@@ -1329,6 +1398,7 @@ async fn run_subagent_loop(
                         &mut transcript_written,
                         agent_id,
                         error,
+                    cumulative_usage.clone(),
                     )
                     .await;
                     return;
@@ -1357,6 +1427,18 @@ async fn run_subagent_loop(
                 .effort
                 .as_ref()
                 .map(crate::definition::AgentEffort::to_wire);
+            // `StructuredOutputMode::WhenDone` (Fusion panels, WP2a item 1): let
+            // the model use its other tools with normal (auto) `tool_choice`
+            // while turns remain; force `StructuredOutput` only on the run's
+            // LAST turn, or once it has produced two consecutive turns with no
+            // tool call at all (`whendone_idle_turns`, updated after the
+            // round-trip below). `StructuredOutputMode::Forced` (the default,
+            // byte-parity with pre-WP2a behavior) forces every turn
+            // unconditionally. Computed once per turn (stable across any
+            // watchdog retry of the SAME turn below).
+            let is_last_turn = turn_idx + 1 == max_turns;
+            let force_this_turn = force_structured_tool.is_some()
+                && (force_every_turn || is_last_turn || whendone_idle_turns >= 2);
             // (M9 cc2.1.198 wake-on-message) Captured by the wake arm in the
             // select below and appended to `history` HERE, before the next
             // `api_call` is built, because the in-flight future immutably
@@ -1405,7 +1487,35 @@ async fn run_subagent_loop(
                         query_source_label: ctx.query_source_label.clone(),
                     };
                     let open_stream = async {
-                        if let Some(forced) = force_tool_choice_for_api {
+                        // Combine both fixes, per-mode rather than by blind
+                        // conjunction (round-3 review items 2/3/7/9/20 fix:
+                        // the merge's plain `&&` made `force_this_turn`'s
+                        // last-turn / two-idle-turn force permanently dead on
+                        // the wire for every real Fusion panel, since a panel
+                        // always advertises more than one tool). Under
+                        // `StructuredOutputMode::Forced` (`force_every_turn`)
+                        // the oracle-verified P0-1 gate is preserved exactly:
+                        // pinning `tool_choice` is only safe when
+                        // StructuredOutput is the ONLY advertised tool, since
+                        // pinning it otherwise silently removes the model's
+                        // ability to call any other tool for the rest of the
+                        // turn — and under `Forced`, `force_this_turn` is
+                        // true on EVERY turn, so a bare OR would re-pin every
+                        // round-trip of a multi-tool schema subagent and
+                        // regress P0-1. Under `StructuredOutputMode::WhenDone`
+                        // (`!force_every_turn`), `force_this_turn` is true
+                        // only on the run's designated last-chance turn (the
+                        // final turn, or after two consecutive idle turns) —
+                        // exactly the turn the policy singles out as having
+                        // nothing else useful left to explore — so that turn
+                        // pins `tool_choice` regardless of how many other
+                        // tools are advertised, restoring the documented
+                        // "forced only on the last turn" contract
+                        // (`platform-api/src/subagent_spawn.rs`,
+                        // `fusion/src/panel.rs`) for every real panel.
+                        if force_this_turn
+                            && (force_tool_choice_for_api.is_some() || !force_every_turn)
+                        {
                             api_client
                                 .messages_create_stream_forced_in_opts(
                                     &current_model,
@@ -1413,7 +1523,7 @@ async fn run_subagent_loop(
                                     system.as_deref(),
                                     messages_for_api,
                                     tool_schemas.clone(),
-                                    Some(forced),
+                                    force_structured_tool,
                                     effort_wire.clone(),
                                     call_opts,
                                 )
@@ -1553,6 +1663,7 @@ async fn run_subagent_loop(
                                 "{} {e}",
                                 platform_api::subagent_spawn::SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX
                             ),
+                        cumulative_usage.clone(),
                         )
                         .await;
                         return;
@@ -1607,6 +1718,11 @@ async fn run_subagent_loop(
                                     assistant_message_count,
                                     last_request_id: last_request_id.clone(),
                                     cumulative_usage: cumulative_usage.clone(),
+                                    // Finding [9]: this is the api_error_partial
+                                    // salvage — `usage`/`cumulative_usage` above
+                                    // are stale (last SUCCESSFUL turn), the
+                                    // failed turn's real spend is not captured.
+                                    usage_complete: false,
                                 })
                                 .await;
                             return;
@@ -1619,6 +1735,7 @@ async fn run_subagent_loop(
                                 &mut transcript_written,
                                 agent_id,
                                 format!("subagent api error: {e}"),
+                            cumulative_usage.clone(),
                             )
                             .await;
                             return;
@@ -1630,11 +1747,14 @@ async fn run_subagent_loop(
             // Keep the FINAL response usage for the terminal `Completed` rollup
             // (claude `getTokenCountFromUsage` reads the LAST assistant usage — so
             // overwrite, never accumulate, to stay byte-faithful).
+            //
+            // WP2a item 2 (F002 sub-claim 3): `max_output_tokens_per_turn` is a
+            // WIRE ceiling forwarded to the provider via
+            // `SubagentApiCallOpts::max_output_tokens` (below) — it is NOT a
+            // clamp on the REPORTED usage. Reporting min(real, ceiling) here
+            // hid a provider overrun from `cumulative_usage`/settlement instead
+            // of surfacing it; report the provider's real usage verbatim.
             last_usage = response.usage.clone();
-            if let Some(max) = ctx.max_output_tokens_per_turn {
-                last_usage.billable_tokens.output =
-                    last_usage.billable_tokens.output.min(u64::from(max));
-            }
             accumulate_usage(&mut cumulative_usage, &last_usage);
             emit_progress(
                 &out_tx,
@@ -1692,6 +1812,17 @@ async fn run_subagent_loop(
             // Accumulate the run-wide tool-use count (claude `totalToolUseCount`).
             total_tool_use_count = total_tool_use_count.saturating_add(tool_uses.len() as u64);
 
+            // `StructuredOutputMode::WhenDone`: reset the idle streak the moment
+            // ANY tool is called (including a `StructuredOutput` attempt — a
+            // failed validation still means the model tried); otherwise count
+            // this as one more consecutive no-tool turn. No-op under `Forced`
+            // (every turn is already forced, so `whendone_idle_turns` is unread).
+            if tool_uses.is_empty() {
+                whendone_idle_turns = whendone_idle_turns.saturating_add(1);
+            } else {
+                whendone_idle_turns = 0;
+            }
+
             // Dispatch any tool_use blocks FIRST, then decide loop disposition by
             // stop_reason — mirroring the orchestrator references. `execute_one_turn`
             // (turn_loop.rs:111) always dispatches tool_uses when present regardless
@@ -1715,6 +1846,7 @@ async fn run_subagent_loop(
                         &mut transcript_written,
                         agent_id,
                         "subagent requested a tool but no tool_invoker was inherited".to_string(),
+                    cumulative_usage.clone(),
                     )
                     .await;
                     return;
@@ -1897,6 +2029,7 @@ async fn run_subagent_loop(
                                 &mut transcript_written,
                                 agent_id,
                                 error,
+                            cumulative_usage.clone(),
                             )
                             .await;
                             return;
@@ -1965,6 +2098,7 @@ async fn run_subagent_loop(
                     format!(
                         "agent({{schema}}): StructuredOutput retry cap ({structured_retry_cap}) exceeded \u{2014} {structured_failed_count} failed {calls} with no valid output"
                     ),
+                cumulative_usage.clone(),
                 )
                 .await;
                 return;
@@ -1990,6 +2124,36 @@ async fn run_subagent_loop(
                 // stop keeps `should_continue` true, so the model retries until the
                 // retry cap above fires.)
                 if force_structured_tool.is_some() && structured_result.is_none() {
+                    // `StructuredOutputMode::WhenDone`: a text-only turn that
+                    // wasn't forced is not an anomaly — the model is still free
+                    // to use its other tools on a later turn. Loop back WITHOUT
+                    // the nudge-then-fail escalation below, which exists to
+                    // catch a FORCED turn the provider still answered with no
+                    // tool call (a genuine anomaly under either mode). The
+                    // `whendone_idle_turns` counter (updated above) forces the
+                    // next turn once it reaches 2, guaranteeing termination
+                    // without relying on this escalation at all.
+                    //
+                    // The next round-trip's request is built straight from
+                    // `history` (`cap_input_bytes(&history, ..)` at the top of
+                    // the turn loop) — every OTHER exit from this arm, and
+                    // every tool-dispatch continuation, appends a user message
+                    // (the nudge below, or the pushed tool_results) before
+                    // looping, so the request's last message is always
+                    // user-authored. This is the one path that did not: append
+                    // a lightweight wrap-up reminder now so the WhenDone idle
+                    // path keeps that invariant too, WITHOUT spending a
+                    // `structured_nudge_count` slot (that budget is reserved
+                    // for the FORCED-turn anomaly below; this is routine).
+                    if !force_this_turn {
+                        let wrap_up = ConversationMessage::user(
+                            MessageId::new(),
+                            "Continue working, or call StructuredOutput now if you have your answer.".to_string(),
+                        );
+                        history.push(wrap_up.clone());
+                        emit_message(&out_tx, agent_id, &wrap_up).await;
+                        continue;
+                    }
                     if structured_nudge_count < 2 {
                         structured_nudge_count = structured_nudge_count.saturating_add(1);
                         let nudge = ConversationMessage::user(
@@ -2015,6 +2179,7 @@ async fn run_subagent_loop(
                         // nudge count are not discoverable static strings in the binary,
                         // so the port's nudge text + 2× retry are left as-is.)
                         "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)".to_string(),
+                    cumulative_usage.clone(),
                     )
                     .await;
                     return;
@@ -2052,6 +2217,7 @@ async fn run_subagent_loop(
                         assistant_message_count,
                         last_request_id: last_request_id.clone(),
                         cumulative_usage: cumulative_usage.clone(),
+                        usage_complete: true,
                     })
                     .await;
                 // Terminal stop for this turn-set: leave the inner turn loop and
@@ -2090,6 +2256,7 @@ async fn run_subagent_loop(
                     &mut transcript_written,
                     agent_id,
                     "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)".to_string(),
+                    cumulative_usage.clone(),
                 )
                 .await;
                 return;
@@ -2116,6 +2283,7 @@ async fn run_subagent_loop(
                     assistant_message_count,
                     last_request_id: last_request_id.clone(),
                     cumulative_usage: cumulative_usage.clone(),
+                    usage_complete: true,
                 })
                 .await;
         }
@@ -2280,6 +2448,7 @@ async fn run_subagent_stub(
                             assistant_message_count: 0,
                             last_request_id: None,
                             cumulative_usage: llm_client::Usage::default(),
+                            usage_complete: true,
                         })
                         .await;
                 }
@@ -2304,6 +2473,7 @@ async fn run_subagent_stub(
                 assistant_message_count: 0,
                 last_request_id: None,
                 cumulative_usage: llm_client::Usage::default(),
+                usage_complete: true,
             })
             .await;
     } else {
@@ -2311,6 +2481,7 @@ async fn run_subagent_stub(
             .send(SubagentEvent::Failed {
                 agent_id,
                 error: "run_subagent: event channel closed without terminal state".into(),
+                cumulative_usage: llm_client::Usage::default(),
             })
             .await;
     }
@@ -2339,6 +2510,40 @@ fn accumulate_usage(acc: &mut llm_client::Usage, turn: &llm_client::Usage) {
         .saturating_add(turn.billable_tokens.reasoning_output);
 }
 
+/// Group `messages` into atomic trim units: an assistant message whose
+/// content is entirely (or partly) `ToolUse` blocks, immediately followed by
+/// a user message whose content is entirely `ToolResult` blocks, is one unit
+/// — every other message is its own unit. Every provider rejects a
+/// `tool_result` with no matching `tool_use` in the same request (and vice
+/// versa), so [`cap_input_bytes`] must never keep one half of such a pair.
+fn tool_pair_units(messages: &[protocol::ConversationMessage]) -> Vec<&[protocol::ConversationMessage]> {
+    let mut units = Vec::new();
+    let mut i = 0;
+    while i < messages.len() {
+        let is_tool_use_turn = matches!(
+            &messages[i],
+            protocol::ConversationMessage::Assistant { content, .. }
+                if content.iter().any(|b| matches!(b, protocol::ContentBlock::ToolUse { .. }))
+        );
+        if is_tool_use_turn && i + 1 < messages.len() {
+            let next_is_all_tool_result = matches!(
+                &messages[i + 1],
+                protocol::ConversationMessage::User { content, .. }
+                    if !content.is_empty()
+                        && content.iter().all(|b| matches!(b, protocol::ContentBlock::ToolResult { .. }))
+            );
+            if next_is_all_tool_result {
+                units.push(&messages[i..=i + 1]);
+                i += 2;
+                continue;
+            }
+        }
+        units.push(&messages[i..=i]);
+        i += 1;
+    }
+    units
+}
+
 fn cap_input_bytes(
     messages: &[protocol::ConversationMessage],
     max_bytes: Option<u64>,
@@ -2346,25 +2551,59 @@ fn cap_input_bytes(
     let Some(max) = max_bytes else {
         return messages.to_vec();
     };
-    let mut out = Vec::new();
+    let units = tool_pair_units(messages);
+    let unit_bytes = |unit: &[protocol::ConversationMessage]| -> u64 {
+        unit.iter()
+            .map(|msg| {
+                serde_json::to_vec(msg)
+                    .map(|bytes| bytes.len() as u64)
+                    .unwrap_or(0)
+            })
+            .sum()
+    };
+
+    // [F009, round-4 review item 6] `history`'s FIRST unit is the caller's
+    // seeded task/fork prefix (`ctx.prompt_messages`, extended onto
+    // `history` before the first turn — see the seeding block above
+    // `run_subagent`'s turn loop). A Fusion panel's ENTIRE task text lives
+    // in that one unit and nothing re-injects it on a later turn, so the
+    // tail-only fill below must never evict it — including when that one
+    // unit alone is bigger than `max`. Pinning it only when it happened to
+    // fit the budget (the round-3 version of this comment) meant that on
+    // any turn where the lone prompt unit was itself over-budget, the
+    // "keep only what fits, newest-first" tail fallback below dropped it
+    // outright, silently sending a request with NO task from turn 2 onward
+    // — an over-budget task sent whole is strictly better than a request
+    // with no task at all, so the head is pinned unconditionally whenever
+    // there is more than one unit. `tail_budget` still saturates to 0 in
+    // that case, so the tail loop below falls back to its own
+    // `!out.is_empty()` guard and keeps at least the single newest unit on
+    // top of the pinned head.
+    let pin_head = units.len() > 1;
+    let head_bytes = if pin_head { unit_bytes(units[0]) } else { 0 };
+    let tail_budget = max.saturating_sub(head_bytes);
+    let tail_start = usize::from(pin_head);
+
+    let mut out: Vec<&[protocol::ConversationMessage]> = Vec::new();
     let mut used = 0u64;
-    for msg in messages.iter().rev() {
-        let size = serde_json::to_vec(msg)
-            .map(|bytes| bytes.len() as u64)
-            .unwrap_or(0);
-        if !out.is_empty() && used.saturating_add(size) > max {
+    for unit in units[tail_start..].iter().rev() {
+        let size = unit_bytes(unit);
+        if !out.is_empty() && used.saturating_add(size) > tail_budget {
             break;
         }
         used = used.saturating_add(size);
-        out.push(msg.clone());
+        out.push(unit);
     }
     out.reverse();
+    if pin_head {
+        out.insert(0, units[0]);
+    }
     if out.is_empty() {
-        if let Some(last) = messages.last() {
-            out.push(last.clone());
+        if let Some(last_unit) = units.last() {
+            out.push(last_unit);
         }
     }
-    out
+    out.into_iter().flatten().cloned().collect()
 }
 
 #[cfg(test)]

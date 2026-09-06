@@ -135,6 +135,11 @@ pub struct RegistryToolInvoker {
     /// gate the main loop consults — so subagent and teammate tool calls are
     /// now subject to the same allow/deny rules, closing the bypass.
     gate: Option<Arc<dyn PermissionGate>>,
+    /// (Finding 22) Marks every dispatch through this invoker as owned by a
+    /// background task with no interactive turn — see
+    /// [`platform_api::permission_gate::PermissionCheckContext::background_owned`].
+    /// Default `false`; set only via [`Self::with_background_owned`].
+    background_owned: bool,
 }
 
 impl RegistryToolInvoker {
@@ -146,6 +151,7 @@ impl RegistryToolInvoker {
         Self {
             registry,
             gate: None,
+            background_owned: false,
         }
     }
 
@@ -154,6 +160,19 @@ impl RegistryToolInvoker {
     #[must_use]
     pub fn with_gate(mut self, gate: Arc<dyn PermissionGate>) -> Self {
         self.gate = Some(gate);
+        self
+    }
+
+    /// (Finding 22) Mark every dispatch through this invoker as
+    /// background-owned (no interactive turn owns it) — see
+    /// [`platform_api::permission_gate::PermissionCheckContext::background_owned`].
+    /// The composition root calls this ONLY on the invoker instance wired
+    /// exclusively to a background task's spawner (as of writing, the
+    /// `/fusion` background task's `fusion_invoker`); an invoker that a
+    /// foreground direct tool call can also reach must never set this.
+    #[must_use]
+    pub fn with_background_owned(mut self, background_owned: bool) -> Self {
+        self.background_owned = background_owned;
         self
     }
 
@@ -315,6 +334,12 @@ impl ToolInvoker for RegistryToolInvoker {
                 // command — which is the entire point: a settings edit made while
                 // a fork was parked must not WIDEN what it may run on resume.
                 permission_layers: frozen_command_deny_layers(&ctx.frozen_command_denies),
+                // Finding 22: carry THIS invoker's background-owned marker
+                // (set only on the dedicated background-task invoker, see
+                // `with_background_owned`) onto every check so a transport
+                // that serializes interactive prompts can tell a background
+                // run's ask apart from the interactive turn's own.
+                background_owned: self.background_owned,
                 ..Default::default()
             };
             // Tool-local DENY has priority over every policy result.  For a

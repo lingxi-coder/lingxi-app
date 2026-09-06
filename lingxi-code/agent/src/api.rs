@@ -463,6 +463,54 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
             )
             .await
     }
+
+    // WP2a item 2 (F002 sub-claim 3), round 2: WITHOUT these two overrides the
+    // trait's default `_in_opts` bodies re-dispatch through `self` (this
+    // wrapper)'s non-opts methods above, silently dropping `opts` — the exact
+    // Fusion per-turn `max_output_tokens` ceiling and `query_source_label`
+    // this seam exists to carry — on the ONLY path that spawns a Fusion panel
+    // (`panel.rs` -> `handle.rs`'s `WORKFLOW_QUERY_WATCHDOG_OVERRIDE` wraps
+    // `ctx.api_client` in this decorator). Delegate verbatim, same as every
+    // other method on this impl.
+    async fn messages_create_stream_in_opts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        effort: Option<serde_json::Value>,
+        opts: SubagentApiCallOpts,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        self.inner
+            .messages_create_stream_in_opts(model, profile, system, messages, tools, effort, opts)
+            .await
+    }
+
+    async fn messages_create_stream_forced_in_opts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        forced_tool: Option<&str>,
+        effort: Option<serde_json::Value>,
+        opts: SubagentApiCallOpts,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        self.inner
+            .messages_create_stream_forced_in_opts(
+                model,
+                profile,
+                system,
+                messages,
+                tools,
+                forced_tool,
+                effort,
+                opts,
+            )
+            .await
+    }
 }
 
 #[cfg(test)]

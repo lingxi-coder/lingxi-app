@@ -994,6 +994,8 @@ export interface TaskRowDto {
   started_at_ms?: number;
   /** Terminal failure reason for a `failed` row, when the handler reported one. */
   error?: string;
+  /** `local_fusion` only (F005): the run's current progress-stage label. */
+  stage?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

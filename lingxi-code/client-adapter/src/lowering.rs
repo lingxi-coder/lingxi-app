@@ -470,6 +470,7 @@ pub fn lower_task_record(rec: &TaskRecord) -> TaskRowDto {
         } else {
             None
         },
+        stage: rec.stage.clone(),
     }
 }
 
@@ -817,11 +818,11 @@ mod tests {
         let uuid = uuid::Uuid::nil();
         let meta = SessionMetadata {
             uuid,
+            mode: session::jsonl::SessionMode::Code,
             title: "First chat".to_string(),
             modified: UNIX_EPOCH + Duration::from_secs(1_609_459_200),
             created: UNIX_EPOCH + Duration::from_secs(1_609_459_200),
             message_count: 7,
-            mode: session::jsonl::SessionMode::Code,
             path: PathBuf::from("/home/u/.lingxi/sessions/abc.jsonl"),
             pr_number: None,
             custom_or_ai_title: Some("First chat".to_string()),
@@ -994,6 +995,37 @@ mod tests {
         // "killed" wire status → Cancelled DTO variant.
         assert_eq!(dto.status, TaskStatusDto::Cancelled);
         assert_eq!(dto.description, "build");
+    }
+
+    /// F005: `TaskRecord.stage` (the `/fusion` task's live progress-stage
+    /// label) survives the lowering to `TaskRowDto.stage` unchanged, so a
+    /// polling client sees the same "Running panels 2/3" text the Agent-tool
+    /// path forwards as `subagent_activity`.
+    #[test]
+    fn task_record_stage_lowers_onto_task_row_stage() {
+        let with_stage = TaskRecord {
+            task_id: "fu3f9zk2x".to_string(),
+            task_type: "local_fusion".to_string(),
+            status: "running".to_string(),
+            description: "deliberate".to_string(),
+            stage: Some("Running panels 2/3".to_string()),
+            ..Default::default()
+        };
+        let dto = lower_task_record(&with_stage);
+        assert_eq!(dto.stage.as_deref(), Some("Running panels 2/3"));
+
+        let without_stage = TaskRecord {
+            task_id: "b3f9zk2xq".to_string(),
+            task_type: "local_bash".to_string(),
+            status: "running".to_string(),
+            description: "build".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            lower_task_record(&without_stage).stage,
+            None,
+            "non-fusion task rows carry no stage"
+        );
     }
 
     #[test]

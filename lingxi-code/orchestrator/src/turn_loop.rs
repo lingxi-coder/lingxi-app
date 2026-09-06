@@ -5678,11 +5678,11 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             // #8: recover the REAL child id surfaced on the success result's
             // `data.agentId`. Absent (the failure path carries `ToolError`, no
             // `data`) → fresh fallback id, the single residual divergence.
-            let child_id = emit_payload
+            let real_agent_id = emit_payload
                 .get("agentId")
                 .and_then(serde_json::Value::as_str)
-                .and_then(protocol::AgentId::parse_prefixed)
-                .unwrap_or_else(protocol::AgentId::new);
+                .and_then(protocol::AgentId::parse_prefixed);
+            let child_id = real_agent_id.unwrap_or_else(protocol::AgentId::new);
             // R7: did the child runner already fire the canonical SubagentStart
             // (+ its own frontmatter SubagentStop)? Only the REAL Agent tool sets
             // this; FakeAgentTool fixtures and the failure path leave it absent.
@@ -5690,6 +5690,23 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                 .get("subagentHooksFired")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
+            // G008: `fusion_tool_result` also stamps `subagentHooksFired: true`
+            // (a Fusion run's panels already fired their own hooks — or, for
+            // `fusion-panel`, none at all, by runner-side design) but NEVER an
+            // `agentId` — a Fusion run is N panels, not one child with a
+            // canonical id. That combination (`subagentHooksFired` true, no real
+            // `agentId`) can only be a Fusion result: an ordinary failed Agent
+            // spawn also lacks `agentId` but never sets `subagentHooksFired`
+            // either. Skip BOTH SubagentStart and SubagentStop here instead of
+            // firing a phantom `"fusion"` pair on a freshly-minted id that has
+            // no transcript and no real child behind it.
+            let is_fusion_result = runner_fired_start && real_agent_id.is_none();
+            if is_fusion_result {
+                tracing::debug!(
+                    tool_name = %name,
+                    "skipped chokepoint Subagent hooks for a Fusion tool result (no single child agent id)",
+                );
+            } else {
             // Carry the dispatched `subagent_type` as the hook context's
             // `agent_type` so the wire payload's `agent_type` is faithful
             // (claude-code passes the subagent's `agentType` into the hooks).
@@ -5748,6 +5765,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                 duration_ms = sa_dur_ms,
                 "fired chokepoint SubagentStart (if runner didn't) + session/plugin SubagentStop after Agent/Task tool completed",
             );
+            }
         }
 
         // MCP results carry the content-block array directly AS `data` (1:1 with

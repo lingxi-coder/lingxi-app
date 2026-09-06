@@ -758,7 +758,7 @@ pub struct FusionSettingsJson {
     /// Continue when some panels fail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_ok: Option<bool>,
-    /// Per-panel turn cap (1..=32).
+    /// Per-panel turn cap (1..=12).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panel_max_turns: Option<u32>,
     /// Per-turn output token cap.
@@ -850,9 +850,17 @@ impl FusionSettingsJson {
             }
         }
         if let Some(turns) = self.panel_max_turns {
-            if !(1..=32).contains(&turns) {
+            // The `fusion-panel` agent definition
+            // (`agent::builtins::fusion_panel_definition`) hard-codes
+            // `max_turns: 12` and a request override only ever LOWERS it
+            // (`.min()`), so the runner can never actually run a panel past
+            // 12 turns. Accepting a configured value above that would only
+            // inflate `budget::quote`'s per-turn reservation (up to 2.7x)
+            // for turns that could never be spent — a spurious
+            // `BudgetExceeded` (F002).
+            if !(1..=12).contains(&turns) {
                 return Err(SchemaViolation(
-                    "fusion.panelMaxTurns must be in 1..=32".into(),
+                    "fusion.panelMaxTurns must be in 1..=12".into(),
                 ));
             }
         }
@@ -887,7 +895,10 @@ impl FusionSettingsJson {
                 ));
             }
         }
-        let total = self.total_timeout_ms.unwrap_or(900_000);
+        // Default kept in lockstep with `fusion::FusionRuntimeConfig::defaults`
+        // (F004) — both must agree so an absent `fusion.totalTimeoutMs` passes
+        // this validator and then the runtime config builds successfully.
+        let total = self.total_timeout_ms.unwrap_or(1_200_000);
         if total == 0 {
             return Err(SchemaViolation(
                 "fusion.totalTimeoutMs must be positive".into(),
@@ -899,8 +910,27 @@ impl FusionSettingsJson {
             ("fusion.analystTimeoutMs", self.analyst_timeout_ms),
             ("fusion.synthesizerTimeoutMs", self.synthesizer_timeout_ms),
         ] {
+            // Finding [15]: same per-file hazard the stage-SUM check below
+            // is deliberately gated against — a tier that sets a stage
+            // field but not `totalTimeoutMs` has no opinion on the total;
+            // it may be raised in a DIFFERENT tier. Defaulting `total` to
+            // the runtime's restrictive 1_200_000 here (unconditionally,
+            // before this gate) rejected a file whose merged view is fine
+            // (e.g. this tier setting `panelTotalTimeoutMs: 1500000` while
+            // a user tier sets `totalTimeoutMs: 2400000`), and
+            // `read_layer_or_skip` silently dropped that tier's unrelated
+            // `permissions`/`hooks`/`model` along with it.
+            // `FusionRuntimeConfig::from_settings` re-checks the identical
+            // per-stage-vs-total invariant on the MERGED view for
+            // `panelTotalTimeoutMs`, `analystTimeoutMs` and
+            // `synthesizerTimeoutMs` — each is a term of its stage-sum
+            // check (fusion/src/config.rs). `panelIdleTimeoutMs` is NOT a
+            // term of that sum, so nothing re-checks it once this gate
+            // closes; see the same-file `panelIdleTimeoutMs` vs
+            // `panelTotalTimeoutMs` check below, which restores the
+            // invariant that actually governs it (Finding [24]).
             if let Some(stage) = value {
-                if stage > total {
+                if self.total_timeout_ms.is_some() && stage > total {
                     return Err(SchemaViolation(format!(
                         "{name} must not exceed fusion.totalTimeoutMs"
                     )));
@@ -912,11 +942,114 @@ impl FusionSettingsJson {
                 }
             }
         }
+        // Finding [24]: `panelIdleTimeoutMs` is the one stage field above
+        // that is NOT a term of `FusionRuntimeConfig::from_settings`'s
+        // stage-sum re-check (fusion/src/config.rs), and the
+        // `totalTimeoutMs`-gated loop above says nothing about it either —
+        // the invariant that actually governs it is not "<= totalTimeoutMs"
+        // anyway: the panel-level stall detector (`stall_timeout_ms`,
+        // fusion/src/panel.rs) is only ever reachable while the panel
+        // itself is still running, i.e. while
+        // `panelIdleTimeoutMs <= panelTotalTimeoutMs`. Check that
+        // invariant directly, same-file only (no cross-tier hazard: both
+        // sides must be present IN THIS FILE, so a tier that sets only one
+        // of them is left to the other tier/default exactly as before —
+        // `FusionRuntimeConfig::from_settings` re-checks the identical
+        // invariant on the merged view, comparing the merged/defaulted
+        // `panel_total_timeout_ms` against the pre-default
+        // `panel_idle_timeout_ms` — but ONLY when some tier actually set
+        // `panelIdleTimeoutMs` at all, so a merged DEFAULT idle value
+        // (180_000) can never trip that check just because a different
+        // tier lowered `panelTotalTimeoutMs` below it; a settings file that
+        // never mentions `panelIdleTimeoutMs` must not be rejected over a
+        // field it never touched. Same gating pattern as the stage-sum and
+        // min-successful-panels merged-view checks beside it. Independent
+        // of validation, `panel::panel_stall_timeout_ms` also clamps the
+        // watchdog deadline at the spawn use site as defense in depth for a
+        // config built in-process without going through `from_settings` at
+        // all).
+        if let (Some(idle), Some(panel_total)) =
+            (self.panel_idle_timeout_ms, self.panel_total_timeout_ms)
+        {
+            if idle > panel_total {
+                return Err(SchemaViolation(
+                    "fusion.panelIdleTimeoutMs must not exceed fusion.panelTotalTimeoutMs"
+                        .into(),
+                ));
+            }
+        }
+        // F004: a run whose panels all completed must not be able to report
+        // "timed out before any panel completed" just because the analyst
+        // retry loop and the synthesizer, summed with the panel stage, can
+        // exceed the end-to-end deadline. Defaults here mirror
+        // `fusion::FusionRuntimeConfig::defaults`.
+        //
+        // Same per-file hazard as the `minSuccessfulPanels` check above, in
+        // BOTH directions: only run this comparison when `totalTimeoutMs` is
+        // present IN THIS FILE *and* at least one of the three stage fields
+        // is too. A tier that sets stage fields but not `totalTimeoutMs` has
+        // no opinion on the total — it may be raised in a different tier —
+        // so defaulting `total` to the runtime's 1_200_000 here would reject
+        // a file whose merged view is fine (e.g. a project tier setting only
+        // `panelTotalTimeoutMs: 900000` while a user tier sets
+        // `totalTimeoutMs: 1800000`), and `read_layer_or_skip` would then
+        // silently drop that tier's unrelated `permissions`/`hooks`/`model`
+        // along with it. `FusionRuntimeConfig::from_settings` re-checks the
+        // identical invariant on the MERGED view and fails only the fusion
+        // run, which is the right blast radius for a genuine violation.
+        if self.total_timeout_ms.is_some()
+            && (self.panel_total_timeout_ms.is_some()
+                || self.analyst_timeout_ms.is_some()
+                || self.synthesizer_timeout_ms.is_some())
+        {
+            let panel_total = self.panel_total_timeout_ms.unwrap_or(600_000);
+            let analyst = self.analyst_timeout_ms.unwrap_or(120_000);
+            let synthesizer = self.synthesizer_timeout_ms.unwrap_or(180_000);
+            let retries = u64::from(self.analysis_protocol_retries.unwrap_or(1));
+            let stage_sum = panel_total
+                .saturating_add(analyst.saturating_mul(1 + retries))
+                .saturating_add(synthesizer);
+            if stage_sum > total {
+                return Err(SchemaViolation(format!(
+                    "fusion.panelTotalTimeoutMs + fusion.analystTimeoutMs*(1+fusion.analysisProtocolRetries) + fusion.synthesizerTimeoutMs ({stage_sum}) must not exceed fusion.totalTimeoutMs ({total})"
+                )));
+            }
+        }
         if let Some(cap) = self.workflow_fusion_call_cap {
             if cap == 0 || cap > 20 {
                 return Err(SchemaViolation(
                     "fusion.workflowFusionCallCap must be in 1..=20".into(),
                 ));
+            }
+        }
+        // F011 item 6: `minSuccessfulPanels` above BOTH preset panel counts
+        // can never be met by an automatic run — the runtime would silently
+        // clamp it at spawn time instead of ever meeting the documented bar.
+        //
+        // This is a per-FILE validator (`read_settings_file` calls it on
+        // each settings tier individually, before merging), so unlike the
+        // other checks in this function it must NOT fill in defaults for an
+        // absent counterpart field: a project-tier file that sets only
+        // `minSuccessfulPanels` has no opinion on `qualityPanelCount` /
+        // `fastPanelCount` — those may come from a different tier — and
+        // defaulting them here would reject a file whose MERGED view is
+        // perfectly valid, silently dropping that file's permissions/hooks/
+        // model settings along with it (see `read_layer_or_skip`). Only
+        // compare when at least one of the two counts is present IN THIS
+        // SAME FILE; take `min` over whichever of them actually appear.
+        if let Some(min_successful) = self.min_successful_panels {
+            let smallest_present_preset = match (self.quality_panel_count, self.fast_panel_count) {
+                (Some(quality), Some(fast)) => Some(quality.min(fast)),
+                (Some(quality), None) => Some(quality),
+                (None, Some(fast)) => Some(fast),
+                (None, None) => None,
+            };
+            if let Some(smallest_preset) = smallest_present_preset {
+                if min_successful > smallest_preset {
+                    return Err(SchemaViolation(format!(
+                        "fusion.minSuccessfulPanels ({min_successful}) must not exceed min(fusion.qualityPanelCount, fusion.fastPanelCount) ({smallest_preset})"
+                    )));
+                }
             }
         }
         Ok(())
@@ -1046,6 +1179,166 @@ fn validate_enum(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fusion_min_successful_above_both_preset_counts_is_rejected() {
+        // F011 item 6: minSuccessfulPanels above BOTH quality and fast preset
+        // counts can never be met by an automatic run.
+        let settings = FusionSettingsJson {
+            quality_panel_count: Some(3),
+            fast_panel_count: Some(2),
+            min_successful_panels: Some(3),
+            ..FusionSettingsJson::default()
+        };
+        let err = settings.validate().unwrap_err();
+        assert!(
+            matches!(&err, crate::settings::SettingsError::SchemaViolation(msg) if msg.contains("minSuccessfulPanels")),
+            "expected a minSuccessfulPanels violation, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fusion_min_successful_at_the_smaller_preset_count_is_accepted() {
+        let settings = FusionSettingsJson {
+            quality_panel_count: Some(3),
+            fast_panel_count: Some(2),
+            min_successful_panels: Some(2),
+            ..FusionSettingsJson::default()
+        };
+        settings.validate().expect("2 <= min(3, 2) must pass");
+    }
+
+    #[test]
+    fn fusion_min_successful_alone_in_a_file_does_not_trip_the_preset_check() {
+        // Regression for a false rejection: `validate()` runs PER SETTINGS
+        // FILE (see `read_settings_file` / `read_layer_or_skip`), so a
+        // project-tier file that sets only `minSuccessfulPanels` has no
+        // opinion on `qualityPanelCount` / `fastPanelCount` — those may live
+        // in a different tier. Filling them in with the runtime's
+        // RESTRICTIVE defaults (3 and 2) here would reject
+        // `{"fusion":{"minSuccessfulPanels":3}}` even though the merged
+        // config (e.g. a user tier setting qualityPanelCount=5,
+        // fastPanelCount=4) is perfectly valid, and the whole file — not
+        // just the fusion block — would then be silently dropped.
+        let settings: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"minSuccessfulPanels":3}}"#).unwrap();
+        settings
+            .validate()
+            .expect("no preset count present in this file — must not be rejected");
+    }
+
+    #[test]
+    fn fusion_total_timeout_alone_in_a_file_does_not_trip_the_stage_sum_check() {
+        // Same per-file hazard as above, for the stage-sum check: a tier
+        // that only lowers `totalTimeoutMs` has no opinion on
+        // `panelTotalTimeoutMs` / `analystTimeoutMs` / `synthesizerTimeoutMs`
+        // — defaulting all three against this file's total alone would
+        // reject a file that sets nothing else (1_020_000 > 500_000).
+        let settings: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"totalTimeoutMs":500000}}"#).unwrap();
+        settings
+            .validate()
+            .expect("no stage field present in this file — must not be rejected");
+    }
+
+    #[test]
+    fn fusion_stage_field_alone_in_a_file_does_not_trip_the_stage_sum_check() {
+        // Finding [15]: the mirror-image per-file hazard from the test
+        // above. A project-tier file that sets only `panelTotalTimeoutMs`
+        // has no opinion on `totalTimeoutMs` — it may be raised in a
+        // DIFFERENT tier (e.g. a user tier setting `totalTimeoutMs:
+        // 1800000`, under which 900_000 + 120_000*2 + 180_000 = 1_320_000
+        // fits easily). Defaulting `total` to the runtime's restrictive
+        // 1_200_000 here must not reject this file on its own
+        // (900_000 + 120_000*2 + 180_000 = 1_320_000 > 1_200_000) — that
+        // would silently drop the whole tier's unrelated
+        // permissions/hooks/model, not just the fusion block.
+        let settings: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"panelTotalTimeoutMs":900000}}"#).unwrap();
+        settings
+            .validate()
+            .expect("no totalTimeoutMs present in this file — must not be rejected");
+    }
+
+    #[test]
+    fn fusion_stage_field_alone_above_the_default_total_does_not_trip_the_per_stage_bound_check() {
+        // Finding [15]: the OLDER per-stage `stage > total` check (three
+        // lines above the stage-sum check the two tests above pin) still
+        // substitutes the runtime's default `total` (1_200_000) for a file
+        // that sets no `totalTimeoutMs` of its own, with no presence gate.
+        // A project-tier file that raises ONE stage timeout above 20
+        // minutes — e.g. `panelTotalTimeoutMs: 1500000`, valid under a user
+        // tier's `totalTimeoutMs: 2400000` — has no opinion on the total; it
+        // may be raised in a DIFFERENT tier, exactly like the stage-SUM
+        // check two tests above already protects against. Filling in the
+        // restrictive 1_200_000 default here rejects this file on its own
+        // even though the merged config is perfectly valid, and
+        // `read_layer_or_skip` then silently drops the whole tier's
+        // unrelated permissions/hooks/model along with it.
+        let settings: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"panelTotalTimeoutMs":1500000}}"#).unwrap();
+        settings
+            .validate()
+            .expect("no totalTimeoutMs present in this file — must not be rejected");
+    }
+
+    #[test]
+    fn fusion_panel_idle_timeout_above_same_file_panel_total_is_rejected() {
+        // Finding [24]: `panelIdleTimeoutMs` is the one stage field in the
+        // `totalTimeoutMs`-gated loop above that `FusionRuntimeConfig::
+        // from_settings`'s merged-view stage-sum re-check does NOT cover
+        // (it is not a term of that sum), so once `totalTimeoutMs` is
+        // absent from a file nothing validates it — and the invariant that
+        // actually matters is `panelIdleTimeoutMs <= panelTotalTimeoutMs`
+        // (the panel-level stall detector can only ever fire while the
+        // panel itself is still running), not a comparison against
+        // `totalTimeoutMs`. This must be rejected even with no
+        // `totalTimeoutMs` anywhere in the file.
+        let settings: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{"panelIdleTimeoutMs":5000000,"panelTotalTimeoutMs":600000}}"#,
+        )
+        .unwrap();
+        let err = settings.validate().unwrap_err();
+        assert!(
+            matches!(&err, crate::settings::SettingsError::SchemaViolation(msg) if msg.contains("panelIdleTimeoutMs") && msg.contains("panelTotalTimeoutMs")),
+            "expected a panelIdleTimeoutMs vs panelTotalTimeoutMs violation, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fusion_panel_idle_timeout_at_or_below_same_file_panel_total_is_accepted() {
+        let settings: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{"panelIdleTimeoutMs":600000,"panelTotalTimeoutMs":600000}}"#,
+        )
+        .unwrap();
+        settings
+            .validate()
+            .expect("panelIdleTimeoutMs == panelTotalTimeoutMs must pass");
+    }
+
+    #[test]
+    fn fusion_panel_idle_timeout_alone_in_a_file_does_not_trip_the_same_file_check() {
+        // Same per-file hazard as the other checks in this module: a tier
+        // that sets only `panelIdleTimeoutMs` has no opinion on
+        // `panelTotalTimeoutMs` — it may be raised in a different tier —
+        // so THIS same-file-only check must not fire when the counterpart
+        // field is absent from this file. That is NOT the same claim as "a
+        // panelIdleTimeoutMs of 5000000 with no panelTotalTimeoutMs
+        // anywhere is safe to run with" — it plainly isn't (the default
+        // panel_total_timeout_ms is 600_000). Round-3 review finding [24]:
+        // that merged-view case is rejected by
+        // `FusionRuntimeConfig::from_settings`
+        // (fusion/src/config.rs::from_settings_rejects_a_merged_panel_idle_timeout_above_the_default_panel_total),
+        // and the watchdog deadline is additionally clamped at the spawn
+        // use site (fusion/src/panel.rs::panel_stall_timeout_ms) as defense
+        // in depth. This test covers only THIS function's narrow, correct,
+        // per-file scope.
+        let settings: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"panelIdleTimeoutMs":5000000}}"#).unwrap();
+        settings
+            .validate()
+            .expect("no panelTotalTimeoutMs present in this file — must not be rejected here");
+    }
 
     #[test]
     fn agent_push_notification_setting_parses() {
@@ -1930,12 +2223,98 @@ mod tests {
             serde_json::from_str(r#"{"fusion":{"totalTimeoutMs":0}}"#).unwrap();
         assert!(zero_total.validate().is_err());
 
-        let exceeds_default_total: SettingsJson =
-            serde_json::from_str(r#"{"fusion":{"panelTotalTimeoutMs":900001}}"#).unwrap();
-        assert!(exceeds_default_total.validate().is_err());
+        // Finding [15]: a stage field set ALONE, above the runtime's
+        // default `totalTimeoutMs` (1_200_000), must NOT be rejected by
+        // this per-FILE validator — this file has no opinion on the total;
+        // it may be raised in a different tier (see
+        // `fusion_stage_field_alone_above_the_default_total_does_not_trip_the_per_stage_bound_check`).
+        // Only `FusionRuntimeConfig::from_settings`, on the merged view,
+        // may reject this.
+        let stage_alone_exceeds_default_total: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"panelTotalTimeoutMs":1200001}}"#).unwrap();
+        assert!(stage_alone_exceeds_default_total.validate().is_ok());
+        // The SAME idea, with `totalTimeoutMs` present in this same file (so
+        // this file DOES have an opinion on the total), is still rejected —
+        // by the per-stage branch specifically. `panelIdleTimeoutMs` is used
+        // here (not `panelTotalTimeoutMs`/`analystTimeoutMs`/
+        // `synthesizerTimeoutMs`) because those three also feed the
+        // stage-SUM check just below (F004): a fixture built from any of
+        // them would be rejected by either branch, so `is_err()` would stop
+        // isolating the per-stage branch this test exists to pin.
+        // `panelIdleTimeoutMs` is not part of that sum, so only the
+        // per-stage branch can produce this Err.
+        let exceeds_default_total: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{"totalTimeoutMs":1200000,"panelIdleTimeoutMs":1200001}}"#,
+        )
+        .unwrap();
+        let err = exceeds_default_total
+            .validate()
+            .expect_err("panelIdleTimeoutMs 1200001 > totalTimeoutMs 1200000");
+        assert!(
+            matches!(&err, crate::settings::SettingsError::SchemaViolation(msg) if msg.contains("panelIdleTimeoutMs")),
+            "expected the per-stage branch to name panelIdleTimeoutMs, got {err:?}"
+        );
 
         let retries: SettingsJson =
             serde_json::from_str(r#"{"fusion":{"analysisProtocolRetries":2}}"#).unwrap();
         assert!(retries.validate().is_err());
+    }
+
+    #[test]
+    fn fusion_rejects_stage_timeout_sum_exceeding_total_even_when_each_stage_fits_alone() {
+        // Each individual stage is well under `totalTimeoutMs` on its own, but
+        // panelTotal + analyst*(1+retries) + synthesizer sums past it — every
+        // per-field "must not exceed total" check above passes, so only the
+        // dedicated stage-sum check (F004) can catch this.
+        let sum_exceeds_total: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{
+                "totalTimeoutMs": 100000,
+                "panelTotalTimeoutMs": 60000,
+                "analystTimeoutMs": 30000,
+                "synthesizerTimeoutMs": 30000,
+                "analysisProtocolRetries": 1
+            }}"#,
+        )
+        .unwrap();
+        let err = sum_exceeds_total
+            .validate()
+            .expect_err("60000 + 30000*2 + 30000 = 150000 > totalTimeoutMs 100000");
+        assert!(
+            matches!(&err, crate::settings::SettingsError::SchemaViolation(msg) if msg.contains("totalTimeoutMs"))
+        );
+
+        // The documented defaults (panelTotal 600_000 + analyst 120_000*2 +
+        // synth 180_000 = 1_020_000) must fit under the default total
+        // (1_200_000) with an absent `totalTimeoutMs`.
+        let defaults_fit: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"enabled":true}}"#).unwrap();
+        defaults_fit
+            .validate()
+            .expect("documented stage defaults must fit under the default total");
+    }
+
+    /// The `fusion-panel` agent definition (`agent::builtins::fusion_panel_definition`)
+    /// hard-codes `max_turns: 12` and only ever LOWERS it via `.min()` — the
+    /// runner will never actually run a panel past 12 turns. A configured
+    /// `panelMaxTurns` above 12 therefore only inflates
+    /// `budget::quote`'s per-turn reservation (up to 2.7x for the schema's
+    /// old 32 ceiling) without buying any more real turns — a spurious
+    /// `BudgetExceeded` for money that could never be spent (F002).
+    #[test]
+    fn fusion_panel_max_turns_is_capped_at_the_runner_ceiling_of_12() {
+        let at_ceiling: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"panelMaxTurns":12}}"#).unwrap();
+        assert!(
+            at_ceiling.validate().is_ok(),
+            "12 matches the runner's hard-coded fusion-panel max_turns and must stay valid"
+        );
+
+        let above_ceiling: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"panelMaxTurns":13}}"#).unwrap();
+        assert!(
+            above_ceiling.validate().is_err(),
+            "13 can never actually run — the runner caps every panel at 12 turns \
+             regardless of this setting, so accepting it only over-reserves budget"
+        );
     }
 }

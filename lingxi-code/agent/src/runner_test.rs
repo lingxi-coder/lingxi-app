@@ -542,6 +542,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         new_diagnostics_source: None,
         tool_schemas: vec![],
         schema: None,
+        structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode::Forced,
         budget: None,
         hook_executor: None,
         strict_plugin_only_hooks: false,
@@ -555,6 +556,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         max_output_tokens_per_turn: None,
         max_input_bytes_per_turn: None,
         query_source_label: None,
+        correlation_id: None,
     }
 }
 
@@ -1179,6 +1181,7 @@ async fn run_subagent_emits_failed_on_eof_before_any_work() {
         SubagentEvent::Failed {
             agent_id: aid,
             error,
+            ..
         } => Some((*aid, error.clone())),
         _ => None,
     });
@@ -1461,6 +1464,319 @@ async fn schema_no_call_nudges_twice_then_aborts() {
     );
     // 3 round-trips: the original turn + 2 nudge re-runs.
     assert_eq!(api2.call_count(), 3);
+}
+
+/// `SubagentApiClient` used ONLY through the `_opts` streaming seam
+/// (`messages_create_stream_in_opts` / `messages_create_stream_forced_in_opts`
+/// — the two methods `run_subagent_loop` actually calls). Records, per
+/// round-trip, whether the runner went through the FORCED variant (`true`) or
+/// the plain/auto variant (`false`) — the only way to observe `tool_choice`
+/// from outside the wire, since both variants funnel unrelated calls through
+/// the same underlying `LlmResponse` script.
+struct StructuredOutputModeCapturingApiClient {
+    responses: Mutex<VecDeque<llm_client::LlmResponse>>,
+    forced_calls: Mutex<Vec<bool>>,
+    /// The `messages` argument of every round-trip, in call order — lets a
+    /// test inspect the REQUEST shape the runner built for a given turn
+    /// (e.g. whether its last message is user- or assistant-authored), not
+    /// just whether `tool_choice` was forced.
+    messages_seen: Mutex<Vec<Vec<ConversationMessage>>>,
+}
+
+impl StructuredOutputModeCapturingApiClient {
+    fn new(responses: Vec<llm_client::LlmResponse>) -> Arc<Self> {
+        Arc::new(Self {
+            responses: Mutex::new(responses.into_iter().collect()),
+            forced_calls: Mutex::new(Vec::new()),
+            messages_seen: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn forced_calls(&self) -> Vec<bool> {
+        self.forced_calls.lock().unwrap().clone()
+    }
+
+    fn messages_seen(&self) -> Vec<Vec<ConversationMessage>> {
+        self.messages_seen.lock().unwrap().clone()
+    }
+
+    fn next_stream(
+        &self,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+        llm_client::LlmError,
+    > {
+        use futures::StreamExt;
+        let resp = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| text_response("(exhausted)", Some("end_turn")));
+        let events = crate::accumulator::response_to_stream_events(resp);
+        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
+    }
+}
+
+#[async_trait]
+impl crate::api::SubagentApiClient for StructuredOutputModeCapturingApiClient {
+    async fn messages_create(
+        &self,
+        _model: &str,
+        _system: Option<&str>,
+        _messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        unreachable!("driven only through the _opts streaming seam")
+    }
+
+    async fn messages_create_stream_in_opts(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+        _system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+        _effort: Option<serde_json::Value>,
+        _opts: crate::api::SubagentApiCallOpts,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+        llm_client::LlmError,
+    > {
+        self.forced_calls.lock().unwrap().push(false);
+        self.messages_seen.lock().unwrap().push(messages);
+        self.next_stream()
+    }
+
+    async fn messages_create_stream_forced_in_opts(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+        _system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+        _forced_tool: Option<&str>,
+        _effort: Option<serde_json::Value>,
+        _opts: crate::api::SubagentApiCallOpts,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+        llm_client::LlmError,
+    > {
+        self.forced_calls.lock().unwrap().push(true);
+        self.messages_seen.lock().unwrap().push(messages);
+        self.next_stream()
+    }
+}
+
+/// Build an `LlmResponse` carrying a valid `StructuredOutput` tool call.
+fn structured_output_call_response(input: serde_json::Value) -> llm_client::LlmResponse {
+    llm_client::LlmResponse {
+        content: vec![llm_client::ContentBlock::ToolCall {
+            id: ToolUseId::new().to_string(),
+            name: "StructuredOutput".into(),
+            input,
+        }],
+        ..tool_use_response("StructuredOutput", Some("tool_use"))
+    }
+}
+
+/// WP2a item 1 / `StructuredOutputMode::WhenDone`: while tools remain and the
+/// run is not on its last turn, the runner uses AUTO `tool_choice` (the model
+/// is free to call its other tools); only the LAST turn forces
+/// `StructuredOutput`. Turns 1-2 call the ordinary `Read` tool (dispatched,
+/// keeping the loop going); turn 3 (the last, `max_turns == 3`) is forced and
+/// returns a schema-valid `StructuredOutput` call.
+#[tokio::test]
+async fn when_done_uses_auto_tool_choice_until_the_last_turn() {
+    let structured = serde_json::json!({ "answer": 1 });
+    let api = StructuredOutputModeCapturingApiClient::new(vec![
+        tool_use_response("Read", Some("tool_use")),
+        tool_use_response("Read", Some("tool_use")),
+        structured_output_call_response(structured.clone()),
+    ]);
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
+    ctx.schema = Some(r#"{"type":"object"}"#.to_string());
+    ctx.structured_output_mode = platform_api::subagent_spawn::StructuredOutputMode::WhenDone;
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+    assert_eq!(
+        one_completed(&evs),
+        structured,
+        "the forced final turn's StructuredOutput call is the result"
+    );
+    assert_eq!(
+        api.forced_calls(),
+        vec![false, false, true],
+        "WhenDone forces tool_choice only on the last turn"
+    );
+    assert_eq!(
+        invoker.call_count(),
+        2,
+        "the two non-final turns actually dispatched Read (auto tool_choice let the model use it)"
+    );
+}
+
+/// Round-3 review items 3/7 regression test. Every REAL Fusion panel
+/// advertises more than one tool (`fusion_panel_definition`:
+/// `Read`/`Grep`/`Glob`/`WebFetch` plus the injected `StructuredOutput`) —
+/// a shape `when_done_uses_auto_tool_choice_until_the_last_turn` above never
+/// exercises, since it builds on `tool_schemas: vec![]` and StructuredOutput
+/// ends up the sole advertised tool. Before the round-3 fix, the runner's
+/// wire gate ANDed `force_this_turn` with the P0-1 single-tool check
+/// (`force_tool_choice_for_api.is_some()`, `true` only when
+/// `tool_schemas.len() == 1`), so with `Read`/`Grep` also advertised that
+/// second conjunct was permanently `false` and WhenDone's last-turn force
+/// never reached the wire for any panel — turn 3 here would have gone out
+/// with `tool_choice` unpinned. Reproduces the panel shape directly: two
+/// tools stay advertised across all three turns; turns 1-2 dispatch `Read`
+/// under AUTO tool_choice, and turn 3 (the last) MUST be forced.
+#[tokio::test]
+async fn when_done_forces_the_last_turn_even_with_other_tools_still_advertised() {
+    let structured = serde_json::json!({ "answer": 9 });
+    let api = StructuredOutputModeCapturingApiClient::new(vec![
+        tool_use_response("Read", Some("tool_use")),
+        tool_use_response("Read", Some("tool_use")),
+        structured_output_call_response(structured.clone()),
+    ]);
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
+    ctx.schema = Some(r#"{"type":"object"}"#.to_string());
+    ctx.structured_output_mode = platform_api::subagent_spawn::StructuredOutputMode::WhenDone;
+    // The exact shape every real Fusion panel spawns with: MORE than one
+    // tool advertised alongside the injected `StructuredOutput`, so
+    // `tool_schemas.len() != 1` and the P0-1 `force_tool_choice_for_api`
+    // gate is `None` for the whole run.
+    ctx.tool_schemas = vec![
+        serde_json::json!({"name": "Read", "input_schema": {"type": "object"}}),
+        serde_json::json!({"name": "Grep", "input_schema": {"type": "object"}}),
+    ];
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+    assert_eq!(
+        one_completed(&evs),
+        structured,
+        "the forced final turn's StructuredOutput call must be the result \
+         even with Read/Grep still advertised — a real panel that answers \
+         in prose on the unforced last turn ends Failed with no report"
+    );
+    assert_eq!(
+        api.forced_calls(),
+        vec![false, false, true],
+        "WhenDone must pin tool_choice on the last turn regardless of how \
+         many other tools are advertised — this is exactly the >1-tool \
+         configuration every real Fusion panel runs in"
+    );
+    assert_eq!(
+        invoker.call_count(),
+        2,
+        "the two non-final turns still dispatch Read under auto tool_choice"
+    );
+}
+
+/// WP2a item 1 / `StructuredOutputMode::WhenDone`: once the model has
+/// produced TWO consecutive turns with no tool call and no `StructuredOutput`
+/// call, the runner forces `StructuredOutput` on the very next turn — even
+/// though `max_turns` (5) is far from exhausted.
+#[tokio::test]
+async fn when_done_forces_after_two_consecutive_idle_turns() {
+    let structured = serde_json::json!({ "answer": 2 });
+    let api = StructuredOutputModeCapturingApiClient::new(vec![
+        text_response("thinking...", Some("end_turn")),
+        text_response("still thinking...", Some("end_turn")),
+        structured_output_call_response(structured.clone()),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 5);
+    ctx.schema = Some(r#"{"type":"object"}"#.to_string());
+    ctx.structured_output_mode = platform_api::subagent_spawn::StructuredOutputMode::WhenDone;
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+    assert_eq!(
+        one_completed(&evs),
+        structured,
+        "the idle-triggered forced turn's StructuredOutput call is the result"
+    );
+    assert_eq!(
+        api.forced_calls(),
+        vec![false, false, true],
+        "two idle (no-tool-call) turns force the third turn, well short of max_turns (5)"
+    );
+}
+
+/// `StructuredOutputMode::WhenDone`: an idle (text-only, non-forced) turn
+/// that loops back must APPEND a user message to `history` before doing so.
+/// Every other exit from the "no tool call" arm pushes a user message first
+/// (the nudge under the forced-turn escalation, or a dispatched tool's
+/// tool_results); this is the one path that used to `continue` with nothing
+/// appended, which would send the NEXT round-trip a request whose last
+/// message is assistant-authored — a prefill continuation rather than a
+/// fresh turn, and something a real provider can reject outright. Turn 1 is
+/// idle (`end_turn`, no tool call, not forced since it's neither the last
+/// turn nor two-idle-turns-deep); turn 2 must see a freshly appended user
+/// message as the LAST message of its request.
+#[tokio::test]
+async fn when_done_idle_turn_appends_a_user_message_before_looping_back() {
+    let structured = serde_json::json!({ "answer": 5 });
+    let api = StructuredOutputModeCapturingApiClient::new(vec![
+        text_response("thinking...", Some("end_turn")),
+        structured_output_call_response(structured.clone()),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 5);
+    ctx.schema = Some(r#"{"type":"object"}"#.to_string());
+    ctx.structured_output_mode = platform_api::subagent_spawn::StructuredOutputMode::WhenDone;
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+    assert_eq!(
+        one_completed(&evs),
+        structured,
+        "the second (forced) turn's StructuredOutput call is the result"
+    );
+    let calls = api.messages_seen();
+    assert_eq!(
+        calls.len(),
+        2,
+        "one idle turn followed by one forced turn: forced_calls={:?}",
+        api.forced_calls()
+    );
+    let second_call_last = calls[1]
+        .last()
+        .expect("the second call's request must carry at least one message");
+    assert!(
+        matches!(second_call_last, ConversationMessage::User { .. }),
+        "the second call's LAST message must be user-authored, not the bare \
+         first-turn assistant reply: {second_call_last:?}"
+    );
+}
+
+/// `StructuredOutputMode::Forced` (the default) is byte-identical to the
+/// pre-WP2a behavior: EVERY turn is forced, even the first.
+#[tokio::test]
+async fn forced_mode_forces_every_turn_including_the_first() {
+    let structured = serde_json::json!({ "answer": 3 });
+    let api =
+        StructuredOutputModeCapturingApiClient::new(vec![structured_output_call_response(
+            structured.clone(),
+        )]);
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 4);
+    ctx.schema = Some(r#"{"type":"object"}"#.to_string());
+    // `Forced` is also `SubagentContext::structured_output_mode`'s default —
+    // set explicitly here so the test documents the invariant rather than
+    // relying on the struct's field order.
+    ctx.structured_output_mode = platform_api::subagent_spawn::StructuredOutputMode::Forced;
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+    assert_eq!(one_completed(&evs), structured);
+    assert_eq!(api.forced_calls(), vec![true]);
 }
 
 // ---- P0-1 (2026-09-02): a schema subagent must still be able to call
@@ -1831,8 +2147,14 @@ async fn loop_g1_completed_carries_final_turn_usage_and_tool_count() {
     assert_eq!(tool_count, 1, "run-wide tool-use count");
 }
 
+/// WP2a item 2: the runner no longer clamps REPORTED usage against
+/// `max_output_tokens_per_turn` — that ceiling reaches the provider on the
+/// WIRE (via `SubagentApiCallOpts::max_output_tokens`, asserted in
+/// `orchestrator::provider_adapter`'s own tests), and the terminal `Completed`
+/// carries the provider's REAL usage even when it exceeds the requested cap
+/// (a provider can still overrun its own advertised ceiling).
 #[tokio::test]
-async fn loop_completed_cumulative_usage_sums_turns_and_ceiling_truncates() {
+async fn loop_completed_cumulative_usage_sums_turns_and_reports_real_uncapped_output() {
     let usage_a = llm_client::Usage {
         billable_tokens: llm_client::TokenUsage {
             input: 1000,
@@ -1866,9 +2188,15 @@ async fn loop_completed_cumulative_usage_sums_turns_and_ceiling_truncates() {
     let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
     ctx.max_output_tokens_per_turn = Some(8);
     ctx.max_input_bytes_per_turn = Some(64);
+    // [Round-4 review item 6] The FIRST prompt unit is now pinned
+    // unconditionally (never dropped, even over-budget — see
+    // `cap_input_bytes`), so it must be the short one here; the oversized
+    // one is the SECOND message so this test still exercises "an
+    // over-budget non-head unit gets dropped" rather than the now-retired
+    // "the head gets dropped when it doesn't fit" behavior.
     ctx.prompt_messages = vec![
-        ConversationMessage::user(MessageId::new(), "x".repeat(200)),
         ConversationMessage::user(MessageId::new(), "keep-me".into()),
+        ConversationMessage::user(MessageId::new(), "x".repeat(200)),
     ];
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
@@ -1885,23 +2213,184 @@ async fn loop_completed_cumulative_usage_sums_turns_and_ceiling_truncates() {
             _ => None,
         })
         .expect("one Completed");
-    assert_eq!(usage.billable_tokens.output, 8, "final-turn output clamped");
+    assert_eq!(
+        usage.billable_tokens.output, 50,
+        "final-turn output is the provider's REAL usage, not clamped to the \
+         requested per-turn ceiling (8)"
+    );
     assert_ne!(
         usage.billable_tokens.input, cumulative.billable_tokens.input,
         "cumulative input must include earlier turns"
     );
     assert_eq!(cumulative.billable_tokens.input, 1010);
     assert_eq!(
-        cumulative.billable_tokens.output, 16,
-        "40 clamped to 8, plus 8"
+        cumulative.billable_tokens.output, 90,
+        "real 40 + real 50, uncapped by max_output_tokens_per_turn"
     );
     let last = api.last_messages();
     let joined = format!("{last:?}");
     assert!(
         !joined.contains(&"x".repeat(200)),
-        "over-budget prefix must be dropped before the API call"
+        "an over-budget non-head unit must still be dropped before the API call"
+    );
+    assert!(
+        joined.contains("keep-me"),
+        "the pinned head unit must survive trimming: {joined}"
     );
     assert!(!last.is_empty(), "at least the newest message is retained");
+}
+
+/// `SubagentApiClient` that implements ONLY the two `_in_opts` methods
+/// (`messages_create_stream_in_opts` / `messages_create_stream_forced_in_opts`
+/// — the seam `run_subagent_loop` actually calls, per `runner.rs`'s
+/// `call_opts` construction). Every other method — including the ones the
+/// trait's OWN default chain would fall back to (`messages_create_stream_in`,
+/// `..._forced_in`, `..._stream`, `..._forced`, `messages_create`) —
+/// is `unreachable!()`, so any call that reaches this client through a
+/// non-opts method panics instead of silently dropping `opts`. Records the
+/// `SubagentApiCallOpts` seen on every round-trip.
+struct OptsOnlyCapturingApiClient {
+    responses: Mutex<VecDeque<llm_client::LlmResponse>>,
+    opts_seen: Mutex<Vec<crate::api::SubagentApiCallOpts>>,
+}
+
+impl OptsOnlyCapturingApiClient {
+    fn new(responses: Vec<llm_client::LlmResponse>) -> Arc<Self> {
+        Arc::new(Self {
+            responses: Mutex::new(responses.into_iter().collect()),
+            opts_seen: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn opts_seen(&self) -> Vec<crate::api::SubagentApiCallOpts> {
+        self.opts_seen.lock().unwrap().clone()
+    }
+
+    fn record_and_stream(
+        &self,
+        opts: crate::api::SubagentApiCallOpts,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+        llm_client::LlmError,
+    > {
+        use futures::StreamExt;
+        self.opts_seen.lock().unwrap().push(opts);
+        let resp = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| text_response("(exhausted)", Some("end_turn")));
+        let events = crate::accumulator::response_to_stream_events(resp);
+        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
+    }
+}
+
+#[async_trait]
+impl crate::api::SubagentApiClient for OptsOnlyCapturingApiClient {
+    async fn messages_create(
+        &self,
+        _model: &str,
+        _system: Option<&str>,
+        _messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        unreachable!("driven only through the _opts streaming seam")
+    }
+
+    async fn messages_create_stream_in_opts(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+        _system: Option<&str>,
+        _messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+        _effort: Option<serde_json::Value>,
+        opts: crate::api::SubagentApiCallOpts,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+        llm_client::LlmError,
+    > {
+        self.record_and_stream(opts)
+    }
+
+    async fn messages_create_stream_forced_in_opts(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+        _system: Option<&str>,
+        _messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+        _forced_tool: Option<&str>,
+        _effort: Option<serde_json::Value>,
+        opts: crate::api::SubagentApiCallOpts,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+        llm_client::LlmError,
+    > {
+        self.record_and_stream(opts)
+    }
+}
+
+/// WP2a item 2 (F002 sub-claim 3), round 2: the Fusion-only decorator
+/// `WorkflowWatchdogApiClient` sits between the runner and the production
+/// `ProviderApiAdapter` on the ONLY path that spawns a Fusion panel
+/// (`panel.rs` -> `handle.rs`'s `WORKFLOW_QUERY_WATCHDOG_OVERRIDE` machinery
+/// wraps `ctx.api_client` in it). If the decorator does not override the two
+/// `_in_opts` methods, the trait's default implementation re-dispatches
+/// through the NON-opts chain on `self` (the wrapper), which the wrapper only
+/// overrides down to `messages_create_stream_forced_in` / `..._stream_in` —
+/// so `opts` (the Fusion per-turn `max_output_tokens` ceiling and the COGS
+/// `query_source_label`) is silently dropped before it ever reaches the inner
+/// adapter, and a client that implements ONLY the opts seam is driven through
+/// its unimplemented non-opts fallback and panics.
+#[tokio::test]
+async fn workflow_watchdog_wrapper_threads_opts_to_the_inner_client() {
+    let api = OptsOnlyCapturingApiClient::new(vec![
+        tool_use_response("Read", Some("tool_use")),
+        text_response("done", Some("end_turn")),
+    ]);
+    let wrapped: Arc<dyn crate::api::SubagentApiClient> =
+        Arc::new(crate::api::WorkflowWatchdogApiClient::new(
+            api.clone(),
+            platform_api::WorkflowQueryWatchdog {
+                stall_timeout_ms: 60_000,
+                max_retries: 0,
+            },
+            Vec::new(),
+        ));
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(wrapped, Some(invoker.clone()), 4);
+    ctx.max_output_tokens_per_turn = Some(4096);
+    ctx.query_source_label = Some("fusion_panel".to_string());
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+    assert!(
+        evs.iter()
+            .any(|e| matches!(e, SubagentEvent::Completed { .. })),
+        "the run must complete through the wrapper: {evs:?}"
+    );
+    let opts = api.opts_seen();
+    assert_eq!(
+        opts.len(),
+        2,
+        "both turns must reach the inner client through the opts seam \
+         (a fallback to the non-opts chain panics before this point)"
+    );
+    for (turn, o) in opts.iter().enumerate() {
+        assert_eq!(
+            o.max_output_tokens,
+            Some(4096),
+            "turn {turn}: WorkflowWatchdogApiClient dropped max_output_tokens"
+        );
+        assert_eq!(
+            o.query_source_label.as_deref(),
+            Some("fusion_panel"),
+            "turn {turn}: WorkflowWatchdogApiClient dropped query_source_label"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3614,6 +4103,154 @@ async fn subagent_start_additional_context_injected_as_system_reminder() {
     );
 }
 
+// ── G008 (Fusion panel is hook-silent) ───────────────────────────────────
+
+/// A `SubagentStart` builtin hook handler that BOTH counts every invocation
+/// AND returns an `additionalContext` string, so a single fixture can pin
+/// both halves of G008 at once: whether the hook machinery fired at all
+/// (the count) and whether the message it would have produced landed in
+/// history (the text). A hook that fires but returns nothing useful would
+/// pass a text-only assertion while still violating the "chokepoint already
+/// accounts for Fusion as ONE hook pair" contract in `build_preload_messages`
+/// — hence asserting the call count separately from the message.
+struct CountingAdditionalContextStartHook {
+    calls: Arc<Mutex<u32>>,
+    context: String,
+}
+#[async_trait]
+impl hooks::executor::BuiltinHookHandler for CountingAdditionalContextStartHook {
+    fn id(&self) -> &str {
+        "g008-counting-start-hook"
+    }
+    async fn handle(
+        &self,
+        _event: &hooks::events::HookEvent,
+        _ctx: &hooks::registry::HookContext,
+    ) -> hooks::response::HookResult {
+        *self.calls.lock().unwrap() += 1;
+        hooks::response::HookResult {
+            outcome: hooks::response::HookOutcome::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            response: Some(hooks::response::HookResponse {
+                additional_context: Some(self.context.clone()),
+                ..Default::default()
+            }),
+        }
+    }
+}
+
+/// Build an `Arc<HookExecutorImpl>` with ONE registered SubagentStart hook
+/// that both counts its invocations into `calls` and would inject `context`
+/// as additionalContext if it fires.
+async fn exec_with_counting_start_context(
+    calls: Arc<Mutex<u32>>,
+    context: &str,
+) -> Arc<hooks::HookExecutorImpl> {
+    use hooks::definition::{HookDefinition, HookExecutor, HookSource};
+    use hooks::events::HookEventType;
+    let registry = Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new()));
+    registry.write().await.register(HookDefinition {
+        id: protocol::HookId::new(),
+        name: "g008-counting-start".into(),
+        events: vec![HookEventType::SubagentStart],
+        if_condition: None,
+        executor: HookExecutor::Builtin {
+            handler_id: "g008-counting-start-hook".into(),
+        },
+        source: HookSource::User,
+        blocking: true,
+        timeout: None,
+        priority: 0,
+        once: false,
+        status_message: None,
+        async_rewake: false,
+        async_timeout: None,
+        rewake_message: None,
+    });
+    let mut exec = hooks::HookExecutorImpl::new(
+        registry,
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    );
+    exec.register_builtin(Arc::new(CountingAdditionalContextStartHook {
+        calls,
+        context: context.to_string(),
+    }));
+    Arc::new(exec)
+}
+
+#[tokio::test]
+async fn fusion_panel_agent_type_fires_no_subagent_start_hook() {
+    // G008 runner half: a `fusion-panel` child must invoke the SubagentStart
+    // hook machinery ZERO times — the orchestrator chokepoint (turn_loop.rs)
+    // already accounts for a whole Fusion run as a SINGLE hook pair via
+    // `fusion_tool_result`'s `subagentHooksFired` marker. Deleting the
+    // `agent_type != FUSION_PANEL_TYPE` guard in `build_preload_messages`
+    // must turn this red.
+    let calls = Arc::new(Mutex::new(0u32));
+    let api = CapturingApiClient::new();
+    let mut ctx = loop_ctx(api.clone(), None, 2);
+    ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "go".into())];
+    ctx.agent_definition.agent_type = platform_api::FUSION_PANEL_TYPE.into();
+    ctx.hook_executor =
+        Some(exec_with_counting_start_context(calls.clone(), "panel-marker").await);
+
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    drop(event_tx);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "fusion-panel agent_type must fire the SubagentStart hook handler ZERO times"
+    );
+    let texts: Vec<String> = api.captured().iter().filter_map(user_text).collect();
+    assert!(
+        texts
+            .iter()
+            .all(|t| !t.contains("SubagentStart hook additional context")),
+        "fusion-panel history must not contain a SubagentStart additionalContext message: {texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn ordinary_agent_type_still_fires_subagent_start_hook_once() {
+    // Companion to `fusion_panel_agent_type_fires_no_subagent_start_hook`:
+    // proves the G008 gate is scoped to EXACTLY `fusion-panel` and cannot be
+    // widened (e.g. inverted, or matched on a prefix) to also swallow
+    // ordinary Agent-tool children — the hook must still fire once and its
+    // additionalContext message must still land in history.
+    let calls = Arc::new(Mutex::new(0u32));
+    let api = CapturingApiClient::new();
+    let mut ctx = loop_ctx(api.clone(), None, 2);
+    ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "go".into())];
+    ctx.agent_definition.agent_type = "ordinary-agent".into();
+    ctx.hook_executor =
+        Some(exec_with_counting_start_context(calls.clone(), "ordinary-marker").await);
+
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    drop(event_tx);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        1,
+        "ordinary agent_type must still fire the SubagentStart hook handler exactly once"
+    );
+    let texts: Vec<String> = api.captured().iter().filter_map(user_text).collect();
+    assert!(
+        texts.iter().any(|t| t
+            == "<system-reminder>\nSubagentStart hook additional context: ordinary-marker\n</system-reminder>"),
+        "ordinary agent_type history must contain the additionalContext message: {texts:?}"
+    );
+}
+
 #[tokio::test]
 async fn mobile_runtime_reminder_is_the_fixed_prefix_before_task_and_hooks() {
     let api = CapturingApiClient::new();
@@ -4277,4 +4914,226 @@ fn a_stalled_stream_is_terminal_and_an_ordinary_interruption_still_recovers() {
             "{error:?} is in CTy and must still recover as api_error_partial"
         );
     }
+}
+
+// ---- Fusion panel input cap must not split tool_use/tool_result pairs ----
+
+/// Build an assistant message whose only content block is a `ToolUse`.
+fn assistant_tool_use(id: ToolUseId, name: &str) -> ConversationMessage {
+    ConversationMessage::Assistant {
+        id: MessageId::new(),
+        content: vec![ContentBlock::ToolUse {
+            id,
+            name: name.to_string(),
+            input: serde_json::json!({}),
+            provider_id: None,
+        }],
+        stop_reason: Some("tool_use".into()),
+    }
+}
+
+/// Build a user message whose only content block is the matching `ToolResult`.
+fn user_tool_result(tool_use_id: ToolUseId, content: &str) -> ConversationMessage {
+    ConversationMessage::User {
+        id: MessageId::new(),
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id,
+            content: content.to_string(),
+            is_error: false,
+            provider_tool_use_id: None,
+            content_blocks: None,
+        }],
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+    }
+}
+
+/// A byte cap tight enough to keep only the LAST message by itself would,
+/// under naive whole-message trimming from the tail, keep a trailing
+/// `ToolResult` while dropping the `ToolUse` message that produced it —
+/// wire-invalid history (a `tool_result` with no matching `tool_use` in the
+/// same request). `cap_input_bytes` must keep or drop such a pair together.
+#[test]
+fn cap_input_bytes_keeps_tool_use_and_tool_result_paired() {
+    let tool_id = ToolUseId::new();
+    let history = vec![
+        assistant_text("turn one, filler text to add up bytes so the cap bites here"),
+        assistant_tool_use(tool_id.clone(), "Read"),
+        user_tool_result(tool_id.clone(), "file contents"),
+    ];
+    // Sized to fit only the trailing `ToolResult` message on its own — not
+    // the `ToolUse` before it. A naive per-message trim from the tail always
+    // keeps the very last message unconditionally, then finds the `ToolUse`
+    // message doesn't fit and stops — leaving a `ToolResult` with no
+    // matching `ToolUse` in the kept history, which is wire-invalid.
+    let tool_result_bytes = serde_json::to_vec(&history[2]).unwrap().len() as u64;
+    let capped = super::cap_input_bytes(&history, Some(tool_result_bytes));
+
+    let has_tool_use = capped.iter().any(|m| {
+        matches!(m, ConversationMessage::Assistant { content, .. }
+            if content.iter().any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if *id == tool_id)))
+    });
+    let has_tool_result = capped.iter().any(|m| {
+        matches!(m, ConversationMessage::User { content, .. }
+            if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if *tool_use_id == tool_id)))
+    });
+    assert_eq!(
+        has_tool_use, has_tool_result,
+        "cap_input_bytes split a tool_use/tool_result pair: tool_use kept={has_tool_use}, tool_result kept={has_tool_result}"
+    );
+    assert!(
+        has_tool_result,
+        "the pair that fits the budget must be kept, not dropped entirely"
+    );
+}
+
+/// [Finding 9] A Fusion panel seeds its ENTIRE task text as `history`'s
+/// first unit (`ctx.prompt_messages`, extended in before the first turn)
+/// and nothing re-injects it on later turns — it is the only production
+/// caller that sets `max_input_bytes_per_turn` (`panel.rs`'s
+/// `spawn_request`). The tail-only fill in `cap_input_bytes` must not evict
+/// that first unit while a newer tool-result pair still fits the budget: two
+/// large tool-result pairs from earlier turns must not silently erase the
+/// task, leaving the panel to emit a `PanelReport` written against no task
+/// at all.
+#[test]
+fn cap_input_bytes_pins_the_task_prompt_when_tool_results_crowd_it_out() {
+    let prompt = ConversationMessage::user(MessageId::new(), "TASK-MARKER: what is 2+2?".into());
+    let tool_id_1 = ToolUseId::new();
+    let tool_id_2 = ToolUseId::new();
+    let pair1 = [
+        assistant_tool_use(tool_id_1.clone(), "Read"),
+        user_tool_result(tool_id_1, &"y".repeat(50_000)),
+    ];
+    let pair2 = [
+        assistant_tool_use(tool_id_2.clone(), "Read"),
+        user_tool_result(tool_id_2, &"z".repeat(50_000)),
+    ];
+    let mut history = vec![prompt.clone()];
+    history.extend(pair1.iter().cloned());
+    history.extend(pair2.iter().cloned());
+
+    let prompt_bytes = serde_json::to_vec(&prompt).unwrap().len() as u64;
+    let newest_pair_bytes: u64 = pair2
+        .iter()
+        .map(|m| serde_json::to_vec(m).unwrap().len() as u64)
+        .sum();
+    // Room for the prompt plus exactly the NEWEST pair, not both pairs.
+    let max = prompt_bytes + newest_pair_bytes + 16;
+
+    let capped = super::cap_input_bytes(&history, Some(max));
+    let joined = format!("{capped:?}");
+    assert!(
+        joined.contains("TASK-MARKER"),
+        "the panel's task prompt must survive per-turn trimming while a \
+         newer tool-result pair still fits the budget; capped history: {joined}"
+    );
+    assert!(
+        !joined.contains(&"y".repeat(50_000)),
+        "the OLDER, over-budget tool-result pair must still be dropped — a \
+         `cap_input_bytes` that just returned the whole history unchanged \
+         would also contain TASK-MARKER, so this must go red on its own"
+    );
+}
+
+/// [Round-4 review item 6] The prior fix above only pinned the task prompt
+/// when it happened to fit the budget on its own. Whenever the task text
+/// itself (a pasted stack trace, a large file's contents) is bigger than
+/// `max_input_bytes_per_turn`, that half of `pin_head`'s condition was
+/// false, and the tail-only fallback below dropped the sole task-carrying
+/// unit outright — sending a request with NO task at all from turn 2
+/// onward. An over-budget task sent whole must still beat a request with no
+/// task.
+#[test]
+fn cap_input_bytes_keeps_the_task_prompt_even_when_it_alone_exceeds_the_cap() {
+    let prompt = ConversationMessage::user(
+        MessageId::new(),
+        format!("TASK-MARKER: {}", "x".repeat(50_000)),
+    );
+    let tool_id = ToolUseId::new();
+    let pair = [
+        assistant_tool_use(tool_id.clone(), "Read"),
+        user_tool_result(tool_id, "small result"),
+    ];
+    let mut history = vec![prompt];
+    history.extend(pair.iter().cloned());
+
+    let pair_bytes: u64 = pair
+        .iter()
+        .map(|m| serde_json::to_vec(m).unwrap().len() as u64)
+        .sum();
+    // Comfortably fits the newest pair, nowhere near fitting the ~50 KB
+    // prompt too.
+    let max = pair_bytes + 32;
+
+    let capped = super::cap_input_bytes(&history, Some(max));
+    let joined = format!("{capped:?}");
+    assert!(
+        joined.contains("TASK-MARKER"),
+        "the sole task-carrying unit must survive turn-2+ trimming even when \
+         it alone exceeds the byte cap — capped history: {joined}"
+    );
+}
+
+/// [Round-4 review item 6] Companion to the fix above: pinning an
+/// over-budget head unconditionally must not reopen the tool_use/tool_result
+/// pairing invariant `cap_input_bytes_keeps_tool_use_and_tool_result_paired`
+/// pins. With the head pinned and `tail_budget` saturated to 0, the tail
+/// loop must still drop an older pair as one atomic unit (never just its
+/// `ToolResult` half) rather than splitting it while making room for the
+/// pinned, oversized head.
+#[test]
+fn cap_input_bytes_keeps_pairing_when_the_oversized_head_is_pinned() {
+    let prompt = ConversationMessage::user(MessageId::new(), "x".repeat(50_000));
+    let tool_id_1 = ToolUseId::new();
+    let tool_id_2 = ToolUseId::new();
+    let pair1 = [
+        assistant_tool_use(tool_id_1.clone(), "Read"),
+        user_tool_result(tool_id_1.clone(), &"y".repeat(200)),
+    ];
+    let pair2 = [
+        assistant_tool_use(tool_id_2.clone(), "Read"),
+        user_tool_result(tool_id_2.clone(), &"z".repeat(50_000)),
+    ];
+    let mut history = vec![prompt];
+    history.extend(pair1.iter().cloned());
+    history.extend(pair2.iter().cloned());
+
+    let pair1_bytes: u64 = pair1
+        .iter()
+        .map(|m| serde_json::to_vec(m).unwrap().len() as u64)
+        .sum();
+    // Room for one small pair, nowhere near enough for the ~50 KB pinned
+    // head — `tail_budget` saturates to 0, so only the atomic-unit guard
+    // decides what else survives.
+    let max = pair1_bytes + 16;
+
+    let capped = super::cap_input_bytes(&history, Some(max));
+
+    let has = |id: &ToolUseId| {
+        let has_tool_use = capped.iter().any(|m| {
+            matches!(m, ConversationMessage::Assistant { content, .. }
+                if content.iter().any(|b| matches!(b, ContentBlock::ToolUse { id: bid, .. } if bid == id)))
+        });
+        let has_tool_result = capped.iter().any(|m| {
+            matches!(m, ConversationMessage::User { content, .. }
+                if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id)))
+        });
+        (has_tool_use, has_tool_result)
+    };
+    let (use1, result1) = has(&tool_id_1);
+    let (use2, result2) = has(&tool_id_2);
+    assert_eq!(
+        use1, result1,
+        "pair 1 must be kept or dropped as a whole unit: tool_use kept={use1}, tool_result kept={result1}"
+    );
+    assert_eq!(
+        use2, result2,
+        "pair 2 must be kept or dropped as a whole unit: tool_use kept={use2}, tool_result kept={result2}"
+    );
+    assert!(
+        use2 && result2,
+        "the newest pair must survive via the `!out.is_empty()` guard"
+    );
 }

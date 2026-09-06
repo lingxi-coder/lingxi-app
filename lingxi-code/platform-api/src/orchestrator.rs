@@ -2347,6 +2347,14 @@ pub trait OrchestratorHandle: Send + Sync {
         self.append_meta_user_message(text).await
     }
 
+    /// Emit a user-visible system notice outside any active model turn — the
+    /// completion path for a background `/fusion` run (F006: previously the
+    /// only trace of a finished run was a `user_meta` transcript row nothing
+    /// live ever surfaced). Routes through the connected client's
+    /// `OutputStream::emit_system_notice` in production; default is a no-op
+    /// so lightweight/test handles keep compiling unchanged.
+    async fn emit_background_system_notice(&self, _body: &str) {}
+
     /// Open `$EDITOR` on `<config-dir>/claude/config.json` (creating if
     /// absent). Used by `/config`.
     async fn edit_config_file(&self) -> Result<MemoryEditorOutcome, HandleError>;

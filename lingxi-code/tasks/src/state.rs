@@ -468,6 +468,37 @@ pub struct LocalFusionTaskState {
     /// Sanitized final text for TaskNotification `<result>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_text: Option<String>,
+    /// Failure reason for a `failed` run — folded into the `<error>` section
+    /// and the failed-summary text. `None` for a run that never failed (or
+    /// hasn't reached a terminal status yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Provider profiles that received prompt data on this run → the
+    /// `<egress-profiles>` notification line. Never includes model names.
+    #[serde(default)]
+    pub egress_profiles: Vec<String>,
+    /// Aggregate run usage summary for the `<usage>` notification section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<platform_api::task_registry::AgentRunUsage>,
+    /// Current progress-stage label (F005), e.g. "Running panels 2/3" — the
+    /// SAME text `FusionStage::label()` produces for the Agent-tool path, so
+    /// the `/fusion` task DTO's progress reads identically. Additive; `None`
+    /// until the first `FusionProgress` event lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    /// Whether `DesktopFusionCompletionSink::publish` (the durable
+    /// `<fusion-result>` session append) has completed for a `Completed`
+    /// run. `finish_fusion_terminal` flips [`TaskStateBase::status`] to
+    /// `Completed` BEFORE the handler's worker awaits the publish (the
+    /// registry's notification drain is terminal-status-gated, so that
+    /// ordering cannot change) — so a consumer that returns the instant it
+    /// observes `Completed` can race the still-in-flight append and, in a
+    /// one-shot host, exit the process before it lands (review finding
+    /// #17). `false` until `TaskRegistry::mark_fusion_result_published`
+    /// flips it once the publish resolves; irrelevant for `Failed`/`Killed`,
+    /// which never call `publish` at all. Additive.
+    #[serde(default)]
+    pub result_published: bool,
 }
 
 /// Tripwire for the residual documented on

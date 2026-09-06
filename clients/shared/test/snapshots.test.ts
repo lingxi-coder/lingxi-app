@@ -26,6 +26,7 @@ import type {
   MessageDto,
   PermissionRequest,
   PermissionResolved,
+  TaskRowDto,
 } from '../src/protocol.js';
 import {
   ALL_APP_EVENT_TYPES,
@@ -34,6 +35,7 @@ import {
   ALL_LOCAL_APP_PLUGIN_ERROR_CODES,
   ALL_MANAGED_LOCAL_APP_MCP_STATUS_TYPES,
   ALL_PLUGIN_COMMAND_TYPES,
+  ALL_TASK_ROW_DTO_KEYS,
 } from '../src/protocolCoverage.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -227,7 +229,53 @@ function validateTaskRow(v: unknown): void {
   validateTaskStatus(task['status']);
   if ('can_resume' in task) assert.ok(isBool(task['can_resume']));
   if ('started_at_ms' in task) assert.ok(isNumber(task['started_at_ms']));
+  if ('error' in task) assert.ok(isString(task['error']));
+  if ('stage' in task) assert.ok(isString(task['stage']));
 }
+
+// Compile-time contract check for finding B7#11: `TaskRowDto` (listings.rs)
+// gained a `stage` field for F005 (`/fusion` progress). This TS mirror is
+// hand-maintained and `clients/shared/tsconfig.json` excludes `test/` from
+// `npm run typecheck`, so nothing in THIS file can be the type-level gate —
+// `tsx` (which `npm test` runs through) transpiles without type-checking, so
+// a dropped field here would be a silent pass. The actual enforcing gate is
+// `ALL_TASK_ROW_DTO_KEYS` in `src/protocolCoverage.ts`, which lives under
+// `src/` specifically so it IS covered by `npm run typecheck`: dropping
+// `stage` from `TaskRowDto` there fails with "Property 'stage' does not
+// exist on type 'Record<keyof TaskRowDto, true>'". The assertion below is a
+// runtime cross-check on that same table (imported, not restated), so a key
+// added to one but not the other — including a future 8th field — goes red
+// here too.
+test('ALL_TASK_ROW_DTO_KEYS (src/protocolCoverage.ts) matches TaskRowDto exactly', () => {
+  assert.deepEqual(Object.keys(ALL_TASK_ROW_DTO_KEYS).sort(), [
+    'can_resume',
+    'description',
+    'error',
+    'stage',
+    'started_at_ms',
+    'status',
+    'task_id',
+    'task_type',
+  ].sort());
+});
+
+// This test does NOT go red if `stage` is removed from the `TaskRowDto`
+// interface — `tsx` transpiles without type-checking, so a missing property
+// on an object literal is silently dropped, not rejected. It exists only to
+// prove `validateTaskRow` accepts and correctly type-checks a string `stage`
+// value at runtime; the type-level guarantee is the `ALL_TASK_ROW_DTO_KEYS`
+// test above.
+test('validateTaskRow accepts a string stage value', () => {
+  const withStage: TaskRowDto = {
+    task_id: 'f00000001',
+    task_type: 'local_fusion',
+    status: { type: 'running' },
+    description: '/fusion compare two approaches',
+    stage: 'Running panels 2/3',
+  };
+  validateTaskRow(withStage);
+  assert.equal(withStage.stage, 'Running panels 2/3');
+});
 
 // ── tool_display.rs — the pre-derived render model ────────────────────────────
 

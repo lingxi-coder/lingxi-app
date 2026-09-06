@@ -90,7 +90,7 @@ impl PermissionGate for TuiPermissionGate {
         worker: Option<PromptWorker>,
     ) -> PermissionDecision {
         match self
-            .check_with_context_impl(name, input, worker, false, None, None)
+            .check_with_context_impl(name, input, worker, false, None, None, false)
             .await
         {
             PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
@@ -125,6 +125,7 @@ impl PermissionGate for TuiPermissionGate {
                     )
                 }),
                 ctx.auto_mode_prompt,
+                ctx.background_owned,
             )
             .await
         {
@@ -148,6 +149,12 @@ impl TuiPermissionGate {
             permission::allow_suggestion::PermissionPersistenceSuggestion,
         >,
         auto_mode_prompt: Option<permission::gate::AutoModePrompt>,
+        // Finding 22: `true` only when `ctx.background_owned` was set by an
+        // invoker the composition root built exclusively for a background
+        // task (see `PermissionCheckContext::background_owned`). `check`/
+        // `check_with_worker` (no `ctx`) always pass `false`, matching prior
+        // behavior for every main-thread / worker-only call.
+        background_owned: bool,
     ) -> PermissionOutcome {
         let auto_mode_prompt = match auto_mode_prompt {
             Some(permission::gate::AutoModePrompt::ExitPlanMode) if name == "ExitPlanMode" => {
@@ -226,16 +233,22 @@ impl TuiPermissionGate {
             suppress_always_allow_rule,
             permission_persistence: permission_persistence.clone(),
             auto_mode_prompt,
+            background_owned,
         };
+        // G006: this deny reason can reach the calling MODEL as a tool-error
+        // string (a background `/fusion` panel's Bash/WebFetch call denied
+        // here feeds straight into that panel's next turn) — model-neutral
+        // copy only, no transport-internal words ("TUI"/"dropped") a
+        // provider model has no context for.
         if self.event_tx.send(exchange).await.is_err() {
             // TUI is gone — fail closed.
             return PermissionOutcome::Deny {
-                reason: "TUI permission bridge closed".to_string(),
+                reason: "permission request could not be delivered".to_string(),
             };
         }
         let Ok(response) = rx.await else {
             return PermissionOutcome::Deny {
-                reason: "TUI permission response dropped".to_string(),
+                reason: "permission request was not resolved".to_string(),
             };
         };
 
@@ -757,7 +770,14 @@ mod tests {
         let decision = gate.check("Bash", &json!({})).await;
         match decision {
             PermissionDecision::Deny { reason } => {
-                assert!(reason.contains("dropped"), "got: {reason}");
+                // G006: this reason can reach a (possibly foreign) model as
+                // raw tool-error text — model-neutral copy, no
+                // transport-internal jargon.
+                assert_eq!(reason, "permission request was not resolved");
+                assert!(
+                    !reason.contains("TUI") && !reason.contains("dropped"),
+                    "got: {reason}"
+                );
             }
             PermissionDecision::Allow => panic!("expected Deny"),
         }
@@ -843,5 +863,32 @@ mod tests {
             matches!(event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
             "read-only tool must not consult the interactive gate"
         );
+    }
+
+    // ---- G006: deny reasons the runner feeds back to a (possibly foreign)
+    // model as raw tool-error text must be model-neutral copy, not
+    // transport-internal jargon ("TUI"/"dropped"). The dropped-response-
+    // channel case is covered above by
+    // `tui_gate_returns_deny_when_response_dropped`; this covers the other
+    // deny path — the event channel itself already closed. ---------------
+
+    #[tokio::test]
+    async fn closed_event_channel_denies_with_model_neutral_copy() {
+        let (event_tx, event_rx) = mpsc::channel::<PermissionExchange>(4);
+        // Drop the receiver up front so `event_tx.send(..)` fails immediately
+        // (the TUI event loop has already gone away).
+        drop(event_rx);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let gate = TuiPermissionGate::new(event_tx, rules);
+
+        let decision = gate.check("Bash", &json!({"command": "ls"})).await;
+        let PermissionDecision::Deny { reason } = decision else {
+            panic!("expected deny, got {decision:?}");
+        };
+        assert!(
+            !reason.contains("TUI"),
+            "deny reason must not leak transport-internal jargon to the model: {reason:?}"
+        );
+        assert_eq!(reason, "permission request could not be delivered");
     }
 }

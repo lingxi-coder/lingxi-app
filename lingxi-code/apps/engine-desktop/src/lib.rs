@@ -3058,66 +3058,2034 @@ impl tool_api::WorktreeStatePersister for JsonlWorktreeStatePersister {
     }
 }
 
+/// `billing_mode` is the OWNING profile's `PricingConfig.billing_mode` (the
+/// same bit `provider-config::cost_translate` keys `mark_unpriced` on).
+///
+/// Finding [2]: the checked-in `llm_client::fusion_hints` table only carries
+/// a handful of rows per subscription-billed profile (e.g. 8 of
+/// `github-copilot`'s 36 slice models). Every row that table has no entry
+/// for defaults to `FusionModelHints::default()` (`cost_class: Medium`), so
+/// without this override such a model is priced through
+/// `DesktopFusionPriceBook::rates_for`, which the composition root has
+/// deliberately marked `explicitly_unpriced` for every Subscription-mode
+/// profile — `budget::model_peak` then hard-rejects any capped session that
+/// selects it (`"token-billed model \`.../...\` has no price"`), even though
+/// the model is subscription-billed and would reserve/settle at $0. Forcing
+/// `cost_class: Subscription` here whenever the owning profile is
+/// subscription-billed is inert for the rows the hint table already lists
+/// for such a profile — every one of them already hand-codes
+/// `FusionCostClass::Subscription` — so this only changes the
+/// previously-unhinted rows that were wrongly defaulting to `Medium`.
 fn desktop_fusion_catalog_row(
     profile: &str,
     model: &llm_client::ModelProfile,
+    billing_mode: platform_api::ModelBillingMode,
+    protocol: &llm_client::ProtocolFamily,
 ) -> fusion::CatalogModel {
+    let mut hints = llm_client::hints_for(profile, &model.request_model).unwrap_or_default();
+    if billing_mode == platform_api::ModelBillingMode::Subscription {
+        hints.cost_class = platform_api::FusionCostClass::Subscription;
+    }
     fusion::CatalogModel {
         profile: profile.to_string(),
         model: model.request_model.clone(),
-        hints: llm_client::hints_for(profile, &model.request_model).unwrap_or_default(),
-        structured_output: model.capabilities.structured_output,
+        hints,
+        // Round-5 review finding [3]: `capabilities.structured_output` is a
+        // property of the MODEL (copied verbatim from the vendored
+        // models.dev slice); `CatalogModel::structured_output` is the
+        // stronger claim `resolve_analyst`'s `with_schema` gate needs — that
+        // THIS profile can actually put a `response_format` on the wire.
+        // AND-ing the owning profile's codec in is what makes the two agree.
+        structured_output: model.capabilities.structured_output
+            && protocol_encodes_response_format(protocol),
     }
 }
 
+/// Round-5 review finding [3]: can a profile on this wire protocol encode an
+/// `LlmRequest.response_format` at all?
+///
+/// `llm_client::protocol::validate_capabilities` only checks the MODEL's
+/// `structured_output` capability bit, so a request with a `response_format`
+/// reaches the codec whenever that bit is true — and `GeminiCodec`
+/// (`llm-client/src/providers/gemini.rs`'s `reject_unsupported_request_intent`,
+/// called from `encode_request`) then hard-fails with `InvalidRequest("GeminiCodec
+/// does not encode response_format yet")`. For Fusion that failure lands in
+/// `analyst.rs`'s `query_json_schema` AFTER every panel has already spent
+/// real money, instead of in §4's zero-provider-call preflight. Gating the
+/// catalog row on this predicate moves it back to preflight
+/// (`FusionError::StructuredOutputUnsupported`).
+///
+/// `VertexGemini` is in the same class: `VertexGeminiCodec::encode_request`
+/// delegates body construction to the inner `GeminiCodec` and only rewrites
+/// the URL. `VertexClaude`/`BedrockClaude`/`FoundryClaude` delegate to
+/// `AnthropicMessagesCodec` and `AzureOpenAi` to `OpenAiChatCodec`, all of
+/// which do encode `response_format`.
+///
+/// Deliberately an exhaustive `match` rather than a `matches!`: a new
+/// `ProtocolFamily` must not silently default to "encodes it" and
+/// re-introduce this defect for the next codec that does not.
+fn protocol_encodes_response_format(protocol: &llm_client::ProtocolFamily) -> bool {
+    match protocol {
+        llm_client::ProtocolFamily::GeminiGenerateContent
+        | llm_client::ProtocolFamily::VertexGemini => false,
+        llm_client::ProtocolFamily::AnthropicMessages
+        | llm_client::ProtocolFamily::OpenAiResponses
+        | llm_client::ProtocolFamily::OpenAiChat
+        | llm_client::ProtocolFamily::VertexClaude
+        | llm_client::ProtocolFamily::BedrockClaude
+        | llm_client::ProtocolFamily::FoundryClaude
+        | llm_client::ProtocolFamily::AzureOpenAi => true,
+    }
+}
+
+/// F011 item 1: drop every catalog row a Fusion panel cannot actually reach —
+/// an uncredentialed provider profile, or a model a managed
+/// `enforceAvailableModels` policy has barred — BEFORE it can ever reach
+/// `model_resolver::resolve`. Without this, an automatic preset can select a
+/// provider with no credential (or a managed-barred model), and a panel
+/// burns turns before failing at request time (`LlmError::Authentication`)
+/// instead of failing the §4 preflight with zero provider calls.
+///
+/// `anthropic_probe_definitive` gives the availability half of this filter
+/// the same probe-blindness guard `connected_provider_fallback` has (see its
+/// doc comment). On a gateway / env-routed Bedrock/Vertex/Foundry install,
+/// `provider_availability["anthropic"] == false` reflects only that the local
+/// key/OAuth probe is BLIND, not that anthropic is disconnected — Claude
+/// models are served fine there, and the main turn loop routes them. Dropping
+/// anthropic rows on that signal emptied the Fusion catalog on every such
+/// install (`TooFewModels{eligible:0}` on every `/fusion` call) even though
+/// the same models work for the ordinary turn loop. When the probe is not
+/// definitive, anthropic rows are kept regardless of the availability map;
+/// every other profile's absence/`false` still means genuinely unavailable —
+/// UNLESS the whole probe timed out (`availability_probe_completed ==
+/// false`), in which case an empty map cannot be told apart from "every
+/// non-anthropic provider is uncredentialed" and the availability half of
+/// this filter is skipped entirely rather than fail-closing the whole
+/// Fusion catalog on a transient stall (finding [7]).
+fn filter_fusion_catalog(
+    catalog: Vec<fusion::CatalogModel>,
+    provider_availability: &std::collections::BTreeMap<String, bool>,
+    anthropic_probe_definitive: bool,
+    availability_probe_completed: bool,
+    session_model_restriction: Option<&(
+        llm_client::model::allowlist::ModelEnforcement,
+        Vec<String>,
+    )>,
+) -> Vec<fusion::CatalogModel> {
+    catalog
+        .into_iter()
+        .filter(|row| {
+            // Finding [7]: an empty `provider_availability` map means either
+            // "the probe ran and found nothing" (genuinely uncredentialed —
+            // fail closed) or "the whole probe timed out" (unknown — fail
+            // open, same as the sibling `connected_provider_fallback` rule
+            // treats an absent map entry). Without this branch the timeout
+            // case is indistinguishable from the first and drops every
+            // non-anthropic profile's rows for the runtime's lifetime.
+            if !availability_probe_completed {
+                return true;
+            }
+            if row.profile == "anthropic" && !anthropic_probe_definitive {
+                return true;
+            }
+            provider_availability
+                .get(&row.profile)
+                .copied()
+                .unwrap_or(false)
+        })
+        .filter(|row| match session_model_restriction {
+            None => true,
+            Some((enforcement, _)) => {
+                llm_client::model::allowlist::model_allowed_under(enforcement, &row.model)
+                    != Some(false)
+            }
+        })
+        .collect()
+}
+
+/// Round-4 review finding [8]: `filter_fusion_catalog`'s availability input
+/// (`provider_availability`) used to be baked into a plain `Vec<CatalogModel>`
+/// at `desktop_fusion_executor` construction — a boot-time snapshot frozen
+/// for the process lifetime. A provider credentialed mid-session via
+/// `/connect` (or a completed `/login`) therefore stayed invisible to Fusion
+/// until a restart, even though the ordinary turn loop routes the same
+/// credential on the very next request (`MultiCredentialProvider` reads
+/// `CredentialManager` per call, not a boot snapshot).
+///
+/// This is the `ModelSource` half of the fix, mirroring `DesktopFusionConfigSource`
+/// (F007, which already re-resolves `fusion.*` SETTINGS on every call instead
+/// of freezing them at construction — see its doc comment): `list()` re-runs
+/// `filter_fusion_catalog` against whatever `availability` holds RIGHT NOW,
+/// not a value captured at construction. `availability` starts as the
+/// boot-time probe result and is updated in place by
+/// [`FusionCatalogRefresher::refresh`], which a credential-write path calls
+/// after persisting a new credential.
+///
+/// `unfiltered`, `anthropic_probe_definitive` and `session_model_restriction`
+/// stay fixed for the process — only per-provider availability, and whether
+/// the availability probe has ever COMPLETED, can change mid-session through
+/// a credential write, so only those halves need to be mutable.
+///
+/// Round-7 finding [2]: `availability_probe_completed` used to be a plain
+/// `bool` frozen at construction, and nothing in the process ever set it to
+/// `true`. A single 5s boot-probe stall therefore disabled the availability
+/// half of `filter_fusion_catalog` for the runtime's LIFETIME — including
+/// after [`FusionCatalogRefresher::refresh_inner`] had re-run the same probe
+/// over the full boot credential-source list and published a complete,
+/// authoritative map into the very lock `list()` reads. Every `/fusion` in
+/// that process kept reserving budget for, spawning and failing panels on
+/// providers with no credential. It is now a shared cell the refresher can
+/// re-arm — see `refresh_inner` for why re-arming is gated on a probe whose
+/// result a degraded credential backend could not have produced.
+struct FusionCatalogModelSource {
+    unfiltered: Vec<fusion::CatalogModel>,
+    availability: Arc<std::sync::RwLock<std::collections::BTreeMap<String, bool>>>,
+    anthropic_probe_definitive: bool,
+    availability_probe_completed: Arc<std::sync::atomic::AtomicBool>,
+    session_model_restriction: Option<(
+        llm_client::model::allowlist::ModelEnforcement,
+        Vec<String>,
+    )>,
+}
+
+impl fusion::ModelSource for FusionCatalogModelSource {
+    fn list(&self) -> Vec<fusion::CatalogModel> {
+        let availability = self
+            .availability
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        filter_fusion_catalog(
+            self.unfiltered.clone(),
+            &availability,
+            self.anthropic_probe_definitive,
+            self.availability_probe_completed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.session_model_restriction.as_ref(),
+        )
+    }
+}
+
+/// One shared, mutable route flag for [`FusionCatalogRefresher`] — see the
+/// doc comment on its `anthropic_has_api_key` field for why the three
+/// special-cased credential slots stopped being construction-time booleans.
+fn fusion_route_flag(initial: bool) -> Arc<std::sync::atomic::AtomicBool> {
+    Arc::new(std::sync::atomic::AtomicBool::new(initial))
+}
+
+/// Handle a credential-write path (`/connect` completion, a finished
+/// `/login`) calls after persisting a new credential, so Fusion's catalog
+/// filter (`FusionCatalogModelSource`) sees it within the same process —
+/// see that type's doc comment for the finding this closes. Cheap to clone:
+/// the mutable state lives behind the shared `availability` lock.
+#[derive(Clone)]
+pub struct FusionCatalogRefresher {
+    availability: Arc<std::sync::RwLock<std::collections::BTreeMap<String, bool>>>,
+    /// The SAME cell [`FusionCatalogModelSource`] reads (round-7 finding
+    /// [2]). A re-probe whose result cannot have been corrupted by a
+    /// degraded credential backend re-arms the availability filter a
+    /// timed-out boot probe had disabled; see `refresh_inner`.
+    availability_probe_completed: Arc<std::sync::atomic::AtomicBool>,
+    credentials: Arc<CredentialManager>,
+    credential_sources: Vec<provider_config::CredentialSource>,
+    /// Round-12 rework: the three route flags `compute_availability_with_isolation`
+    /// special-cases (`anthropic-api-key` / `anthropic-oauth` / `openai-chatgpt`)
+    /// are LIVE cells, not booleans frozen at construction.
+    ///
+    /// They used to be plain `bool`s captured at boot, which made two things
+    /// wrong at once. (i) [`Self::mark_credential_removed`]'s per-route
+    /// fallback answered from the BOOT state: an OAuth-only boot that gained
+    /// an API key mid-session (Settings -> "add key", i.e.
+    /// `refresh_after_credential_write("anthropic")`) still read
+    /// `anthropic_has_api_key == false`, so `/logout` published
+    /// `anthropic: false` while the API key was live and dropped every
+    /// Anthropic row from `filter_fusion_catalog` for the rest of the
+    /// process. (ii) A removal was not DURABLE: [`Self::refresh_inner`]
+    /// re-derives those three rows from these very fields and publishes
+    /// `true` unconditionally for an available row, so the next unrelated
+    /// credential write resurrected the entry a delete had just cleared.
+    ///
+    /// Every seam that establishes or removes one of the three routes now
+    /// notes it here ([`Self::note_route_credential_written`] /
+    /// [`Self::note_route_credential_removed`]), so both readers see the live
+    /// state. Shared (`Arc`) because `FusionCatalogRefresher` is `Clone` and
+    /// the registry, the `/connect` wrappers and the composition root all
+    /// hold clones of the SAME refresher.
+    anthropic_has_api_key: Arc<std::sync::atomic::AtomicBool>,
+    anthropic_has_oauth: Arc<std::sync::atomic::AtomicBool>,
+    openai_chatgpt_available: Arc<std::sync::atomic::AtomicBool>,
+    // Round-4 review finding (isolation boundary): mirrors the boot probe's
+    // `cfg.isolated_credential_storage` (see `resolve_llm_stack`'s call to
+    // `compute_availability_with_isolation` above) so a mid-session refresh
+    // re-probes under the SAME isolation the boot used, instead of always
+    // reading ambient machine env vars regardless of how this session booted.
+    isolated: bool,
+}
+
+impl FusionCatalogRefresher {
+    /// Build a refresher over a shared availability map and an explicit list
+    /// of KEYCHAIN-only profiles (no env-var fallback, no Anthropic/ChatGPT
+    /// special-casing).
+    ///
+    /// The composition root builds the real thing with the full
+    /// `provider_config::CredentialSource` list `resolve_llm_stack` already
+    /// has; this is the constructor for callers OUTSIDE that root — which
+    /// [`FUSION_CATALOG_REFRESHERS`] now makes possible — that only know
+    /// profile names.
+    #[must_use]
+    pub fn for_keychain_profiles(
+        availability: Arc<std::sync::RwLock<std::collections::BTreeMap<String, bool>>>,
+        credentials: Arc<CredentialManager>,
+        profiles: &[&str],
+    ) -> Self {
+        Self {
+            availability,
+            credentials,
+            credential_sources: profiles
+                .iter()
+                .map(|profile| provider_config::CredentialSource {
+                    provider_id: llm_client::ProviderId::OpenAICompatible {
+                        name: (*profile).to_string(),
+                    },
+                    profile_name: (*profile).to_string(),
+                    credential_id: (*profile).to_string(),
+                    env_var: None,
+                    kind: provider_config::CredentialKind::Keychain,
+                })
+                .collect(),
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+            // This constructor is for callers OUTSIDE the composition root,
+            // which hold the shared availability map but not the model
+            // source's probe-completion cell, so the refresher it builds
+            // gets a private one. That is inert rather than wrong: nothing
+            // reads it, and re-arming is a pure recovery from a boot-probe
+            // stall the composition root's own refresher (registered by
+            // `resolve_llm_stack`, and invoked by the SAME
+            // `refresh_fusion_catalog_after_credential_write` fan-out) still
+            // performs on the real cell for the same credential write.
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Re-probe every credential source (the SAME call `resolve_llm_stack`
+    /// makes at boot, `provider_config::compute_availability_with_isolation`)
+    /// and publish the result so the next `FusionCatalogModelSource::list()`
+    /// sees it — this is what makes a mid-session `/connect`/`/login`
+    /// credential write visible to Fusion without a process restart.
+    ///
+    /// `anthropic_has_api_key`/`anthropic_has_oauth`/`openai_chatgpt_available`
+    /// are NOT re-derived here — they reflect the engine's resolved auth
+    /// state at boot (see `compute_availability_with_isolation`'s doc
+    /// comment for why those three need special-cased inputs rather than a
+    /// generic keychain probe), frozen at `FusionCatalogRefresher`
+    /// construction. A caller refreshing after a GENERIC provider's
+    /// credential write (the `credential_id => keychain_has || env_set`
+    /// branch — everything except Anthropic and ChatGPT) still gets a
+    /// correct, live result for that provider: only the three special-cased
+    /// entries stay at their boot-time value, which is exactly what they
+    /// already were before this call and is never staler than that.
+    pub async fn refresh(&self) {
+        self.refresh_inner(None).await;
+    }
+
+    /// [`Self::refresh`] for a caller that knows WHICH credential it just
+    /// persisted — the shape every production caller actually has.
+    ///
+    /// `credential_id` is matched against `CredentialSource::credential_id`
+    /// (and, defensively, `profile_name`, because the TUI `/connect` seam
+    /// keys its actions by the profile name the availability map uses); every
+    /// matching profile is force-marked available regardless of what the
+    /// re-probe answered. Round-5 review finding [5]: the re-probe bottoms
+    /// out in `SecureStorage::contains`, whose `RuntimeFallbackStorage` impl
+    /// answers `Ok(false)` — not `Err` — for `BackendUnavailable` /
+    /// `PermissionDenied` / `Io`, so a degraded macOS credential broker makes
+    /// a key that was just written successfully read back as absent. Without
+    /// this the refresh triggered BY that write can conclude the provider is
+    /// unavailable, which is the exact opposite of what it was called to do.
+    pub async fn refresh_after_credential_write(&self, credential_id: &str) {
+        // Round-12 rework: record the route BEFORE the re-probe, so the probe
+        // resolves the three special-cased rows from the live state rather
+        // than the boot snapshot — and so a later
+        // `mark_credential_removed` of the OTHER Anthropic route can fall
+        // back to this one instead of over-clearing the profile.
+        self.note_route_credential_written(credential_id).await;
+        self.refresh_inner(Some(credential_id)).await;
+    }
+
+    /// Round-12 finding [2]: the "this profile LOST its credential" call that
+    /// [`Self::refresh_inner`]'s merge rule explicitly refuses to be.
+    ///
+    /// A re-probe can never lower an existing `true` — that is deliberate (a
+    /// degraded credential broker answers `Ok(false)`, not `Err`, so the
+    /// merge only ever raises), which means a credential DELETE has no way to
+    /// reach the availability map through the write path. Reusing
+    /// [`Self::refresh_after_credential_write`] here would be strictly worse
+    /// than doing nothing: its `forced` loop publishes `true` for exactly the
+    /// profile whose credential was just removed.
+    ///
+    /// # It re-derives, it does not assert `false`
+    ///
+    /// Round-12 REWORK. The first version of this method published a hard
+    /// `false` for every profile the removed credential backed. That is the
+    /// mirror-image defect of the stale `true` it replaced, and a worse one:
+    /// a stale `true` costs one panel that fails loudly on
+    /// `LlmError::Authentication`, while a wrong `false` removes EVERY row of
+    /// that provider from `filter_fusion_catalog` for the rest of the process
+    /// (`TooFewModels{eligible:0}` on a small install). Two production shapes
+    /// hit it — a generic profile whose `env_var` is still exported, and
+    /// Anthropic's two independent routes read from boot-frozen booleans — so
+    /// this now recomputes each affected profile with
+    /// `compute_availability_with_isolation`'s OWN formula
+    /// (provider-config/src/availability.rs:53-70) and the one fact the
+    /// caller actually established: the removed credential's KEYCHAIN entry
+    /// is gone.
+    ///
+    /// * a GENERIC profile is `keychain_has || env_set`, so with
+    ///   `keychain_has` now `false` it is exactly `env_set` — `!isolated &&
+    ///   std::env::var(source.env_var)`. Production boots non-isolated
+    ///   (`isolated_credential_storage: false`, apps/bridge-server/src/boot.rs
+    ///   and apps/cli/src/init.rs), so a user with `DEEPSEEK_API_KEY`
+    ///   exported who deletes the stored deepseek key keeps routing deepseek
+    ///   in the ordinary turn loop and must keep it in Fusion's catalog too;
+    /// * a profile backed by a DIFFERENT credential id as well contributes
+    ///   `true`, because the caller asserted nothing about that credential;
+    /// * the three special-cased slots (`anthropic-api-key` /
+    ///   `anthropic-oauth` / `openai-chatgpt`) answer from the shared route
+    ///   flags, which [`Self::note_route_credential_removed`] has already
+    ///   lowered for the route that actually went away — see the field doc on
+    ///   `anthropic_has_api_key`.
+    ///
+    /// Note that this is still a pure lock-and-set plus a `std::env::var`
+    /// read: NO keychain I/O (an ephemeral key never touched the keychain in
+    /// the first place, and a persistent delete has already happened by the
+    /// time we are called), so unlike the write path it needs no
+    /// `refresh_fusion_catalog_bounded` budget wrapper.
+    ///
+    /// It deliberately does NOT touch `availability_probe_completed`: a
+    /// removal is an assertion by the caller, not an observation of the
+    /// backend, and so proves nothing about whether the backend answers.
+    ///
+    /// The match is `credential_id == id || profile_name == id` — the same
+    /// defensive pair `refresh_inner`'s `forced` loop uses — because the
+    /// delete seams are keyed by `provider_id`, which is the PROFILE name on
+    /// the [`Self::for_keychain_profiles`] shape and the CREDENTIAL id on the
+    /// composition root's.
+    /// The RAISING counterpart of [`Self::mark_credential_removed`].
+    ///
+    /// [Round-12 review, blocking issue 1] The removal fan-out shipped without
+    /// this, so `/logout` published `anthropic: false` and the following
+    /// `/login` only flipped the route FLAG — nothing republished the map
+    /// entry. `filter_fusion_catalog` then dropped every anthropic row for the
+    /// rest of the process, i.e. `/fusion` on an Anthropic-only install failed
+    /// `TooFewModels{eligible:0}` after a sign-out/sign-in. That is strictly
+    /// worse than the stale `true` the removal path exists to clear: a stale
+    /// `true` costs one panel that fails loudly on `LlmError::Authentication`,
+    /// while a wrong `false` removes EVERY row of that provider.
+    ///
+    /// It also cannot be left to `refresh_inner`: that method's closing
+    /// `entry("anthropic").or_insert(..)` cannot RAISE an entry that already
+    /// exists, so once a delete has written `false` no later credential write
+    /// recovers it.
+    ///
+    /// Deliberately a pure flag-then-lock-and-set, mirroring the removal arms
+    /// in the opposite direction: it must stay cheap enough for the sign-in
+    /// seam, which is why it does not go through
+    /// `refresh_fusion_catalog_bounded`'s re-probe.
+    pub async fn mark_credential_established(&self, credential_id: &str) {
+        // Raise the ROUTE flag first, so the re-derivation below — and every
+        // later `refresh_inner`, which recomputes the three special-cased rows
+        // from these same flags — sees the new credential.
+        self.note_route_credential_written(credential_id).await;
+
+        if let Ok(mut guard) = self.availability.write() {
+            match credential_id {
+                // Same one-slot-two-spellings grouping as the removal arm, and
+                // the same two-route fallback: `anthropic_route_available()`
+                // is `api_key || oauth`, so signing in on either route
+                // republishes `true` without needing to know which one the
+                // delete had cleared.
+                "anthropic" | "anthropic-api-key" | "anthropic-oauth" => {
+                    guard.insert("anthropic".to_string(), self.anthropic_route_available());
+                }
+                "chatgpt" | "openai-chatgpt" => {
+                    guard.insert(
+                        "openai-chatgpt".to_string(),
+                        self.openai_chatgpt_available
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub async fn mark_credential_removed(&self, credential_id: &str) {
+        // (1) Lower the ROUTE flag first, so the re-derivation below — and
+        //     every later `refresh_inner`, which recomputes the three
+        //     special-cased rows from these same flags — sees the removal.
+        //     Without this the next unrelated credential write republishes
+        //     the boot value and resurrects the entry the delete cleared.
+        self.note_route_credential_removed(credential_id);
+
+        let affected: std::collections::BTreeSet<String> = self
+            .credential_sources
+            .iter()
+            .filter(|source| {
+                source.credential_id == credential_id || source.profile_name == credential_id
+            })
+            .map(|source| source.profile_name.clone())
+            .collect();
+        let rederived: Vec<(String, bool)> = affected
+            .into_iter()
+            .map(|profile| {
+                let available = self
+                    .credential_sources
+                    .iter()
+                    .filter(|source| source.profile_name == profile)
+                    .any(|source| self.route_survives_removal(source, credential_id));
+                (profile, available)
+            })
+            .collect();
+
+        if let Ok(mut guard) = self.availability.write() {
+            for (profile, available) in rederived {
+                guard.insert(profile, available);
+            }
+            // The three ids `compute_availability_with_isolation` special-cases
+            // (`anthropic-api-key` / `anthropic-oauth` / `openai-chatgpt`) are
+            // resolved from the route flags, not from `credential_sources`, so
+            // the loop above cannot reach them on a boot whose
+            // `credential_sources` never carried them (an Anthropic-less boot,
+            // or the [`Self::for_keychain_profiles`] shape): name them
+            // explicitly, or signing out leaves the `true` the sign-IN wrapper
+            // force-marked.
+            //
+            // `anthropic` is the one profile with TWO independent routes, so
+            // removing one of them must fall back to the other rather than
+            // blanket-clear: dropping OAuth while an API key is still
+            // configured would empty Fusion's catalog of a provider the turn
+            // loop routes perfectly well, which is the mirror-image defect of
+            // the stale `true` this method exists to fix.
+            //
+            // `"anthropic"` and `"anthropic-api-key"` are ONE slot under two
+            // spellings, so they MUST share an arm: `secret`'s
+            // `is_anthropic_api_key_id` is
+            // `matches!(id, "anthropic" | "anthropic-api-key")`
+            // (secret/src/credential.rs), which is what makes
+            // `delete_provider_key("anthropic")` route to
+            // `delete_anthropic_api_key()` — removing the API key and NOTHING
+            // else; the OAuth session survives. And the bare spelling is the
+            // one production sends: Electron declares the provider as
+            // `id: 'anthropic'` (clients/electron/src/shared/providers.ts) and
+            // passes it through `DeleteProviderCredential` to
+            // `refresh_fusion_catalog_after_credential_delete`. Giving the two
+            // spellings two different semantics let the Settings "delete key"
+            // button clear an Anthropic the turn loop still routes over OAuth.
+            //
+            // All three anthropic spellings share ONE arm because the answer
+            // is the same for each: the profile is available while EITHER
+            // route is live, and step (1) has already lowered whichever route
+            // this call removed.
+            //
+            // These arms must stay AFTER the loop above: for the bare id that
+            // loop already republished the `anthropic` profile from the single
+            // source `assemble` emitted (which names only ONE of the two
+            // routes), and the OR here is what restores the other.
+            match credential_id {
+                "anthropic" | "anthropic-api-key" | "anthropic-oauth" => {
+                    guard.insert("anthropic".to_string(), self.anthropic_route_available());
+                }
+                // ChatGPT gets no per-route OR because there is nothing to OR
+                // WITH: `openai_chatgpt_available` is a single flag the engine
+                // ORed over PAT-env / external-tokens-env / OAuth-session (see
+                // `compute_availability_with_isolation`), and step (1) cleared
+                // it. Both spellings of the slot share this arm — the OpenAI
+                // OAuth handle deletes the minted key under `"chatgpt"`
+                // (llm-client/src/oauth/openai/handle.rs), while the catalog
+                // and `/connect` spell the same slot `"openai-chatgpt"`.
+                "chatgpt" | "openai-chatgpt" => {
+                    guard.insert(
+                        "openai-chatgpt".to_string(),
+                        self.openai_chatgpt_available
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Is `source` still backed by something, given that `removed`'s KEYCHAIN
+    /// entry has just been deleted?
+    ///
+    /// This is `compute_availability_with_isolation`'s per-source formula
+    /// (provider-config/src/availability.rs:53-70) with the one substitution
+    /// the caller established — `has_provider_key(removed) == false` — and no
+    /// keychain read of its own.
+    fn route_survives_removal(
+        &self,
+        source: &provider_config::CredentialSource,
+        removed: &str,
+    ) -> bool {
+        match source.credential_id.as_str() {
+            "anthropic-api-key" => self
+                .anthropic_has_api_key
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "anthropic-oauth" => self
+                .anthropic_has_oauth
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "openai-chatgpt" => self
+                .openai_chatgpt_available
+                .load(std::sync::atomic::Ordering::Relaxed),
+            _ if source.credential_id == removed || source.profile_name == removed => {
+                // `keychain_has || env_set` with `keychain_has` now false.
+                self.env_var_still_set(source.env_var.as_deref())
+            }
+            // A different credential id backs this profile as well and the
+            // caller asserted nothing about it — assuming it is gone too is
+            // exactly the over-clearing this rework exists to remove.
+            _ => true,
+        }
+    }
+
+    /// `!isolated && the variable exists` — the ambient half of
+    /// `compute_availability_with_isolation`'s generic arm, honouring the same
+    /// isolation boundary the boot probe used (round-4 finding).
+    fn env_var_still_set(&self, env_var: Option<&str>) -> bool {
+        !self.isolated && env_var.is_some_and(|var| std::env::var(var).is_ok())
+    }
+
+    /// Anthropic is available while EITHER of its two independent routes is.
+    fn anthropic_route_available(&self) -> bool {
+        self.anthropic_has_api_key
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || self
+                .anthropic_has_oauth
+                .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record that `credential_id`'s route was just ESTABLISHED, for the three
+    /// slots `compute_availability_with_isolation` resolves from flags rather
+    /// than from a keychain read. See the `anthropic_has_api_key` field doc.
+    ///
+    /// # The bare `"anthropic"` spelling is ambiguous, so it is PROBED
+    ///
+    /// `secret::is_anthropic_api_key_id` is
+    /// `matches!(id, "anthropic" | "anthropic-api-key")`, so a bare
+    /// `"anthropic"` from a credential WRITE normally means an API key was
+    /// stored (the bridge-server's `SetProviderCredential` arm, the TUI
+    /// `/connect` key view). But it is not universal: the TUI's OAuth arm
+    /// (`apps/cli/src/mode.rs`) calls
+    /// `refresh_fusion_catalog_after_credential_write(&provider_id)` with the
+    /// picker's `"anthropic"` after an OAUTH sign-in, and
+    /// `EngineOAuthConnect::login("anthropic")` is likewise a sign-in, not a
+    /// key write. Believing the bare spelling there would raise the API-KEY
+    /// route on a session that has none, and a later `/logout` would then
+    /// leave Anthropic in Fusion's catalog on the strength of a route that
+    /// never existed — the very stale `true` this class of change removes.
+    ///
+    /// So the bare spelling is resolved against the store instead:
+    /// `has_provider_key("anthropic")` is the attribute-only presence check
+    /// (`secret/src/credential.rs`, `storage.contains("lingxi",
+    /// "anthropic-api-key")`), plus the ambient `ANTHROPIC_API_KEY` that
+    /// outranks it (`DesktopConfig::api_key`, apps/cli/src/init.rs). A write
+    /// can only ADD a credential, so this only ever RAISES the flag: a
+    /// degraded broker answering `Ok(false)` — the same lie
+    /// `refresh_inner`'s `forced` list exists to survive — leaves the flag
+    /// exactly as it was rather than lowering it.
+    ///
+    /// [`FusionCatalogRefreshingOAuthConnect`] additionally notifies under the
+    /// unambiguous `anthropic-oauth` spelling so the OAuth route is recorded
+    /// even when no API key is present to probe for.
+    async fn note_route_credential_written(&self, credential_id: &str) {
+        match credential_id {
+            "anthropic-api-key" => self
+                .anthropic_has_api_key
+                .store(true, std::sync::atomic::Ordering::Relaxed),
+            "anthropic" => {
+                let key_present = self
+                    .credentials
+                    .has_provider_key("anthropic")
+                    .await
+                    .unwrap_or(false)
+                    || self.env_var_still_set(Some("ANTHROPIC_API_KEY"));
+                if key_present {
+                    self.anthropic_has_api_key
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            "anthropic-oauth" => self
+                .anthropic_has_oauth
+                .store(true, std::sync::atomic::Ordering::Relaxed),
+            "chatgpt" | "openai-chatgpt" => self
+                .openai_chatgpt_available
+                .store(true, std::sync::atomic::Ordering::Relaxed),
+            _ => {}
+        }
+    }
+
+    /// The removal twin of [`Self::note_route_credential_written`].
+    ///
+    /// Deleting the Anthropic API key does not necessarily END the API-key
+    /// route: `DesktopConfig::api_key` is read from the `ANTHROPIC_API_KEY`
+    /// environment variable (apps/cli/src/init.rs) and OUTRANKS the stored
+    /// key, so on a non-isolated boot with that variable exported the route
+    /// survives the delete. That is the same `keychain_has || env_set` rule
+    /// [`Self::route_survives_removal`] applies to a generic profile, at the
+    /// variable `provider_config::assemble` records for the Anthropic
+    /// API-key source.
+    fn note_route_credential_removed(&self, credential_id: &str) {
+        match credential_id {
+            "anthropic" | "anthropic-api-key" => self.anthropic_has_api_key.store(
+                self.env_var_still_set(Some("ANTHROPIC_API_KEY")),
+                std::sync::atomic::Ordering::Relaxed,
+            ),
+            "anthropic-oauth" => self
+                .anthropic_has_oauth
+                .store(false, std::sync::atomic::Ordering::Relaxed),
+            "chatgpt" | "openai-chatgpt" => self
+                .openai_chatgpt_available
+                .store(false, std::sync::atomic::Ordering::Relaxed),
+            _ => {}
+        }
+    }
+
+    /// Round-9 finding [3]: does this row's `available` verdict PROVE the
+    /// credential backend answered?
+    ///
+    /// The re-arm gate below exists to withhold arming when the storage
+    /// backend said nothing (a degraded broker answers `Ok(false)`, not
+    /// `Err`), so it may only count rows whose availability was actually READ
+    /// from storage. Two kinds of row are not:
+    ///
+    /// * the three ids `compute_availability_with_isolation` special-cases
+    ///   (`anthropic-api-key` / `anthropic-oauth` / `openai-chatgpt`,
+    ///   provider-config/src/availability.rs) resolve from
+    ///   `anthropic_has_api_key` / `anthropic_has_oauth` /
+    ///   `openai_chatgpt_available` — booleans frozen at construction that
+    ///   never touch the keychain. On ANY install that booted with Anthropic
+    ///   auth, one of them is permanently `true`, which made the gate
+    ///   unconditionally satisfied and unable to do its documented job;
+    /// * a generic profile whose `env_var` is set in a non-`isolated` process
+    ///   is `keychain_has || env_set`, so `true` can come entirely from the
+    ///   ambient environment while the keychain read returned nothing.
+    ///
+    /// Both answer `false` here. A `false` row is not "unavailable" — it is
+    /// "this verdict is storage-INDEPENDENT", i.e. a degraded backend could
+    /// not have changed it. `refresh_inner` uses that both ways (round-10
+    /// finding N6): such a row cannot testify that the backend answered, but
+    /// a probe made up ENTIRELY of such rows cannot have been corrupted by a
+    /// degraded backend either, and is therefore authoritative on its own.
+    /// Only the mixed case — some verdict did depend on a storage read —
+    /// needs one of those reads to have come back `available`.
+    fn row_availability_came_from_storage(&self, credential_id: &str) -> bool {
+        if matches!(
+            credential_id,
+            "anthropic-api-key" | "anthropic-oauth" | "openai-chatgpt"
+        ) {
+            return false;
+        }
+        if self.isolated {
+            return true;
+        }
+        !self
+            .credential_sources
+            .iter()
+            .filter(|source| source.credential_id == credential_id)
+            .any(|source| {
+                source
+                    .env_var
+                    .as_deref()
+                    .is_some_and(|var| std::env::var(var).is_ok())
+            })
+    }
+
+    /// Round-5 review finding [5]: this MERGES the re-probe into the live map
+    /// instead of replacing it (`*guard = map`, the round-4 shape).
+    ///
+    /// The probe cannot distinguish "no credential" from "the credential
+    /// backend is degraded": `provider_config::compute_availability_with_isolation`
+    /// resolves every generic profile as
+    /// `credentials.has_provider_key(id).await.unwrap_or(false)`, and
+    /// `RuntimeFallbackStorage` already turned a `BackendUnavailable` into
+    /// `Ok(false)` below that. A wholesale replace therefore let one degraded
+    /// re-probe overwrite a known-good boot map with an all-`false` one and
+    /// permanently empty Fusion's catalog for every non-anthropic profile
+    /// (`TooFewModels{eligible:0}` on every subsequent `/fusion`), with
+    /// nothing to repair it — strictly worse than the staleness the refresh
+    /// was added to fix, and invisible because `DesktopRuntime.provider_availability`
+    /// (the `/model` picker's copy) still showed those providers connected.
+    ///
+    /// Merge rule: a profile the probe reports AVAILABLE is published as
+    /// available; a profile the probe reports UNAVAILABLE keeps whatever the
+    /// map already held and is only inserted as `false` when the map had no
+    /// entry for it at all. That is sound because a refresh is only ever
+    /// triggered by a credential WRITE — no caller adds availability by
+    /// deleting a credential, so a refresh has no business REMOVING any. A
+    /// credential-REMOVAL path must NOT reuse this method — its `forced` loop
+    /// would publish `true` for the very profile that just lost its
+    /// credential. Removals go through [`Self::mark_credential_removed`]
+    /// instead (round-12 finding [2]), which clears exactly the entries the
+    /// removed credential backed and touches nothing else.
+    async fn refresh_inner(&self, just_written: Option<&str>) {
+        let rows = provider_config::compute_availability_with_isolation(
+            &self.credentials,
+            &self.credential_sources,
+            self.anthropic_has_api_key
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.anthropic_has_oauth
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.openai_chatgpt_available
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.isolated,
+        )
+        .await;
+        let forced: Vec<String> = just_written
+            .map(|id| {
+                self.credential_sources
+                    .iter()
+                    .filter(|source| source.credential_id == id || source.profile_name == id)
+                    .map(|source| source.profile_name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Round-7 finding [2]: re-arm the availability filter that a
+        // timed-out BOOT probe disabled — but only on a probe whose result a
+        // degraded credential backend could not have produced (see the
+        // round-10 paragraph below for the exact rule; on the ordinary
+        // install shape it reduces to "the probe observed an available row
+        // it actually read from storage"). The probe cannot fail: it bottoms
+        // out
+        // in `has_provider_key(..).unwrap_or(false)` over a `SecureStorage`
+        // whose runtime fallback already turned `BackendUnavailable` /
+        // `PermissionDenied` / `Io` into `Ok(false)` (round-5 finding [5]),
+        // so an all-`false` result is indistinguishable from a degraded
+        // credential broker. Arming on THAT would publish an all-false map
+        // as authoritative and empty Fusion's catalog for the rest of the
+        // process (`TooFewModels{eligible:0}`) — strictly worse than the
+        // over-broad catalog the fail-open leaves. `just_written`'s forced
+        // entries are deliberately NOT counted here: they are asserted by
+        // the caller, not observed by the probe.
+        //
+        // Round-9 finding [3]: only rows the probe actually READ can testify
+        // that the backend answered — see `row_availability_came_from_storage`.
+        // Counting every `available` row made this gate ALWAYS true on any
+        // install that booted with an Anthropic key/OAuth or a ChatGPT
+        // credential, i.e. inert exactly where its comment says it matters.
+        //
+        // Round-10 finding N6: rejecting those rows is right, but requiring
+        // one of the REMAINING rows to be available turned the round-9 gate
+        // into a false NEGATIVE on any install where NO row's verdict
+        // depends on storage — an Anthropic-only/ChatGPT-only install (every
+        // source is one of the three special-cased ids), or a non-isolated
+        // process in which every generic profile carries a set `env_var`.
+        // There the recovery this gate guards could never run at all, so one
+        // 5s boot stall left `filter_fusion_catalog` failing open for the
+        // whole process. The criterion the gate actually wants is not "a
+        // storage-backed row said yes" but "nothing in this result could be
+        // a lie from a degraded backend": when the probe contains no
+        // storage-dependent row, the degraded-broker hypothesis cannot apply
+        // to ANY row and the result is exactly what a boot probe that did
+        // not stall would have published, so it is authoritative. When it
+        // does contain storage-dependent rows, at least one of them must
+        // have answered `available` — the round-9 rule, unchanged.
+        let storage_dependent_rows: Vec<&provider_config::ProviderAvailability> = rows
+            .iter()
+            .filter(|row| self.row_availability_came_from_storage(&row.credential_id))
+            .collect();
+        let probe_result_is_authoritative = if storage_dependent_rows.is_empty() {
+            true
+        } else {
+            storage_dependent_rows.iter().any(|row| row.available)
+        };
+        if probe_result_is_authoritative {
+            self.availability_probe_completed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Ok(mut guard) = self.availability.write() {
+            for row in rows {
+                if row.available {
+                    guard.insert(row.profile_name, true);
+                } else {
+                    guard.entry(row.profile_name).or_insert(false);
+                }
+            }
+            for profile in forced {
+                guard.insert(profile, true);
+            }
+            guard
+                .entry("anthropic".to_string())
+                .or_insert(self.anthropic_route_available());
+        }
+    }
+}
+
+/// Round-5 review finding [15]: every credential-write seam in the process
+/// must be able to tell Fusion's catalog filter about the write, including
+/// the ones that do NOT go through `command_core`'s
+/// `ConnectCredentialWriter` / `CopilotConnectDriver` traits.
+///
+/// The TUI's `/connect` is intercepted before the command registry
+/// (`ChatWidget::cmd_connect` -> `ConnectKeyView` -> `ConnectAction::StoreKey`
+/// -> `apps/cli/src/mode.rs`'s `run_connect_action`) and writes through the
+/// RAW `Arc<secret::CredentialManager>` the TUI runtime carries, so the
+/// round-4 wrappers could not see it: a provider connected from the TUI key
+/// view stayed invisible to `/fusion` for the rest of the process while
+/// `/model` and the ordinary turn loop routed the same credential
+/// immediately.
+///
+/// Rather than thread a refresher handle through `DesktopRuntime` ->
+/// `crate::init::Runtime` -> the ratatui callback chain for each such seam,
+/// every runtime registers its refresher here once and any credential-write
+/// path anywhere in the process calls
+/// [`refresh_fusion_catalog_after_credential_write`]. Entries are pruned when
+/// the owning runtime is gone (its shared availability map has no owner left
+/// but this registry), so a long-lived process that builds several runtimes
+/// does not accumulate them.
+static FUSION_CATALOG_REFRESHERS: OnceLock<Mutex<Vec<FusionCatalogRefresher>>> = OnceLock::new();
+
+/// Publish a runtime's [`FusionCatalogRefresher`] to the process-wide
+/// registry — see [`FUSION_CATALOG_REFRESHERS`].
+pub fn register_fusion_catalog_refresher(refresher: FusionCatalogRefresher) {
+    let cell = FUSION_CATALOG_REFRESHERS.get_or_init(|| Mutex::new(Vec::new()));
+    if let Ok(mut guard) = cell.lock() {
+        guard.retain(|entry| Arc::strong_count(&entry.availability) > 1);
+        guard.push(refresher);
+    }
+}
+
+/// Tell every live Fusion catalog filter in this process that
+/// `credential_id`'s credential was just written, so the next
+/// `FusionCatalogModelSource::list()` sees it — the seam-agnostic half of
+/// round-5 review finding [15]. A no-op in a process with no desktop runtime
+/// (headless tests, the management subcommands).
+pub async fn refresh_fusion_catalog_after_credential_write(credential_id: &str) {
+    let refreshers: Vec<FusionCatalogRefresher> = FUSION_CATALOG_REFRESHERS
+        .get()
+        .and_then(|cell| cell.lock().ok())
+        .map(|mut guard| {
+            guard.retain(|entry| Arc::strong_count(&entry.availability) > 1);
+            guard.clone()
+        })
+        .unwrap_or_default();
+    for refresher in refreshers {
+        refresher
+            .refresh_after_credential_write(credential_id)
+            .await;
+    }
+}
+
+/// The removal twin of [`refresh_fusion_catalog_after_credential_write`]:
+/// tell every live Fusion catalog filter in this process that
+/// `credential_id`'s credential is GONE, so the next
+/// `FusionCatalogModelSource::list()` stops offering the models it backed.
+///
+/// Round-12 finding [2]: without this, deleting a provider key (or signing
+/// out) mid-session left `availability[profile] = true` for the rest of the
+/// process — a re-probe cannot lower it by design — so a `/fusion` preset
+/// could auto-select the provider, reserve budget for it, and only discover
+/// the credential was gone as an `LlmError::Authentication` at request time,
+/// instead of the §4 preflight excluding it.
+///
+/// Unlike the write twin this does no keychain I/O — it re-derives the
+/// affected profiles from the credential sources, the shared route flags and
+/// `std::env::var` (see [`FusionCatalogRefresher::mark_credential_removed`])
+/// — so callers do not need to bound it with
+/// `crate::boot::refresh_fusion_catalog_bounded`. A no-op in a process with
+/// no desktop runtime.
+pub async fn refresh_fusion_catalog_after_credential_delete(credential_id: &str) {
+    let refreshers: Vec<FusionCatalogRefresher> = FUSION_CATALOG_REFRESHERS
+        .get()
+        .and_then(|cell| cell.lock().ok())
+        .map(|mut guard| {
+            guard.retain(|entry| Arc::strong_count(&entry.availability) > 1);
+            guard.clone()
+        })
+        .unwrap_or_default();
+    for refresher in refreshers {
+        refresher.mark_credential_removed(credential_id).await;
+    }
+}
+
+/// Tell every live Fusion catalog filter that `credential_id`'s ROUTE now
+/// exists, without re-probing every credential source and without touching
+/// the availability map.
+///
+/// Round-12 rework: the three slots `compute_availability_with_isolation`
+/// special-cases resolve from flags rather than from a keychain read, and a
+/// removal of one Anthropic route falls back to the other — so a sign-in that
+/// never publishes its route leaves that fallback answering from the boot
+/// snapshot. This is the cheap half of
+/// [`refresh_fusion_catalog_after_credential_write`] for seams (`/login`)
+/// that must not pay for the full re-probe. Its only caller passes the
+/// unambiguous `anthropic-oauth`, for which
+/// [`FusionCatalogRefresher::mark_credential_established`] raises the route
+/// flag and republishes just that one map entry — a lock-and-set, not a
+/// re-probe; only the ambiguous bare `anthropic` spelling costs one
+/// attribute-only presence check there. Publishing the entry (rather than only
+/// noting the flag) is load-bearing: without it a preceding `/logout` leaves
+/// `anthropic: false` in the map, and `refresh_inner`'s closing `or_insert`
+/// cannot raise an entry that already exists — see
+/// [`FusionCatalogRefresher::mark_credential_established`]. A no-op in a
+/// process with no desktop runtime.
+async fn note_fusion_catalog_credential_route(credential_id: &str) {
+    let refreshers: Vec<FusionCatalogRefresher> = FUSION_CATALOG_REFRESHERS
+        .get()
+        .and_then(|cell| cell.lock().ok())
+        .map(|mut guard| {
+            guard.retain(|entry| Arc::strong_count(&entry.availability) > 1);
+            guard.clone()
+        })
+        .unwrap_or_default();
+    for refresher in refreshers {
+        refresher.mark_credential_established(credential_id).await;
+    }
+}
+
+/// Wraps the `/connect <provider>` generic-API-key seam so a successful
+/// credential write also refreshes [`FusionCatalogRefresher`] (round-4
+/// review finding [8]) — kept entirely on the desktop side rather than
+/// touching `commands/core`'s trait or `EngineCredentialWriter`, because
+/// refreshing Fusion's catalog is a desktop-engine-specific consequence of a
+/// credential write, not part of the connect contract itself. Anthropic and
+/// ChatGPT connects are not routed through this seam (they have their own
+/// drivers) — round-5 review finding [15] wraps those too
+/// ([`FusionCatalogRefreshingChatGptConnect`],
+/// [`FusionCatalogRefreshingOAuthConnect`]), and
+/// `refresh_after_credential_write` force-marks the named profile available
+/// so the three special-cased inputs `FusionCatalogRefresher` freezes at boot
+/// (`anthropic_has_api_key`/`anthropic_has_oauth`/`openai_chatgpt_available`)
+/// no longer make those two seams no-ops.
+struct FusionCatalogRefreshingCredentialWriter {
+    inner: Arc<dyn command_core::ConnectCredentialWriter>,
+    refresher: FusionCatalogRefresher,
+}
+
+#[async_trait::async_trait]
+impl command_core::ConnectCredentialWriter for FusionCatalogRefreshingCredentialWriter {
+    async fn prompt_and_store_key(
+        &self,
+        credential_id: &str,
+    ) -> Result<(), command_core::ConnectError> {
+        self.inner.prompt_and_store_key(credential_id).await?;
+        self.refresher
+            .refresh_after_credential_write(credential_id)
+            .await;
+        Ok(())
+    }
+}
+
+/// See [`FusionCatalogRefreshingCredentialWriter`] — the same wrapping for
+/// the Copilot device-flow seam, whose `poll_to_completion` is where a
+/// GitHub Copilot token is actually persisted
+/// (`EngineCopilotConnect::poll_to_completion`, `connect.rs`) — the exact
+/// path the finding [8] scenario names.
+struct FusionCatalogRefreshingCopilotConnect {
+    inner: Arc<dyn command_core::CopilotConnectDriver>,
+    refresher: FusionCatalogRefresher,
+}
+
+#[async_trait::async_trait]
+impl command_core::CopilotConnectDriver for FusionCatalogRefreshingCopilotConnect {
+    async fn begin(
+        &self,
+        domain: Option<&str>,
+    ) -> Result<command_core::CopilotConnectStep, command_core::ConnectError> {
+        self.inner.begin(domain).await
+    }
+
+    async fn poll_to_completion(
+        &self,
+        step: &command_core::CopilotConnectStep,
+    ) -> Result<(), command_core::ConnectError> {
+        self.inner.poll_to_completion(step).await?;
+        // The Copilot device flow persists under the `github-copilot`
+        // credential id (`EngineCopilotConnect::poll_to_completion`); naming
+        // it keeps the degraded-backend guard of
+        // `refresh_after_credential_write` in play here too (finding [5]).
+        self.refresher
+            .refresh_after_credential_write("github-copilot")
+            .await;
+        Ok(())
+    }
+}
+
+/// See [`FusionCatalogRefreshingCredentialWriter`] — the same wrapping for
+/// the ChatGPT-subscription OAuth seam (`/connect chatgpt`), which persists
+/// its credential inside `llm_client::oauth::openai`'s handle rather than
+/// through `ConnectCredentialWriter`. Round-5 review finding [15] class
+/// sweep: this was the one engine-desktop `/connect` driver round 4 left
+/// unwrapped, so a ChatGPT sign-in stayed invisible to Fusion for the rest of
+/// the process.
+struct FusionCatalogRefreshingChatGptConnect {
+    inner: Arc<dyn command_core::ChatGptConnectDriver>,
+    refresher: FusionCatalogRefresher,
+}
+
+#[async_trait::async_trait]
+impl command_core::ChatGptConnectDriver for FusionCatalogRefreshingChatGptConnect {
+    async fn connect(&self) -> Result<String, command_core::ConnectError> {
+        let message = self.inner.connect().await?;
+        self.refresher
+            .refresh_after_credential_write("openai-chatgpt")
+            .await;
+        Ok(message)
+    }
+}
+
+/// Round-12 finding [2], class sweep: the same wrapping for the SIGN-OUT
+/// direction, which had no wrapper at all.
+///
+/// Every sign-IN seam refreshes Fusion's availability map, and
+/// `FusionCatalogRefresher`'s merge rule can never lower a `true` (see
+/// [`FusionCatalogRefresher::refresh_inner`]) — so once a process published
+/// `anthropic: true`, `/logout` (`command_core::LogoutHandler`, the TUI) and
+/// the bridge-server's `ClientCommand::Logout` both left Fusion offering
+/// Anthropic models the session could no longer authenticate, for the rest of
+/// the process. Wrapping the ONE `Arc<dyn AuthHandle>` the whole desktop
+/// runtime shares covers every consumer of it at once rather than asking each
+/// surface to remember the call.
+///
+/// `login` notes the OAUTH route it just established (round-12 rework) and
+/// otherwise delegates untouched. `FusionCatalogRefreshingOAuthConnect` only
+/// covers the `/connect` picker; `/login` (`command_core::LoginHandler`) and
+/// the bridge-server's `ClientCommand::Login` drive this handle directly, and
+/// if their sign-in went unrecorded a later "delete the Anthropic API key"
+/// would fall back to a stale `anthropic_has_oauth == false` and clear a
+/// profile the OAuth session still routes. The note is a single atomic store
+/// — no keychain I/O — so the login path keeps its current cost; publishing
+/// the map entry stays the job of the write fan-out, and a rollback inside a
+/// failed login goes through `logout` below.
+struct FusionCatalogClearingAuth {
+    inner: Arc<dyn AuthHandle>,
+}
+
+#[async_trait::async_trait]
+impl AuthHandle for FusionCatalogClearingAuth {
+    async fn login(&self) -> Result<platform_api::auth::LoginInfo, platform_api::auth::AuthError> {
+        let info = self.inner.login().await?;
+        note_fusion_catalog_credential_route("anthropic-oauth").await;
+        Ok(info)
+    }
+
+    async fn logout(&self) -> Result<(), platform_api::auth::AuthError> {
+        self.inner.logout().await?;
+        refresh_fusion_catalog_after_credential_delete("anthropic-oauth").await;
+        Ok(())
+    }
+
+    async fn current_user(&self) -> Option<platform_api::auth::LoginInfo> {
+        self.inner.current_user().await
+    }
+}
+
+/// See [`FusionCatalogRefreshingCredentialWriter`] — the same wrapping for
+/// the unified OAuth sign-in seam the TUI `/connect` picker uses (Anthropic
+/// Pro/Max, OpenAI ChatGPT). Round-5 review finding [15] class sweep: an
+/// OAuth sign-in persists a credential exactly like an API-key write does,
+/// and `EngineOAuthConnect` was not one of the wrapped drivers.
+struct FusionCatalogRefreshingOAuthConnect {
+    inner: Arc<dyn command_core::OAuthConnectDriver>,
+    refresher: FusionCatalogRefresher,
+}
+
+#[async_trait::async_trait]
+impl command_core::OAuthConnectDriver for FusionCatalogRefreshingOAuthConnect {
+    async fn login(&self, provider_id: &str) -> Result<String, command_core::ConnectError> {
+        let message = self.inner.login(provider_id).await?;
+        // Round-12 rework: this is the ONE seam where a bare `"anthropic"`
+        // means the OAUTH route — `EngineOAuthConnect::login` maps it to
+        // `AuthHandle::login` (connect.rs), not to a stored API key. Every
+        // other write seam that says `"anthropic"` stored an API key
+        // (`secret::is_anthropic_api_key_id` matches the bare spelling), so
+        // notify under the unambiguous credential id here and let
+        // `note_route_credential_written` keep the bare spelling meaning
+        // "API key" everywhere else. Without this, signing in with OAuth
+        // would raise the API-KEY flag and a later "delete the API key" would
+        // leave Anthropic in Fusion's catalog on the strength of a route that
+        // never existed.
+        let credential_id = match provider_id {
+            "anthropic" => "anthropic-oauth",
+            other => other,
+        };
+        self.refresher
+            .refresh_after_credential_write(credential_id)
+            .await;
+        Ok(message)
+    }
+}
+
+/// `fusion::FusionPriceBook` over the session's `cost::PricingCatalog` — the
+/// SAME catalog `CostTracker` bills from (see the WP1/F001/G003 comment at
+/// its construction site). Before this adapter existed, `FusionOrchestrator`
+/// was always built with the `()` price book (`rates_for` always `None`), so
+/// `budget::quote`'s `model_peak` hard-rejected every token-billed model
+/// under a session `--max-budget` (`InvalidConfiguration("... has no
+/// price")`) and, without a cap, every reservation quoted $0 — Fusion's
+/// hard-budget invariant (design §4) was wired to nothing.
+///
+/// `orchestrator::cost_wiring::model_ref_from_string` is the SAME
+/// profile+bare-model → `ModelRef` resolution the main turn loop uses for its
+/// own `record_api_response_v2` calls, so a Fusion panel/analyst/synth model
+/// prices exactly like the corresponding main-loop call would.
+struct DesktopFusionPriceBook {
+    catalog: Arc<cost::PricingCatalog>,
+    /// Round-7 finding [1]: whether this process assembles its Anthropic
+    /// requests with 1-HOUR prompt-cache TTLs, so cache-CREATION tokens are
+    /// billed at the catalog's `TokenClass::CacheWrite1h` rate instead of
+    /// the 5-minute `TokenClass::CacheWrite` one. See
+    /// [`prompt_cache_write_ttl_1h_enabled`].
+    cache_write_ttl_1h: bool,
+}
+
+/// The 1-hour prompt-cache TTL gate, read exactly where the money is priced.
+///
+/// `llm_client::service::ApiService::should_1h_cache_ttl`
+/// (llm-client/src/service.rs:1090) reads this same variable through the same
+/// truthy set (`1|true|yes|on`) and, when it is set, stamps `ttl_1h` on the
+/// system cache blocks of EVERY request `build_request` assembles — which
+/// includes Fusion's panel turns (`stream_forced_with_opts`) and its
+/// analyst/synthesizer side queries. Anthropic bills those cache-creation
+/// tokens at its 1-hour rate (~1.6x the 5-minute rate; `cost/src/pricing.rs`
+/// derives the class for every Anthropic tier, e.g. sonnet 3_750 -> 6_000).
+///
+/// `orchestrator::conversation::hooks`'s model-switch cache-write estimator
+/// already consults this same variable to pick between
+/// `TokenClass::CacheWrite1h` and `TokenClass::CacheWrite` for an aggregate
+/// cache-write token count it likewise has no 1h/5m split for — this mirrors
+/// that precedent rather than inventing a second rule.
+fn prompt_cache_write_ttl_1h_enabled() -> bool {
+    platform_api::env::is_env_truthy(std::env::var("ENABLE_PROMPT_CACHING_1H").ok().as_deref())
+}
+
+impl DesktopFusionPriceBook {
+    /// Production constructor: resolve the session's prompt-cache TTL gate
+    /// once, from the same env var `llm_client` reads when it builds the
+    /// requests this book prices.
+    fn new(catalog: Arc<cost::PricingCatalog>) -> Self {
+        Self {
+            catalog,
+            cache_write_ttl_1h: prompt_cache_write_ttl_1h_enabled(),
+        }
+    }
+
+    /// Test constructor with the TTL gate stated explicitly, so a test that
+    /// does not care about the gate never has to touch process env (and can
+    /// run concurrently with the three tests that do).
+    #[cfg(test)]
+    fn with_ttl_gate(catalog: Arc<cost::PricingCatalog>, cache_write_ttl_1h: bool) -> Self {
+        Self {
+            catalog,
+            cache_write_ttl_1h,
+        }
+    }
+}
+
+impl fusion::FusionPriceBook for DesktopFusionPriceBook {
+    fn rates_for(&self, profile: &str, model: &str) -> Option<fusion::ModelRates> {
+        let model_ref = orchestrator::cost_wiring::model_ref_from_string(model, Some(profile));
+        let (pricing, _resolution) = self.catalog.resolve(&model_ref).ok()?;
+        let input = pricing
+            .token_rates
+            .get(&cost::pricing::TokenClass::Input)?
+            .nano_usd_per_token;
+        let output = pricing
+            .token_rates
+            .get(&cost::pricing::TokenClass::Output)?
+            .nano_usd_per_token;
+        // Cache-read/-write rates default to 0 rather than `?`-propagating a
+        // `None`: a model with real Input/Output rates but no CacheRead /
+        // CacheWrite entry must stay token-priced (only the cache premium is
+        // unrecovered), never flip to fully unpriced and hard-reject under a
+        // session `--max-budget` (`model_peak`'s `InvalidConfiguration`
+        // branch). `cost::calculator::CostCalculator` — the SAME catalog the
+        // main turn loop bills from — already treats a missing rate for a
+        // class it iterates as "that class contributes 0", so this mirrors
+        // it rather than diverging.
+        let cache_read = pricing
+            .token_rates
+            .get(&cost::pricing::TokenClass::CacheRead)
+            .map_or(0, |rate| rate.nano_usd_per_token);
+        // Round-7 finding [1]: pick the cache-WRITE rate that matches the TTL
+        // this process actually stamps on its cache blocks. With
+        // `ENABLE_PROMPT_CACHING_1H` armed, `ApiService::build_request` marks
+        // the system cache blocks of every Fusion request `ttl_1h`, and
+        // Anthropic bills those creation tokens at ~1.6x the 5-minute rate —
+        // a rate the SAME catalog already carries as
+        // `TokenClass::CacheWrite1h` and that the main turn loop bills
+        // through (`orchestrator::cost_wiring` splits
+        // `provider_metadata./cache_creation/ephemeral_1h_input_tokens` into
+        // `TokenUsage::cache_write_1h`, which `CostCalculator` prices through
+        // that class). Fusion has no such split to price from: both seams
+        // that feed it flatten the two buckets into one total
+        // (`agent/src/handle.rs`'s `cache_creation_input_tokens: bt.cache_write`
+        // and `sidequery`'s `cache_write_1h: 0`), so `FusionUsage` carries a
+        // single `cache_write_tokens` figure. Given only that total, billing
+        // it at the 5-minute rate under an armed 1h gate is a SILENT 37.5%
+        // under-charge on the money path (design §4's hard-budget ceiling
+        // then sits below what the provider actually charged); billing it at
+        // the 1h rate is at worst high by the residual 5-minute
+        // message-level breakpoint (service.rs's `CacheControl::Ephemeral`
+        // on the last message block), which errs toward reserving/settling
+        // MORE than was spent — the safe direction for a budget ceiling.
+        // With the gate off (the shipped default — service.rs documents the
+        // feature as deliberately dormant, no settings.json route) this is
+        // byte-identical to the previous behaviour and exactly correct.
+        //
+        // The `.or_else` fallback matters: `provider-config::cost_translate`
+        // never inserts a `CacheWrite1h` class, so every models.dev /
+        // OpenRouter entry keeps its 5-minute rate here instead of dropping
+        // to 0 the moment the gate is armed.
+        let cache_write_class = if self.cache_write_ttl_1h {
+            cost::pricing::TokenClass::CacheWrite1h
+        } else {
+            cost::pricing::TokenClass::CacheWrite
+        };
+        let cache_write = pricing
+            .token_rates
+            .get(&cache_write_class)
+            .or_else(|| {
+                pricing
+                    .token_rates
+                    .get(&cost::pricing::TokenClass::CacheWrite)
+            })
+            .map_or(0, |rate| rate.nano_usd_per_token);
+        // Finding [1]: `provider-config::cost_translate::model_pricing_from_token_pricing`
+        // now ALWAYS inserts a `ReasoningOutput` rate — a model that publishes
+        // a real, separate reasoning price (DeepSeek / a handful of
+        // OpenRouter rows) keeps it; everyone else (most OpenAI / Gemini /
+        // Copilot / … rows, which bill reasoning tokens at the plain output
+        // rate) gets the output rate as the class's value. That fix lives at
+        // the shared catalog layer so both this Fusion price book and the
+        // main turn loop's `cost::CostCalculator` (which iterates only the
+        // classes present in `token_rates`) recover the bucket identically.
+        // The `map_or(output, …)` here is a second line of defense for any
+        // pricing entry that reaches this book without going through
+        // `cost_translate` (e.g. a future direct catalog entry) — it must
+        // still stay token-priced, never flip to fully unpriced.
+        let reasoning = pricing
+            .token_rates
+            .get(&cost::pricing::TokenClass::ReasoningOutput)
+            .map_or(output, |rate| rate.nano_usd_per_token);
+        Some(fusion::ModelRates {
+            input_nano_usd_per_token: input,
+            output_nano_usd_per_token: output,
+            // The pricing catalog has no flat per-request rate today (only
+            // per-token + the separate web-search non-token unit); Fusion's
+            // quote/settlement formulas treat a zero per-request rate as "no
+            // flat fee", not "unpriced" — token rates alone still gate the
+            // hard-budget preflight correctly.
+            per_request_nano_usd: 0,
+            cache_read_nano_usd_per_token: cache_read,
+            cache_write_nano_usd_per_token: cache_write,
+            reasoning_nano_usd_per_token: reasoning,
+            // Round-7 finding [1] residual: with the gate armed, the single
+            // rate above is right for the system cache blocks
+            // (`service.rs` stamps `ttl_1h` on them) and wrong for the
+            // residual last-message breakpoint, which stays 5-minute
+            // (`CacheControl::Ephemeral`) — and Fusion carries no split to
+            // tell the two apart. Report the rate as approximated so
+            // `price_realized_usage` refuses to claim `estimated: false`
+            // over it. With the gate off (the shipped default) every cache
+            // block is 5-minute and the rate is exact.
+            cache_write_rate_is_ttl_approximated: self.cache_write_ttl_1h,
+        })
+    }
+}
+
+#[cfg(test)]
+mod desktop_fusion_price_book_test {
+    use super::*;
+
+    /// Serializes the three tests below, which are the ONLY tests in this
+    /// binary that touch `ENABLE_PROMPT_CACHING_1H` (`git grep -n
+    /// ENABLE_PROMPT_CACHING_1H lingxi-code/apps/engine-desktop` matches
+    /// nothing else), so one lock is enough — a second guard over the same
+    /// variable would serialize nothing.
+    static PROMPT_CACHE_1H_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn rates_for_prices_a_known_model_through_the_shared_catalog() {
+        // Before this adapter was wired in (F001/G003), `FusionOrchestrator`
+        // always ran with the `()` price book, so this call would have
+        // returned `None` for every model and made `budget::quote` reject
+        // any token-billed panel under a session `--max-budget`.
+        let catalog = Arc::new(cost::PricingCatalog::builtin_reference());
+        let book = DesktopFusionPriceBook::with_ttl_gate(catalog, false);
+        let rates = fusion::FusionPriceBook::rates_for(&book, "anthropic", "claude-opus-4-6")
+            .expect("the builtin reference catalog prices claude-opus-4-6");
+        assert_eq!(rates.input_nano_usd_per_token, 5_000);
+        assert_eq!(rates.output_nano_usd_per_token, 25_000);
+        // G003-cache follow-up: the SAME catalog's cache rates
+        // (`insert_anthropic("claude-opus-4-6", 5_000, 25_000, 6_250, 500)`)
+        // must reach `ModelRates` too, not just input/output — otherwise a
+        // Fusion run using prompt caching under-bills against the exact
+        // catalog the main turn loop bills the identical usage from in full.
+        assert_eq!(rates.cache_write_nano_usd_per_token, 6_250);
+        assert_eq!(rates.cache_read_nano_usd_per_token, 500);
+    }
+
+    /// Finding [1]: a catalog entry that prices `TokenClass::ReasoningOutput`
+    /// separately (the shape `provider-config::cost_translate` produces for
+    /// a models.dev row with `reasoning_per_million > 0`, e.g. DeepSeek /
+    /// Gemini / OpenRouter) must reach `ModelRates.reasoning_nano_usd_per_token`
+    /// — before this fix `rates_for` never read `TokenClass::ReasoningOutput`
+    /// at all, so this rate was silently dropped and `price_component` billed
+    /// reasoning tokens at 0 regardless of what the catalog priced them at.
+    #[test]
+    fn rates_for_reads_the_reasoning_output_rate() {
+        let mr = cost::ModelRef {
+            provider: cost::pricing::ProviderId::OpenAICompatible {
+                name: "deepseek".to_string(),
+            },
+            model: "deepseek-v4-pro".to_string(),
+        };
+        let mut rates = std::collections::HashMap::new();
+        rates.insert(
+            cost::pricing::TokenClass::Input,
+            cost::pricing::MoneyPerToken { nano_usd_per_token: 435 },
+        );
+        rates.insert(
+            cost::pricing::TokenClass::Output,
+            cost::pricing::MoneyPerToken { nano_usd_per_token: 870 },
+        );
+        rates.insert(
+            cost::pricing::TokenClass::ReasoningOutput,
+            cost::pricing::MoneyPerToken { nano_usd_per_token: 870 },
+        );
+        let catalog = Arc::new(cost::PricingCatalog::builtin_reference().with_entry(
+            cost::pricing::ModelPricing {
+                model_ref: mr.clone(),
+                token_rates: rates,
+                non_token_rates_nano_usd: std::collections::HashMap::new(),
+                effective_from: None,
+                source: cost::pricing::PricingSource::RemoteManagedSettings,
+            },
+        ));
+        let book = DesktopFusionPriceBook::with_ttl_gate(catalog, false);
+        let priced = fusion::FusionPriceBook::rates_for(&book, "deepseek", "deepseek-v4-pro")
+            .expect("deepseek-v4-pro has token rates");
+        assert_eq!(
+            priced.reasoning_nano_usd_per_token, 870,
+            "the catalog's ReasoningOutput rate must reach ModelRates, not default to 0"
+        );
+    }
+
+    /// Round-7 finding [1] (RED): `ENABLE_PROMPT_CACHING_1H` makes
+    /// `ApiService::build_request` stamp `ttl_1h` on the system cache blocks
+    /// of every request it assembles — Fusion panel turns and the
+    /// analyst/synth side queries included (llm-client/src/service.rs:1090,
+    /// :1186). Anthropic then bills those cache-CREATION tokens at the 1-hour
+    /// rate, which the shared catalog carries as
+    /// `TokenClass::CacheWrite1h` (`cost/src/pricing.rs:543-560`; for the
+    /// $5/$25 Opus tier, 6_250 -> 10_000 nano-USD/token) and which the main
+    /// turn loop bills correctly through
+    /// `orchestrator::cost_wiring` -> `CostCalculator`. `rates_for` read only
+    /// `TokenClass::CacheWrite` (the 5-minute rate), so Fusion priced the
+    /// same tokens 37.5% low against the SAME catalog while
+    /// `price_realized_usage` still reported `estimated: false`.
+    #[test]
+    fn rates_for_prices_cache_writes_at_the_one_hour_rate_when_the_1h_gate_is_on() {
+        let _guard = PROMPT_CACHE_1H_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("ENABLE_PROMPT_CACHING_1H", "1");
+        let catalog = Arc::new(cost::PricingCatalog::builtin_reference());
+        let book = DesktopFusionPriceBook::new(catalog);
+        let rates = fusion::FusionPriceBook::rates_for(&book, "anthropic", "claude-opus-4-6")
+            .expect("the builtin reference catalog prices claude-opus-4-6");
+        std::env::remove_var("ENABLE_PROMPT_CACHING_1H");
+        assert_eq!(
+            rates.cache_write_nano_usd_per_token, 10_000,
+            "with the 1h prompt-cache TTL armed, Fusion must price \
+cache-creation tokens through TokenClass::CacheWrite1h (10_000) — pricing \
+them at the 5-minute rate (6_250) under-bills the run 37.5% against the \
+same catalog the main turn loop bills them from"
+        );
+        assert!(
+            rates.cache_write_rate_is_ttl_approximated,
+            "under the gate the single flattened cache_write bucket mixes 1h system \
+blocks with the 5-minute last-message breakpoint, so the rate is an approximation and \
+`price_realized_usage` must refuse to report `estimated: false` over it"
+        );
+    }
+
+    /// The companion negative: with the dormant opt-in OFF (the shipped
+    /// default), the 5-minute rate is the correct and only rate, so this
+    /// fix must be a no-op for every normal session.
+    #[test]
+    fn rates_for_prices_cache_writes_at_the_five_minute_rate_by_default() {
+        let _guard = PROMPT_CACHE_1H_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::remove_var("ENABLE_PROMPT_CACHING_1H");
+        let catalog = Arc::new(cost::PricingCatalog::builtin_reference());
+        let book = DesktopFusionPriceBook::new(catalog);
+        let rates = fusion::FusionPriceBook::rates_for(&book, "anthropic", "claude-opus-4-6")
+            .expect("the builtin reference catalog prices claude-opus-4-6");
+        assert_eq!(
+            rates.cache_write_nano_usd_per_token, 6_250,
+            "without ENABLE_PROMPT_CACHING_1H every cache-creation token is \
+written with the default 5-minute TTL and must stay priced at 6_250"
+        );
+        assert!(
+            !rates.cache_write_rate_is_ttl_approximated,
+            "with the gate off every cache block is 5-minute: the rate is EXACT and the \
+run must keep reporting an exact total"
+        );
+    }
+
+    /// A catalog entry with no `CacheWrite1h` rate at all — the shape
+    /// `provider-config::cost_translate::model_pricing_from_token_pricing`
+    /// produces for every models.dev / OpenRouter row (it inserts Input,
+    /// Output, CacheWrite, CacheRead and ReasoningOutput and never
+    /// CacheWrite1h) — must fall back to its 5-minute rate rather than
+    /// dropping to 0 when the 1h gate is on.
+    #[test]
+    fn rates_for_falls_back_to_the_five_minute_rate_when_no_1h_rate_exists() {
+        let _guard = PROMPT_CACHE_1H_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("ENABLE_PROMPT_CACHING_1H", "1");
+        let mr = cost::ModelRef {
+            provider: cost::pricing::ProviderId::OpenAICompatible {
+                name: "openrouter".to_string(),
+            },
+            model: "some-cached-model".to_string(),
+        };
+        let mut rates = std::collections::HashMap::new();
+        rates.insert(
+            cost::pricing::TokenClass::Input,
+            cost::pricing::MoneyPerToken {
+                nano_usd_per_token: 100,
+            },
+        );
+        rates.insert(
+            cost::pricing::TokenClass::Output,
+            cost::pricing::MoneyPerToken {
+                nano_usd_per_token: 200,
+            },
+        );
+        rates.insert(
+            cost::pricing::TokenClass::CacheWrite,
+            cost::pricing::MoneyPerToken {
+                nano_usd_per_token: 125,
+            },
+        );
+        let catalog = Arc::new(cost::PricingCatalog::builtin_reference().with_entry(
+            cost::pricing::ModelPricing {
+                model_ref: mr,
+                token_rates: rates,
+                non_token_rates_nano_usd: std::collections::HashMap::new(),
+                effective_from: None,
+                source: cost::pricing::PricingSource::RemoteManagedSettings,
+            },
+        ));
+        let book = DesktopFusionPriceBook::new(catalog);
+        let priced = fusion::FusionPriceBook::rates_for(&book, "openrouter", "some-cached-model")
+            .expect("the entry has token rates");
+        std::env::remove_var("ENABLE_PROMPT_CACHING_1H");
+        assert_eq!(
+            priced.cache_write_nano_usd_per_token, 125,
+            "an entry with no CacheWrite1h class must keep its 5-minute \
+rate under the 1h gate, never fall to 0"
+        );
+    }
+
+    #[test]
+    fn rates_for_is_none_for_an_explicitly_unpriced_model() {
+        // A component the catalog genuinely cannot price must surface as
+        // `None` (the caller then marks the run `estimated = true`, or —
+        // under a session cap at `quote()` time — rejects the run per
+        // design §4) rather than the adapter guessing a rate.
+        let catalog = Arc::new(cost::PricingCatalog::builtin_reference().mark_unpriced(
+            cost::ModelRef {
+                provider: cost::pricing::ProviderId::Anthropic,
+                model: "claude-opus-4-6".into(),
+            },
+        ));
+        let book = DesktopFusionPriceBook::with_ttl_gate(catalog, false);
+        assert!(fusion::FusionPriceBook::rates_for(&book, "anthropic", "claude-opus-4-6").is_none());
+    }
+}
+
+#[cfg(test)]
+mod desktop_fusion_catalog_row_test {
+    use super::*;
+
+    /// WP11: `desktop_fusion_catalog_row` reads `structured_output` straight
+    /// off `ModelProfile.capabilities` — before WP11, `anthropic_model_profiles()`
+    /// hard-coded that bit `false` for every Anthropic model, so a pure-Anthropic
+    /// catalog row was always built with `structured_output: false`, which is
+    /// what made `resolve_analyst`'s judge filter reject every Anthropic model.
+    /// This pins the wiring itself, not just the upstream capability table.
+    #[test]
+    fn anthropic_rows_carry_structured_output_true() {
+        let profiles = llm_client::anthropic_model_profiles();
+        let opus = profiles
+            .iter()
+            .find(|m| m.request_model == "claude-opus-5")
+            .expect("claude-opus-5 present in anthropic_model_profiles()");
+        let row = desktop_fusion_catalog_row(
+            "anthropic",
+            opus,
+            platform_api::ModelBillingMode::PerToken,
+            &llm_client::ProtocolFamily::AnthropicMessages,
+        );
+        assert_eq!(row.profile, "anthropic");
+        assert_eq!(row.model, "claude-opus-5");
+        assert!(
+            row.structured_output,
+            "an Anthropic catalog row must carry structured_output: true"
+        );
+    }
+
+    /// Finding [2]: a model that is absent from the checked-in
+    /// `llm_client::fusion_hints` table (so `hints_for` returns `None` and
+    /// `unwrap_or_default()` yields `cost_class: Medium`) must still be
+    /// classified `Subscription` when its OWNING profile bills by
+    /// subscription — otherwise `budget::model_peak` hard-rejects it as
+    /// "token-billed ... has no price" under a session `--max-budget`, even
+    /// though the model is free at the point of use.
+    #[test]
+    fn unhinted_model_on_a_subscription_profile_is_classified_subscription() {
+        let unhinted = llm_client::ModelProfile {
+            display_model: "claude-sonnet-4.6".to_string(),
+            request_model: "claude-sonnet-4.6".to_string(),
+            billing_model: "claude-sonnet-4.6".to_string(),
+            aliases: Vec::new(),
+            description: None,
+            metadata: platform_api::ModelMetadata::default(),
+            capabilities: llm_client::Capabilities::default(),
+        };
+        let row = desktop_fusion_catalog_row(
+            "github-copilot",
+            &unhinted,
+            platform_api::ModelBillingMode::Subscription,
+            &llm_client::ProtocolFamily::OpenAiChat,
+        );
+        assert_eq!(
+            row.hints.cost_class,
+            platform_api::FusionCostClass::Subscription,
+            "a model unlisted in fusion_hints must inherit its profile's Subscription billing, \
+not fall back to FusionModelHints::default()'s cost_class: Medium"
+        );
+    }
+
+    /// The override must not fire for a `PerToken` profile absent from the
+    /// hint table — that model genuinely has no Fusion-known cost class and
+    /// must stay at the `Medium` default (unpriced-under-cap rejection is
+    /// the CORRECT behavior there, not a bug this finding touches).
+    #[test]
+    fn unhinted_model_on_a_per_token_profile_keeps_the_default_cost_class() {
+        let unhinted = llm_client::ModelProfile {
+            display_model: "some-new-model".to_string(),
+            request_model: "some-new-model".to_string(),
+            billing_model: "some-new-model".to_string(),
+            aliases: Vec::new(),
+            description: None,
+            metadata: platform_api::ModelMetadata::default(),
+            capabilities: llm_client::Capabilities::default(),
+        };
+        let row = desktop_fusion_catalog_row(
+            "openai",
+            &unhinted,
+            platform_api::ModelBillingMode::PerToken,
+            &llm_client::ProtocolFamily::OpenAiResponses,
+        );
+        assert_eq!(row.hints.cost_class, platform_api::FusionCostClass::Medium);
+    }
+
+    /// Round-5 review finding [3]: a `gemini` row's model capability bit says
+    /// `structured_output: true` (it is copied verbatim from the vendored
+    /// models.dev slice), but `GeminiCodec::encode_request` rejects ANY
+    /// `response_format` outright. Before this fix the row was built with
+    /// `structured_output: true`, so `resolve_analyst`'s `with_schema` gate
+    /// happily elected a Gemini analyst, §4 preflight passed with zero
+    /// errors, both panels burned real tokens, and only THEN did
+    /// `analyst.rs`'s `query_json_schema` die with
+    /// `InvalidRequest("GeminiCodec does not encode response_format yet")`.
+    #[test]
+    fn a_gemini_row_is_not_marked_structured_output_capable() {
+        let providers = llm_client::builtin_presets().providers;
+        let gemini = providers
+            .iter()
+            .find(|p| p.profile_name == "gemini")
+            .expect("gemini preset must exist in the builtin catalog");
+        assert_eq!(
+            gemini.protocol,
+            llm_client::ProtocolFamily::GeminiGenerateContent,
+            "sanity: the gemini preset must still be on the Gemini codec"
+        );
+        let pro = gemini
+            .models
+            .iter()
+            .find(|m| m.request_model == "gemini-3.1-pro-preview")
+            .expect("gemini-3.1-pro-preview present in the vendored gemini slice");
+        assert!(
+            pro.capabilities.structured_output,
+            "sanity: this test is only meaningful while the MODEL bit is true — \
+that mismatch with the codec is the whole defect"
+        );
+        let row = desktop_fusion_catalog_row(
+            &gemini.profile_name,
+            pro,
+            gemini.pricing.billing_mode,
+            &gemini.protocol,
+        );
+        assert!(
+            !row.structured_output,
+            "a GeminiGenerateContent row must NOT claim structured_output: its codec \
+rejects every response_format, so electing it analyst fails only AFTER the panels have spent"
+        );
+    }
+
+    /// The class guard for finding [3]: NO judge-eligible row anywhere in the
+    /// real builtin catalog may claim `structured_output` while sitting on a
+    /// protocol family whose codec cannot encode `response_format`. Pins the
+    /// property for every preset at once instead of just the `gemini` one the
+    /// finding named — a future preset on `VertexGemini` (or a new
+    /// non-encoding codec) fails here rather than in production after spend.
+    #[test]
+    fn no_judge_eligible_row_claims_structured_output_on_a_non_encoding_codec() {
+        let providers = llm_client::builtin_presets().providers;
+        let mut offenders: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        for provider in &providers {
+            for model in &provider.models {
+                checked += 1;
+                let row = desktop_fusion_catalog_row(
+                    &provider.profile_name,
+                    model,
+                    provider.pricing.billing_mode,
+                    &provider.protocol,
+                );
+                if row.hints.judge_eligible
+                    && row.structured_output
+                    && !protocol_encodes_response_format(&provider.protocol)
+                {
+                    offenders.push(format!(
+                        "{}/{} ({:?})",
+                        row.profile, row.model, provider.protocol
+                    ));
+                }
+            }
+        }
+        assert!(
+            checked > 50,
+            "coverage check: expected the real builtin catalog, only saw {checked} rows"
+        );
+        assert!(
+            offenders.is_empty(),
+            "these rows would be elected Fusion analyst and then hard-fail at encode time: {offenders:?}"
+        );
+    }
+
+    /// Both halves of the AND must be load-bearing: an encoding codec must
+    /// keep a `structured_output: false` model false (the codec bit cannot
+    /// manufacture a capability), and a non-encoding codec must not be
+    /// rescued by a true model bit.
+    #[test]
+    fn protocol_gate_and_model_bit_are_both_required() {
+        let mut caps = llm_client::Capabilities::default();
+        caps.structured_output = true;
+        let capable = llm_client::ModelProfile {
+            display_model: "m".to_string(),
+            request_model: "m".to_string(),
+            billing_model: "m".to_string(),
+            aliases: Vec::new(),
+            description: None,
+            metadata: platform_api::ModelMetadata::default(),
+            capabilities: caps,
+        };
+        let mut incapable = capable.clone();
+        incapable.capabilities.structured_output = false;
+
+        for family in [
+            llm_client::ProtocolFamily::GeminiGenerateContent,
+            llm_client::ProtocolFamily::VertexGemini,
+        ] {
+            assert!(
+                !protocol_encodes_response_format(&family),
+                "{family:?} delegates to GeminiCodec, which rejects response_format"
+            );
+            assert!(
+                !desktop_fusion_catalog_row(
+                    "p",
+                    &capable,
+                    platform_api::ModelBillingMode::PerToken,
+                    &family,
+                )
+                .structured_output,
+                "{family:?} must gate the row false even with capabilities.structured_output = true"
+            );
+        }
+        for family in [
+            llm_client::ProtocolFamily::AnthropicMessages,
+            llm_client::ProtocolFamily::OpenAiResponses,
+            llm_client::ProtocolFamily::OpenAiChat,
+            llm_client::ProtocolFamily::VertexClaude,
+            llm_client::ProtocolFamily::BedrockClaude,
+            llm_client::ProtocolFamily::FoundryClaude,
+            llm_client::ProtocolFamily::AzureOpenAi,
+        ] {
+            assert!(
+                protocol_encodes_response_format(&family),
+                "{family:?} encodes response_format (directly or via the codec it delegates to)"
+            );
+            assert!(
+                desktop_fusion_catalog_row(
+                    "p",
+                    &capable,
+                    platform_api::ModelBillingMode::PerToken,
+                    &family,
+                )
+                .structured_output,
+                "{family:?} must not narrow a genuinely capable model"
+            );
+            assert!(
+                !desktop_fusion_catalog_row(
+                    "p",
+                    &incapable,
+                    platform_api::ModelBillingMode::PerToken,
+                    &family,
+                )
+                .structured_output,
+                "{family:?} must not manufacture a capability the model lacks"
+            );
+        }
+    }
+}
+
+/// Resolve the effective Fusion settings for one snapshot (F007).
+///
+/// Routes through [`load_effective_settings_for_config`] — the SAME
+/// managed/CLI/scoped-source-aware loader `build()` uses for every other
+/// setting — instead of a bare `Settings::load`, so a managed-policy
+/// `fusion.enabled=false`/`allowedProfiles`/`allowCrossProviderForAgent=false`
+/// and `--settings '{"fusion":…}'` are honored (previously ignored: see the
+/// F007 finding).
 fn desktop_fusion_runtime_config(
-    project_dir: &Path,
+    cfg: &DesktopConfig,
+    managed_raw_tiers: &[String],
 ) -> Result<fusion::FusionRuntimeConfig, platform_api::FusionError> {
-    let env: BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = lingxi_core::settings::LoadInputs {
-        env: &env,
-        project_dir,
-        defaults: lingxi_core::settings::schema::SettingsJson::default(),
-    };
-    let effective = lingxi_core::settings::Settings::load(inputs)
-        .map_err(|error| platform_api::FusionError::InvalidConfiguration(error.to_string()))?;
+    let effective = load_effective_settings_for_config(cfg, managed_raw_tiers).ok_or_else(|| {
+        platform_api::FusionError::InvalidConfiguration("settings failed to load".into())
+    })?;
     match effective.settings.fusion {
         Some(settings) => fusion::FusionRuntimeConfig::from_settings(&settings),
         None => Ok(fusion::FusionRuntimeConfig::defaults()),
     }
 }
 
-struct RejectedFusionExecutor {
-    error: platform_api::FusionError,
+/// F007: reload point handed to `FusionOrchestrator` — `load()` re-resolves
+/// the effective settings on every call instead of a config frozen at
+/// construction, so a settings-file edit or the design's §11 kill switch
+/// (`fusion.enabled=false`) takes effect on the NEXT run, not the next
+/// process restart.
+struct DesktopFusionConfigSource {
+    cfg: DesktopConfig,
+    managed_raw_tiers: Vec<String>,
+}
+
+impl fusion::FusionConfigSource for DesktopFusionConfigSource {
+    fn load(&self) -> Result<fusion::FusionRuntimeConfig, platform_api::FusionError> {
+        desktop_fusion_runtime_config(&self.cfg, &self.managed_raw_tiers)
+    }
+}
+
+/// Finding [14]: wraps the constructed live `FusionOrchestrator` so a
+/// boot-time-invalid `fusion.*` value does NOT pin `RejectedFusionExecutor`
+/// for the rest of the process. `preflight_error()` re-validates FRESH on
+/// every call — mirroring how `FusionOrchestrator::run` /
+/// `agent_surface` / `workflow_fusion_call_cap` already reload the config
+/// per call (F007) — instead of freezing the first boot-time error, so a
+/// user who fixes and saves the settings file recovers within the session
+/// exactly as the F007 doc comment promises ("takes effect on the NEXT run,
+/// not the next process restart"), rather than only after a restart.
+struct DesktopFusionExecutor {
+    inner: fusion::FusionOrchestrator,
+    cfg: DesktopConfig,
+    managed_raw_tiers: Vec<String>,
 }
 
 #[async_trait::async_trait]
-impl platform_api::FusionExecutor for RejectedFusionExecutor {
+impl platform_api::FusionExecutor for DesktopFusionExecutor {
     async fn run(
         &self,
-        _request: platform_api::FusionRequest,
-        _inherit: platform_api::FusionInheritance,
-        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        request: platform_api::FusionRequest,
+        inherit: platform_api::FusionInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
     ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
-        Err(self.error.clone())
+        self.inner.run(request, inherit, progress).await
+    }
+
+    fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+        self.inner.agent_surface()
+    }
+
+    fn preflight_error(&self) -> Option<platform_api::FusionError> {
+        desktop_fusion_runtime_config(&self.cfg, &self.managed_raw_tiers).err()
+    }
+
+    fn resolve_parent_profile(
+        &self,
+        parent_model: &str,
+        explicit_profile: Option<&str>,
+    ) -> Option<String> {
+        self.inner
+            .resolve_parent_profile(parent_model, explicit_profile)
+    }
+
+    fn workflow_fusion_call_cap(&self) -> u32 {
+        self.inner.workflow_fusion_call_cap()
     }
 }
 
 fn desktop_fusion_executor(
     spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner>,
     side_query: Arc<dyn sidequery::SideQueryClient>,
-    project_dir: &Path,
-    catalog: Vec<fusion::CatalogModel>,
+    cfg: &DesktopConfig,
+    managed_raw_tiers: &[String],
+    // Round-4 review finding [8]: a `ModelSource` (typically
+    // `FusionCatalogModelSource`, `LlmStack::fusion_catalog_source`) instead
+    // of a frozen `Vec<CatalogModel>` — the orchestrator already re-queries
+    // `list()` on every run, so this is what lets a mid-session credential
+    // refresh (`FusionCatalogRefresher::refresh`) actually reach it.
+    catalog: Arc<dyn fusion::ModelSource>,
     bus: Arc<telemetry::AnalyticsBus>,
+    pricing: Arc<cost::PricingCatalog>,
 ) -> Arc<dyn platform_api::FusionExecutor> {
-    let config = match desktop_fusion_runtime_config(project_dir) {
-        Ok(config) => config,
-        Err(error) => return Arc::new(RejectedFusionExecutor { error }),
-    };
-    Arc::new(
-        fusion::FusionOrchestrator::new(spawner, side_query, config, Arc::new(catalog))
-            .with_bus(bus),
-    )
+    // Boot-time validation: surface the FIRST invalid `fusion.*` value
+    // through a log line, but always build the live orchestrator below —
+    // its `config_source` (and `DesktopFusionExecutor::preflight_error`)
+    // re-validate on every subsequent call, so a still-broken file keeps
+    // failing with an up-to-date message while a fixed-then-saved one
+    // recovers without a restart (finding [14]).
+    if let Err(error) = desktop_fusion_runtime_config(cfg, managed_raw_tiers) {
+        tracing::warn!(
+            error = %error,
+            "fusion.* settings failed boot-time validation; \
+             /fusion will report this until the settings file is fixed"
+        );
+    }
+    let config_source: Arc<dyn fusion::FusionConfigSource> =
+        Arc::new(DesktopFusionConfigSource {
+            cfg: cfg.clone(),
+            managed_raw_tiers: managed_raw_tiers.to_vec(),
+        });
+    let inner = fusion::FusionOrchestrator::new(spawner, side_query, config_source, catalog)
+        .with_bus(bus)
+        .with_price_book(Arc::new(DesktopFusionPriceBook::new(pricing)));
+    Arc::new(DesktopFusionExecutor {
+        inner,
+        cfg: cfg.clone(),
+        managed_raw_tiers: managed_raw_tiers.to_vec(),
+    })
+}
+
+#[cfg(test)]
+mod desktop_fusion_executor_boot_test {
+    use super::*;
+
+    /// Never actually called: `preflight_error()` re-validates settings
+    /// directly and must not spawn a panel or issue a side query.
+    struct UnreachableSpawner;
+    #[async_trait::async_trait]
+    impl platform_api::subagent_spawn::SubagentSpawner for UnreachableSpawner {
+        async fn spawn(
+            &self,
+            _request: platform_api::subagent_spawn::SubagentSpawnRequest,
+            _inherit: platform_api::subagent_spawn::SubagentInheritance,
+        ) -> Result<
+            platform_api::subagent_spawn::SubagentResult,
+            platform_api::subagent_spawn::SubagentSpawnError,
+        > {
+            panic!("preflight_error() must not spawn a panel");
+        }
+    }
+
+    struct UnreachableSideQuery;
+    #[async_trait::async_trait]
+    impl sidequery::SideQueryClient for UnreachableSideQuery {
+        async fn query(
+            &self,
+            _request: sidequery::SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+            panic!("preflight_error() must not issue a side query");
+        }
+    }
+
+    /// Finding [14]: a `fusion.*` value that is invalid only on the MERGED
+    /// view (passes per-file validation, fails `FusionRuntimeConfig::from_settings`)
+    /// pins the boot-time `InvalidConfiguration` — before this fix, in a
+    /// frozen `RejectedFusionExecutor` for the executor's whole lifetime.
+    /// This test proves the fix: after the SAME executor is constructed
+    /// once, correcting the settings file and calling `preflight_error()`
+    /// again (no restart, no re-construction) must recover to `None`,
+    /// exactly as `DesktopFusionExecutor`'s doc comment now promises.
+    #[test]
+    fn preflight_error_recovers_after_a_fix_then_save_without_restart() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().join("project");
+        let lingxi_home = tmp.path().join("home");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&lingxi_home).unwrap();
+        // Passes FusionSettingsJson::validate() per-file (no stage field is
+        // present alongside totalTimeoutMs in this same file), but fails the
+        // MERGED-view stage-sum check in FusionRuntimeConfig::from_settings:
+        // the default stage sum is 600_000 + 120_000*2 + 180_000 = 1_020_000
+        // > 500_000.
+        std::fs::write(
+            lingxi_home.join("settings.json"),
+            r#"{"fusion":{"totalTimeoutMs":500000}}"#,
+        )
+        .unwrap();
+        let cfg = DesktopConfig {
+            cwd: cwd.clone(),
+            lingxi_home,
+            ..DesktopConfig::default()
+        };
+
+        let executor = desktop_fusion_executor(
+            Arc::new(UnreachableSpawner),
+            Arc::new(UnreachableSideQuery),
+            &cfg,
+            &[],
+            Arc::new(Vec::<fusion::CatalogModel>::new()),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            Arc::new(cost::PricingCatalog::builtin_reference()),
+        );
+
+        let boot_error = executor
+            .preflight_error()
+            .expect("the invalid merged config must surface as a preflight error");
+        let platform_api::FusionError::InvalidConfiguration(msg) = boot_error else {
+            panic!("expected InvalidConfiguration, got {boot_error:?}");
+        };
+        assert!(
+            msg.contains("must not exceed fusion.totalTimeoutMs"),
+            "got: {msg}"
+        );
+
+        // Fix-then-save: raise totalTimeoutMs above the stage sum. Same
+        // `executor` instance — no restart, no re-construction.
+        std::fs::write(
+            cfg.lingxi_home.join("settings.json"),
+            r#"{"fusion":{"totalTimeoutMs":1500000}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            executor.preflight_error(),
+            None,
+            "a fixed-then-saved settings file must recover within the same \
+             session, not only after a process restart"
+        );
+    }
 }
 
 /// Assemble the desktop builtin tool set.
@@ -6005,6 +7973,63 @@ fn merge_agent_frontmatter_mcp_servers(
     blocked
 }
 
+/// Owns the MCP cleanup handles [`build_agent_mcp_tool_set`]'s connect loop
+/// has accumulated SO FAR, for as long as the loop is still running.
+///
+/// [Round-5 review item 11, class member (1) — handed here by that fixer's
+/// `needs_other_file`.] `agent::handle`'s own `McpCleanupGuard` can only be
+/// armed once this function RETURNS, and the loop below suspends on a real
+/// dial (`connect_agent_scoped` / `connect`) once per server. A caller that
+/// drops the spawn future mid-loop (the Fusion `join_set.abort_all()` race,
+/// one await earlier than findings 11 and 19) therefore dropped a plain local
+/// `Vec` that no caller had ever seen — every server already connected in
+/// this loop leaked its live connection with nothing left able to tear it
+/// down. The guard is armed before the first iteration and handed on, via
+/// [`AgentMcpConnectLoopGuard::take`], only in the expression that builds the
+/// returned [`agent::agent_mcp_tools::AgentMcpToolSet`].
+///
+/// Its `Drop` mirrors `agent::handle::McpCleanupGuard`'s: best-effort teardown
+/// on the current runtime, nothing to do once no runtime is left.
+struct AgentMcpConnectLoopGuard {
+    cleanups: Vec<agent::agent_mcp_tools::AgentMcpCleanupHandle>,
+    agent_type: String,
+}
+
+impl AgentMcpConnectLoopGuard {
+    fn new(agent_type: String) -> Self {
+        Self {
+            cleanups: Vec::new(),
+            agent_type,
+        }
+    }
+
+    fn push(&mut self, handle: agent::agent_mcp_tools::AgentMcpCleanupHandle) {
+        self.cleanups.push(handle);
+    }
+
+    /// Hand the handles to their next owner. Call this ONLY in the expression
+    /// that immediately consumes them; the guard is left empty, so from here
+    /// on its `Drop` is a no-op.
+    fn take(&mut self) -> Vec<agent::agent_mcp_tools::AgentMcpCleanupHandle> {
+        std::mem::take(&mut self.cleanups)
+    }
+}
+
+impl Drop for AgentMcpConnectLoopGuard {
+    fn drop(&mut self) {
+        if self.cleanups.is_empty() {
+            return;
+        }
+        let cleanups = std::mem::take(&mut self.cleanups);
+        let agent_type = std::mem::take(&mut self.agent_type);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                agent::agent_mcp_tools::run_agent_mcp_cleanups(cleanups, &agent_type).await;
+            });
+        }
+    }
+}
+
 /// §24b (claude `Agr`, 2.1.251 @~160977000): connect + build ONE subagent
 /// spawn's per-agent inline `mcpServers` tools. Reuses the SAME `PRn`
 /// conversion as the main-thread-agent merge above
@@ -6040,7 +8065,9 @@ async fn build_agent_mcp_tool_set(
         &existing_configs,
     );
     let mut tools: Vec<Arc<dyn tool_api::Tool>> = Vec::new();
-    let mut cleanups = Vec::new();
+    // Armed BEFORE the first dial: every await inside the loop is a window in
+    // which the caller can drop this future (round-5 review item 11).
+    let mut cleanups = AgentMcpConnectLoopGuard::new(def.agent_type.clone());
     for entry in scoped {
         let plain_name = entry.config.name.clone();
         let config_role = entry.config.metadata.role;
@@ -6145,7 +8172,10 @@ async fn build_agent_mcp_tool_set(
             });
         }
     }
-    agent::agent_mcp_tools::AgentMcpToolSet { tools, cleanups }
+    agent::agent_mcp_tools::AgentMcpToolSet {
+        tools,
+        cleanups: cleanups.take(),
+    }
 }
 
 /// Read the merged `settings.enabledPlugins` allowlist (`plugin@marketplace` →
@@ -7027,8 +9057,23 @@ pub struct LlmStack {
     pub chains: provider_config::ChainConfig,
     /// See [`build`] for the resolution rules behind `model_providers`.
     pub model_providers: std::collections::BTreeMap<String, (String, String)>,
-    /// The live Fusion catalog assembled from every configured provider.
+    /// The live Fusion catalog assembled from every configured provider,
+    /// filtered through the boot-time availability snapshot. Kept for
+    /// callers that want a one-shot filtered listing; the orchestrator
+    /// itself is built over [`Self::fusion_catalog_source`] instead, which
+    /// re-filters against LIVE availability on every call.
     pub fusion_catalog: Vec<fusion::CatalogModel>,
+    /// Round-4 review finding [8]: a refreshable `fusion::ModelSource` over
+    /// the SAME unfiltered catalog `fusion_catalog` was filtered from — see
+    /// `FusionCatalogModelSource`'s doc comment. This is what
+    /// `desktop_fusion_executor` is actually built over, so a credential
+    /// connected mid-session (via [`Self::fusion_catalog_refresher`])
+    /// becomes visible to Fusion without a process restart.
+    pub fusion_catalog_source: Arc<dyn fusion::ModelSource>,
+    /// Handle a credential-write path calls after persisting a new
+    /// credential so `fusion_catalog_source` picks it up — see
+    /// [`FusionCatalogRefresher::refresh`].
+    pub fusion_catalog_refresher: FusionCatalogRefresher,
     /// See [`build`] for the resolution rules behind `default_listings`.
     pub default_listings: Vec<platform_api::ModelListing>,
     /// See [`build`] for the resolution rules behind `default_model_id`.
@@ -7634,10 +9679,11 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         .providers
         .iter()
         .flat_map(|provider| {
-            provider
-                .models
-                .iter()
-                .map(move |model| desktop_fusion_catalog_row(&provider.profile_name, model))
+            let billing_mode = provider.pricing.billing_mode;
+            let protocol = provider.protocol.clone();
+            provider.models.iter().map(move |model| {
+                desktop_fusion_catalog_row(&provider.profile_name, model, billing_mode, &protocol)
+            })
         })
         .collect::<Vec<_>>();
 
@@ -7736,12 +9782,25 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         // no machine credentials", and env is the other half of that.
         cfg.isolated_credential_storage,
     );
-    let availability_rows =
+    // Finding [7]: distinguish "the probe ran and found nothing" from "the
+    // probe never completed" (a 5s timeout, e.g. a slow/contended macOS
+    // keychain). `provider_availability` is otherwise empty in BOTH cases,
+    // and `filter_fusion_catalog`'s `unwrap_or(false)` cannot tell them
+    // apart — on the timeout path every non-anthropic profile reads as
+    // "genuinely uncredentialed" and the whole Fusion catalog for that
+    // profile is dropped for the runtime's lifetime, even though the
+    // ordinary turn loop routes the same profile fine on the same
+    // credentials. `availability_probe_completed` lets the Fusion filter
+    // skip its availability half instead of fail-closing on a transient
+    // stall (mirrors the sibling `connected_provider_fallback` rule at
+    // line ~5898, which already treats an unknown provider as "don't
+    // reroute" rather than "disconnected").
+    let (availability_rows, availability_probe_completed) =
         match tokio::time::timeout(std::time::Duration::from_secs(5), availability_probe).await {
-            Ok(rows) => rows,
+            Ok(rows) => (rows, true),
             Err(_) => {
                 tracing::warn!("provider availability probe timed out; continuing engine startup");
-                Vec::new()
+                (Vec::new(), false)
             }
         };
     let mut provider_availability: std::collections::BTreeMap<String, bool> = availability_rows
@@ -7755,6 +9814,22 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     provider_availability
         .entry("anthropic".to_string())
         .or_insert(has_api_key || has_oauth);
+
+    // The anthropic probe is DEFINITIVE only on the stock first-party API
+    // (`api_provider() == FirstParty`) with the default `api_base` and no
+    // gateway auth override. On an env-routed Bedrock/Vertex/Foundry install
+    // (`api_provider() != FirstParty`), a custom `api_base`
+    // (`LINGXI_API_BASE_URL` — an enterprise/auth-free gateway serving Claude
+    // with no local key), or an `ANTHROPIC_AUTH_TOKEN`, anthropic models are
+    // served WITHOUT a local key/OAuth, so the forced
+    // `availability["anthropic"] = false` above is probe-BLINDNESS, not
+    // disconnection — both the default-model fallback below and
+    // `filter_fusion_catalog` (F011 item 1) must not treat it as
+    // disconnection (the same probe-blindness `connected_model_rows` guards
+    // in the TUI picker).
+    let anthropic_probe_definitive = api_provider() == ApiProvider::FirstParty
+        && cfg.api_base == DesktopConfig::default().api_base
+        && std::env::var("ANTHROPIC_AUTH_TOKEN").map_or(true, |v| v.is_empty());
 
     // ── Boot-time connected-provider default-model fallback ─────────────────
     // (LingXi multi-provider divergence — upstream is Anthropic-only.) When the
@@ -7775,16 +9850,6 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         && !cfg.default_model_env_pinned
         && api_provider() == ApiProvider::FirstParty
     {
-        // The anthropic probe is DEFINITIVE only on the stock first-party base
-        // URL with no gateway auth override. A custom `api_base`
-        // (`LINGXI_API_BASE_URL` — an enterprise/auth-free gateway serving
-        // Claude with no local key) or an `ANTHROPIC_AUTH_TOKEN` works today
-        // with `has_api_key == has_oauth == false`, so the forced
-        // `availability["anthropic"] = false` above must not reroute those
-        // installs (the same probe-blindness `connected_model_rows` guards in
-        // the TUI picker).
-        let anthropic_probe_definitive = cfg.api_base == DesktopConfig::default().api_base
-            && std::env::var("ANTHROPIC_AUTH_TOKEN").map_or(true, |v| v.is_empty());
         if let Some(fb) = connected_provider_fallback(
             &default_model_id,
             default_model_profile.as_deref(),
@@ -8018,6 +10083,77 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         is_enterprise: persisted_subscription_type.as_deref() == Some("enterprise"),
     };
 
+    // F011 item 1: the fusion catalog must reflect what a panel can ACTUALLY
+    // reach. Filtered HERE (the earliest point `provider_availability` AND
+    // `session_model_restriction` are both final) rather than left as "every
+    // provider's every model" — otherwise `model_resolver::resolve` treats an
+    // uncredentialed or managed-barred model as available, §4's "fewer than
+    // required models -> TooFewModels before any panel call" preflight
+    // guarantee is false, and a panel can burn up to 12 turns before failing
+    // on `LlmError::Authentication`.
+    // Round-4 review finding [8]: build a REFRESHABLE catalog source
+    // (`FusionCatalogModelSource`) alongside the frozen filtered snapshot
+    // below, over the SAME boot-time `provider_availability` — a
+    // credential-write path calling `fusion_catalog_refresher.refresh()`
+    // later updates `fusion_catalog_availability` in place, and every
+    // subsequent `FusionCatalogModelSource::list()` (called once per
+    // `/fusion` run, same as `DesktopFusionConfigSource::load()`) re-filters
+    // against the fresh value instead of this boot-time snapshot.
+    let fusion_catalog_availability: Arc<std::sync::RwLock<std::collections::BTreeMap<String, bool>>> =
+        Arc::new(std::sync::RwLock::new(provider_availability.clone()));
+    // Round-7 finding [2]: the probe-completion flag is shared state, not a
+    // construction-time constant. A boot probe that TIMED OUT leaves it
+    // `false` (the availability half of `filter_fusion_catalog` fails open,
+    // finding [7]); the refresher below re-arms it the first time a
+    // mid-session re-probe genuinely completes, so the fail-open is
+    // transient like the stall that caused it instead of permanent.
+    let fusion_probe_completed = Arc::new(std::sync::atomic::AtomicBool::new(
+        availability_probe_completed,
+    ));
+    let fusion_catalog_source: Arc<dyn fusion::ModelSource> = Arc::new(FusionCatalogModelSource {
+        unfiltered: fusion_catalog.clone(),
+        availability: fusion_catalog_availability.clone(),
+        anthropic_probe_definitive,
+        availability_probe_completed: fusion_probe_completed.clone(),
+        session_model_restriction: session_model_restriction.clone(),
+    });
+    let fusion_catalog_refresher = FusionCatalogRefresher {
+        availability: fusion_catalog_availability,
+        availability_probe_completed: fusion_probe_completed,
+        credentials: credentials.clone(),
+        credential_sources: assembled.credential_sources.clone(),
+        anthropic_has_api_key: fusion_route_flag(has_api_key),
+        anthropic_has_oauth: fusion_route_flag(has_oauth),
+        openai_chatgpt_available: fusion_route_flag(has_openai_chatgpt),
+        // Round-4 review finding: a refresh must reproduce the boot probe
+        // exactly, including the isolation boundary — otherwise an isolated
+        // boot's first `/connect` replaces the whole availability map with
+        // one that counts ambient machine env-var credentials the boot
+        // deliberately excluded.
+        isolated: cfg.isolated_credential_storage,
+    };
+    // Finding [15]: publish this runtime's refresher so credential writes on
+    // seams that never see a `FusionCatalogRefresher` handle (the TUI
+    // `/connect` key view, which writes straight through
+    // `secret::CredentialManager`) can still reach it — see
+    // `FUSION_CATALOG_REFRESHERS`.
+    register_fusion_catalog_refresher(fusion_catalog_refresher.clone());
+
+    let fusion_catalog = filter_fusion_catalog(
+        fusion_catalog,
+        &provider_availability,
+        anthropic_probe_definitive,
+        availability_probe_completed,
+        session_model_restriction.as_ref(),
+    );
+
+    // Round-12 finding [2], class sweep: `/logout` and the bridge-server's
+    // `ClientCommand::Logout` are credential REMOVALS, and the availability
+    // map's merge rule can never lower the `true` a sign-in published. Wrap
+    // the one shared handle here, after the refresher is registered, so every
+    // sign-out surface in this process clears Fusion's entry.
+    let auth: Arc<dyn AuthHandle> = Arc::new(FusionCatalogClearingAuth { inner: auth });
+
     Ok(LlmStack {
         http,
         clock,
@@ -8032,6 +10168,8 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         chains: assembled.chains,
         model_providers,
         fusion_catalog,
+        fusion_catalog_source,
+        fusion_catalog_refresher,
         default_listings,
         default_model_id,
         default_model_profile,
@@ -8313,7 +10451,8 @@ pub async fn build(
         pricing,
         chains,
         model_providers,
-        fusion_catalog,
+        fusion_catalog_source,
+        fusion_catalog_refresher,
         default_listings,
         default_model_id,
         default_model_profile,
@@ -8636,10 +10775,14 @@ pub async fn build(
     // Phase 2a T7: the CostTracker uses the SAME assembled pricing catalog the
     // estimator was built from (built-in reference tiers + non-Anthropic preset
     // rows + settings overrides), not a fresh `builtin_reference()`, so session
-    // cost accounting matches per-response cost estimation.
+    // cost accounting matches per-response cost estimation. WP1 (F001/G003):
+    // the SAME `Arc` also backs `desktop_fusion_executor`'s `FusionPriceBook`
+    // adapter below, so Fusion's hard-budget quote/settlement prices against
+    // the identical catalog the rest of the session bills from.
+    let pricing = Arc::new(pricing);
     let cost_tracker = Arc::new(cost::CostTracker::new(
         protocol::SessionId::new(),
-        Arc::new(pricing),
+        pricing.clone(),
         cost_persist_tx,
     ));
 
@@ -10233,9 +12376,11 @@ pub async fn build(
         Arc::new(sidequery::ProviderSideQueryClient::from_service(
             api_service.clone(),
         )),
-        &cwd,
-        fusion_catalog.clone(),
+        &cfg,
+        &managed_settings_for_strict,
+        fusion_catalog_source.clone(),
         analytics_bus.clone(),
+        pricing.clone(),
     );
     task_registry_inner.register_handler(
         tasks::TaskType::LocalWorkflow,
@@ -11328,9 +13473,14 @@ pub async fn build(
     // (5.5a-cron) Bind the cron `Dream` handler's `DeferredToolInvoker` to the
     //        real `RegistryToolInvoker` now that `tools` exists — same recursion-
     //        lock invariant and boot gate as the teammate invoker above.
+    // Round-4 review finding [15]: a `Dream` (cron) task is never owned by
+    // any interactive turn either — same reasoning as `local_workflow_invoker`
+    // and `fusion_invoker` below — so a permission ask it raises must not be
+    // wiped by Ctrl-C on an unrelated foreground turn.
     dream_invoker.set(Arc::new(
         tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
-            .with_gate(perms.clone()),
+            .with_gate(perms.clone())
+            .with_background_owned(true),
     ));
 
     // (5.5a-local-agent) T15: bind the `LocalAgent` handler's `DeferredToolInvoker`
@@ -11338,23 +13488,58 @@ pub async fn build(
     //        recursion-lock invariant and boot gate as the teammate + dream
     //        invokers above. A `LocalAgent` task's child runner dispatches its
     //        tools through the parent registry.
+    // Round-4 review finding [15]: a `LocalAgent` task (the backgrounded
+    // async-agent worker) is never owned by any interactive turn either —
+    // same reasoning as `local_workflow_invoker` and `fusion_invoker` below —
+    // so a permission ask it raises must not be wiped by Ctrl-C on an
+    // unrelated foreground turn.
     local_agent_invoker.set(Arc::new(
         tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
-            .with_gate(perms.clone()),
+            .with_gate(perms.clone())
+            .with_background_owned(true),
     ));
 
     // (5.5a-local-workflow) Bind the `LocalWorkflow` handler's `DeferredToolInvoker`
     //        to the real `RegistryToolInvoker` now that `tools` exists — so a
     //        workflow's `agent()` subagents dispatch their tools through the
     //        parent registry under the same recursion-lock + boot gate.
+    //
+    // Finding [23]: this is the ONE invoker every `LocalWorkflow` background
+    // task dispatches through — its own script's direct tool calls, every
+    // `agent()` subagent (`local_workflow.rs:3391 self.tool_invoker.clone()`,
+    // optionally wrapped by `WorkspaceLeaseToolInvoker`, a transparent
+    // delegate that does not touch this flag), and every workflow `fusion()`
+    // panel (`local_workflow.rs:2658-2663`'s `SubagentInheritance {
+    // tool_invoker: tool_invoker.clone(), .. }`, the SAME clone). No
+    // interactive turn ever owns a `LocalWorkflow` task (it is spawned as a
+    // background task, mirroring `fusion_invoker` below), and this cell has
+    // no other reader (`local_workflow_invoker` referenced only at its
+    // creation, at `LocalWorkflowHandler::new`, and here) — so the
+    // `fusion_invoker` comment's "cannot mislabel a foreground direct tool
+    // call" justification holds verbatim for it too. Without this, a
+    // permission ask raised by a workflow's `fusion()` panel (or its
+    // `agent()` subagents) is wiped by Ctrl-C on an UNRELATED foreground
+    // turn, exactly the bug `with_background_owned` was introduced to close
+    // for the `/fusion` slash entrypoint.
     local_workflow_invoker.set(Arc::new(
         tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
-            .with_gate(perms.clone()),
+            .with_gate(perms.clone())
+            .with_background_owned(true),
     ));
 
+    // Finding 22: this is the ONE invoker `LocalFusionHandler` uses for every
+    // `/fusion` background-task panel (`register_fusion_handler` above binds
+    // this exact `fusion_invoker` cell, and `tasks::handlers::local_fusion`
+    // clones it verbatim into `SubagentInheritance::tool_invoker` for each
+    // panel spawn — no other caller reaches this `Arc`). A FOREGROUND
+    // `Agent{subagent_type:"fusion"}` call (tools/agent/src/agent.rs
+    // `call_fusion`) never touches this cell either — it builds its own
+    // fresh `RegistryToolInvoker` per call. So marking this instance
+    // background-owned cannot mislabel a foreground direct tool call.
     fusion_invoker.set(Arc::new(
         tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
-            .with_gate(perms.clone()),
+            .with_gate(perms.clone())
+            .with_background_owned(true),
     ));
 
     // Break the subagent construction cycle now that `tools` + `agent_catalog`
@@ -11904,27 +14089,60 @@ pub async fn build(
     // Plan 3c: `/connect` seams — Copilot device-flow over `PosixHttp`, and the
     // API-key writer over the host secure prompt (tui-supplied; headless no-op).
     // M8: also wire the ChatGPT OAuth seam (`/connect chatgpt`).
-    let connect_copilot: Arc<dyn command_core::CopilotConnectDriver> = Arc::new(
-        crate::connect::EngineCopilotConnect::new(credentials.clone()),
-    );
+    // Round-4 review finding [8] / round-5 finding [15]: EVERY `/connect`
+    // seam below is wrapped so a successful credential write refreshes
+    // Fusion's catalog filter (`FusionCatalogRefresher`) — without this, a
+    // provider connected here stayed invisible to `/fusion` for the rest of
+    // the process even though this same write makes the ordinary turn loop
+    // route it immediately. Round 4 wrapped only the API-key writer and the
+    // Copilot device flow; the ChatGPT and unified-OAuth drivers are wrapped
+    // here too, and the TUI key view (which bypasses all four and writes
+    // straight through `secret::CredentialManager`) reaches the same
+    // refresher through `refresh_fusion_catalog_after_credential_write`.
+    let connect_copilot: Arc<dyn command_core::CopilotConnectDriver> =
+        Arc::new(FusionCatalogRefreshingCopilotConnect {
+            inner: Arc::new(crate::connect::EngineCopilotConnect::new(
+                credentials.clone(),
+            )),
+            refresher: fusion_catalog_refresher.clone(),
+        });
     let connect_writer: Arc<dyn command_core::ConnectCredentialWriter> =
-        Arc::new(crate::connect::EngineCredentialWriter::new(
-            credentials.clone(),
-            cfg.connect_prompt.clone().unwrap_or_else(|| {
-                Arc::new(crate::connect::NoopKeyPrompt) as Arc<dyn crate::connect::SecureKeyPrompt>
-            }),
-        ));
-    let connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver> = Arc::new(
+        Arc::new(FusionCatalogRefreshingCredentialWriter {
+            inner: Arc::new(crate::connect::EngineCredentialWriter::new(
+                credentials.clone(),
+                cfg.connect_prompt.clone().unwrap_or_else(|| {
+                    Arc::new(crate::connect::NoopKeyPrompt)
+                        as Arc<dyn crate::connect::SecureKeyPrompt>
+                }),
+            )),
+            refresher: fusion_catalog_refresher.clone(),
+        });
+    let connect_chatgpt_inner: Arc<dyn command_core::ChatGptConnectDriver> = Arc::new(
         crate::connect::EngineChatGptConnect::new(openai_oauth_client, credentials.clone()),
     );
+    // Round-5 review finding [15] class sweep: EVERY `/connect` seam that
+    // persists a credential refreshes Fusion's catalog, not just the two
+    // round 4 wrapped. The OAuth driver below is built over the UNWRAPPED
+    // ChatGPT driver so a ChatGPT sign-in through the picker refreshes once,
+    // not twice.
+    let connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver> =
+        Arc::new(FusionCatalogRefreshingChatGptConnect {
+            inner: connect_chatgpt_inner.clone(),
+            refresher: fusion_catalog_refresher.clone(),
+        });
     // Unified OAuth sign-in driver for the TUI `/connect` picker (Anthropic
     // Pro/Max + OpenAI ChatGPT browser flows). Reuses the same backends as
     // `/login` (the Anthropic `auth` handle) and `/connect chatgpt`
     // (`connect_chatgpt`); built here while both are still owned (the registry
     // call below moves `connect_chatgpt`).
-    let oauth_connect_driver: Arc<dyn command_core::OAuthConnectDriver> = Arc::new(
-        crate::connect::EngineOAuthConnect::new(auth.clone(), connect_chatgpt.clone()),
-    );
+    let oauth_connect_driver: Arc<dyn command_core::OAuthConnectDriver> =
+        Arc::new(FusionCatalogRefreshingOAuthConnect {
+            inner: Arc::new(crate::connect::EngineOAuthConnect::new(
+                auth.clone(),
+                connect_chatgpt_inner,
+            )),
+            refresher: fusion_catalog_refresher.clone(),
+        });
     let mut reg = desktop_command_registry(
         handle.clone(),
         auth.clone(),
@@ -12684,11 +14902,17 @@ pub async fn build(
 #[cfg(test)]
 mod tests {
     use super::{
-        build, build_shared_credential_stack_for_config, desktop_tool_registry,
-        model_deprecation_warning, parse_worktree_slash_action, resolve_memory_feature_gates,
+        build, build_shared_credential_stack_for_config, desktop_fusion_runtime_config,
+        desktop_tool_registry, filter_fusion_catalog, fusion_route_flag,
+        model_deprecation_warning,
+        refresh_fusion_catalog_after_credential_delete,
+        refresh_fusion_catalog_after_credential_write, register_fusion_catalog_refresher,
+        FusionCatalogClearingAuth, FusionCatalogModelSource, FusionCatalogRefresher,
+        parse_worktree_slash_action, resolve_memory_feature_gates,
         resolve_workflow_session_enabled, resolve_workflow_size_guideline,
-        sandbox_network_ask_callback, CoordinatorWiring, DesktopConfig, DesktopSessionComposition,
-        WorktreeSlashAction, QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK, WORKTREE_SLASH_USAGE,
+        sandbox_network_ask_callback, CoordinatorWiring, DesktopConfig,
+        DesktopSessionComposition, WorktreeSlashAction, QUERY_SOURCE_REPL_MAIN_THREAD,
+        QUERY_SOURCE_SDK, WORKTREE_SLASH_USAGE,
     };
     use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12772,6 +14996,62 @@ mod tests {
             2,
             "the launcher must pass its registry to BOTH resolve_script_at and workflow_source_for_name (`{uses}`)"
         );
+    }
+
+    /// Finding [23] (and round-4 review finding [15], which caught the same
+    /// class re-opened for two more cells): every `DeferredToolInvoker` that
+    /// backs a task NEVER owned by an interactive turn must be bound with
+    /// `.with_background_owned(true)` — `local_workflow_invoker`
+    /// (`LocalWorkflow` script + its `agent()` subagents + its `fusion()`
+    /// panels, `local_workflow.rs:3391` / `:2658-2663`), `fusion_invoker`
+    /// (every `/fusion` background-task panel, `tasks::handlers::local_fusion`),
+    /// `dream_invoker` (cron-spawned `TaskType::Dream` tasks — nothing
+    /// interactive ever spawns a `Dream`), and `local_agent_invoker` (the
+    /// backgrounded `LocalAgent` async-agent worker). Without the flag, a
+    /// permission ask any of these raises is dropped by Ctrl-C on an
+    /// unrelated foreground turn, exactly the bug `with_background_owned`
+    /// exists to close.
+    ///
+    /// No runtime test can observe this without standing up the whole
+    /// desktop stack plus a live TUI permission gate — same reasoning as
+    /// `build_wires_one_plugin_workflow_registry_into_every_participant`
+    /// above — so this reads the composition root's own source instead, and
+    /// checks all four cells so the next background invoker added to
+    /// `build()` cannot silently miss the flag.
+    #[test]
+    fn background_task_invokers_are_wired_background_owned() {
+        const SRC: &str = include_str!("lib.rs");
+        let build_src = SRC
+            .split_once("\n#[cfg(test)]\nmod tests")
+            .map_or(SRC, |(production, _)| production);
+
+        // Assembled from split literals so this needle cannot match itself
+        // if ever copy-pasted verbatim into a comment near a binding.
+        let flag = "with_background_owned".to_string() + "(true)";
+
+        for cell in [
+            "local_workflow_invoker",
+            "fusion_invoker",
+            "dream_invoker",
+            "local_agent_invoker",
+        ] {
+            let marker = format!("{cell}.set(Arc::new(");
+            let start = build_src
+                .find(&marker)
+                .unwrap_or_else(|| panic!("{cell} must be bound in build()"));
+            let close = build_src[start..]
+                .find("));")
+                .unwrap_or_else(|| panic!("the {cell} binding must close with `));`"));
+            let binding = &build_src[start..start + close];
+
+            assert!(
+                binding.contains(&flag),
+                "{cell} must be bound with `.{flag}` — it backs a task \
+                 never owned by any interactive turn, so a permission ask \
+                 it raises must survive a Ctrl-C on an unrelated foreground \
+                 turn: {binding}"
+            );
+        }
     }
 
     struct RecordingNetworkPermissionGate {
@@ -13300,6 +15580,1097 @@ mod tests {
             .expect("read ok")
             .expect("present");
         assert_eq!(got.expose_secret(), "sk-test-123");
+    }
+
+    /// Round-4 review finding [8], end to end through the real `/connect`
+    /// wrapper: `FusionCatalogRefreshingCredentialWriter::prompt_and_store_key`
+    /// must call `FusionCatalogRefresher::refresh()` AFTER a successful
+    /// write, so a provider uncredentialed at boot (`groq`, here) is marked
+    /// available in the shared lock `FusionCatalogModelSource::list()` reads
+    /// — without reconstructing anything and without a process restart.
+    #[tokio::test]
+    async fn connect_writer_wrapper_refreshes_fusion_catalog_availability_after_a_real_write() {
+        use super::connect::{EngineCredentialWriter, SecureKeyPrompt};
+        use async_trait::async_trait;
+        use command_core::ConnectCredentialWriter;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+        use std::collections::HashMap;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct MemStorage {
+            map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+        }
+        #[async_trait]
+        impl SecureStorage for MemStorage {
+            async fn store(
+                &self,
+                service: &str,
+                account: &str,
+                data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .insert((service.into(), account.into()), data);
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .get(&(service.into(), account.into()))
+                    .cloned())
+            }
+            async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .remove(&(service.into(), account.into()));
+                Ok(())
+            }
+            async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .filter(|(s, _)| s == service)
+                    .map(|(_, a)| a.clone())
+                    .collect())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        struct CannedPrompt(Option<String>);
+        #[async_trait]
+        impl SecureKeyPrompt for CannedPrompt {
+            async fn prompt(&self, _label: &str) -> Option<String> {
+                self.0.clone()
+            }
+        }
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        let credential_sources = vec![provider_config::CredentialSource {
+            provider_id: llm_client::ProviderId::OpenAICompatible {
+                name: "groq".to_string(),
+            },
+            profile_name: "groq".to_string(),
+            credential_id: "groq".to_string(),
+            env_var: None,
+            kind: provider_config::CredentialKind::Keychain,
+        }];
+
+        // Boot-time snapshot: groq uncredentialed, exactly `resolve_llm_stack`
+        // would have computed before this `/connect` call.
+        let mut boot_availability = std::collections::BTreeMap::new();
+        boot_availability.insert("groq".to_string(), false);
+        let availability = Arc::new(std::sync::RwLock::new(boot_availability));
+
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            // These tests model a boot whose availability probe COMPLETED
+            // (round-7 finding [2]); the shared cell is already armed, so
+            // `refresh_inner`'s re-arm is a no-op here.
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: credentials.clone(),
+            credential_sources,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: false,
+        };
+        let inner: Arc<dyn ConnectCredentialWriter> = Arc::new(EngineCredentialWriter::new(
+            credentials.clone(),
+            Arc::new(CannedPrompt(Some("gsk-test-456".into()))),
+        ));
+        let wrapped = super::FusionCatalogRefreshingCredentialWriter { inner, refresher };
+
+        assert_eq!(
+            availability.read().unwrap().get("groq").copied(),
+            Some(false),
+            "sanity: groq must read as unavailable before the connect call"
+        );
+
+        wrapped
+            .prompt_and_store_key("groq")
+            .await
+            .expect("store + refresh ok");
+
+        assert_eq!(
+            availability.read().unwrap().get("groq").copied(),
+            Some(true),
+            "a successful /connect write must flip the SAME shared lock \
+FusionCatalogModelSource::list() reads to available, in this process, \
+with no restart and no ModelSource reconstruction"
+        );
+    }
+
+    /// Round-5 review finding [5]: the round-4 `refresh()` REPLACED the
+    /// shared availability map wholesale (`*guard = map`) with whatever the
+    /// re-probe answered — and the re-probe cannot fail: it bottoms out in
+    /// `has_provider_key(..).unwrap_or(false)` over a `SecureStorage` whose
+    /// runtime fallback already turned `BackendUnavailable` /
+    /// `PermissionDenied` / `Io` into `Ok(false)`. One degraded credential
+    /// broker therefore rewrote a known-good boot map into an all-`false` one
+    /// and emptied Fusion's catalog for every non-anthropic profile for the
+    /// rest of the process (`TooFewModels{eligible:0}` on every `/fusion`),
+    /// with nothing that could ever repair it — strictly worse than the
+    /// staleness the refresh was added to fix.
+    ///
+    /// The degraded backend is modelled exactly as production degrades: a
+    /// storage that answers "nothing here" instead of erroring, so
+    /// `openrouter` (available at boot, credential still on disk) probes as
+    /// absent.
+    #[tokio::test]
+    async fn a_degraded_reprobe_must_not_erase_known_good_availability() {
+        use async_trait::async_trait;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+
+        /// Every read answers "absent" — the shape `RuntimeFallbackStorage`
+        /// produces once the macOS credential broker is unavailable.
+        struct DegradedStorage;
+        #[async_trait]
+        impl SecureStorage for DegradedStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(None)
+            }
+            async fn delete(&self, _service: &str, _account: &str) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(Vec::new())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(DegradedStorage);
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        let sources: Vec<provider_config::CredentialSource> = ["openrouter", "deepseek", "groq"]
+            .iter()
+            .map(|name| provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::OpenAICompatible {
+                    name: (*name).to_string(),
+                },
+                profile_name: (*name).to_string(),
+                credential_id: (*name).to_string(),
+                env_var: None,
+                kind: provider_config::CredentialKind::Keychain,
+            })
+            .collect();
+
+        // Boot map from a HEALTHY probe: two providers genuinely connected.
+        let mut boot = std::collections::BTreeMap::new();
+        boot.insert("anthropic".to_string(), true);
+        boot.insert("openrouter".to_string(), true);
+        boot.insert("deepseek".to_string(), true);
+        boot.insert("groq".to_string(), false);
+        let availability = Arc::new(std::sync::RwLock::new(boot));
+
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            // These tests model a boot whose availability probe COMPLETED
+            // (round-7 finding [2]); the shared cell is already armed, so
+            // `refresh_inner`'s re-arm is a no-op here.
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials,
+            credential_sources: sources,
+            anthropic_has_api_key: fusion_route_flag(true),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+
+        // The `/connect groq` that triggers the refresh.
+        refresher.refresh_after_credential_write("groq").await;
+
+        let map = availability.read().unwrap().clone();
+        assert_eq!(
+            map.get("openrouter").copied(),
+            Some(true),
+            "a degraded re-probe must not flip a known-good provider to unavailable; \
+map after refresh was {map:?}"
+        );
+        assert_eq!(
+            map.get("deepseek").copied(),
+            Some(true),
+            "same for every other already-available profile; map after refresh was {map:?}"
+        );
+        assert_eq!(
+            map.get("anthropic").copied(),
+            Some(true),
+            "the anthropic entry must survive too; map after refresh was {map:?}"
+        );
+        assert_eq!(
+            map.get("groq").copied(),
+            Some(true),
+            "the credential the refresh was CALLED FOR must be published available even \
+when the degraded backend cannot read it back; map after refresh was {map:?}"
+        );
+    }
+
+    /// Round-5 review finding [15]: a credential-write seam that never sees a
+    /// `FusionCatalogRefresher` handle — the TUI `/connect` key view writes
+    /// straight through `secret::CredentialManager` — must still be able to
+    /// tell Fusion's catalog filter about the write. This pins the
+    /// process-wide notifier both halves of that seam use
+    /// (`apps/cli/src/mode.rs`'s `run_connect_action` calls it; the assertion
+    /// that IT does lives in that crate's own test).
+    /// `FUSION_CATALOG_REFRESHERS` is a PROCESS-WIDE registry and
+    /// `note_fusion_catalog_credential_route` / `refresh_fusion_catalog_after_credential_write`
+    /// fan out to every entry in it, so two tests that each register a
+    /// refresher will mutate each other's availability map. Every test that
+    /// registers one must hold this lock — the same one-lock-per-shared-global
+    /// rule the prompt-builder tests learned the hard way.
+    static FUSION_REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn the_process_wide_notifier_reaches_a_registered_refresher() {
+        let _registry_guard = FUSION_REGISTRY_LOCK.lock().await;
+        use async_trait::async_trait;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+        use std::collections::HashMap;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct MemStorage {
+            map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+        }
+        #[async_trait]
+        impl SecureStorage for MemStorage {
+            async fn store(
+                &self,
+                service: &str,
+                account: &str,
+                data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .insert((service.into(), account.into()), data);
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .get(&(service.into(), account.into()))
+                    .cloned())
+            }
+            async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .remove(&(service.into(), account.into()));
+                Ok(())
+            }
+            async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .filter(|(s, _)| s == service)
+                    .map(|(_, a)| a.clone())
+                    .collect())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        let mut boot = std::collections::BTreeMap::new();
+        boot.insert("openrouter".to_string(), false);
+        let availability = Arc::new(std::sync::RwLock::new(boot));
+        register_fusion_catalog_refresher(FusionCatalogRefresher::for_keychain_profiles(
+            availability.clone(),
+            credentials.clone(),
+            &["openrouter"],
+        ));
+
+        // What the TUI key view does: a RAW credential write, no wrapper.
+        credentials
+            .set_provider_key("openrouter", "sk-or-test")
+            .await
+            .expect("store ok");
+        assert_eq!(
+            availability.read().unwrap().get("openrouter").copied(),
+            Some(false),
+            "sanity: the raw write alone must NOT be visible to Fusion — that is the defect"
+        );
+
+        refresh_fusion_catalog_after_credential_write("openrouter").await;
+        assert_eq!(
+            availability.read().unwrap().get("openrouter").copied(),
+            Some(true),
+            "the process-wide notifier must reach every registered refresher's shared map"
+        );
+    }
+
+    /// Round-12 finding [2]: the removal half of the fan-out above.
+    ///
+    /// `refresh_inner`'s merge rule can never lower a `true` (deliberately —
+    /// a degraded credential broker answers `Ok(false)`, not `Err`), so a
+    /// credential DELETE has no path to the availability map through the
+    /// write notifier, and `refresh_after_credential_write` would publish the
+    /// exact opposite of the truth if it were reused. This pins the dedicated
+    /// removal fan-out: it lowers exactly the deleted profile, and lowers
+    /// nothing else.
+    #[tokio::test]
+    async fn deleting_a_credential_lowers_only_that_profiles_availability_entry() {
+        let _registry_guard = FUSION_REGISTRY_LOCK.lock().await;
+        let boot: std::collections::BTreeMap<String, bool> = [
+            ("openrouter".to_string(), true),
+            ("deepseek".to_string(), true),
+        ]
+        .into_iter()
+        .collect();
+        let availability = Arc::new(std::sync::RwLock::new(boot));
+        register_fusion_catalog_refresher(FusionCatalogRefresher::for_keychain_profiles(
+            availability.clone(),
+            fusion_delete_test_credentials(),
+            &["openrouter", "deepseek"],
+        ));
+
+        refresh_fusion_catalog_after_credential_delete("openrouter").await;
+
+        let published = availability.read().unwrap().clone();
+        assert_eq!(
+            published.get("openrouter").copied(),
+            Some(false),
+            "the deleted profile must be lowered — a stale `true` is what lets /fusion \
+auto-select a provider the session can no longer authenticate: {published:?}"
+        );
+        assert_eq!(
+            published.get("deepseek").copied(),
+            Some(true),
+            "a sibling profile that still has its credential must be untouched — clearing \
+too much empties Fusion's catalog, the mirror-image defect: {published:?}"
+        );
+    }
+
+    /// Round-12 finding [2], class member: signing OUT is a credential
+    /// removal too. `refresh_inner`'s closing
+    /// `guard.entry("anthropic").or_insert(..)` is an `or_insert`, so the
+    /// `true` a sign-in published survives a sign-out for the life of the
+    /// process. `FusionCatalogClearingAuth` wraps the ONE shared
+    /// `Arc<dyn AuthHandle>` so `/logout` and the bridge-server's
+    /// `ClientCommand::Logout` are both covered by one seam.
+    #[tokio::test]
+    async fn signing_out_clears_the_anthropic_entry_a_sign_in_published() {
+        let _registry_guard = FUSION_REGISTRY_LOCK.lock().await;
+        use async_trait::async_trait;
+        use platform_api::auth::{AuthError, LoginInfo};
+
+        struct OkLogout;
+        #[async_trait]
+        impl platform_api::AuthHandle for OkLogout {
+            async fn login(&self) -> Result<LoginInfo, AuthError> {
+                Err(AuthError::Cancelled)
+            }
+            async fn logout(&self) -> Result<(), AuthError> {
+                Ok(())
+            }
+            async fn current_user(&self) -> Option<LoginInfo> {
+                None
+            }
+        }
+
+        let availability = Arc::new(std::sync::RwLock::new(
+            [("anthropic".to_string(), true)]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        register_fusion_catalog_refresher(FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: fusion_delete_test_credentials(),
+            credential_sources: Vec::new(),
+            // OAuth was the ONLY Anthropic route this session had.
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(true),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        });
+
+        let auth: Arc<dyn platform_api::AuthHandle> =
+            Arc::new(FusionCatalogClearingAuth { inner: Arc::new(OkLogout) });
+        auth.logout().await.expect("logout ok");
+
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(false),
+            "after /logout Fusion must stop offering Anthropic models — nothing else in the \
+process can lower this entry"
+        );
+    }
+
+    /// Round-12 review, BLOCKING issue 1: the removal fan-out shipped without a
+    /// raising counterpart, so `/logout` then `/login` left Fusion permanently
+    /// blind to Anthropic. `filter_fusion_catalog` drops every row of a
+    /// provider whose availability entry is `false`, so on an Anthropic-only
+    /// install `/fusion` failed `TooFewModels{eligible:0}` for the rest of the
+    /// process — strictly worse than the stale `true` the removal path exists
+    /// to clear.
+    #[tokio::test]
+    async fn signing_back_in_after_a_logout_restores_anthropic_for_fusion() {
+        let availability = Arc::new(std::sync::RwLock::new(
+            [("anthropic".to_string(), true)]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: fusion_delete_test_credentials(),
+            credential_sources: Vec::new(),
+            // OAuth is the ONLY route: no API key to fall back on, which is the
+            // Anthropic-only install the finding names.
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(true),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+
+        refresher.mark_credential_removed("anthropic-oauth").await;
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(false),
+            "precondition: signing out of the only route must lower the entry"
+        );
+
+        refresher.mark_credential_established("anthropic-oauth").await;
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(true),
+            "after signing back in Fusion must offer Anthropic again; leaving the entry \
+`false` hides EVERY anthropic row and fails an Anthropic-only /fusion with \
+TooFewModels{{eligible:0}}"
+        );
+    }
+
+    /// The same recovery, but reached through the seam `/login` actually calls
+    /// (`note_fusion_catalog_credential_route`), so the test fails if that
+    /// helper is ever pointed back at the flag-only `note_route_credential_written`.
+    #[tokio::test]
+    async fn the_login_seam_republishes_the_availability_entry_not_just_the_flag() {
+        let _registry_guard = FUSION_REGISTRY_LOCK.lock().await;
+        let availability = Arc::new(std::sync::RwLock::new(
+            [("anthropic".to_string(), false)]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: fusion_delete_test_credentials(),
+            credential_sources: Vec::new(),
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+        register_fusion_catalog_refresher(refresher);
+
+        super::note_fusion_catalog_credential_route("anthropic-oauth").await;
+
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(true),
+            "the /login seam must republish the map entry, not only raise the route flag: \
+`refresh_inner`'s closing `or_insert` cannot RAISE an entry that already exists, so a \
+flag-only login never recovers from a preceding logout"
+        );
+    }
+
+    /// Round-12 finding [2], the over-clearing direction: `anthropic` is the
+    /// one profile with TWO independent routes. Dropping OAuth while an API
+    /// key is still configured must NOT empty Fusion's catalog of a provider
+    /// the turn loop still routes perfectly well.
+    #[tokio::test]
+    async fn signing_out_of_oauth_keeps_anthropic_when_an_api_key_remains() {
+        let availability = Arc::new(std::sync::RwLock::new(
+            [("anthropic".to_string(), true)]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: fusion_delete_test_credentials(),
+            credential_sources: Vec::new(),
+            anthropic_has_api_key: fusion_route_flag(true),
+            anthropic_has_oauth: fusion_route_flag(true),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+        refresher.mark_credential_removed("anthropic-oauth").await;
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(true),
+            "the API key is still configured, so Anthropic must stay in Fusion's catalog; \
+blanket-clearing here would be the mirror-image defect of the stale `true`"
+        );
+    }
+
+    /// The twin of the test above at the spelling PRODUCTION actually sends.
+    ///
+    /// `clients/electron/src/shared/providers.ts` declares the Anthropic
+    /// provider as `id: 'anthropic'`, and `host.ts`'s credential-clear handler
+    /// passes that id straight through to `ClientCommand::DeleteProviderCredential`
+    /// -> `refresh_fusion_catalog_after_credential_delete(&provider_id)`. Bare
+    /// `"anthropic"` and `"anthropic-api-key"` are ONE credential slot —
+    /// `secret::is_anthropic_api_key_id` is
+    /// `matches!(id, "anthropic" | "anthropic-api-key")`, so
+    /// `delete_provider_key("anthropic")` routes to `delete_anthropic_api_key()`
+    /// and removes the API key only, leaving the OAuth session intact. Handling
+    /// the two spellings with two different semantics let the Settings
+    /// "delete key" button empty Fusion's catalog of an Anthropic the turn loop
+    /// still routes over OAuth.
+    #[tokio::test]
+    async fn deleting_the_bare_anthropic_key_id_keeps_anthropic_when_oauth_remains() {
+        let availability = Arc::new(std::sync::RwLock::new(
+            [("anthropic".to_string(), true)]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: fusion_delete_test_credentials(),
+            // The session booted signed in with OAuth and no API key, so
+            // `assemble` published exactly this source (provider-config/src/
+            // assemble.rs:26-38) — the profile the loop in
+            // `mark_credential_removed` lowers before the match arm runs.
+            credential_sources: vec![provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::AnthropicFirstParty,
+                profile_name: "anthropic".to_string(),
+                credential_id: "anthropic-oauth".to_string(),
+                env_var: None,
+                kind: provider_config::CredentialKind::OAuth,
+            }],
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(true),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+
+        refresher.mark_credential_removed("anthropic").await;
+
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(true),
+            "deleting the Anthropic API KEY (the bare `anthropic` id Electron sends) must \
+leave Anthropic available over its still-valid OAuth session — clearing it here drops every \
+Anthropic row from `filter_fusion_catalog` for the rest of the process, and on a small \
+install /fusion then fails TooFewModels{{eligible:0}} instead of running"
+        );
+    }
+
+    /// Round-12 rework: `mark_credential_removed` must not assert a hard
+    /// `false` for a profile another LIVE route still backs.
+    ///
+    /// `provider_config::compute_availability_with_isolation` resolves a
+    /// GENERIC profile as `keychain_has || env_set`
+    /// (provider-config/src/availability.rs:63-70) and production boots
+    /// NON-isolated (`isolated_credential_storage: false` —
+    /// apps/bridge-server/src/boot.rs:508, apps/cli/src/init.rs:791), so an
+    /// exported `DEEPSEEK_API_KEY` keeps routing deepseek in the ordinary turn
+    /// loop after the STORED deepseek key is deleted from Settings. Publishing
+    /// `false` for it is strictly worse than the stale `true` this method
+    /// replaced: it drops EVERY deepseek row from `filter_fusion_catalog` for
+    /// the rest of the process, and on a small install `/fusion` then fails
+    /// `TooFewModels{eligible:0}`.
+    #[tokio::test]
+    async fn deleting_a_stored_key_keeps_a_profile_its_env_var_still_backs() {
+        const VAR: &str = "LINGXI_TEST_FUSION_DELETE_ENV_ROUTE_VAR";
+        std::env::set_var(VAR, "sk-still-exported");
+
+        let availability = Arc::new(std::sync::RwLock::new(
+            [("deepseek".to_string(), true)]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: fusion_delete_test_credentials(),
+            credential_sources: vec![provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::OpenAICompatible {
+                    name: "deepseek".to_string(),
+                },
+                profile_name: "deepseek".to_string(),
+                credential_id: "deepseek".to_string(),
+                env_var: Some(VAR.to_string()),
+                kind: provider_config::CredentialKind::ApiKey,
+            }],
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: false,
+        };
+
+        refresher.mark_credential_removed("deepseek").await;
+        let published = availability.read().unwrap().get("deepseek").copied();
+        std::env::remove_var(VAR);
+
+        assert_eq!(
+            published,
+            Some(true),
+            "the exported env var still routes deepseek, so Fusion must keep offering it; \
+a hard `false` here removes every deepseek row from filter_fusion_catalog for the rest of \
+the process — the mirror-image defect of the stale `true`"
+        );
+    }
+
+    /// Round-12 rework, case (b): the two Anthropic route booleans must not be
+    /// frozen at boot.
+    ///
+    /// An OAuth-only boot gives `anthropic_has_api_key: false,
+    /// anthropic_has_oauth: true` and the single `anthropic-oauth` credential
+    /// source `provider_config::assemble` emits (assemble.rs:26-38). The user
+    /// then ADDS an Anthropic API key from Settings — router.rs:3086's
+    /// `SetProviderCredential` arm fans out to
+    /// `refresh_after_credential_write("anthropic")` — and afterwards
+    /// `/logout`s, which is `mark_credential_removed("anthropic-oauth")`. The
+    /// API key is live, so Anthropic must stay in Fusion's catalog; answering
+    /// from the frozen boot boolean over-clears it.
+    #[tokio::test]
+    async fn an_api_key_added_mid_session_survives_signing_out_of_oauth() {
+        let availability = Arc::new(std::sync::RwLock::new(
+            std::collections::BTreeMap::<String, bool>::new(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            // The Settings "add key" write really did store an Anthropic API
+            // key, so the presence probe the bare `"anthropic"` spelling is
+            // resolved against answers yes.
+            credentials: fusion_test_credentials_with_stored_anthropic_key(),
+            credential_sources: vec![provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::AnthropicFirstParty,
+                profile_name: "anthropic".to_string(),
+                credential_id: "anthropic-oauth".to_string(),
+                env_var: None,
+                kind: provider_config::CredentialKind::OAuth,
+            }],
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(true),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+
+        refresher.refresh_after_credential_write("anthropic").await;
+        refresher.mark_credential_removed("anthropic-oauth").await;
+
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(true),
+            "the API key added mid-session is still live, so Anthropic must stay in Fusion's \
+catalog; the frozen anthropic_has_api_key=false fallback over-clears it"
+        );
+    }
+
+    /// Round-12 rework, the durability half of the same class: a removal that
+    /// only edits the availability MAP is undone by the next unrelated
+    /// credential write, because `refresh_inner` recomputes the three
+    /// special-cased rows from the boot booleans and its merge rule publishes
+    /// `true` unconditionally (lib.rs `if row.available { guard.insert(.., true) }`).
+    #[tokio::test]
+    async fn a_removed_chatgpt_credential_is_not_resurrected_by_a_later_write() {
+        let availability = Arc::new(std::sync::RwLock::new(
+            [
+                ("openai-chatgpt".to_string(), true),
+                ("openrouter".to_string(), true),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<String, bool>>(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: fusion_delete_test_credentials(),
+            credential_sources: vec![
+                provider_config::CredentialSource {
+                    provider_id: llm_client::ProviderId::OpenAICompatible {
+                        name: "openai-chatgpt".to_string(),
+                    },
+                    profile_name: "openai-chatgpt".to_string(),
+                    credential_id: "openai-chatgpt".to_string(),
+                    env_var: None,
+                    kind: provider_config::CredentialKind::OAuth,
+                },
+                provider_config::CredentialSource {
+                    provider_id: llm_client::ProviderId::OpenAICompatible {
+                        name: "openrouter".to_string(),
+                    },
+                    profile_name: "openrouter".to_string(),
+                    credential_id: "openrouter".to_string(),
+                    env_var: None,
+                    kind: provider_config::CredentialKind::ApiKey,
+                },
+            ],
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(true),
+            isolated: true,
+        };
+
+        refresher.mark_credential_removed("openai-chatgpt").await;
+        assert_eq!(
+            availability.read().unwrap().get("openai-chatgpt").copied(),
+            Some(false),
+            "sanity: the removal itself must lower the entry"
+        );
+
+        refresher.refresh_after_credential_write("openrouter").await;
+
+        assert_eq!(
+            availability.read().unwrap().get("openai-chatgpt").copied(),
+            Some(false),
+            "a credential removal must survive the next unrelated credential write — \
+re-deriving the ChatGPT row from a boot boolean nothing can lower resurrects the entry \
+the delete just cleared"
+        );
+    }
+
+    /// Round-12 rework, the ambiguity the class sweep turned up: a bare
+    /// `"anthropic"` credential-write notification does NOT prove an API key
+    /// exists.
+    ///
+    /// `apps/cli/src/mode.rs`'s `ConnectAction::OAuth` arm calls
+    /// `refresh_fusion_catalog_after_credential_write(&provider_id)` with the
+    /// picker's `"anthropic"` AFTER an OAuth sign-in (on top of the refresh
+    /// `FusionCatalogRefreshingOAuthConnect` already performed). Taking that
+    /// at face value raises the API-KEY route on a session that only ever had
+    /// OAuth, and `/logout` then leaves Anthropic in Fusion's catalog on the
+    /// strength of a route that never existed — the exact stale `true`
+    /// round-12 finding [2] is about. The bare spelling is therefore resolved
+    /// against the credential store, which here holds no Anthropic key.
+    #[tokio::test]
+    async fn an_oauth_sign_in_reported_under_the_bare_anthropic_id_raises_no_api_key_route() {
+        let availability = Arc::new(std::sync::RwLock::new(
+            std::collections::BTreeMap::<String, bool>::new(),
+        ));
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            // No Anthropic API key is stored: this session signed in with
+            // OAuth only.
+            credentials: fusion_delete_test_credentials(),
+            credential_sources: vec![provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::AnthropicFirstParty,
+                profile_name: "anthropic".to_string(),
+                credential_id: "anthropic-oauth".to_string(),
+                env_var: None,
+                kind: provider_config::CredentialKind::OAuth,
+            }],
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(true),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+
+        // The TUI OAuth arm's redundant notification, then /logout.
+        refresher.refresh_after_credential_write("anthropic").await;
+        refresher.mark_credential_removed("anthropic-oauth").await;
+
+        assert_eq!(
+            availability.read().unwrap().get("anthropic").copied(),
+            Some(false),
+            "no Anthropic API key was ever stored, so signing out must clear Fusion's \
+Anthropic entry; believing the ambiguous bare `anthropic` write id invents an API-key \
+route and resurrects the stale `true`"
+        );
+    }
+
+    /// [`fusion_delete_test_credentials`] with one difference: the store
+    /// reports an Anthropic API key present, which is what
+    /// `has_provider_key("anthropic")` asks for
+    /// (`storage.contains("lingxi", "anthropic-api-key")`,
+    /// secret/src/credential.rs).
+    fn fusion_test_credentials_with_stored_anthropic_key() -> Arc<secret::CredentialManager> {
+        use async_trait::async_trait;
+        use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
+
+        struct AnthropicKeyPresentStorage;
+        #[async_trait]
+        impl SecureStorage for AnthropicKeyPresentStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(None)
+            }
+            async fn delete(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(Vec::new())
+            }
+            async fn contains(
+                &self,
+                _service: &str,
+                account: &str,
+            ) -> Result<bool, SecureStorageError> {
+                Ok(account == "anthropic-api-key")
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        Arc::new(secret::CredentialManager::new(
+            Arc::new(AnthropicKeyPresentStorage),
+            Arc::new(platform_posix::PosixClock::new()),
+            Arc::new(platform_posix::PosixHttp::new()),
+        ))
+    }
+
+    /// A no-op credential backend for the fan-out tests above: the removal
+    /// path is a pure lock-and-set with no keychain I/O, so nothing here is
+    /// ever read — using a real store would only add a way for the test to
+    /// pass for the wrong reason.
+    fn fusion_delete_test_credentials() -> Arc<secret::CredentialManager> {
+        use async_trait::async_trait;
+        use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
+
+        struct InertStorage;
+        #[async_trait]
+        impl SecureStorage for InertStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(None)
+            }
+            async fn delete(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(Vec::new())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        Arc::new(secret::CredentialManager::new(
+            Arc::new(InertStorage),
+            Arc::new(platform_posix::PosixClock::new()),
+            Arc::new(platform_posix::PosixHttp::new()),
+        ))
+    }
+
+    /// Round-4 review finding (isolation boundary): `FusionCatalogRefresher`
+    /// must reproduce the boot probe's `isolated_credential_storage`
+    /// exactly — `resolve_llm_stack` passes `cfg.isolated_credential_storage`
+    /// into `compute_availability_with_isolation` (which then suppresses
+    /// ambient env-var credentials, `provider-config/src/availability.rs`'s
+    /// `env_set = !isolated && ...`), and a refresh on an isolated boot must
+    /// not silently re-enable them by hardcoding `false`.
+    ///
+    /// This env var name is unique to this test so it cannot race with any
+    /// other test's `std::env::set_var`/`remove_var` calls.
+    #[tokio::test]
+    async fn isolated_refresher_does_not_count_ambient_env_var_credentials() {
+        use async_trait::async_trait;
+        use platform_api::{Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError};
+
+        // Deliberately a no-op store: this test asserts on `env_var`-driven
+        // availability alone (`credential_id: "envonly"` never resolves a
+        // stored key either way), so no backing map is needed.
+        #[derive(Default)]
+        struct MemStorage;
+        #[async_trait]
+        impl SecureStorage for MemStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(None)
+            }
+            async fn delete(&self, _service: &str, _account: &str) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(Vec::new())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        const VAR: &str = "LINGXI_TEST_ISOLATED_REFRESHER_ONLY_VAR";
+        std::env::set_var(VAR, "present");
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        let credential_sources = vec![provider_config::CredentialSource {
+            provider_id: llm_client::ProviderId::OpenAICompatible {
+                name: "envonly".to_string(),
+            },
+            profile_name: "envonly".to_string(),
+            credential_id: "envonly".to_string(),
+            env_var: Some(VAR.to_string()),
+            kind: provider_config::CredentialKind::ApiKey,
+        }];
+
+        let mut boot = std::collections::BTreeMap::new();
+        boot.insert("envonly".to_string(), false);
+        let availability = Arc::new(std::sync::RwLock::new(boot));
+
+        let isolated_refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            // These tests model a boot whose availability probe COMPLETED
+            // (round-7 finding [2]); the shared cell is already armed, so
+            // `refresh_inner`'s re-arm is a no-op here.
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials: credentials.clone(),
+            credential_sources: credential_sources.clone(),
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+        isolated_refresher.refresh().await;
+        assert_eq!(
+            availability.read().unwrap().get("envonly").copied(),
+            Some(false),
+            "an isolated refresher must not count an ambient env-var \
+credential — it must reproduce the boot probe's \
+`isolated_credential_storage` exactly, not always pass `false`"
+        );
+
+        // Contrast: the identical env var, credential source, and map DO
+        // flip once `isolated` is false — proving the assertion above is
+        // exercising the isolation flag and not merely observing a
+        // wiring/env-propagation failure in this test harness.
+        let mut boot2 = std::collections::BTreeMap::new();
+        boot2.insert("envonly".to_string(), false);
+        let availability2 = Arc::new(std::sync::RwLock::new(boot2));
+        let non_isolated_refresher = FusionCatalogRefresher {
+            availability: availability2.clone(),
+            // These tests model a boot whose availability probe COMPLETED
+            // (round-7 finding [2]); the shared cell is already armed, so
+            // `refresh_inner`'s re-arm is a no-op here.
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            credentials,
+            credential_sources,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: false,
+        };
+        non_isolated_refresher.refresh().await;
+        assert_eq!(
+            availability2.read().unwrap().get("envonly").copied(),
+            Some(true),
+            "sanity: a non-isolated refresher over the same env var must \
+still flip to available"
+        );
+
+        std::env::remove_var(VAR);
     }
 
     // ── deprecation tests ────────────────────────────────────────────────────
@@ -15581,6 +18952,1084 @@ mod tests {
                 .map(Vec::as_slice),
             Some(&["llama-3.3-70b-versatile".to_string()][..]),
             "fallback chain must translate to the bare model-id list (provider_id dropped); got: {fallback_overrides:?}"
+        );
+    }
+
+    fn fusion_catalog_row(profile: &str, model: &str) -> fusion::CatalogModel {
+        fusion::CatalogModel {
+            profile: profile.to_string(),
+            model: model.to_string(),
+            hints: platform_api::FusionModelHints::default(),
+            structured_output: false,
+        }
+    }
+
+    /// F011 item 1: an uncredentialed provider's rows never reach
+    /// `model_resolver::resolve` — a panel must not be able to select a
+    /// provider it cannot actually call. Before this filter existed,
+    /// `fusion_catalog` was every assembled provider's every model with no
+    /// `provider_availability` check.
+    #[test]
+    fn filter_fusion_catalog_drops_uncredentialed_providers() {
+        let catalog = vec![
+            fusion_catalog_row("anthropic", "claude-sonnet-4-6"),
+            fusion_catalog_row("openai", "gpt-5.6-sol"),
+        ];
+        let mut availability = std::collections::BTreeMap::new();
+        availability.insert("anthropic".to_string(), true);
+        availability.insert("openai".to_string(), false);
+        let filtered = filter_fusion_catalog(catalog, &availability, true, true, None);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].profile, "anthropic");
+    }
+
+    /// Finding [1]: a definitively-unavailable anthropic profile (stock
+    /// first-party API, real probe, no key/OAuth) must still be dropped —
+    /// the blindness guard only protects gateway/env-routed installs, not a
+    /// genuinely disconnected first-party anthropic.
+    #[test]
+    fn filter_fusion_catalog_drops_anthropic_when_probe_is_definitive() {
+        let catalog = vec![fusion_catalog_row("anthropic", "claude-sonnet-4-6")];
+        let mut availability = std::collections::BTreeMap::new();
+        availability.insert("anthropic".to_string(), false);
+        let filtered = filter_fusion_catalog(catalog, &availability, true, true, None);
+        assert!(filtered.is_empty(), "got: {filtered:?}");
+    }
+
+    /// Finding [1] (CRITICAL): on a gateway / env-routed Bedrock/Vertex/
+    /// Foundry install, `provider_availability["anthropic"] == false` is
+    /// PROBE-BLINDNESS, not disconnection — Claude models are served without
+    /// a local key/OAuth there and the main turn loop routes them fine. Before
+    /// this fix, `filter_fusion_catalog` dropped every anthropic row on that
+    /// signal, emptying the Fusion catalog (`TooFewModels{eligible:0}` on
+    /// every `/fusion` call) on an install whose main loop works.
+    #[test]
+    fn filter_fusion_catalog_keeps_anthropic_when_probe_is_blind() {
+        let catalog = vec![
+            fusion_catalog_row("anthropic", "claude-sonnet-4-6"),
+            fusion_catalog_row("anthropic", "claude-opus-5"),
+            fusion_catalog_row("openai", "gpt-5.6-sol"),
+        ];
+        let mut availability = std::collections::BTreeMap::new();
+        // Forced by the `or_insert(has_api_key || has_oauth)` at boot: a
+        // gateway install with neither reads as `false` even though anthropic
+        // is reachable via `LINGXI_API_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`.
+        availability.insert("anthropic".to_string(), false);
+        availability.insert("openai".to_string(), false);
+        let filtered = filter_fusion_catalog(catalog, &availability, false, true, None);
+        assert_eq!(filtered.len(), 2, "got: {filtered:?}");
+        assert!(filtered.iter().all(|row| row.profile == "anthropic"));
+        // openai is still genuinely dropped — the blindness guard is
+        // anthropic-only, not a blanket "absence means available".
+        assert!(!filtered.iter().any(|row| row.profile == "openai"));
+    }
+
+    /// F011 item 1: a row missing from the availability map entirely (not
+    /// merely `false`) must ALSO be dropped — absence is not availability.
+    #[test]
+    fn filter_fusion_catalog_drops_rows_missing_from_availability_map() {
+        let catalog = vec![fusion_catalog_row("groq", "llama-3.3-70b-versatile")];
+        let availability = std::collections::BTreeMap::new();
+        let filtered = filter_fusion_catalog(catalog, &availability, true, true, None);
+        assert!(filtered.is_empty(), "got: {filtered:?}");
+    }
+
+    /// Finding [7]: an empty `provider_availability` map produced by a
+    /// TIMED-OUT probe (`availability_probe_completed: false`) must NOT be
+    /// treated the same as a completed probe finding nothing — that reading
+    /// dropped every non-anthropic profile's rows for the runtime's
+    /// lifetime even though the ordinary turn loop routes the same profile
+    /// fine on the same credentials (e.g. a locked/contended macOS keychain
+    /// blowing the 5s budget on an openai-parent session). When the probe
+    /// did not complete, every row must survive the availability half of
+    /// the filter (the managed-allowlist half still applies).
+    #[test]
+    fn filter_fusion_catalog_keeps_every_row_when_the_availability_probe_timed_out() {
+        let catalog = vec![
+            fusion_catalog_row("anthropic", "claude-sonnet-4-6"),
+            fusion_catalog_row("openai", "gpt-5.6-sol"),
+            fusion_catalog_row("deepseek", "deepseek-v4-pro"),
+        ];
+        // The probe timed out: no rows were ever produced, so the map is
+        // empty exactly as it would be for "every provider is genuinely
+        // uncredentialed" -- `availability_probe_completed: false` is the
+        // only signal telling the two cases apart.
+        let availability = std::collections::BTreeMap::new();
+        let filtered = filter_fusion_catalog(catalog, &availability, true, false, None);
+        assert_eq!(
+            filtered.len(),
+            3,
+            "a timed-out probe must not empty the catalog for every \
+             non-anthropic profile: got {filtered:?}"
+        );
+    }
+
+    /// F011 item 1 (managed allowlist half, G009-adjacent): a managed
+    /// `enforceAvailableModels` policy that bars a model keeps it out of the
+    /// catalog even though its provider is otherwise available — a panel
+    /// must never be able to resolve onto a model the managed policy just
+    /// refused.
+    #[test]
+    fn filter_fusion_catalog_drops_managed_allowlist_barred_models() {
+        use llm_client::model::allowlist::ModelEnforcement;
+        let catalog = vec![
+            fusion_catalog_row("anthropic", "claude-sonnet-4-6"),
+            fusion_catalog_row("anthropic", "claude-opus-5"),
+        ];
+        let mut availability = std::collections::BTreeMap::new();
+        availability.insert("anthropic".to_string(), true);
+        let enforcement = ModelEnforcement::Active {
+            allowlist: vec!["claude-sonnet-4-6".to_string()],
+            overrides: std::collections::BTreeMap::new(),
+        };
+        let restriction = (enforcement, vec!["claude-sonnet-4-6".to_string()]);
+        let filtered = filter_fusion_catalog(catalog, &availability, true, true, Some(&restriction));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].model, "claude-sonnet-4-6");
+    }
+
+    /// `None` (no managed policy) must be a no-op on top of availability.
+    #[test]
+    fn filter_fusion_catalog_with_no_restriction_keeps_every_available_row() {
+        let catalog = vec![
+            fusion_catalog_row("anthropic", "claude-sonnet-4-6"),
+            fusion_catalog_row("anthropic", "claude-opus-5"),
+        ];
+        let mut availability = std::collections::BTreeMap::new();
+        availability.insert("anthropic".to_string(), true);
+        let filtered = filter_fusion_catalog(catalog, &availability, true, true, None);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    /// Round-4 review finding [8]: a provider uncredentialed at boot but
+    /// connected mid-session (`/connect`) must become visible to Fusion
+    /// WITHOUT reconstructing the `ModelSource` — `FusionCatalogModelSource`
+    /// must re-filter against whatever `availability` holds on every
+    /// `list()` call, not a value captured when it was built. This pins the
+    /// exact mechanism `FusionCatalogRefresher::refresh` updates (a live
+    /// write into the shared `availability` lock); a real refresh additionally
+    /// goes through `provider_config::compute_availability_with_isolation`,
+    /// which is exercised by `FusionCatalogRefresher::refresh`'s own callers
+    /// (the `/connect` seam wrappers) rather than re-tested here.
+    #[test]
+    fn fusion_catalog_model_source_sees_a_provider_connected_after_construction() {
+        use fusion::ModelSource as _;
+
+        let unfiltered = vec![
+            fusion_catalog_row("anthropic", "claude-sonnet-4-6"),
+            fusion_catalog_row("github-copilot", "gpt-5.6-sol"),
+        ];
+        let mut boot_availability = std::collections::BTreeMap::new();
+        boot_availability.insert("anthropic".to_string(), true);
+        boot_availability.insert("github-copilot".to_string(), false);
+        let availability = Arc::new(std::sync::RwLock::new(boot_availability));
+        let source = FusionCatalogModelSource {
+            unfiltered,
+            availability: availability.clone(),
+            anthropic_probe_definitive: true,
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            session_model_restriction: None,
+        };
+
+        // Boot-time snapshot: github-copilot was uncredentialed, so its row
+        // must be filtered out — this is the state the old plain
+        // `Vec<CatalogModel>` (`impl ModelSource for Vec<CatalogModel>`)
+        // would freeze for the rest of the process.
+        let before = source.list();
+        assert_eq!(
+            before.len(),
+            1,
+            "github-copilot must be filtered out before any refresh, got: {before:?}"
+        );
+        assert_eq!(before[0].profile, "anthropic");
+
+        // Simulate what `FusionCatalogRefresher::refresh()` does after a
+        // successful `/connect github-copilot`: publish a new availability
+        // map into the SAME lock `list()` reads.
+        {
+            let mut guard = availability.write().unwrap();
+            guard.insert("github-copilot".to_string(), true);
+        }
+
+        // The finding: without re-running the filter per call, `list()`
+        // would still return only the anthropic row here, and a `/fusion
+        // --crossProvider` run would never see the provider the user just
+        // connected in the same process.
+        let after = source.list();
+        assert_eq!(
+            after.len(),
+            2,
+            "github-copilot must become visible on the NEXT list() call \
+after the availability lock is updated, with no ModelSource \
+reconstruction — got: {after:?}"
+        );
+        assert!(
+            after.iter().any(|row| row.profile == "github-copilot"),
+            "got: {after:?}"
+        );
+    }
+
+    /// Round-7 finding [2]: the boot availability probe's 5s timeout
+    /// (`resolve_llm_stack`: `Err(_) => (Vec::new(), false)`) makes
+    /// `filter_fusion_catalog` skip its availability half entirely — a
+    /// deliberate fail-open (finding [7]) so a transient/contended keychain
+    /// cannot empty the Fusion catalog for the process. The defect was that
+    /// the state justifying it was FROZEN at construction: nothing anywhere
+    /// ever set `availability_probe_completed` back to `true`, so after one
+    /// boot stall every `/fusion` in that process kept selecting panels on
+    /// providers with no credential at all — even after
+    /// `FusionCatalogRefresher::refresh_inner` had re-run the SAME probe
+    /// (`compute_availability_with_isolation`) over the full boot credential
+    /// source list on a `/connect`/`/login` and published a complete,
+    /// authoritative map into the very lock `list()` reads.
+    ///
+    /// This drives the real refresher (not a hand-written map poke), so it
+    /// pins the WIRING: a re-probe that genuinely completed and observed an
+    /// available row must re-arm filtering, and the uncredentialed row must
+    /// disappear on the next `list()`.
+    #[tokio::test]
+    async fn a_completed_reprobe_re_arms_availability_filtering_after_a_boot_probe_timeout() {
+        use async_trait::async_trait;
+        use fusion::ModelSource as _;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+        use std::collections::HashMap;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct MemStorage {
+            map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+        }
+        #[async_trait]
+        impl SecureStorage for MemStorage {
+            async fn store(
+                &self,
+                service: &str,
+                account: &str,
+                data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .insert((service.into(), account.into()), data);
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .get(&(service.into(), account.into()))
+                    .cloned())
+            }
+            async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .remove(&(service.into(), account.into()));
+                Ok(())
+            }
+            async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .filter(|(s, _)| s == service)
+                    .map(|(_, a)| a.clone())
+                    .collect())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+        // A real, readable credential, so the re-probe below genuinely
+        // OBSERVES an available row — the only condition under which
+        // re-arming is safe (a degraded broker answers `Ok(false)` for
+        // everything; re-arming on that would resurrect the round-5
+        // finding [5] "permanently empty Fusion catalog" failure).
+        credentials
+            .set_provider_key("openrouter", "sk-or-test-round7")
+            .await
+            .expect("store openrouter key");
+
+        let credential_sources: Vec<provider_config::CredentialSource> = ["openrouter", "groq"]
+            .iter()
+            .map(|name| provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::OpenAICompatible {
+                    name: (*name).to_string(),
+                },
+                profile_name: (*name).to_string(),
+                credential_id: (*name).to_string(),
+                env_var: None,
+                kind: provider_config::CredentialKind::Keychain,
+            })
+            .collect();
+
+        // Boot state after a TIMED-OUT probe: no rows at all, and the
+        // completion flag `false`.
+        let availability = Arc::new(std::sync::RwLock::new(
+            std::collections::BTreeMap::<String, bool>::new(),
+        ));
+        let probe_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let unfiltered = vec![
+            fusion_catalog_row("openrouter", "some-model"),
+            fusion_catalog_row("groq", "another-model"),
+        ];
+        let source = FusionCatalogModelSource {
+            unfiltered,
+            availability: availability.clone(),
+            anthropic_probe_definitive: true,
+            availability_probe_completed: probe_completed.clone(),
+            session_model_restriction: None,
+        };
+
+        // Fail-open while the probe is unknown: both rows survive. This half
+        // is the already-adjudicated finding [7] behaviour and must not
+        // change.
+        let before = source.list();
+        assert_eq!(
+            before.len(),
+            2,
+            "a timed-out boot probe must fail OPEN, not empty the catalog: got {before:?}"
+        );
+
+        let refresher = FusionCatalogRefresher {
+            availability: availability.clone(),
+            availability_probe_completed: probe_completed.clone(),
+            credentials: credentials.clone(),
+            credential_sources,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: false,
+        };
+        refresher.refresh_after_credential_write("openrouter").await;
+
+        assert!(
+            probe_completed.load(std::sync::atomic::Ordering::Relaxed),
+            "a re-probe that completed and observed an available row must \
+re-arm the availability filter for the rest of the process"
+        );
+        let after = source.list();
+        assert_eq!(
+            after.len(),
+            1,
+            "after an authoritative re-probe the uncredentialed `groq` row \
+must be filtered out — leaving it in is what made every /fusion in a \
+stalled-boot process reserve budget for, spawn, and fail panels on \
+providers with no credential: got {after:?}"
+        );
+        assert_eq!(after[0].profile, "openrouter", "got: {after:?}");
+    }
+
+    /// The negative half of the same class (round-5 finding [5] must not
+    /// regress): a re-probe that completes but observes NOTHING available —
+    /// the shape a degraded macOS credential broker produces, where
+    /// `SecureStorage::contains` answers `Ok(false)` rather than erroring —
+    /// must NOT re-arm the filter. Re-arming there would publish an
+    /// all-`false` map as authoritative and empty the Fusion catalog
+    /// (`TooFewModels{eligible:0}`) for the rest of the process, which is
+    /// strictly worse than the over-broad catalog the fail-open leaves.
+    #[tokio::test]
+    async fn a_degraded_reprobe_must_not_re_arm_availability_filtering() {
+        use async_trait::async_trait;
+        use fusion::ModelSource as _;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+
+        struct DegradedStorage;
+        #[async_trait]
+        impl SecureStorage for DegradedStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(None)
+            }
+            async fn delete(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(Vec::new())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(DegradedStorage);
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        let credential_sources: Vec<provider_config::CredentialSource> = ["openrouter", "groq"]
+            .iter()
+            .map(|name| provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::OpenAICompatible {
+                    name: (*name).to_string(),
+                },
+                profile_name: (*name).to_string(),
+                credential_id: (*name).to_string(),
+                env_var: None,
+                kind: provider_config::CredentialKind::Keychain,
+            })
+            .collect();
+
+        let availability = Arc::new(std::sync::RwLock::new(
+            std::collections::BTreeMap::<String, bool>::new(),
+        ));
+        let probe_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let source = FusionCatalogModelSource {
+            unfiltered: vec![
+                fusion_catalog_row("openrouter", "some-model"),
+                fusion_catalog_row("groq", "another-model"),
+            ],
+            availability: availability.clone(),
+            anthropic_probe_definitive: true,
+            availability_probe_completed: probe_completed.clone(),
+            session_model_restriction: None,
+        };
+
+        let refresher = FusionCatalogRefresher {
+            availability,
+            availability_probe_completed: probe_completed.clone(),
+            credentials,
+            credential_sources,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: false,
+        };
+        refresher.refresh().await;
+
+        assert!(
+            !probe_completed.load(std::sync::atomic::Ordering::Relaxed),
+            "a re-probe that observed no available row is indistinguishable \
+from a degraded credential broker and must NOT re-arm filtering"
+        );
+        assert_eq!(
+            source.list().len(),
+            2,
+            "the catalog must stay fail-open after a degraded re-probe"
+        );
+    }
+
+    /// Round-9 finding [3]: the same negative half as
+    /// `a_degraded_reprobe_must_not_re_arm_availability_filtering`, on the
+    /// install shape where the gate was INERT — one that booted with an
+    /// Anthropic API key.
+    ///
+    /// `compute_availability_with_isolation` resolves `anthropic-api-key` /
+    /// `anthropic-oauth` / `openai-chatgpt` from booleans frozen at
+    /// `FusionCatalogRefresher` construction, WITHOUT reading storage
+    /// (provider-config/src/availability.rs). A row that never consulted the
+    /// credential backend therefore cannot testify that the backend answered,
+    /// so counting it in `probe_observed_an_available_row` made the gate
+    /// always-true on every Anthropic-authenticated install — exactly the
+    /// installs where a degraded broker would otherwise arm an all-`false`
+    /// map as authoritative and drop the user's genuinely credentialed
+    /// OpenRouter/DeepSeek rows from Fusion's catalog for the rest of the
+    /// process.
+    #[tokio::test]
+    async fn a_frozen_anthropic_boot_boolean_must_not_re_arm_availability_filtering() {
+        use async_trait::async_trait;
+        use fusion::ModelSource as _;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+
+        // The documented degraded-broker shape: every read answers
+        // `Ok(None)`/`Ok(false)` instead of erroring (round-5 finding [5]).
+        struct DegradedStorage;
+        #[async_trait]
+        impl SecureStorage for DegradedStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(None)
+            }
+            async fn delete(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(Vec::new())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(DegradedStorage);
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        // The boot credential-source list of an Anthropic-API-key install
+        // that also has OpenRouter and DeepSeek keys in the keychain.
+        let mut credential_sources = vec![provider_config::CredentialSource {
+            provider_id: llm_client::ProviderId::AnthropicFirstParty,
+            profile_name: "anthropic".to_string(),
+            credential_id: "anthropic-api-key".to_string(),
+            env_var: None,
+            kind: provider_config::CredentialKind::ApiKey,
+        }];
+        credential_sources.extend(["openrouter", "deepseek"].iter().map(|name| {
+            provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::OpenAICompatible {
+                    name: (*name).to_string(),
+                },
+                profile_name: (*name).to_string(),
+                credential_id: (*name).to_string(),
+                env_var: None,
+                kind: provider_config::CredentialKind::Keychain,
+            }
+        }));
+
+        // Boot state after a TIMED-OUT probe: no rows, flag `false`.
+        let availability = Arc::new(std::sync::RwLock::new(
+            std::collections::BTreeMap::<String, bool>::new(),
+        ));
+        let probe_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let source = FusionCatalogModelSource {
+            unfiltered: vec![
+                fusion_catalog_row("openrouter", "some-model"),
+                fusion_catalog_row("deepseek", "another-model"),
+            ],
+            availability: availability.clone(),
+            anthropic_probe_definitive: true,
+            availability_probe_completed: probe_completed.clone(),
+            session_model_restriction: None,
+        };
+        assert_eq!(
+            source.list().len(),
+            2,
+            "precondition: a timed-out boot probe fails OPEN"
+        );
+
+        let refresher = FusionCatalogRefresher {
+            availability,
+            availability_probe_completed: probe_completed.clone(),
+            credentials,
+            credential_sources,
+            // The install shape that defeated the gate.
+            anthropic_has_api_key: fusion_route_flag(true),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+        refresher.refresh().await;
+
+        assert!(
+            !probe_completed.load(std::sync::atomic::Ordering::Relaxed),
+            "the `anthropic` row's `available: true` comes from a boot boolean \
+that never reads the credential backend, so it must NOT satisfy the \
+probe-completion gate on a degraded re-probe"
+        );
+        let after = source.list();
+        let profiles: Vec<&str> = after.iter().map(|row| row.profile.as_str()).collect();
+        assert_eq!(
+            profiles,
+            vec!["openrouter", "deepseek"],
+            "arming on a frozen boot boolean publishes the degraded probe's \
+all-false map as authoritative and drops both credentialed profiles from \
+Fusion's catalog for the rest of the process: got {after:?}"
+        );
+    }
+
+    /// Round-9 finding [3], second member of the same class: a generic
+    /// profile resolves as `keychain_has || env_set`
+    /// (provider-config/src/availability.rs), so an ambient env var alone
+    /// makes its row `available` without the credential backend having
+    /// answered anything. Such a row must not satisfy the re-arm gate either.
+    #[tokio::test]
+    async fn an_env_var_only_row_must_not_re_arm_availability_filtering() {
+        use async_trait::async_trait;
+        use fusion::ModelSource as _;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+
+        struct DegradedStorage;
+        #[async_trait]
+        impl SecureStorage for DegradedStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(None)
+            }
+            async fn delete(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(Vec::new())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        // A var name unique to this test, so no other test observes it.
+        const ENV_VAR: &str = "LINGXI_ROUND9_ENV_ONLY_PROVIDER_KEY";
+        std::env::set_var(ENV_VAR, "sk-ambient");
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(DegradedStorage);
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        let credential_sources = vec![
+            provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::OpenAICompatible {
+                    name: "envrouter".to_string(),
+                },
+                profile_name: "envrouter".to_string(),
+                credential_id: "envrouter".to_string(),
+                env_var: Some(ENV_VAR.to_string()),
+                kind: provider_config::CredentialKind::ApiKey,
+            },
+            provider_config::CredentialSource {
+                provider_id: llm_client::ProviderId::OpenAICompatible {
+                    name: "deepseek".to_string(),
+                },
+                profile_name: "deepseek".to_string(),
+                credential_id: "deepseek".to_string(),
+                env_var: None,
+                kind: provider_config::CredentialKind::Keychain,
+            },
+        ];
+
+        let availability = Arc::new(std::sync::RwLock::new(
+            std::collections::BTreeMap::<String, bool>::new(),
+        ));
+        let probe_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let source = FusionCatalogModelSource {
+            unfiltered: vec![
+                fusion_catalog_row("envrouter", "some-model"),
+                fusion_catalog_row("deepseek", "another-model"),
+            ],
+            availability: availability.clone(),
+            anthropic_probe_definitive: true,
+            availability_probe_completed: probe_completed.clone(),
+            session_model_restriction: None,
+        };
+
+        let refresher = FusionCatalogRefresher {
+            availability,
+            availability_probe_completed: probe_completed.clone(),
+            credentials,
+            credential_sources,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: false,
+        };
+        refresher.refresh().await;
+        std::env::remove_var(ENV_VAR);
+
+        assert!(
+            !probe_completed.load(std::sync::atomic::Ordering::Relaxed),
+            "an `available` row that came from an ambient env var, not from a \
+storage read, must NOT satisfy the probe-completion gate"
+        );
+        let after = source.list();
+        assert_eq!(
+            after.len(),
+            2,
+            "the catalog must stay fail-open when the only `available` row was \
+env-derived: got {after:?}"
+        );
+    }
+
+    /// Round-10 finding N6: the round-9 gate traded a false POSITIVE for a
+    /// false NEGATIVE. `row_availability_came_from_storage` rejects the three
+    /// special-cased credential ids, so on an install whose credential
+    /// sources are ONLY those ids (an Anthropic-only or ChatGPT-only
+    /// install) NO row can ever satisfy the gate and round-7's recovery
+    /// path became unreachable: one 5s boot-probe stall left
+    /// `filter_fusion_catalog` failing open for the rest of the process, so
+    /// every `/fusion` kept reserving budget for and spawning panels on
+    /// profiles with no credential at all.
+    ///
+    /// The correct criterion is not "some row came from storage and said
+    /// yes" but "nothing in this probe could have been a lie from a degraded
+    /// backend": when NO row's verdict depended on a storage read, the
+    /// degraded-broker hypothesis the gate exists to guard against cannot
+    /// apply, and the probe reproduces exactly what a boot probe that did
+    /// not stall would have published.
+    #[tokio::test]
+    async fn an_anthropic_only_install_can_still_re_arm_availability_filtering() {
+        use async_trait::async_trait;
+        use fusion::ModelSource as _;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+
+        // The documented degraded-broker shape (round-5 finding [5]): every
+        // read answers `Ok(None)`/`Ok(false)` instead of erroring. It is
+        // never consulted for the three special-cased ids, which is the
+        // whole point: this probe's verdict does not depend on it.
+        struct DegradedStorage;
+        #[async_trait]
+        impl SecureStorage for DegradedStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(None)
+            }
+            async fn delete(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(Vec::new())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(DegradedStorage);
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        // The boot credential-source list of an Anthropic-OAuth-only
+        // install: `provider_config::assemble` emits no other source.
+        let credential_sources = vec![provider_config::CredentialSource {
+            provider_id: llm_client::ProviderId::AnthropicFirstParty,
+            profile_name: "anthropic".to_string(),
+            credential_id: "anthropic-oauth".to_string(),
+            env_var: None,
+            kind: provider_config::CredentialKind::OAuth,
+        }];
+
+        // Boot state after a TIMED-OUT probe: no rows, flag `false`.
+        let availability = Arc::new(std::sync::RwLock::new(
+            std::collections::BTreeMap::<String, bool>::new(),
+        ));
+        let probe_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let source = FusionCatalogModelSource {
+            unfiltered: vec![
+                fusion_catalog_row("anthropic", "claude-model"),
+                fusion_catalog_row("openrouter", "some-model"),
+            ],
+            availability: availability.clone(),
+            anthropic_probe_definitive: true,
+            availability_probe_completed: probe_completed.clone(),
+            session_model_restriction: None,
+        };
+        assert_eq!(
+            source.list().len(),
+            2,
+            "precondition: a timed-out boot probe fails OPEN"
+        );
+
+        let refresher = FusionCatalogRefresher {
+            availability,
+            availability_probe_completed: probe_completed.clone(),
+            credentials,
+            credential_sources,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(true),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: true,
+        };
+        refresher.refresh_after_credential_write("anthropic-oauth").await;
+
+        assert!(
+            probe_completed.load(std::sync::atomic::Ordering::Relaxed),
+            "no row in this probe consulted the credential backend, so a \
+degraded broker could not have produced this result: the re-probe is \
+authoritative and MUST re-arm the availability filter a stalled boot \
+probe disabled"
+        );
+        let after = source.list();
+        let profiles: Vec<&str> = after.iter().map(|row| row.profile.as_str()).collect();
+        assert_eq!(
+            profiles,
+            vec!["anthropic"],
+            "after an authoritative re-probe the uncredentialed `openrouter` \
+row must be filtered out; leaving it in is the permanent fail-open that \
+makes every /fusion spawn a panel answering LlmError::Authentication: \
+got {after:?}"
+        );
+    }
+
+    /// Round-10 finding N6, second shape of the same false negative: a
+    /// NON-isolated process in which every generic profile carries a set
+    /// `env_var`. `row_availability_came_from_storage` rejects each such row
+    /// (its `true` can come entirely from the ambient environment), so the
+    /// round-9 gate could never be satisfied there either — even though a
+    /// degraded credential backend cannot change ANY of those verdicts.
+    #[tokio::test]
+    async fn an_all_env_var_install_can_still_re_arm_availability_filtering() {
+        use async_trait::async_trait;
+        use fusion::ModelSource as _;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+
+        struct DegradedStorage;
+        #[async_trait]
+        impl SecureStorage for DegradedStorage {
+            async fn store(
+                &self,
+                _service: &str,
+                _account: &str,
+                _data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(None)
+            }
+            async fn delete(
+                &self,
+                _service: &str,
+                _account: &str,
+            ) -> Result<(), SecureStorageError> {
+                Ok(())
+            }
+            async fn list(&self, _service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(Vec::new())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        // A var name unique to this test, so no other test observes it.
+        const ENV_VAR: &str = "LINGXI_ROUND10_ALL_ENV_PROVIDER_KEY";
+        std::env::set_var(ENV_VAR, "sk-ambient");
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(DegradedStorage);
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        let credential_sources = vec![provider_config::CredentialSource {
+            provider_id: llm_client::ProviderId::OpenAICompatible {
+                name: "envrouter".to_string(),
+            },
+            profile_name: "envrouter".to_string(),
+            credential_id: "envrouter".to_string(),
+            env_var: Some(ENV_VAR.to_string()),
+            kind: provider_config::CredentialKind::ApiKey,
+        }];
+
+        let availability = Arc::new(std::sync::RwLock::new(
+            std::collections::BTreeMap::<String, bool>::new(),
+        ));
+        let probe_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let source = FusionCatalogModelSource {
+            unfiltered: vec![
+                fusion_catalog_row("envrouter", "some-model"),
+                fusion_catalog_row("deepseek", "another-model"),
+            ],
+            availability: availability.clone(),
+            anthropic_probe_definitive: true,
+            availability_probe_completed: probe_completed.clone(),
+            session_model_restriction: None,
+        };
+        assert_eq!(
+            source.list().len(),
+            2,
+            "precondition: a timed-out boot probe fails OPEN"
+        );
+
+        let refresher = FusionCatalogRefresher {
+            availability,
+            availability_probe_completed: probe_completed.clone(),
+            credentials,
+            credential_sources,
+            anthropic_has_api_key: fusion_route_flag(false),
+            anthropic_has_oauth: fusion_route_flag(false),
+            openai_chatgpt_available: fusion_route_flag(false),
+            isolated: false,
+        };
+        refresher.refresh().await;
+        std::env::remove_var(ENV_VAR);
+
+        assert!(
+            probe_completed.load(std::sync::atomic::Ordering::Relaxed),
+            "every row's verdict here is env-derived and storage-independent, \
+so a degraded credential backend could not have produced it: the re-probe \
+is authoritative and MUST re-arm the availability filter"
+        );
+        let after = source.list();
+        let profiles: Vec<&str> = after.iter().map(|row| row.profile.as_str()).collect();
+        assert_eq!(
+            profiles,
+            vec!["envrouter"],
+            "after an authoritative re-probe the uncredentialed `deepseek` row \
+must be filtered out: got {after:?}"
+        );
+    }
+
+    /// F007: `desktop_fusion_runtime_config` must route through
+    /// `load_effective_settings_for_config` — the SAME managed/CLI/scoped
+    /// loader every other setting uses — not a bare `Settings::load` that
+    /// never even looks at a managed tier (`SupplementalLayers::default()`).
+    /// A managed-only `fusion.enabled=true` (no project/user file at all)
+    /// must be honored; the pre-fix bare loader would have returned the
+    /// documented default (`enabled: false`) regardless.
+    #[tokio::test]
+    async fn desktop_fusion_runtime_config_honors_a_managed_only_tier() {
+        let _guard = MANAGED_ENV_LOCK.lock().unwrap();
+        let (_tmp, cfg) = test_config(true);
+        let managed_tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            managed_tmp.path().join("managed-settings.json"),
+            r#"{"fusion":{"enabled":true,"allowCrossProviderForAgent":false}}"#,
+        )
+        .expect("write managed settings");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, managed_tmp.path());
+        let managed_tiers = super::settings_watch::managed_settings_raw_tiers().await;
+
+        let config =
+            desktop_fusion_runtime_config(&cfg, &managed_tiers).expect("valid fusion config");
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+
+        assert!(
+            config.enabled,
+            "a managed-only fusion.enabled=true must be honored"
+        );
+        assert!(!config.allow_cross_provider_for_agent);
+    }
+
+    /// F007: a managed `fusion.allowCrossProviderForAgent=false` must beat a
+    /// PROJECT-tier `true` — precisely the precedence the bare `Settings::load`
+    /// (no `managed_layers`, no `cli_layer`) could never enforce.
+    #[tokio::test]
+    async fn desktop_fusion_runtime_config_managed_tier_beats_project_tier() {
+        let _guard = MANAGED_ENV_LOCK.lock().unwrap();
+        let (_tmp, mut cfg) = test_config(true);
+        // Give "user" settings a separate home so writing PROJECT settings
+        // below does not collide with it (both default under `cwd/.lingxi`
+        // in `test_config`).
+        let user_home_tmp = tempfile::tempdir().expect("tempdir");
+        cfg.lingxi_home = user_home_tmp.path().to_path_buf();
+
+        let project_settings_path = lingxi_core::settings::loader::project_settings_path(&cfg.cwd);
+        std::fs::create_dir_all(
+            project_settings_path
+                .parent()
+                .expect("project settings path has a parent"),
+        )
+        .expect("create project .lingxi dir");
+        std::fs::write(
+            &project_settings_path,
+            r#"{"fusion":{"allowCrossProviderForAgent":true}}"#,
+        )
+        .expect("write project settings");
+
+        let managed_tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            managed_tmp.path().join("managed-settings.json"),
+            r#"{"fusion":{"allowCrossProviderForAgent":false}}"#,
+        )
+        .expect("write managed settings");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, managed_tmp.path());
+        let managed_tiers = super::settings_watch::managed_settings_raw_tiers().await;
+
+        let config =
+            desktop_fusion_runtime_config(&cfg, &managed_tiers).expect("valid fusion config");
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+
+        assert!(
+            !config.allow_cross_provider_for_agent,
+            "managed fusion.allowCrossProviderForAgent=false must beat project's true"
         );
     }
 
@@ -20315,6 +24764,216 @@ mod workspace_lease_forwarding_tests {
             *seen.lock().unwrap(),
             Some(Some(77)),
             "the deferred invoker must forward the lease token, not swallow it"
+        );
+    }
+}
+
+/// Round-5 review item 11's class member (1), handed to the gate by that
+/// fixer's `needs_other_file`: the connect LOOP inside
+/// [`build_agent_mcp_tool_set`] is one await EARLIER than the
+/// `pool.allocate` window `agent::handle::McpCleanupGuard` now covers, and
+/// its half-built `cleanups` vec had no owner at all.
+#[cfg(test)]
+mod desktop_agent_mcp_cleanup_guard_tests {
+    use platform_api::{
+        ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
+        McpNotificationStream, McpRawConnection, McpResourceContentDto, McpResourceDto,
+        McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+    };
+    use protocol::McpConnectionId;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Its `connect` never resolves, so the connect loop's SECOND iteration
+    /// parks forever inside `connect_agent_scoped` — at which point the FIRST
+    /// server is already live and its cleanup handle already sits in the
+    /// function's local `cleanups` vec. Dropping the future there is exactly
+    /// the Fusion `join_set.abort_all()` race the finding describes.
+    struct HangingConnectTransport;
+
+    #[async_trait::async_trait]
+    impl McpTransport for HangingConnectTransport {
+        async fn connect(&self, _spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            std::future::pending::<()>().await;
+            unreachable!("pending() never resolves")
+        }
+
+        async fn connect_and_initialize(
+            &self,
+            _spec: &McpTransportSpec,
+            _options: McpConnectOptions,
+        ) -> Result<McpConnectResult, McpError> {
+            // Overridden: the trait default wraps `connect` in a DEADLINE, and
+            // a deadline would let the loop move on instead of parking.
+            std::future::pending::<()>().await;
+            unreachable!("pending() never resolves")
+        }
+
+        async fn initialize(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<ServerCapabilitiesDto, McpError> {
+            unreachable!("connect never resolves")
+        }
+
+        async fn list_tools(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<Vec<platform_api::McpToolDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_resources(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<Vec<McpResourceDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_prompts(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<Vec<platform_api::McpPromptDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn call_tool(
+            &self,
+            _conn: &McpRawConnection,
+            _tool: &str,
+            _input: serde_json::Value,
+        ) -> Result<McpToolResultDto, McpError> {
+            unreachable!("unused")
+        }
+
+        async fn read_resource(
+            &self,
+            _conn: &McpRawConnection,
+            _uri: &str,
+        ) -> Result<McpResourceContentDto, McpError> {
+            unreachable!("unused")
+        }
+
+        async fn ping(&self, _conn_id: McpConnectionId) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn notifications(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<McpNotificationStream, McpError> {
+            Err(McpError::Connection("unused".into()))
+        }
+
+        async fn handle_elicitation(
+            &self,
+            _conn: &McpRawConnection,
+            _req: ElicitRequestDto,
+        ) -> Result<ElicitResultDto, McpError> {
+            Ok(ElicitResultDto {
+                data: serde_json::json!({ "action": "cancel" }),
+            })
+        }
+
+        async fn disconnect(&self, _conn_id: McpConnectionId) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        fn supported_transports(&self) -> Vec<McpTransportKind> {
+            vec![McpTransportKind::Stdio, McpTransportKind::Http]
+        }
+    }
+
+    fn record_spec(name: &str) -> agent::AgentMcpServerSpec {
+        let mut server = serde_json::Map::new();
+        server.insert(
+            name.into(),
+            serde_json::json!({ "command": "unused-in-test" }),
+        );
+        agent::AgentMcpServerSpec::Record(server)
+    }
+
+    #[tokio::test]
+    async fn a_dropped_connect_loop_tears_down_the_servers_it_already_opened() {
+        let agent_id = protocol::AgentId::new();
+        let opened_key = mcp::registry::agent_scope_table_key(agent_id, "opened");
+        let registry = Arc::new(mcp::McpRegistry::new(Arc::new(HangingConnectTransport)));
+        // `opened` is already live, so `connect_agent_scoped` short-circuits
+        // on it and the loop pushes its cleanup handle; `hangs` is not, so
+        // its connect parks in the transport forever.
+        let config = mcp::build_server_from_json_entry(
+            "opened",
+            &serde_json::json!({ "command": "unused-in-test" }),
+            mcp::ConfigScope::Agent,
+        )
+        .expect("agent MCP config parses");
+        registry.connections.write().await.insert(
+            opened_key.clone(),
+            mcp::McpConnectionState::Connected {
+                config,
+                connection_id: protocol::McpConnectionId::new(),
+                capabilities: platform_api::ServerCapabilitiesDto {
+                    tools: true,
+                    resources: false,
+                    prompts: false,
+                    logging: false,
+                    directory_read: false,
+                    experimental: std::collections::HashMap::new(),
+                    extensions: std::collections::HashMap::new(),
+                },
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                tools: vec![],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+
+        let mut def = agent::parse_agent_from_json(
+            "tester",
+            &serde_json::json!({"description": "d", "prompt": "p"}),
+            agent::AgentSource::Project,
+        )
+        .expect("agent definition parses");
+        def.mcp_servers = vec![record_spec("opened"), record_spec("hangs")];
+
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.mcp_registry = Some(registry.clone());
+
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(300),
+            super::build_agent_mcp_tool_set(registry.clone(), ctx, false, false, agent_id, def),
+        )
+        .await;
+        assert!(
+            outcome.is_err(),
+            "sanity: the second server's connect must still be parked when the \
+future is dropped — otherwise this test is not exercising the drop window"
+        );
+
+        // The guard's teardown is spawned onto the runtime, exactly like
+        // `SpawnDeallocGuard`'s; give it a bounded window to land.
+        let mut still_connected = true;
+        for _ in 0..200 {
+            if !registry.connections.read().await.contains_key(&opened_key) {
+                still_connected = false;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !still_connected,
+            "the MCP server the connect loop had ALREADY opened ({opened_key}) must be \
+disconnected when the future is dropped mid-loop — the half-built `cleanups` vec is \
+a plain local that no caller has ever seen, so nothing else can ever tear it down"
         );
     }
 }

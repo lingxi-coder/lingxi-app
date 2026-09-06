@@ -619,11 +619,58 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             decision,
             final_text: "FUSION_FINAL".into(),
             analysis: None,
-            panels: vec![],
+            // 3 panels (the quality preset count every fixture in this file
+            // wires) — F008's spawn-quota release compares `panel_n` against
+            // `result.panels.len()`, so a fixture with an EMPTY panel vec
+            // would make a successful run look like it spawned zero panels
+            // and release the whole reservation.
+            panels: (1..=3)
+                .map(|n| platform_api::PanelOutcome {
+                    panel_id: format!("P{n}"),
+                    status: platform_api::PanelRunStatus::Completed,
+                    duration_ms: 100,
+                    error_category: None,
+                    error_detail: None,
+                    usage: None,
+                })
+                .collect(),
             usage: platform_api::FusionUsage::default(),
             timing: platform_api::FusionTiming::default(),
             egress_profiles: vec!["anthropic".into()],
         }
+    }
+
+    /// G008: `fusion_tool_result`'s `data["subagentHooksFired"]` is the
+    /// marker the orchestrator's subagent-hook chokepoint
+    /// (`turn_loop.rs`'s `is_fusion_result` — see its
+    /// `runner_fired_start && real_agent_id.is_none()` check) reads to tell
+    /// a Fusion result apart from an ordinary Agent-tool result and skip
+    /// BOTH the phantom `SubagentStart` and `SubagentStop` it would
+    /// otherwise fire. Both halves of that discriminator are pinned here
+    /// directly on the producer, not just on the orchestrator-side
+    /// `FakeFusionTool` fixture that duplicates this shape: the field must
+    /// be `true`, and `agentId` — the field an ordinary Agent-tool result
+    /// always carries (see the sibling `"agentId": agent_id_str` literal a
+    /// few thousand lines up in `agent.rs`) — must be ABSENT, since its
+    /// presence is what makes the chokepoint treat a result as attributable
+    /// to one real child agent.
+    #[test]
+    fn fusion_tool_result_marks_subagent_hooks_fired_with_no_agent_id() {
+        let result = sample_fusion_result(platform_api::FusionStatus::Completed);
+        let call_result = fusion_tool_result(result);
+        assert_eq!(
+            call_result.data["subagentHooksFired"],
+            serde_json::json!(true),
+            "fusion_tool_result must mark subagentHooksFired=true: {:?}",
+            call_result.data
+        );
+        assert!(
+            call_result.data.get("agentId").is_none(),
+            "fusion_tool_result must NOT carry an agentId (that presence is what tells \
+             turn_loop.rs's chokepoint apart a real single-child Agent result from a Fusion \
+             result): {:?}",
+            call_result.data
+        );
     }
 
     struct ScriptedFusion {
@@ -665,6 +712,78 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         }
     }
 
+    /// Enabled Fusion whose `run()` always returns a scripted [`FusionError`]
+    /// — for F008's error-mapping and spawn-quota-on-Err tests.
+    struct ErroringFusion {
+        error: platform_api::FusionError,
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for ErroringFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            Err(self.error.clone())
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn resolve_parent_profile(
+            &self,
+            _parent_model: &str,
+            explicit_profile: Option<&str>,
+        ) -> Option<String> {
+            explicit_profile
+                .map(str::to_string)
+                .or_else(|| Some("resolved-profile".into()))
+        }
+    }
+
+    /// Mirrors `RejectedFusionExecutor` (apps/engine-desktop) — a
+    /// composition-root-pinned rejection surfaced through `preflight_error()`
+    /// while `agent_surface().enabled` stays `false` (F008): the not-found
+    /// gate must never win the race against the real stored error.
+    struct PreflightRejectedFusion {
+        error: platform_api::FusionError,
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for PreflightRejectedFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            Err(self.error.clone())
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            // `enabled: true` so the test proves `preflight_error()` wins
+            // the race against the ENABLED gate too, not merely against the
+            // disabled default.
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn preflight_error(&self) -> Option<platform_api::FusionError> {
+            Some(self.error.clone())
+        }
+    }
+
     struct CapturingFusion {
         requests: std::sync::Mutex<Vec<platform_api::FusionRequest>>,
     }
@@ -693,6 +812,130 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 ..platform_api::FusionAgentSurface::default()
             }
         }
+    }
+
+    /// F005: sends three scripted `FusionProgress` events through the
+    /// channel `call_fusion` hands it, mimicking what the real orchestrator
+    /// does — the fixture under test is the FORWARDER, not the orchestrator.
+    struct ProgressEmittingFusion;
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for ProgressEmittingFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            if let Some(tx) = progress {
+                for stage in [
+                    platform_api::FusionStage::ResolvingModels,
+                    platform_api::FusionStage::RunningPanels {
+                        completed: 1,
+                        total: 3,
+                    },
+                    platform_api::FusionStage::Completed,
+                ] {
+                    let _ = tx
+                        .send(platform_api::FusionProgress {
+                            message: stage.label(),
+                            stage,
+                            panel_id: None,
+                        realized_output_tokens: None,
+                        egress_profiles: None,
+                        panels_allocated: None,
+                    })
+                        .await;
+                }
+            }
+            Ok(sample_fusion_result(platform_api::FusionStatus::Completed))
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn resolve_parent_profile(
+            &self,
+            _parent_model: &str,
+            explicit_profile: Option<&str>,
+        ) -> Option<String> {
+            explicit_profile
+                .map(str::to_string)
+                .or_else(|| Some("resolved-profile".into()))
+        }
+    }
+
+    /// F005: the Agent-tool forwarder must key its `ToolProgress` payload
+    /// `subagent_activity` — the ONLY key `turn_loop.rs::forward_tool_progress`
+    /// recognizes and renders — with the value equal to `FusionStage::label()`.
+    /// Before this fix the forwarder keyed the payload `fusion_stage` (the raw
+    /// enum tag), which that chokepoint does not recognize, so every Fusion
+    /// progress event reached the pipe and was silently dropped there.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn fusion_progress_forwards_as_subagent_activity_with_label_text() {
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ProgressEmittingFusion));
+        let (progress_tx, mut progress_rx) = tool_api::progress::progress_channel();
+        tool.call(
+            serde_json::json!({
+                "description": "deliberate",
+                "prompt": "review this",
+                "subagent_type": "fusion"
+            }),
+            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            progress_tx,
+        )
+        .await
+        .expect("fusion call succeeds");
+        drop(tool);
+
+        let mut activity_events: Vec<(String, Option<String>)> = Vec::new();
+        while let Ok(event) = progress_rx.try_recv() {
+            if let Some(activity) = event.data.get("subagent_activity").and_then(Value::as_str) {
+                activity_events.push((
+                    activity.to_string(),
+                    event
+                        .data
+                        .get("fusion_stage")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                ));
+            }
+        }
+        assert_eq!(
+            activity_events.len(),
+            3,
+            "expected 3 forwarded subagent_activity events, got {activity_events:?}"
+        );
+        assert_eq!(
+            activity_events[0],
+            ("Resolving models".to_string(), Some("resolving_models".to_string()))
+        );
+        assert_eq!(
+            activity_events[1],
+            (
+                "Running panels 1/3".to_string(),
+                Some("running_panels".to_string())
+            )
+        );
+        assert_eq!(
+            activity_events[2],
+            ("Completed".to_string(), Some("completed".to_string()))
+        );
     }
 
     #[test]
@@ -724,11 +967,17 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ScriptedFusion {
+        // Kept as its own binding (not dropped into `.with_fusion(Arc::new(..))`
+        // inline) so `runs` can be read back AFTER the call below — the prior
+        // version of this test built-and-dropped the `Arc`, which meant a
+        // regression that made the disabled gate a no-op (and actually ran
+        // the executor) could never be caught here.
+        let fusion = Arc::new(ScriptedFusion {
             enabled: false,
             result: sample_fusion_result(platform_api::FusionStatus::Completed),
             runs: std::sync::atomic::AtomicUsize::new(0),
-        }));
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
         let prompt = tool
             .prompt(&tool_api::tool_trait::PromptOptions {
                 include_examples: false,
@@ -758,6 +1007,59 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 assert!(msg.contains("Agent type 'fusion' not found"), "{msg}");
             }
             other => panic!("expected not found, got {other:?}"),
+        }
+        assert_eq!(
+            fusion.runs.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a disabled fusion must never reach the executor"
+        );
+    }
+
+    /// [round-2 review, finding 20] The Fusion not-found tail must apply the
+    /// SAME `Agent(<type>)` deny filter every other `Available agents:` tail
+    /// in this file applies (see `prompt_filters_denied_agent_types`) —
+    /// before the fix `fusion_available_agents_display` rendered the raw
+    /// catalog with no deny filtering at all, so the model could be steered
+    /// into dispatching a denied type and getting hard-rejected on the very
+    /// next turn.
+    #[tokio::test]
+    async fn fusion_not_found_tail_excludes_denied_agent_types() {
+        let spawner = arc_mock_spawner();
+        let mut bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        bctx.permission_gate = Some(Arc::new(DenyExploreGate));
+        // No `.with_fusion(...)` — `self.fusion` is `None`, hitting the
+        // executor-absent not-found branch that renders
+        // `fusion_available_agents_display`.
+        let tool = AgentTool::new(bctx);
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("general-purpose"),
+                    "general-purpose should remain available; {msg}"
+                );
+                assert!(
+                    !msg.contains("Explore"),
+                    "a denied agent type must not appear as a Fusion not-found suggestion: {msg}"
+                );
+            }
+            other => panic!("expected not found InvalidInput, got {other:?}"),
         }
     }
 
@@ -815,6 +1117,1562 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             "one fusion call reserves 3 panel slots, not a wrapper slot"
         );
         assert_eq!(fusion.runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// [round-4 review, finding 17] `call_fusion` emits `AGENT_COMPLETED_M4_05`
+    /// on a successful run (agent.rs's `Ok` arm) but, before this fix, never
+    /// emitted the matching `AGENT_STARTED` — the pair every OTHER
+    /// successful `Agent(...)` dispatch produces on the same
+    /// `invocation_id` (via `call`'s own `emit_started` call, downstream of
+    /// the Fusion intercept and therefore never reached for `fusion`). A
+    /// dashboard joining started -> completed by `invocation_id`, or
+    /// counting launches-by-type from `AGENT_STARTED`, would see this run's
+    /// completion with no matching start.
+    #[tokio::test]
+    async fn fusion_successful_run_emits_started_before_completed() {
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx_with_bus(spawner, bus).await;
+        let fusion = Arc::new(ScriptedFusion {
+            enabled: true,
+            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        tool.call(
+            serde_json::json!({
+                "description": "deliberate",
+                "prompt": "review this",
+                "subagent_type": "fusion"
+            }),
+            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_tx(),
+        )
+        .await
+        .expect("Completed is Ok");
+
+        let events = sink.events().await;
+        let started: Vec<_> = events.iter().filter(|e| e.name == AGENT_STARTED).collect();
+        let completed: Vec<_> = events
+            .iter()
+            .filter(|e| e.name == AGENT_COMPLETED_M4_05)
+            .collect();
+        assert_eq!(
+            started.len(),
+            1,
+            "exactly one AGENT_STARTED event for the successful Fusion run: {events:?}"
+        );
+        assert_eq!(
+            completed.len(),
+            1,
+            "exactly one AGENT_COMPLETED_M4_05 event: {events:?}"
+        );
+        match started[0].metadata.get("subagent_type") {
+            Some(AnalyticsValue::String(s)) => assert_eq!(s, FUSION_AGENT_TYPE),
+            other => panic!("AGENT_STARTED subagent_type must be \"fusion\": {other:?}"),
+        }
+        // Both events must carry the SAME invocation_id — a real
+        // started -> completed pair a dashboard can join on.
+        let started_id = match started[0].metadata.get("invocation_id") {
+            Some(AnalyticsValue::String(s)) => s.clone(),
+            other => panic!("AGENT_STARTED invocation_id missing: {other:?}"),
+        };
+        let completed_id = match completed[0].metadata.get("invocation_id") {
+            Some(AnalyticsValue::String(s)) => s.clone(),
+            other => panic!("AGENT_COMPLETED_M4_05 invocation_id missing: {other:?}"),
+        };
+        assert_eq!(
+            started_id, completed_id,
+            "AGENT_STARTED and AGENT_COMPLETED_M4_05 must share one invocation_id: {events:?}"
+        );
+    }
+
+    /// [round-4 review, finding 9] The Ok-path spawn-quota release counts
+    /// EVERY panel `result.panels` carries, including ones the orchestrator
+    /// finished with `error_category: Some("spawn")` — a pre-allocation
+    /// spawner rejection where no subagent was ever actually spawned (the
+    /// exact category `dispatched_egress_profiles` and
+    /// `fusion_error_is_preflight` already exclude for the identical
+    /// "did this panel really run" question). A mixed run — 2 panels
+    /// genuinely dispatched, 1 rejected before allocation, `partial_ok`
+    /// still satisfied so the orchestrator returns `Ok` — must release the
+    /// one phantom reservation slot, leaving only the 2 real spawns charged
+    /// against the session's lifetime `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`
+    /// counter. Asserting the QUOTA COUNT (not a result field) is the
+    /// judgment call this finding turns on: the tool result looks identical
+    /// either way, only `get_total_agent_spawns()` reveals the phantom
+    /// charge.
+    #[tokio::test]
+    async fn fusion_ok_result_releases_spawn_rejected_panels_from_the_quota() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner,
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let mut result = sample_fusion_result(platform_api::FusionStatus::Completed);
+        // Panel 3 never reached the subagent spawner (e.g. `PoolFull`) —
+        // the orchestrator still returns `Ok` because `partial_ok` is
+        // satisfied by the other two panels.
+        result.panels[2] = platform_api::PanelOutcome {
+            panel_id: "P3".into(),
+            status: platform_api::PanelRunStatus::Failed,
+            duration_ms: 0,
+            error_category: Some("spawn".into()),
+            error_detail: Some("pool full".into()),
+            usage: None,
+        };
+        let fusion = Arc::new(ScriptedFusion {
+            enabled: true,
+            result,
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        tool.call(
+            serde_json::json!({
+                "description": "deliberate",
+                "prompt": "review this",
+                "subagent_type": "fusion"
+            }),
+            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_tx(),
+        )
+        .await
+        .expect("2 of 3 panels succeeding under partial_ok is Ok");
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            2,
+            "the spawn-rejected panel never reached the spawner and must not \
+             stay charged against the session's lifetime spawn quota"
+        );
+    }
+
+    /// [round-6 review B2] CLASS-SWEEP SIBLING of the test above. The
+    /// fusion crate grew a SECOND `error_category` that proves no subagent
+    /// was ever created — `"not_dispatched"` (the slot was aborted or
+    /// cancelled before its task ever called the spawner; see
+    /// `fusion::panel::is_never_dispatched_category`, which fusion now uses
+    /// for every "did this panel reach the spawner" filter on its side).
+    /// The Ok arm's quota release must exclude it exactly as it excludes
+    /// `"spawn"`, or every such panel permanently burns one slot of the
+    /// session's lifetime `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` quota for
+    /// a subagent that provably never existed. As with the `"spawn"` case,
+    /// only `get_total_agent_spawns()` reveals the phantom charge — the
+    /// tool result is byte-identical either way.
+    #[tokio::test]
+    async fn fusion_ok_result_releases_not_dispatched_panels_from_the_quota() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner,
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let mut result = sample_fusion_result(platform_api::FusionStatus::Completed);
+        // Panel 3's task was killed before it ever called the spawner, so
+        // no subagent was allocated and no provider call was made.
+        result.panels[2] = platform_api::PanelOutcome {
+            panel_id: "P3".into(),
+            status: platform_api::PanelRunStatus::Failed,
+            duration_ms: 0,
+            error_category: Some("not_dispatched".into()),
+            error_detail: None,
+            usage: None,
+        };
+        let fusion = Arc::new(ScriptedFusion {
+            enabled: true,
+            result,
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        tool.call(
+            serde_json::json!({
+                "description": "deliberate",
+                "prompt": "review this",
+                "subagent_type": "fusion"
+            }),
+            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_tx(),
+        )
+        .await
+        .expect("2 of 3 panels succeeding under partial_ok is Ok");
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            2,
+            "a `not_dispatched` panel never reached the spawner and must not \
+             stay charged against the session's lifetime spawn quota"
+        );
+    }
+
+    /// [round-6 review B2] Pure counting test over the Ok arm's helper, so
+    /// the two crates' "never reached the spawner" category lists cannot
+    /// drift again without a named failure here. Pins BOTH members of the
+    /// class (`fusion::panel::is_never_dispatched_category`'s
+    /// `"spawn" | "not_dispatched"`) AND the negative side: every other
+    /// category names a panel that DID reach the spawner and may have been
+    /// billed, so it must stay charged.
+    #[test]
+    fn only_spawn_and_not_dispatched_categories_are_excluded_from_the_spawned_count() {
+        fn panel(category: Option<&str>) -> platform_api::PanelOutcome {
+            platform_api::PanelOutcome {
+                panel_id: "P".into(),
+                status: platform_api::PanelRunStatus::Failed,
+                duration_ms: 0,
+                error_category: category.map(str::to_string),
+                error_detail: None,
+                usage: None,
+            }
+        }
+        for never_dispatched in ["spawn", "not_dispatched"] {
+            assert_eq!(
+                fusion_panels_that_reached_the_spawner(&[panel(Some(never_dispatched))]),
+                0,
+                "`{never_dispatched}` proves no subagent was ever created and \
+                 must be released from the spawn reservation"
+            );
+        }
+        // Every other terminal category means the panel reached the spawner
+        // (a subagent existed and the provider may already have been called).
+        for reached in [
+            "timeout",
+            "idle_timeout",
+            "cancelled",
+            "aborted",
+            "provider",
+            "provider_cutoff",
+            "protocol",
+            "panic",
+            "max_turns",
+            "no_structured_output",
+            "schema_retry_exhausted",
+        ] {
+            assert_eq!(
+                fusion_panels_that_reached_the_spawner(&[panel(Some(reached))]),
+                1,
+                "`{reached}` names a panel that reached the spawner and must \
+                 stay charged"
+            );
+        }
+        assert_eq!(
+            fusion_panels_that_reached_the_spawner(&[panel(None)]),
+            1,
+            "a panel with no error category succeeded and is definitely a real spawn"
+        );
+        // The mixed shape the reservation surplus is computed from: 3 slots
+        // collected, one rejected pre-allocation, one killed before dispatch.
+        assert_eq!(
+            fusion_panels_that_reached_the_spawner(&[
+                panel(None),
+                panel(Some("spawn")),
+                panel(Some("not_dispatched")),
+            ]),
+            1,
+            "only the one real spawn stays charged out of three collected slots"
+        );
+    }
+
+    /// F008: `call`'s catalog-lookup dispatch intercepts `subagent_type:
+    /// "fusion"` before it ever reaches the `agent_type_deny`/`tools_denied`
+    /// checks every other subagent type passes through, so a user's
+    /// `Agent(fusion)` permission rule was silently ignored. The denial text
+    /// must be byte-identical to the ordinary catalog path's (see
+    /// `call_rejects_denied_agent_type_with_byte_exact_message`), and the
+    /// executor must never be reached.
+    #[tokio::test]
+    async fn fusion_agent_type_deny_rule_blocks_the_call_with_byte_exact_message_and_zero_runs() {
+        struct DenyFusionGate;
+        #[async_trait::async_trait]
+        impl platform_api::permission_gate::PermissionGate for DenyFusionGate {
+            async fn check(
+                &self,
+                _name: &str,
+                _input: &serde_json::Value,
+            ) -> platform_api::permission_gate::PermissionDecision {
+                platform_api::permission_gate::PermissionDecision::Allow
+            }
+            async fn agent_type_deny(&self, agent_type: &str) -> Option<String> {
+                (agent_type == FUSION_AGENT_TYPE).then(|| "localSettings".to_string())
+            }
+        }
+        let spawner = arc_mock_spawner();
+        let mut bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        bctx.permission_gate = Some(Arc::new(DenyFusionGate));
+        let fusion = Arc::new(ScriptedFusion {
+            enabled: true,
+            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(msg) => assert_eq!(
+                msg,
+                "Agent type 'fusion' has been denied by permission rule 'Agent(fusion)' from localSettings."
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert_eq!(
+            fusion.runs.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a denied Agent(fusion) rule must never reach the executor"
+        );
+    }
+
+    /// F008: a composition-root-pinned rejection (`preflight_error()`, which
+    /// `RejectedFusionExecutor` overrides for a boot-time invalid
+    /// `fusion.*` setting) must be surfaced AS ITSELF — before the `enabled`
+    /// gate — instead of masquerading as the generic "Agent type 'fusion'
+    /// not found" message every other disabled-executor path produces.
+    #[tokio::test]
+    async fn fusion_preflight_error_surfaces_invalid_configuration_before_the_not_found_gate() {
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(PreflightRejectedFusion {
+            error: platform_api::FusionError::InvalidConfiguration(
+                "fusion.maxPanel must be between 1 and 12".into(),
+            ),
+        }));
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("invalid fusion configuration"),
+                    "expected the preflight InvalidConfiguration's Display text, not the \
+                     generic not-found message: {msg}"
+                );
+                assert!(
+                    msg.contains("fusion.maxPanel must be between 1 and 12"),
+                    "{msg}"
+                );
+                assert!(!msg.contains("not found"), "{msg}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    /// F008: only a PREFLIGHT [`platform_api::FusionError`] guarantees zero
+    /// provider calls. `MinPanelsNotMet` happens AFTER every panel actually
+    /// ran, so the full `panel_n` reservation must stay charged (not
+    /// released) — otherwise a repeated failing Fusion run is free to retry
+    /// forever against `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`.
+    #[tokio::test]
+    async fn fusion_min_panels_not_met_keeps_all_reserved_spawns() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner,
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ErroringFusion {
+            error: platform_api::FusionError::MinPanelsNotMet,
+        }));
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::Internal(_)),
+            "MinPanelsNotMet must map to Internal, not InvalidInput: {err:?}"
+        );
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            3,
+            "3 panels genuinely ran before MinPanelsNotMet; none of the reservation may be released"
+        );
+    }
+
+    /// F008: `Cancelled` (a user Ctrl-C) must map to [`ToolError::Aborted`],
+    /// not `InvalidInput` — the old mapping read as "invalid input: fusion
+    /// cancelled", inviting the model to "fix" its arguments and retry a
+    /// cancelled 4-5x-cost run.
+    #[tokio::test]
+    async fn fusion_cancelled_maps_to_aborted_not_invalid_input() {
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ErroringFusion {
+            error: platform_api::FusionError::Cancelled,
+        }));
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::Aborted),
+            "Cancelled must map to Aborted: {err:?}"
+        );
+    }
+
+    /// F008: a `Cancelled` that lands AFTER at least one panel genuinely
+    /// spawned (and completed) must NOT release the reservation — mirrors
+    /// `fusion_min_panels_not_met_keeps_all_reserved_spawns` for the one
+    /// error variant that spans both sides of the panel-spawn boundary.
+    ///
+    /// [round-2 review, finding 13] Sends `RunningPanels{completed: 1, ..}`
+    /// with a `panel_id` — the shape `panel::run_panels` actually emits from
+    /// INSIDE the panel-spawn loop, after a panel has genuinely run to
+    /// completion. The previous version of this fixture sent
+    /// `completed: 0, panel_id: None` — the shape
+    /// `FusionOrchestrator::run_panel_stage` emits BEFORE any panel task is
+    /// spawned — so it modeled the PRE-spawn event while asserting the
+    /// POST-spawn "keep charged" behaviour; see
+    /// `fusion_cancelled_with_only_prespawn_progress_releases_the_full_reservation`
+    /// for the fixture that now covers that pre-spawn shape correctly.
+    struct CancelledAfterPanelSpawnFusion;
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for CancelledAfterPanelSpawnFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            if let Some(tx) = progress {
+                let stage = platform_api::FusionStage::RunningPanels {
+                    completed: 1,
+                    total: 3,
+                };
+                let _ = tx
+                    .send(platform_api::FusionProgress {
+                        message: stage.label(),
+                        stage,
+                        panel_id: Some("p1".to_string()),
+                    realized_output_tokens: None,
+                    egress_profiles: None,
+                    panels_allocated: None,
+                })
+                    .await;
+            }
+            Err(platform_api::FusionError::Cancelled)
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn resolve_parent_profile(
+            &self,
+            _parent_model: &str,
+            explicit_profile: Option<&str>,
+        ) -> Option<String> {
+            explicit_profile
+                .map(str::to_string)
+                .or_else(|| Some("resolved-profile".into()))
+        }
+    }
+
+    /// [round-2 review, finding 13] `Cancelled` observed after ONLY the
+    /// pre-spawn `RunningPanels{completed: 0, total: N}` event —
+    /// `FusionOrchestrator::run_panel_stage` emits exactly this event
+    /// BEFORE calling `panel::run_panels`, i.e. before any panel task is
+    /// spawned — must still release the full `panel_n` reservation. Before
+    /// the fix, the forwarder treated ANY `RunningPanels` event (including
+    /// this pre-spawn one) as proof a panel spawned, so a cancel landing in
+    /// that window permanently kept the whole reservation charged for
+    /// panels that never existed.
+    struct CancelledAfterPrespawnEventOnlyFusion;
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for CancelledAfterPrespawnEventOnlyFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            if let Some(tx) = progress {
+                let stage = platform_api::FusionStage::RunningPanels {
+                    completed: 0,
+                    total: 3,
+                };
+                let _ = tx
+                    .send(platform_api::FusionProgress {
+                        message: stage.label(),
+                        stage,
+                        panel_id: None,
+                        realized_output_tokens: None,
+                        egress_profiles: None,
+                        panels_allocated: None,
+                    })
+                    .await;
+            }
+            Err(platform_api::FusionError::Cancelled)
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn resolve_parent_profile(
+            &self,
+            _parent_model: &str,
+            explicit_profile: Option<&str>,
+        ) -> Option<String> {
+            explicit_profile
+                .map(str::to_string)
+                .or_else(|| Some("resolved-profile".into()))
+        }
+    }
+
+    /// F008: `Cancelled` observed BEFORE any panel spawned (the
+    /// `resolve_and_reserve` / biased-select pre-panel window) must release
+    /// the full `panel_n` reservation — a cancel that never made a provider
+    /// call must not permanently narrow
+    /// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` for agents that never
+    /// existed. `ErroringFusion` never touches the progress channel, so it
+    /// models a cancel observed strictly before `run_panel_stage`.
+    #[tokio::test]
+    async fn fusion_cancelled_before_any_panel_releases_the_full_reservation() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner,
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ErroringFusion {
+            error: platform_api::FusionError::Cancelled,
+        }));
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Aborted), "{err:?}");
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            0,
+            "no panel ever spawned before Cancelled — the full panel_n reservation must be released"
+        );
+    }
+
+    /// [round-2 review, finding 13] A `RunningPanels{completed: 0, ..}`
+    /// event alone — the shape emitted BEFORE any panel task is spawned —
+    /// must NOT be mistaken for "a panel spawned". A `Cancelled` that lands
+    /// having observed only that event must release the full reservation,
+    /// exactly like observing no progress event at all.
+    #[tokio::test]
+    async fn fusion_cancelled_with_only_prespawn_progress_releases_the_full_reservation() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner,
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool =
+            AgentTool::new(bctx).with_fusion(Arc::new(CancelledAfterPrespawnEventOnlyFusion));
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Aborted), "{err:?}");
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            0,
+            "only the pre-spawn RunningPanels{{completed:0,..}} event was observed — no panel \
+             ever spawned, so the full panel_n reservation must be released, not kept charged"
+        );
+    }
+
+    /// F008: `Cancelled` observed AFTER a genuine per-panel completion
+    /// progress event must leave the reservation charged, exactly like
+    /// `MinPanelsNotMet` — those panels made real provider calls.
+    #[tokio::test]
+    async fn fusion_cancelled_after_panels_spawned_keeps_reservation_charged() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner,
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool =
+            AgentTool::new(bctx).with_fusion(Arc::new(CancelledAfterPanelSpawnFusion));
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Aborted), "{err:?}");
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            3,
+            "a genuine per-panel completion progress event was observed before Cancelled — the \
+             reservation must stay charged"
+        );
+    }
+
+    /// [round-2 review, finding 4] A Fusion executor whose `run()` never
+    /// resolves on its own — used to prove the spawn-quota reservation
+    /// survives `call_fusion`'s OWN future being dropped mid-flight, not
+    /// just an `Ok`/`Err` return from it.
+    struct NeverCompletesFusion;
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for NeverCompletesFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            std::future::pending().await
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn resolve_parent_profile(
+            &self,
+            _parent_model: &str,
+            explicit_profile: Option<&str>,
+        ) -> Option<String> {
+            explicit_profile
+                .map(str::to_string)
+                .or_else(|| Some("resolved-profile".into()))
+        }
+    }
+
+    /// [round-2 review, finding 4] The dispatcher
+    /// (`orchestrator::turn_loop::dispatch_tool_uses_tracked_deferred`) does
+    /// not let `call_fusion` run to completion on a user interrupt — it
+    /// races the tool's call future against the SAME `CancellationToken` the
+    /// tool was handed as `ctx.cancel`, with `biased; () = cancel.cancelled()
+    /// => Err(Aborted), outcome = &mut tool_call => outcome`, and drops
+    /// `tool_call` when cancel wins. `call_fusion`'s own `Ok`/`Err` match
+    /// arms never run in that case — reproduce that EXACT shape here (a
+    /// biased select racing the pinned call future against the same token,
+    /// dropping the future when cancel wins) against an executor that never
+    /// resolves on its own, and assert the reservation is still released.
+    #[tokio::test]
+    async fn fusion_dropped_future_on_dispatcher_cancel_releases_the_full_reservation() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner,
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(NeverCompletesFusion));
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.cancel = Some(cancel.clone());
+
+        let cancel_for_task = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel_for_task.cancel();
+        });
+        // Mirrors turn_loop.rs's dispatcher verbatim: the call future is
+        // built AND raced INSIDE this inner block (turn_loop.rs:5183-5199's
+        // own `let tool_outcome = { let tool_call = ...; tokio::pin!(...);
+        // tokio::select! { ... } };`), so leaving the block drops the true
+        // owned future (not merely the `Pin<&mut _>` handle `tokio::pin!`
+        // shadows it with) the moment cancellation wins the race — exactly
+        // what strands `call_fusion`'s own `Ok`/`Err` arms.
+        let completed = {
+            let call_future = tool.call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                ctx,
+                fresh_tx(),
+            );
+            tokio::pin!(call_future);
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => false,
+                _ = &mut call_future => true,
+            }
+        };
+        assert!(!completed, "fusion call must not complete on its own");
+
+        for _ in 0..2000 {
+            if registry.get_total_agent_spawns() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            0,
+            "call_fusion's future was dropped before any panel spawned (mirrors the \
+             dispatcher's cancel-races-the-tool select) — the reservation must not leak"
+        );
+    }
+
+    /// [round-5 review, finding 10] The surplus refund has THREE members,
+    /// not one: the `Ok` arm (trims by `result.panels`), the `Err` arm, and
+    /// `FusionSpawnReservationGuard::drop` — the path the dispatcher takes
+    /// on a user interrupt, where neither match arm ever runs. Emits
+    /// `PanelsDispatched { total: 2 }` and then never resolves, so the
+    /// dropped future must leave exactly the 2 resolved panels charged out
+    /// of the 3 reserved.
+    struct DispatchesFewerPanelsThenHangsFusion {
+        /// [round-12 review, finding 3] `None` keeps the pre-round-12
+        /// fixture shape (no allocation figure published); `Some(n)` makes
+        /// the drop path see the same "a subagent provably exists" basis the
+        /// `Ok` arm reads.
+        panels_allocated: Option<u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for DispatchesFewerPanelsThenHangsFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            if let Some(tx) = progress {
+                let stage = platform_api::FusionStage::PanelsDispatched { total: 2 };
+                let _ = tx
+                    .send(platform_api::FusionProgress {
+                        message: stage.label(),
+                        stage,
+                        panel_id: None,
+                        realized_output_tokens: None,
+                        egress_profiles: None,
+                        panels_allocated: self.panels_allocated,
+                    })
+                    .await;
+            }
+            std::future::pending().await
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn resolve_parent_profile(
+            &self,
+            _parent_model: &str,
+            explicit_profile: Option<&str>,
+        ) -> Option<String> {
+            explicit_profile
+                .map(str::to_string)
+                .or_else(|| Some("resolved-profile".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn fusion_dropped_future_refunds_the_panels_that_never_resolved() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            arc_mock_spawner(),
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(
+            DispatchesFewerPanelsThenHangsFusion {
+                panels_allocated: None,
+            },
+        ));
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.cancel = Some(cancel.clone());
+        let cancel_for_task = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel_for_task.cancel();
+        });
+        let completed = {
+            let call_future = tool.call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                ctx,
+                fresh_tx(),
+            );
+            tokio::pin!(call_future);
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => false,
+                _ = &mut call_future => true,
+            }
+        };
+        assert!(!completed, "fusion call must not complete on its own");
+
+        for _ in 0..2000 {
+            if registry.get_total_agent_spawns() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            2,
+            "3 slots were reserved before model resolution, PanelsDispatched published a \
+             resolved total of 2, and the future was then dropped — exactly the 2 resolved \
+             panels stay charged and the 1 phantom slot must be released, the same trim the \
+             Ok and Err arms perform"
+        );
+    }
+
+
+    /// [round-12 review, finding 3] The drop path is the THIRD member of the
+    /// charge-decision class (`Ok` arm / `Err` arm /
+    /// `FusionSpawnReservationGuard::drop`) and reads the same
+    /// `resolved_panels` cell the `Err` arm does, so it carried the same
+    /// defect: a user interrupt after a 2-panel resolution in which the
+    /// spawner allocated only 1 child kept 2 slots charged forever. With the
+    /// allocation figure published, exactly 1 stays charged.
+    #[tokio::test]
+    async fn fusion_dropped_future_charges_only_the_panels_the_spawner_allocated() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            arc_mock_spawner(),
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(
+            DispatchesFewerPanelsThenHangsFusion {
+                panels_allocated: Some(1),
+            },
+        ));
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.cancel = Some(cancel.clone());
+        let cancel_for_task = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel_for_task.cancel();
+        });
+        let completed = {
+            let call_future = tool.call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                ctx,
+                fresh_tx(),
+            );
+            tokio::pin!(call_future);
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => false,
+                _ = &mut call_future => true,
+            }
+        };
+        assert!(!completed, "fusion call must not complete on its own");
+
+        for _ in 0..2000 {
+            if registry.get_total_agent_spawns() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            1,
+            "3 slots were reserved, 2 panels resolved but the spawner allocated a child for \
+             only 1 of them, and the future was then dropped — only the 1 subagent that \
+             provably exists may stay charged, exactly as the Ok arm's \
+             fusion_panels_that_reached_the_spawner filter would decide"
+        );
+    }
+
+    /// F008: an explicit `run_in_background: true` must be rejected rather
+    /// than silently ignored — Fusion has no background LocalFusion route
+    /// from the Agent tool (§1: Agent-origin Fusion "只写 tool_result").
+    ///
+    /// [finding 24] It must ALSO log an `AGENT_FAILED` event like every one
+    /// of its sibling rejections in `call_fusion` — before the fix this was
+    /// the one early return in the function that returned without calling
+    /// `Self::emit_failed`, leaving the dashboards that see
+    /// `agent_type_denied`/`agent_type_not_found`/etc. blind to this one.
+    #[tokio::test]
+    async fn fusion_explicit_run_in_background_true_is_rejected() {
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx_with_bus(spawner, bus).await;
+        let fusion = Arc::new(ScriptedFusion {
+            enabled: true,
+            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion",
+                    "run_in_background": true
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(msg) => assert!(msg.contains("fusion runs inline"), "{msg}"),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert_eq!(
+            fusion.runs.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "run_in_background: true must be rejected before reaching the executor"
+        );
+        let events = sink.events().await;
+        let failed: Vec<_> = events.iter().filter(|e| e.name == AGENT_FAILED).collect();
+        assert_eq!(
+            failed.len(),
+            1,
+            "exactly one AGENT_FAILED event, like every sibling rejection: {events:?}"
+        );
+        match failed[0].metadata.get("error_kind") {
+            Some(AnalyticsValue::String(s)) => assert_eq!(s, "fusion_run_in_background"),
+            other => panic!(
+                "error_kind must name this rejection specifically, got {other:?}: {:?}",
+                failed[0].metadata
+            ),
+        }
+    }
+
+    /// [round-5 review, finding 10] `call_fusion` reserves the WANTED panel
+    /// count (`fusion_panel_count`) BEFORE model resolution runs. When the
+    /// resolver ends up with FEWER eligible models than wanted (a second
+    /// provider's credential expired mid-session, say), the run really
+    /// dispatches N < `panel_n` panels — the resolved N that
+    /// `PanelsDispatched { total }` / `RunningPanels { total, .. }` publish
+    /// on the very progress channel `call_fusion`'s forwarder already
+    /// inspects. Emits `PanelsDispatched { total }` (the shape
+    /// `panel::run_panels` emits once every panel task has reached the
+    /// spawner) and then fails with a scripted terminal error.
+    struct DispatchesFewerPanelsThenFailsFusion {
+        dispatched_total: u8,
+        /// [round-12 review, finding 3] What the executor publishes as
+        /// `FusionProgress::panels_allocated` — how many panels the SPAWNER
+        /// provably allocated a child for, which is NOT the resolved
+        /// `dispatched_total` whenever the spawner rejected a panel
+        /// pre-allocation. `None` reproduces an executor that publishes no
+        /// allocation figure at all (every fixture that predates this field).
+        panels_allocated: Option<u8>,
+        error: platform_api::FusionError,
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for DispatchesFewerPanelsThenFailsFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            if let Some(tx) = progress {
+                let stage = platform_api::FusionStage::PanelsDispatched {
+                    total: self.dispatched_total,
+                };
+                let _ = tx
+                    .send(platform_api::FusionProgress {
+                        message: stage.label(),
+                        stage,
+                        panel_id: None,
+                        realized_output_tokens: None,
+                        egress_profiles: None,
+                        panels_allocated: self.panels_allocated,
+                    })
+                    .await;
+            }
+            Err(self.error.clone())
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn resolve_parent_profile(
+            &self,
+            _parent_model: &str,
+            explicit_profile: Option<&str>,
+        ) -> Option<String> {
+            explicit_profile
+                .map(str::to_string)
+                .or_else(|| Some("resolved-profile".into()))
+        }
+    }
+
+    async fn run_fusion_with_dispatched_total(
+        dispatched_total: u8,
+        error: platform_api::FusionError,
+    ) -> u64 {
+        run_fusion_with_dispatch(dispatched_total, None, error).await
+    }
+
+    async fn run_fusion_with_dispatch(
+        dispatched_total: u8,
+        panels_allocated: Option<u8>,
+        error: platform_api::FusionError,
+    ) -> u64 {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            arc_mock_spawner(),
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(DispatchesFewerPanelsThenFailsFusion {
+            dispatched_total,
+            panels_allocated,
+            error,
+        }));
+        let _ = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("scripted terminal error");
+        registry.get_total_agent_spawns()
+    }
+
+    /// [round-5 review, finding 10] EVERY runtime `Err` variant must refund
+    /// the reserved-but-never-resolved surplus, exactly as the `Ok` arm
+    /// already does — the resolved panel count is on the progress events the
+    /// forwarder inspects, so "the error itself carries no panel count" is
+    /// not a reason to keep phantom slots charged. Reserved 3 (stock
+    /// `quality_panel_count`), resolved 2 => exactly 2 stay charged.
+    /// Asserted as the registry's spawn COUNT, not the returned error.
+    #[tokio::test]
+    async fn fusion_runtime_errors_refund_the_panels_that_never_resolved() {
+        for error in [
+            platform_api::FusionError::AllPanelsFailed,
+            platform_api::FusionError::MinPanelsNotMet,
+            platform_api::FusionError::PanelSetIncomplete,
+            platform_api::FusionError::TimedOutEmpty,
+            platform_api::FusionError::Internal,
+            platform_api::FusionError::Cancelled,
+        ] {
+            let label = format!("{error:?}");
+            let charged = run_fusion_with_dispatched_total(2, error).await;
+            assert_eq!(
+                charged, 2,
+                "{label}: 3 panel slots were reserved before model resolution but only 2 panels \
+                 were ever dispatched (PanelsDispatched{{total:2}}) — exactly 2 may stay charged, \
+                 the 1 phantom slot must be released like the Ok arm already does"
+            );
+        }
+    }
+
+    /// [round-5 review, finding 10] The surplus refund must not turn into an
+    /// over-refund: when the resolved total EQUALS the reservation, a
+    /// runtime error keeps the whole reservation charged (the behaviour
+    /// `fusion_min_panels_not_met_keeps_all_reserved_spawns` and
+    /// `fusion_cancelled_after_panels_spawned_keeps_reservation_charged`
+    /// already pin for the no-surplus case).
+    #[tokio::test]
+    async fn fusion_runtime_error_keeps_every_resolved_panel_charged() {
+        let charged =
+            run_fusion_with_dispatched_total(3, platform_api::FusionError::AllPanelsFailed).await;
+        assert_eq!(
+            charged, 3,
+            "all 3 reserved panels were dispatched — none of the reservation may be refunded"
+        );
+    }
+
+    /// [round-12 review, finding 3] ONE dispatch, TWO terminations, ONE
+    /// charge against `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`.
+    ///
+    /// The `Ok` arm has charged "panels that provably reached the spawner"
+    /// since round 4 — it filters `error_category: "spawn"` /
+    /// `"not_dispatched"` slots out of `result.panels` with
+    /// `fusion_panels_that_reached_the_spawner`. The `Err` arm and the drop
+    /// path had no equivalent input and charged the RESOLVED panel count
+    /// instead, so the identical 3-panel dispatch (2 allocated, 1 rejected
+    /// pre-allocation) billed 3 slots when it ended in `Err` and 2 when it
+    /// ended in `Ok`. `FusionProgress::panels_allocated` is the missing
+    /// input; this pins the two terminations to the same number, and to the
+    /// number the allocation truth says.
+    #[tokio::test]
+    async fn fusion_ok_and_err_charge_the_same_quota_for_the_same_dispatch() {
+        use platform_api::task_registry::TaskRegistryHandle;
+
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            arc_mock_spawner(),
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let mut result = sample_fusion_result(platform_api::FusionStatus::Completed);
+        // The third of the three resolved panels was REJECTED by the spawner
+        // before any child existed — the exact shape `panel.rs` finishes as
+        // `error_category: "spawn"`.
+        result.panels[2].status = platform_api::PanelRunStatus::Failed;
+        result.panels[2].error_category = Some("spawn".into());
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ScriptedFusion {
+            enabled: true,
+            result,
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        tool.call(
+            serde_json::json!({
+                "description": "deliberate",
+                "prompt": "review this",
+                "subagent_type": "fusion"
+            }),
+            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_tx(),
+        )
+        .await
+        .expect("scripted Ok result");
+        let ok_charged = registry.get_total_agent_spawns();
+        assert_eq!(
+            ok_charged, 2,
+            "precondition: the Ok arm must already charge only the 2 panels a subagent \
+             provably exists for — if this is 3 the fixture is not exercising the \
+             pre-allocation rejection at all"
+        );
+
+        let err_charged = run_fusion_with_dispatch(
+            3,
+            Some(2),
+            platform_api::FusionError::PanelSetIncomplete,
+        )
+        .await;
+
+        assert_eq!(
+            err_charged, ok_charged,
+            "the SAME 3-panel dispatch (2 allocated, 1 rejected pre-allocation) must charge \
+             the session's lifetime spawn quota identically on both terminations: Ok charged \
+             {ok_charged}, Err charged {err_charged}"
+        );
+        assert_eq!(
+            err_charged, 2,
+            "and both must charge the ALLOCATION truth (2), not the resolved panel count (3)"
+        );
+    }
+
+    /// [round-12 review, finding 3] The allocation cap may only ever LOWER
+    /// the charge, and a published figure of 0 is not evidence — an executor
+    /// that publishes no `panels_allocated` at all must keep the exact
+    /// pre-round-12 behaviour (charge the resolved count), or every fixture
+    /// and every older executor would silently start refunding panels that
+    /// really ran.
+    #[tokio::test]
+    async fn fusion_err_without_an_allocation_figure_still_charges_the_resolved_count() {
+        let charged = run_fusion_with_dispatch(
+            3,
+            None,
+            platform_api::FusionError::PanelSetIncomplete,
+        )
+        .await;
+        assert_eq!(
+            charged, 3,
+            "an executor that publishes no allocation figure must not be read as \
+             \"zero allocated\": all 3 resolved panels stay charged"
+        );
+    }
+
+    /// [round-5 review, finding 10] A PREFLIGHT variant still releases the
+    /// FULL reservation even though a (contradictory) dispatch event was
+    /// observed — the preflight branch must keep winning, so the surplus
+    /// trim cannot silently narrow it to a partial refund.
+    #[tokio::test]
+    async fn fusion_preflight_error_still_releases_the_full_reservation() {
+        let charged = run_fusion_with_dispatched_total(
+            2,
+            platform_api::FusionError::AllPanelsFailedPreflight,
+        )
+        .await;
+        assert_eq!(
+            charged, 0,
+            "AllPanelsFailedPreflight guarantees zero provider calls — the full panel_n \
+             reservation must be released, not merely the 1-slot surplus"
+        );
+    }
+
+    /// [round-5 review, findings 17 & 20] Round 4 put `emit_started` ahead of
+    /// `fusion_request_from_agent`, whose `?` propagates with NO terminal
+    /// event: `AGENT_STARTED` was logged and neither `AGENT_FAILED` nor
+    /// `AGENT_COMPLETED_M4_05` ever followed, so a dashboard joining
+    /// started -> terminal on `invocation_id` saw a Fusion invocation stuck
+    /// open forever. `cross_provider: true` against a surface with
+    /// `allow_cross_provider: false` is one of the four inputs that reach
+    /// that `?` (the others: an unknown `preset`, a malformed `models`
+    /// entry, an unresolvable parent profile).
+    #[tokio::test]
+    async fn fusion_invalid_request_emits_failed_with_no_dangling_started() {
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let bctx = wired_ctx_with_bus(arc_mock_spawner(), bus).await;
+        let fusion = Arc::new(ScriptedFusion {
+            enabled: true,
+            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion",
+                    "cross_provider": true
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("disallowed egress must reject");
+        assert!(err
+            .to_string()
+            .contains("cross-provider fusion is not allowed"));
+
+        let events = sink.events().await;
+        let started = events.iter().filter(|e| e.name == AGENT_STARTED).count();
+        let completed = events
+            .iter()
+            .filter(|e| e.name == AGENT_COMPLETED_M4_05)
+            .count();
+        let failed: Vec<_> = events.iter().filter(|e| e.name == AGENT_FAILED).collect();
+        assert_eq!(
+            started, 0,
+            "a request rejected BEFORE dispatch must not log AGENT_STARTED — every sibling \
+             pre-dispatch gate (agent_type_denied, budget_exceeded, subagent_count_cap) logs \
+             only AGENT_FAILED: {events:?}"
+        );
+        assert_eq!(completed, 0, "nothing was dispatched: {events:?}");
+        assert_eq!(
+            failed.len(),
+            1,
+            "exactly one AGENT_FAILED, like every sibling rejection: {events:?}"
+        );
+        match failed[0].metadata.get("error_kind") {
+            Some(AnalyticsValue::String(s)) => assert_eq!(s, "fusion_invalid_request"),
+            other => panic!("error_kind must name this rejection: {other:?}"),
+        }
+        assert_eq!(
+            fusion.runs.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the executor must never run for a rejected request"
+        );
+    }
+
+    /// [round-5 review, finding 20] The other bare `?` round 4 left BELOW
+    /// `emit_started`: an unwired `BudgetEnforcerHandle` returned
+    /// `ToolError::Internal` with a dangling `AGENT_STARTED` and no terminal
+    /// event at all.
+    #[tokio::test]
+    async fn fusion_unwired_budget_enforcer_emits_failed_with_no_dangling_started() {
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let mut bctx = wired_ctx_with_bus(arc_mock_spawner(), bus).await;
+        bctx.budget_enforcer = None;
+        let fusion = Arc::new(ScriptedFusion {
+            enabled: true,
+            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("an unwired budget enforcer must reject");
+        assert!(
+            err.to_string().contains("BudgetEnforcerHandle not wired"),
+            "{err:?}"
+        );
+
+        let events = sink.events().await;
+        let started = events.iter().filter(|e| e.name == AGENT_STARTED).count();
+        let completed = events
+            .iter()
+            .filter(|e| e.name == AGENT_COMPLETED_M4_05)
+            .count();
+        let failed: Vec<_> = events.iter().filter(|e| e.name == AGENT_FAILED).collect();
+        assert_eq!(
+            started, 0,
+            "rejected before dispatch — no AGENT_STARTED may be logged: {events:?}"
+        );
+        assert_eq!(completed, 0, "nothing was dispatched: {events:?}");
+        assert_eq!(
+            failed.len(),
+            1,
+            "exactly one AGENT_FAILED, like every sibling rejection: {events:?}"
+        );
+        match failed[0].metadata.get("error_kind") {
+            Some(AnalyticsValue::String(s)) => {
+                assert_eq!(s, "fusion_budget_enforcer_unwired");
+            }
+            other => panic!("error_kind must name this rejection: {other:?}"),
+        }
+    }
+
+    /// [round-5 review, findings 17 & 20] The pairing invariant stated
+    /// positively over the whole `call_fusion` return-path table: every
+    /// reachable exit logs EITHER exactly one `AGENT_STARTED` plus exactly
+    /// one terminal event, OR no start and exactly one `AGENT_FAILED`.
+    /// Covers the three gates that sit between the old and the new
+    /// `emit_started` position plus the dispatched `Ok` path.
+    #[tokio::test]
+    async fn fusion_every_return_path_pairs_started_with_a_terminal_event() {
+        // (input override, expect the executor to be dispatched)
+        let cases: Vec<(serde_json::Value, bool)> = vec![
+            (serde_json::json!({}), true),
+            (serde_json::json!({ "cross_provider": true }), false),
+            (serde_json::json!({ "preset": "no-such-preset" }), false),
+            (serde_json::json!({ "models": ["openai:"] }), false),
+            (serde_json::json!({ "run_in_background": true }), false),
+        ];
+        for (overrides, dispatched) in cases {
+            let sink = Arc::new(InMemorySink::new());
+            let bus = Arc::new(AnalyticsBus::new());
+            bus.attach_sink(sink.clone()).await;
+            let bctx = wired_ctx_with_bus(arc_mock_spawner(), bus).await;
+            let tool = AgentTool::new(bctx).with_fusion(Arc::new(ScriptedFusion {
+                enabled: true,
+                result: sample_fusion_result(platform_api::FusionStatus::Completed),
+                runs: std::sync::atomic::AtomicUsize::new(0),
+            }));
+            let mut input = serde_json::json!({
+                "description": "deliberate",
+                "prompt": "review this",
+                "subagent_type": "fusion"
+            });
+            for (k, v) in overrides.as_object().expect("object").clone() {
+                input[k] = v;
+            }
+            let label = input.to_string();
+            let _ = tool
+                .call(
+                    input,
+                    fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                    fresh_tx(),
+                )
+                .await;
+            let events = sink.events().await;
+            let started = events.iter().filter(|e| e.name == AGENT_STARTED).count();
+            let completed = events
+                .iter()
+                .filter(|e| e.name == AGENT_COMPLETED_M4_05)
+                .count();
+            let failed = events.iter().filter(|e| e.name == AGENT_FAILED).count();
+            assert_eq!(
+                started,
+                usize::from(dispatched),
+                "{label}: AGENT_STARTED must fire exactly once on a dispatched run and never on \
+                 a pre-dispatch rejection: {events:?}"
+            );
+            assert_eq!(
+                completed + failed,
+                1,
+                "{label}: exactly one terminal event (AGENT_COMPLETED_M4_05 or AGENT_FAILED) on \
+                 every reachable return path: {events:?}"
+            );
+        }
+    }
+
+
+    #[test]
+    fn parse_fusion_models_rejects_a_colon_with_an_empty_model() {
+        // Regression: `"openai:".split_once(':')` used to fall through to
+        // `(None, "openai:")`, silently treating the whole literal (colon
+        // included) as a bare model id instead of rejecting the malformed
+        // `profile:` entry — the exact bug `commands/core/src/fusion.rs`'s
+        // `parse_models` already caught. Both now share
+        // `platform_api::parse_fusion_model_ref`.
+        let err = parse_fusion_models(&["openai:".to_string()]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid input: invalid fusion request: invalid fusion models entry `openai:`"
+        );
+    }
+
+    #[test]
+    fn parse_fusion_models_accepts_profile_colon_model_and_bare_model() {
+        let parsed = parse_fusion_models(&[
+            "anthropic:claude-sonnet-5".to_string(),
+            "gpt-5.6-sol".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                FusionModelRef {
+                    profile: Some("anthropic".into()),
+                    model: "claude-sonnet-5".into(),
+                },
+                FusionModelRef {
+                    profile: None,
+                    model: "gpt-5.6-sol".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_fusion_preset_delegates_to_the_shared_from_str() {
+        assert_eq!(
+            parse_fusion_preset(Some("quality")).unwrap(),
+            FusionPreset::Quality
+        );
+        let err = parse_fusion_preset(Some("bogus")).unwrap_err();
+        assert!(
+            matches!(&err, ToolError::InvalidInput(msg) if msg.contains("must be quality or fast")),
+            "{err:?}"
+        );
+        let err = parse_fusion_preset(None).unwrap_err();
+        assert!(
+            matches!(&err, ToolError::InvalidInput(msg) if msg == "missing fusion preset"),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]
@@ -1329,6 +3187,188 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             inv[0].request.tool_use_id.as_deref(),
             Some(tid.to_string().as_str()),
             "tool_use_id threaded into the async spawn request"
+        );
+    }
+
+    /// [round-4 review, finding 15] `dispatch_async` — the invoker EVERY
+    /// background `Agent(...)` spawn actually dispatches through — must mark
+    /// its `RegistryToolInvoker` `background_owned`, the same as the
+    /// composition root already does for `local_workflow_invoker` /
+    /// `fusion_invoker`. Without it, a permission ask this background child
+    /// raises is indistinguishable (on the wire, via
+    /// `PermissionCheckContext::background_owned`) from one raised by the
+    /// interactive turn itself, and the TUI wipes it on an unrelated Ctrl-C.
+    /// Verified end to end: pull the REAL `ToolInvoker` handed to
+    /// `spawn_async` out of the mock spawner's recorded invocation, dispatch
+    /// a tool through it, and assert the permission gate it consults sees
+    /// `background_owned: true` on the check context.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn dispatch_async_marks_its_invoker_background_owned() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+
+        /// A no-op tool whose only job is to reach the gate. Not
+        /// `requires_user_interaction`, so dispatch takes the plain
+        /// `check_with_context_or_abort` branch rather than the ASK
+        /// transport.
+        struct NoopTool;
+        static NOOP_SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+            once_cell::sync::Lazy::new(|| serde_json::json!({"type": "object"}));
+        #[async_trait::async_trait]
+        impl Tool for NoopTool {
+            fn name(&self) -> &str {
+                "NoopTool"
+            }
+            fn input_schema(&self) -> &serde_json::Value {
+                &NOOP_SCHEMA
+            }
+            fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+                true
+            }
+            fn max_result_size_chars(&self) -> usize {
+                1024
+            }
+            fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+                true
+            }
+            fn is_read_only(&self, _: &serde_json::Value) -> bool {
+                true
+            }
+            async fn check_permissions(
+                &self,
+                _: &serde_json::Value,
+                _: &ToolUseContext,
+            ) -> PermissionResult {
+                PermissionResult::Allow {
+                    reason: PermissionDecisionReason::Other {
+                        reason: "test".into(),
+                    },
+                    updated_input: None,
+                    update_destination: None,
+                    metadata: PermissionMetadata::default(),
+                }
+            }
+            async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+                "noop".into()
+            }
+            async fn prompt(&self, _: &PromptOptions) -> String {
+                "noop".into()
+            }
+            async fn call(
+                &self,
+                _: serde_json::Value,
+                _: ToolUseContext,
+                _: ToolProgressSender,
+            ) -> Result<ToolCallResult, ToolError> {
+                Ok(ToolCallResult {
+                    data: json!({}),
+                    model_content: None,
+                    new_messages: vec![],
+                    context_modifier: None,
+                    is_error: false,
+                    mcp_meta: None,
+                })
+            }
+        }
+
+        /// Captures `PermissionCheckContext::background_owned` from the one
+        /// dispatch it sees.
+        struct CapturingGate {
+            seen_background_owned: std::sync::Mutex<Option<bool>>,
+        }
+        #[async_trait::async_trait]
+        impl platform_api::permission_gate::PermissionGate for CapturingGate {
+            async fn check(
+                &self,
+                _name: &str,
+                _input: &serde_json::Value,
+            ) -> platform_api::permission_gate::PermissionDecision {
+                platform_api::permission_gate::PermissionDecision::Allow
+            }
+            async fn check_with_context(
+                &self,
+                _name: &str,
+                _input: &serde_json::Value,
+                ctx: &platform_api::permission_gate::PermissionCheckContext,
+            ) -> platform_api::permission_gate::PermissionOutcome {
+                *self.seen_background_owned.lock().unwrap() = Some(ctx.background_owned);
+                platform_api::permission_gate::PermissionOutcome::Allow {
+                    updated_input: None,
+                    permission_updates: Vec::new(),
+                    decision_classification: None,
+                }
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(NoopTool));
+        let registry = Arc::new(registry);
+
+        let spawner = arc_mock_spawner();
+        let mut bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let gate = Arc::new(CapturingGate {
+            seen_background_owned: std::sync::Mutex::new(None),
+        });
+        bctx.permission_gate = Some(gate.clone());
+        let tool = AgentTool::new(bctx);
+
+        tool.call(
+            serde_json::json!({
+                "description": "bg work",
+                "prompt": "go",
+                "run_in_background": true
+            }),
+            fresh_ctx_with_registry(registry),
+            fresh_tx(),
+        )
+        .await
+        .expect("async launch ok");
+
+        // Pull the REAL invoker `dispatch_async` handed to `spawn_async` and
+        // dispatch through it, exactly as the child subagent's runner would.
+        let inv = spawner.invocations();
+        assert_eq!(inv.len(), 1);
+        let invoker = inv[0].inherit.tool_invoker.clone();
+        invoker
+            .invoke(
+                "NoopTool",
+                serde_json::json!({}),
+                platform_api::tool_invoker::SubagentInvocationContext {
+                    parent_agent_id: None,
+                    agent_name: None,
+                    team_name: None,
+                    is_async: true,
+                    is_non_interactive_session: false,
+                    can_show_permission_prompts: false,
+                    cwd: None,
+                    tool_use_id: None,
+                    assistant_message_id: None,
+                    depth: 0,
+                    observer: None,
+                    parent_model: None,
+                    parent_model_profile: None,
+                    mode_override: None,
+                    request_source: None,
+                    frozen_command_denies: Vec::new(),
+                },
+            )
+            .await
+            .expect("noop dispatch ok");
+
+        assert_eq!(
+            *gate.seen_background_owned.lock().unwrap(),
+            Some(true),
+            "dispatch_async's invoker must mark every check background_owned \
+             — otherwise this background child's permission ask is wiped by \
+             Ctrl-C on an unrelated foreground turn"
         );
     }
 
@@ -2410,6 +4450,73 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
     }
 
+    // A permission gate that denies the synthetic `fusion` agent type, for
+    // [finding 23]: `Agent(fusion)` deny must apply to the catalog exactly
+    // like a built-in's deny, not leave the model advertised a type
+    // `call_fusion`'s own deny gate will hard-reject on every attempt.
+    struct DenyFusionGate;
+    #[async_trait::async_trait]
+    impl platform_api::permission_gate::PermissionGate for DenyFusionGate {
+        async fn check(
+            &self,
+            _name: &str,
+            _input: &serde_json::Value,
+        ) -> platform_api::permission_gate::PermissionDecision {
+            platform_api::permission_gate::PermissionDecision::Allow
+        }
+        async fn agent_type_deny(&self, agent_type: &str) -> Option<String> {
+            (agent_type == "fusion").then(|| "localSettings".to_string())
+        }
+        async fn agent_deny_content_types(&self) -> Vec<String> {
+            vec!["fusion".to_string()]
+        }
+    }
+
+    /// [finding 23] The inline catalog (`LINGXI_AGENT_LIST_IN_MESSAGES=false`)
+    /// must not advertise `fusion` when `Agent(fusion)` is denied — the same
+    /// treatment `prompt_filters_denied_agent_types` proves for a built-in.
+    /// Before the fix, `append_fusion_listing` ran AFTER the deny-filter
+    /// `retain` calls, so the synthetic entry was immune to them.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn prompt_filters_denied_fusion_agent_type() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
+        let spawner = arc_mock_spawner();
+        let mut bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        bctx.permission_gate = Some(Arc::new(DenyFusionGate));
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ScriptedFusion {
+            enabled: true,
+            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        let prompt = tool
+            .prompt(&PromptOptions {
+                include_examples: true,
+                model: None,
+                model_profile: None,
+            })
+            .await;
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
+        assert!(
+            prompt.contains("- general-purpose:"),
+            "general-purpose should remain; prompt was:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("- fusion:"),
+            "denied fusion must be filtered out of the advertised catalog, \
+             or the model wastes a whole turn dispatching a type it will be \
+             hard-rejected for; prompt was:\n{prompt}"
+        );
+    }
+
     // An explicit denied subagent_type is rejected with the byte-exact
     // claude-code `AgentTypeError` message (raw `SettingSource` identifier).
     #[tokio::test]
@@ -2560,9 +4667,16 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
-    /// `LINGXI_SUBAGENT_STEER` is process-global; serialize the tests that
-    /// flip it.
-    static STEER_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // `LINGXI_SUBAGENT_STEER` is process-global AND `build_prompt` reads it
+    // (via `steer_is_default`, which gates the proactive-use / run-in-parallel
+    // pair), so the tests that flip it must share the SAME lock as every other
+    // test that builds a prompt — see the note above `ctx_with_messages`.
+    // A private second mutex used to live here; two mutexes guarding one
+    // prompt builder let this test change the steer state in the middle of
+    // `build_prompt_lean_gate_selects_short_or_long_arm`'s three back-to-back
+    // `build_prompt` calls, so its LONG arm and its unknown-model arm
+    // disagreed by exactly those two bullets — a flake that only surfaced
+    // under the whole-workspace run's thread pressure.
 
     // Binary `g = DZ()==="default"` gates the `## When to use` LEAD sentence
     // (@292441984): a non-default steer keeps the heading but drops "Reach for
@@ -2571,7 +4685,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // prompt) — it just wasn't consulted here.
     #[test]
     fn build_prompt_steer_gate_drops_the_reach_lead() {
-        let _g = STEER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_SUBAGENT_STEER");
         let agents = prompt_agents();
         let default_steer = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
@@ -3218,6 +5334,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 output_tokens: 5,
                 cache_creation_input_tokens: 7,
                 cache_read_input_tokens: 20,
+                reasoning_output_tokens: 0,
             },
             3,    // total_tool_use_count
             1234, // total_duration_ms

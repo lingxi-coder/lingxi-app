@@ -2541,7 +2541,7 @@ mod tests {
     #[test]
     fn is_fable_model_matches_normalized_fable_id() {
         assert!(is_fable_model("claude-fable-5-1"));
-        assert!(is_fable_model("Claude-Fable-5"));
+        assert!(is_fable_model("Claude-Fable-5-1"));
         assert!(is_fable_model("anthropic/claude-fable-5-1"));
         assert!(is_fable_model("claude-fable-5-1[1m]"));
         assert!(!is_fable_model("claude-sonnet-4-5"));

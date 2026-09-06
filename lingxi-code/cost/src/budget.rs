@@ -191,8 +191,21 @@ impl BudgetEnforcer {
         self.reservations.lock().await.active.remove(&id.raw());
     }
 
-    /// Release the hold after work completed. Does not add `actual` onto the
-    /// cost tracker (API responses already did).
+    /// Release the hold after work completed AND record `actual_nano_usd`
+    /// onto the cost tracker.
+    ///
+    /// Every other API-call path (`record_api_response_v2`, driven from the
+    /// main turn loop's response handling) already charges the tracker
+    /// itself, which is why the ordinary per-call budget check
+    /// (`check_and_charge` / `check_pre_api_call`) never double-adds here.
+    /// Fusion is the one caller of this reservation seam, and its panel /
+    /// analyst / synthesizer calls run through `ProviderApiAdapter` and
+    /// `ProviderSideQueryClient`, neither of which ever calls
+    /// `record_api_response_v2` — so `actual_nano_usd` (priced by the fusion
+    /// crate's own `FusionPriceBook` from usage the tracker never saw) is the
+    /// ONLY place that spend reaches the session total. Without this the
+    /// hold simply vanished on commit and a capped session could spend an
+    /// unbounded amount on Fusion beyond its `--max-budget`.
     ///
     /// # Errors
     ///
@@ -202,7 +215,7 @@ impl BudgetEnforcer {
         id: platform_api::BudgetReservationId,
         actual_nano_usd: u64,
     ) -> Result<(), platform_api::budget::BudgetError> {
-        let _ = actual_nano_usd;
+        self.cost_tracker.record_external_cost(actual_nano_usd).await;
         self.release_reservation(id).await;
         Ok(())
     }
@@ -814,7 +827,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commit_releases_hold_without_double_counting_tracker() {
+    async fn commit_reservation_records_actual_onto_the_tracker() {
+        // Fusion never calls `record_api_response_v2` for its panel / analyst /
+        // synthesizer spend (see `commit_reservation`'s doc comment) — this
+        // reservation seam is the ONLY place that money reaches the session
+        // total, so a discarded `actual_nano_usd` would let a capped session
+        // spend Fusion's whole bill for free.
         let cfg = BudgetConfig {
             max_session_nano_usd: Some(10_000),
             max_turn_nano_usd: None,
@@ -826,13 +844,22 @@ mod tests {
         let e = BudgetEnforcer::new(cfg, tracker.clone());
         let id = e.reserve_nano_usd(5_000).await.unwrap();
         e.commit_reservation(id, 1_000).await.unwrap();
-        assert_eq!(e.active_reservation_nano_usd().await, 0);
+        assert_eq!(e.active_reservation_nano_usd().await, 0, "hold released");
         assert_eq!(
             tracker.total_nano_usd().await,
-            0,
-            "commit must not add onto tracker (API responses already charged)"
+            1_000,
+            "commit must record the actual realized spend onto the tracker"
         );
-        e.commit_reservation(id, 1_000).await.expect("idempotent");
+        // A second commit on the same (already-released) id records again —
+        // `commit_reservation` never claimed idempotent ACCOUNTING, only that
+        // an unknown/noop release id is harmless. Fusion calls it exactly
+        // once per run (`ReservationLease::commit` consumes `self`).
+        e.commit_reservation(id, 1_000).await.expect("id-not-found is not an error");
+        assert_eq!(
+            tracker.total_nano_usd().await,
+            2_000,
+            "a second commit call adds again — callers must not call commit twice"
+        );
     }
 
     #[tokio::test]

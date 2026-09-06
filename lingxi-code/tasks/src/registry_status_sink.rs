@@ -111,6 +111,36 @@ impl TaskStatusSink for RegistryStatusSink {
         }
     }
 
+    async fn set_fusion_error(&self, task_id: &str, error: String) {
+        if let Some(reg) = self.registry.get() {
+            reg.set_fusion_error(task_id, error).await;
+        }
+    }
+
+    async fn set_fusion_egress_and_usage(
+        &self,
+        task_id: &str,
+        egress_profiles: Vec<String>,
+        usage: Option<platform_api::task_registry::AgentRunUsage>,
+    ) {
+        if let Some(reg) = self.registry.get() {
+            reg.set_fusion_egress_and_usage(task_id, egress_profiles, usage)
+                .await;
+        }
+    }
+
+    async fn set_fusion_stage(&self, task_id: &str, stage: String) {
+        if let Some(reg) = self.registry.get() {
+            reg.set_fusion_stage(task_id, stage).await;
+        }
+    }
+
+    async fn mark_fusion_result_published(&self, task_id: &str) {
+        if let Some(reg) = self.registry.get() {
+            reg.mark_fusion_result_published(task_id).await;
+        }
+    }
+
     async fn finish_fusion_terminal(
         &self,
         task_id: &str,

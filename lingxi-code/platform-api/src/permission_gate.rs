@@ -229,6 +229,22 @@ pub struct PermissionCheckContext {
     /// layers; the gate hoists both to the head of this stack before folding, so
     /// a layer here can still override them.
     pub permission_layers: Vec<Value>,
+    /// (Finding 22) `true` only when this dispatch was issued through a
+    /// [`crate::tool_invoker::ToolInvoker`] the composition root built
+    /// EXCLUSIVELY for a background task with no owning interactive turn — as
+    /// of writing this is set only for the `/fusion` background task's
+    /// invoker (`RegistryToolInvoker::with_background_owned`,
+    /// `apps/engine-desktop/src/lib.rs`'s `fusion_invoker` wiring), never for
+    /// the interactive turn's own direct tool call. It exists so a transport
+    /// that queues/serializes interactive prompts (the TUI) can distinguish
+    /// "this ask belongs to the turn a user is cancelling" from "this ask
+    /// belongs to a background run that Ctrl-C does not touch" WITHOUT
+    /// misusing [`Self::worker`] (worker attribution is a display concern —
+    /// `can_show_permission_prompts` — and is `false` for the pool spawns a
+    /// Fusion panel and every other one-shot subagent use, so it is always
+    /// `None` on exactly the requests this field needs to mark). Default
+    /// `false` preserves today's behavior for every other caller.
+    pub background_owned: bool,
 }
 
 /// Wire-neutral description of a matched permission Ask rule.

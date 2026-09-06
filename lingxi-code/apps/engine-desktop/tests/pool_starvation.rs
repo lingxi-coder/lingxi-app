@@ -185,6 +185,7 @@ fn parked_teammate_ctx() -> SubagentContext {
         new_diagnostics_source: None,
         tool_schemas: vec![],
         schema: None,
+        structured_output_mode: Default::default(),
         budget: None,
         hook_executor: None,
         strict_plugin_only_hooks: false,
@@ -198,6 +199,7 @@ fn parked_teammate_ctx() -> SubagentContext {
         max_output_tokens_per_turn: None,
         max_input_bytes_per_turn: None,
         query_source_label: None,
+        correlation_id: None,
     }
 }
 
@@ -239,6 +241,7 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         fork_context_messages: None,
         fork_parent_system_prompt: None,
         schema: None,
+        structured_output_mode: Default::default(),
         effort: None,
         run_in_background: false,
         tool_use_id: None,

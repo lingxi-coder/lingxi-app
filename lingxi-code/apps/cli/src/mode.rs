@@ -2817,7 +2817,33 @@ pub(crate) async fn run_connect_action(
             match key_store.set_provider_key(&provider_id, &key).await {
                 Ok(()) => {
                     notice(format!("✓ Saved {} API key.", label(&provider_id)), false);
-                    connected(provider_id);
+                    // Round-12 review finding [5]: ANNOUNCE FIRST, re-probe
+                    // second. `connected()` is a single `unbounded_channel`
+                    // send and consumes nothing the refresh below produces,
+                    // while the refresh is a keychain re-probe with no
+                    // internal timeout (`compute_availability_with_isolation`
+                    // -> `has_provider_key`, brokered on macOS — the very
+                    // probe `resolve_llm_stack` wraps in a 5s timeout at
+                    // boot). Sequencing the event AFTER it made the /model
+                    // picker and the /connect ✓ badge lag the success
+                    // notice just emitted above by the broker's whole answer
+                    // time, once per credential source, serially — for a fact
+                    // the event never needed. The refresh stays exactly where it
+                    // is and keeps being awaited: Fusion's catalog filter
+                    // still needs it (finding [15] below), and bounding it by
+                    // CANCELLING would resurrect that finding.
+                    connected(provider_id.clone());
+                    // Round-5 review finding [15]: this seam writes through
+                    // the RAW `secret::CredentialManager` on the TUI runtime,
+                    // NOT through the `FusionCatalogRefreshingCredentialWriter`
+                    // wrapper the text `/connect <provider>` command uses — so
+                    // without this call Fusion's catalog filter kept using the
+                    // BOOT availability snapshot and dropped every row of the
+                    // provider just connected, for the rest of the process,
+                    // while `connected()` above and the ordinary turn loop both
+                    // started routing it on the very next request.
+                    engine_desktop::refresh_fusion_catalog_after_credential_write(&provider_id)
+                        .await;
                 }
                 Err(e) => notice(format!("✗ Failed to store key: {e}"), true),
             }
@@ -2863,7 +2889,48 @@ pub(crate) async fn run_connect_action(
                         msg
                     };
                     notice(body, false);
-                    connected(provider_id);
+                    // Round-12 review finding [5]: ANNOUNCE FIRST, re-probe
+                    // second. `connected()` is a single `unbounded_channel`
+                    // send and consumes nothing the refresh below produces,
+                    // while the refresh is a keychain re-probe with no
+                    // internal timeout (`compute_availability_with_isolation`
+                    // -> `has_provider_key`, brokered on macOS — the very
+                    // probe `resolve_llm_stack` wraps in a 5s timeout at
+                    // boot). Sequencing the event AFTER it made the /model
+                    // picker and the /connect ✓ badge lag the success
+                    // notice just emitted above by the broker's whole answer
+                    // time, once per credential source, serially — for a fact
+                    // the event never needed. The refresh stays exactly where it
+                    // is and keeps being awaited: Fusion's catalog filter
+                    // still needs it (finding [15] below), and bounding it by
+                    // CANCELLING would resurrect that finding.
+                    connected(provider_id.clone());
+                    // Finding [15], same class as the `StoreKey` arm above:
+                    // an OAuth sign-in persists a credential too (Anthropic
+                    // Pro/Max, ChatGPT), and `EngineOAuthConnect` is NOT one
+                    // of the wrapped `/connect` drivers.
+                    //
+                    // Round-12 gate: this call deliberately keeps the
+                    // picker's BARE `provider_id` — do not "clean it up" to
+                    // `anthropic-oauth`. `refresh_inner`'s `forced` list
+                    // matches `credential_id == id || profile_name == id`,
+                    // and `provider_config::assemble` emits exactly ONE
+                    // Anthropic `CredentialSource` per boot (api-key XOR
+                    // oauth, assemble.rs:14-40). On a session that booted
+                    // with an API key which was then deleted, the
+                    // unambiguous spelling matches NO source, the recomputed
+                    // row is `false`, and the closing
+                    // `entry("anthropic").or_insert(..)` cannot raise it — so
+                    // Fusion would drop every Anthropic row despite a working
+                    // OAuth route. The bare spelling matches by
+                    // `profile_name` and force-publishes the profile, which
+                    // is what makes the sign-in visible to
+                    // `filter_fusion_catalog`. Ambiguity is handled on the
+                    // engine side instead: `note_route_credential_written`
+                    // PROBES the store for the bare id rather than believing
+                    // it, so this call cannot invent an API-key route.
+                    engine_desktop::refresh_fusion_catalog_after_credential_write(&provider_id)
+                        .await;
                 }
                 // (H-BIN-09) A managed `forceLoginOrgUUID` org pin rejected the
                 // sign-in: surface the admin message VERBATIM. No "network error"
@@ -4055,6 +4122,431 @@ mod tests {
                 .is_empty(),
             "resolved {resolved} should be a 1M model with a 150k threshold"
         );
+    }
+
+    /// Round-5 review finding [15]: the TUI `/connect` key seam
+    /// (`ChatWidget::cmd_connect` -> `ConnectKeyView` ->
+    /// `ConnectAction::StoreKey` -> here) writes through the RAW
+    /// `secret::CredentialManager` the TUI runtime carries, NOT through the
+    /// `FusionCatalogRefreshingCredentialWriter` wrapper that the text
+    /// `/connect <provider>` command goes through. Before this fix the write
+    /// therefore never reached Fusion's catalog filter: `/model` and the
+    /// ordinary turn loop routed the new provider on the very next request
+    /// while `/fusion` kept filtering against the BOOT availability snapshot
+    /// and dropped every one of its rows for the rest of the process.
+    #[tokio::test]
+    async fn store_key_connect_action_makes_the_provider_visible_to_fusion() {
+        use async_trait::async_trait;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex as StdMutex};
+        use tui::bottom_pane::ConnectAction;
+
+        #[derive(Default)]
+        struct MemStorage {
+            map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+        }
+        #[async_trait]
+        impl SecureStorage for MemStorage {
+            async fn store(
+                &self,
+                service: &str,
+                account: &str,
+                data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .insert((service.into(), account.into()), data);
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .get(&(service.into(), account.into()))
+                    .cloned())
+            }
+            async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .remove(&(service.into(), account.into()));
+                Ok(())
+            }
+            async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .filter(|(s, _)| s == service)
+                    .map(|(_, a)| a.clone())
+                    .collect())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        struct UnusedOAuth;
+        #[async_trait]
+        impl command_core::OAuthConnectDriver for UnusedOAuth {
+            async fn login(&self, _provider_id: &str) -> Result<String, command_core::ConnectError> {
+                unreachable!("the StoreKey arm must not touch the OAuth driver")
+            }
+        }
+        struct UnusedCopilot;
+        #[async_trait]
+        impl command_core::CopilotConnectDriver for UnusedCopilot {
+            async fn begin(
+                &self,
+                _domain: Option<&str>,
+            ) -> Result<command_core::CopilotConnectStep, command_core::ConnectError> {
+                unreachable!("the StoreKey arm must not touch the Copilot driver")
+            }
+            async fn poll_to_completion(
+                &self,
+                _step: &command_core::CopilotConnectStep,
+            ) -> Result<(), command_core::ConnectError> {
+                unreachable!("the StoreKey arm must not touch the Copilot driver")
+            }
+        }
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        // The live Fusion catalog filter's shared availability map, as
+        // `resolve_llm_stack` publishes it at boot: openrouter uncredentialed.
+        let mut boot = std::collections::BTreeMap::new();
+        boot.insert("openrouter".to_string(), false);
+        let availability = Arc::new(std::sync::RwLock::new(boot));
+        engine_desktop::register_fusion_catalog_refresher(
+            engine_desktop::FusionCatalogRefresher::for_keychain_profiles(
+                availability.clone(),
+                credentials.clone(),
+                &["openrouter"],
+            ),
+        );
+
+        let (turn_tx, mut turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        run_connect_action(
+            ConnectAction::StoreKey {
+                provider_id: "openrouter".to_string(),
+                key: "sk-or-test-789".to_string(),
+            },
+            credentials.clone(),
+            Arc::new(UnusedOAuth),
+            Arc::new(UnusedCopilot),
+            turn_tx,
+        )
+        .await;
+
+        // Sanity: the write itself succeeded (this is the seam the TUI uses).
+        let stored = credentials
+            .get_provider_key("openrouter")
+            .await
+            .expect("read ok")
+            .expect("key present");
+        assert_eq!(stored.expose_secret(), "sk-or-test-789");
+        let mut events = Vec::new();
+        while let Ok(ev) = turn_rx.try_recv() {
+            events.push(ev);
+        }
+        assert!(
+            events.iter().any(|ev| matches!(
+                ev,
+                tui_core::orchestrator_bridge::TurnEvent::ProviderConnected { provider_id }
+                    if provider_id == "openrouter"
+            )),
+            "sanity: the TUI's own availability map is already refreshed on this path, \
+which is exactly why Fusion falling behind is observable to the user"
+        );
+
+        assert_eq!(
+            availability.read().unwrap().get("openrouter").copied(),
+            Some(true),
+            "the TUI /connect key seam must make the provider visible to Fusion's catalog \
+filter in THIS process — /model and the turn loop already route it"
+        );
+    }
+
+    /// Round-12 review finding [5]: `connected(provider_id)` — the
+    /// `TurnEvent::ProviderConnected` that flips the widget's LIVE
+    /// availability map so `/model` offers the just-connected provider's
+    /// models and the `/connect` picker badges it ✓ mid-session — consumes
+    /// NOTHING the Fusion catalog re-probe produces, yet BOTH credential arms
+    /// sequenced it AFTER `refresh_fusion_catalog_after_credential_write()`.
+    /// That refresh re-runs `compute_availability_with_isolation` over every
+    /// credential source and bottoms out in `has_provider_key`, i.e. the (on
+    /// macOS, brokered) keychain, with no internal timeout — the very probe
+    /// `resolve_llm_stack` wraps in a 5s `tokio::time::timeout` at boot
+    /// because a contended broker stalls it. So the user saw
+    /// "✓ Saved … API key." and then the /model picker and the /connect badge
+    /// lagged for as long as the broker took to answer, once PER credential
+    /// source, serially.
+    ///
+    /// The fix is a reorder, not a bound: the re-probe stays exactly where it
+    /// is (Fusion's catalog filter still needs it, and cancelling it would
+    /// resurrect round-5 finding [15]); the event is simply announced first.
+    #[tokio::test]
+    async fn connect_action_announces_the_provider_before_the_catalog_re_probe() {
+        use async_trait::async_trait;
+        use platform_api::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex as StdMutex};
+        use std::time::Duration;
+        use tui::bottom_pane::ConnectAction;
+        use tui_core::orchestrator_bridge::TurnEvent;
+
+        const PROVIDER: &str = "stalled-broker-provider";
+
+        /// A `SecureStorage` that models a contended credential broker:
+        /// writes go through, but every READ parks until the test releases
+        /// it. `armed` flips on the first successful write so the arm's own
+        /// `set_provider_key` is never the thing that stalls.
+        #[derive(Default)]
+        struct StallingStorage {
+            map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+            armed: AtomicBool,
+            released: AtomicBool,
+            reads_while_stalled: AtomicUsize,
+        }
+        impl StallingStorage {
+            async fn park_if_stalled(&self) {
+                if !self.armed.load(Ordering::SeqCst) || self.released.load(Ordering::SeqCst) {
+                    return;
+                }
+                self.reads_while_stalled.fetch_add(1, Ordering::SeqCst);
+                // Safety valve: never park longer than the test could
+                // possibly need, so a failing assertion cannot wedge the
+                // process-wide refresher registry for sibling tests.
+                for _ in 0..400 {
+                    if self.released.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }
+            fn rearm(&self) {
+                self.released.store(false, Ordering::SeqCst);
+                self.reads_while_stalled.store(0, Ordering::SeqCst);
+            }
+            fn release(&self) {
+                self.released.store(true, Ordering::SeqCst);
+            }
+        }
+        #[async_trait]
+        impl SecureStorage for StallingStorage {
+            async fn store(
+                &self,
+                service: &str,
+                account: &str,
+                data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .insert((service.into(), account.into()), data);
+                self.armed.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                self.park_if_stalled().await;
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .get(&(service.into(), account.into()))
+                    .cloned())
+            }
+            async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .remove(&(service.into(), account.into()));
+                Ok(())
+            }
+            async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
+                self.park_if_stalled().await;
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .filter(|(s, _)| s == service)
+                    .map(|(_, a)| a.clone())
+                    .collect())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        struct OkOAuth;
+        #[async_trait]
+        impl command_core::OAuthConnectDriver for OkOAuth {
+            async fn login(&self, _provider_id: &str) -> Result<String, command_core::ConnectError> {
+                Ok(String::new())
+            }
+        }
+        struct UnusedCopilot;
+        #[async_trait]
+        impl command_core::CopilotConnectDriver for UnusedCopilot {
+            async fn begin(
+                &self,
+                _domain: Option<&str>,
+            ) -> Result<command_core::CopilotConnectStep, command_core::ConnectError> {
+                unreachable!("neither arm under test touches the Copilot driver")
+            }
+            async fn poll_to_completion(
+                &self,
+                _step: &command_core::CopilotConnectStep,
+            ) -> Result<(), command_core::ConnectError> {
+                unreachable!("neither arm under test touches the Copilot driver")
+            }
+        }
+
+        /// First `ProviderConnected` on the channel, or `None` if two seconds
+        /// pass without one.
+        async fn provider_connected_within_2s(
+            rx: &mut tokio::sync::mpsc::UnboundedReceiver<TurnEvent>,
+        ) -> Option<String> {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match rx.recv().await {
+                        Some(TurnEvent::ProviderConnected { provider_id }) => {
+                            return Some(provider_id)
+                        }
+                        Some(_) => continue,
+                        None => return None,
+                    }
+                }
+            })
+            .await
+            .ok()
+            .flatten()
+        }
+
+        /// Spin (bounded) until the parked re-probe has actually reached the
+        /// credential backend, so the ordering assertion above cannot pass
+        /// vacuously on a refresh that never ran.
+        async fn await_parked_reprobe(storage: &StallingStorage) -> usize {
+            for _ in 0..200 {
+                let reads = storage.reads_while_stalled.load(Ordering::SeqCst);
+                if reads > 0 {
+                    return reads;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            0
+        }
+
+        let storage = Arc::new(StallingStorage::default());
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let credentials = Arc::new(secret::CredentialManager::new(
+            storage.clone() as Arc<dyn SecureStorage>,
+            clock,
+            http,
+        ));
+        let mut boot = std::collections::BTreeMap::new();
+        boot.insert(PROVIDER.to_string(), false);
+        let availability = Arc::new(std::sync::RwLock::new(boot));
+        engine_desktop::register_fusion_catalog_refresher(
+            engine_desktop::FusionCatalogRefresher::for_keychain_profiles(
+                availability.clone(),
+                credentials.clone(),
+                &[PROVIDER],
+            ),
+        );
+
+        // --- arm 1: ConnectAction::StoreKey -------------------------------
+        let (turn_tx, mut turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let store_key = tokio::spawn(run_connect_action(
+            ConnectAction::StoreKey {
+                provider_id: PROVIDER.to_string(),
+                key: "sk-stalled-broker".to_string(),
+            },
+            credentials.clone(),
+            Arc::new(OkOAuth),
+            Arc::new(UnusedCopilot),
+            turn_tx.clone(),
+        ));
+        assert_eq!(
+            provider_connected_within_2s(&mut turn_rx).await.as_deref(),
+            Some(PROVIDER),
+            "StoreKey arm: TurnEvent::ProviderConnected must be sent while the Fusion \
+catalog re-probe is still parked in the credential backend — it consumes nothing the \
+re-probe produces, so gating it behind an unbounded keychain read leaves the /model \
+picker and the /connect badge stale for as long as the broker stalls"
+        );
+        assert!(
+            await_parked_reprobe(&storage).await >= 1,
+            "StoreKey arm: the re-probe must still have run (and be parked) — a green \
+assertion above with zero backend reads would mean the refresh was dropped, which is \
+round-5 finding [15] all over again"
+        );
+        assert!(
+            !store_key.is_finished(),
+            "StoreKey arm: the action must still be awaiting the parked re-probe when \
+ProviderConnected has already been delivered"
+        );
+        storage.release();
+        store_key.await.expect("StoreKey arm ran to completion");
+        assert_eq!(
+            availability.read().unwrap().get(PROVIDER).copied(),
+            Some(true),
+            "StoreKey arm: once the broker answers, the re-probe still publishes the \
+provider to Fusion's catalog filter"
+        );
+
+        // --- arm 2: ConnectAction::OAuth ----------------------------------
+        storage.rearm();
+        let (turn_tx, mut turn_rx) = tokio::sync::mpsc::unbounded_channel();
+        let oauth = tokio::spawn(run_connect_action(
+            ConnectAction::OAuth {
+                provider_id: PROVIDER.to_string(),
+            },
+            credentials.clone(),
+            Arc::new(OkOAuth),
+            Arc::new(UnusedCopilot),
+            turn_tx.clone(),
+        ));
+        assert_eq!(
+            provider_connected_within_2s(&mut turn_rx).await.as_deref(),
+            Some(PROVIDER),
+            "OAuth arm: same class as StoreKey — ProviderConnected must not be gated \
+behind the unbounded keychain re-probe"
+        );
+        assert!(
+            await_parked_reprobe(&storage).await >= 1,
+            "OAuth arm: the re-probe must still have run (and be parked)"
+        );
+        storage.release();
+        oauth.await.expect("OAuth arm ran to completion");
     }
 
     /// `/sandbox` persistence: `SetEnabled` writes `sandbox.enabled` to USER

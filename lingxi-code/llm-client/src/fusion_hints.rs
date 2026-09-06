@@ -420,4 +420,70 @@ mod tests {
             .expect("openai slice has models outside the hint table");
         assert!(hints_for("openai", &unlisted.request_model).is_none());
     }
+
+    /// F011: a `judge_eligible: true` hint row promises the model can serve
+    /// as Fusion analyst, but `resolve_analyst`'s `with_schema` filter ALSO
+    /// requires the live catalog's `Capabilities::structured_output` — so a
+    /// row that is `judge_eligible` yet whose real model capability is
+    /// `structured_output: false` can never actually be picked, silently
+    /// shrinking the judge pool below what the hint table advertises.
+    ///
+    /// WP11 fixed the biggest offender — `anthropic_model_profiles()` used
+    /// to hard-code `structured_output: false` for EVERY Anthropic model,
+    /// which was a fill-in gap, not a real capability limit (see the comment
+    /// on that field in `provider_settings.rs`). Finding [7] fixed the
+    /// remaining `openai-chatgpt` rows the same way: that profile is
+    /// `ProtocolFamily::OpenAiResponses` end to end, whose codec
+    /// (`providers/openai_responses.rs::encode_text_controls`) fully encodes
+    /// `ResponseFormat::JsonSchema` unconditionally for every model on the
+    /// protocol — the `false` was a vendored-data omission
+    /// (`llm-client/data/models-dev/openai-chatgpt.json` had no
+    /// `structured_output` field), not a codec limit, and left it as the
+    /// ONLY judge-eligible provider whose entire row set was unusable,
+    /// hard-failing every `/fusion` call on a ChatGPT-subscription-only
+    /// install. `github-copilot/claude-sonnet-5` remains: that profile's
+    /// OTHER judge-eligible rows (`gpt-5.6-sol`, `gpt-5.6-terra`) already
+    /// carry `structured_output: true` in the vendored data, so a
+    /// Copilot-only install still resolves an analyst — this one row is a
+    /// narrower, non-install-blocking gap left for a future models.dev sync.
+    /// This assertion is now an EXACT set, not a loose upper bound: any new
+    /// mismatch (including a regression on the ones already fixed) fails the
+    /// test by name.
+    #[test]
+    fn judge_eligible_rows_mostly_have_a_structured_output_capable_model() {
+        let catalog = builtin_presets();
+        let anthropic = anthropic_model_profiles();
+        let mut mismatches = Vec::new();
+        for (profile, model, hints) in TABLE {
+            if !hints.judge_eligible {
+                continue;
+            }
+            let structured = if *profile == "anthropic" {
+                anthropic
+                    .iter()
+                    .find(|m| m.request_model == *model)
+                    .map(|m| m.capabilities.structured_output)
+            } else {
+                catalog
+                    .providers
+                    .iter()
+                    .find(|p| p.profile_name == *profile)
+                    .and_then(|p| p.models.iter().find(|m| m.request_model == *model))
+                    .map(|m| m.capabilities.structured_output)
+            };
+            if structured != Some(true) {
+                mismatches.push(format!("{profile}/{model}"));
+            }
+        }
+        mismatches.sort();
+        let mut expected = vec!["github-copilot/claude-sonnet-5".to_string()];
+        expected.sort();
+        assert_eq!(
+            mismatches, expected,
+            "judge_eligible/structured_output mismatches changed — this must be \
+             the EXACT known set (models.dev data gaps for openai-chatgpt/\
+             github-copilot), not a superset (new gap) or a subset (a fix that \
+             needs this list trimmed to match)"
+        );
+    }
 }

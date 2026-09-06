@@ -548,6 +548,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             fork_context_messages: Some(fork_msgs),
             fork_parent_system_prompt: parent_sys,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -1382,6 +1383,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
             )));
         }
         Ok(())
+    }
+
+    async fn emit_background_system_notice(&self, body: &str) {
+        self.output.emit_system_notice(body, false).await;
     }
 
     async fn get_status_snapshot(&self) -> StatusSnapshot {

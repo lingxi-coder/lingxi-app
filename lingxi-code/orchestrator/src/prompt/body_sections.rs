@@ -702,6 +702,15 @@ pub fn post_context_sections(model: &str, output_style_active: bool) -> Vec<Stri
 #[cfg(test)]
 mod tests {
 
+    /// ONE lock for every test in this module that mutates the process-wide
+    /// GrowthBook-stand-in env vars (`LINGXI_TOOL_PARAM_STRICTNESS`,
+    /// `LINGXI_SILENT_HARBOR`). Each test used to declare its OWN `ENV_LOCK`
+    /// inside its body, so the two mutexes excluded nothing: the
+    /// silent-harbor test's `set_var` landed inside the inert test's
+    /// "both gates default OFF" window and failed it in roughly 2 of every 15
+    /// full-binary runs.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A `lean_prompt` model gets `# Harness` INSTEAD of the six long statics.
     /// The port previously implemented only the long arm, so every session on
     /// the 2.1.219+ flagships got a materially different prompt from the
@@ -803,7 +812,6 @@ mod tests {
     /// `fable_identity` and `# Session-specific guidance` when enabled.
     #[test]
     fn tool_param_json_is_inert_by_default_and_slots_after_fable_identity() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         const BODY: &str = "Object and array parameter values must be a single JSON value";
 
@@ -851,7 +859,6 @@ mod tests {
     /// neither alone is enough.
     #[test]
     fn the_silent_harbor_arm_needs_the_flag_and_the_model() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         assert!(!tool_param_json_enabled("claude-fable-5-1"), "flag unset");
         std::env::set_var("LINGXI_SILENT_HARBOR", "1");

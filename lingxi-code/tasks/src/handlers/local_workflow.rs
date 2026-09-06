@@ -355,29 +355,258 @@ fn workflow_agent_display_model(opts: &Value) -> Option<String> {
     ))
 }
 
+/// [R5-18] The marker the `workflow/src/lib.rs` prelude's `__wf_pump`
+/// searches for (anywhere in the message — `FusionError::InvalidRequest`'s
+/// Display prepends "invalid fusion request: ") to set
+/// `err.name = "WorkflowFusionOptionError"` on the rejected `fusion()`
+/// promise. EVERY rejection derived from the caller's `opts` object must
+/// carry it, not just the `deny_unknown_fields` "unknown field" shape:
+/// `workflow_description.txt` tells the model, unqualified, to catch a
+/// `fusion()` rejection and branch on that name, so a wrong-typed /
+/// out-of-range / otherwise malformed option value that reached JS with the
+/// default name "Error" skipped the script's recovery branch and aborted
+/// the whole workflow over a fully recoverable mistake. Byte-locked with
+/// the prelude's `indexOf` and with `local_workflow_test::
+/// every_workflow_fusion_option_rejection_carries_the_prelude_option_marker`.
+///
+/// [R7-3/R7-7] The class this marker has to cover is "every rejection a
+/// workflow `fusion(prompt, opts)` call can earn from `opts` alone", and
+/// R5-18 swept only the three sites inside `parse_workflow_fusion_request`.
+/// The rest were raised later, inside `executor.run`, and reached JS
+/// unmarked. The full class, and where each member is now caught:
+///
+/// * unknown option KEY — serde `deny_unknown_fields` (here) — marked
+/// * wrong-typed / out-of-range / unparseable opts — serde (here) — marked
+/// * `preset` — [`parse_workflow_fusion_preset`] (here) — marked
+/// * `models[i]` blank profile/model —
+///   [`validate_workflow_fusion_model_ref`] (here) — marked
+/// * `dimensions` (non-snake_case, reserved, >12) — was
+///   `orchestrator::validate_request`; now also
+///   [`validate_workflow_fusion_dimensions`] (here) — marked
+/// * `models` list shape (<2, over the panel cap, duplicates) — was
+///   `model_resolver::resolve_custom`; now also
+///   [`validate_workflow_fusion_model_list`] (here) — marked
+/// * `models` unknown model / disallowed profile, `crossProvider` denial —
+///   host catalog and host policy, NOT opts alone: deliberately left
+///   unmarked (see [`workflow_fusion_option_error`])
+/// * empty `prompt` (`orchestrator::validate_request`) — the positional
+///   argument, not a member of `opts`; the documented recovery ("retry
+///   without opts") cannot fix it, so it stays unmarked
+///
+/// The two `executor.run` fallbacks stay in place because the parse-time
+/// gates duplicate no rules: both call the shared oracle
+/// (`platform_api::normalize_dimensions`) or mirror `resolve_custom`'s
+/// arithmetic under a test that compares the two.
+///
+/// Accepted consequence: a workflow-origin bad `dimensions`/`models` list
+/// no longer reaches `fusion::orchestrator`, so it no longer emits that
+/// crate's `tengu_fusion_failed` event with `error_category:
+/// "invalid_request"` / `"invalid_custom_models"`. That matches what the
+/// surface already did for every option error R5-18 covered (none of them
+/// ever reached the orchestrator either) and what `/fusion` does, which
+/// likewise normalizes dimensions at parse time.
+const WORKFLOW_FUSION_OPTION_MARKER: &str = "Workflow fusion() received an unknown option";
+
+/// [R5-18] Wraps a malformed option VALUE (wrong type, out-of-range number,
+/// unrecognized preset, blank `models` entry, unparseable opts JSON) in
+/// [`WORKFLOW_FUSION_OPTION_MARKER`] so it names itself to the prelude the
+/// same way an unknown option KEY does — the unknown-key branch keeps its
+/// own byte-locked wording, this one says "or an invalid option value" and
+/// carries the raw detail in parentheses.
+///
+/// Host-state rejections (no parent model/profile, disabled executor, call
+/// cap, boot-time invalid `fusion.*` settings) must NOT go through here:
+/// they are not something a script's option-recovery branch can fix, and
+/// mislabelling them would make a script silently retry a call that can
+/// never succeed. `every_workflow_fusion_option_rejection_carries_the_
+/// prelude_option_marker`'s negative case pins that boundary.
+fn workflow_fusion_option_error(detail: impl std::fmt::Display) -> FusionError {
+    FusionError::InvalidRequest(format!(
+        "{WORKFLOW_FUSION_OPTION_MARKER} or an invalid option value ({detail})"
+    ))
+}
+
+/// `default_preset` keeps its own parameter (the runtime's `fusion.preset`
+/// default when the script omits `opts.preset`) — only the wire-string ⇒
+/// [`FusionPreset`] parse itself delegates to the shared `FromStr` impl, so
+/// an unrecognized preset names the same accepted values the Agent tool and
+/// `/fusion` do.
+///
+/// [R5-18] The shared message is then wrapped in
+/// [`WORKFLOW_FUSION_OPTION_MARKER`]: `opts.preset` is one of the caller's
+/// options, so a script must be able to recover from a bad one through the
+/// same `e.name === "WorkflowFusionOptionError"` branch as any other bad
+/// option. The wrapping happens HERE (the workflow-only call path) rather
+/// than in `FusionPreset::from_str`, so the CLI and Agent-tool entrypoints
+/// keep the bare shared message.
 fn parse_workflow_fusion_preset(
     raw: Option<&str>,
     default_preset: FusionPreset,
 ) -> Result<FusionPreset, FusionError> {
     match raw {
         None => Ok(default_preset),
-        Some("quality") => Ok(FusionPreset::Quality),
-        Some("fast") => Ok(FusionPreset::Fast),
-        Some(other) => Err(FusionError::InvalidRequest(format!(
-            "fusion preset `{other}` must be quality or fast"
-        ))),
+        Some(other) => other.parse().map_err(|error| match error {
+            FusionError::InvalidRequest(detail) => workflow_fusion_option_error(detail),
+            other => other,
+        }),
     }
 }
 
 fn workflow_fusion_cap(executor: Option<&Arc<dyn FusionExecutor>>) -> u32 {
     executor
         .map(|executor| executor.workflow_fusion_call_cap())
-        .unwrap_or(WORKFLOW_FUSION_CALL_CAP_HARD_LIMIT)
-        .clamp(1, WORKFLOW_FUSION_CALL_CAP_HARD_LIMIT)
+        .unwrap_or(platform_api::FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT)
+        .clamp(1, platform_api::FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT)
 }
 
 fn workflow_fusion_cap_message(cap: u32) -> String {
     format!("Workflow fusion() call cap reached ({cap})")
+}
+
+/// [R4-18] `WorkflowFusionOpts.models` (`fusion()`'s structured `models`
+/// option) is deserialized straight from the caller's JSON with no
+/// emptiness check on either half — unlike the CLI (`/fusion --models`) and
+/// Agent-tool string entrypoints, which both route through
+/// `platform_api::parse_fusion_model_ref` and reject a blank profile/model
+/// up front (`"invalid fusion models entry"`). A workflow script can easily
+/// produce `{profile: cfg.profile ?? "", model: "gpt-5.4"}`; without this
+/// check the blank profile reaches `model_resolver::resolve_custom` and
+/// surfaces as an unrelated `cross-provider fusion is not allowed` (or, for
+/// a blank model, an ``unknown model `<profile>/` `` lookup failure)
+/// instead of a malformed-entry error naming the actual problem. Mirrors
+/// `parse_fusion_model_ref`'s emptiness rule for the already-structured
+/// form — there is no `"profile:model"` string here to re-parse, so the
+/// check is duplicated rather than shared (`FusionModelRef` gives no
+/// on-the-wire string to hand the string-grammar parser).
+fn validate_workflow_fusion_model_ref(model_ref: &FusionModelRef) -> Result<(), FusionError> {
+    if model_ref
+        .profile
+        .as_deref()
+        .is_some_and(|profile| profile.trim().is_empty())
+    {
+        return Err(workflow_fusion_option_error(format!(
+            "invalid fusion models entry: profile must not be empty (model `{}`)",
+            model_ref.model
+        )));
+    }
+    if model_ref.model.trim().is_empty() {
+        return Err(workflow_fusion_option_error(
+            "invalid fusion models entry: model must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+/// [R7-3/R7-7] `opts.dimensions` is the caller's option, but until now the
+/// ONLY thing that validated it was `fusion::orchestrator::validate_request`
+/// -> [`platform_api::normalize_dimensions`], deep inside `executor.run` —
+/// far past the last site the R5-18 sweep wrapped. Its `InvalidRequest` came
+/// back out through `wf_throw(&error.to_string())` (the `executor.run` Err
+/// arm) carrying no [`WORKFLOW_FUSION_OPTION_MARKER`], so a capitalized
+/// dimension name (`{dimensions: ['Coverage']}` — `workflow_description.txt`
+/// documents `dimensions?: string[]` with no format constraint, so that is
+/// the natural thing for a model to write) reached JS with the default
+/// `err.name = "Error"` and the script's documented recovery branch could
+/// not fire.
+///
+/// Validated HERE, where the marker already lives, by calling the very same
+/// shared function the orchestrator calls — not a re-implementation of its
+/// rules — so the gate cannot drift into rejecting something
+/// `validate_request` would have accepted. Mirrors `/fusion`, which likewise
+/// normalizes at parse time (`commands/core/src/fusion.rs:403`). The
+/// normalized value is deliberately discarded: `FusionRequest.dimensions`
+/// keeps the caller's list and the orchestrator re-normalizes it
+/// (idempotent), so this adds a gate without moving where the canonical
+/// value is produced.
+fn validate_workflow_fusion_dimensions(dimensions: Option<&[String]>) -> Result<(), FusionError> {
+    let Some(dimensions) = dimensions else {
+        return Ok(());
+    };
+    platform_api::normalize_dimensions(dimensions.to_vec())
+        .map(|_| ())
+        .map_err(|error| match error {
+            FusionError::InvalidRequest(detail) => workflow_fusion_option_error(detail),
+            other => other,
+        })
+}
+
+/// [R7-3/R7-7] The effective panel cap `fusion::model_resolver::resolve`
+/// computes (model_resolver.rs:81-84) from the caller's `opts.maxPanel` and
+/// the runtime's `fusion.maxPanel`, re-derived here so
+/// [`validate_workflow_fusion_model_list`] can apply the same cap at parse
+/// time. `FusionAgentSurface::max_panel` IS `FusionRuntimeConfig::max_panel`
+/// (`fusion::orchestrator`'s `agent_surface`), so the two agree.
+///
+/// Written with `min`/`max` rather than `clamp` on purpose: `clamp` panics
+/// when its lower bound exceeds its upper one, which a runtime config with
+/// `maxPanel < 2` would produce — a workflow bridge must not panic over a
+/// settings value.
+fn workflow_fusion_effective_max_panel(
+    surface: &platform_api::FusionAgentSurface,
+    requested: Option<u8>,
+) -> u8 {
+    let ceiling = surface
+        .max_panel
+        .min(platform_api::FUSION_MAX_PANEL)
+        .max(platform_api::FUSION_MIN_PANEL);
+    requested
+        .unwrap_or(ceiling)
+        .max(platform_api::FUSION_MIN_PANEL)
+        .min(ceiling)
+}
+
+/// [R7-3/R7-7] The LIST-shape rules on `opts.models` — the same class the
+/// per-entry [`validate_workflow_fusion_model_ref`] check belongs to, and
+/// the same class R5-18 stopped short of. Until now these three were
+/// enforced only by `fusion::model_resolver::resolve_custom`
+/// (model_resolver.rs:136 / 144 / 179) inside `executor.run`, so
+/// `{models: [{model: 'gpt-5.4'}]}` — one entry — came back to the script as
+/// a plain `Error` while its sibling `{models: [{profile: '', model: 'x'}]}`
+/// (blank profile) was correctly named `WorkflowFusionOptionError`. That
+/// arity split was visible inside the guard test's own table.
+///
+/// `resolve_custom`'s OTHER rejections are deliberately NOT mirrored here:
+/// `profile ... is not in fusion.allowedProfiles` (host policy),
+/// ``unknown model `p/m` `` (the credential-filtered availability catalog)
+/// and `CrossProviderDenied` (host policy) depend on host state, not on the
+/// opts object, and naming them an option error would invite a script to
+/// retry a call that retrying cannot fix — the boundary
+/// [`workflow_fusion_option_error`]'s doc and the guard test's negative case
+/// exist to hold.
+fn validate_workflow_fusion_model_list(
+    models: &[FusionModelRef],
+    parent_profile: &str,
+    max_panel: u8,
+) -> Result<(), FusionError> {
+    if models.len() < usize::from(platform_api::FUSION_MIN_PANEL) {
+        return Err(workflow_fusion_option_error(
+            "explicit models must contain at least 2 entries",
+        ));
+    }
+    if models.len() > usize::from(max_panel) {
+        return Err(workflow_fusion_option_error(format!(
+            "explicit models has {} entries, exceeding the {max_panel} panel cap",
+            models.len()
+        )));
+    }
+    // Distinctness is judged on the RESOLVED (profile, model) pair, exactly
+    // as `resolve_custom` does — an entry that omits `profile` inherits the
+    // parent profile, so `[{model:'a'}, {profile:'<parent>', model:'a'}]` is
+    // a duplicate even though the two JSON objects differ.
+    let mut seen: Vec<(&str, &str)> = Vec::with_capacity(models.len());
+    for model_ref in models {
+        let entry = (
+            model_ref.profile.as_deref().unwrap_or(parent_profile),
+            model_ref.model.as_str(),
+        );
+        if seen.contains(&entry) {
+            return Err(workflow_fusion_option_error(
+                "explicit models must be distinct",
+            ));
+        }
+        seen.push(entry);
+    }
+    Ok(())
 }
 
 fn parse_workflow_fusion_request(
@@ -391,11 +620,48 @@ fn parse_workflow_fusion_request(
     let Some(executor) = executor else {
         return Err(FusionError::UnavailableOnPlatform);
     };
+    // F008: a composition-root-pinned rejection (an invalid `fusion.*`
+    // setting at boot — see `RejectedFusionExecutor`) is surfaced AS ITSELF,
+    // before the `enabled` gate below, so a workflow's `fusion()` call sees
+    // the real `InvalidConfiguration` instead of the generic `Disabled`
+    // every OTHER disabled-executor path produces.
+    if let Some(error) = executor.preflight_error() {
+        return Err(error);
+    }
     if !executor.agent_surface().enabled {
         return Err(FusionError::Disabled);
     }
-    let opts: WorkflowFusionOpts = serde_json::from_str(opts_json)
-        .map_err(|error| FusionError::InvalidRequest(error.to_string()))?;
+    let opts: WorkflowFusionOpts = serde_json::from_str(opts_json).map_err(|error| {
+        let detail = error.to_string();
+        // `#[serde(deny_unknown_fields)]` reports this shape ("unknown field
+        // `x`, expected ..."); wrap it in a prefix the prelude's `__wf_pump`
+        // recognizes (workflow/src/lib.rs) so a script can `catch (e)` and
+        // branch on `e.name === "WorkflowFusionOptionError"` instead of
+        // string-matching the raw serde message.
+        //
+        // [R5-18] EVERY other deserialization failure of this same object is
+        // just as much a bad-option error — `{maxPanel: 300}` (out of u8
+        // range), `{maxPanel: "3"}` / `{partialOk: 1}` / `{dimensions:
+        // "speed"}` (wrong types), or unparseable JSON — and used to fall
+        // through with the bare serde message, reaching JS with the default
+        // `err.name = "Error"` so the script's documented recovery branch
+        // never fired. Both halves now carry
+        // `WORKFLOW_FUSION_OPTION_MARKER`.
+        if detail.contains("unknown field") {
+            FusionError::InvalidRequest(format!("{WORKFLOW_FUSION_OPTION_MARKER} ({detail})"))
+        } else {
+            workflow_fusion_option_error(detail)
+        }
+    })?;
+    if let Some(models) = &opts.models {
+        for model_ref in models {
+            validate_workflow_fusion_model_ref(model_ref)?;
+        }
+    }
+    // [R7-3/R7-7] Ordered AFTER the per-entry check on purpose: a blank
+    // profile/model keeps naming the actual malformed entry rather than
+    // being masked by the list-arity message below.
+    validate_workflow_fusion_dimensions(opts.dimensions.as_deref())?;
     let surface = executor.agent_surface();
     let preset = parse_workflow_fusion_preset(opts.preset.as_deref(), surface.default_preset)?;
     let parent_model = parent_model
@@ -411,6 +677,16 @@ fn parse_workflow_fusion_request(
                 "workflow parent model profile is unavailable for `{parent_model}`"
             ))
         })?;
+    // [R7-3/R7-7] Last, because the distinctness rule needs the resolved
+    // parent profile (an entry that omits `profile` inherits it) and the cap
+    // needs `surface`.
+    if let Some(models) = &opts.models {
+        validate_workflow_fusion_model_list(
+            models,
+            &parent_profile,
+            workflow_fusion_effective_max_panel(&surface, opts.max_panel),
+        )?;
+    }
     Ok(platform_api::FusionRequest {
         schema_version: platform_api::FUSION_SCHEMA_VERSION,
         origin: FusionOrigin::Workflow,
@@ -772,6 +1048,21 @@ fn sort_value(v: Value) -> Value {
     }
 }
 
+/// Deterministic chain-key input for a `fusion()` call's raw opts JSON.
+///
+/// Unlike [`normalize_opts_for_chain_key`] — `agent()`'s fixed-field
+/// projection that strips display-only fields like `label`/`phase` — every
+/// field of `WorkflowFusionOpts` (`preset`, `models`, `dimensions`,
+/// `partialOk`, `maxPanel`, `crossProvider`) affects the run Fusion actually
+/// performs, so none of them can be dropped from cache identity. This only
+/// canonicalizes key ORDER (via the shared recursive [`sort_value`] sorter)
+/// so the same options object hashes identically regardless of the script's
+/// literal key order.
+fn normalize_fusion_opts_for_chain_key(opts_json: &str) -> String {
+    let value: Value = serde_json::from_str(opts_json).unwrap_or(Value::Null);
+    serde_json::to_string(&sort_value(value)).unwrap_or_else(|_| "{}".to_string())
+}
+
 /// The chained resume-cache key for an `agent(prompt, opts)` call (claude-code
 /// `qKa(se, te, m)`): a running hash that folds in the PREVIOUS key (`prev`), so
 /// any change in the preceding sequence of agent() calls cascades into every
@@ -780,6 +1071,39 @@ fn sort_value(v: Value) -> Value {
 /// hash bytes are private to LingXi (the journal is its own same-session format),
 /// so a stable FNV-1a-64 over `prev | prompt | opts` suffices.
 fn chain_key(prev: &str, prompt: &str, opts_json: &str) -> String {
+    chain_key_with_discriminator(prev, None, prompt, opts_json)
+}
+
+/// Shared FNV-1a-64 fold behind [`chain_key`] (agent()) and
+/// [`fusion_chain_key`] (fusion()). `discriminator`, when present, is folded
+/// as its own out-of-band field — between `prev` and `prompt`, wrapped in a
+/// `0xFF` sentinel byte — rather than being prepended as plain text into the
+/// `prompt` slot both call kinds hash over.
+///
+/// [Finding 19] `0xFF` is not a plain "reserved" convention; it is a byte
+/// value that can **never** occur anywhere in the byte representation of a
+/// valid Rust `&str` — `prev`, `prompt`, `discriminator` and `opts_json` are
+/// all `&str`, and the Rust compiler guarantees `&str` is well-formed UTF-8,
+/// whose encoding never emits 0xFF (nor 0xC0/0xC1/0xF5-0xFE) as a byte,
+/// under RFC 3629. An earlier version of this fold used `\x1d` (U+001D,
+/// GROUP SEPARATOR) as the sentinel instead: `\x1d` IS a valid single-byte
+/// UTF-8 character, so a `prompt` that happened to SPELL the exact framing
+/// bytes (`\x1d` + tag + `\x1d`) could reproduce a `fusion()` key
+/// byte-for-byte — the "disjoint BY CONSTRUCTION" claim did not actually
+/// hold for that choice of sentinel. `0xFF` closes that hole for real: no
+/// `&str` content can ever fold to the same bytes as the discriminator
+/// frame, so the two key spaces are disjoint whenever `discriminator` is
+/// `Some` for one call and `None` (or a different tag) for the other, with
+/// no dependence on what text the prompt spells. Passing
+/// `discriminator: None` reproduces the pre-existing `chain_key` byte
+/// sequence exactly, so agent()'s own keys — and every journal entry a
+/// prior release already wrote to disk — are unchanged by this split.
+fn chain_key_with_discriminator(
+    prev: &str,
+    discriminator: Option<&str>,
+    prompt: &str,
+    opts_json: &str,
+) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut fold = |bytes: &[u8]| {
         for &b in bytes {
@@ -789,10 +1113,24 @@ fn chain_key(prev: &str, prompt: &str, opts_json: &str) -> String {
     };
     fold(prev.as_bytes());
     fold(b"\x1e");
+    if let Some(tag) = discriminator {
+        fold(b"\xff");
+        fold(tag.as_bytes());
+        fold(b"\xff");
+    }
     fold(prompt.as_bytes());
     fold(b"\x1f");
     fold(opts_json.as_bytes());
     format!("{h:016x}")
+}
+
+/// The chained resume-cache key for a `fusion(prompt, opts)` call — same
+/// running-cursor chaining as [`chain_key`], but folding a `"fusion"`
+/// discriminator as its own hashed field (see
+/// [`chain_key_with_discriminator`]) so this key space can never collide
+/// with `chain_key`'s, no matter what text an agent() prompt spells.
+fn fusion_chain_key(prev: &str, prompt: &str, opts_json: &str) -> String {
+    chain_key_with_discriminator(prev, Some("fusion"), prompt, opts_json)
 }
 
 /// Append-only workflow cache journal. Claude Code writes one `started` record
@@ -890,8 +1228,6 @@ fn group_en_us(n: u64) -> String {
 /// The subagent type spawned for a bare `agent(prompt)` call — claude-code's
 /// default workflow subagent.
 pub const DEFAULT_WORKFLOW_SUBAGENT: &str = "workflow-subagent";
-
-const WORKFLOW_FUSION_CALL_CAP_HARD_LIMIT: u32 = 20;
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -1552,6 +1888,10 @@ fn make_request(
             .get("schema")
             .filter(|v| !v.is_null())
             .map(std::string::ToString::to_string),
+        // Workflow `agent({schema})` keeps the pre-existing forced-every-turn
+        // contract (byte-parity with pre-WP2a behavior); only Fusion panels
+        // request `WhenDone`.
+        structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode::Forced,
         // `agent(prompt, { effort })` → override the subagent's thinking effort
         // (claude-code `me={...ie,effort:ae}`). A level string or integer, carried
         // raw for the spawner to apply onto the resolved agent definition.
@@ -2284,6 +2624,7 @@ async fn run_workflow_script_with_live_updates(
         None,
         None,
         None,
+        None,
         bus,
         agent_count_out,
         phase_telemetry_ctx,
@@ -2314,6 +2655,17 @@ async fn run_workflow_script_with_live_updates_and_fusion(
     workflow_run_id: Option<String>,
     parent_model: Option<String>,
     parent_model_profile: Option<String>,
+    // The same workflow-scoped child transcript directory the `agent()` batch
+    // path applies via `WorkflowIsolationSpawner::spawn_inner` (`agent::
+    // with_transcript_subdir_override`). NOT currently applied to the
+    // fusion() arm below — see the comment at that call site (G012 residual):
+    // a `tokio::task_local!` scope wrapped only around `executor.run(..)`
+    // does not survive `fusion::panel::run_panels`'s per-panel `JoinSet`
+    // spawn, so wrapping here would have no production effect. Kept as a
+    // parameter (currently unused) rather than threaded through the ~10
+    // call sites below and in local_workflow_test.rs, so the real fix can
+    // wire it up without another signature churn.
+    _transcript_subdir: Option<PathBuf>,
     bus: Arc<AnalyticsBus>,
     agent_count_out: Option<Arc<AtomicU64>>,
     phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
@@ -2488,42 +2840,210 @@ async fn run_workflow_script_with_live_updates_and_fusion(
         };
         match work {
             WorkflowBridgeRequest::Fusion(call) => {
+                // Advance the SAME resume cursor `agent()` advances (`running_key`)
+                // for EVERY fusion() dispatch — cap refusal, budget refusal, parse
+                // rejection, or a real run — mirroring the agent() arm's Phase A,
+                // which advances unconditionally at line ~2801 before its own
+                // budget/cap gates run in Phase B. Computing `key` here (rather
+                // than only inside the `Ok(request)` branch below, as before) does
+                // not touch the executor: `fusion_chain_key`/
+                // `normalize_fusion_opts_for_chain_key` are pure functions over
+                // `call.prompt`/`call.opts_json`, so this cannot skip any
+                // validation `parse_workflow_fusion_request` still performs below.
+                // Without this, a call refused here leaves the cursor exactly
+                // where it was, so every subsequently journaled agent() key
+                // (chained off the pre-refusal cursor) misses on replay and the
+                // whole downstream fleet re-spawns instead of hitting the journal.
+                let normalized_opts = normalize_fusion_opts_for_chain_key(&call.opts_json);
+                let key = fusion_chain_key(&running_key, &call.prompt, &normalized_opts);
+                running_key.clone_from(&key);
+
                 if fusion_calls_seen >= fusion_cap {
                     let _ = call
                         .reply
                         .send(wf_throw(&workflow_fusion_cap_message(fusion_cap)));
                     continue;
                 }
-                fusion_calls_seen = fusion_calls_seen.saturating_add(1);
-                let response = match parse_workflow_fusion_request(
-                    fusion.as_ref(),
-                    &call.prompt,
-                    &call.opts_json,
-                    workflow_run_id.as_deref().unwrap_or_default(),
-                    parent_model.as_deref(),
-                    parent_model_profile.as_deref(),
-                ) {
-                    Ok(request) => {
-                        let inherit = FusionInheritance::new(
-                            SubagentInheritance {
-                                tool_invoker: tool_invoker.clone(),
-                                budget: budget.clone(),
-                            },
-                            fusion_cancel.clone(),
-                        );
-                        match fusion
-                            .as_ref()
-                            .expect("fusion request parsing requires an executor")
-                            .run(request, inherit, None)
-                            .await
-                        {
-                            Ok(result) => serde_json::to_string(&result).unwrap_or_else(|_| {
-                                wf_throw("fusion() host could not serialize the result")
-                            }),
-                            Err(error) => wf_throw(&error.to_string()),
-                        }
+                // Mirror the agent() batch's budget ceiling (line ~2547 below):
+                // fusion() output tokens are NOT free just because they are
+                // dispatched from a different queue — a workflow that has
+                // already spent its turn budget must not be able to launch a
+                // 4-5x-cost Fusion run. Same message/format as agent()'s
+                // check, so the prelude's `err.name = "WorkflowBudgetExceededError"`
+                // detection (workflow/src/lib.rs) recognizes it identically.
+                //
+                // The cap slot is consumed only AFTER this gate (parity with
+                // the agent() arm's `metrics.call_count += 1`, which also
+                // runs after its budget check below): a call refused for
+                // budget must not burn a cap slot, or a workflow retried
+                // after a budget refusal could exhaust its cap on refusals
+                // alone and never see a real cap failure once budget frees
+                // up.
+                if let Some(total) = token_budget_total.filter(|&t| t > 0) {
+                    let turn_spent = spent.load(Ordering::Relaxed).saturating_sub(turn_start_baseline);
+                    if turn_spent >= total {
+                        let _ = call
+                            .reply
+                            .send(wf_throw(&workflow_budget_exceeded_message(turn_spent, total)));
+                        continue;
                     }
-                    Err(error) => wf_throw(&error.to_string()),
+                }
+                fusion_calls_seen = fusion_calls_seen.saturating_add(1);
+                // [R4-12] Look the journal up BEFORE re-deriving the request
+                // from LIVE executor state. `parse_workflow_fusion_request`
+                // calls `executor.preflight_error()` (re-validates the
+                // `fusion.*` settings from disk on every call on desktop),
+                // `executor.agent_surface().enabled`, and
+                // `executor.resolve_parent_profile(..)` (fail-closed on an
+                // ambiguous catalog match) — any of which can flip between
+                // the run that journaled this key and a later resume, even
+                // though replaying an already-journaled string needs no
+                // executor at all. R3-16 hoisted `key`/`running_key` above
+                // the cap/budget gates so a refusal still advances the
+                // resume cursor for later calls; this hoists the cache
+                // lookup itself above the live re-derivation for the same
+                // reason — a cache HIT must not be discarded just because
+                // live executor state now rejects a fresh request. Chains
+                // into the SAME resume cursor `agent()` calls advance
+                // (`running_key`/`gone_live`), discriminated by an
+                // out-of-band `"fusion"` field (`chain_key_with_discriminator`)
+                // folded as its own hashed field rather than prepended as
+                // text into the prompt slot agent() also hashes over — that
+                // keeps this key space disjoint from agent()'s BY
+                // CONSTRUCTION, so a fusion() call can never
+                // journal-cache-collide with an agent() call, even one whose
+                // prompt happens to be spelled "fusion:<the same text>".
+                // Every fusion opt participates in the key (unlike agent()'s
+                // fixed-field projection) since `WorkflowFusionOpts` has no
+                // display-only fields to strip.
+                let cached = if gone_live {
+                    None
+                } else {
+                    journal
+                        .as_ref()
+                        .and_then(|j| j.lock().unwrap().get(&key).cloned())
+                };
+                let response = if let Some(cached) = cached {
+                    cached
+                } else {
+                    gone_live = true;
+                    match parse_workflow_fusion_request(
+                        fusion.as_ref(),
+                        &call.prompt,
+                        &call.opts_json,
+                        workflow_run_id.as_deref().unwrap_or_default(),
+                        parent_model.as_deref(),
+                        parent_model_profile.as_deref(),
+                    ) {
+                        Ok(request) => {
+                            let inherit = FusionInheritance::new(
+                                SubagentInheritance {
+                                    tool_invoker: tool_invoker.clone(),
+                                    budget: budget.clone(),
+                                },
+                                fusion_cancel.clone(),
+                            );
+                            let executor = fusion
+                                .as_ref()
+                                .expect("fusion request parsing requires an executor")
+                                .clone();
+                            // KNOWN GAP (G012, tracked as a cross-lane
+                            // residual — see local_workflow_test.rs's removed
+                            // `workflow_fusion_run_inherits_the_workflow_
+                            // transcript_subdir_override` history / WP7 fix
+                            // round 1 review): panels are ordinary hidden
+                            // subagents spawned through the shared
+                            // `PoolSubagentSpawner`, and ideally would pick up
+                            // this run's transcript subdir the same way
+                            // `WorkflowIsolationSpawner::spawn_inner` wraps
+                            // every agent() spawn in
+                            // `agent::with_transcript_subdir_override`.
+                            // Wrapping ONLY this call does not achieve that:
+                            // `fusion::panel::run_panels` spawns every panel
+                            // on its own `JoinSet` task, and a
+                            // `tokio::task_local!` scope (which is what
+                            // `with_transcript_subdir_override` is) does not
+                            // cross a `tokio::spawn`/`JoinSet::spawn`
+                            // boundary — the override would be invisible
+                            // inside each panel's task and
+                            // `resolved_transcript_subdir()` would fall back
+                            // to the session default there regardless. A real
+                            // fix needs the value re-entered inside each
+                            // panel's spawned future (`fusion/src/panel.rs`,
+                            // not owned by this package) and consumed at
+                            // `agent::handle::AgentHandle::
+                            // build_subagent_context`'s
+                            // `resolved_transcript_subdir()` call (also not
+                            // owned by this package) — e.g. via an additive
+                            // `transcript_subdir` field on
+                            // `FusionInheritance`/`SubagentSpawnRequest`
+                            // threaded through both. Left unwrapped here
+                            // rather than shipping an override that never
+                            // takes effect.
+                            // F005: forward Fusion progress into the SAME
+                            // `worker_progress_tx` string-line channel
+                            // `emit_workflow_agent_snapshot` uses for agent()
+                            // batches, so a workflow's `fusion()` call is no
+                            // longer completely silent between dispatch and
+                            // its (up to 15-minute) result.
+                            let (fusion_prog_tx, mut fusion_prog_rx) = tokio::sync::mpsc::channel::<
+                                platform_api::FusionProgress,
+                            >(32);
+                            let forward_progress_tx = worker_progress_tx.clone();
+                            // [Finding 12] Track the LAST `realized_output_tokens`
+                            // seen on the progress channel — the orchestrator
+                            // emits one when `check_panel_bar` fails after real
+                            // panel spend (`fusion::orchestrator::run_inner`) so
+                            // this bridge can charge that spend against the
+                            // workflow's own token budget (`spent`) even when
+                            // the overall call ends in `Err` below, instead of
+                            // leaving `spent` unmoved for a call that already
+                            // burned a real panel fan-out.
+                            let progress_forwarder = tokio::spawn(async move {
+                                let mut last_realized_output_tokens: Option<u64> = None;
+                                while let Some(event) = fusion_prog_rx.recv().await {
+                                    if let Some(tokens) = event.realized_output_tokens {
+                                        last_realized_output_tokens = Some(tokens);
+                                    }
+                                    if let Some(tx) = &forward_progress_tx {
+                                        let _ = tx
+                                            .send(format!("[workflow_fusion] {}", event.stage.label()));
+                                    }
+                                }
+                                last_realized_output_tokens
+                            });
+                            let run_result =
+                                executor.run(request, inherit, Some(fusion_prog_tx)).await;
+                            let last_realized_output_tokens =
+                                progress_forwarder.await.unwrap_or(None);
+                            match run_result {
+                                Ok(result) => {
+                                    spent.fetch_add(result.usage.output_tokens, Ordering::Relaxed);
+                                    match serde_json::to_string(&result) {
+                                        Ok(encoded) => {
+                                            if let Some(j) = journal.as_ref() {
+                                                j.lock().unwrap().insert(key.clone(), encoded.clone());
+                                            }
+                                            if let Some(writer) = &journal_writer {
+                                                writer.append_result(&key, "", &encoded).await;
+                                            }
+                                            encoded
+                                        }
+                                        Err(_) => wf_throw(
+                                            "fusion() host could not serialize the result",
+                                        ),
+                                    }
+                                }
+                                Err(error) => {
+                                    if let Some(tokens) = last_realized_output_tokens {
+                                        spent.fetch_add(tokens, Ordering::Relaxed);
+                                    }
+                                    wf_throw(&error.to_string())
+                                }
+                            }
+                        }
+                        Err(error) => wf_throw(&error.to_string()),
+                    }
                 };
                 let _ = call.reply.send(response);
             }
@@ -3465,6 +3985,7 @@ impl Task for LocalWorkflowHandler {
                     Some(run_id.clone()),
                     parent_model,
                     parent_model_profile,
+                    transcript_subdir.clone(),
                     worker_bus.clone(),
                     None,
                     // Pass the phase telemetry context so run_workflow_script can

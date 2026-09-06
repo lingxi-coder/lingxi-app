@@ -841,6 +841,9 @@ pub struct MockOrchestratorHandle {
     model_listings: StdMutex<Vec<platform_api::ModelListing>>,
     /// Local slash-command transcript pairs requested by a host.
     slash_command_transcript: StdMutex<Vec<(String, String)>>,
+    /// Every `body` passed to `emit_background_system_notice`, in call order
+    /// (WP6/F006: the Fusion completion sink's best-effort UI notice).
+    background_notices: StdMutex<Vec<String>>,
 }
 
 impl MockOrchestratorHandle {
@@ -889,6 +892,7 @@ impl MockOrchestratorHandle {
             files_in_context: StdMutex::new(Vec::new()),
             model_listings: StdMutex::new(Vec::new()),
             slash_command_transcript: StdMutex::new(Vec::new()),
+            background_notices: StdMutex::new(Vec::new()),
         }
     }
 
@@ -1043,6 +1047,12 @@ impl MockOrchestratorHandle {
     /// Transcript pairs supplied through [`OrchestratorHandle::append_slash_command_transcript`].
     pub fn slash_command_transcript(&self) -> Vec<(String, String)> {
         self.slash_command_transcript.lock().unwrap().clone()
+    }
+
+    /// Every `body` passed to `emit_background_system_notice` so far, in
+    /// call order.
+    pub fn background_notices(&self) -> Vec<String> {
+        self.background_notices.lock().unwrap().clone()
     }
 }
 
@@ -1315,6 +1325,10 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 
     async fn list_available_models(&self) -> Vec<String> {
         self.available_models.lock().unwrap().clone()
+    }
+
+    async fn emit_background_system_notice(&self, body: &str) {
+        self.background_notices.lock().unwrap().push(body.to_string());
     }
 
     async fn list_model_listings(&self) -> Vec<platform_api::ModelListing> {

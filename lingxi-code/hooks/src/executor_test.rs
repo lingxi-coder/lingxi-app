@@ -4463,7 +4463,8 @@ mod http_agent_dispatch_tests {
                 response_char_count: 0,
                 last_request_id: None,
                 cumulative_usage: SubagentUsage::default(),
-            }))),
+                        usage_complete: true,
+}))),
         });
         let mut registry = HookRegistry::new();
         registry.register(agent_hook());

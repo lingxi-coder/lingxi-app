@@ -2307,6 +2307,7 @@ fn canonical_task_row() -> TaskRowDto {
         can_resume: false,
         started_at_ms: None,
         error: None,
+        stage: None,
     }
 }
 

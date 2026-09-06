@@ -805,6 +805,7 @@ fn task_row_round_trips() {
             can_resume: false,
             started_at_ms: None,
             error: None,
+            stage: None,
         },
     };
     let json = serde_json::to_value(&ev).expect("serialize TaskRow");

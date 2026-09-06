@@ -469,6 +469,14 @@ mod tests {
 
     #[test]
     fn classify_policy_file_and_dropin() {
+        // Reads the managed dir (via `paths()`/`SettingsPaths::resolve` AND a
+        // second direct call), while ~10 tests in `lib.rs` flip
+        // `LINGXI_MANAGED_DIR` around their own bodies under
+        // `crate::tests::MANAGED_ENV_LOCK`. Without taking the SAME lock the two
+        // reads here can straddle a flip and the policy path stops classifying.
+        let _managed_env = crate::tests::MANAGED_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let managed = managed_settings_dir();
         let p = paths();
         assert_eq!(
@@ -515,6 +523,14 @@ mod tests {
 
     #[tokio::test]
     async fn handle_event_fires_with_correct_source_per_path() {
+        // Reads the managed dir (via `paths()`/`SettingsPaths::resolve` AND a
+        // second direct call), while ~10 tests in `lib.rs` flip
+        // `LINGXI_MANAGED_DIR` around their own bodies under
+        // `crate::tests::MANAGED_ENV_LOCK`. Without taking the SAME lock the two
+        // reads here can straddle a flip and the policy path stops classifying.
+        let _managed_env = crate::tests::MANAGED_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let p = paths();
         let firer = RecordingFirer::default();
 
@@ -587,6 +603,14 @@ mod tests {
 
     #[test]
     fn watch_dirs_dedup_and_cover_layers() {
+        // Reads the managed dir (via `paths()`/`SettingsPaths::resolve` AND a
+        // second direct call), while ~10 tests in `lib.rs` flip
+        // `LINGXI_MANAGED_DIR` around their own bodies under
+        // `crate::tests::MANAGED_ENV_LOCK`. Without taking the SAME lock the two
+        // reads here can straddle a flip and the policy path stops classifying.
+        let _managed_env = crate::tests::MANAGED_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let p = paths();
         let dirs = p.watch_dirs();
         // user dir, project .claude dir (covers both project + local), policy

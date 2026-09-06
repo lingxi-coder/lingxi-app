@@ -84,13 +84,53 @@ pub struct PermissionView {
     prompt: Prompt,
     /// One-shot response sender, consumed by the first resolution.
     resp_tx: Option<oneshot::Sender<PermissionResponse>>,
+    /// Whether this exchange belongs to a turn-independent owner (finding
+    /// 22): either `exchange.background_owned` — set only by an invoker the
+    /// composition root built exclusively for a background task, e.g. the
+    /// `/fusion` background task's `fusion_invoker` — or `exchange.worker`
+    /// attribution, the same signal `AdapterPermissionGate::cancel_owner`
+    /// already uses to "cancel only requests owned by one main turn,
+    /// preserving child agents" (client-adapter/src/permission_gate.rs), for
+    /// an in-process teammate. Neither is ever the interactive turn's OWN
+    /// blocked tool call, so
+    /// [`crate::bottom_pane::ViewStack::dismiss_turn_prompts`] must not
+    /// treat it as belonging to the turn being interrupted.
+    background: bool,
 }
 
 impl PermissionView {
+    /// Whether [`Self::new`] was built from a turn-independent exchange
+    /// (see the [`Self::background`] field doc).
+    #[must_use]
+    pub const fn is_background(&self) -> bool {
+        self.background
+    }
+
+    /// Whether the asker that opened this dialog has already unwound, i.e.
+    /// the future holding the one-shot receiving half was dropped.
+    ///
+    /// Finding 4 (round 7): every event that unwinds the tool call behind an
+    /// ask — the owning turn's cancellation, a `/fusion` panel's
+    /// `panel_total_timeout_ms`, the orchestrator's early-abort bar, the pool
+    /// runner's deallocation, session teardown — ends the same way, so
+    /// `oneshot::Sender::is_closed` is the single predicate that covers all of
+    /// them. [`crate::bottom_pane::BottomPane::show_permission`] already
+    /// refuses to STACK such an exchange; this accessor is what lets
+    /// [`crate::bottom_pane::ViewStack::drop_abandoned_prompts`] remove one
+    /// that went ownerless while it was ALREADY open — which matters because
+    /// a `background_owned` view survives
+    /// [`crate::bottom_pane::ViewStack::dismiss_turn_prompts`] and owns the
+    /// keyboard, so nothing else would ever clear it.
+    #[must_use]
+    pub fn is_asker_gone(&self) -> bool {
+        self.resp_tx.as_ref().is_some_and(oneshot::Sender::is_closed)
+    }
+
     /// Build the prompt for `exchange` (dialog shape mirrors the request
     /// variant; the response channel is taken from the exchange).
     #[must_use]
     pub fn new(exchange: PermissionExchange) -> Self {
+        let background = exchange.background_owned || exchange.worker.is_some();
         let who = exchange
             .worker
             .as_ref()
@@ -218,6 +258,7 @@ impl PermissionView {
         Self {
             prompt,
             resp_tx: Some(exchange.resp_tx),
+            background,
         }
     }
 
@@ -385,6 +426,7 @@ mod tests {
                 suppress_always_allow_rule: false,
                 permission_persistence: None,
                 auto_mode_prompt: None,
+                background_owned: false,
             },
             resp_rx,
         )
@@ -453,6 +495,7 @@ mod tests {
                 suppress_always_allow_rule: false,
                 permission_persistence: None,
                 auto_mode_prompt: Some(permission::gate::AutoModePrompt::ExitPlanMode),
+                background_owned: false,
             },
             resp_rx,
         )

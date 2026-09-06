@@ -338,6 +338,35 @@ impl tool_api::Tool for PromptAgentTool {
 /// tail (SP-5), the Fable/Mythos autonomy tail (SP-6), the fork bullet (SP-7),
 /// and dropped Opus 4.7 from the `# Environment` fast-mode line (SP-8).
 ///
+/// SECOND MOVE, 2026-09-02 — the values below are NOT the ones the 2.1.238
+/// pass produced. `main` commit 5689bf092 ("Keep provider choices aligned with
+/// official model catalogs") changed the assembled bytes and did not touch this
+/// manifest, so these three byte locks —
+/// `production_prompt_bodies_match_normalized_2_1_238_manifests`,
+/// `live_orchestrator_prompt_uses_production_context` and
+/// `production_output_style_bodies_match_normalized_2_1_238_manifests` — were
+/// regenerated against that commit's output. Exactly two things moved:
+///
+/// 1. `env_block.rs` renders the `# Environment` model-catalog line as
+///    `Model IDs — Fable 5.1: 'claude-fable-5-1', …` where it used to render
+///    `Model IDs — Fable 5: 'claude-fable-5', …`. That is +4 bytes ("5" ->
+///    "5.1" and `claude-fable-5` -> `claude-fable-5-1`), and it is why EVERY
+///    case here except the two renamed ones, BOTH output styles, and the live
+///    prompt each grew by exactly 4 bytes and got a new digest.
+/// 2. The Fable/Mythos profile ids themselves were renamed
+///    (`claude-fable-5` -> `claude-fable-5-1`, `claude-mythos-5` ->
+///    `claude-mythos-5-1`) in `body_sections::is_communicating_model` /
+///    `post_context_sections`, and `FABLE_IDENTITY_SECTION` was rewritten.
+///    Those two cases therefore changed wholesale (10_449 -> 10_204 and
+///    9_755 -> 10_206), not by 4 bytes.
+///
+/// Nothing outside `main` contributed: the only non-test edit under
+/// `orchestrator/src/prompt/` that is not on `main` is `task_notification.rs`,
+/// a module `assemble_system_prompt` (prompt/mod.rs) never calls. When a future
+/// re-bless is needed, extend this note the same way — a bare number change with
+/// no named cause is indistinguishable from the unintended drift these locks
+/// exist to catch.
+///
 /// Claude emits one extra first block carrying a private
 /// `x-anthropic-billing-header` attestation. LingXi deliberately does not
 /// spoof that private billing identity, so its request contains the remaining
@@ -349,54 +378,54 @@ fn production_prompt_bodies_match_normalized_2_1_238_manifests() {
     let memory_dir = cwd.join(".lingxi/projects/oracle/memory");
     let cases = [
         (
-            "claude-fable-5",
-            10_449,
-            "cf1c325030407204d13bb0ef18112538177527add11387a9ade102d8db509a46",
+            "claude-fable-5-1",
+            10_204,
+            "f79eca286b15dbe26ff7ca7859915f401a10e6cb02d5cd3fdb482a7f28ff1ee2",
         ),
         (
             "claude-haiku-4-5-20251001",
-            27_530,
-            "f374890bd85e1c7ccc39f4408849db9efb3d785ea631b6b5b8abe098f14260c2",
+            27_534,
+            "9a1b989ee609c655734dc08cccdd827ba9f3cd0c744755f8f3dee3f3c12d2beb",
         ),
         (
-            "claude-mythos-5",
-            9_755,
-            "be335dfb8bda35d5cd5c7bcd0e3522e815d26df8195c143dba37a882333fe002",
+            "claude-mythos-5-1",
+            10_206,
+            "47789ec1aacaff7191eb00e77718191a172428cb1f4b9b36aa0386196404563b",
         ),
         (
             "claude-opus-4-5",
-            27_514,
-            "d7012ba94b9acac26f3bbf8434c8fe6d97dddac5d68cf523a3100e50fa61bd75",
+            27_518,
+            "3f3e136c3b3b9cf436272f9c8fa466aaffd747a88968cc9b96c6df3d112d44c0",
         ),
         (
             "claude-opus-4-6",
-            27_514,
-            "cb79937b876361530ecab7720e5ae2c91dad53cdb7f16ea801dcbb912597ef23",
+            27_518,
+            "a91a49f61250a5f2615da21b720bba08799082801302757bcc776f64c6bf21d1",
         ),
         (
             "claude-opus-4-7",
-            27_518,
-            "efa1aa1482f0796dc980f70e22e1b0e53a0667fd5d11754cf1b80ec62607e77f",
+            27_522,
+            "58ec2a8d3225884c5e4db49f0bed65c7031dade24412a8cc55350117745aa924",
         ),
         (
             "claude-opus-4-8",
-            5_970,
-            "f981d9468098943aba71a17c07006d48dc34fca1ed59cae6216b8ca5757cead5",
+            5_974,
+            "691b46144c6863808f1b0e2e8622aadd5caeaa906f1164a0e3a1b066e622a680",
         ),
         (
             "claude-opus-5",
-            9_309,
-            "f662f5e2797c7e846c707af3033d51cf58dc9c0d5dec9f72bf8b443efe3e76f1",
+            9_313,
+            "0ad0b8229d23dca7c0df4b9b05eb8b60a4beda0f34fbf519dc6dfb06e0348bc5",
         ),
         (
             "claude-sonnet-4-6",
-            27_521,
-            "2f18032d2e1f7257f751561637ff4d4a226cc8a1fcc720129e45cceea54a2c6a",
+            27_525,
+            "f650c78c8c31ebbefd261414917b0a321d86ab1cc906fb32c9e9302c4388f1e1",
         ),
         (
             "claude-sonnet-5",
-            27_518,
-            "6765e2aae1d5cc5ee568dfb90badb98fd264905965adb711328bc89d8b948c0b",
+            27_522,
+            "ed97f8736e8d575ad31d77aa6b764bc315e7f6fdaac97bb1b0cf7dee32e17bd5",
         ),
     ];
 
@@ -429,6 +458,10 @@ fn production_prompt_bodies_match_normalized_2_1_238_manifests() {
 /// above intentionally use a synthetic context so dynamic machine fields can be
 /// normalized deterministically; this test prevents that stable fixture from
 /// masking a broken composition path.
+///
+/// Its 14_602/`06da73ad…` byte lock shares the PROVENANCE block above
+/// `production_prompt_bodies_match_normalized_2_1_238_manifests` — read it
+/// before changing either value, and record WHY the number moved.
 #[tokio::test]
 async fn live_orchestrator_prompt_uses_production_context() {
     use std::sync::Arc;
@@ -531,13 +564,17 @@ async fn live_orchestrator_prompt_uses_production_context() {
 
     let normalized = normalize_live_prompt(&prompt, &cwd);
     let digest = format!("{:x}", Sha256::digest(normalized.as_bytes()));
-    assert_eq!(normalized.len(), 14_598, "live prompt length drifted");
+    assert_eq!(normalized.len(), 14_602, "live prompt length drifted");
     assert_eq!(
-        digest, "6258cf2009cf83b2f6a73eccc83201cbbd53e6d20987a25ef7610519b9293567",
+        digest, "06da73ad932d83116628c510ea628befd77b0f87b6f1fbe2df041c30e73bc54c",
         "live normalized production prompt drifted"
     );
 }
 
+/// Byte lock for the two builtin output-style bodies. Its lengths and
+/// digests share the PROVENANCE block above
+/// `production_prompt_bodies_match_normalized_2_1_238_manifests` — read it
+/// before changing a number here, and record WHY the number moved.
 #[test]
 fn production_output_style_bodies_match_normalized_2_1_238_manifests() {
     let temp = tempfile::tempdir().expect("temp cwd");
@@ -546,13 +583,13 @@ fn production_output_style_bodies_match_normalized_2_1_238_manifests() {
     let cases = [
         (
             "Explanatory",
-            10_320,
-            "28096b3c4fdc3a69ab15fa6db7eef0236c118027c16cc8638bafd2a993628fbc",
+            10_324,
+            "74522c48054038c5dfbd1b82f9a2e9f2d5d54e9f8ff0ed78adbc18e26aea8de3",
         ),
         (
             "Learning",
-            14_196,
-            "77c6495beab3631d860386817db1d59e02a399d1cea4ef0676989db6af3fe752",
+            14_200,
+            "cd524867f55a13362a7e95caf0fa7d9932a07c37bc47a78cccbfd26e9069e6ad",
         ),
     ];
 

@@ -187,6 +187,42 @@ pub trait TaskStatusSink: Send + Sync {
     /// Registry-backed sinks override this; standalone sinks stay no-ops.
     async fn set_fusion_outcome(&self, _task_id: &str, _run_id: String, _final_text: String) {}
 
+    /// Record a Fusion run's failure reason before its terminal `Failed`
+    /// status. Registry-backed sinks override this; standalone sinks stay
+    /// no-ops. Additive — call sites that never fail a Fusion run need not
+    /// change.
+    async fn set_fusion_error(&self, _task_id: &str, _error: String) {}
+
+    /// Record a Fusion run's egress profiles and usage summary. Registry-
+    /// backed sinks override this; standalone sinks stay no-ops. Additive.
+    async fn set_fusion_egress_and_usage(
+        &self,
+        _task_id: &str,
+        _egress_profiles: Vec<String>,
+        _usage: Option<platform_api::task_registry::AgentRunUsage>,
+    ) {
+    }
+
+    /// Record a Fusion run's current progress-stage label (F005), e.g.
+    /// "Running panels 2/3" — the SAME text `FusionStage::label()` produces
+    /// for the Agent-tool progress path. Registry-backed sinks override this
+    /// to write `LocalFusionTaskState.stage`; standalone sinks stay no-ops.
+    /// Additive — call sites that never forward Fusion progress need not
+    /// change.
+    async fn set_fusion_stage(&self, _task_id: &str, _stage: String) {}
+
+    /// Record that a `Completed` Fusion run's durable `<fusion-result>`
+    /// session append (`FusionCompletionSink::publish`) has finished. Call
+    /// this AFTER `publish` resolves — necessarily after
+    /// [`Self::finish_fusion_terminal`] already flipped the status, since the
+    /// registry's notification drain still needs terminal-status-first
+    /// ordering. Registry-backed sinks override this so a one-shot host can
+    /// keep polling past `Completed` until the append actually landed instead
+    /// of racing process exit against it (review finding #17); standalone
+    /// sinks stay no-ops. `Failed`/`Killed` runs never call `publish` and so
+    /// never call this either.
+    async fn mark_fusion_result_published(&self, _task_id: &str) {}
+
     /// Atomically publish a Fusion run's terminal payload together with its
     /// terminal task status. Registry-backed sinks override this to close the
     /// outcome/status race; the default preserves legacy standalone behavior.

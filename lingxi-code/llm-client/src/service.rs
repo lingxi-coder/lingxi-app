@@ -3945,6 +3945,56 @@ impl ApiService {
         self.drive_stream(req).await
     }
 
+    /// Like [`Self::stream`], but ALSO threads a per-turn output-token ceiling
+    /// and a COGS query-source label onto the WIRE request (the agent crate's
+    /// `SubagentApiCallOpts` seam — Fusion panels and any other opts-aware
+    /// subagent caller). `max_tokens: None` and `query_source: None` keep the
+    /// body byte-identical to [`Self::stream`] (auto-computed ceiling, no
+    /// label).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stream_with_opts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        effort: Option<serde_json::Value>,
+        max_tokens: Option<u32>,
+        query_source: Option<&str>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let mut req = self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        req.effort = effort;
+        req.query_source = query_source.map(str::to_string);
+        self.drive_stream(req).await
+    }
+
+    /// Like [`Self::stream_forced`], with the same per-turn output-token
+    /// ceiling + COGS query-source label as [`Self::stream_with_opts`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stream_forced_with_opts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        forced_tool: Option<&str>,
+        effort: Option<serde_json::Value>,
+        max_tokens: Option<u32>,
+        query_source: Option<&str>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let mut req = self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        req.effort = effort;
+        if let Some(name) = forced_tool {
+            req.tool_choice = Some(crate::ToolChoice::Tool {
+                name: name.to_string(),
+            });
+        }
+        req.query_source = query_source.map(str::to_string);
+        self.drive_stream(req).await
+    }
+
     /// Structured-output streaming call constrained by a JSON SCHEMA rather
     /// than by a forced tool.
     ///
@@ -3977,6 +4027,59 @@ impl ApiService {
         )?;
         req.effort = effort;
         req.response_format = Some(crate::ResponseFormat::JsonSchema { schema });
+        self.drive_stream(req).await
+    }
+
+    /// [`Self::stream_json_schema`] with explicit thinking and temperature
+    /// semantics (F003 round 2), mirroring
+    /// [`Self::messages_create_side_query_stream_with_thinking`].
+    ///
+    /// Plain `stream_json_schema` never touches `req.reasoning` or
+    /// `req.temperature` at all — it just inherits whatever `build_request`
+    /// already derives from the LIVE session thinking config. That is
+    /// correct for a caller (like the auto-mode propose query) that wants to
+    /// inherit the session's thinking decision untouched. It is wrong for a
+    /// caller that wants a specific temperature contract (e.g. the fusion
+    /// analyst's `temperature: 0.0`): `build_request` defaults session
+    /// thinking to `Adaptive` (ON), so setting a bare temperature override on
+    /// top of that inherited config could emit BOTH a `thinking` block and a
+    /// non-1.0 `temperature` — a pairing every provider that supports
+    /// extended thinking rejects.
+    ///
+    /// Use this method whenever the caller has an opinion about `thinking`
+    /// (including "none at all" — pass `None`, which clears any
+    /// session-derived reasoning, exactly like the `sidequery` crate's
+    /// `SideQueryRequest.thinking: None` convention) and/or a specific
+    /// `temperature` contract, rather than raw `stream_json_schema`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stream_json_schema_with_thinking(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        schema: serde_json::Value,
+        max_tokens: Option<u32>,
+        effort: Option<serde_json::Value>,
+        thinking: Option<crate::model::thinking::ThinkingConfig>,
+        temperature: Option<f32>,
+        query_source: Option<&str>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let mut req = self.build_request(
+            model,
+            profile,
+            system,
+            messages,
+            Vec::new(),
+            true,
+            max_tokens,
+        )?;
+        req.effort = effort;
+        req.response_format = Some(crate::ResponseFormat::JsonSchema { schema });
+        self.apply_side_query_thinking(&mut req, model, thinking, temperature);
+        if query_source.is_some() {
+            req.query_source = query_source.map(str::to_string);
+        }
         self.drive_stream(req).await
     }
 }

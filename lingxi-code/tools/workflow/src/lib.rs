@@ -2125,6 +2125,117 @@ mod tests {
         );
     }
 
+    /// The second registered divergence: the `fusion()` script hook. Agent
+    /// Fusion has no claude-code counterpart, so the oracle cannot document a
+    /// hook the shipped runtime provides — a script that never learns `fusion()`
+    /// exists cannot call it. Asserted on both sides so the bullet can neither
+    /// vanish from the shipped text nor creep into the oracle.
+    #[test]
+    fn the_shipped_description_documents_the_fusion_hook() {
+        assert!(
+            !ORACLE_DESCRIPTION.contains("fusion(prompt: string, opts?:"),
+            "the oracle must stay free of LingXi-only hooks; that is what the register is for"
+        );
+        assert!(
+            DESCRIPTION.contains("fusion(prompt: string, opts?:"),
+            "the shipped description must document the fusion() script hook"
+        );
+        assert!(
+            DESCRIPTION.contains("WorkflowFusionOptionError"),
+            "the catchable rejection names must be documented, or a script cannot handle them"
+        );
+        // `platform_api::normalize_dimensions`' real rules. Pinned as prose, not
+        // just as length: an undocumented `dimensions: ['Coverage']` is rejected,
+        // and until it was written down the rejection did not even reach the
+        // script as a named error.
+        assert!(
+            DESCRIPTION
+                .contains("lowercase snake_case, at most 12, never a provider/model/panel name"),
+            "the dimensions rule must stay documented on the option it constrains"
+        );
+        // It belongs in the script-body hook list, next to the other hooks a
+        // script can call — not in the prose after it.
+        let hooks = DESCRIPTION
+            .find("Script body hooks:")
+            .expect("the hook list must exist");
+        let bullet = DESCRIPTION
+            .find("- fusion(prompt: string")
+            .expect("checked above");
+        let after_hooks = DESCRIPTION
+            .find("Subagents are told their final text IS the return value")
+            .expect("the paragraph after the hook list must exist");
+        assert!(
+            hooks < bullet && bullet < after_hooks,
+            "the fusion() bullet must sit inside the hook list ({hooks}..{after_hooks}), got {bullet}"
+        );
+    }
+
+    /// Drift gate for the `fusion()` bullet's documented resolved-object shape.
+    /// Round 1 shipped `{runId, status, decision, panels, usage, timing, egress}`
+    /// in the description while `platform_api::FusionResult` actually
+    /// serializes `run_id` / `egress_profiles` (no `#[serde(rename_all)]`) and
+    /// carries `final_text` — the ONLY field with the deliberation's answer —
+    /// under no documented key at all. Nothing caught it: the byte-lock test
+    /// above only pins length + a handful of substrings, and the round-trip
+    /// test in `tasks` pins the real shape without ever comparing it back to
+    /// this description text. Parse the object literal out of the bullet and
+    /// assert every key it lists is an actual top-level key of a serialized
+    /// `FusionResult`, so the two can never independently drift again.
+    #[test]
+    fn fusion_bullet_documents_only_real_fusion_result_keys() {
+        let marker = "compact result object ({";
+        let start = DESCRIPTION
+            .find(marker)
+            .expect("fusion() bullet documents the resolved object shape")
+            + marker.len()
+            - 1; // keep the leading '{'
+        let rest = &DESCRIPTION[start..];
+        let end = rest
+            .find('}')
+            .expect("object literal in the fusion() bullet is closed");
+        let object_literal = &rest[1..end]; // strip the leading '{'
+        let documented_keys: Vec<&str> = object_literal
+            .split(',')
+            .map(|part| part.trim().split(':').next().unwrap().trim())
+            .collect();
+        assert!(
+            documented_keys.contains(&"run_id") && documented_keys.contains(&"final_text"),
+            "sanity: expected run_id and final_text among parsed keys, got {documented_keys:?}"
+        );
+
+        let sample = platform_api::FusionResult {
+            schema_version: 1,
+            run_id: "fu_test".into(),
+            status: platform_api::FusionStatus::Completed,
+            decision: platform_api::FusionDecision::Picked {
+                panel_id: "P1".into(),
+            },
+            final_text: "the answer".into(),
+            analysis: None,
+            panels: vec![platform_api::PanelOutcome {
+                panel_id: "P1".into(),
+                status: platform_api::PanelRunStatus::Completed,
+                duration_ms: 7,
+                error_category: None,
+                error_detail: None,
+                usage: None,
+            }],
+            usage: platform_api::FusionUsage::default(),
+            timing: platform_api::FusionTiming::default(),
+            egress_profiles: vec!["anthropic".into()],
+        };
+        let serialized = serde_json::to_value(&sample).expect("FusionResult serializes");
+        let actual_keys = serialized.as_object().expect("object");
+        for key in &documented_keys {
+            assert!(
+                actual_keys.contains_key(*key),
+                "fusion() bullet documents key `{key}` but FusionResult never serializes it \
+                 (actual keys: {:?}) — the description and the wire shape have drifted",
+                actual_keys.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+
     /// Managed `disableWorkflows: true` must disable the tool. Before this was
     /// wired there was no seam for the setting at all, so an organization that
     /// set it still had Workflow advertised AND executable — the policy was

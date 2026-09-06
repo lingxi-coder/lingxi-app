@@ -322,6 +322,7 @@ impl Task for DreamHandler {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -658,11 +659,13 @@ mod tests {
                         response_char_count: 0,
                         last_request_id: None,
                         cumulative_usage: SubagentUsage::default(),
-                    })
+                                        usage_complete: true,
+})
                 }
                 Some(CannedResult::Failed(reason)) => Ok(SubagentResult::Failed {
                     agent_id: protocol::AgentId::new(),
                     reason,
+                    usage: platform_api::subagent_spawn::SubagentUsage::default(),
                 }),
                 Some(CannedResult::Killed) => Ok(SubagentResult::Killed {
                     agent_id: protocol::AgentId::new(),

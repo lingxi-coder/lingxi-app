@@ -1588,6 +1588,7 @@ mod tests {
                         }]),
                     ),
                 auto_mode_prompt: None,
+                background_owned: false,
             },
             resp_rx,
         )

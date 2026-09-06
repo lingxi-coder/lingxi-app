@@ -136,6 +136,7 @@ impl AgentExecutor {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            structured_output_mode: Default::default(),
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -324,7 +325,8 @@ mod tests {
                 response_char_count: 0,
                 last_request_id: None,
                 cumulative_usage: SubagentUsage::default(),
-            }))),
+                        usage_complete: true,
+}))),
         });
         let exec = AgentExecutor::new(Some(spawner.clone()), Duration::from_secs(5));
         let hook = make_agent_hook();
@@ -374,6 +376,7 @@ mod tests {
             result: Mutex::new(Some(Ok(SubagentResult::Failed {
                 agent_id: protocol::AgentId::new(),
                 reason: "no API key".into(),
+                usage: platform_api::subagent_spawn::SubagentUsage::default(),
             }))),
         });
         let exec = AgentExecutor::new(Some(spawner.clone()), Duration::from_secs(5));

@@ -130,6 +130,8 @@ NeedsParent 是 **Ok 成功状态**，不是 ToolError。宿主决策：
 - Merge：`confidence >= 60` 且无未解决 critical contradiction，否则强制 NeedsParent
 - scores 的 panel id / dimension / 0..=100 必须与请求完全匹配
 
+> **落地更新（F004）：** `FusionNeedsParentReason` 落地时比本节最初列的 `AnalystRequested` / `AnalysisParseFailed` / `CriticalContradiction` / `LowConfidence` / `SynthesisFailed` 多一个变体 `AnalysisFailed { category: String }`——覆盖 analyst 调用本身失败（超时、传输/4xx/5xx、或面板跑完后才发现 analyst 路由不支持结构化输出）而不是"JSON 解码/校验失败"的情形；旧实现把这类失败也贴上 `AnalysisParseFailed` 标签，误导排障。`category` 是 sanitize 过的分类字符串（如 `"timeout"`、`"structured_output_unsupported"`），从不携带原始 provider 错误体。`SynthesisTimedOut` 同理是 `SynthesisFailed` 之外单独区分超时的变体。
+
 ### 2.4 错误
 
 预检类（零 provider 调用）：`Disabled`, `UnavailableOnPlatform`, `InvalidConfiguration`, `InvalidRequest`, `TooFewModels`, `InvalidCustomModels`, `CrossProviderDenied`, `NoJudgeModel`, `StructuredOutputUnsupported`, `BudgetReservationUnavailable`, `BudgetExceeded`, `SpawnLimitExceeded`。
@@ -176,7 +178,7 @@ pub trait FusionExecutor: Send + Sync {
     "panelTotalTimeoutMs": 600000,
     "analystTimeoutMs": 120000,
     "synthesizerTimeoutMs": 180000,
-    "totalTimeoutMs": 900000,
+    "totalTimeoutMs": 1200000,
     "analysisProtocolRetries": 1,
     "slashCrossProviderDefault": true,
     "allowCrossProviderForAgent": false,
@@ -187,7 +189,9 @@ pub trait FusionExecutor: Send + Sync {
 }
 ```
 
-校验：counts ≥ 2；maxPanel 2..=8；counts ≤ maxPanel；minSuccessful ≤ panel count；timeouts 阶段 ≤ total；retries 0 或 1。无效配置不 panic，入口返回 `InvalidConfiguration`。
+> **落地更新（F004）：** `totalTimeoutMs` 默认值由 900000 提到 **1,200,000**（上方 JSON 已同步）——原来的 900000 连自身的阶段默认值都装不下（600000+120000*2+180000=1,020,000），会被本节新增的阶段和校验直接判非法。`FusionSettingsJson::validate`（`core/src/settings/schema.rs`）与 `fusion::FusionRuntimeConfig::defaults()`（`fusion/src/config.rs`）的默认值刻意保持锁步，改一处必须改另一处，否则一个缺省的 `fusion.totalTimeoutMs` 会在校验器和运行时配置之间读到两个不同的值。
+
+校验：counts ≥ 2；maxPanel 2..=8；counts ≤ maxPanel；minSuccessful ≤ panel count；每个 timeout 阶段单独 ≤ total；**阶段之和 ≤ total**（`panelTotalTimeoutMs + analystTimeoutMs*(1+analysisProtocolRetries) + synthesizerTimeoutMs ≤ totalTimeoutMs`，F004——否则全部面板成功完成的一次 run 仍可能因为 analyst 重试 + synthesizer 的耗时把端到端截止时间挤爆，被误报成"未产出任何面板前超时"）；retries 0 或 1。这两条校验分别在两处生效并互为兜底：`FusionSettingsJson::validate` 只看单个 settings 分层文件自身出现的字段（分层文件只设置其中一侧时不误判整体），`FusionRuntimeConfig::from_settings`（`fusion/src/config.rs`）在所有分层合并、每个字段取到最终值之后对**合并结果**重跑同一条阶段和不变量以及 `minSuccessfulPanels ≤ min(qualityPanelCount, fastPanelCount)`。无效配置不 panic，入口返回 `InvalidConfiguration`。
 
 **预留公式（覆盖 Codex 1byte=1token 峰值）：**
 
@@ -203,6 +207,12 @@ if maxReservedNanoUsd is Some: reserved_usd = min(reserved_usd, maxReservedNanoU
 ```
 
 1 byte = 1 token **只**用于单次调用 usage 缺失时的结算兜底，不用于预留。
+
+> **落地更新（F001 / G003 / G001）：** 上面的公式此前只在纸面上成立——`FusionOrchestrator` 组装时价格表恒为 `()`（`FusionPriceBook for ()` 永远 `rates_for → None`），按 token 计费的模型在有硬 `--max-budget` 时预检必拒（`"has no price"`），没有硬上限时每次预留又都报价 $0，硬预算不变量没有接到任何真实数字上。落地做法：
+> - `apps/engine-desktop` 新增 `DesktopFusionPriceBook`，包一层会话本就在用的 `cost::PricingCatalog`（`CostTracker` 计费的同一张表），用主循环 `record_api_response_v2` 同款的 `orchestrator::cost_wiring::model_ref_from_string` 做 `(profile, model)` 解析，`desktop_fusion_executor` 组装时 `.with_price_book(Arc::new(book))`。定价目录没有独立的按次费率字段，`per_request_nano_usd` 固定填 0（"没有固定费"而不是"没定价"，不影响硬预算门靠 token 费率生效）。
+> - `realized_nano_usd` 不再是"运行前后 session 级 CostTracker 差值"这种启发式（旧写法会把同一会话里父模型自己产生的花费也记到 Fusion 头上，G001）；改为 `fusion::orchestrator` 在 run 结束时用同一张价格表，对**这一次 run 自己的** usage（每个 Panel 的 cumulative usage + Analyst + Synthesizer）单独计价；任何一个组件缺费率就把整个结果标 `estimated = true`，不是悄悄按 0 记账。
+> - `cost::budget::BudgetEnforcer::commit_reservation` 此前 `let _ = actual_nano_usd;`——预留的钱在 commit 时直接消失，不进 `CostTracker`，一个设了 `--max-budget` 的会话可以在 Fusion 上无限超支。落地后 `commit_reservation` 先 `cost_tracker.record_external_cost(actual_nano_usd)` 再释放持有；这是 Fusion usage 唯一进入会话总花费的入口，因为 Fusion 的 provider 调用全部走 `ProviderApiAdapter` / `ProviderSideQueryClient`，从不经过 `record_api_response_v2`。
+> - `platform-api::task_registry::stop_background_agents_for_budget` 此前只认 `local_agent` / `local_workflow`，超预算时后台 `/fusion` 任务不会被停；加了 `"local_fusion" => true`（G003）。
 
 ---
 
@@ -235,6 +245,10 @@ Cancel / 预检失败 / 0 成功 / 低于 min → Failed | Cancelled
 每个 terminal 只跑一次 finalize：取消子任务、释放 Panel slot、释放 spawn reservation 未使用部分、释放预算余额、flush usage/telemetry、只发一次完成通知。迟到事件不得覆盖 terminal。
 
 Panel：JoinSet + CancellationToken。idle watchdog 作用于 provider stream 建连与每个响应事件，并在每个事件后重置；另有 end-to-end panel total timeout。成功数 ≥ min 且 partialOk → 进 Analyst。
+
+> **落地更新（F002）：** Panel 的子代理 spawn request 使用 `structured_output_mode: StructuredOutputMode::WhenDone`（`fusion/src/panel.rs`），不是对整轮循环恒定的 `Forced`——runner 在还有只读工具可用、且未到最后一轮时用普通（auto）`tool_choice`，只在最后一轮或模型连续无工具调用时才强制 `StructuredOutput`。这条能力是 runner 层新加的 additive 字段（`SubagentSpawnRequest::structured_output_mode`，serde default 仍是 `Forced`，保证既有 `agent({schema})` workflow 的字节级行为不变），Fusion 是唯一把它设为 `WhenDone` 的调用方。
+
+> **落地更新（F007）：** `FusionOrchestrator` 不在构造时把 `FusionRuntimeConfig` 冻结一份——`run()` 一开始就通过 `FusionConfigSource::load()` 重新读一次当前生效配置（`fusion/src/config.rs`），`agent_surface()` / `workflow_fusion_call_cap()` 同理。见 §11 kill switch 的对应说明。
 
 父 provider/profile：优先使用 session 显式身份。legacy/resume 只有 bare model 时，仅当 live catalog 中该 model 唯一对应一个 profile 才回填；多 profile 重名必须 fail-closed，禁止按 catalog 顺序猜测 same-provider 路由。
 
@@ -457,6 +471,8 @@ pub cross_provider: Option<bool>,
 1. 解析 input
 2. `subagent_type == "fusion"`？
 3. 无 executor 或 `!enabled` → 当未知类型 / Disabled（listing 不含则 "Agent type 'fusion' not found"）
+
+   > **落地更新（统一 §3 与本条的矛盾）：** §3 说无效的 `fusion.*` 配置要在入口处返回 `InvalidConfiguration`，但本条字面上只区分"没有 executor"和"`enabled=false`"两种通用消息——一份非法配置（例如阶段超时之和超过 total）如果只是让组合根装不出 orchestrator，会被这里当成普通 Disabled 吞掉，调用方看到的还是泛泛的"未找到/已禁用"，看不出是配置错误。落地做法是 `FusionExecutor` trait 加一个 `preflight_error(&self) -> Option<FusionError>`（默认 `None`，不影响任何正常 executor），组合根在设置校验失败时不再让 `desktop_fusion_executor` 直接 panic 或返回不可用，而是构造一个 `RejectedFusionExecutor` 把校验失败的 `InvalidConfiguration` 钉在这个方法上。`call` 顺序里第 3 步在检查 `enabled` **之前**先查 `executor.preflight_error()`——有值就直接把它当错误返回，绕开"未知类型/Disabled"这条通用分支；workflow 的 `fusion()` 桥（`tasks/src/handlers/local_workflow.rs`）在同一个位置消费同一个方法，两个入口对同一个非法配置给出同一个 `InvalidConfiguration`，不再各说各话。
 4. 校验 options → `FusionRequest { origin: Agent, cross_provider: 仅当 allowCrossProviderForAgent && 显式 true }`
 5. batch spawn reserve N（见 4.2）
 6. `executor.run`
@@ -543,7 +559,9 @@ quality/fast 互斥；same/cross 互斥；未传 provider flag 用 `slashCrossPr
 - [ ] 默认跨 provider；`--same-provider` 同源
 - [ ] 立即返回 `f` + 8 base36
 - [ ] 完成只追加一条 meta；重放不重复
-- [ ] 取消 / resume / read
+- [x] 取消：`TaskStop` → `tasks::handlers::local_fusion::cancel_fusion_worker` 触发 `inherit.cancel`，等一小段宽限期收 worker 自己的完成信号，收不到再 hard-abort 兜底（F012）
+- [x] read：任务 DTO（`LocalFusionTaskState.stage` + 终态字段）+ 落盘的 sanitized `FusionResult` spool 体
+- [ ] **resume：未实现**（落地更新——`TaskType::LocalFusion` 没有会话续跑路径；一个 `/^f[0-9a-z]{8}$/` 任务不能像其它任务类型那样被恢复重放，只能读它已经落盘的终态或重新发起一次 `/fusion`。这是已知残留，不是本节最初勾选清单暗示的"已实现"）
 - [ ] `cargo test -p command-core` `cargo test -p tui` `cargo test -p tasks`
 
 **PR5 验收:** `/fusion` 在 enabled=false 时也能跑。
@@ -597,6 +615,11 @@ Resolving models → Reserving budget → Running panels x/N
 ```
 
 默认 UI 显示匿名 P1..Pn，不显示模型名；详情可显示 egress profile/model。
+
+> **落地更新（F005）：** 本节只定义了文案，没定义谁渲染——落地前 `FusionProgress` 事件确实被发出，但三条入口都没有消费者，用户从 "Resolving models" 到终态之间完全看不到进度。落地后分三条腿，共用同一份 `FusionStage::label()` 文案：
+> - **Agent-tool 路径**：`tools/agent` 把每个 `FusionProgress` 转发成既有的 `subagent_activity` 通知（复用父 session 现成的子代理活动展示，不新开一条 UI 通道）。
+> - **`/fusion` 任务路径**：`tasks::handlers::local_fusion::run_fusion_worker` 起一个转发协程，把同一串 `FusionProgress` 写进 `LocalFusionTaskState.stage`（task DTO 字段），客户端轮询任务状态时能看到与 Agent-tool 路径相同的阶段文案，而不是"Running"和终态之间的空白。
+> - **workflow `fusion()` 路径**：`tasks::handlers::local_workflow.rs` 的 fusion 臂起同样的转发协程，把每个 `FusionProgress` 以 `[workflow_fusion] <FusionStage::label()>` 一行写进 agent() 批次共用的 `worker_progress_tx` 进度通道，`fusion()` 调用在派发到结果之间不再完全静默。
 
 ---
 
@@ -654,5 +677,6 @@ Codex 验收 1–20 全部成立，并额外：
 
 - `fusion.enabled=false` 关掉 Agent/Workflow
 - `/fusion` 可用本地/远端 policy 停注册或让 handler 直接 Disabled
-- kill switch 向运行中 Fusion 发 cancel，走正常 finalize
 - 历史里已有 fusion-result 当普通 user_meta 显示，不 crash
+
+> **落地更新（F007）：** kill switch **只对新 run 生效**，不是本节最初写的"向运行中 Fusion 发 cancel"——`FusionOrchestrator::run()` 在每次调用开始时才重新 `FusionConfigSource::load()`（见 §5），已经跑在 `run_inner` 里的 run 不会因为设置中途翻转成 `enabled=false` 被主动打断；它按自己已经读到的那份配置继续跑到自然终态（完成 / 各阶段自身超时 / 显式 cancel token）。任何一条终止路径上的资源释放都靠 `Drop`：`fusion::budget::ReservationLease` 没被 `commit()`（成功）就被丢弃时，`Drop` 会 spawn 一次异步 `release_reservation`，是"忘记释放"路径的兜底而不是 kill switch 的机制；已经启动的 Panel 子任务本身的取消仍走 `JoinSet` + `CancellationToken`（`inherit.cancel`），与 `fusion.enabled` 的值无关。真正想打断一个正在跑的 `/fusion` 后台任务要用 `TaskStop`（`tasks::handlers::local_fusion::cancel_fusion_worker`），不是翻转设置。

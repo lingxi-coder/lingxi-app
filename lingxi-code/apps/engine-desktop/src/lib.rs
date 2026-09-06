@@ -3115,6 +3115,7 @@ fn desktop_fusion_catalog_row(
         // AND-ing the owning profile's codec in is what makes the two agree.
         structured_output: model.capabilities.structured_output
             && protocol_encodes_response_format(protocol),
+        limits: fusion::ModelLimits::from_metadata(&model.metadata),
     }
 }
 
@@ -3238,10 +3239,10 @@ fn filter_fusion_catalog(
 /// [`FusionCatalogRefresher::refresh`], which a credential-write path calls
 /// after persisting a new credential.
 ///
-/// `unfiltered`, `anthropic_probe_definitive` and `session_model_restriction`
-/// stay fixed for the process — only per-provider availability, and whether
-/// the availability probe has ever COMPLETED, can change mid-session through
-/// a credential write, so only those halves need to be mutable.
+/// `unfiltered` and `anthropic_probe_definitive` stay fixed for the process.
+/// Provider availability is shared mutable state, while the managed model
+/// restriction is re-resolved for each view so a policy edit can tighten or
+/// relax the next preparation without mutating an accepted snapshot.
 ///
 /// Round-7 finding [2]: `availability_probe_completed` used to be a plain
 /// `bool` frozen at construction, and nothing in the process ever set it to
@@ -3259,8 +3260,13 @@ struct FusionCatalogModelSource {
     availability: Arc<std::sync::RwLock<std::collections::BTreeMap<String, bool>>>,
     anthropic_probe_definitive: bool,
     availability_probe_completed: Arc<std::sync::atomic::AtomicBool>,
+    mutation_epoch: Arc<std::sync::atomic::AtomicU64>,
     session_model_restriction:
         Option<(llm_client::model::allowlist::ModelEnforcement, Vec<String>)>,
+    /// Production reloads managed model policy on every catalog view. Tests
+    /// that inject a fixed restriction keep this false for deterministic,
+    /// filesystem-independent fixtures.
+    reload_managed_model_restriction: bool,
 }
 
 impl fusion::ModelSource for FusionCatalogModelSource {
@@ -3270,14 +3276,42 @@ impl fusion::ModelSource for FusionCatalogModelSource {
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default();
+        let live_restriction = self
+            .reload_managed_model_restriction
+            .then(live_managed_model_restriction_sync)
+            .flatten();
+        let restriction = if self.reload_managed_model_restriction {
+            live_restriction.as_ref()
+        } else {
+            self.session_model_restriction.as_ref()
+        };
         filter_fusion_catalog(
             self.unfiltered.clone(),
             &availability,
             self.anthropic_probe_definitive,
             self.availability_probe_completed
-                .load(std::sync::atomic::Ordering::Relaxed),
-            self.session_model_restriction.as_ref(),
+                .load(std::sync::atomic::Ordering::Acquire),
+            restriction,
         )
+    }
+
+    fn revision(&self) -> u64 {
+        self.mutation_epoch
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+fn live_managed_model_restriction_sync(
+) -> Option<(llm_client::model::allowlist::ModelEnforcement, Vec<String>)> {
+    use llm_client::model::allowlist::{self, ModelEnforcement};
+
+    let source = managed_model_policy_source(&managed_settings_raw_tiers_sync());
+    let enforcement = allowlist::resolve_enforcement(&source, &mut |_| {});
+    match enforcement {
+        ModelEnforcement::Inactive => None,
+        // `Refused` is intentionally retained: a malformed managed policy
+        // must remove every Fusion route rather than fail open.
+        active_or_refused => Some((active_or_refused, Vec::new())),
     }
 }
 
@@ -10268,17 +10302,20 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     let fusion_probe_completed = Arc::new(std::sync::atomic::AtomicBool::new(
         availability_probe_completed,
     ));
+    let fusion_catalog_mutation_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let fusion_catalog_source: Arc<dyn fusion::ModelSource> = Arc::new(FusionCatalogModelSource {
         unfiltered: fusion_catalog.clone(),
         availability: fusion_catalog_availability.clone(),
         anthropic_probe_definitive,
         availability_probe_completed: fusion_probe_completed.clone(),
+        mutation_epoch: fusion_catalog_mutation_epoch.clone(),
         session_model_restriction: session_model_restriction.clone(),
+        reload_managed_model_restriction: true,
     });
     let fusion_catalog_refresher = FusionCatalogRefresher {
         availability: fusion_catalog_availability,
         availability_probe_completed: fusion_probe_completed,
-        mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        mutation_epoch: fusion_catalog_mutation_epoch,
         credentials: credentials.clone(),
         credential_sources: assembled.credential_sources.clone(),
         anthropic_has_api_key: fusion_route_flag(has_api_key),
@@ -19484,6 +19521,11 @@ still flip to available"
             model: model.to_string(),
             hints: platform_api::FusionModelHints::default(),
             structured_output: false,
+            limits: fusion::ModelLimits {
+                context_window_tokens: Some(200_000),
+                max_input_tokens: Some(180_000),
+                max_output_tokens: Some(32_000),
+            },
         }
     }
 
@@ -19652,7 +19694,9 @@ still flip to available"
             availability: availability.clone(),
             anthropic_probe_definitive: true,
             availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             session_model_restriction: None,
+            reload_managed_model_restriction: false,
         };
 
         // Boot-time snapshot: github-copilot was uncredentialed, so its row
@@ -19691,6 +19735,60 @@ reconstruction — got: {after:?}"
             after.iter().any(|row| row.profile == "github-copilot"),
             "got: {after:?}"
         );
+    }
+
+    #[test]
+    fn fusion_catalog_model_source_reloads_managed_model_policy() {
+        use fusion::ModelSource as _;
+
+        let _guard = MANAGED_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os(super::settings_watch::MANAGED_DIR_ENV);
+        let managed = tempfile::tempdir().expect("managed tempdir");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, managed.path());
+        let catalog = vec![
+            fusion_catalog_row("anthropic", "claude-sonnet-4-6"),
+            fusion_catalog_row("anthropic", "claude-opus-5"),
+        ];
+        let source = FusionCatalogModelSource {
+            unfiltered: catalog,
+            availability: Arc::new(std::sync::RwLock::new(
+                [("anthropic".to_string(), true)].into(),
+            )),
+            anthropic_probe_definitive: true,
+            availability_probe_completed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            session_model_restriction: None,
+            reload_managed_model_restriction: true,
+        };
+
+        assert_eq!(source.list().len(), 2);
+        let policy_path = managed.path().join("managed-settings.json");
+        std::fs::write(
+            &policy_path,
+            r#"{"availableModels":["claude-sonnet-4-6"],"enforceAvailableModels":true}"#,
+        )
+        .unwrap();
+        let restricted = source.list();
+        assert_eq!(restricted.len(), 1);
+        assert_eq!(restricted[0].model, "claude-sonnet-4-6");
+
+        std::fs::write(&policy_path, "{").unwrap();
+        assert!(
+            source.list().is_empty(),
+            "a malformed live managed policy must fail closed"
+        );
+        std::fs::remove_file(policy_path).unwrap();
+        assert_eq!(
+            source.list().len(),
+            2,
+            "policy removal affects later snapshots"
+        );
+
+        if let Some(previous) = previous {
+            std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, previous);
+        } else {
+            std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+        }
     }
 
     /// Round-7 finding [2]: the boot availability probe's 5s timeout
@@ -19820,7 +19918,9 @@ reconstruction — got: {after:?}"
             availability: availability.clone(),
             anthropic_probe_definitive: true,
             availability_probe_completed: probe_completed.clone(),
+            mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             session_model_restriction: None,
+            reload_managed_model_restriction: false,
         };
 
         // Fail-open while the probe is unknown: both rows survive. This half
@@ -20055,7 +20155,9 @@ providers with no credential: got {after:?}"
             availability: availability.clone(),
             anthropic_probe_definitive: true,
             availability_probe_completed: probe_completed.clone(),
+            mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             session_model_restriction: None,
+            reload_managed_model_restriction: false,
         };
 
         let refresher = FusionCatalogRefresher {
@@ -20185,7 +20287,9 @@ from a degraded credential broker and must NOT re-arm filtering"
             availability: availability.clone(),
             anthropic_probe_definitive: true,
             availability_probe_completed: probe_completed.clone(),
+            mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             session_model_restriction: None,
+            reload_managed_model_restriction: false,
         };
         assert_eq!(
             source.list().len(),
@@ -20316,7 +20420,9 @@ Fusion's catalog for the rest of the process: got {after:?}"
             availability: availability.clone(),
             anthropic_probe_definitive: true,
             availability_probe_completed: probe_completed.clone(),
+            mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             session_model_restriction: None,
+            reload_managed_model_restriction: false,
         };
 
         let refresher = FusionCatalogRefresher {
@@ -20440,7 +20546,9 @@ env-derived: got {after:?}"
             availability: availability.clone(),
             anthropic_probe_definitive: true,
             availability_probe_completed: probe_completed.clone(),
+            mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             session_model_restriction: None,
+            reload_managed_model_restriction: false,
         };
         assert_eq!(
             source.list().len(),
@@ -20564,7 +20672,9 @@ got {after:?}"
             availability: availability.clone(),
             anthropic_probe_definitive: true,
             availability_probe_completed: probe_completed.clone(),
+            mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             session_model_restriction: None,
+            reload_managed_model_restriction: false,
         };
         assert_eq!(
             source.list().len(),

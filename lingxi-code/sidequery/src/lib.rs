@@ -27,8 +27,9 @@ pub use forked_agent::{
 pub use provider_side_query::ProviderSideQueryClient;
 pub use purposes::QuerySource;
 pub use side_query::{
-    SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse,
-    StrictStructuredQueryRequest, StrictStructuredQueryResponse,
+    CanonicalSideQueryRequest, SideQueryClient, SideQueryError, SideQueryEstimate,
+    SideQueryRequest, SideQueryResponse, StrictStructuredQueryRequest,
+    StrictStructuredQueryResponse,
 };
 pub use vision_delegation::{
     collect_media, collect_media_fingerprints, covered_fingerprints,

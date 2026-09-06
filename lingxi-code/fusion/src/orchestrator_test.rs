@@ -284,9 +284,24 @@ fn catalog() -> Vec<CatalogModel> {
                 ..FusionModelHints::default()
             },
             structured_output: true,
+            limits: crate::model_resolver::known_test_limits(),
         }
     })
     .collect()
+}
+
+fn catalog_with_route(profile: &str, model: &str) -> Vec<CatalogModel> {
+    let mut rows = catalog();
+    rows.push(CatalogModel {
+        profile: profile.into(),
+        model: model.into(),
+        // This is a parent-only synthesis route. Keeping automatic-selection
+        // hints off prevents it from changing the panel or analyst fixtures.
+        hints: FusionModelHints::default(),
+        structured_output: true,
+        limits: crate::model_resolver::known_test_limits(),
+    });
+    rows
 }
 
 /// WP11: a catalog built the SAME way `desktop_fusion_catalog_row` builds it
@@ -310,6 +325,7 @@ fn anthropic_only_catalog(models: &[&str]) -> Vec<CatalogModel> {
                 model: (*id).into(),
                 hints: llm_client::hints_for("anthropic", id).unwrap_or_default(),
                 structured_output: profile.capabilities.structured_output,
+                limits: crate::model_resolver::ModelLimits::from_metadata(&profile.metadata),
             }
         })
         .collect()
@@ -372,6 +388,10 @@ struct MutableUnitPrices {
     nano_per_token: Arc<AtomicU64>,
 }
 
+struct ScriptedUnitPrices {
+    nano_per_token: Mutex<VecDeque<u64>>,
+}
+
 struct TogglePanicPrices {
     panic_on_read: Arc<AtomicBool>,
 }
@@ -422,6 +442,25 @@ impl FusionPriceBook for PanicAfterArmedReads {
 impl FusionPriceBook for MutableUnitPrices {
     fn rates_for(&self, _profile: &str, _model: &str) -> Option<ModelRates> {
         let rate = self.nano_per_token.load(Ordering::SeqCst);
+        Some(ModelRates {
+            input_nano_usd_per_token: rate,
+            output_nano_usd_per_token: rate,
+            per_request_nano_usd: 0,
+            cache_read_nano_usd_per_token: rate,
+            cache_write_nano_usd_per_token: rate,
+            reasoning_nano_usd_per_token: rate,
+            cache_write_rate_is_ttl_approximated: false,
+        })
+    }
+}
+
+impl FusionPriceBook for ScriptedUnitPrices {
+    fn rates_for(&self, _profile: &str, _model: &str) -> Option<ModelRates> {
+        let mut values = self.nano_per_token.lock().unwrap();
+        let rate = values.front().copied().unwrap_or_default();
+        if values.len() > 1 {
+            values.pop_front();
+        }
         Some(ModelRates {
             input_nano_usd_per_token: rate,
             output_nano_usd_per_token: rate,
@@ -1282,6 +1321,7 @@ fn parent_profile_resolution_prefers_session_identity_then_catalog_fallback() {
         model: "gpt-5.6-terra".into(),
         hints: FusionModelHints::default(),
         structured_output: true,
+        limits: crate::model_resolver::known_test_limits(),
     });
     let ambiguous = FusionOrchestrator::new(
         FakeSpawner::new(HashMap::new()),
@@ -1936,7 +1976,12 @@ async fn egress_includes_parent_profile_when_synthesis_failed_after_being_billed
         AnalystMode::Merge,
         vec![Err(SideQueryError::InvalidResponse("boom".into()))],
     );
-    let orch = orch_scripted(spawner, side.clone());
+    let orch = FusionOrchestrator::new(
+        spawner,
+        side.clone(),
+        Arc::new(test_config()),
+        Arc::new(catalog_with_route("parent-only", "parent-only-model")),
+    );
     let mut req = request("task");
     req.parent_profile = "parent-only".into();
     req.parent_model = "parent-only-model".into();
@@ -1975,7 +2020,7 @@ async fn egress_includes_parent_profile_when_synthesis_timed_out_after_being_bil
         FakeSpawner::new(three_ok()),
         side,
         Arc::new(config),
-        Arc::new(catalog()),
+        Arc::new(catalog_with_route("parent-only", "parent-only-model")),
     );
     let mut req = request("task");
     req.parent_profile = "parent-only".into();
@@ -2572,6 +2617,7 @@ async fn blocked_post_analyst_analytics_respects_cancel_and_operational_deadline
                 ..FusionModelHints::default()
             },
             structured_output: true,
+            limits: crate::model_resolver::known_test_limits(),
         });
         let orchestrator = Arc::new(
             FusionOrchestrator::new(
@@ -2856,6 +2902,7 @@ async fn allowlist_shrunk_catalog_fails_preflight_with_zero_spawns() {
             ..FusionModelHints::default()
         },
         structured_output: true,
+        limits: crate::model_resolver::known_test_limits(),
     }];
     let orch = FusionOrchestrator::new(
         spawner.clone(),
@@ -4727,10 +4774,13 @@ async fn prepared_run_reuses_captured_config_catalog_and_identity() {
         .expect("preparation must resolve the initial snapshot");
     let prepared_duration = std::time::Duration::from_millis(prepared.summary().duration_ms);
 
-    // Both live sources become unusable after preparation. Activation must
-    // consume the private resolved/config/catalog snapshot, not reload them.
-    config.lock().unwrap().max_panel = 2;
-    catalog_state.lock().unwrap().clear();
+    // Relaxations/additions after preparation must not reroute the active
+    // selection. Restrictive changes are covered separately and fail closed.
+    config.lock().unwrap().panel_max_output_tokens_per_turn += 1;
+    let mut added = catalog()[0].clone();
+    added.profile = "later-provider".into();
+    added.model = "later-model".into();
+    catalog_state.lock().unwrap().push(added);
     // Time before activation (including TaskCreated hooks) is excluded.
     tokio::time::sleep(prepared_duration + std::time::Duration::from_millis(10)).await;
     let outcome = prepared.activate(FusionActivation::now(), None).await;
@@ -4741,6 +4791,196 @@ async fn prepared_run_reuses_captured_config_catalog_and_identity() {
     assert_eq!(outcome.facts.allocated_panels, Some(3));
     assert_eq!(outcome.facts.dispatched_panels, Some(3));
     assert_eq!(outcome.facts.attempts, Some(4));
+}
+
+#[test]
+fn preparation_retries_a_config_catalog_straddle_before_resolving() {
+    let mut before = test_config();
+    before.max_panel = 3;
+    let mut after = before.clone();
+    after.max_panel = 2;
+    let configs = Arc::new(Mutex::new(std::collections::VecDeque::from([
+        before,
+        after.clone(),
+        after.clone(),
+        after,
+    ])));
+    let config_source = {
+        let configs = Arc::clone(&configs);
+        Arc::new(move || {
+            let mut configs = configs.lock().unwrap();
+            let config = configs.front().cloned().expect("scripted config");
+            if configs.len() > 1 {
+                configs.pop_front();
+            }
+            Ok(config)
+        }) as Arc<dyn crate::config::FusionConfigSource>
+    };
+    let orchestrator = Arc::new(FusionOrchestrator::new(
+        FakeSpawner::new(three_ok()),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        config_source,
+        Arc::new(catalog()),
+    ));
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-config-catalog-straddle".into()),
+    );
+
+    let error = match orchestrator
+        .prepare(FusionSubmission::new(request("task"), inherit(), identity).unwrap())
+    {
+        Ok(_) => panic!("the stable max_panel=2 view must reject three explicit panels"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, FusionError::InvalidCustomModels(_)));
+    assert_eq!(
+        configs.lock().unwrap().len(),
+        1,
+        "the first mixed config bracket was discarded before resolution"
+    );
+}
+
+#[test]
+fn preparation_retries_a_price_straddle_and_keeps_one_complete_table() {
+    // Three unique routes are priced per capture. The first table is all 1,
+    // the immediately following table all 2; the next aggregate attempt sees
+    // two complete all-2 tables and may accept it.
+    let prices = Arc::new(ScriptedUnitPrices {
+        nano_per_token: Mutex::new([vec![1; 3], vec![2; 9]].concat().into_iter().collect()),
+    });
+    let orchestrator = FusionOrchestrator::new(
+        FakeSpawner::new(three_ok()),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        Arc::new(test_config()),
+        Arc::new(catalog()),
+    )
+    .with_price_book(prices);
+    let runtime = orchestrator
+        .capture_runtime_snapshot(&request("task"), None)
+        .expect("a stable second pricing table is available");
+
+    for row in runtime.catalog.rows() {
+        assert_eq!(
+            runtime
+                .prices
+                .rates_for(&row.profile, &row.model)
+                .unwrap()
+                .input_nano_usd_per_token,
+            2
+        );
+    }
+}
+
+#[test]
+fn live_route_check_preserves_an_unchanged_explicit_unhinted_panel() {
+    let mut explicit = catalog()[0].clone();
+    explicit.hints.eligible = false;
+    let captured_catalog = vec![explicit.clone()];
+    let live_catalog = vec![explicit];
+    let snapshot = crate::snapshot::CatalogSnapshot::capture(&captured_catalog).unwrap();
+
+    FusionOrchestrator::ensure_live_routes(
+        &live_catalog,
+        &snapshot,
+        &[("anthropic", "claude-sonnet-5", false)],
+        8_192,
+        "panel",
+    )
+    .expect("automatic eligibility hints do not govern an explicit panel route");
+}
+
+#[test]
+fn live_route_check_rejects_only_effective_capacity_narrowing() {
+    let mut captured = catalog()[0].clone();
+    captured.limits.context_window_tokens = None;
+    captured.limits.max_input_tokens = Some(8_000);
+    captured.limits.max_output_tokens = None;
+    let captured_catalog = vec![captured.clone()];
+    let snapshot = crate::snapshot::CatalogSnapshot::capture(&captured_catalog).unwrap();
+
+    let mut harmless_addition = captured.clone();
+    harmless_addition.limits.max_output_tokens = Some(16_000);
+    let harmless_catalog = vec![harmless_addition];
+    FusionOrchestrator::ensure_live_routes(
+        &harmless_catalog,
+        &snapshot,
+        &[("anthropic", "claude-sonnet-5", false)],
+        8_192,
+        "panel",
+    )
+    .expect("a newly published limit above the prepared request cap is not restrictive");
+
+    let mut narrowed = captured;
+    narrowed.limits.max_output_tokens = Some(1_024);
+    let narrowed_catalog = vec![narrowed];
+    let error = FusionOrchestrator::ensure_live_routes(
+        &narrowed_catalog,
+        &snapshot,
+        &[("anthropic", "claude-sonnet-5", false)],
+        8_192,
+        "panel",
+    )
+    .expect_err("a new finite limit below the prepared request cap must stop the stage");
+    assert!(matches!(error, FusionError::InvalidConfiguration(_)));
+
+    let mut narrowed_input = captured_catalog[0].clone();
+    narrowed_input.limits.max_input_tokens = Some(4_000);
+    let narrowed_input_catalog = vec![narrowed_input];
+    let error = FusionOrchestrator::ensure_live_routes(
+        &narrowed_input_catalog,
+        &snapshot,
+        &[("anthropic", "claude-sonnet-5", false)],
+        8_192,
+        "panel",
+    )
+    .expect_err("a lower newly published input limit must stop the stage");
+    assert!(matches!(error, FusionError::InvalidConfiguration(_)));
+}
+
+#[test]
+fn live_config_check_stops_kill_switch_and_cross_provider_tightening() {
+    let mut captured = test_config();
+    captured.enabled = true;
+    captured.allow_cross_provider_for_agent = true;
+    let current = Arc::new(Mutex::new(captured.clone()));
+    let source = {
+        let current = Arc::clone(&current);
+        move || Ok(current.lock().unwrap().clone())
+    };
+    let mut agent_request = request("task");
+    agent_request.origin = FusionOrigin::Agent;
+    let cross_route = ResolvedPanel {
+        profile: "openai".into(),
+        model: "gpt-5.6-terra".into(),
+    };
+
+    current.lock().unwrap().allow_cross_provider_for_agent = false;
+    assert_eq!(
+        FusionOrchestrator::ensure_live_config(
+            &source,
+            &captured,
+            &agent_request,
+            &[&cross_route],
+            "panel",
+        ),
+        Err(FusionError::CrossProviderDenied)
+    );
+
+    let mut live = captured.clone();
+    live.enabled = false;
+    *current.lock().unwrap() = live;
+    let error = FusionOrchestrator::ensure_live_config(
+        &source,
+        &captured,
+        &agent_request,
+        &[&cross_route],
+        "panel",
+    )
+    .expect_err("the live kill switch must stop an undispatched stage");
+    assert!(matches!(error, FusionError::InvalidConfiguration(_)));
 }
 
 #[tokio::test]
@@ -5426,7 +5666,7 @@ async fn dropping_prepared_activation_waiter_does_not_drop_the_owned_run() {
 }
 
 #[tokio::test]
-async fn prepared_runner_panic_settles_before_sealing_stable_facts() {
+async fn prepared_run_uses_captured_prices_after_live_source_becomes_unreadable() {
     let panic_on_read = Arc::new(AtomicBool::new(false));
     let budget = Arc::new(QuoteRecordingBudget::default());
     let inherit = FusionInheritance::new(
@@ -5457,14 +5697,18 @@ async fn prepared_runner_panic_settles_before_sealing_stable_facts() {
     panic_on_read.store(true, Ordering::SeqCst);
     let outcome = prepared.activate(FusionActivation::now(), None).await;
 
-    assert_eq!(outcome.result, Err(FusionError::Internal));
+    let result = outcome
+        .result
+        .expect("activation must use the readable price table captured at preparation");
+    assert!(matches!(result.decision, FusionDecision::Picked { .. }));
+    assert_eq!(result.usage.realized_nano_usd, 3 * (8 + 4) + 5 + 3);
     assert!(outcome
         .facts
         .dispatched_panels
         .is_some_and(|count| count > 0));
-    assert!(outcome.facts.usage_incomplete);
+    assert!(!outcome.facts.usage_incomplete);
     assert!(!outcome.facts.possible_egress.is_empty());
-    assert_eq!(budget.committed.lock().unwrap().as_slice(), &[0]);
+    assert_eq!(budget.committed.lock().unwrap().as_slice(), &[44]);
 }
 
 #[tokio::test]
@@ -5492,7 +5736,64 @@ async fn production_run_compatibility_shim_contains_runner_panics() {
 }
 
 #[tokio::test]
-async fn analyst_response_facts_survive_its_immediate_pricing_panic() {
+async fn prepared_runner_panic_waits_for_commit_before_terminal_publication() {
+    let commit_started = Arc::new(Notify::new());
+    let release_commit = Arc::new(Notify::new());
+    let budget = Arc::new(HangingCommitBudget {
+        commit_started: Arc::clone(&commit_started),
+        release_commit: Arc::clone(&release_commit),
+        commit_calls: AtomicUsize::new(0),
+        release_calls: AtomicUsize::new(0),
+        held: AtomicBool::new(false),
+        committed: Mutex::new(Vec::new()),
+    });
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: budget.clone(),
+        },
+        CancellationToken::new(),
+    );
+    let orchestrator = Arc::new(
+        FusionOrchestrator::new(
+            FakeSpawner::new(three_ok()),
+            Arc::new(PanicSideQuery),
+            Arc::new(test_config()),
+            Arc::new(catalog()),
+        )
+        .with_price_book(Arc::new(priced_book())),
+    );
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-runner-panic-settlement".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(FusionSubmission::new(request("task"), inherit, identity).unwrap())
+        .unwrap();
+    let control = prepared.control();
+    let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), commit_started.notified())
+        .await
+        .expect("panic cleanup must transfer the lease into settlement");
+    assert!(
+        control.terminal_outcome().is_none(),
+        "terminal facts cannot seal before the owned commit acknowledges"
+    );
+    release_commit.notify_one();
+    let outcome = waiter.await.expect("activation waiter");
+
+    assert_eq!(outcome.result, Err(FusionError::Internal));
+    assert!(outcome.facts.usage.is_some());
+    assert!(outcome.facts.usage_incomplete);
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn captured_prices_keep_analyst_facts_and_commit_barrier_after_source_revocation() {
     let panic_on_read = Arc::new(AtomicBool::new(false));
     let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
     side.arm_price_panic_after_analyst(Arc::clone(&panic_on_read));
@@ -5525,6 +5826,14 @@ async fn analyst_response_facts_survive_its_immediate_pricing_panic() {
             ..FusionModelHints::default()
         },
         structured_output: true,
+        limits: crate::model_resolver::known_test_limits(),
+    });
+    let prices = Arc::new(PanicAfterArmedReads {
+        armed: Arc::clone(&panic_on_read),
+        reads: AtomicUsize::new(0),
+        // Any lookup after the analyst arms the source would panic. A prepared
+        // run must exclusively use its immutable captured table instead.
+        panic_at: 1,
     });
     let orchestrator = Arc::new(
         FusionOrchestrator::new(
@@ -5533,14 +5842,7 @@ async fn analyst_response_facts_survive_its_immediate_pricing_panic() {
             Arc::new(test_config()),
             Arc::new(analyst_catalog),
         )
-        .with_price_book(Arc::new(PanicAfterArmedReads {
-            armed: panic_on_read,
-            reads: AtomicUsize::new(0),
-            // Three panels plus the analyst are priced in the response
-            // observer. The next refresh's first read panics, after an exact
-            // monetary snapshot already exists for the same known usage.
-            panic_at: 5,
-        })),
+        .with_price_book(prices.clone()),
     );
     let identity = FusionRunIdentity::new(
         FusionRunId::generated(),
@@ -5556,7 +5858,7 @@ async fn analyst_response_facts_survive_its_immediate_pricing_panic() {
 
     tokio::time::timeout(std::time::Duration::from_secs(2), commit_started.notified())
         .await
-        .expect("panic cleanup must start committing the last safe amount");
+        .expect("normal finalization must start the captured-price commit");
     assert!(
         control.terminal_outcome().is_none(),
         "terminal cannot seal before the cleanup commit acknowledges"
@@ -5564,7 +5866,10 @@ async fn analyst_response_facts_survive_its_immediate_pricing_panic() {
     release_commit.notify_one();
     let outcome = waiter.await.expect("activation waiter");
 
-    assert_eq!(outcome.result, Err(FusionError::Internal));
+    let result = outcome
+        .result
+        .expect("late source revocation cannot invalidate a prepared price snapshot");
+    assert!(matches!(result.decision, FusionDecision::Picked { .. }));
     let usage = outcome
         .facts
         .usage
@@ -5579,16 +5884,21 @@ async fn analyst_response_facts_survive_its_immediate_pricing_panic() {
     );
     assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
     assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
-    assert!(outcome.facts.usage_incomplete);
+    assert!(!outcome.facts.usage_incomplete);
     assert!(outcome
         .facts
         .confirmed_egress
         .iter()
         .any(|profile| profile == "judge-only"));
+    assert_eq!(
+        prices.reads.load(Ordering::SeqCst),
+        0,
+        "no live price lookup may occur after the analyst response arms the source"
+    );
 }
 
 #[tokio::test]
-async fn synth_response_facts_survive_its_immediate_pricing_panic() {
+async fn captured_prices_keep_synth_facts_after_live_source_revocation() {
     let panic_on_read = Arc::new(AtomicBool::new(false));
     let side = ScriptedAnalyst::new(AnalystMode::Merge, vec![Ok("merged".into())]);
     side.arm_price_panic_after_synth(Arc::clone(&panic_on_read));
@@ -5601,8 +5911,15 @@ async fn synth_response_facts_survive_its_immediate_pricing_panic() {
         CancellationToken::new(),
     );
     let orchestrator = Arc::new(
-        orch_scripted(FakeSpawner::new(three_ok()), side)
-            .with_price_book(Arc::new(TogglePanicPrices { panic_on_read })),
+        FusionOrchestrator::new(
+            FakeSpawner::new(three_ok()),
+            side,
+            Arc::new(test_config()),
+            Arc::new(catalog_with_route("parent-only", "parent-model")),
+        )
+        .with_price_book(Arc::new(TogglePanicPrices {
+            panic_on_read: Arc::clone(&panic_on_read),
+        })),
     );
     let identity = FusionRunIdentity::new(
         FusionRunId::generated(),
@@ -5619,7 +5936,10 @@ async fn synth_response_facts_survive_its_immediate_pricing_panic() {
 
     let outcome = prepared.activate(FusionActivation::now(), None).await;
 
-    assert_eq!(outcome.result, Err(FusionError::Internal));
+    let result = outcome
+        .result
+        .expect("synthesis must finish against the captured price table");
+    assert!(matches!(result.decision, FusionDecision::Merged));
     let usage = outcome.facts.usage.expect("synth usage facts must survive");
     assert_eq!(usage.input_tokens, 3 * 8 + 5 + 17);
     assert_eq!(usage.output_tokens, 3 * 4 + 3 + 19);
@@ -5628,16 +5948,20 @@ async fn synth_response_facts_survive_its_immediate_pricing_panic() {
         budget.committed.lock().unwrap().as_slice(),
         &[usage.realized_nano_usd]
     );
-    assert!(outcome.facts.usage_incomplete);
+    assert!(!outcome.facts.usage_incomplete);
     assert!(outcome
         .facts
         .confirmed_egress
         .iter()
         .any(|profile| profile == "parent-only"));
+    assert!(
+        panic_on_read.load(Ordering::SeqCst),
+        "the provider response must have revoked the live source during the run"
+    );
 }
 
 #[tokio::test]
-async fn late_final_pricing_panic_keeps_lease_owned_until_commit_ack() {
+async fn captured_prices_keep_lease_owned_until_commit_ack_after_source_revocation() {
     let panic_on_read = Arc::new(AtomicBool::new(false));
     let bus = Arc::new(AnalyticsBus::new());
     bus.attach_sink(Arc::new(ArmPricePanicSink {
@@ -5685,7 +6009,7 @@ async fn late_final_pricing_panic_keeps_lease_owned_until_commit_ack() {
 
     tokio::time::timeout(std::time::Duration::from_secs(2), commit_started.notified())
         .await
-        .expect("panic cleanup must retain and commit the reservation lease");
+        .expect("finalization must retain and commit the reservation lease");
     assert!(control.is_finalizing());
     assert!(
         control.terminal_outcome().is_none(),
@@ -5696,6 +6020,10 @@ async fn late_final_pricing_panic_keeps_lease_owned_until_commit_ack() {
         .snapshot()
         .usage
         .is_some_and(|usage| usage.output_tokens > 0));
+    assert!(
+        panic_on_read.load(Ordering::SeqCst),
+        "analysis telemetry must have revoked the live price source"
+    );
 
     release_commit.notify_one();
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
@@ -5703,7 +6031,7 @@ async fn late_final_pricing_panic_keeps_lease_owned_until_commit_ack() {
         .expect("cleanup commit must unblock terminal publication")
         .expect("activation waiter");
 
-    assert_eq!(outcome.result, Err(FusionError::Internal));
+    assert!(outcome.result.is_ok());
     assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
     assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
     assert!(!budget.held.load(Ordering::SeqCst));
@@ -5787,6 +6115,7 @@ fn leftover_gateway_panel_catalog() -> Vec<CatalogModel> {
                 ..FusionModelHints::default()
             },
             structured_output: true,
+            limits: crate::model_resolver::known_test_limits(),
         },
         CatalogModel {
             profile: "anthropic".into(),
@@ -5799,6 +6128,7 @@ fn leftover_gateway_panel_catalog() -> Vec<CatalogModel> {
                 ..FusionModelHints::default()
             },
             structured_output: true,
+            limits: crate::model_resolver::known_test_limits(),
         },
         CatalogModel {
             profile: "deepseek".into(),
@@ -5811,6 +6141,7 @@ fn leftover_gateway_panel_catalog() -> Vec<CatalogModel> {
                 ..FusionModelHints::default()
             },
             structured_output: true,
+            limits: crate::model_resolver::known_test_limits(),
         },
         // Leftover gateway copy of the FIRST row's model: same wire model
         // ("sol"), different profile, cheapest cost_class.
@@ -5825,6 +6156,7 @@ fn leftover_gateway_panel_catalog() -> Vec<CatalogModel> {
                 ..FusionModelHints::default()
             },
             structured_output: true,
+            limits: crate::model_resolver::known_test_limits(),
         },
     ]
 }
@@ -5944,11 +6276,11 @@ async fn panel_spawn_requests_are_when_done_capped_and_named() {
 
     let requests = spawner.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 2);
-    // T1 item 2: the cap must be derived from `count_tokens`'s shared
-    // `APPROX_CHARS_PER_TOKEN` constant, not a hardcoded literal that could
-    // silently drift from it.
-    let expected_cap = u64::from(config.panel_reserved_input_tokens_per_turn)
-        * llm_client::model::count_tokens::APPROX_CHARS_PER_TOKEN;
+    // The byte ceiling is the exact inverse of the shared conservative
+    // request-fit estimator, not the looser transcript heuristic.
+    let expected_cap = crate::panel::max_input_bytes_for_token_cap(u64::from(
+        config.panel_reserved_input_tokens_per_turn,
+    ));
     for (index, request) in requests.iter().enumerate() {
         assert_eq!(
             request.structured_output_mode,
@@ -7026,6 +7358,7 @@ fn ttl_catalog() -> Vec<CatalogModel> {
             ..FusionModelHints::default()
         },
         structured_output: true,
+        limits: crate::model_resolver::known_test_limits(),
     })
     .collect()
 }

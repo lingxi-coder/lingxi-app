@@ -6,6 +6,98 @@ use platform_api::{
     FusionOrigin, FusionPreset, FusionRequest, FUSION_MAX_PANEL, FUSION_MIN_PANEL,
 };
 
+/// Provider/profile-specific capacity facts captured with a Fusion route.
+///
+/// Missing provider facts remain unknown. Callers and fixtures that know a
+/// route's limits must state them explicitly; default construction must never
+/// invent capacity that could authorize an oversized provider request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModelLimits {
+    /// Total context window, when the provider publishes one.
+    pub context_window_tokens: Option<u64>,
+    /// Input-only ceiling, when the route publishes one.
+    pub max_input_tokens: Option<u64>,
+    /// Output ceiling, when the route publishes one.
+    pub max_output_tokens: Option<u64>,
+}
+
+impl ModelLimits {
+    /// Explicit unknown-capacity value used by production metadata adapters and
+    /// tests that exercise fail-closed analyst selection.
+    #[must_use]
+    pub const fn unknown() -> Self {
+        Self {
+            context_window_tokens: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+        }
+    }
+
+    /// Build route limits from provider-neutral model metadata.
+    #[must_use]
+    pub const fn from_metadata(metadata: &platform_api::ModelMetadata) -> Self {
+        Self {
+            context_window_tokens: metadata.context_window_tokens,
+            max_input_tokens: metadata.max_input_tokens,
+            max_output_tokens: metadata.max_output_tokens,
+        }
+    }
+
+    /// Whether the route supplies enough metadata for a bounded judge request.
+    #[must_use]
+    pub const fn has_input_capacity(self) -> bool {
+        matches!(self.context_window_tokens, Some(value) if value > 0)
+            || matches!(self.max_input_tokens, Some(value) if value > 0)
+    }
+
+    /// Whether the published limits leave positive input and output capacity
+    /// for this stage's configured output cap.
+    #[must_use]
+    pub fn has_usable_capacity(self, configured_output: u32) -> bool {
+        let output = self.output_cap(configured_output);
+        output > 0 && self.input_cap(output).is_some_and(|input| input > 0)
+    }
+
+    /// Effective maximum output for a configured cap.
+    #[must_use]
+    pub fn output_cap(self, configured: u32) -> u32 {
+        match self.max_output_tokens {
+            Some(limit) => configured.min(u32::try_from(limit).unwrap_or(u32::MAX)),
+            None => configured,
+        }
+    }
+
+    /// Effective input-token budget after reserving configured output and the
+    /// approved context margin. None means no route capacity is known.
+    #[must_use]
+    pub fn input_cap(self, configured_output: u32) -> Option<u64> {
+        let direct = self.max_input_tokens;
+        let contextual = self.context_window_tokens.map(|context| {
+            let margin = (context / 20).clamp(1_024, 20_000);
+            context
+                .saturating_sub(u64::from(configured_output))
+                .saturating_sub(margin)
+        });
+        match (direct, contextual) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        }
+    }
+}
+
+/// Explicit, finite capacity for unit fixtures that are not backed by provider
+/// metadata. Keeping it test-only prevents `Default` from becoming a hidden
+/// production authorization policy.
+#[cfg(test)]
+pub(crate) const fn known_test_limits() -> ModelLimits {
+    ModelLimits {
+        context_window_tokens: Some(200_000),
+        max_input_tokens: Some(180_000),
+        max_output_tokens: Some(32_000),
+    }
+}
+
 /// One catalog row the orchestrator may select.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogModel {
@@ -34,12 +126,21 @@ pub struct CatalogModel {
     /// `engine_desktop::protocol_encodes_response_format`, applied at the one
     /// production construction site (`desktop_fusion_catalog_row`).
     pub structured_output: bool,
+    /// Provider/profile-specific context and input/output limits.
+    pub limits: ModelLimits,
 }
 
 /// Injected model listing. Production later wraps the live catalog.
 pub trait ModelSource: Send + Sync {
     /// Currently available models.
     fn list(&self) -> Vec<CatalogModel>;
+
+    /// Monotonic source revision when the host can provide one. The content
+    /// digest captured by CatalogSnapshot remains authoritative when this
+    /// default is used.
+    fn revision(&self) -> u64 {
+        0
+    }
 }
 
 impl ModelSource for Vec<CatalogModel> {
@@ -168,9 +269,18 @@ fn resolve_custom(
         let found = available
             .iter()
             .find(|row| row.profile == profile && row.model == model_ref.model);
-        if found.is_none() {
+        let Some(found) = found else {
             return Err(FusionError::InvalidCustomModels(format!(
                 "unknown model `{profile}/{}`",
+                model_ref.model
+            )));
+        };
+        if !found
+            .limits
+            .has_usable_capacity(config.panel_max_output_tokens_per_turn)
+        {
+            return Err(FusionError::InvalidCustomModels(format!(
+                "model `{profile}/{}` has unknown or unusable capacity metadata",
                 model_ref.model
             )));
         }
@@ -207,6 +317,10 @@ fn resolve_preset(
     let mut eligible: Vec<&CatalogModel> = available
         .iter()
         .filter(|row| row.hints.eligible)
+        .filter(|row| {
+            row.limits
+                .has_usable_capacity(config.panel_max_output_tokens_per_turn)
+        })
         .filter(|row| profile_allowed(&row.profile, config))
         .filter(|row| request.cross_provider || row.profile == request.parent_profile)
         .collect();
@@ -253,6 +367,10 @@ pub(crate) fn canonical_key(model: &str) -> String {
         .unwrap_or(model)
         .to_ascii_lowercase()
         .replace('.', "-")
+}
+
+pub(crate) fn route_key(profile: &str, model: &str) -> String {
+    format!("{profile}\0{model}")
 }
 
 fn canonical_model_key(row: &CatalogModel) -> String {
@@ -389,8 +507,20 @@ fn resolve_analyst(
         .iter()
         .copied()
         .filter(|row| row.structured_output)
+        .filter(|row| {
+            row.limits
+                .has_usable_capacity(config.analyst_max_output_tokens)
+        })
         .collect();
     if with_schema.is_empty() {
+        if judges.iter().any(|row| row.structured_output) {
+            return Err(FusionError::NoJudgeModel {
+                eligible: 0,
+                required: 1,
+                same_provider_only: !request.cross_provider,
+                parent_profile: request.parent_profile.clone(),
+            });
+        }
         return Err(FusionError::StructuredOutputUnsupported);
     }
     // F011 round-2 blocking issue #2: compare CANONICAL model identity, not
@@ -462,6 +592,12 @@ fn _cost_ord() -> FusionCostClass {
 mod tests {
     use super::*;
 
+    #[test]
+    fn default_limits_are_unknown_and_never_authorize_capacity() {
+        assert_eq!(ModelLimits::default(), ModelLimits::unknown());
+        assert!(!ModelLimits::default().has_input_capacity());
+    }
+
     fn hinted(
         profile: &str,
         model: &str,
@@ -481,6 +617,7 @@ mod tests {
                 judge_eligible: judge,
             },
             structured_output: judge,
+            limits: known_test_limits(),
         }
     }
 
@@ -647,6 +784,87 @@ mod tests {
     }
 
     #[test]
+    fn explicit_model_without_capacity_metadata_fails_before_dispatch() {
+        let mut unknown = hinted(
+            "anthropic",
+            "unknown",
+            100,
+            FusionLatencyClass::Fast,
+            FusionCostClass::Low,
+            true,
+        );
+        unknown.limits = ModelLimits::unknown();
+        let mut request = req();
+        request.cross_provider = false;
+        request.models = Some(vec![
+            FusionModelRef {
+                profile: Some("anthropic".into()),
+                model: "unknown".into(),
+            },
+            FusionModelRef {
+                profile: Some("anthropic".into()),
+                model: "unknown-2".into(),
+            },
+        ]);
+        let catalog = vec![
+            unknown,
+            hinted(
+                "anthropic",
+                "unknown-2",
+                90,
+                FusionLatencyClass::Fast,
+                FusionCostClass::Low,
+                true,
+            ),
+        ];
+        let error = resolve(&request, &FusionRuntimeConfig::defaults(), &catalog)
+            .expect_err("explicit unknown capacity must fail closed");
+        assert!(
+            matches!(error, FusionError::InvalidCustomModels(message) if message.contains("capacity"))
+        );
+    }
+
+    #[test]
+    fn explicit_model_with_zero_usable_capacity_fails_before_dispatch() {
+        let mut zero = hinted(
+            "anthropic",
+            "zero-output",
+            100,
+            FusionLatencyClass::Fast,
+            FusionCostClass::Low,
+            true,
+        );
+        zero.limits.max_output_tokens = Some(0);
+        let known = hinted(
+            "anthropic",
+            "known",
+            90,
+            FusionLatencyClass::Fast,
+            FusionCostClass::Low,
+            true,
+        );
+        let mut request = req();
+        request.cross_provider = false;
+        request.models = Some(vec![
+            FusionModelRef {
+                profile: Some("anthropic".into()),
+                model: "zero-output".into(),
+            },
+            FusionModelRef {
+                profile: Some("anthropic".into()),
+                model: "known".into(),
+            },
+        ]);
+
+        let catalog = vec![zero, known];
+        let error = resolve(&request, &FusionRuntimeConfig::defaults(), &catalog)
+            .expect_err("an explicit zero-output route must fail before panel dispatch");
+        assert!(
+            matches!(error, FusionError::InvalidCustomModels(message) if message.contains("unusable"))
+        );
+    }
+
+    #[test]
     fn too_few_models_error_carries_diagnostic_data() {
         let catalog = vec![hinted(
             "anthropic",
@@ -738,6 +956,7 @@ mod tests {
                 hints: llm_client::hints_for("openai-chatgpt", &m.request_model)
                     .unwrap_or_default(),
                 structured_output: m.capabilities.structured_output,
+                limits: ModelLimits::from_metadata(&m.metadata),
             })
             .collect();
         assert!(
@@ -916,12 +1135,22 @@ mod tests {
 
     #[test]
     fn preset_catalog_shortfall_reports_the_configured_minimum() {
-        let catalog = three_provider_catalog().into_iter().take(2).collect::<Vec<_>>();
+        let catalog = three_provider_catalog()
+            .into_iter()
+            .take(2)
+            .collect::<Vec<_>>();
         let config = config_requiring_three_successes();
 
         let err = resolve(&req(), &config, &catalog).unwrap_err();
         assert!(
-            matches!(&err, FusionError::TooFewModels { eligible: 2, required: 3, .. }),
+            matches!(
+                &err,
+                FusionError::TooFewModels {
+                    eligible: 2,
+                    required: 3,
+                    ..
+                }
+            ),
             "catalog filtering below the configured success bar must name required=3, got {err:?}"
         );
     }
@@ -1201,6 +1430,127 @@ mod tests {
         );
     }
 
+    #[test]
+    fn automatic_analyst_skips_routes_without_capacity_metadata() {
+        let mut unknown = hinted(
+            "anthropic",
+            "unknown-judge",
+            100,
+            FusionLatencyClass::Fast,
+            FusionCostClass::Low,
+            true,
+        );
+        unknown.limits = ModelLimits::unknown();
+        let known = hinted(
+            "openai",
+            "known-judge",
+            80,
+            FusionLatencyClass::Standard,
+            FusionCostClass::Medium,
+            true,
+        );
+        let panels = vec![ResolvedPanel {
+            profile: "deepseek".into(),
+            model: "panel".into(),
+        }];
+        let analyst = resolve_analyst(
+            &req(),
+            &FusionRuntimeConfig::defaults(),
+            &panels,
+            &[unknown, known],
+        )
+        .expect("a known-capacity judge should remain eligible");
+        assert_eq!(analyst.model, "known-judge");
+    }
+
+    #[test]
+    fn automatic_panels_skip_routes_without_capacity_metadata() {
+        let mut unknown = hinted(
+            "anthropic",
+            "unknown-panel",
+            200,
+            FusionLatencyClass::Fast,
+            FusionCostClass::Low,
+            true,
+        );
+        unknown.limits = ModelLimits::unknown();
+        let known_a = hinted(
+            "openai",
+            "known-a",
+            90,
+            FusionLatencyClass::Standard,
+            FusionCostClass::Medium,
+            true,
+        );
+        let known_b = hinted(
+            "deepseek",
+            "known-b",
+            80,
+            FusionLatencyClass::Standard,
+            FusionCostClass::Medium,
+            true,
+        );
+        let mut request = req();
+        request.models = None;
+        request.max_panel = Some(2);
+        let mut config = FusionRuntimeConfig::defaults();
+        config.quality_panel_count = 2;
+
+        let catalog = [unknown, known_a, known_b];
+        let panels = resolve_preset(&request, &config, &catalog, 2, 2)
+            .expect("two known-capacity routes remain");
+        assert_eq!(panels.len(), 2);
+        assert!(panels.iter().all(|panel| panel.model != "unknown-panel"));
+    }
+
+    #[test]
+    fn no_known_capacity_judge_is_a_preflight_error() {
+        let mut unknown = hinted(
+            "anthropic",
+            "unknown-judge",
+            100,
+            FusionLatencyClass::Fast,
+            FusionCostClass::Low,
+            true,
+        );
+        unknown.limits = ModelLimits::unknown();
+        let error = resolve_analyst(&req(), &FusionRuntimeConfig::defaults(), &[], &[unknown])
+            .expect_err("automatic judging must not select unknown capacity");
+        assert!(matches!(error, FusionError::NoJudgeModel { .. }));
+    }
+
+    #[test]
+    fn automatic_analyst_rejects_zero_input_or_output_capacity() {
+        let mut zero_output = hinted(
+            "anthropic",
+            "zero-output-judge",
+            100,
+            FusionLatencyClass::Fast,
+            FusionCostClass::Low,
+            true,
+        );
+        zero_output.limits.max_output_tokens = Some(0);
+        let mut zero_input = hinted(
+            "openai",
+            "zero-input-judge",
+            90,
+            FusionLatencyClass::Fast,
+            FusionCostClass::Low,
+            true,
+        );
+        zero_input.limits.context_window_tokens = None;
+        zero_input.limits.max_input_tokens = Some(0);
+
+        let error = resolve_analyst(
+            &req(),
+            &FusionRuntimeConfig::defaults(),
+            &[],
+            &[zero_output, zero_input],
+        )
+        .expect_err("automatic judging must skip routes with no usable capacity");
+        assert!(matches!(error, FusionError::NoJudgeModel { .. }));
+    }
+
     /// Round-3 review finding 5: the checked-in hint table's anthropic
     /// (`"claude-fable-5-1"`) and openrouter (`"anthropic/claude-fable-5.1"`)
     /// rows for the SAME underlying model — Claude Fable 5.1 — diverge in
@@ -1227,24 +1577,28 @@ mod tests {
                 model: "claude-fable-5-1".into(),
                 hints: fable_anthropic,
                 structured_output: true,
+                limits: known_test_limits(),
             },
             CatalogModel {
                 profile: "openrouter".into(),
                 model: "anthropic/claude-fable-5.1".into(),
                 hints: fable_openrouter,
                 structured_output: true,
+                limits: known_test_limits(),
             },
             CatalogModel {
                 profile: "anthropic".into(),
                 model: "claude-opus-5".into(),
                 hints: opus,
                 structured_output: true,
+                limits: known_test_limits(),
             },
             CatalogModel {
                 profile: "deepseek".into(),
                 model: "deepseek-v4-pro".into(),
                 hints: deepseek,
                 structured_output: true,
+                limits: known_test_limits(),
             },
         ];
         let set = resolve(&req(), &FusionRuntimeConfig::defaults(), &catalog).unwrap();

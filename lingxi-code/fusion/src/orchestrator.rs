@@ -1,13 +1,14 @@
 //! Fusion state machine. Implements [`platform_api::FusionExecutor`].
 
 use crate::analyst::{AnalystError, AnalystUsage};
-use crate::budget::{self, FusionPriceBook, FusionQuote, ReservationLease};
+use crate::budget::{self, CapturedPriceBook, FusionPriceBook, FusionQuote, ReservationLease};
 use crate::config::{FusionConfigSource, FusionRuntimeConfig};
 use crate::decision::{interpret, panel_by_id, successful, HostDecision};
 use crate::model_resolver::{self, ModelSource, ResolvedPanel, ResolvedSet};
 use crate::panel::{self, PanelInternal};
 use crate::progress;
-use crate::synthesizer::{synthesize, SynthError};
+use crate::snapshot::{CatalogSnapshot, FusionRuntimeSnapshot};
+use crate::synthesizer::SynthError;
 use async_trait::async_trait;
 use platform_api::subagent_spawn::SubagentSpawner;
 use platform_api::{
@@ -83,6 +84,11 @@ const FINALIZE_GRACE_MS: u64 = 250;
 /// stalled external sink gets this small best-effort tail, capped again by
 /// the run's captured outer deadline.
 const TERMINAL_TELEMETRY_GRACE_MS: u64 = 100;
+
+/// Runtime sources are local and normally immutable or lock-backed. A small
+/// bounded retry absorbs one concurrent credential/settings publication while
+/// still failing closed under sustained churn.
+const SNAPSHOT_CAPTURE_ATTEMPTS: usize = 4;
 
 /// Injected Fusion orchestrator. Settings, catalog, spawner, and side-query
 /// client live here; [`FusionInheritance`] carries the parent session handles.
@@ -193,6 +199,194 @@ impl FusionOrchestrator {
         } else {
             Ok(())
         }
+    }
+
+    fn prepared_config(
+        &self,
+        effective_timeout_ms: Option<u64>,
+    ) -> Result<FusionRuntimeConfig, FusionError> {
+        let mut config = self.config_source.load()?;
+        if let Some(captured_total) =
+            effective_timeout_ms.map(|timeout_ms| timeout_ms.saturating_sub(FINALIZE_GRACE_MS))
+        {
+            config.total_timeout_ms = captured_total;
+        }
+        Ok(config)
+    }
+
+    /// Capture one coherent immutable view across effective settings, route
+    /// rows/limits and prices. Catalog reads are revision-bracketed; repeating
+    /// the aggregate prevents resolution from observing a settings/catalog
+    /// straddle. The production price catalog is an immutable `Arc`, while the
+    /// equality check also keeps mutable test implementations honest.
+    pub(crate) fn capture_runtime_snapshot(
+        &self,
+        request: &FusionRequest,
+        effective_timeout_ms: Option<u64>,
+    ) -> Result<FusionRuntimeSnapshot, FusionError> {
+        let extra_routes = [(request.parent_profile.clone(), request.parent_model.clone())];
+        for _ in 0..SNAPSHOT_CAPTURE_ATTEMPTS {
+            let config_before = self.prepared_config(effective_timeout_ms)?;
+            let catalog_before = CatalogSnapshot::capture(self.catalog.as_ref())?;
+            let prices_before = catalog_before.capture_prices(self.prices.as_ref(), &extra_routes);
+
+            let catalog_after = CatalogSnapshot::capture(self.catalog.as_ref())?;
+            let config_after = self.prepared_config(effective_timeout_ms)?;
+            let prices_after = catalog_after.capture_prices(self.prices.as_ref(), &extra_routes);
+
+            if config_before == config_after
+                && catalog_before == catalog_after
+                && prices_before == prices_after
+            {
+                return Ok(FusionRuntimeSnapshot::new(
+                    config_after,
+                    catalog_after,
+                    prices_after,
+                ));
+            }
+        }
+        Err(FusionError::InvalidConfiguration(
+            "fusion runtime inputs changed during preparation".into(),
+        ))
+    }
+
+    /// Reject a captured route when current auth/policy metadata revoked it or
+    /// narrowed its capacity. This is deliberately stage-level: additions do
+    /// not reroute a prepared run, and PR06 will add the final per-wire check.
+    pub(crate) fn ensure_live_routes(
+        live_catalog: &dyn ModelSource,
+        snapshot: &CatalogSnapshot,
+        routes: &[(&str, &str, bool)],
+        configured_output_tokens: u32,
+        stage: &str,
+    ) -> Result<(), FusionError> {
+        let current = live_catalog.list();
+        for (profile, model, judge) in routes {
+            let Some(captured) = snapshot.row_for(profile, model) else {
+                return Err(FusionError::InvalidConfiguration(format!(
+                    "fusion {stage} route {profile}/{model} was not present in the prepared catalog"
+                )));
+            };
+            let Some(row) = current
+                .iter()
+                .find(|row| row.profile == *profile && row.model == *model)
+            else {
+                return Err(FusionError::InvalidConfiguration(format!(
+                    "fusion {stage} route {profile}/{model} is no longer available"
+                )));
+            };
+            let eligibility_revoked = if *judge {
+                (captured.hints.judge_eligible && !row.hints.judge_eligible)
+                    || (captured.structured_output && !row.structured_output)
+            } else {
+                // Explicit panel routes are allowed without automatic-selection
+                // hints. Only a capability that was present at prepare time can
+                // be revoked here; unchanged `false` is not a new restriction.
+                captured.hints.eligible && !row.hints.eligible
+            };
+            if eligibility_revoked
+                || capacity_narrowed(captured.limits, row.limits, configured_output_tokens)
+            {
+                return Err(FusionError::InvalidConfiguration(format!(
+                    "fusion {stage} route {profile}/{model} was restricted after preparation"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Restrictive settings changes must stop a later stage, not silently
+    /// reinterpret the prepared selection.  The normal composition root
+    /// reloads effective settings on every call; this check keeps a prepared
+    /// run fail-closed when that source changes between stages.
+    pub(crate) fn ensure_live_config(
+        source: &dyn FusionConfigSource,
+        captured: &FusionRuntimeConfig,
+        request: &FusionRequest,
+        routes: &[&ResolvedPanel],
+        stage: &str,
+    ) -> Result<(), FusionError> {
+        let current = source.load().map_err(|_| {
+            FusionError::InvalidConfiguration(format!(
+                "fusion {stage} settings could not be revalidated"
+            ))
+        })?;
+        if captured.enabled && !current.enabled {
+            return Err(FusionError::InvalidConfiguration(format!(
+                "fusion was disabled before the {stage} stage"
+            )));
+        }
+        let has_cross_provider_route = routes
+            .iter()
+            .any(|route| route.profile != request.parent_profile);
+        let cross_provider_revoked = request.cross_provider
+            && has_cross_provider_route
+            && match request.origin {
+                FusionOrigin::Slash => false,
+                FusionOrigin::Agent => !current.allow_cross_provider_for_agent,
+                FusionOrigin::Workflow => !current.allow_cross_provider_for_workflow,
+            };
+        if cross_provider_revoked {
+            return Err(FusionError::CrossProviderDenied);
+        }
+        if !current.allowed_profiles.is_empty()
+            && routes
+                .iter()
+                .any(|route| !current.allowed_profiles.contains(&route.profile))
+        {
+            return Err(FusionError::InvalidConfiguration(format!(
+                "fusion {stage} route is no longer allowed by current settings"
+            )));
+        }
+        let output_narrowed = match stage {
+            "panel" => {
+                current.panel_max_output_tokens_per_turn < captured.panel_max_output_tokens_per_turn
+            }
+            "analyst" => current.analyst_max_output_tokens < captured.analyst_max_output_tokens,
+            "synthesizer" => {
+                current.synthesizer_max_output_tokens < captured.synthesizer_max_output_tokens
+            }
+            _ => false,
+        };
+        if output_narrowed {
+            return Err(FusionError::InvalidConfiguration(format!(
+                "fusion {stage} output capacity was restricted after preparation"
+            )));
+        }
+        let reservation_cap_narrowed = match current.max_reserved_nano_usd {
+            Some(current_limit) => captured
+                .max_reserved_nano_usd
+                .map_or(true, |captured_limit| current_limit < captured_limit),
+            None => false,
+        };
+        // All stage and total deadlines are part of the prepared run's
+        // immutable activation contract. A later timeout edit applies to the
+        // next preparation; treating it as a live restriction would silently
+        // shorten the deadline already handed to Task/CLI waiters.
+        if reservation_cap_narrowed {
+            return Err(FusionError::InvalidConfiguration(format!(
+                "fusion {stage} run policy was restricted after preparation"
+            )));
+        }
+        let stage_policy_narrowed = match stage {
+            "panel" => {
+                current.max_panel < routes.len() as u8
+                    || current.panel_max_turns < captured.panel_max_turns
+                    || current.panel_reserved_input_tokens_per_turn
+                        < captured.panel_reserved_input_tokens_per_turn
+                    || (captured.partial_ok && !current.partial_ok)
+                    || current.min_successful_panels > captured.min_successful_panels
+            }
+            "analyst" => current.analysis_protocol_retries < captured.analysis_protocol_retries,
+            "synthesizer" => false,
+            _ => false,
+        };
+        if stage_policy_narrowed {
+            return Err(FusionError::InvalidConfiguration(format!(
+                "fusion {stage} policy was restricted after preparation"
+            )));
+        }
+        Ok(())
     }
 
     /// Reserve a route resolved during `prepare`. Resolution and quoting are
@@ -356,6 +550,7 @@ impl FusionOrchestrator {
         config: &FusionRuntimeConfig,
         request: &FusionRequest,
         resolved: &ResolvedSet,
+        catalog_snapshot: &CatalogSnapshot,
         inherit: &FusionInheritance,
         progress: &Option<Sender<FusionProgress>>,
         run_id: &str,
@@ -425,6 +620,7 @@ impl FusionOrchestrator {
             parent_profile: &request.parent_profile,
             parent_model: &request.parent_model,
             request_prompt: &request.prompt,
+            catalog_snapshot: Some(catalog_snapshot),
             reserved_max_nano_usd: facts
                 .snapshot()
                 .usage
@@ -514,6 +710,8 @@ impl FusionOrchestrator {
         operational_deadline: Instant,
         resolved: ResolvedSet,
         quote: FusionQuote,
+        runtime_snapshot: Arc<FusionRuntimeSnapshot>,
+        live_catalog: Arc<dyn ModelSource>,
         facts: FusionRunFactsRecorder,
         control: FusionRunControl,
         panel_tasks: panel::PanelTaskBarrier,
@@ -581,12 +779,33 @@ impl FusionOrchestrator {
         .await?;
         facts.set_resolved_panels(u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX));
         Self::ensure_operational_time(operational_deadline)?;
+        let panel_routes: Vec<(&str, &str, bool)> = resolved
+            .panels
+            .iter()
+            .map(|panel| (panel.profile.as_str(), panel.model.as_str(), false))
+            .collect();
+        let panel_route_refs: Vec<&ResolvedPanel> = resolved.panels.iter().collect();
+        Self::ensure_live_config(
+            self.config_source.as_ref(),
+            &runtime_snapshot.config,
+            &request,
+            &panel_route_refs,
+            "panel",
+        )?;
+        Self::ensure_live_routes(
+            live_catalog.as_ref(),
+            &runtime_snapshot.catalog,
+            &panel_routes,
+            config.panel_max_output_tokens_per_turn,
+            "panel",
+        )?;
 
         let (panels, panels_ms) = self
             .run_panel_stage(
                 config,
                 &request,
                 &resolved,
+                &runtime_snapshot.catalog,
                 &inherit,
                 &progress,
                 &run_id,
@@ -607,11 +826,17 @@ impl FusionOrchestrator {
             realized_tokens: &realized_tokens,
             settlement: &settlement,
             catalog: self.catalog.as_ref(),
+            live_catalog: live_catalog.as_ref(),
+            catalog_snapshot: &runtime_snapshot.catalog,
             prices: self.prices.as_ref(),
             analyst: &resolved.analyst,
             parent_profile: &request.parent_profile,
             parent_model: &request.parent_model,
             request_prompt: &request.prompt,
+            request: Some(&request),
+            config: Some(config),
+            side_query: Some(self.side_query.as_ref()),
+            synth_estimate: Arc::new(Mutex::new(None)),
             panels: &panels,
             operational_deadline,
             cancel: inherit.cancel.clone(),
@@ -1327,6 +1552,68 @@ impl FusionOrchestrator {
                 false,
             );
         }
+        let analyst_route_refs = [&resolved.analyst];
+        if Self::ensure_live_config(
+            self.config_source.as_ref(),
+            config,
+            request,
+            &analyst_route_refs,
+            "analyst",
+        )
+        .is_err()
+        {
+            return (
+                Err((
+                    AnalystError::Failed("settings_restricted".into()),
+                    AnalystUsage::default(),
+                )),
+                0,
+                false,
+            );
+        }
+        if Self::ensure_live_routes(
+            stage_settlement.live_catalog,
+            stage_settlement.catalog_snapshot,
+            &[(
+                resolved.analyst.profile.as_str(),
+                resolved.analyst.model.as_str(),
+                true,
+            )],
+            config.analyst_max_output_tokens,
+            "analyst",
+        )
+        .is_err()
+        {
+            return (
+                Err((
+                    AnalystError::Failed("route_restricted".into()),
+                    AnalystUsage::default(),
+                )),
+                0,
+                false,
+            );
+        }
+        let analyst_limits = stage_settlement
+            .catalog_snapshot
+            .limits_for(&resolved.analyst.profile, &resolved.analyst.model)
+            .unwrap_or_else(crate::model_resolver::ModelLimits::unknown);
+        if let Err(error) = crate::analyst::preflight_request(
+            self.side_query.as_ref(),
+            config,
+            request,
+            &resolved.analyst,
+            panels,
+            analyst_limits,
+        ) {
+            return (
+                Err((
+                    AnalystError::Failed(error.category().into()),
+                    AnalystUsage::default(),
+                )),
+                0,
+                false,
+            );
+        }
         // [Round-3 review B2, reworked] Fold the analyst's profile into the
         // survives-a-drop egress latch right here, before the call below is
         // issued — this is the one place in `run_inner`'s call graph where
@@ -1393,16 +1680,21 @@ impl FusionOrchestrator {
                     .map_or_else(|poisoned| poisoned.into_inner().clone(), |latest| latest.clone());
                 Err((AnalystError::Failed("timeout".into()), latest))
             }
-            outcome = crate::analyst::analyze_with_observer(
+            outcome = crate::analyst::analyze_with_observer_and_limits(
                 Arc::clone(&self.side_query),
                 config,
                 request,
                 &resolved.analyst,
                 panels,
+                analyst_limits,
                 &mut observe,
             ) => outcome,
         };
-        (analysis_outcome, millis_since(analyst_started), true)
+        let attempted = latest
+            .lock()
+            .map(|snapshot| snapshot.calls > 0)
+            .unwrap_or(true);
+        (analysis_outcome, millis_since(analyst_started), attempted)
     }
 
     /// `run_synthesis` helper: the `SYNTHESIS_FAILED` telemetry both
@@ -1562,6 +1854,114 @@ impl FusionOrchestrator {
                 0,
             );
         }
+        let parent_route = ResolvedPanel {
+            profile: request.parent_profile.clone(),
+            model: request.parent_model.clone(),
+        };
+        let parent_route_refs = [&parent_route];
+        if Self::ensure_live_config(
+            self.config_source.as_ref(),
+            config,
+            request,
+            &parent_route_refs,
+            "synthesizer",
+        )
+        .is_err()
+        {
+            self.emit_synthesis_failed(
+                request,
+                panels,
+                run_id,
+                0,
+                "settings_restricted",
+                stage_settlement,
+            )
+            .await;
+            return (
+                FusionDecision::NeedsParent {
+                    reason: FusionNeedsParentReason::SynthesisFailed,
+                },
+                needs_parent_text(
+                    panels,
+                    "synthesizer settings were restricted after preparation",
+                    Some(&analysis),
+                ),
+                Some(analysis),
+                0,
+            );
+        }
+        if Self::ensure_live_routes(
+            stage_settlement.live_catalog,
+            stage_settlement.catalog_snapshot,
+            &[(
+                request.parent_profile.as_str(),
+                request.parent_model.as_str(),
+                false,
+            )],
+            config.synthesizer_max_output_tokens,
+            "synthesizer",
+        )
+        .is_err()
+        {
+            self.emit_synthesis_failed(
+                request,
+                panels,
+                run_id,
+                0,
+                "route_restricted",
+                stage_settlement,
+            )
+            .await;
+            return (
+                FusionDecision::NeedsParent {
+                    reason: FusionNeedsParentReason::SynthesisFailed,
+                },
+                needs_parent_text(
+                    panels,
+                    "synthesizer route was restricted after preparation",
+                    Some(&analysis),
+                ),
+                Some(analysis),
+                0,
+            );
+        }
+        let parent_limits = stage_settlement
+            .catalog_snapshot
+            .limits_for(&request.parent_profile, &request.parent_model)
+            .unwrap_or_else(crate::model_resolver::ModelLimits::unknown);
+        if crate::synthesizer::preflight_request(
+            self.side_query.as_ref(),
+            config,
+            request,
+            &analysis,
+            panels,
+            parent_limits,
+        )
+        .is_err()
+        {
+            self.emit_synthesis_failed(
+                request,
+                panels,
+                run_id,
+                0,
+                "synthesis_input_too_large",
+                stage_settlement,
+            )
+            .await;
+            return (
+                FusionDecision::NeedsParent {
+                    reason: FusionNeedsParentReason::SynthesisFailed,
+                },
+                needs_parent_text(
+                    panels,
+                    "synthesizer input does not fit the prepared parent route",
+                    Some(&analysis),
+                ),
+                Some(analysis),
+                0,
+            );
+        }
+        stage_settlement.capture_synth_estimate(&analysis);
         // T1 item 1: set unconditionally, before the call and its own
         // timeout race — every path below (success, timeout, failure) is a
         // genuine ATTEMPT that may have reached and been billed by the
@@ -1603,12 +2003,13 @@ impl FusionOrchestrator {
             () = tokio::time::sleep_until(operational_deadline) => {
                 Err((SynthError::TimedOut, cost::Usage::default()))
             }
-            outcome = synthesize(
+            outcome = crate::synthesizer::synthesize_with_limits(
                 Arc::clone(&self.side_query),
                 config,
                 request,
                 &analysis,
                 panels,
+                parent_limits,
             ) => outcome,
         };
         let synthesizer_ms = millis_since(synth_started);
@@ -1644,6 +2045,19 @@ impl FusionOrchestrator {
                 (FusionDecision::Merged, text, Some(analysis), synthesizer_ms)
             }
             Err((error, lost_usage)) => {
+                let mut lost_usage = lost_usage;
+                if lost_usage.total_tokens() == 0 && self.side_query.has_canonical_estimator() {
+                    if let Ok(input_tokens) = crate::synthesizer::estimate_input_tokens(
+                        self.side_query.as_ref(),
+                        config,
+                        request,
+                        &analysis,
+                        panels,
+                        parent_limits,
+                    ) {
+                        lost_usage.tokens.input = input_tokens;
+                    }
+                }
                 Self::record_failed_synth_usage(
                     lost_usage,
                     usage,
@@ -1697,6 +2111,8 @@ impl FusionOrchestrator {
         facts: FusionRunFactsRecorder,
         resolved: ResolvedSet,
         quote: FusionQuote,
+        runtime_snapshot: Arc<FusionRuntimeSnapshot>,
+        live_catalog: Arc<dyn ModelSource>,
         started: Instant,
     ) -> Result<FusionResult, FusionError> {
         let run_id = control.identity().run_id.to_string();
@@ -1726,6 +2142,8 @@ impl FusionOrchestrator {
                 operational_deadline,
                 resolved,
                 quote,
+                runtime_snapshot,
+                live_catalog,
                 facts.clone(),
                 control.clone(),
                 panel_tasks.clone(),
@@ -1855,26 +2273,24 @@ impl FusionExecutor for FusionOrchestrator {
             identity,
         } = submission;
         let inherit = scope_inheritance_to_identity(&identity, inherit)?;
-        let mut config = self.config_source.load()?;
-        if let Some(captured_total) = inherit
-            .effective_timeout_ms
-            .map(|timeout_ms| timeout_ms.saturating_sub(FINALIZE_GRACE_MS))
-        {
-            config.total_timeout_ms = captured_total;
-        }
         let request = validate_request(request)?;
-        let catalog = self.catalog.list();
-        let resolved = model_resolver::resolve(&request, &config, &catalog)?;
+        let runtime_snapshot =
+            self.capture_runtime_snapshot(&request, inherit.effective_timeout_ms)?;
+        let config = runtime_snapshot.config.clone();
+        let catalog_snapshot = runtime_snapshot.catalog.clone();
+        let resolved = model_resolver::resolve(&request, &config, &catalog_snapshot)?;
+        let captured_prices = runtime_snapshot.prices.clone();
         // Quote during preparation so an invalid price/configuration fails
         // before TaskCreated. The actual reservation remains activation-only.
         let quote = budget::quote(
             &config,
             &resolved,
             &request,
-            &catalog,
-            self.prices.as_ref(),
+            &catalog_snapshot,
+            &captured_prices,
             inherit.budget().max_session_nano_usd().is_some(),
         )?;
+        let runtime_snapshot = Arc::new(runtime_snapshot);
         let duration_ms = inherit
             .effective_timeout_ms
             .unwrap_or_else(|| config.total_timeout_ms.saturating_add(FINALIZE_GRACE_MS));
@@ -1895,14 +2311,18 @@ impl FusionExecutor for FusionOrchestrator {
         // reached. It lets pre-reservation failures remain distinguishable
         // from legacy runners that expose no facts at all.
         facts.set_known_zero();
+        let live_catalog = Arc::clone(&self.catalog);
         let mut snapshot_orchestrator = (*self).clone();
-        snapshot_orchestrator.catalog = Arc::new(catalog);
+        snapshot_orchestrator.catalog = Arc::new(catalog_snapshot);
+        snapshot_orchestrator.prices = Arc::new(captured_prices);
         let snapshot_orchestrator = Arc::new(snapshot_orchestrator);
         Ok(PreparedFusionRun::new(
             summary,
             control.clone(),
             move |activation: FusionActivation, progress| {
                 let orchestrator = Arc::clone(&snapshot_orchestrator);
+                let runtime_snapshot = Arc::clone(&runtime_snapshot);
+                let live_catalog = Arc::clone(&live_catalog);
                 let control = control.clone();
                 let facts = facts.clone();
                 let request = request.clone();
@@ -1922,6 +2342,8 @@ impl FusionExecutor for FusionOrchestrator {
                             facts.clone(),
                             resolved,
                             quote,
+                            runtime_snapshot,
+                            live_catalog,
                             started,
                         )
                         .await;
@@ -2232,9 +2654,9 @@ impl Drop for SettlementLease {
 /// | a panel task reaches the spawner | one priced `panel_prompt` turn per DISPATCHED panel | estimate (`panel::PanelDispatch` + `RealizedSpendSink`) |
 /// | a panel finishes | that panel's real usage + the floor for the ones still in flight | provider usage where known |
 /// | panel stage returns | every panel's real usage, analyst/synth exactly $0 | provider usage (`refresh(None, false, None, false)`) |
-/// | analyst call dispatched | panels + `judge_input_token_estimate` for the analyst | estimate (`refresh(None, true, ..)`) |
+/// | analyst call dispatched | panels + canonical analyst request estimate | estimate (`refresh(None, true, ..)`) |
 /// | analyst returned | panels + the analyst's REAL usage | provider usage (`refresh(Some(..), true, ..)`) |
-/// | synthesizer dispatched | + `judge_input_token_estimate` for the synth | estimate (`refresh(.., None, true)`) |
+/// | synthesizer dispatched | + canonical synthesizer request estimate | estimate (`refresh(.., None, true)`) |
 /// | synthesizer returned | + the synthesizer's REAL usage | provider usage (`refresh(.., Some(..), true)`) |
 /// | `finalize_result` | the same figure, committed against the lease | `price_realized_usage` |
 ///
@@ -2245,11 +2667,17 @@ struct StageSettlement<'a> {
     realized_tokens: &'a Arc<Mutex<Option<u64>>>,
     settlement: &'a Arc<Mutex<Option<(u64, bool)>>>,
     catalog: &'a dyn ModelSource,
+    live_catalog: &'a dyn ModelSource,
+    catalog_snapshot: &'a CatalogSnapshot,
     prices: &'a dyn FusionPriceBook,
     analyst: &'a ResolvedPanel,
     parent_profile: &'a str,
     parent_model: &'a str,
     request_prompt: &'a str,
+    request: Option<&'a FusionRequest>,
+    config: Option<&'a FusionRuntimeConfig>,
+    side_query: Option<&'a dyn SideQueryClient>,
+    synth_estimate: Arc<Mutex<Option<cost::Usage>>>,
     /// The finished, anonymized panel set — fixed for the whole life of
     /// this borrow (every stage below only reads it).
     panels: &'a [PanelInternal],
@@ -2267,10 +2695,82 @@ impl StageSettlement<'_> {
     /// disappear merely because `analyst_usage` is already `Some`.
     fn analyst_usage_with_missing_estimates(&self, snapshot: &AnalystUsage) -> cost::Usage {
         let mut usage = snapshot.usage;
-        let missing_input = judge_input_token_estimate(self.request_prompt, self.panels)
-            .saturating_mul(u64::from(snapshot.unreported_calls));
+        let input_estimate = match (self.request, self.config, self.side_query) {
+            (Some(request), Some(config), Some(client)) if client.has_canonical_estimator() => {
+                let limits = self
+                    .catalog_snapshot
+                    .limits_for(&self.analyst.profile, &self.analyst.model)
+                    .unwrap_or_else(crate::model_resolver::ModelLimits::unknown);
+                crate::analyst::estimate_input_tokens(
+                    client,
+                    config,
+                    request,
+                    self.analyst,
+                    self.panels,
+                    limits,
+                )
+                .unwrap_or_else(|_| judge_input_token_estimate(self.request_prompt, self.panels))
+            }
+            _ => judge_input_token_estimate(self.request_prompt, self.panels),
+        };
+        let missing_input = input_estimate.saturating_mul(u64::from(snapshot.unreported_calls));
         usage.tokens.input = usage.tokens.input.saturating_add(missing_input);
         usage
+    }
+
+    fn canonical_analyst_estimate(&self) -> Option<cost::Usage> {
+        if !self.side_query?.has_canonical_estimator() {
+            return None;
+        }
+        let (request, config, client) = (self.request?, self.config?, self.side_query?);
+        let limits = self
+            .catalog_snapshot
+            .limits_for(&self.analyst.profile, &self.analyst.model)
+            .unwrap_or_else(crate::model_resolver::ModelLimits::unknown);
+        let input = crate::analyst::estimate_input_tokens(
+            client,
+            config,
+            request,
+            self.analyst,
+            self.panels,
+            limits,
+        )
+        .ok()?;
+        let mut usage = cost::Usage::default();
+        usage.tokens.input = input;
+        Some(usage)
+    }
+
+    fn canonical_synth_estimate(&self) -> Option<cost::Usage> {
+        self.synth_estimate.lock().ok().and_then(|guard| *guard)
+    }
+
+    fn capture_synth_estimate(&self, analysis: &FusionAnalysis) {
+        let (request, config, client) = match (self.request, self.config, self.side_query) {
+            (Some(request), Some(config), Some(client)) if client.has_canonical_estimator() => {
+                (request, config, client)
+            }
+            _ => return,
+        };
+        let limits = self
+            .catalog_snapshot
+            .limits_for(self.parent_profile, self.parent_model)
+            .unwrap_or_else(crate::model_resolver::ModelLimits::unknown);
+        let Ok(input) = crate::synthesizer::estimate_input_tokens(
+            client,
+            config,
+            request,
+            analysis,
+            self.panels,
+            limits,
+        ) else {
+            return;
+        };
+        let mut usage = cost::Usage::default();
+        usage.tokens.input = input;
+        if let Ok(mut guard) = self.synth_estimate.lock() {
+            *guard = Some(usage);
+        }
     }
 
     /// Rewrite both cells for the stage boundary just reached. Arguments
@@ -2308,6 +2808,18 @@ impl StageSettlement<'_> {
         }
         if let Some(synth) = synth_usage {
             add_cost_usage(&mut usage, synth, 1);
+        }
+        let estimated_analyst = (analyst_attempted && analyst_usage.is_none())
+            .then(|| self.canonical_analyst_estimate())
+            .flatten();
+        if let Some(estimate) = &estimated_analyst {
+            add_cost_usage(&mut usage, estimate, 1);
+        }
+        let estimated_synth = (synth_attempted && synth_usage.is_none())
+            .then(|| self.canonical_synth_estimate())
+            .flatten();
+        if let Some(estimate) = &estimated_synth {
+            add_cost_usage(&mut usage, estimate, 1);
         }
         let usage_was_estimated = usage.estimated;
         usage.realized_nano_usd = previous_priced.0;
@@ -2363,19 +2875,23 @@ impl StageSettlement<'_> {
             ..Default::default()
         });
 
-        let (priced_nano_usd, priced_estimated) = price_realized_usage(
+        let analyst_for_pricing =
+            analyst_usage.or_else(|| estimated_analyst.as_ref().map(|estimate| (estimate, 1)));
+        let synth_for_pricing = synth_usage.or(estimated_synth.as_ref());
+        let (priced_nano_usd, mut priced_estimated) = price_realized_usage(
             self.catalog,
             self.prices,
             self.panels,
             self.analyst,
-            analyst_usage,
+            analyst_for_pricing,
             analyst_attempted,
             self.parent_profile,
             self.parent_model,
-            synth_usage,
+            synth_for_pricing,
             synth_attempted,
             self.request_prompt,
         );
+        priced_estimated |= estimated_analyst.is_some() || estimated_synth.is_some();
         if let Ok(mut guard) = self.settlement.lock() {
             *guard = Some((
                 priced_nano_usd,
@@ -2666,14 +3182,11 @@ pub(crate) fn price_realized_usage(
     (total_nano_usd, estimated)
 }
 
-/// T1 item 1 (analyst/synth half, user-directed policy): approximate the
-/// input a JUDGE call (analyst or synthesizer) is known to have read —
-/// the task prompt plus every successful panel's own report, which is what
-/// `analyst_user_message` / `synthesize`'s real payload both serialize —
-/// using the SAME character-based approximation the panel-side settlement
-/// fallback uses (`llm_client::model::count_tokens::approximate_tokens_for_bytes`),
-/// never a second, divergent formula. `pub(crate)` so `orchestrator_test`
-/// can compute the exact expected value instead of duplicating this math.
+/// Conservative fallback used only by isolated test fixtures or when a
+/// provider estimator is unavailable. Real Session-backed analyst/synth
+/// paths use the canonical request builders in `packing` and the
+/// `SideQueryClient::estimate_request` hook, including system/schema/framing.
+/// `pub(crate)` remains for tests that exercise the no-client fallback.
 pub(crate) fn judge_input_token_estimate(prompt: &str, panels: &[PanelInternal]) -> u64 {
     let mut bytes = prompt.len() as u64;
     for panel in panels {
@@ -2701,6 +3214,27 @@ fn add_cost_usage(acc: &mut FusionUsage, usage: &cost::Usage, calls: u32) {
         .cache_write_tokens
         .saturating_add(usage.tokens.cache_write);
     acc.provider_requests = acc.provider_requests.saturating_add(calls);
+}
+
+fn capacity_narrowed(
+    captured: crate::model_resolver::ModelLimits,
+    current: crate::model_resolver::ModelLimits,
+    configured_output_tokens: u32,
+) -> bool {
+    let captured_output = captured.output_cap(configured_output_tokens);
+    let current_output = current.output_cap(configured_output_tokens);
+    if current_output < captured_output {
+        return true;
+    }
+
+    match (
+        captured.input_cap(captured_output),
+        current.input_cap(current_output),
+    ) {
+        (Some(before), Some(after)) => after < before,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
 }
 
 /// Byte cap on each panel's rendered `candidate_answer` inside
@@ -3127,21 +3661,27 @@ mod record_failed_analyst_usage_tests {
         realized_tokens: Arc<Mutex<Option<u64>>>,
         settlement: Arc<Mutex<Option<(u64, bool)>>>,
         catalog: Vec<CatalogModel>,
+        snapshot: CatalogSnapshot,
         prices: (),
         analyst: ResolvedPanel,
+        facts: FusionRunFactsRecorder,
     }
 
     impl StageFixture {
         fn new() -> Self {
+            let catalog = Vec::new();
+            let snapshot = CatalogSnapshot::capture(&catalog).unwrap();
             Self {
                 realized_tokens: Arc::new(Mutex::new(None)),
                 settlement: Arc::new(Mutex::new(None)),
-                catalog: Vec::new(),
+                catalog,
+                snapshot,
                 prices: (),
                 analyst: ResolvedPanel {
                     profile: "profile".into(),
                     model: "model".into(),
                 },
+                facts: FusionRunFactsRecorder::default(),
             }
         }
 
@@ -3150,19 +3690,75 @@ mod record_failed_analyst_usage_tests {
                 realized_tokens: &self.realized_tokens,
                 settlement: &self.settlement,
                 catalog: &self.catalog,
+                live_catalog: &self.catalog,
+                catalog_snapshot: &self.snapshot,
                 prices: &self.prices,
                 analyst: &self.analyst,
                 parent_profile: "profile",
                 parent_model: "model",
                 request_prompt: "task",
+                request: None,
+                config: None,
+                side_query: None,
+                synth_estimate: Arc::new(Mutex::new(None)),
                 panels: &[],
                 operational_deadline: Instant::now() + Duration::from_secs(60),
                 cancel: CancellationToken::new(),
                 reserved_max_nano_usd: 0,
-                facts: FusionRunFactsRecorder::default(),
+                facts: self.facts.clone(),
                 started: Instant::now(),
             }
         }
+    }
+
+    struct PanicPrices;
+
+    impl FusionPriceBook for PanicPrices {
+        fn rates_for(&self, _profile: &str, _model: &str) -> Option<crate::budget::ModelRates> {
+            panic!("injected stage pricing panic")
+        }
+    }
+
+    #[test]
+    fn stage_refresh_latches_returned_usage_before_pricing_can_panic() {
+        let fixture = StageFixture::new();
+        *fixture.settlement.lock().unwrap() = Some((17, false));
+        let prices = PanicPrices;
+        let mut stage = fixture.cell();
+        stage.prices = &prices;
+        let analyst = cost::Usage {
+            tokens: cost::TokenUsage {
+                input: 5,
+                output: 3,
+                ..cost::TokenUsage::default()
+            },
+            ..cost::Usage::default()
+        };
+        let synth = cost::Usage {
+            tokens: cost::TokenUsage {
+                input: 17,
+                output: 19,
+                ..cost::TokenUsage::default()
+            },
+            ..cost::Usage::default()
+        };
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stage.refresh(Some((&analyst, 1)), true, Some(&synth), true, false);
+        }));
+        assert!(panic.is_err());
+
+        let facts = fixture.facts.snapshot();
+        let usage = facts
+            .usage
+            .expect("provider-returned analyst and synth usage must be latched first");
+        assert_eq!(usage.input_tokens, 22);
+        assert_eq!(usage.output_tokens, 22);
+        assert_eq!(usage.provider_requests, 2);
+        assert_eq!(usage.realized_nano_usd, 17);
+        assert!(facts.usage_incomplete);
+        assert_eq!(facts.confirmed_egress, vec!["profile"]);
+        assert_eq!(*fixture.settlement.lock().unwrap(), Some((17, false)));
     }
 
     #[test]
@@ -3633,6 +4229,7 @@ mod outer_err_arm_realized_tokens_tests {
                     ..FusionModelHints::default()
                 },
                 structured_output: true,
+                limits: crate::model_resolver::known_test_limits(),
             }
         })
         .collect()

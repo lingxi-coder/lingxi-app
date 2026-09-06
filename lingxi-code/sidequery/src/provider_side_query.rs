@@ -29,7 +29,10 @@
 //! This fixes the pre-broken `text_response_decodes_text_usage_and_stop_reason`
 //! test.
 
-use crate::side_query::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
+use crate::side_query::{
+    CanonicalSideQueryRequest, SideQueryClient, SideQueryError, SideQueryEstimate,
+    SideQueryRequest, SideQueryResponse,
+};
 use async_trait::async_trait;
 use llm_client::LlmTransportBridge;
 use llm_client::{
@@ -321,6 +324,76 @@ fn decode_response(
 
 #[async_trait]
 impl SideQueryClient for ProviderSideQueryClient {
+    fn estimate_request(
+        &self,
+        request: CanonicalSideQueryRequest,
+    ) -> Result<SideQueryEstimate, SideQueryError> {
+        match (&self.backend, request) {
+            (
+                ProviderSideQueryBackend::Session(service),
+                CanonicalSideQueryRequest::Plain(request),
+            ) => {
+                let query_source = request.query_source.as_str();
+                let canonical = service.build_side_query_request_with_thinking(
+                    &request.model,
+                    request.profile.as_deref(),
+                    request.system_prompt.as_deref(),
+                    request.messages,
+                    request.tools,
+                    Some(request.max_tokens),
+                    convert_tool_choice(request.tool_choice.as_ref()),
+                    request.stop_sequences,
+                    request.thinking,
+                    request.effort,
+                    request.temperature,
+                    Some(query_source),
+                )?;
+                estimate_canonical_request(canonical)
+            }
+            (
+                ProviderSideQueryBackend::Session(service),
+                CanonicalSideQueryRequest::Strict(request),
+            ) => {
+                let query_source = request.query_source.as_str();
+                let temperature = temperature_for_capable_model(
+                    &service.model_listings(),
+                    request.profile.as_deref(),
+                    &request.model,
+                    request.temperature,
+                );
+                let canonical = service.build_json_schema_request_with_thinking(
+                    &request.model,
+                    request.profile.as_deref(),
+                    request.system_prompt.as_deref(),
+                    request.messages,
+                    request.schema,
+                    Some(request.max_tokens),
+                    None,
+                    None,
+                    temperature,
+                    Some(query_source),
+                )?;
+                estimate_canonical_request(canonical)
+            }
+            (_, request) => {
+                let serialized_bytes = match request {
+                    CanonicalSideQueryRequest::Plain(request) => {
+                        crate::side_query::serialized_size(&request)
+                    }
+                    CanonicalSideQueryRequest::Strict(request) => {
+                        crate::side_query::serialized_size(&request)
+                    }
+                }?;
+                Ok(SideQueryEstimate {
+                    serialized_bytes,
+                    input_tokens: llm_client::model::count_tokens::approximate_tokens_for_bytes(
+                        serialized_bytes,
+                    ),
+                })
+            }
+        }
+    }
+
     async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
         let first_text_only = request.query_source == crate::purposes::QuerySource::Compaction;
         if let ProviderSideQueryBackend::Session(service) = &self.backend {
@@ -522,6 +595,18 @@ impl SideQueryClient for ProviderSideQueryClient {
             ProviderSideQueryBackend::Direct { .. } => 0,
         }
     }
+
+    fn has_canonical_estimator(&self) -> bool {
+        matches!(&self.backend, ProviderSideQueryBackend::Session(_))
+    }
+}
+
+fn estimate_canonical_request(request: LlmRequest) -> Result<SideQueryEstimate, SideQueryError> {
+    let serialized_bytes = crate::side_query::serialized_size(&request)?;
+    Ok(SideQueryEstimate {
+        serialized_bytes,
+        input_tokens: llm_client::model::count_tokens::approximate_tokens(&request),
+    })
 }
 
 /// Round-3 review finding 4: whether the vendored catalog data reachable

@@ -3002,6 +3002,70 @@ impl ApiService {
             .await
     }
 
+    /// Build the canonical non-strict side-query request used by both
+    /// estimation and the live Session dispatch path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_side_query_request_with_thinking(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        max_tokens: Option<u32>,
+        tool_choice: Option<crate::ToolChoice>,
+        stop_sequences: Vec<String>,
+        thinking: Option<crate::model::thinking::ThinkingConfig>,
+        effort: Option<serde_json::Value>,
+        temperature: Option<f32>,
+        query_source: Option<&str>,
+    ) -> Result<LlmRequest, LlmError> {
+        let mut req =
+            self.build_request(model, profile, system, messages, tools, false, max_tokens)?;
+        req.effort = effort;
+        req.tool_choice = tool_choice;
+        req.stop_sequences = stop_sequences;
+        req.capture_retry_count = true;
+        req.query_source = query_source.map(str::to_string);
+        self.apply_side_query_thinking(&mut req, model, thinking, temperature);
+        Ok(req)
+    }
+
+    /// Build the canonical strict JSON-schema request used by both estimation
+    /// and the live Session dispatch path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_json_schema_request_with_thinking(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        schema: serde_json::Value,
+        max_tokens: Option<u32>,
+        effort: Option<serde_json::Value>,
+        thinking: Option<crate::model::thinking::ThinkingConfig>,
+        temperature: Option<f32>,
+        query_source: Option<&str>,
+    ) -> Result<LlmRequest, LlmError> {
+        let mut req = self.build_request(
+            model,
+            profile,
+            system,
+            messages,
+            Vec::new(),
+            true,
+            max_tokens,
+        )?;
+        req.tool_choice = None;
+        req.effort = effort;
+        req.response_format = Some(crate::ResponseFormat::JsonSchema { schema });
+        self.apply_side_query_thinking(&mut req, model, thinking, temperature);
+        if query_source.is_some() {
+            req.query_source = query_source.map(str::to_string);
+        }
+        Ok(req)
+    }
+
     /// Run a session-bound side query through the same request builder,
     /// provider routing, credentials, cache layout, headers, and retry driver
     /// as the parent conversation.
@@ -3077,14 +3141,20 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<LlmResponse, LlmError> {
-        let mut req =
-            self.build_request(model, profile, system, messages, tools, false, max_tokens)?;
-        req.effort = effort;
-        req.tool_choice = tool_choice;
-        req.stop_sequences = stop_sequences;
-        req.capture_retry_count = true;
-        req.query_source = query_source.map(str::to_string);
-        self.apply_side_query_thinking(&mut req, model, thinking, temperature);
+        let req = self.build_side_query_request_with_thinking(
+            model,
+            profile,
+            system,
+            messages,
+            tools,
+            max_tokens,
+            tool_choice,
+            stop_sequences,
+            thinking,
+            effort,
+            temperature,
+            query_source,
+        )?;
 
         let ctl = resolve_retry_control_with_settings(
             model,
@@ -4072,24 +4142,18 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        let mut req = self.build_request(
+        let req = self.build_json_schema_request_with_thinking(
             model,
             profile,
             system,
             messages,
-            Vec::new(),
-            true,
+            schema,
             max_tokens,
+            effort,
+            thinking,
+            temperature,
+            query_source,
         )?;
-        // See `stream_json_schema`: the parent turn's forced tool choice must
-        // not leak into this empty-tool structured-output request.
-        req.tool_choice = None;
-        req.effort = effort;
-        req.response_format = Some(crate::ResponseFormat::JsonSchema { schema });
-        self.apply_side_query_thinking(&mut req, model, thinking, temperature);
-        if query_source.is_some() {
-            req.query_source = query_source.map(str::to_string);
-        }
         self.drive_stream(req).await
     }
 }

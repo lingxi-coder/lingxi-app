@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use protocol::ConversationMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::io::Write;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -138,6 +139,26 @@ pub struct StrictStructuredQueryRequest {
     pub skip_system_prompt_prefix: bool,
 }
 
+/// Request shape used by Fusion's preflight estimator. The Session provider
+/// adapter replaces the fallback DTO serialization with the same canonical
+/// LlmRequest builder used for the actual wire call.
+#[derive(Debug, Clone)]
+pub enum CanonicalSideQueryRequest {
+    /// Ordinary text side query.
+    Plain(SideQueryRequest),
+    /// Strict JSON-schema side query.
+    Strict(StrictStructuredQueryRequest),
+}
+
+/// Deterministic preflight request-size/token estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SideQueryEstimate {
+    /// Bytes in the canonical request representation.
+    pub serialized_bytes: u64,
+    /// Conservative input-token estimate.
+    pub input_tokens: u64,
+}
+
 /// Decoded strict JSON-schema side query.
 #[derive(Debug, Clone)]
 pub struct StrictStructuredQueryResponse {
@@ -168,6 +189,13 @@ pub trait SideQueryClient: Send + Sync {
         0
     }
 
+    /// Whether request estimates come from the same canonical Session builder
+    /// used for dispatch. Small fakes retain the DTO fallback for deterministic
+    /// unit tests; production ProviderSideQueryClient opts into this seam.
+    fn has_canonical_estimator(&self) -> bool {
+        false
+    }
+
     /// Strict JSON-schema query. Default rejects so existing test doubles stay
     /// object-safe and source-compatible. Fusion's production client overrides
     /// this and must not fall back to best-effort `output_format` parsing.
@@ -176,5 +204,73 @@ pub trait SideQueryClient: Send + Sync {
         _request: StrictStructuredQueryRequest,
     ) -> Result<StrictStructuredQueryResponse, SideQueryError> {
         Err(SideQueryError::StructuredOutputUnsupported)
+    }
+
+    /// Estimate a request without contacting a provider.
+    ///
+    /// ProviderSideQueryClient overrides this for the live Session backend so
+    /// the estimate uses ApiService's canonical request builder. Fakes and
+    /// isolated utility clients retain a deterministic DTO fallback.
+    fn estimate_request(
+        &self,
+        request: CanonicalSideQueryRequest,
+    ) -> Result<SideQueryEstimate, SideQueryError> {
+        let serialized_bytes = match request {
+            CanonicalSideQueryRequest::Plain(request) => serialized_size(&request),
+            CanonicalSideQueryRequest::Strict(request) => serialized_size(&request),
+        }?;
+        Ok(SideQueryEstimate {
+            serialized_bytes,
+            input_tokens: llm_client::model::count_tokens::approximate_tokens_for_bytes(
+                serialized_bytes,
+            ),
+        })
+    }
+}
+
+#[derive(Default)]
+struct SerializedByteCounter {
+    bytes: u64,
+}
+
+impl Write for SerializedByteCounter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let bytes = u64::try_from(buffer.len())
+            .map_err(|_| std::io::Error::other("serialized request length overflow"))?;
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .ok_or_else(|| std::io::Error::other("serialized request length overflow"))?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Count compact JSON bytes directly from a borrowed value. Request sizing is
+/// a preflight operation; it must not allocate a second full request body just
+/// to learn the length of the body the canonical builder already produced.
+pub(crate) fn serialized_size<T: Serialize>(value: &T) -> Result<u64, SideQueryError> {
+    let mut counter = SerializedByteCounter::default();
+    serde_json::to_writer(&mut counter, value)
+        .map_err(|error| SideQueryError::InvalidResponse(error.to_string()))?;
+    Ok(counter.bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_counter_matches_compact_json_for_escaping_and_unicode() {
+        let value = serde_json::json!({
+            "task": "界\\\"\n",
+            "dimensions": ["coverage", "safety"],
+            "nested": {"ok": true}
+        });
+        let expected = u64::try_from(serde_json::to_vec(&value).unwrap().len()).unwrap();
+        assert_eq!(serialized_size(&value).unwrap(), expected);
     }
 }

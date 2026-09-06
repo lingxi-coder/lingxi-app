@@ -5,6 +5,7 @@ use crate::config::FusionRuntimeConfig;
 use crate::model_resolver::{ModelSource, ResolvedPanel};
 use crate::orchestrator::price_realized_usage;
 use crate::progress;
+use crate::snapshot::CatalogSnapshot;
 use async_trait::async_trait;
 use platform_api::subagent_output_guard::sanitize_blocks;
 use platform_api::subagent_spawn::{
@@ -51,6 +52,7 @@ pub struct RealizedSpendSink<'a> {
     pub parent_profile: &'a str,
     pub parent_model: &'a str,
     pub request_prompt: &'a str,
+    pub catalog_snapshot: Option<&'a CatalogSnapshot>,
     pub reserved_max_nano_usd: u64,
     pub facts: FusionRunFactsRecorder,
     pub started: Instant,
@@ -650,6 +652,38 @@ fn panel_stall_timeout_ms(config: &FusionRuntimeConfig) -> u64 {
         .min(config.panel_total_timeout_ms)
 }
 
+/// Largest byte ceiling whose shared conservative request approximation does
+/// not exceed `tokens`. This deliberately derives the inverse from the public
+/// estimator instead of duplicating its private bytes-per-token constant.
+pub(crate) fn max_input_bytes_for_token_cap(tokens: u64) -> u64 {
+    if tokens == 0 {
+        return 0;
+    }
+    let mut low = 0_u64;
+    let mut high = tokens.saturating_mul(llm_client::model::count_tokens::APPROX_CHARS_PER_TOKEN);
+    while low < high {
+        let midpoint = low.saturating_add(high.saturating_sub(low).div_ceil(2));
+        if llm_client::model::count_tokens::approximate_tokens_for_bytes(midpoint) <= tokens {
+            low = midpoint;
+        } else {
+            high = midpoint.saturating_sub(1);
+        }
+    }
+    low
+}
+
+#[cfg(test)]
+#[test]
+fn panel_byte_cap_is_the_exact_safe_inverse_of_request_estimation() {
+    let tokens = 32_768;
+    let bytes = max_input_bytes_for_token_cap(tokens);
+    assert_eq!(
+        llm_client::model::count_tokens::approximate_tokens_for_bytes(bytes),
+        tokens
+    );
+    assert!(llm_client::model::count_tokens::approximate_tokens_for_bytes(bytes + 1) > tokens);
+}
+
 /// `run_panels` helper: spawn every panel's subagent task onto a fresh
 /// `JoinSet`, returning it plus a task-id → panel-index map (the collection
 /// loop needs this to recover a panicked/aborted task's identity — a join
@@ -666,7 +700,8 @@ fn spawn_panel_tasks(
     overall_deadline_at: Instant,
     schema: &str,
     generic_prompt: &str,
-    max_input_bytes: u64,
+    catalog_snapshot: Option<&CatalogSnapshot>,
+    fallback_input_bytes: u64,
     progress: &Option<Sender<FusionProgress>>,
     // [Round-5 review items 8/12] Flipped by each task from inside the
     // branch that actually calls the spawner, and — [round-6 blocking B1]
@@ -701,7 +736,18 @@ fn spawn_panel_tasks(
         let schema = schema.to_string();
         let run_id = run_id.to_string();
         let max_turns = config.panel_max_turns;
-        let max_out = config.panel_max_output_tokens_per_turn;
+        let max_out = catalog_snapshot
+            .and_then(|catalog| catalog.limits_for(&panel.profile, &panel.model))
+            .map_or(config.panel_max_output_tokens_per_turn, |limits| {
+                limits.output_cap(config.panel_max_output_tokens_per_turn)
+            });
+        let max_input_tokens = catalog_snapshot
+            .and_then(|catalog| catalog.limits_for(&panel.profile, &panel.model))
+            .and_then(|limits| limits.input_cap(max_out))
+            .map(|tokens| tokens.min(u64::from(config.panel_reserved_input_tokens_per_turn)));
+        let max_input_bytes = max_input_tokens
+            .map(max_input_bytes_for_token_cap)
+            .unwrap_or(fallback_input_bytes);
         let panel_watchdog = WorkflowQueryWatchdog {
             stall_timeout_ms: panel_stall_timeout_ms(config),
             max_retries: 0,
@@ -904,26 +950,13 @@ pub(crate) async fn run_panels_supervised(
     // other, so the task text never varies by identity) — built once and
     // reused both for spawning and for synthesizing a panicked/aborted slot.
     let generic_prompt = panel_prompt(task_prompt);
-    // T1 item 2 (user-directed policy): this is the one bytes-per-token
-    // conversion that runs BEFORE any provider call (`budget::quote`'s own
-    // peak stays pure config-derived token counts — see its module doc,
-    // "never 1 byte = 1 token" — so it has no text-based estimate of its own
-    // to align). It used to hardcode a bare `4` here; now it reads
-    // `llm_client::model::count_tokens::APPROX_CHARS_PER_TOKEN`, the SAME
-    // named constant `count_tokens`'s own coarse transcript-size estimates
-    // are built from, instead of a silently-duplicated magic number that
-    // could drift from it. The missing-usage SETTLEMENT fallback
-    // (`estimate_in_flight_usage` above, `judge_input_token_estimate` in
-    // `orchestrator.rs`) instead calls
-    // `count_tokens::approximate_tokens_for_bytes`, the request-fit formula
-    // `count_tokens::approximate_tokens` itself is defined in terms of — a
-    // deliberately MORE conservative (denser) divisor than this cap's, since
-    // the two serve different purposes: this is a generous ceiling on bytes
-    // actually sent (permissive is safe — panels have their own real
-    // `max_input_bytes_per_turn` enforcement), while the settlement fallback
-    // prices real dollars and must not UNDER-count.
-    let max_input_bytes = u64::from(config.panel_reserved_input_tokens_per_turn)
-        * llm_client::model::count_tokens::APPROX_CHARS_PER_TOKEN;
+    // Convert the configured token ceiling through the same conservative
+    // request-fit approximation used for judge packing. A permissive 4-byte
+    // transcript heuristic could admit a CJK/JSON-heavy request that exceeds
+    // the route's token limit before the pair-aware cap sees it.
+    let max_input_bytes =
+        max_input_bytes_for_token_cap(u64::from(config.panel_reserved_input_tokens_per_turn));
+    let catalog_snapshot = sink.and_then(|sink| sink.catalog_snapshot);
 
     // [Round-5 review items 8/12] Shared with every spawned task so both
     // the `PanelsDispatched` emit below and the aborted-slot classification
@@ -944,6 +977,7 @@ pub(crate) async fn run_panels_supervised(
         overall_deadline_at,
         &schema,
         &generic_prompt,
+        catalog_snapshot,
         max_input_bytes,
         progress,
         &dispatch,
@@ -3435,6 +3469,7 @@ mod cancel_drain_settlement_tests {
                 parent_profile: "anthropic",
                 parent_model: "claude-sonnet-5",
                 request_prompt: "task",
+                catalog_snapshot: None,
                 reserved_max_nano_usd: 0,
                 facts: FusionRunFactsRecorder::default(),
                 started: Instant::now(),
@@ -3495,6 +3530,7 @@ mod cancel_drain_settlement_tests {
             parent_profile: "anthropic",
             parent_model: "claude-sonnet-5",
             request_prompt: "task",
+            catalog_snapshot: None,
             reserved_max_nano_usd: 99,
             facts: facts.clone(),
             started: Instant::now(),

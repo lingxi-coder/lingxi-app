@@ -991,6 +991,76 @@ mod tests {
         );
     }
 
+    #[test]
+    fn side_query_builder_preserves_all_canonical_request_controls() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let req = adapter
+            .build_side_query_request_with_thinking(
+                "claude-sonnet-4-20250514",
+                Some("anthropic"),
+                Some("system"),
+                vec![text_user_msg("payload")],
+                vec![],
+                Some(321),
+                None,
+                vec!["STOP".into()],
+                None,
+                Some(serde_json::json!("high")),
+                Some(0.2),
+                Some("fusion_analyst"),
+            )
+            .expect("side-query request builder");
+        assert_eq!(req.model, "claude-sonnet-4-20250514");
+        assert_eq!(req.profile.as_deref(), Some("anthropic"));
+        assert_eq!(req.system[0].text, "system");
+        assert_eq!(req.messages.len(), 1);
+        assert_eq!(req.max_tokens, Some(321));
+        assert_eq!(req.stop_sequences, vec!["STOP"]);
+        assert!(
+            req.temperature
+                .is_some_and(|temperature| (temperature - f64::from(0.2_f32)).abs() < f64::EPSILON),
+            "the f32 caller value must survive its exact widening to f64"
+        );
+        assert_eq!(req.effort, Some(serde_json::json!("high")));
+        assert_eq!(req.query_source.as_deref(), Some("fusion_analyst"));
+        assert!(req.capture_retry_count);
+    }
+
+    #[test]
+    fn strict_side_query_builder_uses_json_schema_without_parent_tools() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"]
+        });
+        let req = adapter
+            .build_json_schema_request_with_thinking(
+                "claude-sonnet-4-20250514",
+                Some("anthropic"),
+                Some("judge"),
+                vec![text_user_msg("payload")],
+                schema.clone(),
+                Some(256),
+                None,
+                None,
+                Some(0.0),
+                Some("fusion_analyst"),
+            )
+            .expect("strict request builder");
+        assert!(req.stream);
+        assert!(req.tools.is_empty());
+        assert!(req.tool_choice.is_none());
+        assert_eq!(req.max_tokens, Some(256));
+        assert_eq!(
+            req.response_format,
+            Some(crate::ResponseFormat::JsonSchema { schema })
+        );
+        assert_eq!(req.query_source.as_deref(), Some("fusion_analyst"));
+    }
+
     // ── build_request thinking / temperature / max_tokens (DIV-1/3/4) ────────
 
     // Serialize the env-touching thinking tests: they mutate process-global

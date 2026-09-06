@@ -2,18 +2,17 @@
 
 use crate::config::FusionRuntimeConfig;
 use crate::decision::{scores_match_request, successful, MERGE_MIN_CONFIDENCE};
-use crate::model_resolver::ResolvedPanel;
+use crate::model_resolver::{ModelLimits, ResolvedPanel};
+use crate::packing::{self, PackingError};
 use crate::panel::PanelInternal;
 use platform_api::subagent_output_guard::sanitize_blocks;
 use platform_api::{
     FusionAnalysis, FusionError, FusionRecommendation, FusionRequest,
     DEFAULT_FUSION_DIMENSION_DESCRIPTIONS,
 };
-use protocol::{ConversationMessage, MessageId};
 use serde_json::Value;
 use sidequery::{
-    QuerySource, SideQueryClient, SideQueryError, StrictStructuredQueryRequest,
-    StrictStructuredQueryResponse,
+    SideQueryClient, SideQueryError, StrictStructuredQueryRequest, StrictStructuredQueryResponse,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,43 +78,16 @@ impl From<AnalystError> for FusionError {
     }
 }
 
-/// Call the analyst.
-///
-/// Retry policy (F003/F004): only a decode failure (invalid JSON, or JSON
-/// that fails [`scores_match_request`]) is retried — the provider clearly
-/// answered, just not usefully, so asking again with the failure appended can
-/// help. A timeout or a transport/4xx/5xx error is NOT retried: the host has
-/// no reason to believe an identical retry fares differently, and a retry
-/// there only doubles latency/cost before degrading anyway.
-pub async fn analyze(
+/// Observer-enabled analyst call with the immutable route limits captured at
+/// preparation. Unknown or insufficient capacity returns before the side
+/// query future is constructed, so no provider call can be paid.
+pub(crate) async fn analyze_with_observer_and_limits<F>(
     client: Arc<dyn SideQueryClient>,
     config: &FusionRuntimeConfig,
     request: &FusionRequest,
     analyst: &ResolvedPanel,
     panels: &[PanelInternal],
-) -> Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)> {
-    analyze_with_observer(
-        client,
-        config,
-        request,
-        analyst,
-        panels,
-        |_usage, _incomplete| {},
-    )
-    .await
-}
-
-/// Call the analyst while publishing cumulative usage at every retry
-/// boundary. The observer runs synchronously after the call count is known,
-/// before an attempt is polled, and after each response. This lets an outer
-/// cancellation settle a prior billed attempt even when the retry future is
-/// dropped before `analyze` can return its accumulator.
-pub(crate) async fn analyze_with_observer<F>(
-    client: Arc<dyn SideQueryClient>,
-    config: &FusionRuntimeConfig,
-    request: &FusionRequest,
-    analyst: &ResolvedPanel,
-    panels: &[PanelInternal],
+    limits: ModelLimits,
     mut observe: F,
 ) -> Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)>
 where
@@ -134,6 +106,23 @@ where
     // committed lease the moment the run ultimately failed.
     let mut acc = AnalystUsage::default();
     for attempt in 0..attempts {
+        let output_tokens = limits.output_cap(config.analyst_max_output_tokens);
+        let req = match packing::prepare_analyst_request(
+            client.as_ref(),
+            request,
+            analyst,
+            panels,
+            schema.clone(),
+            analyst_system_prompt(),
+            last_decode_error.as_deref(),
+            output_tokens,
+            limits,
+        ) {
+            Ok(req) => req,
+            Err(error) => {
+                return Err((AnalystError::Failed(error.category().into()), acc));
+            }
+        };
         // Publish the incremented call count before polling the provider.
         // `true` means the current attempt has no response usage yet; if the
         // outer Fusion future is dropped here, settlement keeps prior known
@@ -141,18 +130,6 @@ where
         acc.calls += 1;
         acc.unreported_calls += 1;
         observe(&acc, true);
-        let user = analyst_user_message(request, panels, last_decode_error.as_deref());
-        let req = StrictStructuredQueryRequest {
-            model: analyst.model.clone(),
-            profile: Some(analyst.profile.clone()),
-            system_prompt: Some(analyst_system_prompt()),
-            messages: vec![ConversationMessage::user(MessageId::new(), user)],
-            schema: schema.clone(),
-            max_tokens: config.analyst_max_output_tokens,
-            temperature: Some(0.0),
-            query_source: QuerySource::FusionAnalyst,
-            skip_system_prompt_prefix: true,
-        };
         let outcome = timeout(
             Duration::from_millis(config.analyst_timeout_ms),
             client.query_json_schema(req),
@@ -230,6 +207,57 @@ where
         }
     }
     Err((AnalystError::ParseFailed, acc))
+}
+
+/// Prepare the first analyst request without incrementing call accounting.
+/// The orchestrator uses this before publishing egress/attempt facts.
+pub(crate) fn preflight_request(
+    client: &dyn SideQueryClient,
+    config: &FusionRuntimeConfig,
+    request: &FusionRequest,
+    analyst: &ResolvedPanel,
+    panels: &[PanelInternal],
+    limits: ModelLimits,
+) -> Result<(), PackingError> {
+    let panel_ids = successful_panel_ids(panels);
+    packing::preflight_analyst_request(
+        client,
+        request,
+        analyst,
+        panels,
+        analyst_json_schema(&panel_ids, &request.dimensions),
+        analyst_system_prompt(),
+        config.analysis_protocol_retries > 0,
+        limits.output_cap(config.analyst_max_output_tokens),
+        limits,
+    )
+}
+
+/// Estimate the exact canonical analyst request shape used for a missing
+/// provider usage receipt. The caller may fall back to the legacy text-only
+/// estimate only when no Session estimator is available (for example in a
+/// tiny unit fixture).
+pub(crate) fn estimate_input_tokens(
+    client: &dyn SideQueryClient,
+    config: &FusionRuntimeConfig,
+    request: &FusionRequest,
+    analyst: &ResolvedPanel,
+    panels: &[PanelInternal],
+    limits: ModelLimits,
+) -> Result<u64, PackingError> {
+    let panel_ids = successful_panel_ids(panels);
+    packing::estimate_analyst_request(
+        client,
+        request,
+        analyst,
+        panels,
+        analyst_json_schema(&panel_ids, &request.dimensions),
+        analyst_system_prompt(),
+        config.analysis_protocol_retries > 0,
+        limits.output_cap(config.analyst_max_output_tokens),
+        limits,
+    )
+    .map(|estimate| estimate.input_tokens)
 }
 
 /// Successful (completed, reported) panel anonymous ids, sorted. Shared by
@@ -392,62 +420,7 @@ fn analyst_user_message(
     panels: &[PanelInternal],
     retry_hint: Option<&str>,
 ) -> String {
-    let mut reports = Vec::new();
-    let mut successful: Vec<&PanelInternal> = panels
-        .iter()
-        .filter(|panel| panel.report.is_some())
-        .collect();
-    successful.sort_by(|a, b| a.anonymous_id.cmp(&b.anonymous_id));
-    for panel in successful {
-        if let Some(report) = &panel.report {
-            reports.push(serde_json::json!({
-                "panel_id": panel.anonymous_id,
-                "report": report,
-            }));
-        }
-    }
-    let mut payload = serde_json::json!({
-        "task": request.prompt,
-        "dimensions": request.dimensions,
-        "panels": reports,
-    });
-    if let Some(hint) = retry_hint {
-        // F010: `hint` is `decode_analysis`'s serde failure message
-        // (analyst.rs), which quotes the analyst's own malformed response
-        // verbatim and uncapped — the ONE channel in this file that would
-        // otherwise re-enter a prompt without the guard every other
-        // analyst-authored string gets (`sanitize_analysis`) and every
-        // panel-authored string gets (`panel::sanitize_report`). Neutralize
-        // control tags/NULs the same way, then cap the length so a
-        // pathological schema-mismatch message can't bloat the retry
-        // prompt.
-        let safe_hint = truncate_bytes(&guard_text(hint), RETRY_HINT_BYTE_CAP);
-        payload["retry_reason"] = Value::String(format!(
-            "Your previous response could not be used: {safe_hint}. Return ONLY JSON matching \
-the schema, with no other text."
-        ));
-    }
-    payload.to_string()
-}
-
-/// Byte cap on the guarded retry hint interpolated into the next attempt's
-/// prompt (F010) — bounds prompt bloat from a pathological schema-mismatch
-/// message without needing the full diagnostic.
-const RETRY_HINT_BYTE_CAP: usize = 512;
-
-/// Truncate `s` to at most `cap` bytes on a UTF-8 char boundary, marking a
-/// cut with a trailing `…`. Mirrors `orchestrator::truncate_bytes` (private
-/// to that module; duplicated here rather than exported to keep the guard
-/// local to where it's applied).
-fn truncate_bytes(s: &str, cap: usize) -> String {
-    if s.len() <= cap {
-        return s.to_string();
-    }
-    let mut end = cap;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
+    packing::analyst_user_message(request, panels, retry_hint)
 }
 
 /// Build a strict-compatible JSON schema for THIS run: a closed `scores`
@@ -585,6 +558,25 @@ fn analyst_json_schema(panel_ids: &[String], dimensions: &[String]) -> Value {
 mod tests {
     use super::*;
     use platform_api::{PanelRunStatus, RiskSeverity};
+
+    async fn analyze_with_test_limits(
+        client: Arc<dyn SideQueryClient>,
+        config: &FusionRuntimeConfig,
+        request: &FusionRequest,
+        analyst: &ResolvedPanel,
+        panels: &[PanelInternal],
+    ) -> Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)> {
+        analyze_with_observer_and_limits(
+            client,
+            config,
+            request,
+            analyst,
+            panels,
+            crate::model_resolver::known_test_limits(),
+            |_usage, _incomplete| {},
+        )
+        .await
+    }
 
     fn stub_panel(id: &str) -> PanelInternal {
         PanelInternal {
@@ -859,7 +851,7 @@ mod tests {
         let client: Arc<dyn SideQueryClient> = Arc::new(FlakyThenGoodClient {
             calls: std::sync::atomic::AtomicU32::new(0),
         });
-        let (_, acc) = analyze(client, &config, &request, &analyst, &panels)
+        let (_, acc) = analyze_with_test_limits(client, &config, &request, &analyst, &panels)
             .await
             .expect("second attempt must decode successfully");
         assert_eq!(acc.calls, 2, "both attempts must be counted");
@@ -917,7 +909,7 @@ attempt's real usage — the total is not incomplete"
         let client: Arc<dyn SideQueryClient> = Arc::new(AlwaysDecodeFailsClient {
             calls: std::sync::atomic::AtomicU32::new(0),
         });
-        let (err, acc) = analyze(client, &config, &request, &analyst, &panels)
+        let (err, acc) = analyze_with_test_limits(client, &config, &request, &analyst, &panels)
             .await
             .expect_err("both attempts decode-fail");
         assert_eq!(err, AnalystError::ParseFailed);
@@ -1018,7 +1010,7 @@ error exit — before this fix every AnalystError arm dropped usage_acc entirely
         let client: Arc<dyn SideQueryClient> = Arc::new(InvalidThenGoodClient {
             calls: std::sync::atomic::AtomicU32::new(0),
         });
-        let (_, acc) = analyze(client, &config, &request, &analyst, &panels)
+        let (_, acc) = analyze_with_test_limits(client, &config, &request, &analyst, &panels)
             .await
             .expect("second attempt decodes successfully");
         assert_eq!(acc.calls, 2);
@@ -1213,7 +1205,7 @@ length: user_message.len()={} decode_err.len()={}",
         };
         let config = FusionRuntimeConfig::defaults();
         let client: Arc<dyn SideQueryClient> = Arc::new(PartialAccountingClient);
-        let (err, acc) = analyze(client, &config, &request, &analyst, &panels)
+        let (err, acc) = analyze_with_test_limits(client, &config, &request, &analyst, &panels)
             .await
             .expect_err("a Partial failure is not retried and fails the analyst stage");
         assert_eq!(err, AnalystError::Failed("partial".into()));

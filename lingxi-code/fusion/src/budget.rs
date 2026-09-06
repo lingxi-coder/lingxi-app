@@ -22,7 +22,7 @@
 //! `orchestrator::judge_input_token_estimate`.
 
 use crate::config::FusionRuntimeConfig;
-use crate::model_resolver::{ModelSource, ResolvedPanel, ResolvedSet};
+use crate::model_resolver::{route_key, ModelLimits, ModelSource, ResolvedPanel, ResolvedSet};
 use platform_api::{
     BudgetEnforcerHandle, BudgetError, BudgetReservationId, FusionCostClass, FusionError,
     FusionRequest,
@@ -116,6 +116,43 @@ pub trait FusionPriceBook: Send + Sync {
     fn rates_for(&self, profile: &str, model: &str) -> Option<ModelRates>;
 }
 
+/// Immutable price lookup captured during preparation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapturedPriceBook {
+    rates: Arc<std::collections::BTreeMap<String, Option<ModelRates>>>,
+}
+
+impl CapturedPriceBook {
+    /// Capture rates exactly once for the supplied route set.
+    #[must_use]
+    pub fn capture<I>(book: &dyn FusionPriceBook, routes: I) -> Self
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        let rates = routes
+            .into_iter()
+            .map(|(profile, model)| {
+                (
+                    route_key(&profile, &model),
+                    book.rates_for(&profile, &model),
+                )
+            })
+            .collect();
+        Self {
+            rates: Arc::new(rates),
+        }
+    }
+}
+
+impl FusionPriceBook for CapturedPriceBook {
+    fn rates_for(&self, profile: &str, model: &str) -> Option<ModelRates> {
+        self.rates
+            .get(&route_key(profile, model))
+            .copied()
+            .flatten()
+    }
+}
+
 impl FusionPriceBook for () {
     fn rates_for(&self, _profile: &str, _model: &str) -> Option<ModelRates> {
         None
@@ -166,15 +203,29 @@ pub fn quote(
 ) -> Result<FusionQuote, FusionError> {
     let panel_count = u64::from(u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX));
     let turns = u64::from(config.panel_max_turns);
-    let reserved_input_tokens = panel_count
-        .saturating_mul(turns)
-        .saturating_mul(u64::from(config.panel_reserved_input_tokens_per_turn));
-    let panel_output = panel_count
-        .saturating_mul(turns)
-        .saturating_mul(u64::from(config.panel_max_output_tokens_per_turn));
-    let analyst_output = u64::from(config.analyst_max_output_tokens)
+    let mut reserved_input_tokens = 0_u64;
+    let mut panel_output = 0_u64;
+    for panel in &resolved.panels {
+        let limits = route_limits(catalog, panel);
+        let output = limits.output_cap(config.panel_max_output_tokens_per_turn);
+        let input = limits.input_cap(output).map_or(
+            u64::from(config.panel_reserved_input_tokens_per_turn),
+            |cap| cap.min(u64::from(config.panel_reserved_input_tokens_per_turn)),
+        );
+        reserved_input_tokens = reserved_input_tokens.saturating_add(turns.saturating_mul(input));
+        panel_output = panel_output.saturating_add(turns.saturating_mul(u64::from(output)));
+    }
+    let analyst_limits = route_limits(catalog, &resolved.analyst);
+    let analyst_output_cap = analyst_limits.output_cap(config.analyst_max_output_tokens);
+    let analyst_output = u64::from(analyst_output_cap)
         .saturating_mul(1 + u64::from(config.analysis_protocol_retries));
-    let synth_output = u64::from(config.synthesizer_max_output_tokens);
+    let parent = ResolvedPanel {
+        profile: request.parent_profile.clone(),
+        model: request.parent_model.clone(),
+    };
+    let synth_output_cap =
+        route_limits(catalog, &parent).output_cap(config.synthesizer_max_output_tokens);
+    let synth_output = u64::from(synth_output_cap);
     let reserved_output_tokens = panel_output
         .saturating_add(analyst_output)
         .saturating_add(synth_output);
@@ -189,10 +240,20 @@ pub fn quote(
             catalog,
             prices,
             session_has_max,
-            u64::from(config.panel_max_turns)
-                .saturating_mul(u64::from(config.panel_reserved_input_tokens_per_turn)),
-            u64::from(config.panel_max_turns)
-                .saturating_mul(u64::from(config.panel_max_output_tokens_per_turn)),
+            u64::from(config.panel_max_turns).saturating_mul(
+                route_limits(catalog, panel)
+                    .input_cap(
+                        route_limits(catalog, panel)
+                            .output_cap(config.panel_max_output_tokens_per_turn),
+                    )
+                    .map_or(
+                        u64::from(config.panel_reserved_input_tokens_per_turn),
+                        |cap| cap.min(u64::from(config.panel_reserved_input_tokens_per_turn)),
+                    ),
+            ),
+            u64::from(config.panel_max_turns).saturating_mul(u64::from(
+                route_limits(catalog, panel).output_cap(config.panel_max_output_tokens_per_turn),
+            )),
             u64::from(config.panel_max_turns),
         )?);
     }
@@ -205,10 +266,6 @@ pub fn quote(
         analyst_output,
         analyst_calls,
     )?);
-    let parent = ResolvedPanel {
-        profile: request.parent_profile.clone(),
-        model: request.parent_model.clone(),
-    };
     reserved_usd = reserved_usd.saturating_add(model_peak(
         &parent,
         catalog,
@@ -229,6 +286,14 @@ pub fn quote(
         reserved_output_tokens,
         max_calls,
     })
+}
+
+fn route_limits(catalog: &dyn ModelSource, route: &ResolvedPanel) -> ModelLimits {
+    catalog
+        .list()
+        .into_iter()
+        .find(|row| row.profile == route.profile && row.model == route.model)
+        .map_or_else(ModelLimits::unknown, |row| row.limits)
 }
 
 /// Price one component (a panel, the analyst, or the synthesizer/parent) from
@@ -364,11 +429,35 @@ impl ReservationLease {
     /// Release the hold after actual spend and record it into the cost
     /// tracker.
     ///
-    /// The actual budget operation runs in a detached task that owns the
-    /// lease. If this future is cancelled while the backend await is pending,
-    /// the task still commits the known amount; if it errors or panics, the
-    /// task-owned lease's Drop path releases the hold.
-    pub async fn commit(self, actual_nano_usd: u64) -> Result<(), FusionError> {
+    /// The actual budget operation runs in a detached task. A production
+    /// receipt transfers ownership synchronously and permanently disarms this
+    /// lease before that task can await durability, so cancellation or a
+    /// failed acknowledgement cannot refund known provider spend. Legacy
+    /// implementations that return no receipt retain the prior behavior: the
+    /// task owns the armed lease and releases it if their commit fails.
+    pub async fn commit(mut self, actual_nano_usd: u64) -> Result<(), FusionError> {
+        match self
+            .budget
+            .begin_commit_reservation(self.id, actual_nano_usd)
+            .map_err(|error| map_budget_err(&error))?
+        {
+            Some(receipt) => {
+                // Ownership crossed into the durable settlement receipt before
+                // the first await. From here, neither a failed acknowledgement
+                // nor cancellation may release/re-arm the already-billed hold.
+                self.disarmed = true;
+                let worker = tokio::spawn(async move {
+                    receipt
+                        .finish()
+                        .await
+                        .map_err(|error| map_budget_err(&error))
+                });
+                return worker
+                    .await
+                    .map_err(|_| FusionError::BudgetReservationUnavailable)?;
+            }
+            None => {}
+        }
         let worker = tokio::spawn(async move {
             let mut lease = self;
             let result = lease
@@ -453,8 +542,8 @@ mod tests {
         FusionModelHints, FusionOrigin, FusionPreset, FusionRequest, DEFAULT_FUSION_DIMENSIONS,
     };
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use tokio::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use tokio::sync::{Mutex, Notify};
 
     /// T1 item 3 (user-directed policy): `mistaken_byte_input_tokens` has
     /// ZERO production callers — it exists purely as a named regression
@@ -516,6 +605,7 @@ comparator, not dead API surface and not a production fallback"
                 ..FusionModelHints::default()
             },
             structured_output: true,
+            limits: crate::model_resolver::known_test_limits(),
         }
     }
 
@@ -806,6 +896,121 @@ comparator, not dead API surface and not a production fallback"
         }
     }
 
+    struct ReceiptState {
+        started: Notify,
+        allow_finish: Notify,
+        finished: Notify,
+        did_finish: AtomicBool,
+        begin_calls: AtomicUsize,
+        legacy_commit_calls: AtomicUsize,
+        release_calls: AtomicUsize,
+        fail_finish: bool,
+        block_finish: bool,
+    }
+
+    struct ReceiptBudget {
+        state: Arc<ReceiptState>,
+    }
+
+    struct TestSettlementReceipt {
+        state: Arc<ReceiptState>,
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::BudgetSettlementReceipt for TestSettlementReceipt {
+        async fn finish(self: Box<Self>) -> Result<(), BudgetError> {
+            self.state.started.notify_one();
+            if self.state.block_finish {
+                self.state.allow_finish.notified().await;
+            }
+            self.state.did_finish.store(true, Ordering::SeqCst);
+            self.state.finished.notify_one();
+            if self.state.fail_finish {
+                Err(BudgetError::Internal(
+                    "durable acknowledgement failed".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BudgetEnforcerHandle for ReceiptBudget {
+        async fn check_and_charge(&self, _: u64) -> Result<(), BudgetError> {
+            Ok(())
+        }
+
+        async fn snapshot_total_nano_usd(&self) -> u64 {
+            0
+        }
+
+        fn max_session_nano_usd(&self) -> Option<u64> {
+            Some(u64::MAX)
+        }
+
+        async fn reserve_nano_usd(
+            &self,
+            _nano_usd: u64,
+        ) -> Result<BudgetReservationId, BudgetError> {
+            Ok(BudgetReservationId::from_raw(42))
+        }
+
+        fn begin_commit_reservation(
+            &self,
+            _id: BudgetReservationId,
+            _actual_nano_usd: u64,
+        ) -> Result<Option<platform_api::BudgetCommitReceipt>, BudgetError> {
+            self.state.begin_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(Box::new(TestSettlementReceipt {
+                state: Arc::clone(&self.state),
+            })))
+        }
+
+        async fn commit_reservation(
+            &self,
+            _id: BudgetReservationId,
+            _actual_nano_usd: u64,
+        ) -> Result<(), BudgetError> {
+            self.state
+                .legacy_commit_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn release_reservation(&self, _id: BudgetReservationId) {
+            self.state.release_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn receipt_state(fail_finish: bool, block_finish: bool) -> Arc<ReceiptState> {
+        Arc::new(ReceiptState {
+            started: Notify::new(),
+            allow_finish: Notify::new(),
+            finished: Notify::new(),
+            did_finish: AtomicBool::new(false),
+            begin_calls: AtomicUsize::new(0),
+            legacy_commit_calls: AtomicUsize::new(0),
+            release_calls: AtomicUsize::new(0),
+            fail_finish,
+            block_finish,
+        })
+    }
+
+    fn receipt_lease(state: Arc<ReceiptState>) -> ReservationLease {
+        ReservationLease {
+            budget: Arc::new(ReceiptBudget { state }),
+            id: BudgetReservationId::from_raw(42),
+            quote: FusionQuote {
+                reserved_nano_usd: 1_000,
+                reserved_input_tokens: 1,
+                reserved_output_tokens: 1,
+                max_calls: 1,
+            },
+            disarmed: false,
+        }
+    }
+
     #[tokio::test]
     async fn acquire_failure_does_not_hold_capacity() {
         let budget = RecordingBudget {
@@ -989,9 +1194,10 @@ comparator, not dead API surface and not a production fallback"
 
     #[tokio::test]
     async fn commit_stays_armed_on_reservation_error_so_drop_still_releases() {
+        // On the legacy `begin_commit_reservation -> None` path,
         // `ReservationLease::commit` must await `commit_reservation` BEFORE
         // setting `disarmed = true`. Prove it from the failure side: when the
-        // budget's `commit_reservation` itself errors, the lease must still be
+        // legacy budget's `commit_reservation` itself errors, the lease must still be
         // armed when it is dropped, so `Drop`'s spawned release is the
         // fallback that reclaims the hold instead of leaking it for the rest
         // of the session.
@@ -1043,6 +1249,50 @@ comparator, not dead API surface and not a production fallback"
             budget.held.load(Ordering::SeqCst),
             0,
             "Drop released the hold because commit left it armed on failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_receipt_survives_a_dropped_commit_waiter_without_releasing() {
+        let state = receipt_state(false, true);
+        let commit = tokio::spawn(receipt_lease(Arc::clone(&state)).commit(777));
+        tokio::time::timeout(std::time::Duration::from_secs(1), state.started.notified())
+            .await
+            .expect("the owned receipt started");
+
+        commit.abort();
+        let _ = commit.await;
+        state.allow_finish.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), state.finished.notified())
+            .await
+            .expect("the detached receipt must finish after its caller is dropped");
+
+        assert!(state.did_finish.load(Ordering::SeqCst));
+        assert_eq!(state.begin_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.legacy_commit_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state.release_calls.load(Ordering::SeqCst),
+            0,
+            "ownership transfer permanently disarms the legacy release path"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_receipt_error_is_reported_without_rearming_the_hold() {
+        let state = receipt_state(true, false);
+        let error = receipt_lease(Arc::clone(&state))
+            .commit(888)
+            .await
+            .expect_err("durable acknowledgement failure must reach Fusion");
+        assert_eq!(error, FusionError::BudgetReservationUnavailable);
+        tokio::task::yield_now().await;
+        assert!(state.did_finish.load(Ordering::SeqCst));
+        assert_eq!(state.begin_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.legacy_commit_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state.release_calls.load(Ordering::SeqCst),
+            0,
+            "a failed durable acknowledgement must not refund known provider spend"
         );
     }
 }

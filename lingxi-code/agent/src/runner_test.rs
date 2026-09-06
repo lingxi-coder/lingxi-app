@@ -5058,9 +5058,22 @@ fn cap_input_bytes_rejects_task_plus_latest_pair_over_the_exact_cap() {
     let cap = exact_bytes - 1;
     assert!(u64::try_from(serde_json::to_vec(&vec![prompt]).unwrap().len()).unwrap() <= cap);
 
+    let units = super::tool_pair_units(&history);
+    let expected_measured_bytes = units
+        .first()
+        .into_iter()
+        .chain(units.last())
+        .map(|unit| u64::try_from(serde_json::to_vec(unit).unwrap().len()).unwrap())
+        .sum();
+    super::reset_cap_input_measurements();
     let error = super::cap_input_bytes(&history, Some(cap))
         .expect_err("the mandatory task/latest pair is one serialized byte over cap");
     assert!(error.contains("mandatory latest tool/message unit exceeds"));
+    assert_eq!(
+        super::cap_input_measurements(),
+        (2, expected_measured_bytes),
+        "a mandatory latest-unit rejection must not visit older history"
+    );
 }
 
 /// [Finding 9] A Fusion panel seeds its ENTIRE task text as `history`'s
@@ -5170,7 +5183,227 @@ fn cap_input_bytes_rejects_an_oversized_head_without_sending_it() {
     // head.
     let max = pair1_bytes + 16;
 
+    let expected_head_bytes = u64::try_from(
+        serde_json::to_vec(super::tool_pair_units(&history)[0])
+            .unwrap()
+            .len(),
+    )
+    .unwrap();
+    super::reset_cap_input_measurements();
     let error = super::cap_input_bytes(&history, Some(max))
         .expect_err("an oversized mandatory prompt must be rejected before sending");
     assert!(error.contains("mandatory initial prompt exceeds"));
+    assert_eq!(
+        super::cap_input_measurements(),
+        (1, expected_head_bytes),
+        "an oversized head must reject before visiting any tail unit"
+    );
+}
+
+/// Keep the pre-optimization selection and ordering as a golden: the
+/// implementation may change how it measures candidates, but it must still
+/// retain the seed, the newest unit, and the newest older unit that fits.
+#[test]
+fn cap_input_bytes_preserves_legacy_selection_and_order() {
+    let head = ConversationMessage::user(
+        MessageId::new(),
+        r#"任务 seed with escaped "quotes" and \slashes\"#.to_string(),
+    );
+    let older = assistant_text("older CJK context: 你好世界");
+    let rejected = assistant_text(&"oversized middle context ".repeat(256));
+    let newest = assistant_text("newest continuation");
+    let history = vec![head.clone(), older.clone(), rejected, newest.clone()];
+    let expected = vec![head, older, newest];
+    let max = serde_json::to_vec(&expected).unwrap().len() as u64;
+
+    let capped = super::cap_input_bytes(&history, Some(max)).expect("golden selection fits");
+    assert_eq!(
+        serde_json::to_vec(&capped).unwrap(),
+        serde_json::to_vec(&expected).unwrap(),
+        "byte-cap optimization changed the legacy retained order"
+    );
+}
+
+/// Independent copy of the old clone-and-reserialize algorithm. Keeping this
+/// in the test module makes parity explicit while the production measurement
+/// path is replaced with cached borrowed-unit metadata.
+fn legacy_cap_input_bytes_reference(
+    messages: &[ConversationMessage],
+    max_bytes: Option<u64>,
+) -> Result<Vec<ConversationMessage>, String> {
+    let Some(max) = max_bytes else {
+        return Ok(messages.to_vec());
+    };
+    let units = super::tool_pair_units(messages);
+    if units.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let serialized_bytes = |candidate: &[&[ConversationMessage]]| -> u64 {
+        let flattened: Vec<ConversationMessage> = candidate
+            .iter()
+            .flat_map(|unit| unit.iter().cloned())
+            .collect();
+        serde_json::to_vec(&flattened)
+            .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+            .unwrap_or(u64::MAX)
+    };
+
+    let head = units[0];
+    let head_bytes = serialized_bytes(&[head]);
+    if head_bytes > max {
+        return Err(format!(
+            "mandatory initial prompt exceeds max_input_bytes_per_turn ({head_bytes} > {max})"
+        ));
+    }
+
+    let mut selected_tail: Vec<&[ConversationMessage]> = Vec::new();
+    if let Some(newest) = units.get(1..).and_then(|tail| tail.last()).copied() {
+        if serialized_bytes(&[head, newest]) > max {
+            let newest_bytes = serialized_bytes(&[newest]);
+            return Err(format!(
+                "mandatory latest tool/message unit exceeds max_input_bytes_per_turn when combined with the initial prompt ({head_bytes} + {newest_bytes} > {max})"
+            ));
+        }
+        selected_tail.push(newest);
+    }
+
+    if units.len() > 2 {
+        for unit in units[1..units.len() - 1].iter().rev() {
+            let mut candidate = Vec::with_capacity(selected_tail.len() + 2);
+            candidate.push(head);
+            candidate.extend(selected_tail.iter().copied());
+            candidate.push(unit);
+            if serialized_bytes(&candidate) <= max {
+                selected_tail.push(unit);
+            }
+        }
+    }
+
+    selected_tail.reverse();
+    let mut out =
+        Vec::with_capacity(head.len() + selected_tail.iter().map(|unit| unit.len()).sum::<usize>());
+    out.extend(head.iter().cloned());
+    for unit in selected_tail {
+        out.extend(unit.iter().cloned());
+    }
+    Ok(out)
+}
+
+/// CJK, JSON escaping, and atomic tool pairs must produce byte-for-byte the
+/// same output and errors as the old implementation.
+#[test]
+fn cap_input_bytes_matches_legacy_for_unicode_and_tool_pairs() {
+    let head = ConversationMessage::user(
+        MessageId::new(),
+        r#"任务 "quoted" \ escaped / 你好世界"#.to_string(),
+    );
+    let mut history = vec![head];
+    for index in 0..12 {
+        let tool_id = ToolUseId::new();
+        history.push(assistant_tool_use(
+            tool_id.clone(),
+            &format!("读取-{index}"),
+        ));
+        history.push(user_tool_result(
+            tool_id,
+            &format!(r#"结果 {index}: 你好 "quoted" \ slash"#),
+        ));
+    }
+    let units = super::tool_pair_units(&history);
+    let serialized_candidate_bytes = |candidate: &[&[ConversationMessage]]| -> u64 {
+        let flattened: Vec<ConversationMessage> = candidate
+            .iter()
+            .flat_map(|unit| unit.iter().cloned())
+            .collect();
+        u64::try_from(serde_json::to_vec(&flattened).unwrap().len()).unwrap()
+    };
+
+    // Exercise both sides of every retained-unit framing boundary, plus the
+    // mandatory-head/latest errors and the uncapped compatibility path.
+    let head = units[0];
+    let newest = *units.last().expect("history has a newest unit");
+    let mut candidate = vec![head, newest];
+    let mut caps = vec![
+        0,
+        serialized_candidate_bytes(&[head]).saturating_sub(1),
+        serialized_candidate_bytes(&[head]),
+        serialized_candidate_bytes(&candidate).saturating_sub(1),
+        serialized_candidate_bytes(&candidate),
+        u64::MAX,
+    ];
+    for unit in units[1..units.len() - 1].iter().rev().copied() {
+        candidate.push(unit);
+        let boundary = serialized_candidate_bytes(&candidate);
+        caps.extend([
+            boundary.saturating_sub(1),
+            boundary,
+            boundary.saturating_add(1),
+        ]);
+    }
+    caps.sort_unstable();
+    caps.dedup();
+
+    assert_eq!(
+        super::cap_input_bytes(&history, None),
+        legacy_cap_input_bytes_reference(&history, None),
+        "uncapped input changed"
+    );
+    for max in caps {
+        let expected = legacy_cap_input_bytes_reference(&history, Some(max));
+        let actual = super::cap_input_bytes(&history, Some(max));
+        assert_eq!(
+            actual, expected,
+            "optimized cap changed Unicode/tool-pair output or error at {max} bytes"
+        );
+        if let Ok(capped) = actual {
+            assert!(
+                u64::try_from(serde_json::to_vec(&capped).unwrap().len()).unwrap() <= max,
+                "optimized cap returned an over-limit candidate at {max} bytes"
+            );
+        }
+    }
+}
+
+/// The optimized path must serialize every reached borrowed unit exactly once,
+/// independent of history length. This is deterministic test-only
+/// instrumentation, not a wall-clock test.
+#[test]
+fn cap_input_bytes_measurement_work_is_linear_for_many_pairs() {
+    let head = ConversationMessage::user(
+        MessageId::new(),
+        r#"任务 seed "quoted" 你好世界"#.to_string(),
+    );
+    let mut history = vec![head];
+    for index in 0..96 {
+        let tool_id = ToolUseId::new();
+        history.push(assistant_tool_use(
+            tool_id.clone(),
+            &format!("read-{index}"),
+        ));
+        history.push(user_tool_result(
+            tool_id,
+            &format!(r#"result-{index}: "escaped" 你好"#),
+        ));
+    }
+    let expected_units = 1 + 96;
+    let expected_serialized_bytes = super::tool_pair_units(&history)
+        .into_iter()
+        .map(|unit| u64::try_from(serde_json::to_vec(unit).unwrap().len()).unwrap())
+        .sum();
+    let max = serde_json::to_vec(&history).unwrap().len() as u64;
+
+    super::reset_cap_input_measurements();
+    let capped = super::cap_input_bytes(&history, Some(max))
+        .expect("the complete Unicode/tool-pair history fits");
+    assert_eq!(
+        super::cap_input_measurements(),
+        (expected_units, expected_serialized_bytes),
+        "each trimming unit and its bytes must be visited exactly once"
+    );
+    assert_eq!(
+        serde_json::to_vec(&capped).unwrap().len() as u64,
+        max,
+        "linear metadata must preserve the exact full-history byte count"
+    );
 }

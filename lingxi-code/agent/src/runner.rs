@@ -2559,6 +2559,95 @@ fn tool_pair_units(
     units
 }
 
+/// Cached measurements for the exact compact JSON representation of one
+/// borrowed trimming unit. `payload_bytes` excludes the unit's `[` and `]`;
+/// compact serde_json sequences can then be joined with one comma without
+/// cloning or serializing a growing candidate on every fit check.
+struct SerializedInputUnit {
+    serialized_bytes: u64,
+    payload_bytes: Option<u64>,
+}
+
+#[derive(Default)]
+struct SerializedByteCounter {
+    bytes: u64,
+}
+
+impl std::io::Write for SerializedByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let bytes = u64::try_from(buf.len())
+            .map_err(|_| std::io::Error::other("serialized input length overflow"))?;
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .ok_or_else(|| std::io::Error::other("serialized input length overflow"))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only observation point for unit serializations and bytes visited.
+    /// Thread-local state keeps parallel module tests independent and compiles
+    /// entirely out of production builds.
+    static CAP_INPUT_MEASUREMENTS: std::cell::Cell<(usize, u64)> = const {
+        std::cell::Cell::new((0, 0))
+    };
+}
+
+#[cfg(test)]
+fn reset_cap_input_measurements() {
+    CAP_INPUT_MEASUREMENTS.set((0, 0));
+}
+
+#[cfg(test)]
+fn cap_input_measurements() -> (usize, u64) {
+    CAP_INPUT_MEASUREMENTS.get()
+}
+
+fn measure_serialized_input_unit(
+    messages: &[protocol::ConversationMessage],
+) -> SerializedInputUnit {
+    // A slice serializes as the same compact JSON array as the old flattened
+    // Vec. Count the borrowed serialization directly instead of allocating a
+    // temporary byte buffer. Keep the u64::MAX sentinel used by the old helper
+    // for either a serde failure or a length overflow.
+    let mut counter = SerializedByteCounter::default();
+    let serialized_bytes = serde_json::to_writer(&mut counter, messages)
+        .ok()
+        .map(|()| counter.bytes);
+    #[cfg(test)]
+    CAP_INPUT_MEASUREMENTS.set({
+        let (units, bytes) = CAP_INPUT_MEASUREMENTS.get();
+        (
+            units.saturating_add(1),
+            bytes.saturating_add(serialized_bytes.unwrap_or_default()),
+        )
+    });
+    let payload_bytes = serialized_bytes.and_then(|bytes| bytes.checked_sub(2));
+    SerializedInputUnit {
+        serialized_bytes: serialized_bytes.unwrap_or(u64::MAX),
+        payload_bytes,
+    }
+}
+
+/// Append one already-measured non-empty JSON array fragment to another
+/// compact JSON array. The result is exactly the byte count of the flattened
+/// candidate: the fragment contributes its contents and one inter-unit comma.
+fn append_serialized_input_unit(current_bytes: u64, unit: &SerializedInputUnit) -> u64 {
+    let Some(payload_bytes) = unit.payload_bytes else {
+        return u64::MAX;
+    };
+    current_bytes
+        .checked_add(payload_bytes)
+        .and_then(|bytes| bytes.checked_add(1))
+        .unwrap_or(u64::MAX)
+}
+
 fn cap_input_bytes(
     messages: &[protocol::ConversationMessage],
     max_bytes: Option<u64>,
@@ -2571,25 +2660,14 @@ fn cap_input_bytes(
         return Ok(Vec::new());
     };
 
-    // Measure the exact serialized message array, not the sum of individual
-    // message encodings. The latter omits array framing and could still send a
-    // request over the declared byte cap.
-    let serialized_bytes = |candidate: &[&[protocol::ConversationMessage]]| -> u64 {
-        let flattened: Vec<protocol::ConversationMessage> = candidate
-            .iter()
-            .flat_map(|unit| unit.iter().cloned())
-            .collect();
-        serde_json::to_vec(&flattened)
-            .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
-            .unwrap_or(u64::MAX)
-    };
-
     // The first seeded task/fork unit is mandatory: Fusion puts its entire
     // task text here and never re-injects it on later turns. Sending it whole
     // when over-cap violated the cap; dropping it silently violated task
-    // semantics. Reject explicitly instead.
+    // semantics. Measure it first and reject without serializing any optional
+    // history when it cannot fit.
     let head = units[0];
-    let head_bytes = serialized_bytes(&[head]);
+    let head_measurement = measure_serialized_input_unit(head);
+    let head_bytes = head_measurement.serialized_bytes;
     if head_bytes > max {
         return Err(format!(
             "mandatory initial prompt exceeds max_input_bytes_per_turn ({head_bytes} > {max})"
@@ -2601,27 +2679,32 @@ fn cap_input_bytes(
     // with the seed would exceed the cap rather than silently sending stale,
     // incomplete history. Older units may be dropped as whole units.
     let mut selected_tail: Vec<&[protocol::ConversationMessage]> = Vec::new();
+    let mut selected_bytes = head_bytes;
     if let Some(newest) = units.get(1..).and_then(|tail| tail.last()).copied() {
-        if serialized_bytes(&[head, newest]) > max {
-            let newest_bytes = serialized_bytes(&[newest]);
+        let newest_measurement = measure_serialized_input_unit(newest);
+        let head_and_newest_bytes =
+            append_serialized_input_unit(selected_bytes, &newest_measurement);
+        if head_and_newest_bytes > max {
+            let newest_bytes = newest_measurement.serialized_bytes;
             return Err(format!(
                 "mandatory latest tool/message unit exceeds max_input_bytes_per_turn when combined with the initial prompt ({head_bytes} + {newest_bytes} > {max})"
             ));
         }
         selected_tail.push(newest);
+        selected_bytes = head_and_newest_bytes;
     }
 
     // Fill from the newest older unit backwards, keeping each tool_use /
     // tool_result pair atomic. A unit that does not fit is dropped and the
-    // search continues; no over-cap fallback is permitted.
+    // search continues; no over-cap fallback is permitted. Each optional unit
+    // is measured only when reached, once, in newest-to-oldest order.
     if units.len() > 2 {
-        for unit in units[1..units.len() - 1].iter().rev() {
-            let mut candidate = Vec::with_capacity(selected_tail.len() + 2);
-            candidate.push(head);
-            candidate.extend(selected_tail.iter().copied());
-            candidate.push(unit);
-            if serialized_bytes(&candidate) <= max {
+        for unit in units[1..units.len() - 1].iter().rev().copied() {
+            let measurement = measure_serialized_input_unit(unit);
+            let candidate_bytes = append_serialized_input_unit(selected_bytes, &measurement);
+            if candidate_bytes <= max {
                 selected_tail.push(unit);
+                selected_bytes = candidate_bytes;
             }
         }
     }
@@ -2634,7 +2717,7 @@ fn cap_input_bytes(
         out.extend(unit.iter().cloned());
     }
     debug_assert!(
-        serialized_bytes(&[&out]) <= max,
+        selected_bytes <= max,
         "cap_input_bytes must never return an over-cap request"
     );
     Ok(out)

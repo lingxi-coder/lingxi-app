@@ -43,7 +43,7 @@ impl BudgetReservationId {
 }
 
 /// Failure modes for [`BudgetEnforcerHandle::check_and_charge`].
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum BudgetError {
     /// Budget exceeded — the caller should format the M3-05 denial string
     /// from `current_nano_usd`.
@@ -56,6 +56,19 @@ pub enum BudgetError {
     #[error("BudgetEnforcer: internal error: {0}")]
     Internal(String),
 }
+
+/// Owned settlement receipt returned after a production budget implementation
+/// transfers responsibility for a known provider charge. Fusion can disarm
+/// its reservation lease as soon as it receives this receipt; a later durable
+/// acknowledgement or error must not re-arm or release the token.
+#[async_trait]
+pub trait BudgetSettlementReceipt: Send {
+    /// Finish the already-owned settlement and surface its durable result.
+    async fn finish(self: Box<Self>) -> Result<(), BudgetError>;
+}
+
+/// Type-erased receipt so legacy budget mocks can keep returning `None`.
+pub type BudgetCommitReceipt = Box<dyn BudgetSettlementReceipt>;
 
 /// Budget consultation seam used by `AgentTool` before spawning a subagent.
 #[async_trait]
@@ -121,6 +134,18 @@ pub trait BudgetEnforcerHandle: Send + Sync {
         let _ = actual_nano_usd;
         self.release_reservation(id).await;
         Ok(())
+    }
+
+    /// Transfer settlement ownership before any durable queue wait. Legacy
+    /// implementations return `None`, preserving their existing commit path;
+    /// production implementations return a receipt and disarm the caller's
+    /// reservation immediately after `Ok(Some(..))`.
+    fn begin_commit_reservation(
+        &self,
+        _id: BudgetReservationId,
+        _actual_nano_usd: u64,
+    ) -> Result<Option<BudgetCommitReceipt>, BudgetError> {
+        Ok(None)
     }
 
     /// Drop a hold without realizing additional spend. Unknown / noop ids are

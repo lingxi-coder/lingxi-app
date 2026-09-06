@@ -166,9 +166,11 @@ pub struct WorkflowLaunchSpec {
     pub args: Option<Value>,
     /// Resume a prior run by its `wf_…` id.
     pub resume_from_run_id: Option<String>,
-    /// Internal host pin for an explicit resume. Tool-driven launches leave
-    /// this unset and resolve the current session at launch time; mobile UI
-    /// resumes set it so a concurrent session switch cannot retarget the run.
+    /// Internal host pin for an explicit resume, in canonical bare-UUID form.
+    /// Tool-driven launches leave this unset and resolve the current session at
+    /// launch time; mobile UI resumes set it so a concurrent session switch
+    /// cannot retarget the run. Hosts accept the legacy `sess:<uuid>` spelling
+    /// at their boundary and normalize it before deriving transcript paths.
     pub session_uuid: Option<String>,
     /// Originating Workflow tool-use id for the terminal task notification.
     pub tool_use_id: Option<String>,
@@ -1507,6 +1509,22 @@ impl Tool for WorkflowTool {
             ToolError::Internal("Workflow launching is not available in this host".into())
         })?;
         let mut spec = Self::spec_from_input(&input);
+        // A Workflow task can outlive the turn that launched it. Capture the
+        // owning session at this boundary so later `fusion()` calls continue
+        // to use the original session-scoped budget after a clear/resume or
+        // model/router change.
+        if let Some(session) = ctx.session.as_ref() {
+            // WorkflowLaunchSpec is a host boundary: desktop/mobile task
+            // launchers use the bare UUID for transcript directory identity,
+            // while Fusion requests may add the `sess:` wire prefix later.
+            spec.session_uuid = Some(session.lock().await.session_id.as_uuid().to_string());
+        } else if let Some(session_id) = ctx.origin_session_id {
+            // Subagent tool invocations intentionally do not clone the live
+            // SessionState mutex. Their trusted origin id is propagated on
+            // the invocation context instead, so a background Workflow still
+            // binds later Fusion calls to the session that launched it.
+            spec.session_uuid = Some(session_id.as_uuid().to_string());
+        }
         spec.tool_use_id = ctx.tool_use_id.as_ref().map(ToString::to_string);
         if let Some(raw_path) = spec.script_path.as_deref().filter(|path| !path.is_empty()) {
             let requested = self
@@ -3249,10 +3267,26 @@ mod tests {
     async fn call_launches_and_returns_async_launched() {
         let launcher = MockLauncher::new("w_abc123");
         let t = tool(Some(launcher.clone()));
+        let session_id = "11111111-2222-4333-8444-555555555555";
+        let mut ctx = tool_api::test_support::fresh_ctx();
+        ctx.session = Some(Arc::new(tokio::sync::Mutex::new(
+            serde_json::from_value(json!({
+                "session_id": session_id,
+                "history": [],
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                },
+                "model": "test-model"
+            }))
+            .expect("session fixture"),
+        )));
         let res = t
             .call(
                 json!({ "script": "return 1;", "args": ["a.ts", "b.ts"] }),
-                tool_api::test_support::fresh_ctx(),
+                ctx,
                 tool_api::test_support::fresh_tx(),
             )
             .await
@@ -3264,6 +3298,28 @@ mod tests {
         let spec = launcher.seen.lock().unwrap().clone().expect("launched");
         assert_eq!(spec.script.as_deref(), Some("return 1;"));
         assert_eq!(spec.args, Some(json!(["a.ts", "b.ts"])));
+        assert_eq!(spec.session_uuid, Some(session_id.to_string()));
+    }
+
+    #[tokio::test]
+    async fn call_uses_trusted_origin_session_without_a_live_session_context() {
+        let launcher = MockLauncher::new("w_origin");
+        let t = tool(Some(launcher.clone()));
+        let origin_id = "22222222-3333-4444-8555-666666666666";
+        let mut ctx = tool_api::test_support::fresh_ctx();
+        ctx.origin_session_id =
+            Some(serde_json::from_value(json!(origin_id)).expect("origin session fixture"));
+
+        t.call(
+            json!({ "script": "return 1;" }),
+            ctx,
+            tool_api::test_support::fresh_tx(),
+        )
+        .await
+        .expect("call ok");
+
+        let spec = launcher.seen.lock().unwrap().clone().expect("launched");
+        assert_eq!(spec.session_uuid, Some(origin_id.to_string()));
     }
 
     #[tokio::test]

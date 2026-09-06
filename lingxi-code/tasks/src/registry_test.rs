@@ -99,6 +99,7 @@ impl FileSystem for InMemoryFs {
 struct RecordingHandler {
     task_type: TaskType,
     task_id: String,
+    fusion_timeout_ms: Option<u64>,
     spawns: AtomicUsize,
     killed: StdMutex<Vec<String>>,
     cleanup_count: Option<Arc<AtomicUsize>>,
@@ -109,6 +110,7 @@ impl RecordingHandler {
         Arc::new(Self {
             task_type,
             task_id: task_id.to_string(),
+            fusion_timeout_ms: None,
             spawns: AtomicUsize::new(0),
             killed: StdMutex::new(Vec::new()),
             cleanup_count: None,
@@ -123,9 +125,21 @@ impl RecordingHandler {
         Arc::new(Self {
             task_type,
             task_id: task_id.to_string(),
+            fusion_timeout_ms: None,
             spawns: AtomicUsize::new(0),
             killed: StdMutex::new(Vec::new()),
             cleanup_count: Some(cleanup_count),
+            kill_failures_remaining: AtomicUsize::new(0),
+        })
+    }
+    fn with_fusion_timeout(task_id: &str, timeout_ms: u64) -> Arc<Self> {
+        Arc::new(Self {
+            task_type: TaskType::LocalFusion,
+            task_id: task_id.to_string(),
+            fusion_timeout_ms: Some(timeout_ms),
+            spawns: AtomicUsize::new(0),
+            killed: StdMutex::new(Vec::new()),
+            cleanup_count: None,
             kill_failures_remaining: AtomicUsize::new(0),
         })
     }
@@ -158,7 +172,8 @@ impl Task for RecordingHandler {
                 count.fetch_add(1, Ordering::SeqCst);
             }) as Arc<dyn Fn() + Send + Sync>
         });
-        Ok(TaskHandle::new(self.task_id.clone(), cleanup))
+        Ok(TaskHandle::new(self.task_id.clone(), cleanup)
+            .with_fusion_timeout_ms(self.fusion_timeout_ms))
     }
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
         if self
@@ -234,6 +249,49 @@ async fn spawn_invokes_handler_and_returns_handler_task_id() {
         registry.get(&id).await.is_some(),
         "spawned task state is registered under the handler id"
     );
+}
+
+#[tokio::test]
+async fn spawn_publishes_the_handlers_captured_fusion_timeout_on_the_task_state() {
+    const TIMEOUT_MS: u64 = 3_600_250;
+    let (_d, mut registry) = make_registry();
+    registry.register_handler(
+        TaskType::LocalFusion,
+        RecordingHandler::with_fusion_timeout("ftimeout1", TIMEOUT_MS),
+    );
+    let request = platform_api::FusionRequest {
+        schema_version: 1,
+        origin: platform_api::FusionOrigin::Slash,
+        prompt: "review this".into(),
+        preset: platform_api::FusionPreset::Quality,
+        models: None,
+        dimensions: vec!["coverage".into()],
+        partial_ok: true,
+        max_panel: None,
+        cross_provider: false,
+        parent_profile: "openai".into(),
+        parent_model: "gpt-5.4".into(),
+        conversation_id: Some("11111111-2222-4333-8444-555555555555".into()),
+        workflow_run_id: None,
+    };
+
+    let id = registry
+        .spawn(
+            TaskType::LocalFusion,
+            TaskSpawnInput::LocalFusion {
+                request,
+                conversation_id: "11111111-2222-4333-8444-555555555555".into(),
+            },
+            "Fusion quality same-provider: review this".into(),
+        )
+        .await
+        .expect("spawn");
+
+    let state = registry.get(&id).await.expect("fusion state published");
+    let TaskState::LocalFusion(fusion) = state else {
+        panic!("expected LocalFusion state");
+    };
+    assert_eq!(fusion.effective_timeout_ms, Some(TIMEOUT_MS));
 }
 
 #[tokio::test]
@@ -1809,6 +1867,7 @@ fn local_fusion_state_for_test(id: &str, output_dir: &std::path::Path) -> TaskSt
         egress_profiles: Vec::new(),
         usage: None,
         stage: None,
+        effective_timeout_ms: None,
         result_published: false,
     })
 }
@@ -1835,7 +1894,11 @@ async fn take_pending_drains_local_fusion_error_through_status_sink() {
     sink.set_status(id, TaskStatus::Failed).await;
 
     let drained = registry.take_pending_task_notifications().await;
-    assert_eq!(drained.len(), 1, "one terminal fusion task ⇒ one notification");
+    assert_eq!(
+        drained.len(),
+        1,
+        "one terminal fusion task ⇒ one notification"
+    );
     let n = &drained[0];
     assert_eq!(n.task_id, id);
     assert_eq!(n.task_type, "local_fusion");
@@ -1845,10 +1908,7 @@ async fn take_pending_drains_local_fusion_error_through_status_sink() {
         Some("too few fusion models"),
         "a failed local_fusion task notifies with its real reason, not bare \"failed\""
     );
-    assert!(
-        n.result.is_none(),
-        "no final_text was ever set on this run"
-    );
+    assert!(n.result.is_none(), "no final_text was ever set on this run");
     assert!(n.egress_profiles.is_empty());
 }
 
@@ -1888,7 +1948,11 @@ async fn take_pending_drains_local_fusion_egress_and_usage_through_status_sink()
     .await;
 
     let drained = registry.take_pending_task_notifications().await;
-    assert_eq!(drained.len(), 1, "one terminal fusion task ⇒ one notification");
+    assert_eq!(
+        drained.len(),
+        1,
+        "one terminal fusion task ⇒ one notification"
+    );
     let n = &drained[0];
     assert_eq!(n.task_id, id);
     assert_eq!(n.task_type, "local_fusion");

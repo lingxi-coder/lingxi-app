@@ -246,7 +246,10 @@ enum FakePanel {
     /// already billed successfully. `finish_panel` must still price this,
     /// not settle it at $0 the way a spawn-time `Fail` (all-zero usage)
     /// correctly does.
-    FailedWithUsage { input: u64, output: u64 },
+    FailedWithUsage {
+        input: u64,
+        output: u64,
+    },
     /// [Finding 9] A `Completed` result with `usage_complete: false` —
     /// mirrors the runner's `api_error_partial` salvage arm, whose
     /// `usage`/`cumulative_usage` are stale (the last turn that completed
@@ -422,8 +425,8 @@ impl FakeSpawner {
                 response_char_count: 1,
                 last_request_id: None,
                 cumulative_usage: SubagentUsage::default(),
-                        usage_complete: true,
-}),
+                usage_complete: true,
+            }),
             Some(FakePanel::Report(report)) => Ok(SubagentResult::Completed {
                 agent_id: AgentId::new(),
                 content: serde_json::to_value(&report).unwrap(),
@@ -449,35 +452,37 @@ impl FakeSpawner {
                     cache_read_input_tokens: 0,
                     reasoning_output_tokens: 0,
                 },
-                        usage_complete: true,
-}),
-            Some(FakePanel::ReportWithReasoning(report, reasoning)) => Ok(SubagentResult::Completed {
-                agent_id: AgentId::new(),
-                content: serde_json::to_value(&report).unwrap(),
-                usage: SubagentUsage {
-                    total_tokens: 12 + reasoning,
-                    input_tokens: 8,
-                    output_tokens: 4,
-                    cache_creation_input_tokens: 0,
-                    cache_read_input_tokens: 0,
-                    reasoning_output_tokens: reasoning,
-                },
-                total_tool_use_count: 0,
-                total_duration_ms: 1,
-                total_tokens: 12 + reasoning,
-                assistant_message_count: 1,
-                response_char_count: 1,
-                last_request_id: None,
-                cumulative_usage: SubagentUsage {
-                    total_tokens: 12 + reasoning,
-                    input_tokens: 8,
-                    output_tokens: 4,
-                    cache_creation_input_tokens: 0,
-                    cache_read_input_tokens: 0,
-                    reasoning_output_tokens: reasoning,
-                },
                 usage_complete: true,
             }),
+            Some(FakePanel::ReportWithReasoning(report, reasoning)) => {
+                Ok(SubagentResult::Completed {
+                    agent_id: AgentId::new(),
+                    content: serde_json::to_value(&report).unwrap(),
+                    usage: SubagentUsage {
+                        total_tokens: 12 + reasoning,
+                        input_tokens: 8,
+                        output_tokens: 4,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
+                        reasoning_output_tokens: reasoning,
+                    },
+                    total_tool_use_count: 0,
+                    total_duration_ms: 1,
+                    total_tokens: 12 + reasoning,
+                    assistant_message_count: 1,
+                    response_char_count: 1,
+                    last_request_id: None,
+                    cumulative_usage: SubagentUsage {
+                        total_tokens: 12 + reasoning,
+                        input_tokens: 8,
+                        output_tokens: 4,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
+                        reasoning_output_tokens: reasoning,
+                    },
+                    usage_complete: true,
+                })
+            }
             Some(FakePanel::MalformedReport) => Ok(SubagentResult::Completed {
                 agent_id: AgentId::new(),
                 content: json!({"not": "a valid panel report"}),
@@ -503,8 +508,8 @@ impl FakeSpawner {
                     cache_read_input_tokens: 0,
                     reasoning_output_tokens: 0,
                 },
-                        usage_complete: true,
-}),
+                usage_complete: true,
+            }),
         }
     }
 }
@@ -829,7 +834,9 @@ impl SideQueryClient for ScriptedAnalyst {
             AnalystMode::Merge => merge_analysis(&id_refs, &dims, 80, false),
             AnalystMode::MergeCritical => merge_analysis(&id_refs, &dims, 90, true),
             AnalystMode::AlwaysInvalid => json!({"nope": true}),
-            AnalystMode::NeedsParentInjected => needs_parent_analysis_with_injection(&id_refs, &dims),
+            AnalystMode::NeedsParentInjected => {
+                needs_parent_analysis_with_injection(&id_refs, &dims)
+            }
             AnalystMode::ApiError => unreachable!("handled above"),
         };
         Ok(StrictStructuredQueryResponse {
@@ -968,6 +975,160 @@ impl SideQueryClient for BlockingSideQuery {
     }
 }
 
+/// F03 regression fixture: the first analyst response is provider-billed but
+/// fails host validation, then the protocol retry remains in flight. The
+/// retry's cancellation must not erase the first response's known usage.
+struct BilledInvalidThenBlockingAnalyst {
+    calls: AtomicUsize,
+    retry_started: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl SideQueryClient for BilledInvalidThenBlockingAnalyst {
+    async fn query(&self, _: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
+        unreachable!("the fixture is only used for the analyst structured query")
+    }
+
+    async fn query_json_schema(
+        &self,
+        request: StrictStructuredQueryRequest,
+    ) -> Result<StrictStructuredQueryResponse, SideQueryError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(StrictStructuredQueryResponse {
+                // Structurally valid JSON, but no score for the successful
+                // panel ids, so `decode_analysis` rejects it and retries.
+                value: json!({
+                    "consensus": [],
+                    "contradictions": [],
+                    "unique_insights": [],
+                    "coverage_gaps": [],
+                    "scores": {},
+                    "confidence": 50,
+                    "recommendation": { "type": "needs_parent", "reason": "retry" }
+                }),
+                usage: cost::Usage {
+                    tokens: cost::TokenUsage {
+                        input: 100,
+                        output: 50,
+                        ..cost::TokenUsage::default()
+                    },
+                    ..cost::Usage::default()
+                },
+                model: request.model,
+                profile: request.profile,
+                request_id: None,
+                retry_count: 0,
+            });
+        }
+        let _guard = PendingQueryGuard(self.dropped.clone());
+        self.retry_started.notify_one();
+        std::future::pending::<()>().await;
+        unreachable!("the retry is cancelled while in flight")
+    }
+}
+
+/// F03: cumulative usage from an analyst response must be published before a
+/// protocol retry can be cancelled. This enters the real orchestrator and
+/// reservation settlement, rather than only asserting the local `analyze()`
+/// return value.
+#[tokio::test]
+async fn cancel_during_analyst_retry_commits_usage_from_prior_response() {
+    let budget = RecordingBudget::new();
+    let retry_started = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let side = Arc::new(BilledInvalidThenBlockingAnalyst {
+        calls: AtomicUsize::new(0),
+        retry_started: retry_started.clone(),
+        dropped: dropped.clone(),
+    });
+    let orch = FusionOrchestrator::new(
+        FakeSpawner::new(three_ok()),
+        side,
+        Arc::new(test_config()),
+        Arc::new(catalog()),
+    )
+    .with_price_book(Arc::new(priced_book()));
+    let cancel = CancellationToken::new();
+    let inherit = inherit_recording_cancel(budget.clone(), cancel.clone());
+    let handle = tokio::spawn(async move { orch.run(request("task"), inherit, None).await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), retry_started.notified())
+        .await
+        .expect("the analyst retry should be in flight");
+    cancel.cancel();
+    let err = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("cancelled retry should unwind")
+        .expect("join")
+        .expect_err("cancelled Fusion run");
+    assert_eq!(err, FusionError::Cancelled);
+    assert!(dropped.load(Ordering::SeqCst));
+
+    // Panels cost 36 at the unit price book. The first, invalid analyst
+    // response still reported 100 input + 50 output tokens and must remain
+    // in the cancellation settlement while retry #2 is pending. That second
+    // call has already egressed its input, so its missing usage retains the
+    // same input-only estimate used for any other attempted judge call.
+    let retry_input_estimate = crate::orchestrator::judge_input_token_estimate(
+        "task",
+        &three_ok_completed_panels(),
+    );
+    assert_eq!(
+        budget.committed.lock().unwrap().clone(),
+        vec![36 + 100 + 50 + retry_input_estimate]
+    );
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
+}
+
+/// F03 deadline variant: the outer analyst-stage deadline can drop the
+/// retry future before it returns its local accumulator. The last published
+/// snapshot must still reach the normal NeedsParent settlement path.
+#[tokio::test]
+async fn analyst_stage_deadline_keeps_usage_from_prior_retry_response() {
+    let budget = RecordingBudget::new();
+    let retry_started = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let side = Arc::new(BilledInvalidThenBlockingAnalyst {
+        calls: AtomicUsize::new(0),
+        retry_started: retry_started.clone(),
+        dropped: dropped.clone(),
+    });
+    let mut config = test_config();
+    config.total_timeout_ms = 150;
+    config.analyst_timeout_ms = 60_000;
+    let orch = FusionOrchestrator::new(
+        FakeSpawner::new(three_ok()),
+        side,
+        Arc::new(config),
+        Arc::new(catalog()),
+    )
+    .with_price_book(Arc::new(priced_book()));
+    let result = orch
+        .run(request("task"), inherit_recording(budget.clone()), None)
+        .await
+        .expect("analyst deadline degrades to NeedsParent");
+    assert!(matches!(result.status, FusionStatus::NeedsParent));
+    assert!(dropped.load(Ordering::SeqCst));
+    assert!(result.usage.estimated);
+    let retry_input_estimate = crate::orchestrator::judge_input_token_estimate(
+        "task",
+        &three_ok_completed_panels(),
+    );
+    assert_eq!(
+        budget.committed.lock().unwrap().clone(),
+        vec![36 + 100 + 50 + retry_input_estimate]
+    );
+    assert_eq!(
+        result.usage.input_tokens,
+        3 * 8 + 100 + retry_input_estimate,
+        "the result token rollup must disclose the estimated in-flight retry input too"
+    );
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
+}
+
 /// F005: three panels must fan out exactly FOUR `RunningPanels` progress
 /// events — the initial `0/3` emitted before the panel stage starts, plus one
 /// per panel completion — ending at `3/3`. Before `run_panels` accepted a
@@ -1083,7 +1244,10 @@ async fn anthropic_only_catalog_clears_structured_output_preflight() {
         spawner.clone(),
         side,
         Arc::new(test_config()),
-        Arc::new(anthropic_only_catalog(&["claude-opus-5", "claude-sonnet-5"])),
+        Arc::new(anthropic_only_catalog(&[
+            "claude-opus-5",
+            "claude-sonnet-5",
+        ])),
     );
     let req = FusionRequest {
         schema_version: 1,
@@ -1200,6 +1364,7 @@ async fn analyst_invalid_json_retries_once() {
     let spawner = FakeSpawner::new(three_ok());
     let side = ScriptedAnalyst::new(AnalystMode::InvalidThenPick, vec![]);
     let result = orch_scripted(spawner, side.clone())
+        .with_price_book(Arc::new(priced_book()))
         .run(request("task"), inherit(), None)
         .await
         .unwrap();
@@ -1214,6 +1379,16 @@ async fn analyst_invalid_json_retries_once() {
         retry_user.contains("retry_reason"),
         "retry must carry the prior decode failure: {retry_user}"
     );
+    let missing_first_attempt = crate::orchestrator::judge_input_token_estimate(
+        "task",
+        &three_ok_completed_panels(),
+    );
+    assert_eq!(
+        result.usage.realized_nano_usd,
+        36 + 8 + missing_first_attempt,
+        "a successful retry must retain an input estimate for the earlier billed response whose usage was unavailable"
+    );
+    assert!(result.usage.estimated);
 }
 
 #[tokio::test]
@@ -1572,8 +1747,8 @@ impl SubagentSpawner for WatchdogSpawner {
             response_char_count: 1,
             last_request_id: None,
             cumulative_usage: SubagentUsage::default(),
-                usage_complete: true,
-})
+            usage_complete: true,
+        })
     }
 }
 
@@ -2337,8 +2512,7 @@ async fn analyst_failure_estimates_and_prices_its_attempted_call() {
         "a real, attempted-but-unrecovered analyst call must flag the run estimated"
     );
     let panels = three_ok_completed_panels();
-    let estimated_analyst_tokens =
-        crate::orchestrator::judge_input_token_estimate("task", &panels);
+    let estimated_analyst_tokens = crate::orchestrator::judge_input_token_estimate("task", &panels);
     // 3 panels (8 input + 4 output = 36) priced normally; the analyst term
     // adds ONLY the estimate above (at priced_book()'s 1 nano-USD/token unit
     // rate) — no per-request fee (0 in priced_book()).
@@ -2361,13 +2535,19 @@ async fn synth_failure_estimates_and_prices_its_attempted_call() {
     let spawner = FakeSpawner::new(three_ok());
     let side = ScriptedAnalyst::new(
         AnalystMode::Merge,
-        vec![Err(SideQueryError::Api(llm_client::LlmError::InvalidRequest {
-            message: "synthetic 4xx".into(),
-        }))],
+        vec![Err(SideQueryError::Api(
+            llm_client::LlmError::InvalidRequest {
+                message: "synthetic 4xx".into(),
+            },
+        ))],
     );
     let orch = orch_scripted(spawner, side.clone()).with_price_book(Arc::new(priced_book()));
     let result = orch.run(request("task"), inherit(), None).await.unwrap();
-    assert_eq!(side.synth_calls.load(Ordering::SeqCst), 1, "the synthesizer must be called");
+    assert_eq!(
+        side.synth_calls.load(Ordering::SeqCst),
+        1,
+        "the synthesizer must be called"
+    );
     assert!(
         matches!(
             result.decision,
@@ -2412,7 +2592,10 @@ async fn panel_bar_failure_never_estimates_the_uncalled_analyst_or_synth() {
     let spawner = FakeSpawner::new(map);
     let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
     let orch = orch_scripted(spawner, side.clone()).with_price_book(Arc::new(priced_book()));
-    let err = orch.run(request("task"), inherit(), None).await.unwrap_err();
+    let err = orch
+        .run(request("task"), inherit(), None)
+        .await
+        .unwrap_err();
     assert_eq!(err, platform_api::FusionError::AllPanelsFailed);
     assert_eq!(
         side.analyst_calls.load(Ordering::SeqCst),
@@ -2424,6 +2607,26 @@ async fn panel_bar_failure_never_estimates_the_uncalled_analyst_or_synth() {
         0,
         "the synthesizer must never be called when the panel bar fails"
     );
+}
+
+/// A pre-allocation spawn rejection is provably exact $0, not an unknown
+/// provider call. It should not taint an otherwise fully priced partial run's
+/// `estimated` flag.
+#[tokio::test]
+async fn pre_dispatch_spawn_rejection_does_not_mark_exact_run_estimated() {
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::SpawnErr),
+        ("gpt-5.6-terra".into(), FakePanel::Report(report("B"))),
+        ("deepseek-v4-pro".into(), FakePanel::Report(report("C"))),
+    ]);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let result = orch_scripted(FakeSpawner::new(map), side)
+        .with_price_book(Arc::new(priced_book()))
+        .run(request("task"), inherit(), None)
+        .await
+        .expect("two successful panels satisfy the partial run bar");
+    assert_eq!(result.usage.realized_nano_usd, 2 * 12 + 8);
+    assert!(!result.usage.estimated);
 }
 
 #[tokio::test]
@@ -2472,12 +2675,10 @@ async fn budget_reservation_settles_on_pick() {
 
 #[tokio::test]
 async fn budget_reservation_settles_on_pick_uncapped_session_still_commits() {
-    // Fix round 1, finding #1: an uncapped session (no `--max-budget`)
-    // takes the `!session_has_max` branch of `budget::acquire`, which used
-    // to return a lease backed by a throwaway `NoopBudget` whose `commit`
-    // discarded the amount — Fusion spend on an uncapped session never
-    // reached the session's CostTracker / `/cost`. `commit_reservation`
-    // must still reach the REAL budget handle on this path.
+    // Fix round 1, finding #1: an uncapped session must still settle through
+    // the REAL budget handle; Fusion spend must reach the session's
+    // CostTracker / `/cost`. The reservation token is zero-capacity but keeps
+    // commit idempotent across the same path as capped runs.
     let budget = RecordingBudget::uncapped();
     let spawner = FakeSpawner::new(three_ok());
     let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
@@ -2489,8 +2690,8 @@ async fn budget_reservation_settles_on_pick_uncapped_session_still_commits() {
     assert!(matches!(result.decision, FusionDecision::Picked { .. }));
     assert_eq!(
         budget.reserve_calls.load(Ordering::SeqCst),
-        0,
-        "an uncapped session never calls reserve_nano_usd"
+        1,
+        "an uncapped session still requests a settlement token"
     );
     assert_eq!(
         budget.commit_calls.load(Ordering::SeqCst),
@@ -2526,7 +2727,11 @@ async fn realized_usage_prices_a_completed_panel_with_a_malformed_report() {
         .run(request("task"), inherit_recording(budget.clone()), None)
         .await
         .unwrap();
-    assert_eq!(result.panels.len(), 3, "the malformed panel is still reported");
+    assert_eq!(
+        result.panels.len(),
+        3,
+        "the malformed panel is still reported"
+    );
     let malformed = result
         .panels
         .iter()
@@ -2539,7 +2744,10 @@ async fn realized_usage_prices_a_completed_panel_with_a_malformed_report() {
     // All three panels' tokens must be priced (36) plus the analyst (8) —
     // not just the two that parsed (24 + 8 = 32), which is what the old
     // `status != Completed` guard silently produced.
-    assert_eq!(result.usage.realized_nano_usd, THREE_PANEL_PICK_PRICED_NANO_USD);
+    assert_eq!(
+        result.usage.realized_nano_usd,
+        THREE_PANEL_PICK_PRICED_NANO_USD
+    );
     assert_eq!(
         budget.committed.lock().unwrap().clone(),
         vec![THREE_PANEL_PICK_PRICED_NANO_USD]
@@ -2572,7 +2780,10 @@ async fn budget_reservation_settles_on_needs_parent() {
         .run(request("task"), inherit_recording(budget.clone()), None)
         .await
         .unwrap();
-    assert!(matches!(result.decision, FusionDecision::NeedsParent { .. }));
+    assert!(matches!(
+        result.decision,
+        FusionDecision::NeedsParent { .. }
+    ));
     assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
     assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
     assert_reservation_settled_exactly_once(&budget);
@@ -2746,9 +2957,8 @@ async fn cancel_mid_analyst_call_commits_the_real_panel_spend_already_billed() {
         dropped: dropped.clone(),
     });
     let spawner = FakeSpawner::new(three_ok());
-    let orch =
-        FusionOrchestrator::new(spawner, side, Arc::new(test_config()), Arc::new(catalog()))
-            .with_price_book(Arc::new(priced_book()));
+    let orch = FusionOrchestrator::new(spawner, side, Arc::new(test_config()), Arc::new(catalog()))
+        .with_price_book(Arc::new(priced_book()));
     let cancel = CancellationToken::new();
     let inherit = inherit_recording_cancel(budget.clone(), cancel.clone());
     let handle = tokio::spawn(async move { orch.run(request("task"), inherit, None).await });
@@ -2857,6 +3067,113 @@ not be None/empty, got {:?}",
     );
 }
 
+/// F005: exercise the allocation/cancel boundary through the outer
+/// `FusionOrchestrator::run` race, not only through `panel::run_panels`.
+/// `run()` gives cancellation priority and drops `run_inner` immediately;
+/// therefore the synchronous allocation receipt itself must publish the
+/// authoritative non-zero count before triggering cancellation.
+#[tokio::test]
+async fn outer_cancel_after_allocation_corrects_an_initial_zero_progress_snapshot() {
+    struct CancelOnFirstAllocation {
+        allocation_gate: CancellationToken,
+        cancel: CancellationToken,
+        allocated: AtomicBool,
+    }
+
+    #[async_trait]
+    impl SubagentSpawner for CancelOnFirstAllocation {
+        async fn spawn(
+            &self,
+            _request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            unreachable!("Fusion panels use the observer-aware workflow spawn path")
+        }
+
+        async fn spawn_workflow_with_observer(
+            &self,
+            request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+            _progress: Option<tokio::sync::mpsc::Sender<String>>,
+            observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+            _watchdog: WorkflowQueryWatchdog,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            self.allocation_gate.cancelled().await;
+            if !self.allocated.swap(true, Ordering::SeqCst) {
+                if let Some(observer) = observer {
+                    let event = platform_api::subagent_spawn::SubagentObservation::Allocated {
+                        agent_id: AgentId::new(),
+                        agent_type: platform_api::FUSION_PANEL_TYPE.to_string(),
+                        name: request.name,
+                        model: request.model.unwrap_or_default(),
+                        model_profile: request.model_profile,
+                        persistent: false,
+                        initial_message_index: 0,
+                    };
+                    observer.on_allocated(&event);
+                }
+                self.cancel.cancel();
+            }
+            std::future::pending::<Result<SubagentResult, SubagentSpawnError>>().await
+        }
+    }
+
+    let cancel = CancellationToken::new();
+    let allocation_gate = CancellationToken::new();
+    let spawner = Arc::new(CancelOnFirstAllocation {
+        allocation_gate: allocation_gate.clone(),
+        cancel: cancel.clone(),
+        allocated: AtomicBool::new(false),
+    });
+    let orch = FusionOrchestrator::new(
+        spawner,
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        Arc::new(test_config()),
+        Arc::new(catalog()),
+    );
+    let inherit = inherit_cancel(cancel);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<platform_api::FusionProgress>(64);
+    let handle = tokio::spawn(async move { orch.run(request("task"), inherit, Some(tx)).await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let event = rx
+                .recv()
+                .await
+                .expect("Fusion progress closed before the dispatch snapshot");
+            if matches!(event.stage, platform_api::FusionStage::PanelsDispatched { .. })
+                && event.panels_allocated == Some(0)
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the reached-spawner snapshot should be published before allocation");
+
+    allocation_gate.cancel();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("the allocation-triggered cancel should unwind promptly")
+        .expect("join")
+        .expect_err("the spawner cancels the Fusion run");
+    assert_eq!(error, FusionError::Cancelled);
+
+    let mut corrected = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event.stage, platform_api::FusionStage::PanelsDispatched { .. })
+            && matches!(event.panels_allocated, Some(count) if count >= 1)
+        {
+            corrected = true;
+        }
+    }
+    assert!(
+        corrected,
+        "the synchronous allocation receipt must correct the earlier explicit Some(0) before \
+         the biased outer cancellation arm drops run_inner"
+    );
+}
+
 /// A budget whose `commit_reservation` parks on a `Notify` handshake so a
 /// test can land a cancellation squarely inside the window `finalize_result`
 /// is suspended on `lease.commit(..).await` — after it has already flipped
@@ -2866,6 +3183,8 @@ struct HangingCommitBudget {
     commit_started: Arc<Notify>,
     release_commit: Arc<Notify>,
     commit_calls: AtomicUsize,
+    release_calls: AtomicUsize,
+    held: AtomicBool,
     committed: Mutex<Vec<u64>>,
 }
 
@@ -2877,6 +3196,13 @@ impl BudgetEnforcerHandle for HangingCommitBudget {
     async fn snapshot_total_nano_usd(&self) -> u64 {
         0
     }
+    fn max_session_nano_usd(&self) -> Option<u64> {
+        Some(u64::MAX)
+    }
+    async fn reserve_nano_usd(&self, _: u64) -> Result<BudgetReservationId, BudgetError> {
+        self.held.store(true, Ordering::SeqCst);
+        Ok(BudgetReservationId::from_raw(1))
+    }
     async fn commit_reservation(
         &self,
         _id: BudgetReservationId,
@@ -2885,8 +3211,13 @@ impl BudgetEnforcerHandle for HangingCommitBudget {
         self.commit_started.notify_one();
         self.release_commit.notified().await;
         self.commit_calls.fetch_add(1, Ordering::SeqCst);
+        self.held.store(false, Ordering::SeqCst);
         self.committed.lock().unwrap().push(actual_nano_usd);
         Ok(())
+    }
+    async fn release_reservation(&self, _id: BudgetReservationId) {
+        self.release_calls.fetch_add(1, Ordering::SeqCst);
+        self.held.store(false, Ordering::SeqCst);
     }
 }
 
@@ -2903,6 +3234,7 @@ async fn cancel_landing_mid_finalize_commit_does_not_discard_a_completed_run() {
     let spawner = FakeSpawner::new(three_ok());
     let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
     let (orch, sink) = orch_with_telemetry(spawner, side, test_config()).await;
+    let orch = orch.with_price_book(Arc::new(priced_book()));
 
     let cancel = CancellationToken::new();
     let commit_started = Arc::new(Notify::new());
@@ -2911,6 +3243,8 @@ async fn cancel_landing_mid_finalize_commit_does_not_discard_a_completed_run() {
         commit_started: commit_started.clone(),
         release_commit: release_commit.clone(),
         commit_calls: AtomicUsize::new(0),
+        release_calls: AtomicUsize::new(0),
+        held: AtomicBool::new(false),
         committed: Mutex::new(Vec::new()),
     });
     let inherit = FusionInheritance::new(
@@ -2947,6 +3281,8 @@ completed FusionResult",
         1,
         "the lease must still be committed exactly once"
     );
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
+    assert!(!budget.held.load(Ordering::SeqCst));
 
     let events = sink.events().await;
     let terminal: Vec<&str> = events
@@ -2967,6 +3303,114 @@ completed FusionResult",
         "exactly one terminal telemetry event, and it must be COMPLETED — not a CANCELLED \
 event logged over a run that already committed its lease"
     );
+}
+
+/// F01 regression: the panel-bar error path takes the lease before awaiting
+/// the budget commit. Cancelling that await used to drop the lease, release
+/// the hold, and lose the already-priced panel spend. The budget's commit is
+/// deliberately parked so cancellation lands in that exact internal window.
+#[tokio::test]
+async fn cancel_mid_panel_bar_commit_keeps_known_spend_and_releases_no_hold() {
+    let commit_started = Arc::new(Notify::new());
+    let release_commit = Arc::new(Notify::new());
+    let budget = Arc::new(HangingCommitBudget {
+        commit_started: commit_started.clone(),
+        release_commit: release_commit.clone(),
+        commit_calls: AtomicUsize::new(0),
+        release_calls: AtomicUsize::new(0),
+        held: AtomicBool::new(false),
+        committed: Mutex::new(Vec::new()),
+    });
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Report(report("A"))),
+        ("gpt-5.6-terra".into(), FakePanel::Fail),
+        ("deepseek-v4-pro".into(), FakePanel::Fail),
+    ]);
+    let orch = orch_scripted(
+        FakeSpawner::new(map),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+    )
+    .with_price_book(Arc::new(priced_book()));
+    let cancel = CancellationToken::new();
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: budget.clone(),
+        },
+        cancel.clone(),
+    );
+    let handle = tokio::spawn(async move { orch.run(request("task"), inherit, None).await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), commit_started.notified())
+        .await
+        .expect("panel-bar settlement must reach commit");
+    cancel.cancel();
+    // Let the shielded settlement finish after the caller's cancellation.
+    release_commit.notify_one();
+    let err = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("cancelled panel-bar run should unwind")
+        .expect("join")
+        .expect_err("panel bar remains an error");
+    assert_eq!(err, FusionError::Cancelled);
+
+    // One panel completed with 8 input + 4 output at the unit price book.
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.committed.lock().unwrap().clone(), vec![12]);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
+    assert!(!budget.held.load(Ordering::SeqCst));
+}
+
+/// F01 whole-future-drop regression: callers can abort the task that owns
+/// `FusionExecutor::run`, bypassing its cooperative cancellation select. The
+/// surviving settlement guard must still commit the last priced snapshot
+/// rather than letting the lease's plain Drop release it as unspent.
+#[tokio::test]
+async fn dropping_the_whole_run_future_commits_the_surviving_snapshot() {
+    let budget = RecordingBudget::new();
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Report(report("A"))),
+        ("gpt-5.6-terra".into(), FakePanel::Hang),
+        ("deepseek-v4-pro".into(), FakePanel::Hang),
+    ]);
+    let orch = orch_scripted(
+        FakeSpawner::new(map),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+    )
+    .with_price_book(Arc::new(priced_book()));
+    let inherit = inherit_recording(budget.clone());
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<platform_api::FusionProgress>(64);
+    let handle = tokio::spawn(async move { orch.run(request("task"), inherit, Some(tx)).await });
+
+    let progress = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let Some(event) = rx.recv().await else {
+                panic!("run progress channel closed before a panel completed");
+            };
+            if matches!(
+                event.stage,
+                platform_api::FusionStage::RunningPanels { completed, .. } if completed >= 1
+            ) {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("one panel should finish before aborting the owner task");
+    assert!(matches!(
+        progress.stage,
+        platform_api::FusionStage::RunningPanels { completed, .. } if completed >= 1
+    ));
+
+    handle.abort();
+    let join = handle.await.expect_err("the owner task must be aborted");
+    assert!(join.is_cancelled());
+    settle_spawned_drops().await;
+
+    let expected = 12 + 2 * in_flight_panel_floor("task");
+    assert_eq!(budget.committed.lock().unwrap().clone(), vec![expected]);
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
 }
 
 // ── F003 / F004 / F010 (WP3) ────────────────────────────────────────────────
@@ -3120,8 +3564,7 @@ fn needs_parent_text_bounds_an_analyst_authored_consensus_section() {
             reason: "test reason".into(),
         },
     };
-    let text =
-        crate::orchestrator::needs_parent_text(&panels, "test reason", Some(&analysis));
+    let text = crate::orchestrator::needs_parent_text(&panels, "test reason", Some(&analysis));
     assert!(
         text.len() < 40_000,
         "a single 100 KB consensus item must not reach the parent uncapped -- \
@@ -3179,7 +3622,9 @@ fn needs_parent_text_keeps_every_panel_row_and_the_closing_line_at_max_panels() 
         );
     }
     assert!(
-        text.ends_with("Next: review the panel material above and provide the final answer yourself."),
+        text.ends_with(
+            "Next: review the panel material above and provide the final answer yourself."
+        ),
         "the closing directive was pushed BEFORE the whole-string tail cut, \
          so it is the first casualty -- rendered text ends with: {:?}",
         &text[text.len().saturating_sub(120)..]
@@ -3244,7 +3689,9 @@ fn needs_parent_text_keeps_panel_rows_and_the_closing_line_under_a_huge_analyst_
         text.len()
     );
     assert!(
-        text.ends_with("Next: review the panel material above and provide the final answer yourself."),
+        text.ends_with(
+            "Next: review the panel material above and provide the final answer yourself."
+        ),
         "the closing directive was cut away by the whole-string tail cut -- \
          rendered text ends with: {:?}",
         &text[text.len().saturating_sub(120)..]
@@ -3398,7 +3845,11 @@ async fn fast_panels_with_hanging_analyst_and_short_total_yields_needs_parent_no
         "got {:?}",
         result.decision
     );
-    assert_eq!(result.panels.len(), 3, "the completed panel material is kept");
+    assert_eq!(
+        result.panels.len(),
+        3,
+        "the completed panel material is kept"
+    );
 }
 
 /// F004: a transport/4xx-shaped analyst failure must be labelled
@@ -3519,6 +3970,81 @@ async fn run_reloads_the_config_source_between_consecutive_runs() {
     assert!(
         matches!(second, Err(FusionError::InvalidCustomModels(_))),
         "second run must read the NEW max_panel=2 and reject the same 3-ref request; got {second:?}"
+    );
+}
+
+/// F011: a task-owned Fusion run snapshots its effective timeout before the
+/// task row is published. A later settings edit may still affect every other
+/// live setting, but it must not extend the already-published run beyond the
+/// timeout its waiter was given.
+#[tokio::test]
+async fn captured_timeout_is_not_extended_by_a_later_config_reload() {
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Hang),
+        ("gpt-5.6-terra".into(), FakePanel::Hang),
+        ("deepseek-v4-pro".into(), FakePanel::Hang),
+    ]);
+    let shared = Arc::new(Mutex::new(test_config()));
+    shared.lock().unwrap().total_timeout_ms = 25;
+    let for_source = Arc::clone(&shared);
+    let config_source: Arc<dyn crate::config::FusionConfigSource> =
+        Arc::new(move || Ok(for_source.lock().unwrap().clone()));
+    let orch = FusionOrchestrator::new(
+        FakeSpawner::new(map),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        config_source,
+        Arc::new(catalog()),
+    );
+    let captured = orch
+        .effective_timeout_ms()
+        .expect("FusionOrchestrator exposes its effective timeout");
+
+    shared.lock().unwrap().total_timeout_ms = 5_000;
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        orch.run(
+            request("task"),
+            inherit().with_effective_timeout_ms(Some(captured)),
+            None,
+        ),
+    )
+    .await
+    .expect("the captured short timeout must still bound the activated run");
+    assert_eq!(outcome, Err(FusionError::TimedOutEmpty));
+}
+
+/// F011 inverse: lowering the live timeout after task publication must not
+/// prematurely terminate a run whose waiter was handed the longer snapshot.
+/// The fake panels each need 15 ms, so a reloaded 1 ms deadline would fail
+/// deterministically if `run()` ignored the inherited snapshot.
+#[tokio::test]
+async fn captured_timeout_is_not_shortened_by_a_later_config_reload() {
+    let shared = Arc::new(Mutex::new(test_config()));
+    shared.lock().unwrap().total_timeout_ms = 1_000;
+    let for_source = Arc::clone(&shared);
+    let config_source: Arc<dyn crate::config::FusionConfigSource> =
+        Arc::new(move || Ok(for_source.lock().unwrap().clone()));
+    let orch = FusionOrchestrator::new(
+        FakeSpawner::new(three_ok()),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        config_source,
+        Arc::new(catalog()),
+    );
+    let captured = orch
+        .effective_timeout_ms()
+        .expect("FusionOrchestrator exposes its effective timeout");
+
+    shared.lock().unwrap().total_timeout_ms = 1;
+    let outcome = orch
+        .run(
+            request("task"),
+            inherit().with_effective_timeout_ms(Some(captured)),
+            None,
+        )
+        .await;
+    assert!(
+        outcome.is_ok(),
+        "the captured long timeout must survive the later 1 ms settings edit: {outcome:?}"
     );
 }
 
@@ -3829,8 +4355,8 @@ impl SubagentSpawner for MessageCountSpawner {
             response_char_count: 1,
             last_request_id: None,
             cumulative_usage: SubagentUsage::default(),
-                usage_complete: true,
-})
+            usage_complete: true,
+        })
     }
 }
 
@@ -4029,7 +4555,8 @@ async fn early_abort_seals_on_the_callers_effective_partial_ok_not_just_config()
         .filter(|panel| panel.error_category.as_deref() == Some("aborted"))
         .count();
     assert_eq!(
-        aborted, 2,
+        aborted,
+        2,
         "both still-hanging siblings must carry the synthesized early-abort \
          category, got: {:?}",
         panels

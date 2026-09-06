@@ -78,18 +78,22 @@ pub fn resolve(
 ) -> Result<ResolvedSet, FusionError> {
     deny_cross_provider_if_needed(request, config)?;
     let available = catalog.list();
-    let max_panel = request
-        .max_panel
-        .unwrap_or(config.max_panel)
-        .clamp(FUSION_MIN_PANEL, config.max_panel.min(FUSION_MAX_PANEL));
+    let required = config.min_successful_panels.max(FUSION_MIN_PANEL);
+    let requested_max = request.max_panel.unwrap_or(config.max_panel);
+    if requested_max < required {
+        return Err(FusionError::InvalidRequest(format!(
+            "max_panel ({requested_max}) must be at least fusion.minSuccessfulPanels ({required})"
+        )));
+    }
+    let max_panel = requested_max.clamp(FUSION_MIN_PANEL, config.max_panel.min(FUSION_MAX_PANEL));
 
     let panels = if let Some(refs) = request.models.as_ref() {
-        resolve_custom(refs, request, config, &available, max_panel)?
+        resolve_custom(refs, request, config, &available, max_panel, required)?
     } else {
-        resolve_preset(request, config, &available, max_panel)?
+        resolve_preset(request, config, &available, max_panel, required)?
     };
-    if panels.len() < usize::from(FUSION_MIN_PANEL) {
-        return Err(too_few_models(request, panels.len(), FUSION_MIN_PANEL));
+    if panels.len() < usize::from(required) {
+        return Err(too_few_models(request, panels.len(), required));
     }
     let analyst = resolve_analyst(request, config, &panels, &available)?;
     Ok(ResolvedSet { panels, analyst })
@@ -131,11 +135,12 @@ fn resolve_custom(
     config: &FusionRuntimeConfig,
     available: &[CatalogModel],
     max_panel: u8,
+    required: u8,
 ) -> Result<Vec<ResolvedPanel>, FusionError> {
-    if refs.len() < usize::from(FUSION_MIN_PANEL) {
-        return Err(FusionError::InvalidCustomModels(
-            "explicit models must contain at least 2 entries".into(),
-        ));
+    if refs.len() < usize::from(required) {
+        return Err(FusionError::InvalidCustomModels(format!(
+            "explicit models must contain at least {required} entries to satisfy fusion.minSuccessfulPanels"
+        )));
     }
     // F011 item 5: an explicit list longer than max_panel is a caller error,
     // not a silent truncation — a caller who asked for 5 named models has no
@@ -190,6 +195,7 @@ fn resolve_preset(
     config: &FusionRuntimeConfig,
     available: &[CatalogModel],
     max_panel: u8,
+    required: u8,
 ) -> Result<Vec<ResolvedPanel>, FusionError> {
     let wanted = match request.preset {
         FusionPreset::Quality => config.quality_panel_count,
@@ -204,8 +210,8 @@ fn resolve_preset(
         .filter(|row| profile_allowed(&row.profile, config))
         .filter(|row| request.cross_provider || row.profile == request.parent_profile)
         .collect();
-    if eligible.len() < usize::from(FUSION_MIN_PANEL) {
-        return Err(too_few_models(request, eligible.len(), FUSION_MIN_PANEL));
+    if eligible.len() < usize::from(required) {
+        return Err(too_few_models(request, eligible.len(), required));
     }
 
     let selected = match request.preset {
@@ -494,6 +500,42 @@ mod tests {
             conversation_id: None,
             workflow_run_id: None,
         }
+    }
+
+    fn three_provider_catalog() -> Vec<CatalogModel> {
+        vec![
+            hinted(
+                "anthropic",
+                "opus",
+                100,
+                FusionLatencyClass::Slow,
+                FusionCostClass::High,
+                true,
+            ),
+            hinted(
+                "openai",
+                "sol",
+                95,
+                FusionLatencyClass::Standard,
+                FusionCostClass::Medium,
+                true,
+            ),
+            hinted(
+                "deepseek",
+                "pro",
+                90,
+                FusionLatencyClass::Standard,
+                FusionCostClass::Low,
+                true,
+            ),
+        ]
+    }
+
+    fn config_requiring_three_successes() -> FusionRuntimeConfig {
+        let mut config = FusionRuntimeConfig::defaults();
+        config.fast_panel_count = 3;
+        config.min_successful_panels = 3;
+        config
     }
 
     #[test]
@@ -832,6 +874,59 @@ mod tests {
     }
 
     #[test]
+    fn request_panel_cap_cannot_lower_the_configured_success_minimum() {
+        let catalog = three_provider_catalog();
+        let config = config_requiring_three_successes();
+        let mut request = req();
+        request.max_panel = Some(2);
+
+        let err = resolve(&request, &config, &catalog).unwrap_err();
+        assert!(
+            matches!(&err, FusionError::InvalidRequest(message)
+                if message.contains("max_panel (2)")
+                    && message.contains("minSuccessfulPanels (3)")),
+            "a request cap below the configured success bar must fail preflight, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_model_list_cannot_lower_the_configured_success_minimum() {
+        let catalog = three_provider_catalog();
+        let config = config_requiring_three_successes();
+        let mut request = req();
+        request.models = Some(vec![
+            FusionModelRef {
+                profile: Some("anthropic".into()),
+                model: "opus".into(),
+            },
+            FusionModelRef {
+                profile: Some("openai".into()),
+                model: "sol".into(),
+            },
+        ]);
+
+        let err = resolve(&request, &config, &catalog).unwrap_err();
+        assert!(
+            matches!(&err, FusionError::InvalidCustomModels(message)
+                if message.contains("at least 3 entries")
+                    && message.contains("minSuccessfulPanels")),
+            "a custom list below the configured success bar must fail preflight, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn preset_catalog_shortfall_reports_the_configured_minimum() {
+        let catalog = three_provider_catalog().into_iter().take(2).collect::<Vec<_>>();
+        let config = config_requiring_three_successes();
+
+        let err = resolve(&req(), &config, &catalog).unwrap_err();
+        assert!(
+            matches!(&err, FusionError::TooFewModels { eligible: 2, required: 3, .. }),
+            "catalog filtering below the configured success bar must name required=3, got {err:?}"
+        );
+    }
+
+    #[test]
     fn quality_preset_dedups_same_model_across_two_gateways() {
         // "sol" is the SAME underlying model listed under two profiles
         // (different gateways) — the same shape as the checked-in hint
@@ -1091,11 +1186,7 @@ mod tests {
         // so the parent-profile tie-break key never discriminates here.
         let set = resolve(&req(), &FusionRuntimeConfig::defaults(), &catalog).unwrap();
         assert_eq!(set.panels.len(), 3);
-        let panel_keys: Vec<String> = set
-            .panels
-            .iter()
-            .map(|p| canonical_key(&p.model))
-            .collect();
+        let panel_keys: Vec<String> = set.panels.iter().map(|p| canonical_key(&p.model)).collect();
         assert!(
             !panel_keys.contains(&canonical_key(&set.analyst.model)),
             "analyst must not be the leftover gateway copy of a panel model: \

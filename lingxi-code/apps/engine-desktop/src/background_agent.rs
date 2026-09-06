@@ -210,7 +210,9 @@ impl SubagentSpawner for BackgroundAgentSpawner {
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
-        self.inner.spawn_with_progress(request, inherit, progress).await
+        self.inner
+            .spawn_with_progress(request, inherit, progress)
+            .await
     }
 
     /// Forwarded explicitly — see [`Self::spawn_with_progress`]; the default
@@ -600,6 +602,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            origin_session_id: None,
             parent_model_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,

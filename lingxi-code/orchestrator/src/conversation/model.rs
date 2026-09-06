@@ -1089,8 +1089,16 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
     /// `--resume`d session's footer continues from the prior accumulated cost
     /// instead of resetting to `$0.0000` (claude-code `restoreCostStateForSession`).
     pub async fn restore_session_cost(&self, total_nano_usd: u64) {
+        // Keep the target id on one side of a clear/resume boundary. Callers
+        // generally invoke this during boot, but the handle is public and may
+        // be used while the runtime is live. Hydration addresses the captured
+        // cell directly; it must never retarget the active projection itself.
+        let _turn_guard = self.turn_gate.lock().await;
         if let Some(tracker) = self.model_runtime.cost_tracker.as_ref() {
-            tracker.restore_total_nano_usd(total_nano_usd).await;
+            let session_id = self.session.lock().await.session_id;
+            tracker
+                .restore_total_for_session(session_id, total_nano_usd)
+                .await;
         }
     }
 
@@ -1109,7 +1117,10 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
                 ..platform_api::CostSnapshot::default()
             };
         };
-        let state = tracker.snapshot().await;
+        // Pin the tracker view to the session id captured above. Clear/resume
+        // can switch the active projection between awaits; reading the active
+        // tracker here would otherwise return session B's costs labeled as A.
+        let state = tracker.scoped(session_id).snapshot().await;
         // Sum per-model usage into aggregate token counters. api_calls comes
         // from our own counter because cost::Usage does not carry a
         // per-call count (its `add()` merges token totals only).

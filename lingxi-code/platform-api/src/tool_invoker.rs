@@ -9,7 +9,7 @@
 //! See M4-05 wiring follow-up plan.
 
 use async_trait::async_trait;
-use protocol::{AgentId, MessageId};
+use protocol::{AgentId, MessageId, SessionId};
 use serde_json::Value;
 use std::any::Any;
 use thiserror::Error;
@@ -24,6 +24,10 @@ use thiserror::Error;
 pub struct SubagentInvocationContext {
     /// Parent agent id (the agent that is dispatching the child).
     pub parent_agent_id: Option<AgentId>,
+    /// Trusted originating session for nested Agent/Fusion budget scoping.
+    /// Receivers must propagate this value explicitly and must not infer it
+    /// from hook/session metadata.
+    pub origin_session_id: Option<SessionId>,
     /// DISPLAY NAME of the teammate dispatching this tool call, if known
     /// (claude-code `getAgentName()` — the teammate's human name, e.g.
     /// `"researcher"`, NOT the `agent:<uuid>` form). `None` for the main

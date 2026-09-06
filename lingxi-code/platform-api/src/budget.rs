@@ -9,18 +9,21 @@
 //! (`"Budget exceeded ($X.YZ); stopped."`).
 
 use async_trait::async_trait;
+use std::sync::Arc;
 use thiserror::Error;
 
-/// Opaque hold on session budget capacity. `0` is the no-op id used when the
-/// session has no max budget (or the reserved amount is zero).
+/// Opaque settlement token, which may also hold session budget capacity.
+/// `0` is the legacy/default no-op sentinel. Concrete implementations may
+/// return a non-zero token for an unlimited or zero-sized hold so a later
+/// commit can still account its realized spend exactly once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BudgetReservationId(u64);
 
 impl BudgetReservationId {
-    /// No hold. `commit` / `release` are no-ops.
+    /// No hold and no settlement. `commit` / `release` are no-ops.
     pub const NOOP: Self = Self(0);
 
-    /// True when this id does not occupy capacity.
+    /// True when this id carries neither capacity nor settlement ownership.
     #[must_use]
     pub const fn is_noop(self) -> bool {
         self.0 == 0
@@ -75,6 +78,18 @@ pub trait BudgetEnforcerHandle: Send + Sync {
         None
     }
 
+    /// Return a budget view pinned to an originating session. Background
+    /// work may finish after the active conversation changes, so a caller
+    /// must not let a late settlement follow the host's current projection.
+    /// Legacy implementations return `None` and callers may retain their
+    /// existing handle behavior.
+    fn scoped_for_session(
+        &self,
+        _session_id: protocol::SessionId,
+    ) -> Option<Arc<dyn BudgetEnforcerHandle>> {
+        None
+    }
+
     /// Sum of active reservation holds, in nano-USD. Default 0.
     async fn active_reservation_nano_usd(&self) -> u64 {
         0
@@ -95,9 +110,9 @@ pub trait BudgetEnforcerHandle: Send + Sync {
         ))
     }
 
-    /// Release the hold after the work has realized `actual_nano_usd`.
-    /// Does not double-count spend that the cost tracker already recorded.
-    /// Unknown / noop ids succeed.
+    /// Consume the token after the work has realized `actual_nano_usd`.
+    /// The production cost implementation records that externally-priced
+    /// amount onto the owning session exactly once; unknown / noop ids succeed.
     async fn commit_reservation(
         &self,
         id: BudgetReservationId,

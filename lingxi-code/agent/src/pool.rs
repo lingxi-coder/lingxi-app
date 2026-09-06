@@ -109,6 +109,19 @@ impl StateMachinePool {
         &self,
         ctx: SubagentContext,
     ) -> Result<(AgentId, mpsc::Receiver<SubagentEvent>), PoolError> {
+        self.allocate_with_receipt(ctx, None).await
+    }
+
+    /// Allocate a slot and synchronously publish the fact that the runner was
+    /// created by the runtime.  The receipt fires before the test hook and the
+    /// slot-table insertion below can suspend.  This is intentionally separate
+    /// from the async lifecycle observer: a slow observer must not make a real
+    /// allocation look like a zero-allocation spawn to Fusion's quota logic.
+    pub async fn allocate_with_receipt(
+        &self,
+        ctx: SubagentContext,
+        allocation_receipt: Option<Arc<dyn Fn(AgentId) + Send + Sync>>,
+    ) -> Result<(AgentId, mpsc::Receiver<SubagentEvent>), PoolError> {
         // Reserve capacity atomically before spawning the runner. A len/read
         // check can race when multiple parallel Agent tool calls allocate at
         // once and let all of them pass the same stale count.
@@ -129,6 +142,14 @@ impl StateMachinePool {
             )
             .await?;
         let mut cancel_guard = AllocateCancelGuard::new(self.runtime.clone(), task.clone());
+
+        // The runtime has accepted and started the child task. Publish this
+        // fact before any subsequent await; if the caller is cancelled while
+        // waiting for the slot-table write, the receipt still prevents a
+        // real child from being refunded as "never allocated".
+        if let Some(receipt) = allocation_receipt {
+            receipt(agent_id);
+        }
 
         #[cfg(test)]
         if let Some(wait) = self.post_spawn_wait.read().await.clone() {
@@ -230,6 +251,7 @@ mod tests {
         AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
     };
     use crate::display::{AgentColor, AgentDisplay};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use test_harness::mocks::MockRuntimeSpawner;
 
@@ -278,6 +300,7 @@ mod tests {
             persistent: false,
             can_show_permission_prompts: true,
             session_interactive: None,
+            origin_session_id: None,
             mcp_clients: vec![],
             transcript_subdir: "/tmp".into(),
             transcript_fs: None,
@@ -326,6 +349,48 @@ mod tests {
         assert_eq!(id, aid);
         assert_eq!(pool.slot_count().await, 1);
         pool.deallocate(&aid).await.unwrap();
+        assert_eq!(pool.slot_count().await, 0);
+    }
+
+    /// The allocation fact must be published immediately after the runtime
+    /// task is created, before the slot-table insertion can suspend.  Fusion
+    /// uses this receipt for quota/accounting; waiting for the normal async
+    /// lifecycle observer would leave a cancellation window in which a real
+    /// child exists but the caller still believes that nothing was allocated.
+    #[tokio::test]
+    async fn allocation_receipt_precedes_slot_table_wait() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 1));
+        let wait = Arc::new(Notify::new());
+        pool.set_post_spawn_wait(wait).await;
+        let receipts = Arc::new(AtomicUsize::new(0));
+        let receipt_counter = Arc::clone(&receipts);
+        let receipt: Arc<dyn Fn(AgentId) + Send + Sync> = Arc::new(move |_agent_id| {
+            receipt_counter.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let allocation = tokio::spawn({
+            let pool = Arc::clone(&pool);
+            async move { pool.allocate_with_receipt(make_ctx(), Some(receipt)).await }
+        });
+        for _ in 0..100 {
+            if receipts.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            receipts.load(Ordering::SeqCst),
+            1,
+            "allocation receipt must not wait for the post-spawn slot-table suspension"
+        );
+
+        // Drop the allocation future while it is parked before slot insertion.
+        // The cancel guard owns the just-created runtime task, so this must not
+        // leave a live pool slot behind even though the receipt already fired.
+        allocation.abort();
+        let _ = allocation.await;
+        tokio::task::yield_now().await;
         assert_eq!(pool.slot_count().await, 0);
     }
 

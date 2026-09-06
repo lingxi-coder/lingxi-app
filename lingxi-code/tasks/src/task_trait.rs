@@ -106,9 +106,10 @@ pub enum TaskSpawnInput {
     },
     /// Spawn a local workflow.
     LocalWorkflow {
-        /// Session that owns this workflow row. Mobile uses it to scope
-        /// workflow listings to the active session; desktop leaves the filter
-        /// unset so behavior stays unchanged.
+        /// Session that owns this workflow row. Desktop and mobile launchers
+        /// pass the originating session so late agent/Fusion work keeps its
+        /// budget and transcript identity; the desktop registry may still
+        /// leave listing filters unscoped.
         session_uuid: Option<String>,
         /// Workflow identifier.
         workflow_id: String,
@@ -251,6 +252,10 @@ pub struct TaskHandle {
     pub task_id: String,
     /// Optional cleanup hook to run on task termination.
     pub cleanup: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Effective Fusion end-to-end timeout captured by the handler before the
+    /// registry publishes the task. `None` for every non-Fusion task and for
+    /// hosts that do not expose a timeout snapshot.
+    pub(crate) fusion_timeout_ms: Option<u64>,
     /// One-shot worker activation owned by the registry handoff. Dropping an
     /// unactivated handle cancels handlers whose callback owns a readiness
     /// sender, so a cancelled registry spawn cannot launch partial work.
@@ -263,8 +268,16 @@ impl TaskHandle {
         Self {
             task_id: task_id.into(),
             cleanup,
+            fusion_timeout_ms: None,
             activation: None,
         }
+    }
+
+    /// Attach the effective Fusion timeout captured for this run.
+    #[must_use]
+    pub fn with_fusion_timeout_ms(mut self, timeout_ms: Option<u64>) -> Self {
+        self.fusion_timeout_ms = timeout_ms;
+        self
     }
 
     /// Attach a one-shot activation invoked only after the registry has fully

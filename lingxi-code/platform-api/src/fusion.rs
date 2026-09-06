@@ -157,7 +157,9 @@ pub fn parse_fusion_model_ref(item: &str) -> Result<FusionModelRef, FusionError>
 ///
 /// Returns the first entry's [`FusionError::InvalidRequest`].
 pub fn parse_fusion_models(raw: &[String]) -> Result<Vec<FusionModelRef>, FusionError> {
-    raw.iter().map(|item| parse_fusion_model_ref(item)).collect()
+    raw.iter()
+        .map(|item| parse_fusion_model_ref(item))
+        .collect()
 }
 
 /// Per-request Fusion input. Unknown fields are rejected (caller-facing).
@@ -209,13 +211,28 @@ pub struct FusionInheritance {
     pub subagent: SubagentInheritance,
     /// Cancellation for the whole Fusion run.
     pub cancel: CancellationToken,
+    /// Effective end-to-end timeout captured for this run before it is
+    /// activated. `None` preserves legacy behavior for callers that do not
+    /// expose a pre-run runtime snapshot.
+    pub effective_timeout_ms: Option<u64>,
 }
 
 impl FusionInheritance {
     /// Build inheritance from a subagent bundle and a cancel token.
     #[must_use]
     pub fn new(subagent: SubagentInheritance, cancel: CancellationToken) -> Self {
-        Self { subagent, cancel }
+        Self {
+            subagent,
+            cancel,
+            effective_timeout_ms: None,
+        }
+    }
+
+    /// Attach the effective timeout captured for this run.
+    #[must_use]
+    pub fn with_effective_timeout_ms(mut self, timeout_ms: Option<u64>) -> Self {
+        self.effective_timeout_ms = timeout_ms;
+        self
     }
 
     /// Budget handle inherited from the parent.
@@ -961,6 +978,19 @@ pub trait FusionExecutor: Send + Sync {
         progress: Option<tokio::sync::mpsc::Sender<FusionProgress>>,
     ) -> Result<FusionResult, FusionError>;
 
+    /// Return the effective end-to-end timeout for a newly spawned run, in
+    /// milliseconds, when the host can expose one without starting work.
+    ///
+    /// Task/CLI surfaces snapshot this value before publishing a
+    /// `local_fusion` row so print mode can wait for the configured run rather
+    /// than duplicating the Fusion default. `None` keeps lightweight/test
+    /// executors source-compatible; hosts that return `Some` must use the
+    /// same value for the run's outer deadline (including any internal grace
+    /// handling) or leave it `None` until that runtime snapshot is available.
+    fn effective_timeout_ms(&self) -> Option<u64> {
+        None
+    }
+
     /// Agent listing / intercept gate. Default is disabled (inert).
     fn agent_surface(&self) -> FusionAgentSurface {
         FusionAgentSurface::default()
@@ -1243,7 +1273,10 @@ mod tests {
 
     #[test]
     fn preset_from_str_accepts_the_two_wire_spellings_and_rejects_others() {
-        assert_eq!("quality".parse::<FusionPreset>().unwrap(), FusionPreset::Quality);
+        assert_eq!(
+            "quality".parse::<FusionPreset>().unwrap(),
+            FusionPreset::Quality
+        );
         assert_eq!("fast".parse::<FusionPreset>().unwrap(), FusionPreset::Fast);
         let err = "sloppy".parse::<FusionPreset>().unwrap_err();
         assert_eq!(
@@ -1285,9 +1318,8 @@ mod tests {
 
     #[test]
     fn parse_fusion_models_stops_at_the_first_bad_entry() {
-        let err =
-            parse_fusion_models(&["anthropic:opus".to_string(), "openai:".to_string()])
-                .unwrap_err();
+        let err = parse_fusion_models(&["anthropic:opus".to_string(), "openai:".to_string()])
+            .unwrap_err();
         assert!(err.to_string().contains("invalid fusion models entry"));
     }
 

@@ -145,6 +145,7 @@ impl AgentExecutor {
             max_turns_override: None,
             max_output_tokens_per_turn: None,
             max_input_bytes_per_turn: None,
+            origin_session_id: None,
             query_source_label: None,
             correlation_id: None,
         };

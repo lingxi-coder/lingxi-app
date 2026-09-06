@@ -787,7 +787,16 @@ impl TaskRegistry {
             creator_team_name: None,
             creator_agent_id: None,
         };
-        let state = state_for_spawn(base, &input);
+        let mut state = state_for_spawn(base, &input);
+        // Fusion handlers resolve their live settings before returning the
+        // prepared handle. Publish that captured timeout with the state before
+        // activation so print-mode waiters cannot observe a task without its
+        // per-run deadline, and never need to reload mutable settings.
+        if let (Some(timeout_ms), TaskState::LocalFusion(fusion)) =
+            (handle.fusion_timeout_ms, &mut state)
+        {
+            fusion.effective_timeout_ms = Some(timeout_ms);
+        }
         // 4. Publish every registry artifact as one transaction from the point
         //    of view of task readers. Holding the task write lock while the
         //    secondary guards are acquired prevents `list` / `get` / `kill`
@@ -2359,6 +2368,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             egress_profiles: Vec::new(),
             usage: None,
             stage: None,
+            effective_timeout_ms: None,
             result_published: false,
         }),
     }

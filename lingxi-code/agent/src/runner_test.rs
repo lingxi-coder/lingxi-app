@@ -523,6 +523,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         persistent: false,
         can_show_permission_prompts: true,
         session_interactive: None,
+        origin_session_id: None,
         mcp_clients: vec![],
         transcript_subdir: "/tmp".into(),
         transcript_fs: None,
@@ -1761,10 +1762,9 @@ async fn when_done_idle_turn_appends_a_user_message_before_looping_back() {
 #[tokio::test]
 async fn forced_mode_forces_every_turn_including_the_first() {
     let structured = serde_json::json!({ "answer": 3 });
-    let api =
-        StructuredOutputModeCapturingApiClient::new(vec![structured_output_call_response(
-            structured.clone(),
-        )]);
+    let api = StructuredOutputModeCapturingApiClient::new(vec![structured_output_call_response(
+        structured.clone(),
+    )]);
     let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 4);
     ctx.schema = Some(r#"{"type":"object"}"#.to_string());
     // `Forced` is also `SubagentContext::structured_output_mode`'s default —
@@ -2187,13 +2187,10 @@ async fn loop_completed_cumulative_usage_sums_turns_and_reports_real_uncapped_ou
     let invoker = CountingInvoker::new();
     let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
     ctx.max_output_tokens_per_turn = Some(8);
-    ctx.max_input_bytes_per_turn = Some(64);
-    // [Round-4 review item 6] The FIRST prompt unit is now pinned
-    // unconditionally (never dropped, even over-budget — see
-    // `cap_input_bytes`), so it must be the short one here; the oversized
-    // one is the SECOND message so this test still exercises "an
-    // over-budget non-head unit gets dropped" rather than the now-retired
-    // "the head gets dropped when it doesn't fit" behavior.
+    ctx.max_input_bytes_per_turn = Some(4096);
+    // Keep the cap active while leaving both mandatory seed units safely
+    // representable; strict over-cap rejection is covered by the focused
+    // cap helper tests below.
     ctx.prompt_messages = vec![
         ConversationMessage::user(MessageId::new(), "keep-me".into()),
         ConversationMessage::user(MessageId::new(), "x".repeat(200)),
@@ -2230,8 +2227,12 @@ async fn loop_completed_cumulative_usage_sums_turns_and_reports_real_uncapped_ou
     let last = api.last_messages();
     let joined = format!("{last:?}");
     assert!(
-        !joined.contains(&"x".repeat(200)),
-        "an over-budget non-head unit must still be dropped before the API call"
+        joined.contains(&"x".repeat(200)),
+        "the second seed unit fits the active cap and must remain in the API call"
+    );
+    assert!(
+        serde_json::to_vec(&last).unwrap().len() <= 4096,
+        "the request must still honor max_input_bytes_per_turn"
     );
     assert!(
         joined.contains("keep-me"),
@@ -4194,8 +4195,7 @@ async fn fusion_panel_agent_type_fires_no_subagent_start_hook() {
     let mut ctx = loop_ctx(api.clone(), None, 2);
     ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "go".into())];
     ctx.agent_definition.agent_type = platform_api::FUSION_PANEL_TYPE.into();
-    ctx.hook_executor =
-        Some(exec_with_counting_start_context(calls.clone(), "panel-marker").await);
+    ctx.hook_executor = Some(exec_with_counting_start_context(calls.clone(), "panel-marker").await);
 
     let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
@@ -4918,6 +4918,30 @@ fn a_stalled_stream_is_terminal_and_an_ordinary_interruption_still_recovers() {
 
 // ---- Fusion panel input cap must not split tool_use/tool_result pairs ----
 
+#[tokio::test]
+async fn oversized_mandatory_prompt_is_rejected_before_provider_call() {
+    let api = MockSubagentApiClient::new(vec![Ok(text_response("must not run", Some("end_turn")))]);
+    let mut ctx = loop_ctx(api.clone(), None, 1);
+    ctx.prompt_messages = vec![ConversationMessage::user(
+        MessageId::new(),
+        "TASK-MARKER: ".to_string() + &"x".repeat(10_000),
+    )];
+    ctx.max_input_bytes_per_turn = Some(128);
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+    assert_eq!(
+        api.call_count(),
+        0,
+        "the provider must not receive an over-cap mandatory prompt"
+    );
+    assert!(events.iter().any(|event| {
+        matches!(event, SubagentEvent::Failed { error, .. } if error.contains("mandatory initial prompt exceeds"))
+    }));
+}
+
 /// Build an assistant message whose only content block is a `ToolUse`.
 fn assistant_tool_use(id: ToolUseId, name: &str) -> ConversationMessage {
     ConversationMessage::Assistant {
@@ -4962,13 +4986,11 @@ fn cap_input_bytes_keeps_tool_use_and_tool_result_paired() {
         assistant_tool_use(tool_id.clone(), "Read"),
         user_tool_result(tool_id.clone(), "file contents"),
     ];
-    // Sized to fit only the trailing `ToolResult` message on its own — not
-    // the `ToolUse` before it. A naive per-message trim from the tail always
-    // keeps the very last message unconditionally, then finds the `ToolUse`
-    // message doesn't fit and stops — leaving a `ToolResult` with no
-    // matching `ToolUse` in the kept history, which is wire-invalid.
-    let tool_result_bytes = serde_json::to_vec(&history[2]).unwrap().len() as u64;
-    let capped = super::cap_input_bytes(&history, Some(tool_result_bytes));
+    // The complete seed + tool pair fits. The cap implementation must retain
+    // that pair atomically, rather than trimming one half to satisfy a
+    // per-message approximation.
+    let max = serde_json::to_vec(&history).unwrap().len() as u64;
+    let capped = super::cap_input_bytes(&history, Some(max)).expect("cap fits");
 
     let has_tool_use = capped.iter().any(|m| {
         matches!(m, ConversationMessage::Assistant { content, .. }
@@ -4986,6 +5008,28 @@ fn cap_input_bytes_keeps_tool_use_and_tool_result_paired() {
         has_tool_result,
         "the pair that fits the budget must be kept, not dropped entirely"
     );
+}
+
+/// F009: the task seed and newest tool pair are both mandatory. Even when
+/// each fits separately, their exact serialized array may not; reject that
+/// request instead of splitting the pair or exceeding the declared cap.
+#[test]
+fn cap_input_bytes_rejects_task_plus_latest_pair_over_the_exact_cap() {
+    let tool_id = ToolUseId::new();
+    let prompt = ConversationMessage::user(MessageId::new(), "TASK-MARKER".repeat(20));
+    let pair = [
+        assistant_tool_use(tool_id.clone(), "Read"),
+        user_tool_result(tool_id, &"result".repeat(20)),
+    ];
+    let mut history = vec![prompt.clone()];
+    history.extend(pair);
+    let exact_bytes = u64::try_from(serde_json::to_vec(&history).unwrap().len()).unwrap();
+    let cap = exact_bytes - 1;
+    assert!(u64::try_from(serde_json::to_vec(&vec![prompt]).unwrap().len()).unwrap() <= cap);
+
+    let error = super::cap_input_bytes(&history, Some(cap))
+        .expect_err("the mandatory task/latest pair is one serialized byte over cap");
+    assert!(error.contains("mandatory latest tool/message unit exceeds"));
 }
 
 /// [Finding 9] A Fusion panel seeds its ENTIRE task text as `history`'s
@@ -5022,7 +5066,7 @@ fn cap_input_bytes_pins_the_task_prompt_when_tool_results_crowd_it_out() {
     // Room for the prompt plus exactly the NEWEST pair, not both pairs.
     let max = prompt_bytes + newest_pair_bytes + 16;
 
-    let capped = super::cap_input_bytes(&history, Some(max));
+    let capped = super::cap_input_bytes(&history, Some(max)).expect("cap fits");
     let joined = format!("{capped:?}");
     assert!(
         joined.contains("TASK-MARKER"),
@@ -5037,16 +5081,11 @@ fn cap_input_bytes_pins_the_task_prompt_when_tool_results_crowd_it_out() {
     );
 }
 
-/// [Round-4 review item 6] The prior fix above only pinned the task prompt
-/// when it happened to fit the budget on its own. Whenever the task text
-/// itself (a pasted stack trace, a large file's contents) is bigger than
-/// `max_input_bytes_per_turn`, that half of `pin_head`'s condition was
-/// false, and the tail-only fallback below dropped the sole task-carrying
-/// unit outright — sending a request with NO task at all from turn 2
-/// onward. An over-budget task sent whole must still beat a request with no
-/// task.
+/// F009: a task prompt that cannot fit the declared cap must be rejected.
+/// Sending it whole violates the cap, while dropping it silently removes the
+/// only task-carrying unit from later turns.
 #[test]
-fn cap_input_bytes_keeps_the_task_prompt_even_when_it_alone_exceeds_the_cap() {
+fn cap_input_bytes_rejects_when_the_task_prompt_alone_exceeds_the_cap() {
     let prompt = ConversationMessage::user(
         MessageId::new(),
         format!("TASK-MARKER: {}", "x".repeat(50_000)),
@@ -5067,34 +5106,26 @@ fn cap_input_bytes_keeps_the_task_prompt_even_when_it_alone_exceeds_the_cap() {
     // prompt too.
     let max = pair_bytes + 32;
 
-    let capped = super::cap_input_bytes(&history, Some(max));
-    let joined = format!("{capped:?}");
+    let error = super::cap_input_bytes(&history, Some(max))
+        .expect_err("an oversized mandatory prompt must be rejected before sending");
     assert!(
-        joined.contains("TASK-MARKER"),
-        "the sole task-carrying unit must survive turn-2+ trimming even when \
-         it alone exceeds the byte cap — capped history: {joined}"
+        error.contains("mandatory initial prompt exceeds"),
+        "the rejection must explain the mandatory prompt cap violation: {error}"
     );
 }
 
-/// [Round-4 review item 6] Companion to the fix above: pinning an
-/// over-budget head unconditionally must not reopen the tool_use/tool_result
-/// pairing invariant `cap_input_bytes_keeps_tool_use_and_tool_result_paired`
-/// pins. With the head pinned and `tail_budget` saturated to 0, the tail
-/// loop must still drop an older pair as one atomic unit (never just its
-/// `ToolResult` half) rather than splitting it while making room for the
-/// pinned, oversized head.
+/// [F009] A mandatory oversized seed must be rejected instead of being sent
+/// whole (over the declared cap) or silently dropped (losing the task).
 #[test]
-fn cap_input_bytes_keeps_pairing_when_the_oversized_head_is_pinned() {
+fn cap_input_bytes_rejects_an_oversized_head_without_sending_it() {
     let prompt = ConversationMessage::user(MessageId::new(), "x".repeat(50_000));
-    let tool_id_1 = ToolUseId::new();
-    let tool_id_2 = ToolUseId::new();
     let pair1 = [
-        assistant_tool_use(tool_id_1.clone(), "Read"),
-        user_tool_result(tool_id_1.clone(), &"y".repeat(200)),
+        assistant_tool_use(ToolUseId::new(), "Read"),
+        user_tool_result(ToolUseId::new(), &"y".repeat(200)),
     ];
     let pair2 = [
-        assistant_tool_use(tool_id_2.clone(), "Read"),
-        user_tool_result(tool_id_2.clone(), &"z".repeat(50_000)),
+        assistant_tool_use(ToolUseId::new(), "Read"),
+        user_tool_result(ToolUseId::new(), &"z".repeat(50_000)),
     ];
     let mut history = vec![prompt];
     history.extend(pair1.iter().cloned());
@@ -5104,36 +5135,11 @@ fn cap_input_bytes_keeps_pairing_when_the_oversized_head_is_pinned() {
         .iter()
         .map(|m| serde_json::to_vec(m).unwrap().len() as u64)
         .sum();
-    // Room for one small pair, nowhere near enough for the ~50 KB pinned
-    // head — `tail_budget` saturates to 0, so only the atomic-unit guard
-    // decides what else survives.
+    // Room for one small pair, nowhere near enough for the ~50 KB mandatory
+    // head.
     let max = pair1_bytes + 16;
 
-    let capped = super::cap_input_bytes(&history, Some(max));
-
-    let has = |id: &ToolUseId| {
-        let has_tool_use = capped.iter().any(|m| {
-            matches!(m, ConversationMessage::Assistant { content, .. }
-                if content.iter().any(|b| matches!(b, ContentBlock::ToolUse { id: bid, .. } if bid == id)))
-        });
-        let has_tool_result = capped.iter().any(|m| {
-            matches!(m, ConversationMessage::User { content, .. }
-                if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id)))
-        });
-        (has_tool_use, has_tool_result)
-    };
-    let (use1, result1) = has(&tool_id_1);
-    let (use2, result2) = has(&tool_id_2);
-    assert_eq!(
-        use1, result1,
-        "pair 1 must be kept or dropped as a whole unit: tool_use kept={use1}, tool_result kept={result1}"
-    );
-    assert_eq!(
-        use2, result2,
-        "pair 2 must be kept or dropped as a whole unit: tool_use kept={use2}, tool_result kept={result2}"
-    );
-    assert!(
-        use2 && result2,
-        "the newest pair must survive via the `!out.is_empty()` guard"
-    );
+    let error = super::cap_input_bytes(&history, Some(max))
+        .expect_err("an oversized mandatory prompt must be rejected before sending");
+    assert!(error.contains("mandatory initial prompt exceeds"));
 }

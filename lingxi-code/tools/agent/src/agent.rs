@@ -667,7 +667,8 @@ fn parse_fusion_preset(raw: Option<&str>) -> Result<FusionPreset, ToolError> {
 /// entrypoint instead of one silently treating the whole literal as a bare
 /// model id.
 fn parse_fusion_models(raw: &[String]) -> Result<Vec<FusionModelRef>, ToolError> {
-    platform_api::parse_fusion_models(raw).map_err(|error| ToolError::InvalidInput(error.to_string()))
+    platform_api::parse_fusion_models(raw)
+        .map_err(|error| ToolError::InvalidInput(error.to_string()))
 }
 
 fn fusion_request_from_agent(
@@ -975,7 +976,8 @@ struct FusionSpawnReservationGuard {
     resolved_panels: Arc<std::sync::atomic::AtomicU64>,
     /// [round-12 review, finding 3] The largest
     /// `FusionProgress::panels_allocated` any event carried, or 0 when the
-    /// executor published no allocation figure at all.
+    /// executor published `Some(0)`. `allocated_panels_observed` preserves
+    /// the separate `None` (no allocation figure) state.
     ///
     /// `resolved_panels` above is the count the model resolver settled on —
     /// it INCLUDES panels the spawner then rejected pre-allocation
@@ -984,6 +986,10 @@ struct FusionSpawnReservationGuard {
     /// resolved count here made an identical 3-panel dispatch bill 3 slots on
     /// a failure and 2 on a success. See [`allocation_capped_charge`].
     allocated_panels: Arc<std::sync::atomic::AtomicU64>,
+    /// Whether an event explicitly published `panels_allocated: Some(_)`,
+    /// including `Some(0)`. Zero is a valid allocation count and cannot carry
+    /// the missing-value state by itself.
+    allocated_panels_observed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// [round-12 review, finding 3] The number of `panel_n` reservation slots a
@@ -991,14 +997,13 @@ struct FusionSpawnReservationGuard {
 /// the progress events carried and the largest allocation figure they
 /// carried.
 ///
-/// `allocated == 0` is ambiguous — it is what an executor that publishes no
-/// allocation figure looks like, and also what a run where nothing was
-/// allocated looks like — so it falls back to `resolved`, i.e. exactly the
-/// pre-round-12 behaviour. Any published figure is a count of panels a
-/// subagent PROVABLY exists for, and can only ever lower the charge, which is
-/// the same direction (and the same basis) as the `Ok` arm's filter.
-fn allocation_capped_charge(resolved: u64, allocated: u64) -> u64 {
-    if allocated == 0 {
+/// A missing allocation figure is deliberately different from an explicit
+/// `Some(0)`: older/custom executors that publish no figure retain the
+/// conservative resolved-count charge, while a real producer that publishes
+/// a final zero has proved that no child was allocated. Any published figure
+/// can only lower the charge, matching the successful arm's filtering basis.
+fn allocation_capped_charge(resolved: u64, allocated: u64, allocated_observed: bool) -> u64 {
+    if !allocated_observed {
         resolved
     } else {
         resolved.min(allocated)
@@ -1011,12 +1016,14 @@ impl FusionSpawnReservationGuard {
         panel_n: u64,
         resolved_panels: Arc<std::sync::atomic::AtomicU64>,
         allocated_panels: Arc<std::sync::atomic::AtomicU64>,
+        allocated_panels_observed: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         Self {
             registry,
             outstanding: panel_n,
             resolved_panels,
             allocated_panels,
+            allocated_panels_observed,
         }
     }
 
@@ -1061,11 +1068,26 @@ impl Drop for FusionSpawnReservationGuard {
         // the panels the SPAWNER provably allocated a child for, when the
         // executor published that figure — the resolved count includes
         // panels the spawner rejected pre-allocation, which the `Ok` arm has
-        // always filtered out. See [`allocation_capped_charge`].
-        let resolved = self.resolved_panels.load(std::sync::atomic::Ordering::Relaxed);
-        let allocated = self.allocated_panels.load(std::sync::atomic::Ordering::Relaxed);
-        let charge = allocation_capped_charge(resolved, allocated);
-        let release = if resolved == 0 {
+        // always filtered out. An explicit `Some(0)` remains a real zero;
+        // only a missing figure falls back conservatively. See
+        // [`allocation_capped_charge`].
+        let resolved = self
+            .resolved_panels
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let allocated = self
+            .allocated_panels
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let allocated_observed = self
+            .allocated_panels_observed
+            .load(std::sync::atomic::Ordering::Relaxed);
+        // The forwarder writes the resolved and allocated latches separately.
+        // A parent can drop this future after observing the allocation write
+        // but before observing the resolved-total write from the same event.
+        // Preserve that proven child instead of treating `resolved == 0` as
+        // proof that no panel exists; this mirrors the normal Err arm.
+        let charge_basis = resolved.max(allocated);
+        let charge = allocation_capped_charge(charge_basis, allocated, allocated_observed);
+        let release = if charge_basis == 0 {
             self.outstanding
         } else {
             self.outstanding.saturating_sub(charge)
@@ -1200,6 +1222,26 @@ impl AgentTool {
 
     fn fresh_invocation_id() -> String {
         tool_api::util::ids::ulid_or_uuid()
+    }
+
+    /// Resolve the trusted session that owns this tool call. Top-level calls
+    /// read the live session cell; nested calls use the explicit origin hop
+    /// stamped by the parent runner. Never infer this from hook/session
+    /// metadata because those may describe a boot session after resume.
+    async fn origin_session_id(ctx: &ToolUseContext) -> Option<protocol::SessionId> {
+        if let Some(session) = ctx.session.as_ref() {
+            return Some(session.lock().await.session_id);
+        }
+        ctx.origin_session_id
+    }
+
+    fn budget_for_origin(
+        budget: Arc<dyn platform_api::budget::BudgetEnforcerHandle>,
+        origin_session_id: Option<protocol::SessionId>,
+    ) -> Arc<dyn platform_api::budget::BudgetEnforcerHandle> {
+        origin_session_id
+            .and_then(|session_id| budget.scoped_for_session(session_id))
+            .unwrap_or(budget)
     }
 
     fn fusion_surface(&self) -> FusionAgentSurface {
@@ -1398,6 +1440,8 @@ impl AgentTool {
                 "AgentTool: BudgetEnforcerHandle not wired into BuiltinToolContext".into(),
             ));
         };
+        let origin_session_id = Self::origin_session_id(&ctx).await;
+        let budget = Self::budget_for_origin(budget, origin_session_id);
         if let Err(BudgetError::Exceeded { current_nano_usd }) = budget.check_and_charge(0).await {
             Self::emit_failed(
                 bus,
@@ -1424,7 +1468,7 @@ impl AgentTool {
         // dashboard joining started -> terminal on `invocation_id` showed
         // the invocation running forever and per-type failure counts
         // under-reported exactly the invalid-request class.
-        let request = match fusion_request_from_agent(
+        let mut request = match fusion_request_from_agent(
             self.ctx.main_loop_model_profile_provider.as_ref(),
             &parsed,
             &ctx,
@@ -1443,6 +1487,12 @@ impl AgentTool {
                 return Err(err);
             }
         };
+        // Fusion's orchestrator scopes its budget ledger from the request's
+        // conversation id.  Read the live session immediately before dispatch
+        // so a session switch that happened earlier in this turn cannot leave
+        // the request unscoped (the parser intentionally has no session
+        // dependency and keeps this wire field `None` for other callers).
+        request.conversation_id = origin_session_id.map(|session_id| session_id.to_string());
         let panel_n = u64::from(fusion_panel_count(&parsed, surface));
         let cap = max_subagents_per_session();
         // [round-2 review, findings 4 & 13] `panel_stage_observed` must exist
@@ -1455,6 +1505,7 @@ impl AgentTool {
         // `panel_stage_observed`, for the allocation figure that tells the
         // resolved panel count from the panels a subagent provably exists for.
         let panels_allocated_observed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let panels_allocated_figure_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut reservation_guard: Option<FusionSpawnReservationGuard> = None;
         if let Some(registry) = &self.ctx.task_registry {
             if let Err(spawned) = registry.try_reserve_total_agent_spawns(panel_n, cap) {
@@ -1476,6 +1527,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 panel_n,
                 Arc::clone(&panel_stage_observed),
                 Arc::clone(&panels_allocated_observed),
+                Arc::clone(&panels_allocated_figure_seen),
             ));
         }
 
@@ -1538,6 +1590,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // could only complete after spawning).
         let panel_stage_observed_writer = panel_stage_observed.clone();
         let panels_allocated_writer = panels_allocated_observed.clone();
+        let panels_allocated_figure_seen_writer = panels_allocated_figure_seen.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = prog_rx.recv().await {
                 // [round-5 review, finding 10] Keep the LARGEST resolved
@@ -1560,6 +1613,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 // every panel finished — hence after every allocation — so
                 // the max equals the run's final allocated count.
                 if let Some(allocated) = event.panels_allocated {
+                    panels_allocated_figure_seen_writer
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     panels_allocated_writer
                         .fetch_max(u64::from(allocated), std::sync::atomic::Ordering::Relaxed);
                 }
@@ -1655,13 +1710,17 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                     panel_stage_observed.load(std::sync::atomic::Ordering::Relaxed);
                 let allocated_panels =
                     panels_allocated_observed.load(std::sync::atomic::Ordering::Relaxed);
+                let allocated_panels_observed =
+                    panels_allocated_figure_seen.load(std::sync::atomic::Ordering::Relaxed);
+                let has_allocated_fact = allocated_panels_observed && allocated_panels > 0;
                 let releases_full_reservation = fusion_error_is_preflight(&err)
                     || (matches!(err, platform_api::FusionError::Cancelled)
-                        && resolved_panels == 0);
+                        && resolved_panels == 0
+                        && !has_allocated_fact);
                 if let Some(guard) = reservation_guard.as_mut() {
                     if releases_full_reservation {
                         guard.release(panel_n);
-                    } else if resolved_panels > 0 {
+                    } else if resolved_panels > 0 || has_allocated_fact {
                         // [round-5 review, finding 10] The panels genuinely
                         // ran, so the reservation stays charged — but only
                         // for the panels that genuinely EXIST. `panel_n` was
@@ -1684,12 +1743,18 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                         // `fusion_panels_that_reached_the_spawner`; charging
                         // them here made an identical 3-panel dispatch bill
                         // 3 slots on a failure and 2 on a success. See
-                        // [`allocation_capped_charge`] for why a published
-                        // figure of 0 falls back to the resolved count
-                        // instead of refunding everything.
+                        // [`allocation_capped_charge`] for why a missing
+                        // figure falls back to the resolved count while an
+                        // explicit Some(0) refunds every unresolved slot.
+                        // A synchronous allocation receipt can arrive before
+                        // the orchestrator publishes a resolved-panel stage;
+                        // use the observed allocation as the minimum basis in
+                        // that narrow outer-cancel window.
+                        let charge_basis = resolved_panels.max(allocated_panels);
                         guard.release(panel_n.saturating_sub(allocation_capped_charge(
-                            resolved_panels,
+                            charge_basis,
                             allocated_panels,
+                            allocated_panels_observed,
                         )));
                     }
                     // Either a release above just settled it, or the
@@ -1856,7 +1921,12 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let fusion_notice = agents
             .iter()
             .find(|a| a.agent_type == FUSION_AGENT_TYPE)
-            .map(|entry| format!(" `{}` is also available: {}", entry.agent_type, entry.when_to_use));
+            .map(|entry| {
+                format!(
+                    " `{}` is also available: {}",
+                    entry.agent_type, entry.when_to_use
+                )
+            });
         let agent_list_section =
             if platform_api::subagent_spawn::should_inject_agent_list_in_messages() {
                 format!(
@@ -2570,6 +2640,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
         is_fork: bool,
         ctx: &ToolUseContext,
         budget: Arc<dyn platform_api::budget::BudgetEnforcerHandle>,
+        origin_session_id: Option<protocol::SessionId>,
         parent_registry: Arc<tool_api::ToolRegistry>,
         effective_isolation: Option<String>,
         resolved_cwd: Option<String>,
@@ -2589,10 +2660,9 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
         // (`local_agent.rs`'s `inheritance.unwrap_or_else(|| ... )` only
         // falls back to `local_agent_invoker` for legacy direct tasks with
         // no inheritance at all).
-        let mut invoker_impl = tool_api::tool_invoker_impl::RegistryToolInvoker::new(
-            parent_registry,
-        )
-        .with_background_owned(true);
+        let mut invoker_impl =
+            tool_api::tool_invoker_impl::RegistryToolInvoker::new(parent_registry)
+                .with_background_owned(true);
         if let Some(gate) = self.ctx.permission_gate.clone() {
             invoker_impl = invoker_impl.with_gate(gate);
         }
@@ -2653,6 +2723,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             creator_teammate_name: ctx.agent_name.clone(),
             creator_team_name: ctx.team_name.clone(),
             creator_agent_id: ctx.agent_id,
+            origin_session_id,
             // Workflow-only spawn seam (defaults; the Agent tool doesn't use the
             // workflow-subagent prompt override/addendum or disallow-union).
             system_prompt_override: None,
@@ -2856,8 +2927,23 @@ impl Tool for AgentTool {
     fn is_open_world(&self, _: &Value) -> bool {
         true
     }
-    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
-        InterruptBehavior::Cancel
+    fn interrupt_behavior(&self, input: &Value) -> InterruptBehavior {
+        // Fusion owns a multi-stage settlement state (including already
+        // realized panel spend and spawn-quota refunds).  The outer turn-loop
+        // dispatcher drops `Cancel` tool futures as soon as the shared token
+        // fires, which bypasses Fusion's internal settlement arms.  Keep the
+        // Fusion input cooperative at this boundary so its own cancellation
+        // path observes the token and returns only after accounting is sealed;
+        // ordinary Agent spawns retain the existing drop-on-cancel behavior.
+        let is_fusion = input
+            .get("subagent_type")
+            .and_then(Value::as_str)
+            .is_some_and(|agent_type| normalize_agent_type(agent_type) == FUSION_AGENT_TYPE);
+        if is_fusion {
+            InterruptBehavior::Block
+        } else {
+            InterruptBehavior::Cancel
+        }
     }
 
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
@@ -3362,6 +3448,8 @@ impl Tool for AgentTool {
                 "AgentTool: BudgetEnforcerHandle not wired into BuiltinToolContext".into(),
             )
         })?;
+        let origin_session_id = Self::origin_session_id(&ctx).await;
+        let budget = Self::budget_for_origin(budget, origin_session_id);
         if let Err(BudgetError::Exceeded { current_nano_usd }) = budget.check_and_charge(0).await {
             Self::emit_failed(
                 &bus,
@@ -3648,6 +3736,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     is_fork,
                     &ctx,
                     budget.clone(),
+                    origin_session_id,
                     parent_registry.clone(),
                     effective_isolation.clone(),
                     resolved_cwd,
@@ -3790,6 +3879,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             creator_teammate_name: ctx.agent_name.clone(),
             creator_team_name: ctx.team_name.clone(),
             creator_agent_id: ctx.agent_id,
+            origin_session_id,
             // Workflow-only spawn seam (defaults; unused by the Agent tool).
             system_prompt_override: None,
             system_prompt_addendum: None,
@@ -4275,7 +4365,10 @@ mod f_description_l_gate_tests {
             std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
             AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true, LEAN_MODEL, true)
         });
-        assert!(!p.contains("also available"), "no fusion entry ⇒ no notice; got: {p:?}");
+        assert!(
+            !p.contains("also available"),
+            "no fusion entry ⇒ no notice; got: {p:?}"
+        );
     }
 }
 

@@ -1902,6 +1902,7 @@ fn make_request(
         system_prompt_addendum,
         additional_disallowed_tools,
         depth: 0,
+        origin_session_id: None,
         // Workflow-spawned agents are top-level ⇒ the spawner's default anchors.
         parent_model_override: None,
         forked_skill_name: None,
@@ -2329,6 +2330,10 @@ pub struct NestedConfig {
     /// `None` ⇒ only built-in/project/user workflows resolve, exactly
     /// today's behavior.
     pub plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
+    /// Session that owns this workflow run. Fusion requests keep this
+    /// original session identity even if the active router/model changes
+    /// before a background workflow reaches its next `fusion()` call.
+    pub session_uuid: Option<String>,
 }
 
 /// Per-call plan for one batch: decided sequentially in Phase A (prefix-cache
@@ -2676,6 +2681,7 @@ async fn run_workflow_script_with_live_updates_and_fusion(
         args: nested_args,
         fs: nested_fs,
         plugin_workflows: nested_plugin_workflows,
+        session_uuid: workflow_session_uuid,
     } = nested;
     use std::sync::atomic::Ordering;
 
@@ -2880,11 +2886,13 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                 // alone and never see a real cap failure once budget frees
                 // up.
                 if let Some(total) = token_budget_total.filter(|&t| t > 0) {
-                    let turn_spent = spent.load(Ordering::Relaxed).saturating_sub(turn_start_baseline);
+                    let turn_spent = spent
+                        .load(Ordering::Relaxed)
+                        .saturating_sub(turn_start_baseline);
                     if turn_spent >= total {
-                        let _ = call
-                            .reply
-                            .send(wf_throw(&workflow_budget_exceeded_message(turn_spent, total)));
+                        let _ = call.reply.send(wf_throw(&workflow_budget_exceeded_message(
+                            turn_spent, total,
+                        )));
                         continue;
                     }
                 }
@@ -2935,18 +2943,25 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                         parent_model.as_deref(),
                         parent_model_profile.as_deref(),
                     ) {
-                        Ok(request) => {
+                        Ok(mut request) => {
+                            // Keep a background workflow tied to the session
+                            // that launched it. The Fusion engine uses this
+                            // named request identity to select the scoped
+                            // budget, so do not infer it from the current
+                            // router/model state at dispatch time.
+                            request.conversation_id = workflow_session_uuid.clone();
+                            let executor = fusion
+                                .as_ref()
+                                .expect("fusion request parsing requires an executor")
+                                .clone();
                             let inherit = FusionInheritance::new(
                                 SubagentInheritance {
                                     tool_invoker: tool_invoker.clone(),
                                     budget: budget.clone(),
                                 },
                                 fusion_cancel.clone(),
-                            );
-                            let executor = fusion
-                                .as_ref()
-                                .expect("fusion request parsing requires an executor")
-                                .clone();
+                            )
+                            .with_effective_timeout_ms(executor.effective_timeout_ms());
                             // KNOWN GAP (G012, tracked as a cross-lane
                             // residual — see local_workflow_test.rs's removed
                             // `workflow_fusion_run_inherits_the_workflow_
@@ -2986,9 +3001,8 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                             // batches, so a workflow's `fusion()` call is no
                             // longer completely silent between dispatch and
                             // its (up to 15-minute) result.
-                            let (fusion_prog_tx, mut fusion_prog_rx) = tokio::sync::mpsc::channel::<
-                                platform_api::FusionProgress,
-                            >(32);
+                            let (fusion_prog_tx, mut fusion_prog_rx) =
+                                tokio::sync::mpsc::channel::<platform_api::FusionProgress>(32);
                             let forward_progress_tx = worker_progress_tx.clone();
                             // [Finding 12] Track the LAST `realized_output_tokens`
                             // seen on the progress channel — the orchestrator
@@ -3006,8 +3020,10 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                                         last_realized_output_tokens = Some(tokens);
                                     }
                                     if let Some(tx) = &forward_progress_tx {
-                                        let _ = tx
-                                            .send(format!("[workflow_fusion] {}", event.stage.label()));
+                                        let _ = tx.send(format!(
+                                            "[workflow_fusion] {}",
+                                            event.stage.label()
+                                        ));
                                     }
                                 }
                                 last_realized_output_tokens
@@ -3022,16 +3038,18 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                                     match serde_json::to_string(&result) {
                                         Ok(encoded) => {
                                             if let Some(j) = journal.as_ref() {
-                                                j.lock().unwrap().insert(key.clone(), encoded.clone());
+                                                j.lock()
+                                                    .unwrap()
+                                                    .insert(key.clone(), encoded.clone());
                                             }
                                             if let Some(writer) = &journal_writer {
                                                 writer.append_result(&key, "", &encoded).await;
                                             }
                                             encoded
                                         }
-                                        Err(_) => wf_throw(
-                                            "fusion() host could not serialize the result",
-                                        ),
+                                        Err(_) => {
+                                            wf_throw("fusion() host could not serialize the result")
+                                        }
                                     }
                                 }
                                 Err(error) => {
@@ -3127,6 +3145,7 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                     let ptx = worker_progress_tx.clone();
                     let live_tx = worker_live_progress_tx.clone();
                     let workflow_metrics = workflow_metrics.clone();
+                    let workflow_session_uuid = workflow_session_uuid.clone();
                     async move {
                         if !matches!(&plan, Plan::Resolve(_)) {
                             if let Some(total) = budget_total.filter(|&t| t > 0) {
@@ -3353,7 +3372,10 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                             tool_invoker,
                             budget,
                         };
-                        let request = make_request(&subagent_type, &prompt, &opts_json);
+                        let mut request = make_request(&subagent_type, &prompt, &opts_json);
+                        request.origin_session_id = workflow_session_uuid
+                            .as_deref()
+                            .and_then(protocol::SessionId::parse_prefixed);
                         let queued_ms = unix_time_ms_now();
                         emit_workflow_agent_queued(
                             ptx.as_ref(),
@@ -3602,7 +3624,7 @@ impl Task for LocalWorkflowHandler {
     ) -> Result<TaskHandle, TaskError> {
         // 1. Only the LocalWorkflow variant is accepted.
         let TaskSpawnInput::LocalWorkflow {
-            session_uuid: _session_uuid,
+            session_uuid,
             workflow_id,
             script,
             resume_from_run_id,
@@ -3686,7 +3708,16 @@ impl Task for LocalWorkflowHandler {
         let spawner = self.spawner.clone();
         let worktree_manager = self.worktree_manager.clone();
         let tool_invoker = self.tool_invoker.clone();
-        let budget = self.budget.clone();
+        // A background workflow keeps the budget ledger of the session that
+        // launched it. Scope once at task spawn so every later agent() and
+        // fusion() dispatch inherits the same handle even after a clear/resume
+        // switches the active router. Legacy/unparseable ids retain the
+        // composition-root handle.
+        let budget = session_uuid
+            .as_deref()
+            .and_then(protocol::SessionId::parse_prefixed)
+            .and_then(|session_id| self.budget.scoped_for_session(session_id))
+            .unwrap_or_else(|| self.budget.clone());
         let status_sink = self.status_sink.clone();
         let workflow_progress_sink = self.workflow_progress_sink.clone();
         let workers = self.workers.clone();
@@ -3978,6 +4009,7 @@ impl Task for LocalWorkflowHandler {
                         args: workflow_args,
                         fs: Some(fs.clone()),
                         plugin_workflows: plugin_workflows.clone(),
+                        session_uuid: session_uuid.clone(),
                     },
                     worker_cancel,
                     worker_fusion_cancel,

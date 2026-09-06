@@ -1398,7 +1398,7 @@ async fn run_subagent_loop(
                         &mut transcript_written,
                         agent_id,
                         error,
-                    cumulative_usage.clone(),
+                        cumulative_usage.clone(),
                     )
                     .await;
                     return;
@@ -1481,7 +1481,8 @@ async fn run_subagent_loop(
                     // partial (empty vec); a mid-stream error yields whatever
                     // blocks were finalized.
                     let profile = ctx.model_profile.as_deref();
-                    let messages_for_api = cap_input_bytes(&history, ctx.max_input_bytes_per_turn);
+                    let messages_for_api = cap_input_bytes(&history, ctx.max_input_bytes_per_turn)
+                        .map_err(|message| (Vec::new(), LlmError::InvalidRequest { message }))?;
                     let call_opts = crate::api::SubagentApiCallOpts {
                         max_output_tokens: ctx.max_output_tokens_per_turn,
                         query_source_label: ctx.query_source_label.clone(),
@@ -1663,7 +1664,7 @@ async fn run_subagent_loop(
                                 "{} {e}",
                                 platform_api::subagent_spawn::SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX
                             ),
-                        cumulative_usage.clone(),
+                            cumulative_usage.clone(),
                         )
                         .await;
                         return;
@@ -1735,7 +1736,7 @@ async fn run_subagent_loop(
                                 &mut transcript_written,
                                 agent_id,
                                 format!("subagent api error: {e}"),
-                            cumulative_usage.clone(),
+                                cumulative_usage.clone(),
                             )
                             .await;
                             return;
@@ -1846,7 +1847,7 @@ async fn run_subagent_loop(
                         &mut transcript_written,
                         agent_id,
                         "subagent requested a tool but no tool_invoker was inherited".to_string(),
-                    cumulative_usage.clone(),
+                        cumulative_usage.clone(),
                     )
                     .await;
                     return;
@@ -1921,6 +1922,7 @@ async fn run_subagent_loop(
                     }
                     let inv_ctx = platform_api::tool_invoker::SubagentInvocationContext {
                         parent_agent_id: ctx.parent_agent_id,
+                        origin_session_id: ctx.origin_session_id,
                         // Swarm identity (claude-code `getAgentName()` /
                         // `getTeammateContext()?.teamName`): a teammate's dispatched
                         // tools see the teammate's DISPLAY name + team name so the
@@ -2029,7 +2031,7 @@ async fn run_subagent_loop(
                                 &mut transcript_written,
                                 agent_id,
                                 error,
-                            cumulative_usage.clone(),
+                                cumulative_usage.clone(),
                             )
                             .await;
                             return;
@@ -2516,7 +2518,9 @@ fn accumulate_usage(acc: &mut llm_client::Usage, turn: &llm_client::Usage) {
 /// — every other message is its own unit. Every provider rejects a
 /// `tool_result` with no matching `tool_use` in the same request (and vice
 /// versa), so [`cap_input_bytes`] must never keep one half of such a pair.
-fn tool_pair_units(messages: &[protocol::ConversationMessage]) -> Vec<&[protocol::ConversationMessage]> {
+fn tool_pair_units(
+    messages: &[protocol::ConversationMessage],
+) -> Vec<&[protocol::ConversationMessage]> {
     let mut units = Vec::new();
     let mut i = 0;
     while i < messages.len() {
@@ -2547,63 +2551,82 @@ fn tool_pair_units(messages: &[protocol::ConversationMessage]) -> Vec<&[protocol
 fn cap_input_bytes(
     messages: &[protocol::ConversationMessage],
     max_bytes: Option<u64>,
-) -> Vec<protocol::ConversationMessage> {
+) -> Result<Vec<protocol::ConversationMessage>, String> {
     let Some(max) = max_bytes else {
-        return messages.to_vec();
+        return Ok(messages.to_vec());
     };
     let units = tool_pair_units(messages);
-    let unit_bytes = |unit: &[protocol::ConversationMessage]| -> u64 {
-        unit.iter()
-            .map(|msg| {
-                serde_json::to_vec(msg)
-                    .map(|bytes| bytes.len() as u64)
-                    .unwrap_or(0)
-            })
-            .sum()
+    if units.is_empty() {
+        return Ok(Vec::new());
     };
 
-    // [F009, round-4 review item 6] `history`'s FIRST unit is the caller's
-    // seeded task/fork prefix (`ctx.prompt_messages`, extended onto
-    // `history` before the first turn — see the seeding block above
-    // `run_subagent`'s turn loop). A Fusion panel's ENTIRE task text lives
-    // in that one unit and nothing re-injects it on a later turn, so the
-    // tail-only fill below must never evict it — including when that one
-    // unit alone is bigger than `max`. Pinning it only when it happened to
-    // fit the budget (the round-3 version of this comment) meant that on
-    // any turn where the lone prompt unit was itself over-budget, the
-    // "keep only what fits, newest-first" tail fallback below dropped it
-    // outright, silently sending a request with NO task from turn 2 onward
-    // — an over-budget task sent whole is strictly better than a request
-    // with no task at all, so the head is pinned unconditionally whenever
-    // there is more than one unit. `tail_budget` still saturates to 0 in
-    // that case, so the tail loop below falls back to its own
-    // `!out.is_empty()` guard and keeps at least the single newest unit on
-    // top of the pinned head.
-    let pin_head = units.len() > 1;
-    let head_bytes = if pin_head { unit_bytes(units[0]) } else { 0 };
-    let tail_budget = max.saturating_sub(head_bytes);
-    let tail_start = usize::from(pin_head);
+    // Measure the exact serialized message array, not the sum of individual
+    // message encodings. The latter omits array framing and could still send a
+    // request over the declared byte cap.
+    let serialized_bytes = |candidate: &[&[protocol::ConversationMessage]]| -> u64 {
+        let flattened: Vec<protocol::ConversationMessage> = candidate
+            .iter()
+            .flat_map(|unit| unit.iter().cloned())
+            .collect();
+        serde_json::to_vec(&flattened)
+            .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+            .unwrap_or(u64::MAX)
+    };
 
-    let mut out: Vec<&[protocol::ConversationMessage]> = Vec::new();
-    let mut used = 0u64;
-    for unit in units[tail_start..].iter().rev() {
-        let size = unit_bytes(unit);
-        if !out.is_empty() && used.saturating_add(size) > tail_budget {
-            break;
+    // The first seeded task/fork unit is mandatory: Fusion puts its entire
+    // task text here and never re-injects it on later turns. Sending it whole
+    // when over-cap violated the cap; dropping it silently violated task
+    // semantics. Reject explicitly instead.
+    let head = units[0];
+    let head_bytes = serialized_bytes(&[head]);
+    if head_bytes > max {
+        return Err(format!(
+            "mandatory initial prompt exceeds max_input_bytes_per_turn ({head_bytes} > {max})"
+        ));
+    }
+
+    // The newest unit is the current turn's continuation (usually a tool
+    // result pair) and is also mandatory. Reject when preserving it together
+    // with the seed would exceed the cap rather than silently sending stale,
+    // incomplete history. Older units may be dropped as whole units.
+    let mut selected_tail: Vec<&[protocol::ConversationMessage]> = Vec::new();
+    if let Some(newest) = units.get(1..).and_then(|tail| tail.last()).copied() {
+        if serialized_bytes(&[head, newest]) > max {
+            let newest_bytes = serialized_bytes(&[newest]);
+            return Err(format!(
+                "mandatory latest tool/message unit exceeds max_input_bytes_per_turn when combined with the initial prompt ({head_bytes} + {newest_bytes} > {max})"
+            ));
         }
-        used = used.saturating_add(size);
-        out.push(unit);
+        selected_tail.push(newest);
     }
-    out.reverse();
-    if pin_head {
-        out.insert(0, units[0]);
-    }
-    if out.is_empty() {
-        if let Some(last_unit) = units.last() {
-            out.push(last_unit);
+
+    // Fill from the newest older unit backwards, keeping each tool_use /
+    // tool_result pair atomic. A unit that does not fit is dropped and the
+    // search continues; no over-cap fallback is permitted.
+    if units.len() > 2 {
+        for unit in units[1..units.len() - 1].iter().rev() {
+            let mut candidate = Vec::with_capacity(selected_tail.len() + 2);
+            candidate.push(head);
+            candidate.extend(selected_tail.iter().copied());
+            candidate.push(unit);
+            if serialized_bytes(&candidate) <= max {
+                selected_tail.push(unit);
+            }
         }
     }
-    out.into_iter().flatten().cloned().collect()
+
+    selected_tail.reverse();
+    let mut out =
+        Vec::with_capacity(head.len() + selected_tail.iter().map(|unit| unit.len()).sum::<usize>());
+    out.extend(head.iter().cloned());
+    for unit in selected_tail {
+        out.extend(unit.iter().cloned());
+    }
+    debug_assert!(
+        serialized_bytes(&[&out]) <= max,
+        "cap_input_bytes must never return an over-cap request"
+    );
+    Ok(out)
 }
 
 #[cfg(test)]

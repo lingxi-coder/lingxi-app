@@ -70,8 +70,8 @@ fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
             response_char_count: 0,
             last_request_id: None,
             cumulative_usage: SubagentUsage::default(),
-                usage_complete: true,
-}),
+            usage_complete: true,
+        }),
     );
     metrics.record_result(
         2,
@@ -162,6 +162,7 @@ fn a_same_named_custom_workflow_gets_no_workspace_lease() {
 struct EchoSpawner {
     seen: StdMutex<Vec<String>>,
     seen_reqs: StdMutex<Vec<SubagentSpawnRequest>>,
+    inherited_budget_totals: Option<Arc<StdMutex<Vec<u64>>>>,
     fail: bool,
     total_tokens: u64,
     total_tool_use_count: u64,
@@ -224,7 +225,7 @@ fn completed_probe_result(agent_id: protocol::AgentId) -> SubagentResult {
         last_request_id: None,
         cumulative_usage: SubagentUsage::default(),
         usage_complete: true,
-}
+    }
 }
 
 #[async_trait]
@@ -722,8 +723,12 @@ impl SubagentSpawner for EchoSpawner {
     async fn spawn(
         &self,
         request: SubagentSpawnRequest,
-        _inherit: SubagentInheritance,
+        inherit: SubagentInheritance,
     ) -> Result<SubagentResult, SubagentSpawnError> {
+        if let Some(totals) = &self.inherited_budget_totals {
+            let total = inherit.budget.snapshot_total_nano_usd().await;
+            totals.lock().unwrap().push(total);
+        }
         self.seen.lock().unwrap().push(request.prompt.clone());
         self.seen_reqs.lock().unwrap().push(request.clone());
         if self.fail {
@@ -747,8 +752,8 @@ impl SubagentSpawner for EchoSpawner {
             response_char_count: 0,
             last_request_id: None,
             cumulative_usage: SubagentUsage::default(),
-                usage_complete: true,
-})
+            usage_complete: true,
+        })
     }
 }
 
@@ -837,6 +842,68 @@ impl BudgetEnforcerHandle for MockBudget {
     }
     async fn snapshot_total_nano_usd(&self) -> u64 {
         0
+    }
+}
+
+struct RecordingBudget {
+    scoped: Arc<StdMutex<Vec<protocol::SessionId>>>,
+    scoped_total: u64,
+}
+
+#[async_trait]
+impl BudgetEnforcerHandle for RecordingBudget {
+    async fn check_and_charge(&self, _nano_usd: u64) -> Result<(), BudgetError> {
+        Ok(())
+    }
+
+    async fn snapshot_total_nano_usd(&self) -> u64 {
+        0
+    }
+
+    fn scoped_for_session(
+        &self,
+        session_id: protocol::SessionId,
+    ) -> Option<Arc<dyn BudgetEnforcerHandle>> {
+        self.scoped.lock().unwrap().push(session_id);
+        Some(Arc::new(SnapshotBudget(self.scoped_total)))
+    }
+}
+
+struct SnapshotBudget(u64);
+
+#[async_trait]
+impl BudgetEnforcerHandle for SnapshotBudget {
+    async fn check_and_charge(&self, _nano_usd: u64) -> Result<(), BudgetError> {
+        Ok(())
+    }
+
+    async fn snapshot_total_nano_usd(&self) -> u64 {
+        self.0
+    }
+}
+
+struct BudgetInspectingFusionExecutor {
+    inherited_budget_totals: Arc<StdMutex<Vec<u64>>>,
+}
+
+#[async_trait]
+impl FusionExecutor for BudgetInspectingFusionExecutor {
+    async fn run(
+        &self,
+        _request: FusionRequest,
+        inherit: FusionInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        let total = inherit.budget().snapshot_total_nano_usd().await;
+        self.inherited_budget_totals.lock().unwrap().push(total);
+        Ok(workflow_fusion_result())
+    }
+
+    fn agent_surface(&self) -> FusionAgentSurface {
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        }
     }
 }
 
@@ -1155,8 +1222,8 @@ impl SubagentSpawner for TranscriptOverrideSpawner {
             response_char_count: 0,
             last_request_id: None,
             cumulative_usage: SubagentUsage::default(),
-                usage_complete: true,
-})
+            usage_complete: true,
+        })
     }
 }
 
@@ -1280,8 +1347,8 @@ async fn run_with_progress_drain_completes_and_does_not_hang() {
                 response_char_count: 0,
                 last_request_id: None,
                 cumulative_usage: SubagentUsage::default(),
-                        usage_complete: true,
-})
+                usage_complete: true,
+            })
         }
     }
 
@@ -2364,6 +2431,7 @@ async fn top_level_args_global_reaches_the_script() {
             args: Some(r#"{"a":5}"#.to_string()),
             fs: None,
             plugin_workflows: None,
+            session_uuid: None,
         },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
@@ -2410,6 +2478,7 @@ async fn workflow_runs_a_nested_scriptpath_inline_sharing_the_runtime() {
             args: None,
             fs: Some(fs),
             plugin_workflows: None,
+            session_uuid: None,
         },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
@@ -2433,7 +2502,9 @@ async fn workflow_runs_a_nested_scriptpath_inline_sharing_the_runtime() {
 
 #[tokio::test]
 async fn workflow_runs_a_nested_name_from_user_workflows_dir() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _g = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let config_dir = tempdir().unwrap();
     let workflows_dir = config_dir.path().join("workflows");
     std::fs::create_dir_all(&workflows_dir).unwrap();
@@ -2469,6 +2540,7 @@ async fn workflow_runs_a_nested_name_from_user_workflows_dir() {
             args: None,
             fs: Some(fs),
             plugin_workflows: None,
+            session_uuid: None,
         },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
@@ -2502,7 +2574,9 @@ async fn workflow_runs_a_nested_name_from_plugin_workflow_registry() {
     // Serializes with the CONFIG_DIR_ENV mutators above: this test does not
     // change the var itself, but `resolve_nested_script`'s project/user probe
     // (which must miss for this test to isolate the plugin branch) reads it.
-    let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _g = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let script_dir = tempdir().unwrap();
     let script_path = script_dir.path().join("deploy.js");
     std::fs::write(&script_path, "return { source: 'plugin', n: args.n };").unwrap();
@@ -2537,6 +2611,7 @@ async fn workflow_runs_a_nested_name_from_plugin_workflow_registry() {
             args: None,
             fs: Some(fs),
             plugin_workflows: Some(registry),
+            session_uuid: None,
         },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
@@ -2565,6 +2640,85 @@ fn make_handler(
 }
 
 #[tokio::test]
+async fn local_workflow_scopes_budget_to_its_origin_session_at_spawn() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let dir = tempfile::tempdir().unwrap();
+    let output_manager = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let scoped = Arc::new(StdMutex::new(Vec::new()));
+    let agent_budget_totals = Arc::new(StdMutex::new(Vec::new()));
+    let fusion_budget_totals = Arc::new(StdMutex::new(Vec::new()));
+    const SCOPED_TOTAL: u64 = 42_424;
+    let budget: Arc<dyn BudgetEnforcerHandle> = Arc::new(RecordingBudget {
+        scoped: scoped.clone(),
+        scoped_total: SCOPED_TOTAL,
+    });
+    let spawner = Arc::new(EchoSpawner {
+        inherited_budget_totals: Some(agent_budget_totals.clone()),
+        ..Default::default()
+    });
+    let status_sink = Arc::new(RecordingSink::default());
+    let handler = LocalWorkflowHandler::new(
+        spawner.clone(),
+        Arc::new(MockInvoker),
+        budget,
+        output_manager,
+    )
+    .with_status_sink(status_sink.clone())
+    .with_fusion(Arc::new(BudgetInspectingFusionExecutor {
+        inherited_budget_totals: fusion_budget_totals.clone(),
+    }));
+    let expected = protocol::SessionId::parse_prefixed("11111111-2222-4333-8444-555555555555")
+        .expect("valid session id");
+    let mut input = workflow_input(
+        "const a = await agent('probe'); const f = await fusion('probe'); return { a, f };",
+    );
+    let TaskSpawnInput::LocalWorkflow {
+        session_uuid,
+        parent_model,
+        parent_model_profile,
+        ..
+    } = &mut input
+    else {
+        unreachable!("workflow_input builds a LocalWorkflow request");
+    };
+    *session_uuid = Some(expected.as_uuid().to_string());
+    *parent_model = Some("gpt-5.4".into());
+    *parent_model_profile = Some("openai".into());
+
+    let handle = handler
+        .spawn(input, make_ctx(fs))
+        .await
+        .expect("workflow spawn succeeds");
+    assert_eq!(*scoped.lock().unwrap(), vec![expected]);
+
+    assert_eq!(await_terminal(&status_sink).await, TaskStatus::Completed);
+    assert_eq!(
+        *agent_budget_totals.lock().unwrap(),
+        vec![SCOPED_TOTAL],
+        "agent() must inherit the scoped handle returned at workflow spawn"
+    );
+    assert_eq!(
+        spawner
+            .seen_reqs
+            .lock()
+            .unwrap()
+            .first()
+            .and_then(|request| request.origin_session_id),
+        Some(expected),
+        "workflow agent() children must carry the trusted origin session for their own descendants"
+    );
+    assert_eq!(
+        *fusion_budget_totals.lock().unwrap(),
+        vec![SCOPED_TOTAL],
+        "fusion() must inherit the same scoped handle for the workflow lifetime"
+    );
+    assert!(!handle.task_id.is_empty());
+}
+
+#[tokio::test]
 async fn workflow_fusion_round_trips_a_compact_result() {
     let executor = ImmediateFusionExecutor::new(
         FusionAgentSurface {
@@ -2589,7 +2743,10 @@ async fn workflow_fusion_round_trips_a_compact_result() {
         None,
         None,
         0,
-        NestedConfig::default(),
+        NestedConfig {
+            session_uuid: Some("11111111-2222-4333-8444-555555555555".into()),
+            ..Default::default()
+        },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         CancellationToken::new(),
         Some(executor.clone()),
@@ -2627,6 +2784,10 @@ async fn workflow_fusion_round_trips_a_compact_result() {
     let seen = executor.seen.lock().unwrap();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].origin, platform_api::FusionOrigin::Workflow);
+    assert_eq!(
+        seen[0].conversation_id.as_deref(),
+        Some("11111111-2222-4333-8444-555555555555")
+    );
     assert_eq!(seen[0].workflow_run_id.as_deref(), Some("wf_fusion"));
     assert_eq!(seen[0].parent_model, "gpt-5.4");
     assert_eq!(seen[0].parent_profile, "openai");
@@ -2655,10 +2816,7 @@ async fn workflow_fusion_resume_hits_the_journal_and_never_calls_the_executor() 
         "review this",
         &normalize_fusion_opts_for_chain_key("{}"),
     );
-    let journal = Arc::new(StdMutex::new(HashMap::from([(
-        key,
-        cached_result.clone(),
-    )])));
+    let journal = Arc::new(StdMutex::new(HashMap::from([(key, cached_result.clone())])));
     let outcome = run_workflow_script_with_live_updates_and_fusion(
         "return await fusion('review this');",
         DEFAULT_WORKFLOW_SUBAGENT,
@@ -2707,8 +2865,8 @@ async fn workflow_fusion_resume_hits_the_journal_and_never_calls_the_executor() 
 /// executor at all. Judged by REPLAY, not by inspecting `preflight_error()`
 /// — the executor's own call counter must stay at 0.
 #[tokio::test]
-async fn workflow_fusion_resume_replays_the_journal_even_when_the_live_executor_would_now_reject_a_fresh_request()
-{
+async fn workflow_fusion_resume_replays_the_journal_even_when_the_live_executor_would_now_reject_a_fresh_request(
+) {
     let executor = Arc::new(PreflightRejectedFusionExecutor {
         error: FusionError::InvalidConfiguration(
             "fusion.totalTimeoutMs exceeds the sum of its stage timeouts".into(),
@@ -2721,10 +2879,7 @@ async fn workflow_fusion_resume_replays_the_journal_even_when_the_live_executor_
         "review this",
         &normalize_fusion_opts_for_chain_key("{}"),
     );
-    let journal = Arc::new(StdMutex::new(HashMap::from([(
-        key,
-        cached_result.clone(),
-    )])));
+    let journal = Arc::new(StdMutex::new(HashMap::from([(key, cached_result.clone())])));
     let outcome = run_workflow_script_with_live_updates_and_fusion(
         "return await fusion('review this');",
         DEFAULT_WORKFLOW_SUBAGENT,
@@ -6221,7 +6376,10 @@ fn every_workflow_fusion_option_rejection_carries_the_prelude_option_marker() {
             r#"{"dimensions":["coverage","evidence_quality"]}"#,
             "well-formed snake_case dimensions",
         ),
-        (r#"{"dimensions":[]}"#, "an empty dimensions list (defaults)"),
+        (
+            r#"{"dimensions":[]}"#,
+            "an empty dimensions list (defaults)",
+        ),
     ] {
         parse_workflow_fusion_request(
             Some(&executor),
@@ -6266,8 +6424,7 @@ fn workflow_fusion_dimension_gate_matches_the_orchestrators_own_rule() {
         (1..=13).map(|i| format!("d{i}")).collect::<Vec<_>>(),
     ] {
         let orchestrator_rejects = platform_api::normalize_dimensions(dimensions.clone()).is_err();
-        let opts_json =
-            serde_json::json!({ "dimensions": dimensions.clone() }).to_string();
+        let opts_json = serde_json::json!({ "dimensions": dimensions.clone() }).to_string();
         let parsed = parse_workflow_fusion_request(
             Some(&executor),
             "review this",

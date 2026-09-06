@@ -389,6 +389,7 @@ mod tests {
             agent_name: None,
             observer: None,
             team_name: None,
+            origin_session_id: None,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,

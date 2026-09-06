@@ -5558,6 +5558,7 @@ mod workspace_lease_forwarding_tests {
     fn bare_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
             parent_agent_id: None,
+            origin_session_id: None,
             agent_name: None,
             team_name: None,
             is_async: false,

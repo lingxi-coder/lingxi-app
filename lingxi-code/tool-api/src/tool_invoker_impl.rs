@@ -246,6 +246,7 @@ impl ToolInvoker for RegistryToolInvoker {
             agent_id: ctx.parent_agent_id,
             agent_name: ctx.agent_name.clone(),
             team_name: ctx.team_name.clone(),
+            origin_session_id: ctx.origin_session_id,
             content_replacement_state: None,
             session: None,
             subagent_registry: Some(self.registry.clone()),
@@ -755,13 +756,20 @@ mod tests {
 
     // ──── swarm identity: SubagentInvocationContext name/team → ToolUseContext ────
 
-    /// Tool fixture that records the `(agent_name, team_name, assistant_message_id)` the dispatched
-    /// `ToolUseContext` carries, so a test can assert the swarm identity flows
-    /// through the invoker (claude-code `getAgentName()` /
-    /// `getTeammateContext()?.teamName`).
+    /// Tool fixture that records the identity the dispatched `ToolUseContext`
+    /// carries, so a test can assert swarm and originating-session identity
+    /// flow through the invoker.
     struct NameRecordingTool {
-        captured:
-            Arc<StdMutex<Option<(Option<String>, Option<String>, Option<protocol::MessageId>)>>>,
+        captured: Arc<
+            StdMutex<
+                Option<(
+                    Option<String>,
+                    Option<String>,
+                    Option<protocol::MessageId>,
+                    Option<protocol::SessionId>,
+                )>,
+            >,
+        >,
     }
     #[async_trait]
     impl Tool for NameRecordingTool {
@@ -813,6 +821,7 @@ mod tests {
                 ctx.agent_name.clone(),
                 ctx.team_name.clone(),
                 ctx.assistant_message_id,
+                ctx.origin_session_id,
             ));
             Ok(ToolCallResult {
                 data: json!({}),
@@ -841,6 +850,7 @@ mod tests {
         }));
         let invoker = RegistryToolInvoker::new(Arc::new(registry));
         let assistant_message_id = protocol::MessageId::new();
+        let origin_session_id = protocol::SessionId::new();
 
         invoker
             .invoke(
@@ -848,6 +858,7 @@ mod tests {
                 json!({}),
                 SubagentInvocationContext {
                     parent_agent_id: None,
+                    origin_session_id: Some(origin_session_id),
                     agent_name: Some("researcher".to_string()),
                     team_name: Some("alpha".to_string()),
                     is_async: false,
@@ -869,7 +880,7 @@ mod tests {
             .expect("dispatch ok");
 
         let captured = captured.lock().unwrap();
-        let (agent_name, team_name, captured_message_id) =
+        let (agent_name, team_name, captured_message_id, captured_origin_session_id) =
             captured.as_ref().expect("NameRecordingTool::call ran");
         assert_eq!(
             agent_name.as_deref(),
@@ -885,6 +896,11 @@ mod tests {
             *captured_message_id,
             Some(assistant_message_id),
             "the current assistant message id reaches ToolUseContext unchanged"
+        );
+        assert_eq!(
+            *captured_origin_session_id,
+            Some(origin_session_id),
+            "the trusted originating session reaches ToolUseContext unchanged"
         );
     }
 
@@ -1021,6 +1037,7 @@ mod tests {
     fn no_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
             parent_agent_id: None,
+            origin_session_id: None,
             agent_name: None,
             team_name: None,
             is_async: false,
@@ -1206,6 +1223,7 @@ mod tests {
     fn named_ctx(can_show: bool) -> SubagentInvocationContext {
         SubagentInvocationContext {
             parent_agent_id: None,
+            origin_session_id: None,
             agent_name: Some("researcher".to_string()),
             team_name: Some("alpha".to_string()),
             is_async: true,
@@ -1346,6 +1364,7 @@ mod tests {
     fn ctx_with_tool_use_id(id: &str) -> SubagentInvocationContext {
         SubagentInvocationContext {
             parent_agent_id: None,
+            origin_session_id: None,
             agent_name: Some("researcher".to_string()),
             team_name: Some("alpha".to_string()),
             is_async: true,

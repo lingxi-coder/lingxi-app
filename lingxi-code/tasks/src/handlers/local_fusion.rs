@@ -124,8 +124,8 @@ async fn finalize_fusion_outcome(
 ) {
     match outcome {
         Ok(result) => {
-            let body = serde_json::to_string_pretty(result)
-                .unwrap_or_else(|_| result.final_text.clone());
+            let body =
+                serde_json::to_string_pretty(result).unwrap_or_else(|_| result.final_text.clone());
             let _ = output_manager.append(worker_spool_path, &body).await;
             // Write the egress/usage summary BEFORE the terminal status
             // transition (same ordering rule as `set_agent_outcome`): the
@@ -534,15 +534,20 @@ impl Task for LocalFusionHandler {
             .map_err(|e| TaskError::Io(e.to_string()))?;
 
         let cancel = CancellationToken::new();
+        let executor = self.executor.clone();
+        // Capture the executor's effective per-run timeout before the worker
+        // is handed to the registry. The same snapshot is carried through
+        // FusionInheritance so the orchestrator's actual deadline cannot
+        // diverge if settings change before activation.
+        let effective_timeout_ms = executor.effective_timeout_ms();
         let inherit = FusionInheritance::new(
             SubagentInheritance {
                 tool_invoker: self.tool_invoker.clone(),
                 budget: self.budget.clone(),
             },
             cancel.clone(),
-        );
-
-        let executor = self.executor.clone();
+        )
+        .with_effective_timeout_ms(effective_timeout_ms);
         let sink = self.sink.clone();
         let status_sink = self.status_sink.clone();
         let workers = self.workers.clone();
@@ -602,7 +607,8 @@ impl Task for LocalFusionHandler {
                 .push(cleanup_task_id.clone());
         });
 
-        let handle = TaskHandle::new(task_id, Some(cleanup));
+        let handle =
+            TaskHandle::new(task_id, Some(cleanup)).with_fusion_timeout_ms(effective_timeout_ms);
         Ok(match activation_tx {
             Some(activation_tx) => handle.with_activation(move || {
                 let _ = activation_tx.send(());

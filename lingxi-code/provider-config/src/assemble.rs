@@ -38,7 +38,25 @@ fn anthropic_profile(inputs: &AssembleInputs) -> (ProviderProfile, Option<Creden
             }),
         )
     } else {
-        (AuthStrategy::None, CredentialConfig::None, None)
+        // Keep the first-party route credential-capable even when the process
+        // boots without a key.  `DefaultLlmClient` resolves the credential on
+        // every request, so a bridge that starts unauthenticated can accept a
+        // key later in the same process.  Emitting `AuthStrategy::None` here
+        // would make the catalog look fixable while permanently bypassing the
+        // credential provider for the live route.
+        (
+            AuthStrategy::ApiKey,
+            CredentialConfig::Static {
+                id: "anthropic-api-key".to_string(),
+            },
+            Some(CredentialSource {
+                provider_id: ProviderId::AnthropicFirstParty,
+                profile_name: "anthropic".to_string(),
+                credential_id: "anthropic-api-key".to_string(),
+                env_var: Some("ANTHROPIC_API_KEY".to_string()),
+                kind: CredentialKind::ApiKey,
+            }),
+        )
     };
 
     let mut profile =
@@ -348,17 +366,26 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_none_path_has_no_credential() {
+    fn anthropic_without_boot_credential_keeps_a_live_api_key_route() {
         let mut inp = anthropic_only_inputs();
         inp.anthropic_has_api_key = false;
         inp.anthropic_has_oauth = false;
         let out = assemble(inp);
         let anthropic = &out.client_config.providers[0];
-        assert_eq!(anthropic.auth, AuthStrategy::None);
-        assert_eq!(anthropic.credential, CredentialConfig::None);
-        assert!(out.credential_sources.iter().all(
-            |c| c.credential_id != "anthropic-api-key" && c.credential_id != "anthropic-oauth"
-        ));
+        assert_eq!(anthropic.auth, AuthStrategy::ApiKey);
+        assert_eq!(
+            anthropic.credential,
+            CredentialConfig::Static {
+                id: "anthropic-api-key".to_string()
+            }
+        );
+        let source = out
+            .credential_sources
+            .iter()
+            .find(|c| c.credential_id == "anthropic-api-key")
+            .expect("cold-start Anthropic route must retain a credential source");
+        assert_eq!(source.profile_name, "anthropic");
+        assert_eq!(source.env_var.as_deref(), Some("ANTHROPIC_API_KEY"));
     }
 
     #[test]

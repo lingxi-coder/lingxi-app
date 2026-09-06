@@ -206,6 +206,7 @@ mod tests {
             agent_id: None,
             agent_name: None,
             team_name: None,
+            origin_session_id: None,
             content_replacement_state: None,
             session: None,
             subagent_registry: Some(registry),
@@ -841,10 +842,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                             message: stage.label(),
                             stage,
                             panel_id: None,
-                        realized_output_tokens: None,
-                        egress_profiles: None,
-                        panels_allocated: None,
-                    })
+                            realized_output_tokens: None,
+                            egress_profiles: None,
+                            panels_allocated: None,
+                        })
                         .await;
                 }
             }
@@ -923,7 +924,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         assert_eq!(
             activity_events[0],
-            ("Resolving models".to_string(), Some("resolving_models".to_string()))
+            (
+                "Resolving models".to_string(),
+                Some("resolving_models".to_string())
+            )
         );
         assert_eq!(
             activity_events[1],
@@ -1600,10 +1604,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                         message: stage.label(),
                         stage,
                         panel_id: Some("p1".to_string()),
-                    realized_output_tokens: None,
-                    egress_profiles: None,
-                    panels_allocated: None,
-                })
+                        realized_output_tokens: None,
+                        egress_profiles: None,
+                        panels_allocated: None,
+                    })
                     .await;
             }
             Err(platform_api::FusionError::Cancelled)
@@ -1783,8 +1787,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool =
-            AgentTool::new(bctx).with_fusion(Arc::new(CancelledAfterPanelSpawnFusion));
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(CancelledAfterPanelSpawnFusion));
         let err = tool
             .call(
                 serde_json::json!({
@@ -1844,19 +1847,14 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         }
     }
 
-    /// [round-2 review, finding 4] The dispatcher
-    /// (`orchestrator::turn_loop::dispatch_tool_uses_tracked_deferred`) does
-    /// not let `call_fusion` run to completion on a user interrupt — it
-    /// races the tool's call future against the SAME `CancellationToken` the
-    /// tool was handed as `ctx.cancel`, with `biased; () = cancel.cancelled()
-    /// => Err(Aborted), outcome = &mut tool_call => outcome`, and drops
-    /// `tool_call` when cancel wins. `call_fusion`'s own `Ok`/`Err` match
-    /// arms never run in that case — reproduce that EXACT shape here (a
-    /// biased select racing the pinned call future against the same token,
-    /// dropping the future when cancel wins) against an executor that never
-    /// resolves on its own, and assert the reservation is still released.
+    /// [round-2 review, finding 4] A parent that owns the Fusion call future
+    /// may still drop it while cancellation wins a biased select. This
+    /// defensive regression models that ownership boundary against an
+    /// executor that never resolves on its own and asserts the reservation is
+    /// still released. The production dispatcher marks Fusion cooperative,
+    /// so this test is not a claim about the dispatcher's current policy.
     #[tokio::test]
-    async fn fusion_dropped_future_on_dispatcher_cancel_releases_the_full_reservation() {
+    async fn fusion_dropped_future_by_parent_releases_the_full_reservation() {
         use platform_api::task_registry::TaskRegistryHandle;
         let spawner = arc_mock_spawner();
         let registry = arc_mock_task_registry();
@@ -1877,13 +1875,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             cancel_for_task.cancel();
         });
-        // Mirrors turn_loop.rs's dispatcher verbatim: the call future is
-        // built AND raced INSIDE this inner block (turn_loop.rs:5183-5199's
-        // own `let tool_outcome = { let tool_call = ...; tokio::pin!(...);
-        // tokio::select! { ... } };`), so leaving the block drops the true
-        // owned future (not merely the `Pin<&mut _>` handle `tokio::pin!`
-        // shadows it with) the moment cancellation wins the race — exactly
-        // what strands `call_fusion`'s own `Ok`/`Err` arms.
+        // Keep the owned future inside the race's scope. Leaving this block
+        // drops the true future (not merely the `Pin<&mut _>` handle
+        // `tokio::pin!` shadows it with) when cancellation wins, which is the
+        // lifetime boundary this defensive test is meant to cover.
         let completed = {
             let call_future = tool.call(
                 serde_json::json!({
@@ -1912,15 +1907,16 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert_eq!(
             registry.get_total_agent_spawns(),
             0,
-            "call_fusion's future was dropped before any panel spawned (mirrors the \
-             dispatcher's cancel-races-the-tool select) — the reservation must not leak"
+            "call_fusion's future was dropped before any panel spawned — the \
+             reservation must not leak"
         );
     }
 
     /// [round-5 review, finding 10] The surplus refund has THREE members,
     /// not one: the `Ok` arm (trims by `result.panels`), the `Err` arm, and
-    /// `FusionSpawnReservationGuard::drop` — the path the dispatcher takes
-    /// on a user interrupt, where neither match arm ever runs. Emits
+    /// `FusionSpawnReservationGuard::drop` — the defensive path for an
+    /// arbitrary parent dropping the owned call future before either match
+    /// arm runs. (The production dispatcher now keeps Fusion cooperative.) Emits
     /// `PanelsDispatched { total: 2 }` and then never resolves, so the
     /// dropped future must leave exactly the 2 resolved panels charged out
     /// of the 3 reserved.
@@ -1987,11 +1983,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(
-            DispatchesFewerPanelsThenHangsFusion {
+        let tool =
+            AgentTool::new(bctx).with_fusion(Arc::new(DispatchesFewerPanelsThenHangsFusion {
                 panels_allocated: None,
-            },
-        ));
+            }));
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
@@ -2036,14 +2031,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
     }
 
-
     /// [round-12 review, finding 3] The drop path is the THIRD member of the
     /// charge-decision class (`Ok` arm / `Err` arm /
     /// `FusionSpawnReservationGuard::drop`) and reads the same
     /// `resolved_panels` cell the `Err` arm does, so it carried the same
-    /// defect: a user interrupt after a 2-panel resolution in which the
-    /// spawner allocated only 1 child kept 2 slots charged forever. With the
-    /// allocation figure published, exactly 1 stays charged.
+    /// defect: an arbitrary parent drop after a 2-panel resolution in which
+    /// the spawner allocated only 1 child kept 2 slots charged forever. With
+    /// the allocation figure published, exactly 1 stays charged.
     #[tokio::test]
     async fn fusion_dropped_future_charges_only_the_panels_the_spawner_allocated() {
         use platform_api::task_registry::TaskRegistryHandle;
@@ -2054,11 +2048,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(
-            DispatchesFewerPanelsThenHangsFusion {
+        let tool =
+            AgentTool::new(bctx).with_fusion(Arc::new(DispatchesFewerPanelsThenHangsFusion {
                 panels_allocated: Some(1),
-            },
-        ));
+            }));
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
@@ -2252,11 +2245,12 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(DispatchesFewerPanelsThenFailsFusion {
-            dispatched_total,
-            panels_allocated,
-            error,
-        }));
+        let tool =
+            AgentTool::new(bctx).with_fusion(Arc::new(DispatchesFewerPanelsThenFailsFusion {
+                dispatched_total,
+                panels_allocated,
+                error,
+            }));
         let _ = tool
             .call(
                 serde_json::json!({
@@ -2370,12 +2364,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
              pre-allocation rejection at all"
         );
 
-        let err_charged = run_fusion_with_dispatch(
-            3,
-            Some(2),
-            platform_api::FusionError::PanelSetIncomplete,
-        )
-        .await;
+        let err_charged =
+            run_fusion_with_dispatch(3, Some(2), platform_api::FusionError::PanelSetIncomplete)
+                .await;
 
         assert_eq!(
             err_charged, ok_charged,
@@ -2390,23 +2381,66 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     }
 
     /// [round-12 review, finding 3] The allocation cap may only ever LOWER
-    /// the charge, and a published figure of 0 is not evidence — an executor
-    /// that publishes no `panels_allocated` at all must keep the exact
-    /// pre-round-12 behaviour (charge the resolved count), or every fixture
-    /// and every older executor would silently start refunding panels that
-    /// really ran.
+    /// the charge. An executor that publishes no `panels_allocated` at all
+    /// must keep the exact pre-round-12 behaviour (charge the resolved count),
+    /// while an explicit `Some(0)` is a real zero allocation fact.
     #[tokio::test]
     async fn fusion_err_without_an_allocation_figure_still_charges_the_resolved_count() {
-        let charged = run_fusion_with_dispatch(
-            3,
-            None,
-            platform_api::FusionError::PanelSetIncomplete,
-        )
-        .await;
+        let charged =
+            run_fusion_with_dispatch(3, None, platform_api::FusionError::PanelSetIncomplete).await;
         assert_eq!(
             charged, 3,
             "an executor that publishes no allocation figure must not be read as \
              \"zero allocated\": all 3 resolved panels stay charged"
+        );
+    }
+
+    /// `None` means the executor supplied no allocation fact and must retain
+    /// the conservative resolved-count charge; `Some(0)` is an explicit
+    /// producer fact that no child was allocated and therefore refunds all
+    /// resolved slots. The numeric latch alone cannot represent this.
+    #[test]
+    fn allocation_charge_preserves_missing_vs_explicit_zero() {
+        assert_eq!(super::allocation_capped_charge(3, 0, false), 3);
+        assert_eq!(super::allocation_capped_charge(3, 0, true), 0);
+        assert_eq!(super::allocation_capped_charge(3, 1, true), 1);
+    }
+
+    /// The progress forwarder updates the resolved and allocated latches in
+    /// separate atomic operations. If an arbitrary parent drops the Fusion
+    /// future between those observations, the proven allocation must still
+    /// remain charged even though the resolved-total latch is momentarily 0.
+    #[test]
+    fn fusion_drop_preserves_an_allocation_seen_before_the_resolved_latch() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let registry = arc_mock_task_registry();
+        registry
+            .try_reserve_total_agent_spawns(3, u64::MAX)
+            .expect("reserve three slots");
+        let guard = FusionSpawnReservationGuard::new(
+            registry.clone(),
+            3,
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        );
+
+        drop(guard);
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            1,
+            "one synchronously observed child must stay charged"
+        );
+    }
+
+    #[tokio::test]
+    async fn fusion_err_with_explicit_zero_allocation_refunds_all_slots() {
+        let charged =
+            run_fusion_with_dispatch(3, Some(0), platform_api::FusionError::PanelSetIncomplete)
+                .await;
+        assert_eq!(
+            charged, 0,
+            "an explicit Some(0) allocation receipt is distinct from a missing figure"
         );
     }
 
@@ -2619,7 +2653,6 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         }
     }
 
-
     #[test]
     fn parse_fusion_models_rejects_a_colon_with_an_empty_model() {
         // Regression: `"openai:".split_once(':')` used to fall through to
@@ -2714,6 +2747,53 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].parent_model, "gpt-5.6-sol");
         assert_eq!(seen[0].parent_profile, "openai");
+    }
+
+    #[tokio::test]
+    async fn fusion_request_carries_the_live_switched_session_id() {
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let fusion = Arc::new(CapturingFusion {
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let previous_session = protocol::SessionId::new();
+        let switched_session = protocol::SessionId::new();
+        let session = Arc::new(tokio::sync::Mutex::new(lingxi_core::SessionState::empty(
+            previous_session,
+            "test".into(),
+        )));
+        // Model the live-session switch that can happen after a context was
+        // built: call_fusion must read the current state, not a stale id
+        // captured by request construction.
+        session.lock().await.session_id = switched_session;
+
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.options.model_profile = Some("anthropic".into());
+        ctx.session = Some(session);
+        tool.call(
+            serde_json::json!({
+                "description": "deliberate",
+                "prompt": "review this",
+                "subagent_type": "fusion"
+            }),
+            ctx,
+            fresh_tx(),
+        )
+        .await
+        .expect("fusion call");
+
+        let seen = fusion
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].conversation_id, Some(switched_session.to_string()));
     }
 
     #[tokio::test]
@@ -3343,6 +3423,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 serde_json::json!({}),
                 platform_api::tool_invoker::SubagentInvocationContext {
                     parent_agent_id: None,
+                    origin_session_id: None,
                     agent_name: None,
                     team_name: None,
                     is_async: true,
@@ -5282,6 +5363,33 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             )
             .await;
         assert_eq!(desc, "Launch a new agent");
+    }
+
+    #[test]
+    fn fusion_dispatch_is_cooperative_while_other_agents_remain_cancelable() {
+        let tool = AgentTool::new(ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![PathBuf::from("/tmp")],
+        ));
+        assert!(
+            matches!(
+                tool.interrupt_behavior(&json!({ "subagent_type": "fusion" })),
+                InterruptBehavior::Block
+            ),
+            "Fusion settlement must remain owned by call_fusion after cancellation"
+        );
+        assert!(
+            matches!(
+                tool.interrupt_behavior(&json!({ "subagent_type": "Fusion" })),
+                InterruptBehavior::Block
+            ),
+            "Fusion type matching is case/format insensitive"
+        );
+        assert!(matches!(
+            tool.interrupt_behavior(&json!({ "subagent_type": "general-purpose" })),
+            InterruptBehavior::Cancel
+        ));
     }
 
     #[test]

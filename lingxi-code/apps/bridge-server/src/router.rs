@@ -3044,7 +3044,7 @@ impl CommandRouter for EngineCommandRouter {
             } => {
                 let credential_preview =
                     secret::masked_credential_preview(credential.expose_secret());
-                let error = if !provider_id_is_valid(&provider_id)
+                let mut error = if !provider_id_is_valid(&provider_id)
                     || credential.expose_secret().is_empty()
                     || credential.expose_secret().len() > 16_384
                     || credential.expose_secret().contains('\0')
@@ -3068,39 +3068,17 @@ impl CommandRouter for EngineCommandRouter {
                 } else {
                     Some("provider credential storage is unavailable".to_string())
                 };
-                let applied = error.is_none();
-                if applied {
-                    // Round-9 review finding [2]: this is the ONLY
-                    // credential-add path the Electron desktop has (Settings ->
-                    // Provider Credentials), in BOTH the brokered/ephemeral and
-                    // the persistent mode, and neither branch above told
-                    // Fusion's catalog filter about the write. `/model` and the
-                    // ordinary turn loop route the new key on the very next
-                    // request (`MultiCredentialProvider` reads
-                    // `CredentialManager` per call), while
-                    // `FusionCatalogModelSource::list()` kept re-filtering
-                    // against the BOOT availability map — so every row of the
-                    // just-added provider stayed dropped for the rest of the
-                    // engine process (`TooFewModels{eligible:0}` under
-                    // `fusion.allowedProfiles`). Same call the TUI key view
-                    // makes (`apps/cli/src/mode.rs`'s `run_connect_action`);
-                    // `refresh_after_credential_write` force-marks the named
-                    // profile available, so it is correct for the ephemeral
-                    // branch too, where the re-probe cannot see a key that was
-                    // never persisted.
-                    //
-                    // Round-10 finding N3's class sweep: BOUNDED, because this
-                    // arm is awaited straight from the connection read loop
-                    // (`server.rs`'s `on_frame`, whose contract is "return
-                    // promptly"), and the refresh is an unbounded keychain
-                    // re-probe. A contended macOS credential broker would
-                    // otherwise stop this connection from READING anything at
-                    // all -- interrupts and permission replies included -- for
-                    // as long as the broker stalls. Same budget, and the same
-                    // detach-rather-than-cancel rule, as the parent-supplied
-                    // keys at `boot::seed_parent_supplied_provider_keys`.
-                    crate::boot::refresh_fusion_catalog_bounded(vec![provider_id.clone()]).await;
+                // Publish before emitting readiness. The helper starts its
+                // full-source reconciliation detached; `false` means storage
+                // succeeded but this process's fixed auth route needs restart.
+                if error.is_none()
+                    && !crate::boot::refresh_fusion_catalog_bounded(vec![provider_id.clone()]).await
+                {
+                    error = Some(engine_desktop::fusion_credential_restart_required_message(
+                        &provider_id,
+                    ));
                 }
+                let applied = error.is_none();
                 let credential_previews = applied
                     .then(|| HashMap::from([(provider_id.clone(), credential_preview)]))
                     .unwrap_or_default();
@@ -3457,23 +3435,11 @@ impl CommandRouter for EngineCommandRouter {
             }
 
             // ── Auth ───────────────────────────────────────────────────────
-            // Round-10 finding N5: this IS a credential write (the Anthropic
-            // OAuth handle persists tokens on success), and it is the one
-            // credential-write arm in this file with no
-            // `refresh_fusion_catalog_bounded` call. That is deliberate, not an
-            // omission: the same call would be a provable no-op here.
-            // `provider_config::assemble` emits NO Anthropic `CredentialSource`
-            // in the unauthenticated path (provider-config/src/assemble.rs,
-            // `anthropic_profile`'s final arm), so a refresh keyed on
-            // `anthropic-oauth` matches nothing and its `forced` list is empty,
-            // and `refresh_inner`'s closing
-            // `guard.entry("anthropic").or_insert(..)` cannot overwrite the
-            // `false` the boot map already holds (`resolve_llm_stack` always
-            // seeds an "anthropic" entry before cloning the map into the Fusion
-            // refresher). Making a mid-session sign-in visible to `/fusion`
-            // needs a NEW engine-desktop API — "this profile just GAINED a
-            // credential it had no source for" — the same one the demoted
-            // credential-DELETE direction needs; it is not this one-liner.
+            // This is a credential write: the Anthropic OAuth handle persists
+            // tokens on success. The shared AuthHandle is wrapped by
+            // `FusionCatalogClearingAuth`, which cheaply publishes the canonical
+            // `anthropic-oauth` route before returning. Do not repeat the global
+            // refresh here; that would create a second reconciliation owner.
             ClientCommand::Login => {
                 let state = match self.auth.login().await {
                     Ok(li) => lower_auth_state(Some(li)),
@@ -4127,7 +4093,10 @@ mod fusion_catalog_refresh_tests {
         async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
             Ok(None)
         }
-        async fn list(&self, _filter: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+        async fn list(
+            &self,
+            _filter: TaskListFilter,
+        ) -> Result<Vec<TaskRecord>, TaskRegistryError> {
             Ok(Vec::new())
         }
         async fn update(
@@ -4306,6 +4275,7 @@ here stops the client's interrupts and permission replies from being read"
             crate::boot::FUSION_CATALOG_REFRESH_BUDGET,
             began.elapsed()
         );
+        crate::boot::fusion_refresh_test_support::wait_for_refresh_start(&reads).await;
         assert!(
             reads.load(std::sync::atomic::Ordering::SeqCst) >= 1,
             "the refresh must actually have reached the credential backend — with \

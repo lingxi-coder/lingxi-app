@@ -1453,6 +1453,7 @@ impl PoolSubagentSpawner {
             can_show_permission_prompts: false,
             // Filled by `build_subagent_context` from the owning spawner.
             session_interactive: None,
+            origin_session_id: None,
             mcp_clients: vec![],
             transcript_subdir: "/tmp".into(),
             transcript_fs: None,
@@ -1680,6 +1681,7 @@ impl PoolSubagentSpawner {
             request.fork_parent_system_prompt.clone(),
         );
         ctx.session_interactive = self.session_interactive;
+        ctx.origin_session_id = request.origin_session_id;
         // Append the subagent `<env>` block (claude-code 2.1.186 `tIm`, after the
         // `Notes:` trailer) on the NON-fork path only — the fork path replays the
         // parent's rendered prompt verbatim with no `enhanceSystemPromptWithEnvDetails`.
@@ -1720,7 +1722,11 @@ impl PoolSubagentSpawner {
         // Hand the child the parent's tool invoker + budget enforcer + our model
         // API seam (recursion-lock / budget-inheritance invariants).
         ctx.tool_invoker = Some(inherit.tool_invoker);
-        ctx.budget = Some(inherit.budget);
+        let child_budget = request
+            .origin_session_id
+            .and_then(|session_id| inherit.budget.scoped_for_session(session_id))
+            .unwrap_or_else(|| Arc::clone(&inherit.budget));
+        ctx.budget = Some(child_budget);
         ctx.api_client.clone_from(&self.api_client);
         // Per-spawn provider routing (dual-LLM dual-PROVIDER): the runner passes
         // this as the `profile` arg of the api client's `messages_create_*_in`
@@ -1935,7 +1941,35 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
         let resolved_model = crate::runner::resolve_model(&ctx);
         let resolved_model_profile = ctx.model_profile.clone();
         let initial_message_index = observer_initial_message_index(ctx.resumed_history.as_deref());
-        let (_aid, mut rx) = match self.pool.allocate(ctx).await {
+        // Publish persistent allocations through the same synchronous receipt
+        // used by one-shot spawns.  The async observer wrapper below remains
+        // the UI/event-stream path, but it must not be the source of truth for
+        // allocation-sensitive accounting.
+        let observers: Vec<Arc<dyn SubagentSpawnObserver>> =
+            self.spawn_observer.iter().cloned().collect();
+        let allocation_event = SubagentObservation::Allocated {
+            agent_id,
+            agent_type: resolved_agent_type.clone(),
+            name: request_name.clone(),
+            model: resolved_model.clone(),
+            model_profile: resolved_model_profile.clone(),
+            persistent: true,
+            initial_message_index,
+        };
+        let allocation_receipt = (!observers.is_empty()).then(|| {
+            let allocation_event = allocation_event.clone();
+            let observers = observers.clone();
+            Arc::new(move |_allocated_agent_id: AgentId| {
+                for observer in &observers {
+                    observer.on_allocated(&allocation_event);
+                }
+            }) as Arc<dyn Fn(AgentId) + Send + Sync>
+        });
+        let (_aid, mut rx) = match self
+            .pool
+            .allocate_with_receipt(ctx, allocation_receipt)
+            .await
+        {
             Ok(pair) => pair,
             Err(e) => {
                 // Never allocated, so `stop` will never be called for this id:
@@ -1965,23 +1999,13 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
         // contract as one-shot agents. The forwarded receiver retains the
         // original event shape for the task handler while this side reports
         // real messages and terminal lifecycle transitions to Desktop.
-        let observers: Vec<Arc<dyn SubagentSpawnObserver>> =
-            self.spawn_observer.iter().cloned().collect();
         if observers.is_empty() {
             return Ok((agent_id, rx));
         }
         let observer_events = crate::api::ObserverEventSink::new(observers);
         let forward_agent_id = agent_id;
         let (tx, forwarded_rx) = tokio::sync::mpsc::channel(100);
-        observer_events.try_emit(SubagentObservation::Allocated {
-            agent_id,
-            agent_type: resolved_agent_type,
-            name: request_name,
-            model: resolved_model,
-            model_profile: resolved_model_profile,
-            persistent: true,
-            initial_message_index,
-        });
+        observer_events.try_emit(allocation_event);
         tokio::spawn(async move {
             let mut forwarding = true;
             let mut terminal_death_seen = false;
@@ -2527,7 +2551,29 @@ impl SubagentSpawner for PoolSubagentSpawner {
         let resolved_model_profile = ctx.model_profile.clone();
         let initial_message_index = observer_initial_message_index(ctx.resumed_history.as_deref());
         let agent_id = ctx.agent_id;
-        let (_aid, mut rx) = match self.pool.allocate(ctx).await {
+        let allocation_event = SubagentObservation::Allocated {
+            agent_id,
+            agent_type: resolved_agent_type.clone(),
+            name: request_name.clone(),
+            model: resolved_model.clone(),
+            model_profile: resolved_model_profile.clone(),
+            persistent: false,
+            initial_message_index,
+        };
+        let allocation_receipt = (!observers.is_empty()).then(|| {
+            let allocation_event = allocation_event.clone();
+            let observers = observers.clone();
+            Arc::new(move |_allocated_agent_id: AgentId| {
+                for observer in &observers {
+                    observer.on_allocated(&allocation_event);
+                }
+            }) as Arc<dyn Fn(AgentId) + Send + Sync>
+        });
+        let (_aid, mut rx) = match self
+            .pool
+            .allocate_with_receipt(ctx, allocation_receipt)
+            .await
+        {
             Ok(pair) => pair,
             Err(e) => {
                 // §24b: the pool never got a runner started for this spawn, so
@@ -2560,15 +2606,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
             agent_type: resolved_agent_type.clone(),
         };
         drop(mcp_guard);
-        observer_events.try_emit(SubagentObservation::Allocated {
-            agent_id,
-            agent_type: resolved_agent_type.clone(),
-            name: request_name.clone(),
-            model: resolved_model.clone(),
-            model_profile: resolved_model_profile.clone(),
-            persistent: false,
-            initial_message_index,
-        });
+        observer_events.try_emit(allocation_event);
 
         // Pump the slot until terminal. The runner emits Progress/Message
         // events as it streams turns; we ignore those here and surface only
@@ -2839,7 +2877,9 @@ impl SubagentSpawner for PoolSubagentSpawner {
                         "agentId": agent_id.to_string(),
                         "content": content,
                     }),
-                    Ok(SubagentResult::Failed { agent_id, reason, .. }) => serde_json::json!({
+                    Ok(SubagentResult::Failed {
+                        agent_id, reason, ..
+                    }) => serde_json::json!({
                         "status": "failed",
                         "agentId": agent_id.to_string(),
                         "reason": reason,
@@ -3191,6 +3231,23 @@ mod tests {
         }
     }
 
+    struct DirectAllocationObserver {
+        allocations: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SubagentSpawnObserver for DirectAllocationObserver {
+        fn on_allocated(&self, _event: &SubagentObservation) {
+            self.allocations.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn on_event(&self, _event: SubagentObservation) {
+            // Keep the asynchronous path blocked so this test proves the
+            // allocation fact does not depend on observer queue delivery.
+            std::future::pending::<()>().await;
+        }
+    }
+
     #[derive(Default)]
     struct RecordingLifecycleObserver {
         events: Mutex<Vec<SubagentObservation>>,
@@ -3343,6 +3400,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 1,
+            origin_session_id: None,
             parent_model_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
@@ -3618,6 +3676,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn allocation_receipt_is_immediate_even_when_global_observer_is_blocked() {
+        let runtime = Arc::new(CountingRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let api = Arc::new(QueueApi {
+            responses: Mutex::new(VecDeque::from([text_response("done")])),
+            calls: AtomicUsize::new(0),
+        });
+        let allocation = Arc::new(DirectAllocationObserver {
+            allocations: AtomicUsize::new(0),
+        });
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_api_client(api)
+            .with_spawn_observer(Arc::new(BlockingObserver));
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": "finish"
+        }))
+        .expect("minimal spawn request");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            spawner.spawn_with_observer(
+                request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+                None,
+                Some(allocation.clone()),
+            ),
+        )
+        .await
+        .expect("a blocked async observer must not stall the child")
+        .expect("spawn succeeds");
+
+        assert!(matches!(result, SubagentResult::Completed { .. }));
+        assert_eq!(
+            allocation.allocations.load(Ordering::SeqCst),
+            1,
+            "the synchronous receipt must arrive even though async observer delivery is blocked"
+        );
+    }
+
+    #[tokio::test]
     async fn observer_receives_resolved_type_and_ordered_terminal_event() {
         let runtime = Arc::new(CountingRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
@@ -3774,7 +3876,8 @@ mod tests {
             })
             .count();
         assert_eq!(
-            terminal_count, 1,
+            terminal_count,
+            1,
             "the child's terminal event must reach the observer even when the caller drops \
              the spawn future while it is stuck in post-completion cleanup; got: {:?}",
             observer.events.lock().unwrap()
@@ -4229,7 +4332,8 @@ mod tests {
             })
             .count();
         assert_eq!(
-            terminal_count, 1,
+            terminal_count,
+            1,
             "the terminal observation must still be emitted exactly once, and before the MCP \
              teardown; got: {:?}",
             observer.events.lock().unwrap()
@@ -4288,7 +4392,6 @@ mod tests {
              `build_subagent_context` bails out on the `resolve_tools` await that follows it"
         );
     }
-
 
     /// [round-3 finding B1] `SpawnDeallocGuard::drop`'s spawned cleanup task
     /// must emit its terminal `Killed` observation even when its OWN MCP
@@ -4396,7 +4499,8 @@ mod tests {
         }
 
         assert_eq!(
-            terminal_count, 1,
+            terminal_count,
+            1,
             "the guard must emit its terminal Killed observation even when its own MCP \
              cleanup hangs forever — a wedged `disconnect` must not permanently swallow the \
              cancel-path terminal event; events observed: {:?}",
@@ -5893,6 +5997,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 1,
+            origin_session_id: None,
             parent_model_override: Some("claude-sonnet-5".to_string()),
             forked_skill_name: None,
             forked_skill_attribution: None,
@@ -5956,6 +6061,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            origin_session_id: None,
             parent_model_override: Some("override-model".to_string()),
             forked_skill_name: None,
             forked_skill_attribution: None,
@@ -6696,6 +6802,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            origin_session_id: None,
             parent_model_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
@@ -6822,6 +6929,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            origin_session_id: None,
             parent_model_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
@@ -6940,6 +7048,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            origin_session_id: None,
             parent_model_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
@@ -7016,6 +7125,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            origin_session_id: None,
             parent_model_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
@@ -7082,6 +7192,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            origin_session_id: None,
             parent_model_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
@@ -7163,6 +7274,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            origin_session_id: None,
             parent_model_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
@@ -7273,6 +7385,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            origin_session_id: None,
             parent_model_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
@@ -7382,6 +7495,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            origin_session_id: None,
             parent_model_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
@@ -7477,6 +7591,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 1,
+            origin_session_id: None,
             parent_model_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
@@ -7893,6 +8008,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            origin_session_id: None,
             parent_model_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,

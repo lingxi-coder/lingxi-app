@@ -178,7 +178,10 @@ impl CredentialProvider for MultiCredentialProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_client::{Credential, CredentialProvider, CredentialScope, LlmError, ProviderId};
+    use llm_client::{
+        Capabilities, Credential, CredentialProvider, CredentialScope, DefaultLlmClient, LlmError,
+        LlmRequest, ModelProfile, ProviderId,
+    };
     use std::sync::Arc;
 
     /// Shared in-memory `CredentialManager` harness (re-used by availability.rs too).
@@ -362,6 +365,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistent_anthropic_key_rotation_and_delete_are_live() {
+        let credentials = manager();
+        credentials
+            .store_anthropic_api_key("sk-ant-old")
+            .await
+            .expect("seed old key");
+        // Desktop passes no immutable snapshot when the resolved key came
+        // from this shared store.
+        let provider = MultiCredentialProvider::new(
+            credentials.clone(),
+            Vec::new(),
+            None,
+            None,
+            Default::default(),
+        );
+        let scope = scope(
+            ProviderId::AnthropicFirstParty,
+            "anthropic",
+            "anthropic-api-key",
+        );
+
+        credentials
+            .store_anthropic_api_key("sk-ant-new")
+            .await
+            .expect("rotate key");
+        assert_eq!(
+            provider.load(&scope).await.expect("rotated key"),
+            Credential::ApiKey("sk-ant-new".to_string())
+        );
+
+        credentials
+            .delete_anthropic_api_key()
+            .await
+            .expect("delete key");
+        assert!(matches!(
+            provider.load(&scope).await,
+            Err(LlmError::Authentication { .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn anthropic_api_key_dispatch_missing_key_is_authentication_error() {
         let provider =
             MultiCredentialProvider::new(manager(), Vec::new(), None, None, Default::default());
@@ -378,6 +422,54 @@ mod tests {
             LlmError::Authentication {
                 message: String::new()
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_anthropic_route_authenticates_after_key_is_added() {
+        let credentials = manager();
+        let assembled = crate::assemble::assemble(crate::AssembleInputs {
+            anthropic_api_base: "https://api.anthropic.com".to_string(),
+            anthropic_models: vec![ModelProfile {
+                display_model: "claude-sonnet-4-6".to_string(),
+                request_model: "claude-sonnet-4-6".to_string(),
+                billing_model: "claude-sonnet-4-6".to_string(),
+                aliases: Vec::new(),
+                description: None,
+                metadata: Default::default(),
+                capabilities: Capabilities::default(),
+            }],
+            anthropic_has_api_key: false,
+            anthropic_has_oauth: false,
+            user_providers: Default::default(),
+            routing: None,
+        });
+        let mut client = DefaultLlmClient::from_config(assembled.client_config)
+            .expect("cold-start route config must be valid");
+        client = client.with_credential_provider(Arc::new(MultiCredentialProvider::new(
+            credentials.clone(),
+            assembled.credential_sources,
+            None,
+            None,
+            Default::default(),
+        )));
+        let request = LlmRequest::new("claude-sonnet-4-6").with_user_text("hello");
+        assert!(client.prepare(&request).await.is_err());
+
+        credentials
+            .set_provider_key_ephemeral("anthropic", "sk-ant-after-boot")
+            .await;
+        let prepared = client
+            .prepare(&request)
+            .await
+            .expect("the same live route must load a key added after boot");
+        assert_eq!(
+            prepared
+                .provider_request
+                .headers
+                .get("x-api-key")
+                .map(String::as_str),
+            Some("sk-ant-after-boot")
         );
     }
 

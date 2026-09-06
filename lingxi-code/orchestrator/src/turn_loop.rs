@@ -3730,6 +3730,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             // getTeammateContext() are undefined here).
             agent_name: None,
             team_name: None,
+            origin_session_id: None,
             content_replacement_state: None,
             session: Some(orch.session.clone()),
             subagent_registry: Some(orch.tools.clone()),
@@ -5707,64 +5708,64 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                     "skipped chokepoint Subagent hooks for a Fusion tool result (no single child agent id)",
                 );
             } else {
-            // Carry the dispatched `subagent_type` as the hook context's
-            // `agent_type` so the wire payload's `agent_type` is faithful
-            // (claude-code passes the subagent's `agentType` into the hooks).
-            // The session_id / cwd reuse the same context the pre/post hooks used.
-            let mut sa_ctx = HookContext {
-                agent_type: Some(subagent_type.clone()),
-                agent_id: Some(child_id),
-                ..hook_ctx.clone()
-            };
-            // SubagentStart FIRST (claude start-then-stop), with the canonical id.
-            // SKIP when the runner already fired it (no production double-fire).
-            if !runner_fired_start {
-                let start_event = HookEvent::SubagentStart {
-                    agent_id: child_id,
-                    agent_type: subagent_type,
-                    parent_agent_id: None,
+                // Carry the dispatched `subagent_type` as the hook context's
+                // `agent_type` so the wire payload's `agent_type` is faithful
+                // (claude-code passes the subagent's `agentType` into the hooks).
+                // The session_id / cwd reuse the same context the pre/post hooks used.
+                let mut sa_ctx = HookContext {
+                    agent_type: Some(subagent_type.clone()),
+                    agent_id: Some(child_id),
+                    ..hook_ctx.clone()
                 };
-                let _start_agg = orch.hooks.execute(start_event, sa_ctx.clone()).await;
-            }
+                // SubagentStart FIRST (claude start-then-stop), with the canonical id.
+                // SKIP when the runner already fired it (no production double-fire).
+                if !runner_fired_start {
+                    let start_event = HookEvent::SubagentStart {
+                        agent_id: child_id,
+                        agent_type: subagent_type,
+                        parent_agent_id: None,
+                    };
+                    let _start_agg = orch.hooks.execute(start_event, sa_ctx.clone()).await;
+                }
 
-            let status = if is_error { "failed" } else { "completed" };
-            let sa_event = HookEvent::SubagentStop {
-                agent_id: child_id,
-                status: status.to_string(),
-                // Same subagent type as the SubagentStart above — claude keys
-                // SubagentStop matchers on it. `subagent_type` was moved into the
-                // SubagentStart event, so source it from the cloned `sa_ctx`.
-                agent_type: sa_ctx.agent_type.clone().unwrap_or_default(),
-            };
-            // claude-code stamps `background_tasks` + `session_crons` onto the
-            // SubagentStop payload too (the `$Ee` firer's `...m` covers both the
-            // Stop and SubagentStop branches when the tool-use context is
-            // present). Populate the snapshot onto the SubagentStop context ONLY
-            // (NOT the SubagentStart cloned above, which claude never carries it
-            // on).
-            orch.populate_stop_hook_snapshot(&mut sa_ctx).await;
-            let sa_started = std::time::Instant::now();
-            // EXCLUDE the child's own frontmatter bucket — the runner fired those
-            // agent-scoped (claude fires a subagent's stop hooks in-child). This
-            // covers session / plugin SubagentStop without double-firing the
-            // child's frontmatter ones, race-free vs. the runner's
-            // `clear_agent_hooks`.
-            let _sa_agg = orch
-                .hooks
-                .execute_excluding_agent(sa_event, sa_ctx, child_id)
-                .await;
-            // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
-            #[allow(clippy::cast_possible_truncation)]
-            let sa_dur_ms = sa_started.elapsed().as_millis() as u64;
-            // No `tengu_*` analytic here: claude-code's subagent-stop path emits
-            // no orchestrator-lifecycle event, so we keep parity by logging only.
-            tracing::debug!(
-                tool_name = %name,
-                status,
-                runner_fired_start,
-                duration_ms = sa_dur_ms,
-                "fired chokepoint SubagentStart (if runner didn't) + session/plugin SubagentStop after Agent/Task tool completed",
-            );
+                let status = if is_error { "failed" } else { "completed" };
+                let sa_event = HookEvent::SubagentStop {
+                    agent_id: child_id,
+                    status: status.to_string(),
+                    // Same subagent type as the SubagentStart above — claude keys
+                    // SubagentStop matchers on it. `subagent_type` was moved into the
+                    // SubagentStart event, so source it from the cloned `sa_ctx`.
+                    agent_type: sa_ctx.agent_type.clone().unwrap_or_default(),
+                };
+                // claude-code stamps `background_tasks` + `session_crons` onto the
+                // SubagentStop payload too (the `$Ee` firer's `...m` covers both the
+                // Stop and SubagentStop branches when the tool-use context is
+                // present). Populate the snapshot onto the SubagentStop context ONLY
+                // (NOT the SubagentStart cloned above, which claude never carries it
+                // on).
+                orch.populate_stop_hook_snapshot(&mut sa_ctx).await;
+                let sa_started = std::time::Instant::now();
+                // EXCLUDE the child's own frontmatter bucket — the runner fired those
+                // agent-scoped (claude fires a subagent's stop hooks in-child). This
+                // covers session / plugin SubagentStop without double-firing the
+                // child's frontmatter ones, race-free vs. the runner's
+                // `clear_agent_hooks`.
+                let _sa_agg = orch
+                    .hooks
+                    .execute_excluding_agent(sa_event, sa_ctx, child_id)
+                    .await;
+                // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
+                #[allow(clippy::cast_possible_truncation)]
+                let sa_dur_ms = sa_started.elapsed().as_millis() as u64;
+                // No `tengu_*` analytic here: claude-code's subagent-stop path emits
+                // no orchestrator-lifecycle event, so we keep parity by logging only.
+                tracing::debug!(
+                    tool_name = %name,
+                    status,
+                    runner_fired_start,
+                    duration_ms = sa_dur_ms,
+                    "fired chokepoint SubagentStart (if runner didn't) + session/plugin SubagentStop after Agent/Task tool completed",
+                );
             }
         }
 
@@ -9041,6 +9042,7 @@ mod tool_hook_wiring_tests {
             RegistryToolInvoker::new(Arc::new(registry)).with_gate(Arc::new(NoOpPermissionGate));
         let ctx = SubagentInvocationContext {
             parent_agent_id: None,
+            origin_session_id: None,
             agent_name: Some("researcher".into()),
             team_name: Some("alpha".into()),
             is_async: false,

@@ -7,7 +7,7 @@
 use crate::content_replacement::ContentReplacementState;
 use crate::registry::ToolRegistry;
 use lingxi_core::SessionState;
-use protocol::{AgentId, McpConnectionId, MessageId, ToolUseId};
+use protocol::{AgentId, McpConnectionId, MessageId, SessionId, ToolUseId};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -46,6 +46,13 @@ pub struct ToolUseContext {
     /// (priority 2) so in-process teammates resolve to the leader's on-disk task
     /// directory. `None` for the main thread / standalone sessions.
     pub team_name: Option<String>,
+    /// Trusted session that originated a nested subagent tool invocation.
+    /// Main-loop calls normally leave this unset because [`Self::session`]
+    /// exposes the live session directly. Subagent dispatch has no writable
+    /// session state, so recursive Agent, Fusion, and Workflow calls use this
+    /// immutable identity to keep their cost and budget accounting attached to
+    /// the originating conversation.
+    pub origin_session_id: Option<SessionId>,
     /// Shared content-replacement state. Populated in Task 3.
     pub content_replacement_state: Option<Arc<Mutex<ContentReplacementState>>>,
     /// Mutable session state (M4-04). Tools that mutate the conversation
@@ -128,6 +135,7 @@ impl ToolUseContext {
             agent_id: None,
             agent_name: None,
             team_name: None,
+            origin_session_id: None,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,

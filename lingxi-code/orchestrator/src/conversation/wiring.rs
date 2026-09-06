@@ -317,9 +317,16 @@ impl ConversationOrchestrator {
 
     /// Attach a [`cost::CostTracker`] so `snapshot_cost` returns
     /// real numbers. Without this, `snapshot_cost` keeps the M5-10
-    /// zero-shaped stub shape. (M6-06)
+    /// zero-shaped stub shape. This construction-only builder must run before
+    /// the tracker is used to issue any budget reservations. (M6-06)
     #[must_use]
     pub fn with_cost_tracker(mut self, tracker: Arc<cost::CostTracker>) -> Self {
+        let session_id = self
+            .session
+            .try_lock()
+            .expect("with_cost_tracker runs at construction")
+            .session_id;
+        tracker.adopt_active_session_for_builder(session_id);
         self.model_runtime.cost_tracker = Some(tracker);
         self
     }

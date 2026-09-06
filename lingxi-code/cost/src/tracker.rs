@@ -15,11 +15,11 @@ use crate::{
 use indexmap::IndexMap;
 use protocol::SessionId;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use telemetry::AnalyticsBus;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 /// Persisted snapshot of one session's cumulative cost and usage.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -76,7 +76,7 @@ pub struct CostState {
 /// providers.
 ///
 /// `#[serde(default)]` on the new fields preserves on-disk compatibility:
-/// previously persisted `CostState` JSON without these fields deserializes
+/// previously persisted [`CostState`] JSON without these fields deserializes
 /// with zeros, so an upgrade does not invalidate existing session files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelUsage {
@@ -94,9 +94,79 @@ pub struct ModelUsage {
     pub cost_nano_usd: u64,
 }
 
-/// In-memory accumulator + persistence channel for one session's cost state.
+/// Shared in-memory session ledger.
+///
+/// The process owns one active projection, but background work must retain a
+/// stable view of the session that originated it. Keeping the state cells in
+/// this map means a clear/resume can move the active projection without
+/// destroying a previous session's unfinished or completed settlement.
+struct SessionLedger {
+    active_session: RwLock<SessionId>,
+    states: Mutex<HashMap<SessionId, Arc<RwLock<CostState>>>>,
+    /// Persisted resume baselines already merged into each session. The
+    /// marker is separate from the state cell because a cell can receive
+    /// late in-memory settlement before the resume loader supplies its saved
+    /// baseline; that baseline must be added exactly once to the delta.
+    hydrated_sessions: Mutex<HashMap<SessionId, u64>>,
+}
+
+impl SessionLedger {
+    fn new(session_id: SessionId, state: CostState) -> Self {
+        let mut states = HashMap::new();
+        states.insert(session_id, Arc::new(RwLock::new(state)));
+        Self {
+            active_session: RwLock::new(session_id),
+            states: Mutex::new(states),
+            hydrated_sessions: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn state_for(&self, session_id: SessionId) -> Arc<RwLock<CostState>> {
+        let mut states = self.states.lock().await;
+        states
+            .entry(session_id)
+            .or_insert_with(|| {
+                Arc::new(RwLock::new(CostState {
+                    session_id,
+                    ..Default::default()
+                }))
+            })
+            .clone()
+    }
+
+    async fn active_state(&self) -> (SessionId, Arc<RwLock<CostState>>) {
+        let session_id = *self.active_session.read().await;
+        (session_id, self.state_for(session_id).await)
+    }
+
+    async fn switch_active(&self, session_id: SessionId) {
+        // Create the destination before publishing it as active. A live turn
+        // that starts after the switch always sees a real state cell.
+        self.state_for(session_id).await;
+        let previous = *self.active_session.read().await;
+        if previous != session_id {
+            // Leaving a live session establishes its zero persisted baseline:
+            // any later resume of that in-process ledger must not add the same
+            // on-disk spend a second time. The initial active session remains
+            // unmarked until it is either hydrated or left.
+            self.hydrated_sessions
+                .lock()
+                .await
+                .entry(previous)
+                .or_insert(0);
+        }
+        *self.active_session.write().await = session_id;
+    }
+}
+
+/// In-memory accumulator + persistence channel for the active session.
+///
+/// `CostTracker::scoped` creates a fixed-origin view over the same ledger for
+/// delayed work such as Fusion. The ordinary tracker follows the active
+/// session projection switched by the orchestrator at clear/resume boundaries.
 pub struct CostTracker {
-    state: Arc<RwLock<CostState>>,
+    ledger: Arc<SessionLedger>,
+    scope: Option<SessionId>,
     catalog: Arc<PricingCatalog>,
     persist_tx: mpsc::Sender<CostState>,
 }
@@ -118,10 +188,133 @@ impl CostTracker {
             ..Default::default()
         };
         Self {
-            state: Arc::new(RwLock::new(state)),
+            ledger: Arc::new(SessionLedger::new(session_id, state)),
+            scope: None,
             catalog,
             persist_tx,
         }
+    }
+
+    /// Return a view permanently bound to `session_id`.
+    ///
+    /// Unlike the active tracker, this view never follows a later clear or
+    /// resume. Existing and late Fusion settlement therefore remains charged
+    /// to the originating session.
+    #[must_use]
+    pub fn scoped(&self, session_id: SessionId) -> Arc<Self> {
+        Arc::new(Self {
+            ledger: self.ledger.clone(),
+            scope: Some(session_id),
+            catalog: self.catalog.clone(),
+            persist_tx: self.persist_tx.clone(),
+        })
+    }
+
+    /// Current active session id. Scoped views return their fixed origin id.
+    pub async fn session_id(&self) -> SessionId {
+        if let Some(session_id) = self.scope {
+            session_id
+        } else {
+            *self.ledger.active_session.read().await
+        }
+    }
+
+    async fn selected_state(&self) -> Arc<RwLock<CostState>> {
+        if let Some(session_id) = self.scope {
+            self.ledger.state_for(session_id).await
+        } else {
+            self.ledger.active_state().await.1
+        }
+    }
+
+    /// Resolve the state cell for a budget operation. The caller may acquire
+    /// its lock before touching a reservation token so cancellation cannot
+    /// consume a hold before the actual charge mutation is ready.
+    pub(crate) async fn selected_state_cell(&self) -> Arc<RwLock<CostState>> {
+        self.selected_state().await
+    }
+
+    /// Switch the active projection while preserving every session cell.
+    pub async fn switch_session(&self, session_id: SessionId) {
+        if self.scope.is_none() {
+            self.ledger.switch_active(session_id).await;
+        }
+    }
+
+    /// Adopt the orchestrator's construction-time session id without an
+    /// async boundary. Builders run before any turn and may attach a tracker
+    /// created with a placeholder id (legacy tests/hosts); move that sole
+    /// pre-seeded cell while making future active writes use the real id.
+    /// No budget reservation may have been issued from the tracker before this
+    /// construction step; reservation ownership is intentionally not remapped.
+    ///
+    /// This is deliberately a construction-only migration, not a general
+    /// session switch. Reusing a multi-session tracker or one that has already
+    /// published a scoped view would invalidate that view's stable origin, so
+    /// those shapes are rejected instead of copying spend into two sessions.
+    pub fn adopt_active_session_for_builder(&self, session_id: SessionId) {
+        assert!(
+            self.scope.is_none(),
+            "cost tracker builder adoption requires an active tracker"
+        );
+        let mut active = self
+            .ledger
+            .active_session
+            .try_write()
+            .expect("cost tracker builder adoption must run before concurrent turns");
+        let previous = *active;
+        if previous == session_id {
+            return;
+        }
+        assert_eq!(
+            Arc::strong_count(&self.ledger),
+            1,
+            "cost tracker builder adoption cannot remap published scoped views"
+        );
+        let mut states = self
+            .ledger
+            .states
+            .try_lock()
+            .expect("cost tracker builder adoption must run before concurrent turns");
+        assert_eq!(
+            states.len(),
+            1,
+            "cost tracker builder adoption requires one construction-time session"
+        );
+        let source = states
+            .remove(&previous)
+            .expect("active cost session state exists");
+        {
+            let mut state = source
+                .try_write()
+                .expect("cost tracker builder adoption source is not in use");
+            state.session_id = session_id;
+        }
+        assert!(states.insert(session_id, source).is_none());
+        let mut hydrated = self
+            .ledger
+            .hydrated_sessions
+            .try_lock()
+            .expect("cost tracker builder adoption must run before concurrent turns");
+        if let Some(baseline) = hydrated.remove(&previous) {
+            hydrated.insert(session_id, baseline);
+        }
+        *active = session_id;
+    }
+
+    /// Merge a persisted baseline exactly once for one session. A resumed
+    /// session may already have late in-memory settlement, so the baseline is
+    /// added to the current cell rather than replacing it. Repeated resume
+    /// hydration is a no-op, including after switching away and back.
+    pub async fn restore_total_for_session(&self, session_id: SessionId, nano_usd: u64) {
+        let state = self.ledger.state_for(session_id).await;
+        let mut hydrated = self.ledger.hydrated_sessions.lock().await;
+        if hydrated.contains_key(&session_id) {
+            return;
+        }
+        let mut state = state.write().await;
+        state.total_nano_usd = state.total_nano_usd.saturating_add(nano_usd);
+        hydrated.insert(session_id, nano_usd);
     }
 
     /// Resolve the exact pricing catalog owned by this tracker, applying the
@@ -215,8 +408,9 @@ impl CostTracker {
         let cost = CostCalculator::calculate_nano_usd(&usage, &pricing);
 
         // ----- update in-memory state -----
+        let state_cell = self.selected_state().await;
         let (session_id, snap) = {
-            let mut state = self.state.write().await;
+            let mut state = state_cell.write().await;
             state.total_nano_usd = state.total_nano_usd.saturating_add(cost);
             #[allow(clippy::cast_possible_truncation)]
             let dur_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
@@ -257,7 +451,7 @@ impl CostTracker {
             state.last_cache_creation_input_tokens = cache_creation_input_tokens;
             (state.session_id, state.clone())
         };
-        let _ = self.persist_tx.send(snap).await;
+        self.persist_snapshot(snap).await;
 
         // `tengu_cost_recorded` was a PORT-ONLY event (0 hits in claude-code
         // 2.1.195) — dropped under strict parity. The per-request success
@@ -271,7 +465,7 @@ impl CostTracker {
 
     /// Cumulative cost across all models in nano-USD.
     pub async fn total_nano_usd(&self) -> u64 {
-        self.state.read().await.total_nano_usd
+        self.selected_state().await.read().await.total_nano_usd
     }
 
     /// Seed the cumulative cost from a restored session (resume). Mirrors
@@ -285,7 +479,56 @@ impl CostTracker {
     /// Does NOT emit on the persist channel — this is a hydrate, not a new
     /// charge, and the on-resume value is already the persisted truth.
     pub async fn restore_total_nano_usd(&self, nano_usd: u64) {
-        self.state.write().await.total_nano_usd = nano_usd;
+        let session_id = self.session_id().await;
+        let state = self.ledger.state_for(session_id).await;
+        let mut hydrated = self.ledger.hydrated_sessions.lock().await;
+        state.write().await.total_nano_usd = nano_usd;
+        hydrated.insert(session_id, nano_usd);
+    }
+
+    /// Update the in-memory state with externally-priced spend and return the
+    /// snapshot that should be persisted.
+    ///
+    /// This is the lock-only half of [`Self::record_external_cost`]. Budget
+    /// settlement uses it while holding its reservation-book lock so a
+    /// concurrent reserve observes either the pre-settlement hold or the
+    /// post-settlement realized spend, never both. The persistence send must
+    /// happen after that lock is released; a bounded persistence channel must
+    /// not hold budget capacity hostage.
+    pub(crate) async fn record_external_cost_snapshot(&self, nano_usd: u64) -> Option<CostState> {
+        if nano_usd == 0 {
+            return None;
+        }
+        let state_cell = self.selected_state().await;
+        let mut state = state_cell.write().await;
+        Self::record_external_cost_in_state(&mut state, nano_usd)
+    }
+
+    /// Apply one external charge to an already-held state guard. No await is
+    /// performed, which lets BudgetEnforcer consume a reservation and charge
+    /// the tracker as one cancellation-safe in-memory transition.
+    pub(crate) fn record_external_cost_in_state(
+        state: &mut CostState,
+        nano_usd: u64,
+    ) -> Option<CostState> {
+        if nano_usd == 0 {
+            return None;
+        }
+        state.total_nano_usd = state.total_nano_usd.saturating_add(nano_usd);
+        // Track this addition separately from `per_model_usage` (which
+        // this call never touches — there is no single `ModelRef` for a
+        // Fusion run's several priced components) so a summary can tell
+        // "unattributed but accounted-for" apart from a `by_model`
+        // breakdown that has silently fallen behind the total.
+        state.external_nano_usd = state.external_nano_usd.saturating_add(nano_usd);
+        Some(state.clone())
+    }
+
+    /// Persist a snapshot produced by one of the lock-only accounting
+    /// operations. The sender is intentionally awaited outside any budget
+    /// reservation lock.
+    pub(crate) async fn persist_snapshot(&self, snapshot: CostState) {
+        let _ = self.persist_tx.send(snapshot).await;
     }
 
     /// Add externally-priced spend directly onto the cumulative total.
@@ -317,21 +560,9 @@ impl CostTracker {
     /// usage per-model at the spawner/side-query layer instead — a larger,
     /// separate task.
     pub async fn record_external_cost(&self, nano_usd: u64) {
-        if nano_usd == 0 {
-            return;
+        if let Some(snapshot) = self.record_external_cost_snapshot(nano_usd).await {
+            self.persist_snapshot(snapshot).await;
         }
-        let snap = {
-            let mut state = self.state.write().await;
-            state.total_nano_usd = state.total_nano_usd.saturating_add(nano_usd);
-            // Track this addition separately from `per_model_usage` (which
-            // this call never touches — there is no single `ModelRef` for a
-            // Fusion run's several priced components) so a summary can tell
-            // "unattributed but accounted-for" apart from a `by_model`
-            // breakdown that has silently fallen behind the total.
-            state.external_nano_usd = state.external_nano_usd.saturating_add(nano_usd);
-            state.clone()
-        };
-        let _ = self.persist_tx.send(snap).await;
     }
 
     /// Reset every cumulative counter to zero — the parity twin of claude-code
@@ -356,25 +587,29 @@ impl CostTracker {
     /// `yJe`, which mutates the in-process cost singleton only (the prior
     /// session's totals are saved separately, before the reset).
     pub async fn reset(&self) {
-        let mut state = self.state.write().await;
+        let mut hydrated = self.ledger.hydrated_sessions.lock().await;
+        let state_cell = self.selected_state().await;
+        let mut state = state_cell.write().await;
         let session_id = state.session_id;
         *state = CostState {
             session_id,
             ..Default::default()
         };
+        hydrated.remove(&session_id);
     }
 
     /// Accumulate one edit's line changes (claude-code `Bhn(added, removed)`:
     /// `Pt.totalLinesAdded += added; Pt.totalLinesRemoved += removed`).
     pub async fn record_code_change(&self, added: u64, removed: u64) {
-        let mut state = self.state.write().await;
+        let state_cell = self.selected_state().await;
+        let mut state = state_cell.write().await;
         state.total_lines_added = state.total_lines_added.saturating_add(added);
         state.total_lines_removed = state.total_lines_removed.saturating_add(removed);
     }
 
     /// Snapshot the current state. Cloned, safe to inspect off-thread.
     pub async fn snapshot(&self) -> CostState {
-        self.state.read().await.clone()
+        self.selected_state().await.read().await.clone()
     }
 }
 
@@ -498,11 +733,7 @@ mod tests {
             summary.session.total_nano_usd, 1_800_000_000,
             "the Fusion run's money reached the session total"
         );
-        let by_model_total: u64 = summary
-            .by_model
-            .values()
-            .map(|m| m.total_nano_usd)
-            .sum();
+        let by_model_total: u64 = summary.by_model.values().map(|m| m.total_nano_usd).sum();
         assert_eq!(
             by_model_total + summary.session.external_nano_usd,
             summary.session.total_nano_usd,
@@ -860,5 +1091,113 @@ gap had no explanation at all"
         let snap = tracker.snapshot().await;
         assert_eq!(snap.total_lines_added, 3);
         assert_eq!(snap.total_lines_removed, 3);
+    }
+
+    #[tokio::test]
+    async fn scoped_session_view_survives_active_switch_and_late_settlement() {
+        let (tx, _rx) = mpsc::channel(16);
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let tracker = Arc::new(CostTracker::new(
+            session_a,
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        ));
+        let origin = tracker.scoped(session_a);
+        origin.record_external_cost(125).await;
+
+        tracker.switch_session(session_b).await;
+        assert_eq!(tracker.total_nano_usd().await, 0);
+        origin.record_external_cost(75).await;
+        assert_eq!(tracker.total_nano_usd().await, 0);
+
+        tracker.switch_session(session_a).await;
+        assert_eq!(tracker.total_nano_usd().await, 200);
+        assert_eq!(origin.snapshot().await.session_id, session_a);
+    }
+
+    #[tokio::test]
+    async fn restore_hydrates_pristine_session_once_without_overwriting_live_spend() {
+        let (tx, _rx) = mpsc::channel(16);
+        let session = SessionId::new();
+        let tracker = CostTracker::new(session, Arc::new(PricingCatalog::builtin_reference()), tx);
+        tracker.restore_total_for_session(session, 500).await;
+        tracker.restore_total_for_session(session, 900).await;
+        assert_eq!(tracker.total_nano_usd().await, 500);
+
+        tracker.record_external_cost(25).await;
+        tracker.restore_total_for_session(session, 1_000).await;
+        assert_eq!(tracker.total_nano_usd().await, 525);
+    }
+
+    #[tokio::test]
+    async fn leaving_a_live_session_marks_its_zero_baseline_before_revisit() {
+        let (tx, _rx) = mpsc::channel(16);
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let tracker =
+            CostTracker::new(session_a, Arc::new(PricingCatalog::builtin_reference()), tx);
+        tracker.record_external_cost(100).await;
+        tracker.switch_session(session_b).await;
+        tracker.restore_total_for_session(session_a, 100).await;
+        tracker.switch_session(session_a).await;
+        assert_eq!(tracker.total_nano_usd().await, 100);
+    }
+
+    #[tokio::test]
+    async fn builder_adoption_moves_state_and_its_hydration_marker_once() {
+        let (tx, _rx) = mpsc::channel(16);
+        let placeholder = SessionId::new();
+        let mounted = SessionId::new();
+        let tracker = CostTracker::new(
+            placeholder,
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        );
+        tracker.restore_total_for_session(placeholder, 500).await;
+        tracker.record_external_cost(25).await;
+
+        tracker.adopt_active_session_for_builder(mounted);
+        let adopted = tracker.snapshot().await;
+        assert_eq!(adopted.session_id, mounted);
+        assert_eq!(adopted.total_nano_usd, 525);
+
+        // The persisted baseline moved with the state. Hydrating the mounted
+        // id again must not add the same 500 nano-USD a second time.
+        tracker.restore_total_for_session(mounted, 500).await;
+        assert_eq!(tracker.total_nano_usd().await, 525);
+
+        // Adoption moves rather than clones: the placeholder no longer owns a
+        // duplicate of the mounted session's spend.
+        assert_eq!(tracker.scoped(placeholder).total_nano_usd().await, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot remap published scoped views")]
+    fn builder_adoption_rejects_a_tracker_with_a_published_origin_view() {
+        let (tx, _rx) = mpsc::channel(1);
+        let placeholder = SessionId::new();
+        let tracker = CostTracker::new(
+            placeholder,
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        );
+        let _published_origin = tracker.scoped(placeholder);
+
+        tracker.adopt_active_session_for_builder(SessionId::new());
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "requires one construction-time session")]
+    async fn builder_adoption_rejects_a_multi_session_ledger() {
+        let (tx, _rx) = mpsc::channel(1);
+        let tracker = CostTracker::new(
+            SessionId::new(),
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        );
+        tracker.switch_session(SessionId::new()).await;
+
+        tracker.adopt_active_session_for_builder(SessionId::new());
     }
 }

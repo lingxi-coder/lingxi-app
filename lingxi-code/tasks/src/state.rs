@@ -301,9 +301,9 @@ pub struct LocalWorkflowTaskState {
     /// Shared base fields.
     #[serde(flatten)]
     pub base: TaskStateBase,
-    /// Session that owns this workflow row. Mobile uses this to keep TaskList
-    /// and `/workflows` scoped to the live session while desktop leaves the
-    /// registry unfiltered.
+    /// Session that owns this workflow row. Launchers persist it for stable
+    /// late-work budget/transcript ownership; the desktop registry may keep
+    /// TaskList and `/workflows` unfiltered while mobile scopes them live.
     #[serde(default)]
     pub session_uuid: Option<String>,
     /// Workflow identifier.
@@ -486,6 +486,13 @@ pub struct LocalFusionTaskState {
     /// until the first `FusionProgress` event lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
+    /// Effective end-to-end timeout captured for this run before task
+    /// publication. The print-mode waiter uses this snapshot rather than
+    /// reloading live settings, so a later config edit cannot shorten or
+    /// lengthen an already-running Fusion task's wait budget. `None` is kept
+    /// for legacy/external task producers that do not expose the seam.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_timeout_ms: Option<u64>,
     /// Whether `DesktopFusionCompletionSink::publish` (the durable
     /// `<fusion-result>` session append) has completed for a `Completed`
     /// run. `finish_fusion_terminal` flips [`TaskStateBase::status`] to

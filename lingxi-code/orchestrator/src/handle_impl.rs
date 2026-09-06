@@ -192,7 +192,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
         s.active_goal = None;
         s.message_timing = lingxi_core::session::MessageTimingState::default();
         s.session_id = protocol::SessionId::new();
-        let new_session_id = s.session_id.to_string();
+        let new_session_id_value = s.session_id;
+        let new_session_id = new_session_id_value.to_string();
         self.compaction_runtime
             .compaction_cumulative_dropped_tokens
             .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -201,6 +202,12 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // session's last entry.
         *self.transcript.last_jsonl_uuid.lock().await = None;
         drop(s);
+        // Publish the new active cost projection only after the session id is
+        // mounted. Any Fusion budget view captured before clear remains bound
+        // to `old_session_id` and can settle into that archived ledger.
+        self.model_runtime
+            .switch_cost_session(new_session_id_value)
+            .await;
         self.invoked_skill_session_guard.replace(new_session_id);
         // (review #8) Reset the autocompact circuit-breaker / rapid-refill
         // tracking. claude-code's clearConversation restarts the query loop with
@@ -313,6 +320,11 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // Adopt the NAMED id (clear_session mints a fresh one; resume does NOT).
         s.session_id = session_id;
         drop(s);
+        // Resume adopts the named id. Switch the live projection after the
+        // adoption so a late run from `old_session_id` cannot charge the
+        // resumed session, while an in-memory ledger for `session_id` is
+        // preserved when returning to it.
+        self.model_runtime.switch_cost_session(session_id).await;
         self.invoked_skill_session_guard
             .replace(session_id.to_string());
         if let Some(selection) = resumed_reasoning {
@@ -492,13 +504,16 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .ok_or_else(|| HandleError::ActionFailed("fork: no budget wired".into()))?;
 
         // The fork prefix is built from the most-recent assistant message.
-        let assistant = {
+        let (assistant, origin_session_id) = {
             let s = self.session.lock().await;
-            s.history
-                .iter()
-                .rev()
-                .find(|m| matches!(m, protocol::ConversationMessage::Assistant { .. }))
-                .cloned()
+            (
+                s.history
+                    .iter()
+                    .rev()
+                    .find(|m| matches!(m, protocol::ConversationMessage::Assistant { .. }))
+                    .cloned(),
+                s.session_id,
+            )
         };
         let Some(assistant) = assistant else {
             return Err(HandleError::ActionFailed(
@@ -519,6 +534,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
         let request = platform_api::subagent_spawn::SubagentSpawnRequest {
             subagent_type: platform_api::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
+            origin_session_id: Some(origin_session_id),
             // NOTE (deliberate deviation from the plan's `String::new()`): the
             // ONLY wired async spawner — `BackgroundAgentSpawner::spawn_async` —
             // forwards `prompt` to the backgrounded LocalAgent and IGNORES

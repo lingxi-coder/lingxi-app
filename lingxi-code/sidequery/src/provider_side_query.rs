@@ -1445,8 +1445,10 @@ mod tests {
     impl llm_client::FrameStream for ScriptedFrames {
         fn next_frame(
             &mut self,
-        ) -> llm_client::BoxFuture<'_, Result<Option<llm_client::RawStreamFrame>, llm_client::LlmError>>
-        {
+        ) -> llm_client::BoxFuture<
+            '_,
+            Result<Option<llm_client::RawStreamFrame>, llm_client::LlmError>,
+        > {
             let next = match self.items.pop_front() {
                 Some(Ok(frame)) => Ok(Some(frame)),
                 Some(Err(error)) => Err(error),
@@ -1553,6 +1555,14 @@ mod tests {
         transport: Arc<StreamStubTransport>,
         analytics: Option<Arc<telemetry::AnalyticsBus>>,
     ) -> ProviderSideQueryClient {
+        structured_session_client_with_parent_forced_tool_choice(transport, analytics, false)
+    }
+
+    fn structured_session_client_with_parent_forced_tool_choice(
+        transport: Arc<StreamStubTransport>,
+        analytics: Option<Arc<telemetry::AnalyticsBus>>,
+        parent_forced_tool_choice: bool,
+    ) -> ProviderSideQueryClient {
         let config = ClientConfig {
             providers: vec![ProviderProfile {
                 provider_id: ProviderId::AnthropicFirstParty,
@@ -1593,7 +1603,7 @@ mod tests {
                 Credential::BearerToken("session-oauth-token".to_string()),
             )));
         let session_transport: Arc<dyn llm_client::Transport> = transport;
-        let service = Arc::new(llm_client::ApiService::new(
+        let service = llm_client::ApiService::new(
             Arc::new(session_client),
             session_transport,
             llm_client::SubscriberState::default(),
@@ -1601,13 +1611,53 @@ mod tests {
             "test",
             analytics,
             None,
-        ));
-        ProviderSideQueryClient::from_service(service)
+        );
+        let service = if parent_forced_tool_choice {
+            service.with_forced_tool_choice(llm_client::ToolChoice::Tool {
+                name: "StructuredOutput".to_string(),
+            })
+        } else {
+            service
+        };
+        ProviderSideQueryClient::from_service(Arc::new(service))
+    }
+
+    /// Parent structured-output settings must not leak into an independent
+    /// empty-tool JSON-schema side query.
+    #[tokio::test]
+    async fn session_json_schema_does_not_inherit_parent_forced_tool_choice() {
+        let transport = Arc::new(StreamStubTransport::text_response("{\"ok\":true}"));
+        let client =
+            structured_session_client_with_parent_forced_tool_choice(transport.clone(), None, true);
+        let request = strict_req();
+        let expected_schema = request.schema.clone();
+
+        let response = client
+            .query_json_schema(request)
+            .await
+            .expect("session structured query succeeds");
+        assert_eq!(response.value, serde_json::json!({ "ok": true }));
+
+        let received = transport.received_bodies.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        let body = &received[0];
+        assert!(
+            body.get("tools").is_none(),
+            "JSON-schema side query must not send tools: {body}"
+        );
+        assert!(
+            body.get("tool_choice").is_none(),
+            "parent forced StructuredOutput choice leaked into side query: {body}"
+        );
+        assert_eq!(
+            body["output_config"]["format"],
+            serde_json::json!({ "type": "json_schema", "schema": expected_schema }),
+            "structured response format must remain on the wire"
+        );
     }
 
     /// F003: `query_json_schema` decodes the accumulated text as a strict
-    /// `serde_json::from_str` — a complete, standalone JSON value. Three
-    /// shapes the analyst provider might return:
+    /// `serde_json::from_str` — a complete, standalone JSON value.
     #[tokio::test]
     async fn query_json_schema_decodes_a_complete_valid_json_value() {
         let transport = Arc::new(StreamStubTransport::text_response("{\"ok\":true}"));
@@ -1625,15 +1675,19 @@ mod tests {
         // The model appended prose after an otherwise-valid JSON object —
         // `serde_json::from_str` rejects trailing non-whitespace, so this must
         // surface as a decode failure, not a silently-truncated parse.
-        let transport =
-            Arc::new(StreamStubTransport::text_response("{\"ok\":true} hope that helps!"));
+        let transport = Arc::new(StreamStubTransport::text_response(
+            "{\"ok\":true} hope that helps!",
+        ));
         let client = structured_session_client(transport, None);
 
         let err = client
             .query_json_schema(strict_req())
             .await
             .expect_err("trailing prose after the JSON value must not decode");
-        assert!(matches!(err, SideQueryError::InvalidResponse(_)), "got {err:?}");
+        assert!(
+            matches!(err, SideQueryError::InvalidResponse(_)),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -1646,7 +1700,10 @@ mod tests {
             .query_json_schema(strict_req())
             .await
             .expect_err("truncated JSON must not decode");
-        assert!(matches!(err, SideQueryError::InvalidResponse(_)), "got {err:?}");
+        assert!(
+            matches!(err, SideQueryError::InvalidResponse(_)),
+            "got {err:?}"
+        );
     }
 
     /// F003: the Session backend previously dropped `temperature` and

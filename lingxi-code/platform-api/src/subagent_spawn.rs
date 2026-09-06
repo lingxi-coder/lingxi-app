@@ -11,7 +11,7 @@
 use crate::budget::BudgetEnforcerHandle;
 use crate::tool_invoker::ToolInvoker;
 use async_trait::async_trait;
-use protocol::{AgentId, ConversationMessage};
+use protocol::{AgentId, ConversationMessage, SessionId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -262,6 +262,12 @@ pub struct SubagentSpawnRequest {
     /// it behaves like a top-level spawn (the conservative direction).
     #[serde(default)]
     pub depth: u32,
+    /// Trusted originating session for nested tool calls and Fusion budget
+    /// scoping. This is propagated explicitly across agent boundaries instead
+    /// of being inferred from hook/session metadata; `None` preserves legacy
+    /// call sites that have no owning session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_session_id: Option<SessionId>,
     /// The parent / main-loop model to resolve this spawn's `AgentModel::Inherit`
     /// + bare-family aliases against (claude-code `AgentTool.tsx:418`
     /// `getAgentModel(selectedAgent.model, toolUseContext.options.mainLoopModel, …)`).
@@ -496,6 +502,14 @@ pub enum SubagentObservation {
 /// Structured observer for a spawned subagent's live lifecycle.
 #[async_trait]
 pub trait SubagentSpawnObserver: Send + Sync {
+    /// Synchronous receipt emitted at the allocation boundary, before the
+    /// normal asynchronous lifecycle stream.  Hosts use this for facts that
+    /// affect accounting (for example, Fusion spawn-quota settlement) and
+    /// must not derive them from a potentially delayed UI observer.
+    ///
+    /// The default is a no-op so existing observers remain source-compatible.
+    fn on_allocated(&self, _event: &SubagentObservation) {}
+
     /// Receive one typed event from the child lifecycle.
     async fn on_event(&self, event: SubagentObservation);
 }

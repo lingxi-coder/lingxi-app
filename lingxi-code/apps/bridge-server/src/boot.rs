@@ -678,8 +678,11 @@ pub fn has_no_credential_source(cfg: &DesktopConfig) -> bool {
 fn needs_credential_driver(
     parent_credential_supplied: bool,
     provider_availability: &BTreeMap<String, bool>,
+    late_credential_route: bool,
 ) -> bool {
-    !parent_credential_supplied && !provider_availability.values().any(|available| *available)
+    !parent_credential_supplied
+        && !provider_availability.values().any(|available| *available)
+        && !late_credential_route
 }
 
 /// The assembled, ready-to-serve connection plus its auth-relevant facts.
@@ -918,27 +921,29 @@ async fn list_sessions_json_from(cwd: &Path, lingxi_home: &Path) -> Result<Strin
     .map_err(|_| "failed to encode session catalog".to_string())
 }
 
-/// How long connection assembly (and the router's Settings credential arm) is
-/// willing to WAIT for the Fusion catalog refresh a credential write triggers.
+/// Regression ceiling used by the credential-publication tests. Production no
+/// longer waits for the broker-backed reconciliation probe at all: the known
+/// mutation is published synchronously and the probe is detached.
 ///
-/// Round-10 finding N3. `engine_desktop::refresh_fusion_catalog_after_credential_write`
-/// re-runs `provider_config::compute_availability_with_isolation` over EVERY
-/// `CredentialSource` of every registered refresher, which bottoms out in the
+/// Round-10 finding N3. The detached engine refresh re-runs
+/// `provider_config::compute_availability_with_isolation` over every
+/// `CredentialSource` of each registered refresher, which bottoms out in the
 /// (on macOS, possibly brokered) keychain — the exact call the boot probe
 /// deliberately wraps in a 5s `tokio::time::timeout`
 /// (`apps/engine-desktop/src/lib.rs`, `resolve_llm_stack`) because a contended
-/// broker can stall it. Same probe, same reason, so the same budget.
+/// broker can stall it. The historical five-second budget remains a generous
+/// assertion ceiling for tests of the now-immediate publication path.
+#[cfg(test)]
 pub(crate) const FUSION_CATALOG_REFRESH_BUDGET: std::time::Duration =
     std::time::Duration::from_secs(5);
 
-/// Refresh Fusion's catalog filter for each of `provider_ids` under ONE shared
-/// [`FUSION_CATALOG_REFRESH_BUDGET`], never cancelling the refresh when the
-/// budget runs out.
+/// Publish each known credential mutation, then start one detached reconciliation
+/// probe. The historical name is retained for the two bridge call sites.
 ///
 /// Two properties this seam exists for, both of which the inline
 /// `for … { refresh(id).await }` it replaced got wrong:
 ///
-/// * **Bounded.** `engine_desktop::refresh_fusion_catalog_after_credential_write`
+/// * **Non-blocking.** `engine_desktop::refresh_fusion_catalog_after_credential_write`
 ///   is a keychain re-probe with no internal timeout. Awaiting it inline put an
 ///   unbounded stall on two paths that must not have one: connection assembly
 ///   (nothing serves the Electron client until `assemble_with_provider_keys`
@@ -946,42 +951,35 @@ pub(crate) const FUSION_CATALOG_REFRESH_BUDGET: std::time::Duration =
 ///   connection's read loop in `server.rs`'s `on_frame`, whose contract is
 ///   "return promptly" — a stall there stops the client's interrupts and
 ///   permission replies from even being READ).
-/// * **One budget for N ids, not N budgets.** The packaged Electron host
-///   supplies one key per configured provider, and each id re-probes ALL
-///   credential sources; N serial unbounded probes is the shape that actually
-///   hurts.
+/// * **One detached probe for N ids.** The packaged Electron host supplies one
+///   key per configured provider. Publishing all known ids first and spawning
+///   once avoids N identical full-source scans.
 ///
-/// On budget exhaustion the work is DETACHED, not dropped: the spawned task
-/// keeps running, so the availability map still converges once the broker
-/// answers. That is why the refresh is SPAWNED rather than raced with
-/// `tokio::time::timeout` directly — timing out a borrowed future would CANCEL
-/// the re-probe and leave the just-written credential invisible to `/fusion`
-/// for the rest of the process, which is the very defect the refresh call was
-/// added to fix.
-///
-/// In the ordinary (non-degraded) case the probe answers in microseconds and
-/// this awaits it to completion, so callers keep the "the map is refreshed by
-/// the time I return" behaviour they had.
-pub(crate) async fn refresh_fusion_catalog_bounded(provider_ids: Vec<String>) {
+/// The spawned task keeps running, so the availability map still converges once
+/// the broker answers. The caller never waits for it: readiness depends only on
+/// the cheap publication above, not on task scheduling or keychain latency.
+pub(crate) async fn refresh_fusion_catalog_bounded(provider_ids: Vec<String>) -> bool {
     if provider_ids.is_empty() {
-        return;
+        return true;
     }
-    let pending = provider_ids.len();
-    let refresh = tokio::spawn(async move {
-        for provider_id in provider_ids {
-            engine_desktop::refresh_fusion_catalog_after_credential_write(&provider_id).await;
-        }
-    });
-    if tokio::time::timeout(FUSION_CATALOG_REFRESH_BUDGET, refresh)
-        .await
-        .is_err()
-    {
-        tracing::warn!(
-            pending_provider_ids = pending,
-            "fusion catalog refresh exceeded its budget; continuing without waiting \
-             (the refresh keeps running in the background)"
-        );
+    // Publish the known mutation before returning readiness to the caller.
+    // The full broker scan has one detached owner for the whole runtime and is
+    // epoch-guarded, so it cannot block this connection or resurrect a newer
+    // delete.  Anthropic's bridge provider id is a UI id; normalize it before
+    // the engine records the mutation so OAuth is never mistaken for a key.
+    let mut routable = true;
+    for provider_id in provider_ids {
+        let mutation_id = if provider_id == "anthropic" {
+            "anthropic-api-key"
+        } else {
+            provider_id.as_str()
+        };
+        routable &= engine_desktop::publish_fusion_catalog_credential(mutation_id).await;
     }
+    if routable {
+        engine_desktop::spawn_fusion_catalog_refresh();
+    }
+    routable
 }
 
 /// Seed the provider keys the parent process handed over the dedicated stdin
@@ -1013,7 +1011,7 @@ pub(crate) async fn seed_parent_supplied_provider_keys(
             .set_provider_key_ephemeral(provider_id, secret)
             .await;
     }
-    refresh_fusion_catalog_bounded(provider_keys.keys().cloned().collect()).await;
+    let _ = refresh_fusion_catalog_bounded(provider_keys.keys().cloned().collect()).await;
 }
 
 /// Assemble a fully-bound [`BridgeConnection`] from a resolved [`DesktopConfig`].
@@ -1191,8 +1189,20 @@ pub async fn assemble_with_provider_keys(
     // The parent-source fact is authoritative for packaged Electron sessions.
     // Unpackaged CLI/TUI-oriented hosts may still derive availability from
     // their own persistent storage before binding the fail-fast driver.
-    let credential_required =
-        needs_credential_driver(parent_credential_supplied, &runtime.provider_availability);
+    let credential_required = needs_credential_driver(
+        parent_credential_supplied,
+        &runtime.provider_availability,
+        // `provider-config` keeps Anthropic's API-key route live even on
+        // a cold unauthenticated boot.  The composite credential provider
+        // reads the process-local store per request, so after Settings
+        // adds the first key this same connection can authenticate a live
+        // turn; a permanently fail-fast driver would make the catalog
+        // publication a false positive.
+        runtime
+            .provider_auth_methods
+            .get("anthropic")
+            .is_some_and(|method| method == "api_key"),
+    );
 
     // `use_noop_permission_gate: false` ⇒ build MUST surface the adapter gate.
     let gate = runtime.permission_gate.clone().ok_or_else(|| {
@@ -1618,9 +1628,13 @@ mod tests {
             ("openrouter".to_string(), false),
         ]);
 
-        assert!(!needs_credential_driver(false, &availability));
-        assert!(needs_credential_driver(false, &BTreeMap::new()));
-        assert!(!needs_credential_driver(true, &BTreeMap::new()));
+        assert!(!needs_credential_driver(false, &availability, false));
+        assert!(needs_credential_driver(false, &BTreeMap::new(), false));
+        assert!(!needs_credential_driver(true, &BTreeMap::new(), false));
+        assert!(
+            !needs_credential_driver(false, &BTreeMap::new(), true),
+            "a route that resolves credentials at request time must remain live after a cold boot"
+        );
     }
 
     #[test]
@@ -2053,13 +2067,27 @@ pub(crate) mod fusion_refresh_test_support {
         );
         (credentials, availability, reads)
     }
+
+    /// Give a detached refresh a bounded number of scheduler turns to reach
+    /// the injected backend. The production seam intentionally does not yield
+    /// on behalf of this observation.
+    pub(crate) async fn wait_for_refresh_start(reads: &AtomicUsize) {
+        for _ in 0..128 {
+            if reads.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
 }
 
 /// Round-10 finding N3: the Fusion catalog refresh that follows a credential
 /// write must never put an UNBOUNDED keychain stall on connection assembly.
 #[cfg(test)]
 mod fusion_catalog_refresh_budget_tests {
-    use super::fusion_refresh_test_support::{register_stalling_refresher, REGISTRY_LOCK};
+    use super::fusion_refresh_test_support::{
+        register_stalling_refresher, wait_for_refresh_start, REGISTRY_LOCK,
+    };
     use super::{seed_parent_supplied_provider_keys, FUSION_CATALOG_REFRESH_BUDGET};
     use std::collections::BTreeMap;
     use std::sync::atomic::Ordering;
@@ -2080,12 +2108,8 @@ mod fusion_catalog_refresh_budget_tests {
         // three. The fourth has no ephemeral key, so its probe reaches the
         // never-answering backend — exactly like a real install where the
         // parent-supplied providers are a subset of the configured ones.
-        let (credentials, _availability, reads) = register_stalling_refresher(&[
-            "openrouter",
-            "deepseek",
-            "groq",
-            "never-answers",
-        ]);
+        let (credentials, _availability, reads) =
+            register_stalling_refresher(&["openrouter", "deepseek", "groq", "never-answers"]);
 
         let provider_keys: BTreeMap<String, String> = [
             ("openrouter", "sk-or-n3"),
@@ -2115,6 +2139,7 @@ credential backend never answers: a stalled keychain here blocks \
 budget, not one each; waited {waited:?}",
             provider_keys.len()
         );
+        wait_for_refresh_start(&reads).await;
         assert!(
             reads.load(Ordering::SeqCst) >= 1,
             "the refresh must actually have reached the credential backend — with \

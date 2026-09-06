@@ -11,6 +11,8 @@
 use crate::budget::{BudgetCheckResult, BudgetEnforcer};
 use async_trait::async_trait;
 use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
+use protocol::SessionId;
+use std::sync::Arc;
 
 #[async_trait]
 impl BudgetEnforcerHandle for BudgetEnforcer {
@@ -32,6 +34,10 @@ impl BudgetEnforcerHandle for BudgetEnforcer {
 
     fn max_session_nano_usd(&self) -> Option<u64> {
         BudgetEnforcer::max_session_nano_usd(self)
+    }
+
+    fn scoped_for_session(&self, session_id: SessionId) -> Option<Arc<dyn BudgetEnforcerHandle>> {
+        Some(BudgetEnforcer::scoped_for_session(self, session_id))
     }
 
     async fn active_reservation_nano_usd(&self) -> u64 {

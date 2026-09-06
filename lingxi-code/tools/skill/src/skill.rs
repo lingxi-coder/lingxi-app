@@ -337,6 +337,11 @@ impl SkillTool {
             }
         };
 
+        let origin_session_id = if let Some(session) = ctx.session.as_ref() {
+            Some(session.lock().await.session_id)
+        } else {
+            ctx.origin_session_id
+        };
         let request = platform_api::subagent_spawn::SubagentSpawnRequest {
             subagent_type: desc
                 .agent
@@ -356,6 +361,7 @@ impl SkillTool {
             forked_skill_effort: None,
             frozen_command_denies: scoping.frozen_command_denies.clone().unwrap_or_default(),
             depth: ctx.depth + 1,
+            origin_session_id,
             context_paths: Vec::new(),
             model_profile: None,
             team_name: None,
@@ -403,11 +409,15 @@ impl SkillTool {
         if let Some(gate) = self.ctx.permission_gate.clone() {
             invoker_impl = invoker_impl.with_gate(gate);
         }
+        let budget = self.ctx.budget_enforcer.clone().ok_or_else(|| {
+            ToolError::Internal("Skill: budget enforcer is not configured".into())
+        })?;
+        let budget = origin_session_id
+            .and_then(|session_id| budget.scoped_for_session(session_id))
+            .unwrap_or(budget);
         let inherit = platform_api::subagent_spawn::SubagentInheritance {
             tool_invoker: Arc::new(invoker_impl),
-            budget: self.ctx.budget_enforcer.clone().ok_or_else(|| {
-                ToolError::Internal("Skill: budget enforcer is not configured".into())
-            })?,
+            budget,
         };
 
         // Re-check across the await window: a concurrent tool call can launch

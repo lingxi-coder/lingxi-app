@@ -6080,8 +6080,14 @@ mod pre_cancel_tests {
         fn is_read_only(&self, _: &serde_json::Value) -> bool {
             false
         }
-        fn interrupt_behavior(&self, _: &serde_json::Value) -> InterruptBehavior {
-            InterruptBehavior::Block
+        fn interrupt_behavior(&self, input: &serde_json::Value) -> InterruptBehavior {
+            // Mirrors AgentTool's input-sensitive contract: Fusion owns a
+            // settlement boundary; ordinary Agent calls remain cancelable.
+            if input.get("subagent_type").and_then(serde_json::Value::as_str) == Some("fusion") {
+                InterruptBehavior::Block
+            } else {
+                InterruptBehavior::Cancel
+            }
         }
         async fn validate_input(
             &self,
@@ -6244,10 +6250,12 @@ mod pre_cancel_tests {
         );
     }
 
-    /// A Block tool keeps the dispatch future occupied after cancellation and
-    /// publishes its real completed result only after its safe boundary exits.
+    /// F01: run Agent's input-sensitive interrupt contract through the real
+    /// dispatcher. The Agent tool's own unit test pins the same classification:
+    /// ordinary agents return `Cancel`, while Fusion returns `Block` so its
+    /// tool-owned settlement boundary can finish.
     #[tokio::test]
-    async fn in_flight_block_tool_finishes_naturally_after_cancel() {
+    async fn agent_fusion_block_and_normal_cancel_reach_the_real_dispatcher() {
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let mut registry = ToolRegistry::new();
@@ -6266,6 +6274,42 @@ mod pre_cancel_tests {
             Arc::new(StaticMemoryProvider::empty()),
             PathBuf::from("/tmp"),
         ));
+
+        let normal_cancel = CancellationToken::new();
+        let normal_dispatch = tokio::spawn({
+            let orch = orch.clone();
+            let cancel = normal_cancel.clone();
+            async move {
+                dispatch_tool_uses_tracked(
+                    &orch,
+                    &[(
+                        ToolUseId::new(),
+                        "BlockingMutation".to_string(),
+                        json!({ "subagent_type": "general-purpose" }),
+                        None,
+                    )],
+                    Some(cancel),
+                )
+                .await
+            }
+        });
+        started.notified().await;
+        normal_cancel.cancel();
+        let (normal_results, _, _, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), normal_dispatch)
+                .await
+                .expect("ordinary Agent dispatch must drop the blocked call future")
+                .expect("ordinary dispatch joined")
+                .expect("ordinary dispatch");
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = &normal_results[0]
+        else {
+            panic!("expected ordinary Agent ToolResult");
+        };
+        assert!(*is_error);
+        assert!(content.contains("aborted"));
+
         let cancel = CancellationToken::new();
         let task_orch = orch.clone();
         let task_cancel = cancel.clone();
@@ -6275,7 +6319,7 @@ mod pre_cancel_tests {
                 &[(
                     ToolUseId::new(),
                     "BlockingMutation".to_string(),
-                    json!({}),
+                    json!({ "subagent_type": "fusion" }),
                     None,
                 )],
                 Some(task_cancel),
@@ -6305,7 +6349,11 @@ mod pre_cancel_tests {
         };
         assert!(!is_error);
         assert!(content.contains("committed"));
-        assert!(output.denial_snapshot().await.is_empty());
+        assert_eq!(
+            output.denial_snapshot().await.len(),
+            1,
+            "only the ordinary Cancel branch should emit an interruption denial"
+        );
     }
 }
 // RECOV.4: the `max_output_tokens` recovery-reset helper used by both the

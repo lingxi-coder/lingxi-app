@@ -55,6 +55,13 @@ pub struct AnalystUsage {
     pub usage: cost::Usage,
     /// Number of provider calls made (every attempt, decoded or not).
     pub calls: u32,
+    /// Attempts for which no provider usage was returned at all. These calls
+    /// still egressed the analyst payload, so cancellation/final settlement
+    /// must retain an input estimate for each one in addition to any exact
+    /// usage accumulated from earlier attempts. A `Partial` response is not
+    /// counted here: it carries some real usage and remains represented as
+    /// known-short via [`Self::incomplete`] rather than being double-estimated.
+    pub unreported_calls: u32,
     /// Set once at least one attempt is known to have been billed by the
     /// provider without a usage figure to add to `usage` (an
     /// `InvalidResponse` retry). When true, a caller must never report
@@ -87,6 +94,33 @@ pub async fn analyze(
     analyst: &ResolvedPanel,
     panels: &[PanelInternal],
 ) -> Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)> {
+    analyze_with_observer(
+        client,
+        config,
+        request,
+        analyst,
+        panels,
+        |_usage, _incomplete| {},
+    )
+    .await
+}
+
+/// Call the analyst while publishing cumulative usage at every retry
+/// boundary. The observer runs synchronously after the call count is known,
+/// before an attempt is polled, and after each response. This lets an outer
+/// cancellation settle a prior billed attempt even when the retry future is
+/// dropped before `analyze` can return its accumulator.
+pub(crate) async fn analyze_with_observer<F>(
+    client: Arc<dyn SideQueryClient>,
+    config: &FusionRuntimeConfig,
+    request: &FusionRequest,
+    analyst: &ResolvedPanel,
+    panels: &[PanelInternal],
+    mut observe: F,
+) -> Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)>
+where
+    F: FnMut(&AnalystUsage, bool),
+{
     let panel_ids = successful_panel_ids(panels);
     let schema = analyst_json_schema(&panel_ids, &request.dimensions);
     let attempts = 1 + u32::from(config.analysis_protocol_retries);
@@ -100,6 +134,13 @@ pub async fn analyze(
     // committed lease the moment the run ultimately failed.
     let mut acc = AnalystUsage::default();
     for attempt in 0..attempts {
+        // Publish the incremented call count before polling the provider.
+        // `true` means the current attempt has no response usage yet; if the
+        // outer Fusion future is dropped here, settlement keeps prior known
+        // usage and marks the total estimated.
+        acc.calls += 1;
+        acc.unreported_calls += 1;
+        observe(&acc, true);
         let user = analyst_user_message(request, panels, last_decode_error.as_deref());
         let req = StrictStructuredQueryRequest {
             model: analyst.model.clone(),
@@ -117,12 +158,15 @@ pub async fn analyze(
             client.query_json_schema(req),
         )
         .await;
-        acc.calls += 1;
         match outcome {
             // A stalled/slow provider call is not retried — see the doc
             // comment above.
-            Err(_) => return Err((AnalystError::Failed("timeout".into()), acc)),
+            Err(_) => {
+                observe(&acc, true);
+                return Err((AnalystError::Failed("timeout".into()), acc));
+            }
             Ok(Err(SideQueryError::StructuredOutputUnsupported)) => {
+                observe(&acc, true);
                 return Err((AnalystError::Unsupported, acc));
             }
             Ok(Err(SideQueryError::InvalidResponse(reason))) => {
@@ -135,6 +179,7 @@ pub async fn analyze(
                 // successful retry ever reports `estimated: false` over a
                 // total that is silently missing this attempt's real spend.
                 acc.incomplete = true;
+                observe(&acc, true);
                 if attempt + 1 == attempts {
                     return Err((AnalystError::ParseFailed, acc));
                 }
@@ -154,8 +199,10 @@ pub async fn analyze(
                 // failed batch's spend, so mark it `incomplete` too.
                 if let SideQueryError::Partial { usage, .. } = &other {
                     acc.usage.add(usage);
+                    acc.unreported_calls = acc.unreported_calls.saturating_sub(1);
                     acc.incomplete = true;
                 }
+                observe(&acc, true);
                 return Err((
                     AnalystError::Failed(analyst_failure_category(&other).into()),
                     acc,
@@ -163,13 +210,21 @@ pub async fn analyze(
             }
             Ok(Ok(StrictStructuredQueryResponse { value, usage, .. })) => {
                 acc.usage.add(&usage);
+                acc.unreported_calls = acc.unreported_calls.saturating_sub(1);
                 match decode_analysis(&value, request, panels) {
-                    Ok(analysis) => return Ok((analysis, acc)),
+                    Ok(analysis) => {
+                        observe(&acc, acc.incomplete);
+                        return Ok((analysis, acc));
+                    }
                     Err(reason) if attempt + 1 == attempts => {
                         let _ = reason;
+                        observe(&acc, true);
                         return Err((AnalystError::ParseFailed, acc));
                     }
-                    Err(reason) => last_decode_error = Some(reason),
+                    Err(reason) => {
+                        observe(&acc, true);
+                        last_decode_error = Some(reason);
+                    }
                 }
             }
         }
@@ -627,7 +682,9 @@ mod tests {
         };
         sanitize_analysis(&mut analysis);
         assert!(!analysis.consensus[0].contains("<system-reminder>"));
-        assert!(!analysis.contradictions[0].topic.contains("<system-reminder>"));
+        assert!(!analysis.contradictions[0]
+            .topic
+            .contains("<system-reminder>"));
         assert!(!analysis.contradictions[0].positions[0]
             .position
             .contains("<system-reminder>"));
@@ -639,7 +696,9 @@ mod tests {
         assert!(!analysis.contradictions[0].positions[0]
             .panel_id
             .contains("<system-reminder>"));
-        assert!(!analysis.unique_insights[0].insight.contains("<system-reminder>"));
+        assert!(!analysis.unique_insights[0]
+            .insight
+            .contains("<system-reminder>"));
         assert!(!analysis.unique_insights[0]
             .panel_id
             .contains("<system-reminder>"));
@@ -805,6 +864,10 @@ mod tests {
             .expect("second attempt must decode successfully");
         assert_eq!(acc.calls, 2, "both attempts must be counted");
         assert_eq!(
+            acc.unreported_calls, 0,
+            "both attempts returned exact usage even though the first response failed validation"
+        );
+        assert_eq!(
             acc.usage.tokens.input, 120,
             "the first (decode-failed) attempt's 100 input tokens must not be \
 dropped — only the second attempt's 20 survived before this fix"
@@ -859,6 +922,7 @@ attempt's real usage — the total is not incomplete"
             .expect_err("both attempts decode-fail");
         assert_eq!(err, AnalystError::ParseFailed);
         assert_eq!(acc.calls, 2, "both billed attempts must be counted");
+        assert_eq!(acc.unreported_calls, 0);
         assert_eq!(
             acc.usage.tokens.input, 120,
             "the first attempt's 100 input tokens must not be discarded on the \
@@ -892,7 +956,11 @@ error exit — before this fix every AnalystError arm dropped usage_acc entirely
             _request: StrictStructuredQueryRequest,
         ) -> Result<StrictStructuredQueryResponse, SideQueryError> {
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let (input, output) = if call == 0 { (100_u64, 50_u64) } else { (20_u64, 10_u64) };
+            let (input, output) = if call == 0 {
+                (100_u64, 50_u64)
+            } else {
+                (20_u64, 10_u64)
+            };
             Ok(StrictStructuredQueryResponse {
                 value: serde_json::json!({
                     "consensus": [],
@@ -954,6 +1022,10 @@ error exit — before this fix every AnalystError arm dropped usage_acc entirely
             .await
             .expect("second attempt decodes successfully");
         assert_eq!(acc.calls, 2);
+        assert_eq!(
+            acc.unreported_calls, 1,
+            "the first billed response returned no recoverable usage"
+        );
         assert!(
             acc.incomplete,
             "a billed InvalidResponse attempt whose usage could not be captured \
@@ -1145,6 +1217,10 @@ length: user_message.len()={} decode_err.len()={}",
             .await
             .expect_err("a Partial failure is not retried and fails the analyst stage");
         assert_eq!(err, AnalystError::Failed("partial".into()));
+        assert_eq!(
+            acc.unreported_calls, 0,
+            "Partial carries real usage and must not receive a second full-call estimate"
+        );
         assert_eq!(
             acc.usage.tokens.input, 777,
             "the 777 input tokens the provider already billed for the completed \

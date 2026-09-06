@@ -138,6 +138,7 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
     let error = match s {
         TaskState::LocalWorkflow(w) => w.outcome.error.clone(),
         TaskState::LocalAgent(a) => a.error.clone(),
+        TaskState::LocalFusion(f) => f.error.clone(),
         _ => None,
     };
     // F005: `local_fusion` carries its current progress-stage label (the same
@@ -1332,6 +1333,7 @@ mod tests {
             egress_profiles: Vec::new(),
             usage: None,
             stage: None,
+            effective_timeout_ms: None,
             result_published: false,
         });
         registry.insert_state_for_test(state).await;
@@ -1358,6 +1360,67 @@ mod tests {
             Some("Running panels 2/3"),
             "the DTO/list record — not just LocalFusionTaskState — must carry the label"
         );
+    }
+
+    /// F010: a failed `/fusion` task's recorded reason must survive the
+    /// public TaskRegistryHandle projection.  The registry stores the reason
+    /// on LocalFusionTaskState and notifications already expose it, but the
+    /// get/list DTO path used by task clients must expose the same value.
+    #[tokio::test]
+    async fn local_fusion_failure_reason_reaches_public_get_and_list_records() {
+        let (_d, registry) = make_registry();
+        let task_id = crate::id::generate_task_id(crate::id::TaskType::LocalFusion);
+        let spool = registry.output_manager.allocate(&task_id).await.unwrap();
+        let base = crate::state::TaskStateBase {
+            id: task_id.clone(),
+            task_type: crate::id::TaskType::LocalFusion,
+            status: TaskStatus::Failed,
+            description: "compare two approaches".into(),
+            tool_use_id: None,
+            start_time: std::time::SystemTime::UNIX_EPOCH,
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: spool,
+            output_offset: 0,
+            notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
+        };
+        registry
+            .insert_state_for_test(TaskState::LocalFusion(crate::state::LocalFusionTaskState {
+                base,
+                conversation_id: "conv1".into(),
+                prompt: "compare two approaches".into(),
+                run_id: None,
+                preset: "quality".into(),
+                cross_provider: false,
+                final_text: None,
+                error: Some("too few eligible models".into()),
+                egress_profiles: Vec::new(),
+                usage: None,
+                stage: None,
+                effective_timeout_ms: None,
+                result_published: false,
+            }))
+            .await;
+
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
+        let get = h.get(&task_id).await.unwrap().expect("record present");
+        assert_eq!(get.status, "failed");
+        assert_eq!(get.error.as_deref(), Some("too few eligible models"));
+
+        let failed = h
+            .list(TaskListFilter {
+                status: Some("failed".into()),
+            })
+            .await
+            .unwrap();
+        let listed = failed
+            .iter()
+            .find(|record| record.task_id == task_id)
+            .expect("failed Fusion record listed");
+        assert_eq!(listed.error.as_deref(), Some("too few eligible models"));
     }
 
     #[tokio::test]

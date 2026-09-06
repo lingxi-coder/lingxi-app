@@ -204,6 +204,41 @@ impl FusionExecutor for ImmediateExecutor {
     }
 }
 
+/// Captures the timeout that the handler carries into the actual Fusion run.
+/// This guards the per-run snapshot seam separately from the print-mode
+/// deadline projection.
+struct TimeoutSnapshotExecutor {
+    observed: StdMutex<Vec<Option<u64>>>,
+}
+
+impl TimeoutSnapshotExecutor {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            observed: StdMutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl FusionExecutor for TimeoutSnapshotExecutor {
+    async fn run(
+        &self,
+        _request: FusionRequest,
+        inherit: FusionInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        self.observed
+            .lock()
+            .unwrap()
+            .push(inherit.effective_timeout_ms);
+        Ok(dummy_result())
+    }
+
+    fn effective_timeout_ms(&self) -> Option<u64> {
+        Some(3_600_000)
+    }
+}
+
 /// F005: sends two scripted `FusionProgress` events through whatever channel
 /// `spawn` hands it before completing — the fixture under test is the
 /// HANDLER's forwarding wire, not the orchestrator.
@@ -560,7 +595,13 @@ struct RecordingStatusSink {
     events: Arc<StdMutex<Vec<String>>>,
     statuses: StdMutex<Vec<(String, TaskStatus)>>,
     errors: StdMutex<Vec<(String, String)>>,
-    egress_and_usage: StdMutex<Vec<(String, Vec<String>, Option<platform_api::task_registry::AgentRunUsage>)>>,
+    egress_and_usage: StdMutex<
+        Vec<(
+            String,
+            Vec<String>,
+            Option<platform_api::task_registry::AgentRunUsage>,
+        )>,
+    >,
 }
 
 impl RecordingStatusSink {
@@ -598,7 +639,10 @@ impl RecordingStatusSink {
 #[async_trait]
 impl TaskStatusSink for RecordingStatusSink {
     async fn set_status(&self, task_id: &str, status: TaskStatus) {
-        self.events.lock().unwrap().push(format!("status:{status:?}"));
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("status:{status:?}"));
         self.statuses
             .lock()
             .unwrap()
@@ -804,7 +848,11 @@ impl TaskStatusSink for BlockingStageSink {
     }
 
     async fn set_fusion_stage(&self, _task_id: &str, stage: String) {
-        self.inner.events.lock().unwrap().push(format!("stage:{stage}"));
+        self.inner
+            .events
+            .lock()
+            .unwrap()
+            .push(format!("stage:{stage}"));
         if let Some(tx) = self.started_tx.lock().unwrap().take() {
             let _ = tx.send(());
         }
@@ -947,6 +995,48 @@ async fn handler_waits_for_activation_before_running_executor() {
     assert_eq!(completion_sink.0.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn handler_carries_effective_timeout_into_the_runtime_inheritance_snapshot() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let status_sink = Arc::new(RecordingSink::default());
+    let completion_sink = Arc::new(CountingCompletionSink::default());
+    let executor = TimeoutSnapshotExecutor::new();
+    let handler = make_handler(
+        executor.clone(),
+        output_manager,
+        status_sink.clone(),
+        completion_sink,
+    );
+
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: "conv".into(),
+            },
+            make_ctx(fs),
+        )
+        .await
+        .expect("spawn succeeds");
+    assert_eq!(handle.fusion_timeout_ms, Some(3_600_000));
+
+    for _ in 0..200 {
+        if status_sink
+            .last_status()
+            .is_some_and(TaskStatus::is_terminal)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        *executor.observed.lock().unwrap(),
+        vec![Some(3_600_000)],
+        "the runtime must receive the timeout captured before task publication"
+    );
+}
+
 /// F005: `LocalFusionHandler::spawn` must forward every `FusionProgress` the
 /// executor emits into `TaskStatusSink::set_fusion_stage`, in order — before
 /// this fix `spawn` always passed `None` for the progress channel, so a
@@ -989,7 +1079,10 @@ async fn spawn_forwards_fusion_progress_into_set_fusion_stage() {
     assert_eq!(executor.runs.load(Ordering::SeqCst), 1);
     assert_eq!(
         status_sink.stages(),
-        vec!["Resolving models".to_string(), "Running panels 2/3".to_string()],
+        vec![
+            "Resolving models".to_string(),
+            "Running panels 2/3".to_string()
+        ],
         "expected the 2 scripted FusionProgress events forwarded in order"
     );
 }
@@ -1457,8 +1550,7 @@ async fn failing_executor_records_error_before_failed_status_and_spools_it() {
 /// not leave the task's usage permanently `None` for a run that really
 /// burned tokens.
 #[tokio::test]
-async fn failing_executor_that_already_spent_tokens_discloses_partial_usage_before_failed_status()
-{
+async fn failing_executor_that_already_spent_tokens_discloses_partial_usage_before_failed_status() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let status_sink = Arc::new(RecordingStatusSink::default());
@@ -1729,7 +1821,8 @@ async fn kill_while_running_ends_status_killed_exactly_once() {
         .filter(|(_, s)| s.is_terminal())
         .count();
     assert_eq!(
-        terminal_transitions, 1,
+        terminal_transitions,
+        1,
         "exactly one terminal transition: {:?}",
         status_sink.statuses.lock().unwrap()
     );

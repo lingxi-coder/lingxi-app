@@ -3963,7 +3963,8 @@ impl ApiService {
         max_tokens: Option<u32>,
         query_source: Option<&str>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        let mut req = self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        let mut req =
+            self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
         req.effort = effort;
         req.query_source = query_source.map(str::to_string);
         self.drive_stream(req).await
@@ -3984,7 +3985,8 @@ impl ApiService {
         max_tokens: Option<u32>,
         query_source: Option<&str>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        let mut req = self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        let mut req =
+            self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
         req.effort = effort;
         if let Some(name) = forced_tool {
             req.tool_choice = Some(crate::ToolChoice::Tool {
@@ -4025,6 +4027,11 @@ impl ApiService {
             true,
             max_tokens,
         )?;
+        // JSON-schema side queries are independent structured-output requests,
+        // not forced-tool calls. A parent `--json-schema` turn may have set a
+        // session-level `forced_tool_choice`; do not send that choice with the
+        // empty tool list used by this request.
+        req.tool_choice = None;
         req.effort = effort;
         req.response_format = Some(crate::ResponseFormat::JsonSchema { schema });
         self.drive_stream(req).await
@@ -4074,6 +4081,9 @@ impl ApiService {
             true,
             max_tokens,
         )?;
+        // See `stream_json_schema`: the parent turn's forced tool choice must
+        // not leak into this empty-tool structured-output request.
+        req.tool_choice = None;
         req.effort = effort;
         req.response_format = Some(crate::ResponseFormat::JsonSchema { schema });
         self.apply_side_query_thinking(&mut req, model, thinking, temperature);

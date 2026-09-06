@@ -9,7 +9,7 @@
 use crate::tracker::CostTracker;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -56,6 +56,19 @@ pub enum BudgetExceedPolicy {
 pub struct BudgetEnforcer {
     config: BudgetConfig,
     cost_tracker: Arc<CostTracker>,
+    /// Per-session warning/latch/hold state. The active enforcer follows the
+    /// tracker projection; scoped views stay pinned to their origin session.
+    sessions: Arc<BudgetSessionLedger>,
+    session_scope: Option<protocol::SessionId>,
+}
+
+struct BudgetSessionLedger {
+    sessions: Mutex<HashMap<protocol::SessionId, Arc<BudgetSessionState>>>,
+    next_reservation_id: AtomicU64,
+    owners: std::sync::Mutex<HashMap<u64, protocol::SessionId>>,
+}
+
+struct BudgetSessionState {
     warnings_fired: RwLock<HashSet<u32>>,
     realized_exceeded: AtomicBool,
     /// Active Fusion (and future) holds. Occupancy is
@@ -63,15 +76,23 @@ pub struct BudgetEnforcer {
     reservations: Mutex<ReservationBook>,
 }
 
+impl BudgetSessionState {
+    fn new() -> Self {
+        Self {
+            warnings_fired: RwLock::new(HashSet::new()),
+            realized_exceeded: AtomicBool::new(false),
+            reservations: Mutex::new(ReservationBook::new()),
+        }
+    }
+}
+
 struct ReservationBook {
-    next_id: u64,
     active: HashMap<u64, u64>,
 }
 
 impl ReservationBook {
     fn new() -> Self {
         Self {
-            next_id: 1,
             active: HashMap::new(),
         }
     }
@@ -142,15 +163,84 @@ impl BudgetEnforcer {
         Self {
             config,
             cost_tracker,
-            warnings_fired: RwLock::new(HashSet::new()),
-            realized_exceeded: AtomicBool::new(false),
-            reservations: Mutex::new(ReservationBook::new()),
+            sessions: Arc::new(BudgetSessionLedger {
+                sessions: Mutex::new(HashMap::new()),
+                next_reservation_id: AtomicU64::new(1),
+                owners: std::sync::Mutex::new(HashMap::new()),
+            }),
+            session_scope: None,
         }
+    }
+
+    /// Create a budget view pinned to one originating session. Its holds,
+    /// warning thresholds, and realized-exceeded latch are independent from
+    /// the active projection used by the parent session.
+    #[must_use]
+    pub fn scoped_for_session(&self, session_id: protocol::SessionId) -> Arc<Self> {
+        Arc::new(Self {
+            config: self.config.clone(),
+            cost_tracker: self.cost_tracker.scoped(session_id),
+            sessions: self.sessions.clone(),
+            session_scope: Some(session_id),
+        })
+    }
+
+    async fn session_id(&self) -> protocol::SessionId {
+        match self.session_scope {
+            Some(session_id) => session_id,
+            None => self.cost_tracker.session_id().await,
+        }
+    }
+
+    async fn session_state_for(&self, session_id: protocol::SessionId) -> Arc<BudgetSessionState> {
+        let mut sessions = self.sessions.sessions.lock().await;
+        sessions
+            .entry(session_id)
+            .or_insert_with(|| Arc::new(BudgetSessionState::new()))
+            .clone()
+    }
+
+    async fn session_state(&self) -> Arc<BudgetSessionState> {
+        self.session_state_for(self.session_id().await).await
+    }
+
+    /// Capture the budget book and tracker cell for one session before any
+    /// subsequent await. The active projection may switch concurrently, but
+    /// this operation remains pinned to the id selected at its start.
+    async fn session_context(
+        &self,
+    ) -> (
+        Arc<BudgetSessionState>,
+        Arc<tokio::sync::RwLock<crate::tracker::CostState>>,
+    ) {
+        self.session_context_for(self.session_id().await).await
+    }
+
+    async fn session_context_for(
+        &self,
+        session_id: protocol::SessionId,
+    ) -> (
+        Arc<BudgetSessionState>,
+        Arc<tokio::sync::RwLock<crate::tracker::CostState>>,
+    ) {
+        let session = self.session_state_for(session_id).await;
+        let tracker = self.cost_tracker.scoped(session_id);
+        let state = tracker.selected_state_cell().await;
+        (session, state)
+    }
+
+    fn owner_for(&self, id: platform_api::BudgetReservationId) -> Option<protocol::SessionId> {
+        self.sessions
+            .owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id.raw())
+            .copied()
     }
 
     /// Sum of active reservation holds.
     pub async fn active_reservation_nano_usd(&self) -> u64 {
-        self.reservations.lock().await.held()
+        self.session_state().await.reservations.lock().await.held()
     }
 
     /// Hold `nano_usd` so concurrent work cannot spend it.
@@ -164,22 +254,39 @@ impl BudgetEnforcer {
         nano_usd: u64,
     ) -> Result<platform_api::BudgetReservationId, platform_api::budget::BudgetError> {
         use platform_api::budget::{BudgetError, BudgetReservationId};
-        if nano_usd == 0 || self.config.max_session_nano_usd.is_none() {
-            return Ok(BudgetReservationId::NOOP);
-        }
-        let max = self.config.max_session_nano_usd.unwrap_or(0);
-        let mut book = self.reservations.lock().await;
-        let realized = self.cost_tracker.total_nano_usd().await;
+        let session_id = self.session_id().await;
+        let (session, state_cell) = self.session_context_for(session_id).await;
+        // Lock the realized state before the reservation book. Commit uses
+        // this same order, so cancellation cannot consume a token while an
+        // awaited state lock is still pending.
+        let state = state_cell.read().await;
+        let mut book = session.reservations.lock().await;
+        let realized = state.total_nano_usd;
         let held = book.held();
-        let occupancy = realized.saturating_add(held).saturating_add(nano_usd);
-        if occupancy > max {
-            return Err(BudgetError::Exceeded {
-                current_nano_usd: realized.saturating_add(held),
-            });
+        if let Some(max) = self.config.max_session_nano_usd {
+            let occupancy = realized.saturating_add(held).saturating_add(nano_usd);
+            if occupancy > max {
+                return Err(BudgetError::Exceeded {
+                    current_nano_usd: realized.saturating_add(held),
+                });
+            }
         }
-        let id = book.next_id;
-        book.next_id = book.next_id.saturating_add(1);
-        book.active.insert(id, nano_usd);
+        // Reservation ids are process-global, not per-session. This keeps a
+        // late token unambiguous even when two sessions both have active
+        // zero-hold (uncapped) settlements.
+        let id = self
+            .sessions
+            .next_reservation_id
+            .fetch_add(1, Ordering::Relaxed);
+        // An uncapped run still needs a unique settlement token, but it does
+        // not occupy a finite-capacity hold.
+        let held_amount = self.config.max_session_nano_usd.map_or(0, |_| nano_usd);
+        book.active.insert(id, held_amount);
+        self.sessions
+            .owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, session_id);
         Ok(BudgetReservationId::from_raw(id))
     }
 
@@ -188,7 +295,24 @@ impl BudgetEnforcer {
         if id.is_noop() {
             return;
         }
-        self.reservations.lock().await.active.remove(&id.raw());
+        let Some(owner) = self.owner_for(id) else {
+            return;
+        };
+        let session = self.session_state_for(owner).await;
+        let removed = session
+            .reservations
+            .lock()
+            .await
+            .active
+            .remove(&id.raw())
+            .is_some();
+        if removed {
+            self.sessions
+                .owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id.raw());
+        }
     }
 
     /// Release the hold after work completed AND record `actual_nano_usd`
@@ -215,8 +339,37 @@ impl BudgetEnforcer {
         id: platform_api::BudgetReservationId,
         actual_nano_usd: u64,
     ) -> Result<(), platform_api::budget::BudgetError> {
-        self.cost_tracker.record_external_cost(actual_nano_usd).await;
-        self.release_reservation(id).await;
+        if id.is_noop() {
+            return Ok(());
+        }
+        let Some(owner) = self.owner_for(id) else {
+            return Ok(());
+        };
+        let (session, state_cell) = self.session_context_for(owner).await;
+        // Hold the reservation-book mutex across the in-memory transition,
+        // but not across persistence. Resolve/acquire the state write lock
+        // first; after both guards are held, token consumption and actual
+        // charge are synchronous and cancellation-safe.
+        let mut state = state_cell.write().await;
+        let snapshot = {
+            let mut book = session.reservations.lock().await;
+            if book.active.remove(&id.raw()).is_none() {
+                // Reservation ids are once-only settlement tokens. A retry
+                // after a successful commit is a harmless no-op, including
+                // when the actual amount is non-zero.
+                return Ok(());
+            }
+            self.sessions
+                .owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id.raw());
+            CostTracker::record_external_cost_in_state(&mut state, actual_nano_usd)
+        };
+        drop(state);
+        if let Some(snapshot) = snapshot {
+            self.cost_tracker.persist_snapshot(snapshot).await;
+        }
         Ok(())
     }
 
@@ -224,13 +377,15 @@ impl BudgetEnforcer {
     /// [`Self::check_post_api_call`] to latch the realized-exceeded flag if
     /// the actual cost overran.
     pub async fn check_pre_api_call(&self, estimated_cost_nano_usd: u64) -> BudgetCheckResult {
-        if self.realized_exceeded.load(Ordering::Acquire) {
-            let current = self.cost_tracker.total_nano_usd().await;
+        let (session, state_cell) = self.session_context().await;
+        if session.realized_exceeded.load(Ordering::Acquire) {
+            let current = state_cell.read().await.total_nano_usd;
             let limit = self.config.max_session_nano_usd.unwrap_or(0);
             return BudgetCheckResult::Halt { current, limit };
         }
-        let held = self.reservations.lock().await.held();
-        let realized = self.cost_tracker.total_nano_usd().await;
+        let state = state_cell.read().await;
+        let held = session.reservations.lock().await.held();
+        let realized = state.total_nano_usd;
         // `check_and_charge(0)` (Agent / subagent turn gate) means "already
         // over", which is realized spend — a Fusion hold is future capacity
         // and must not freeze the reserved child itself. Positive estimates
@@ -276,7 +431,7 @@ impl BudgetEnforcer {
                 if ratio >= threshold {
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     let pct = (threshold * 100.0) as u32;
-                    let mut fired = self.warnings_fired.write().await;
+                    let mut fired = session.warnings_fired.write().await;
                     if fired.insert(pct) {
                         return BudgetCheckResult::ThresholdWarning {
                             pct,
@@ -294,10 +449,11 @@ impl BudgetEnforcer {
     /// configured session limit. Subsequent [`Self::check_pre_api_call`]
     /// returns [`BudgetCheckResult::Halt`].
     pub async fn check_post_api_call(&self, _realized_cost: u64) {
-        let total = self.cost_tracker.total_nano_usd().await;
+        let (session, state_cell) = self.session_context().await;
+        let total = state_cell.read().await.total_nano_usd;
         if let Some(max) = self.config.max_session_nano_usd {
             if total >= max {
-                self.realized_exceeded.store(true, Ordering::Release);
+                session.realized_exceeded.store(true, Ordering::Release);
             }
         }
     }
@@ -322,7 +478,8 @@ impl BudgetEnforcer {
         _realized_cost: u64,
         bus: Option<&Arc<telemetry::AnalyticsBus>>,
     ) {
-        let total = self.cost_tracker.total_nano_usd().await;
+        let (session, state_cell) = self.session_context().await;
+        let total = state_cell.read().await.total_nano_usd;
         let Some(max) = self.config.max_session_nano_usd else {
             // No limit configured — nothing to alarm on.
             return;
@@ -343,7 +500,7 @@ impl BudgetEnforcer {
         // ----- 100% exceeded -----
         if percent_bps >= BUDGET_EXCEEDED_THRESHOLD_BPS {
             // Atomic-latch on realized_exceeded ensures idempotency.
-            if !self.realized_exceeded.swap(true, Ordering::AcqRel) {
+            if !session.realized_exceeded.swap(true, Ordering::AcqRel) {
                 if let Some(bus) = bus {
                     emit_budget_exceeded(bus, max, total).await;
                 }
@@ -352,7 +509,7 @@ impl BudgetEnforcer {
             // ----- 80% warning (fires once per session) -----
             // Reuse warnings_fired with a synthetic pct value of 80 so the same
             // dedupe set guards both M1 thresholds and the M3-05 BPS warning.
-            let mut fired = self.warnings_fired.write().await;
+            let mut fired = session.warnings_fired.write().await;
             if fired.insert(80) {
                 if let Some(bus) = bus {
                     emit_budget_warning(bus, max, total, percent_bps).await;
@@ -850,20 +1007,20 @@ mod tests {
             1_000,
             "commit must record the actual realized spend onto the tracker"
         );
-        // A second commit on the same (already-released) id records again —
-        // `commit_reservation` never claimed idempotent ACCOUNTING, only that
-        // an unknown/noop release id is harmless. Fusion calls it exactly
-        // once per run (`ReservationLease::commit` consumes `self`).
-        e.commit_reservation(id, 1_000).await.expect("id-not-found is not an error");
+        // Settlement ids are consumed exactly once. A retry after the first
+        // successful commit must not charge the actual amount again.
+        e.commit_reservation(id, 1_000)
+            .await
+            .expect("id-not-found is not an error");
         assert_eq!(
             tracker.total_nano_usd().await,
-            2_000,
-            "a second commit call adds again — callers must not call commit twice"
+            1_000,
+            "a second commit call must be an accounting no-op"
         );
     }
 
     #[tokio::test]
-    async fn zero_or_unlimited_reserve_is_noop() {
+    async fn unlimited_reserve_mints_a_zero_hold_settlement_token() {
         let unlimited = BudgetConfig {
             max_session_nano_usd: None,
             max_turn_nano_usd: None,
@@ -873,8 +1030,174 @@ mod tests {
         };
         let e = BudgetEnforcer::new(unlimited, make_tracker());
         let id = e.reserve_nano_usd(9_000_000).await.unwrap();
-        assert!(id.is_noop());
+        assert!(!id.is_noop());
         assert_eq!(e.active_reservation_nano_usd().await, 0);
+    }
+
+    #[tokio::test]
+    async fn commit_transition_is_atomic_to_concurrent_reserve() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let tracker = Arc::new(CostTracker::new(
+            SessionId::nil(),
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        ));
+        let cfg = BudgetConfig {
+            max_session_nano_usd: Some(1_000),
+            max_turn_nano_usd: None,
+            max_turn_tokens: None,
+            warning_thresholds: vec![],
+            on_exceed: BudgetExceedPolicy::Halt,
+        };
+        let e = Arc::new(BudgetEnforcer::new(cfg, tracker.clone()));
+        tracker.record_external_cost(1).await;
+        let first = e.reserve_nano_usd(800).await.unwrap();
+
+        let committing = e.clone();
+        let commit = tokio::spawn(async move {
+            committing.commit_reservation(first, 400).await.unwrap();
+        });
+        while tracker.total_nano_usd().await == 1 {
+            tokio::task::yield_now().await;
+        }
+
+        // The commit has charged the tracker and released the hold before its
+        // bounded persistence send completes. The second reserve sees the
+        // post-state (401 + 100), never the transient 401 + 800 + 100.
+        let second = e.reserve_nano_usd(100).await.unwrap();
+        e.release_reservation(second).await;
+        assert_eq!(e.active_reservation_nano_usd().await, 0);
+
+        rx.recv().await.unwrap();
+        commit.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_commit_keeps_token_for_a_safe_retry() {
+        let tracker = make_tracker();
+        let cfg = BudgetConfig {
+            max_session_nano_usd: Some(1_000),
+            max_turn_nano_usd: None,
+            max_turn_tokens: None,
+            warning_thresholds: vec![],
+            on_exceed: BudgetExceedPolicy::Halt,
+        };
+        let e = Arc::new(BudgetEnforcer::new(cfg, tracker.clone()));
+        let id = e.reserve_nano_usd(800).await.unwrap();
+        let state_cell = tracker.selected_state_cell().await;
+        let state_guard = state_cell.write().await;
+
+        let committing = e.clone();
+        let task = tokio::spawn(async move {
+            committing.commit_reservation(id, 400).await.unwrap();
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        let _ = task.await;
+        drop(state_guard);
+
+        e.commit_reservation(id, 400).await.unwrap();
+        assert_eq!(tracker.total_nano_usd().await, 400);
+        assert_eq!(e.active_reservation_nano_usd().await, 0);
+    }
+
+    #[tokio::test]
+    async fn uncapped_commit_accounts_actual_once() {
+        let tracker = make_tracker();
+        let cfg = BudgetConfig {
+            max_session_nano_usd: None,
+            max_turn_nano_usd: None,
+            max_turn_tokens: None,
+            warning_thresholds: vec![],
+            on_exceed: BudgetExceedPolicy::Halt,
+        };
+        let e = BudgetEnforcer::new(cfg, tracker.clone());
+        let id = e.reserve_nano_usd(0).await.unwrap();
+        assert!(!id.is_noop());
+        e.commit_reservation(id, 125).await.unwrap();
+        e.commit_reservation(id, 125).await.unwrap();
+        assert_eq!(tracker.total_nano_usd().await, 125);
+    }
+
+    #[tokio::test]
+    async fn scoped_budget_keeps_holds_and_spend_on_origin_session() {
+        let (tx, _rx) = mpsc::channel(16);
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let tracker = Arc::new(CostTracker::new(
+            session_a,
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        ));
+        let cfg = BudgetConfig {
+            max_session_nano_usd: Some(1_000),
+            max_turn_nano_usd: None,
+            max_turn_tokens: None,
+            warning_thresholds: vec![],
+            on_exceed: BudgetExceedPolicy::Halt,
+        };
+        let active = BudgetEnforcer::new(cfg, tracker.clone());
+        let origin = active.scoped_for_session(session_a);
+        let origin_id = origin.reserve_nano_usd(800).await.unwrap();
+
+        tracker.switch_session(session_b).await;
+        let b_id = active.reserve_nano_usd(800).await.unwrap();
+        assert_ne!(origin_id, b_id, "settlement tokens are globally unique");
+        active.release_reservation(b_id).await;
+        origin.commit_reservation(origin_id, 400).await.unwrap();
+
+        assert_eq!(tracker.total_nano_usd().await, 0);
+        tracker.switch_session(session_a).await;
+        assert_eq!(tracker.total_nano_usd().await, 400);
+        assert_eq!(origin.active_reservation_nano_usd().await, 0);
+    }
+
+    #[tokio::test]
+    async fn budget_warning_and_latch_are_isolated_per_session() {
+        let (tx, _rx) = mpsc::channel(16);
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let tracker = Arc::new(CostTracker::new(
+            session_a,
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        ));
+        let cfg = BudgetConfig {
+            max_session_nano_usd: Some(1_000),
+            max_turn_nano_usd: None,
+            max_turn_tokens: None,
+            warning_thresholds: vec![0.8],
+            on_exceed: BudgetExceedPolicy::Halt,
+        };
+        let e = BudgetEnforcer::new(cfg, tracker.clone());
+        tracker.record_external_cost(800).await;
+        assert!(matches!(
+            e.check_pre_api_call(0).await,
+            BudgetCheckResult::ThresholdWarning { pct: 80, .. }
+        ));
+        tracker.record_external_cost(200).await;
+        e.check_post_api_call(0).await;
+        assert!(matches!(
+            e.check_pre_api_call(0).await,
+            BudgetCheckResult::Halt { .. }
+        ));
+
+        tracker.switch_session(session_b).await;
+        assert!(matches!(
+            e.check_pre_api_call(0).await,
+            BudgetCheckResult::Ok
+        ));
+        tracker.record_external_cost(800).await;
+        assert!(matches!(
+            e.check_pre_api_call(0).await,
+            BudgetCheckResult::ThresholdWarning { pct: 80, .. }
+        ));
+
+        tracker.switch_session(session_a).await;
+        assert!(matches!(
+            e.check_pre_api_call(0).await,
+            BudgetCheckResult::Halt { .. }
+        ));
     }
 
     #[tokio::test]

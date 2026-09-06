@@ -329,6 +329,7 @@ impl Task for DreamHandler {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            origin_session_id: None,
             // Top-level spawn ⇒ the spawner's own default model anchors resolution.
             parent_model_override: None,
             forked_skill_name: None,

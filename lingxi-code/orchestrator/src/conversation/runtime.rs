@@ -925,8 +925,22 @@ impl ModelRuntime {
 
     /// Reset cost and API timing between compaction-engine and token resets.
     pub(crate) async fn reset_cost_and_api_accounting(&self) {
+        self.api_calls_recorded
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.last_api_call_at_ms
+            .store(-1, std::sync::atomic::Ordering::SeqCst);
+        *self
+            .session_started_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = std::time::Instant::now();
+    }
+
+    /// Move the active cost projection to the session that has just been
+    /// mounted. Existing session cells remain available to scoped background
+    /// work and are never reset here.
+    pub(crate) async fn switch_cost_session(&self, session_id: protocol::SessionId) {
         if let Some(tracker) = self.cost_tracker.as_ref() {
-            tracker.reset().await;
+            tracker.switch_session(session_id).await;
         }
         self.api_calls_recorded
             .store(0, std::sync::atomic::Ordering::SeqCst);

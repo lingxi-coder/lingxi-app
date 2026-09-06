@@ -272,14 +272,21 @@ impl PanelDispatch {
     }
 
     /// Called from [`PanelAllocationObserver`] when the spawner reports that
-    /// panel `index` has a real child slot. Deliberately does NOT notify:
-    /// the `PanelsDispatched` emit and the settlement floor are keyed on
-    /// [`Self::reached_spawner`], which has already woken the collection
-    /// loop for this panel.
-    fn mark_allocated(&self, index: usize) {
+    /// panel `index` has a real child slot. Notify as well as setting the flag:
+    /// allocation can happen after the earlier reached-spawner notification
+    /// was consumed, and the collection/outer-cancel path must wake to publish
+    /// the updated count.
+    fn mark_allocated(&self, index: usize) -> bool {
         if let Some(flag) = self.allocated.get(index) {
-            flag.store(true, Ordering::SeqCst);
+            if flag
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                self.signal.notify_one();
+                return true;
+            }
         }
+        false
     }
 
     pub(crate) fn reached_spawner(&self, index: usize) -> bool {
@@ -324,34 +331,67 @@ impl PanelDispatch {
 /// used for the single question `PanelDispatch` cannot answer from this side
 /// of the spawn boundary — did the pool actually allocate a child?
 ///
-/// `PoolSubagentSpawner::spawn_with_observer` emits
-/// [`SubagentObservation::Allocated`] exactly once, on the line right after
-/// `pool.allocate` returns `Ok` and before the runner exists, so observing it
-/// is proof that a subagent was created; NOT observing it (the spawner
-/// rejected the panel, or the task was killed while still building the
-/// child's context) is proof that none was. Every other observation is
-/// ignored: this panel's real work is already reported through the
-/// `SubagentResult` the spawner call returns.
+/// `PoolSubagentSpawner::spawn_with_observer` invokes the synchronous
+/// [`SubagentSpawnObserver::on_allocated`] receipt at the runtime allocation
+/// boundary, before slot-table insertion and before its asynchronous observer
+/// queue. Observing it is proof that a subagent task was accepted; NOT
+/// observing it (the spawner rejected the panel, or the task was killed while
+/// still building the child's context) is proof that none was. Every other
+/// observation is ignored: this panel's real work is already reported through
+/// the `SubagentResult` the spawner call returns.
 ///
-/// The observation is delivered through `agent::api::ObserverEventSink`'s
-/// bounded channel, so there is a sub-millisecond window between
-/// `pool.allocate` returning and this flag being set. `Allocated` is the
-/// FIRST event ever emitted on a spawn's own freshly-built sink, so it can
-/// never be the one the sink drops when full; the only residual is an abort
-/// landing inside that window, which classifies a just-allocated panel as
-/// `"not_dispatched"` and releases its spawn slot. That direction is the
-/// safe one (a slot handed back, never a phantom subagent charged forever),
-/// and it needs the bar to seal in the same instant the pool allocated.
+/// The production pool invokes `SubagentSpawnObserver::on_allocated`
+/// synchronously at its runtime allocation boundary, before publishing the
+/// same event through `agent::api::ObserverEventSink`'s bounded asynchronous
+/// channel. A slow global/UI observer therefore cannot make Fusion see
+/// `allocated=false` after a child already exists. If cancellation wins while
+/// the pool is still before that boundary, no receipt is emitted and the
+/// existing conservative pre-allocation path remains in force.
 struct PanelAllocationObserver {
     dispatch: Arc<PanelDispatch>,
     index: usize,
+    progress: Option<Sender<FusionProgress>>,
+    total: usize,
+}
+
+impl PanelAllocationObserver {
+    fn publish_allocation(&self) {
+        if !self.dispatch.mark_allocated(self.index) {
+            return;
+        }
+        let stage = FusionStage::PanelsDispatched {
+            total: u8::try_from(self.total).unwrap_or(u8::MAX),
+        };
+        // This is intentionally a nonblocking send from the synchronous pool
+        // receipt. It makes the allocation fact observable even if the outer
+        // Fusion run is dropped by its biased cancellation arm before the
+        // panel collection loop can be polled again.
+        progress::emit_with_allocated(
+            &self.progress,
+            stage.clone(),
+            None,
+            stage.label(),
+            u8::try_from(self.dispatch.allocated_count()).unwrap_or(u8::MAX),
+        );
+    }
 }
 
 #[async_trait]
 impl SubagentSpawnObserver for PanelAllocationObserver {
+    fn on_allocated(&self, _event: &SubagentObservation) {
+        // This callback is invoked synchronously by the production pool at its
+        // allocation boundary, before the global asynchronous observer queue
+        // can delay the fact.  Fusion quota/accounting must use this receipt,
+        // not the UI observer's eventual delivery.
+        self.publish_allocation();
+    }
+
     async fn on_event(&self, event: SubagentObservation) {
+        // Keep compatibility with non-pool/test spawners that only expose
+        // the legacy asynchronous event. The production synchronous receipt
+        // above already set this idempotent flag before this event arrives.
         if matches!(event, SubagentObservation::Allocated { .. }) {
-            self.dispatch.mark_allocated(self.index);
+            self.publish_allocation();
         }
     }
 }
@@ -477,7 +517,9 @@ type PanelTaskOutput = (usize, ResolvedPanel, String, Duration, PanelFinish);
 /// slips past the per-file and per-load checks still can't produce an
 /// unusable watchdog deadline.
 fn panel_stall_timeout_ms(config: &FusionRuntimeConfig) -> u64 {
-    config.panel_idle_timeout_ms.min(config.panel_total_timeout_ms)
+    config
+        .panel_idle_timeout_ms
+        .min(config.panel_total_timeout_ms)
 }
 
 /// `run_panels` helper: spawn every panel's subagent task onto a fresh
@@ -497,6 +539,7 @@ fn spawn_panel_tasks(
     schema: &str,
     generic_prompt: &str,
     max_input_bytes: u64,
+    progress: &Option<Sender<FusionProgress>>,
     // [Round-5 review items 8/12] Flipped by each task from inside the
     // branch that actually calls the spawner, and — [round-6 blocking B1]
     // — flipped a second time from the spawner's own `Allocated`
@@ -513,6 +556,7 @@ fn spawn_panel_tasks(
     // `anonymize` will use, so `Fusion P{n}` in the Runtime Center and
     // `P{n}` in the reported outcome always name the same panel.
     let anon_rank = anon_rank_by_spawn_index(run_id, panels.len());
+    let progress = progress.clone();
     for (index, panel) in panels.iter().cloned().enumerate() {
         let spawner = Arc::clone(spawner);
         let subagent = inherit.subagent.clone();
@@ -531,6 +575,8 @@ fn spawn_panel_tasks(
         };
         let name_index = anon_rank[index];
         let dispatch = Arc::clone(dispatch);
+        let progress = progress.clone();
+        let total = panels.len();
         let abort_handle = join_set.spawn(async move {
             let started = Instant::now();
             let request = spawn_request(
@@ -580,6 +626,8 @@ fn spawn_panel_tasks(
                             Arc::new(PanelAllocationObserver {
                                 dispatch: Arc::clone(&dispatch),
                                 index,
+                                progress: progress.clone(),
+                                total,
                             });
                         spawner
                             .spawn_workflow_with_observer(
@@ -712,6 +760,7 @@ pub async fn run_panels(
         &schema,
         &generic_prompt,
         max_input_bytes,
+        progress,
         &dispatch,
     );
 
@@ -719,7 +768,12 @@ pub async fn run_panels(
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let mut bar_aborted = false;
-    let mut dispatched_emitted = false;
+    // `allocated_count` can advance after the first dispatch notification:
+    // the panel task enters the spawner before its allocation receipt runs.
+    // Keep the last published count so a cancellation path can publish the
+    // final count instead of leaving an earlier explicit `Some(0)` snapshot
+    // as the only accounting fact.
+    let mut dispatched_allocated = None;
     while collected.len() < total {
         tokio::select! {
             biased;
@@ -781,7 +835,7 @@ pub async fn run_panels(
                 // over-charge item 12 removed. The shared one-shot helper
                 // is what keeps the two arms from drifting apart again:
                 // nothing is emitted when no task ever reached the spawner.
-                emit_panels_dispatched_once(&mut dispatched_emitted, &dispatch, progress, total);
+                emit_panels_dispatched_once(&mut dispatched_allocated, &dispatch, progress, total);
                 // [Round-5 review item 6] One last refresh before the whole
                 // `collected` vector is discarded: the panels still in
                 // flight at this instant have already egressed their entire
@@ -805,7 +859,7 @@ pub async fn run_panels(
             // that same window guaranteed would never exist, and the Agent
             // tool kept the session's spawn quota charged for them.
             () = dispatch.notified() => {
-                emit_panels_dispatched_once(&mut dispatched_emitted, &dispatch, progress, total);
+                emit_panels_dispatched_once(&mut dispatched_allocated, &dispatch, progress, total);
                 // The in-flight floor this panel just earned (its prompt is
                 // egressed the moment the spawner call is made) belongs in
                 // the settlement cell right away — a cancel one poll later
@@ -876,7 +930,10 @@ pub async fn run_panels(
     }
 
     collected.sort_by_key(|(index, _)| *index);
-    Ok(collected.into_iter().map(|(_, internal)| internal).collect())
+    Ok(collected
+        .into_iter()
+        .map(|(_, internal)| internal)
+        .collect())
 }
 
 /// `run_panels` helper: synthesize the panel slot behind a `JoinError`.
@@ -938,11 +995,13 @@ fn panel_from_join_error(
 /// caller's side after this returns), so `panel_id` is the pre-shuffle spawn
 /// slot (`p{index+1}`) — an identifier for progress purposes only, never
 /// exposed as the panel's real anonymous id.
-/// [round-3 review, findings 11/19] Emit `PanelsDispatched{total}` once,
-/// right after every panel task has been handed to the spawner (see the
-/// call site in [`run_panels`] for why this must be distinct from both the
-/// pre-spawn `RunningPanels{completed:0,..}` event and the post-completion
+/// [round-3 review, findings 11/19] Emit `PanelsDispatched{total}` when the
+/// first panel task has been handed to the spawner (see the call site in
+/// [`run_panels`] for why this must be distinct from both the pre-spawn
+/// `RunningPanels{completed:0,..}` event and the post-completion
 /// `RunningPanels{completed>0,..}` events [`emit_running_panels`] sends).
+/// Re-emit only when the synchronous allocation count advances, so the
+/// cancellation path can correct an earlier `Some(0)` snapshot.
 fn emit_panels_dispatched(
     progress: &Option<Sender<FusionProgress>>,
     total: usize,
@@ -983,16 +1042,20 @@ fn emit_panels_dispatched(
 /// the spawner has already made the notify arm win an earlier poll. See
 /// `panels_dispatched_precedes_the_completed_arm_for_a_dispatched_panel`.
 fn emit_panels_dispatched_once(
-    emitted: &mut bool,
+    emitted_allocated: &mut Option<usize>,
     dispatch: &PanelDispatch,
     progress: &Option<Sender<FusionProgress>>,
     total: usize,
 ) {
-    if *emitted || !dispatch.any_reached_spawner() {
+    if !dispatch.any_reached_spawner() {
         return;
     }
-    *emitted = true;
-    emit_panels_dispatched(progress, total, dispatch.allocated_count());
+    let allocated = dispatch.allocated_count();
+    if *emitted_allocated == Some(allocated) {
+        return;
+    }
+    *emitted_allocated = Some(allocated);
+    emit_panels_dispatched(progress, total, allocated);
 }
 
 fn emit_running_panels(
@@ -1249,11 +1312,8 @@ fn finish_panel(
             usage_complete,
             ..
         }) => {
-            let mut panel_usage = usage_from_subagent(
-                &cumulative_usage,
-                &usage,
-                assistant_message_count,
-            );
+            let mut panel_usage =
+                usage_from_subagent(&cumulative_usage, &usage, assistant_message_count);
             // Finding [9]: the runner's `api_error_partial` salvage path
             // emits `Completed` with STALE usage (the last turn that
             // completed successfully before the unrecovered mid-stream
@@ -1296,8 +1356,9 @@ fn finish_panel(
                         // the first block of `content`. Recover it here so the
                         // operator (and `tengu.fusion` telemetry) see the real
                         // cause instead of a generic parse failure.
-                        let cutoff_detail =
-                            (!usage_complete).then(|| api_error_cutoff_detail(&content)).flatten();
+                        let cutoff_detail = (!usage_complete)
+                            .then(|| api_error_cutoff_detail(&content))
+                            .flatten();
                         if let Some(detail) = cutoff_detail {
                             internal.error_category = Some("provider_cutoff".into());
                             internal.error_detail = Some(sanitize_detail(&detail));
@@ -1363,7 +1424,14 @@ fn api_error_cutoff_detail(content: &Value) -> Option<String> {
         .get("text")?
         .as_str()?;
     let cause = first_text.strip_prefix("Agent terminated early due to an API error: ")?;
-    Some(cause.split("\n\n").next().unwrap_or(cause).trim().to_string())
+    Some(
+        cause
+            .split("\n\n")
+            .next()
+            .unwrap_or(cause)
+            .trim()
+            .to_string(),
+    )
 }
 
 fn is_query_watchdog_timeout(reason: &str) -> bool {
@@ -1785,7 +1853,9 @@ down mid-flight"
             "nothing was sent, so there is no usage to estimate: got {:?}",
             internal.usage
         );
-        assert!(is_never_dispatched_category(internal.error_category.as_deref()));
+        assert!(is_never_dispatched_category(
+            internal.error_category.as_deref()
+        ));
     }
 
     /// A genuine PRE-FLIGHT spawn failure (the spawner's `Result::Err`
@@ -2453,9 +2523,7 @@ emitted — got {stages:?}"
                 _progress: Option<tokio::sync::mpsc::Sender<String>>,
                 observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
             ) -> Result<SubagentResult, SubagentSpawnError> {
-                let nth = self
-                    .calls
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let nth = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if nth == 0 {
                     if let Some(observer) = observer {
                         observer
@@ -2514,7 +2582,9 @@ emitted — got {stages:?}"
         let dispatched = events
             .iter()
             .find(|event| matches!(event.stage, FusionStage::PanelsDispatched { total: 2 }))
-            .expect("both panels reached the spawner, so PanelsDispatched{total:2} must be emitted");
+            .expect(
+                "both panels reached the spawner, so PanelsDispatched{total:2} must be emitted",
+            );
         assert_eq!(
             dispatched.panels_allocated,
             Some(1),
@@ -2685,6 +2755,210 @@ PanelsDispatched must still be emitted on the cancel exit — otherwise the whol
 reservation is released for subagents that really exist — got {stages:?}"
         );
     }
+
+    /// The dispatch notification can be observed before the pool's
+    /// synchronous allocation receipt when the panel is parked inside the
+    /// spawner. If cancellation then follows the receipt, the final progress
+    /// fact must update from `Some(0)` to `Some(1)`; otherwise the Agent-tool
+    /// reservation guard would refund a child that really existed.
+    #[tokio::test]
+    async fn cancel_publishes_the_final_allocation_count_after_an_initial_zero() {
+        struct AllocatesAfterYieldThenCancels {
+            cancel: CancellationToken,
+        }
+
+        #[async_trait]
+        impl SubagentSpawner for AllocatesAfterYieldThenCancels {
+            async fn spawn(
+                &self,
+                _request: SubagentSpawnRequest,
+                _inherit: SubagentInheritance,
+            ) -> Result<SubagentResult, SubagentSpawnError> {
+                unreachable!("run_panels always uses the observer-aware spawn path")
+            }
+
+            async fn spawn_with_observer(
+                &self,
+                _request: SubagentSpawnRequest,
+                _inherit: SubagentInheritance,
+                _progress: Option<tokio::sync::mpsc::Sender<String>>,
+                observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+            ) -> Result<SubagentResult, SubagentSpawnError> {
+                // Let run_panels publish its reached-spawner snapshot before
+                // the allocation receipt arrives.
+                tokio::task::yield_now().await;
+                if let Some(observer) = observer {
+                    observer.on_allocated(
+                        &platform_api::subagent_spawn::SubagentObservation::Allocated {
+                            agent_id: protocol::AgentId::new(),
+                            agent_type: FUSION_PANEL_TYPE.to_string(),
+                            name: None,
+                            model: "claude-sonnet-5".into(),
+                            model_profile: Some("anthropic".into()),
+                            persistent: false,
+                            initial_message_index: 0,
+                        },
+                    );
+                }
+                self.cancel.cancel();
+                std::future::pending::<Result<SubagentResult, SubagentSpawnError>>().await
+            }
+        }
+
+        let config = FusionRuntimeConfig {
+            panel_total_timeout_ms: 60_000,
+            ..FusionRuntimeConfig::defaults()
+        };
+        let cancel = CancellationToken::new();
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                tool_invoker: Arc::new(InertInvoker),
+                budget: Arc::new(InertBudget),
+            },
+            cancel.clone(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<FusionProgress>(16);
+        let progress = Some(tx);
+        let panels = vec![ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        }];
+
+        let err = run_panels(
+            Arc::new(AllocatesAfterYieldThenCancels {
+                cancel: cancel.clone(),
+            }),
+            &inherit,
+            &config,
+            true,
+            "task",
+            &panels,
+            "run-id",
+            Duration::from_secs(60),
+            &progress,
+            None,
+        )
+        .await
+        .expect_err("the spawner cancels after its allocation receipt");
+        assert_eq!(err, FusionError::Cancelled);
+
+        drop(progress);
+        let mut allocated_counts = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event.stage, FusionStage::PanelsDispatched { .. }) {
+                allocated_counts.push(event.panels_allocated);
+            }
+        }
+        assert_eq!(allocated_counts.first(), Some(&Some(0)));
+        assert_eq!(allocated_counts.last(), Some(&Some(1)));
+    }
+
+    /// The allocation receipt must wake progress independently of panel
+    /// completion or the cancellation arm. This is the production window in
+    /// which the outer Fusion task may be dropped before `run_panels` polls
+    /// again, so the direct receipt publication is the only authoritative
+    /// `Some(1)` snapshot available to the Agent quota forwarder.
+    #[tokio::test]
+    async fn allocation_receipt_updates_progress_without_completion_or_cancel() {
+        struct AllocatesAfterYieldThenHangs;
+
+        #[async_trait]
+        impl SubagentSpawner for AllocatesAfterYieldThenHangs {
+            async fn spawn(
+                &self,
+                _request: SubagentSpawnRequest,
+                _inherit: SubagentInheritance,
+            ) -> Result<SubagentResult, SubagentSpawnError> {
+                unreachable!("run_panels always uses the observer-aware spawn path")
+            }
+
+            async fn spawn_with_observer(
+                &self,
+                _request: SubagentSpawnRequest,
+                _inherit: SubagentInheritance,
+                _progress: Option<tokio::sync::mpsc::Sender<String>>,
+                observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+            ) -> Result<SubagentResult, SubagentSpawnError> {
+                tokio::task::yield_now().await;
+                if let Some(observer) = observer {
+                    observer.on_allocated(
+                        &platform_api::subagent_spawn::SubagentObservation::Allocated {
+                            agent_id: protocol::AgentId::new(),
+                            agent_type: FUSION_PANEL_TYPE.to_string(),
+                            name: None,
+                            model: "claude-sonnet-5".into(),
+                            model_profile: Some("anthropic".into()),
+                            persistent: false,
+                            initial_message_index: 0,
+                        },
+                    );
+                }
+                std::future::pending::<Result<SubagentResult, SubagentSpawnError>>().await
+            }
+        }
+
+        let config = FusionRuntimeConfig {
+            panel_total_timeout_ms: 60_000,
+            ..FusionRuntimeConfig::defaults()
+        };
+        let cancel = CancellationToken::new();
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                tool_invoker: Arc::new(InertInvoker),
+                budget: Arc::new(InertBudget),
+            },
+            cancel.clone(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<FusionProgress>(16);
+        let progress = Some(tx);
+        let panels = vec![ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        }];
+        let run = tokio::spawn({
+            let inherit = inherit.clone();
+            async move {
+                run_panels(
+                    Arc::new(AllocatesAfterYieldThenHangs),
+                    &inherit,
+                    &config,
+                    true,
+                    "task",
+                    &panels,
+                    "run-id",
+                    Duration::from_secs(60),
+                    &progress,
+                    None,
+                )
+                .await
+            }
+        });
+
+        let first = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("initial reached-spawner progress")
+            .expect("progress channel remains open");
+        assert_eq!(
+            first.panels_allocated,
+            Some(0),
+            "the reached-spawner snapshot precedes the allocation receipt"
+        );
+        let second = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("synchronous allocation receipt progress")
+            .expect("progress channel remains open");
+        assert_eq!(
+            second.panels_allocated,
+            Some(1),
+            "allocation receipt must update progress before completion/cancel"
+        );
+
+        cancel.cancel();
+        assert_eq!(
+            run.await.expect("run task joins").expect_err("cancelled"),
+            FusionError::Cancelled
+        );
+    }
 }
 
 /// [Round-6 blocking B1] The two `PanelDispatch` flags mean different things
@@ -2746,6 +3020,8 @@ subagent exists for it"
         let observer = PanelAllocationObserver {
             dispatch: Arc::clone(&dispatch),
             index: 1,
+            progress: None,
+            total: 2,
         };
         observer.on_event(observation("progress")).await;
         assert!(

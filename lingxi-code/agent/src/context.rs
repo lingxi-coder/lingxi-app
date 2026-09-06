@@ -91,6 +91,10 @@ pub struct SubagentContext {
     /// Owning session mode for prompt/provider gates inside this independently
     /// spawned runner. `None` preserves the legacy process-global fallback.
     pub session_interactive: Option<bool>,
+    /// Trusted originating session propagated across nested Agent spawns.
+    /// Unlike the hook session id, this is the budget/accounting owner for
+    /// descendants and is never inferred by a receiver.
+    pub origin_session_id: Option<SessionId>,
     /// MCP connections the agent should attach to.
     pub mcp_clients: Vec<McpConnectionId>,
     /// Directory under which this agent writes its transcript.

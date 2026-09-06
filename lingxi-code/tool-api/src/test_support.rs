@@ -267,6 +267,7 @@ pub fn fresh_ctx() -> ToolUseContext {
         agent_id: None,
         agent_name: None,
         team_name: None,
+        origin_session_id: None,
         content_replacement_state: None,
         session: None,
         subagent_registry: None,

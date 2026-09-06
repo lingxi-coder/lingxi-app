@@ -3321,13 +3321,14 @@ async fn build_mobile_inner_with_ask(
     // channel is DRAINED by a spawned recv-loop that discards each `CostState` —
     // byte-for-byte mirroring engine-desktop (which also just drains it): mobile
     // has no on-disk cost persistence / `/cost` UI consumer yet, but wiring the
-    // tracker keeps the accounting path 1:1 with desktop. A fresh build-time
-    // SessionId is used (the per-connection session swaps in later, as on desktop).
+    // tracker keeps the accounting path 1:1 with desktop. Bind it to the
+    // same boot session id as the orchestrator; clear/resume then switch the
+    // active projection while late Fusion views retain their origin.
     let cost_tracker = {
         let (cost_persist_tx, mut cost_persist_rx) = tokio::sync::mpsc::channel(64);
         tokio::spawn(async move { while cost_persist_rx.recv().await.is_some() {} });
         Arc::new(cost::CostTracker::new(
-            protocol::SessionId::new(),
+            main_session_id,
             Arc::new(assembled.pricing),
             cost_persist_tx,
         ))
@@ -12028,7 +12029,10 @@ fn boot_backfill_sweep_should_run(data_root: &std::path::Path) -> bool {
 /// `base` is the one carrying the forked user transcript the promotion
 /// exists to protect — pushing it to the back handed that protection to
 /// whichever unrelated drifted directory happened to read-dir first instead.
-fn requeue_failed_catalog_promotion(base: std::path::PathBuf, drifted: &mut Vec<std::path::PathBuf>) {
+fn requeue_failed_catalog_promotion(
+    base: std::path::PathBuf,
+    drifted: &mut Vec<std::path::PathBuf>,
+) {
     drifted.insert(0, base);
 }
 
@@ -12312,24 +12316,24 @@ pub(crate) async fn run_app_boot_backfill_sweep(
             canonical_cwd_string(&backfill_root.join(&record.workspace_rel));
         let existing_conversation: Option<session::jsonl::SessionMetadata> =
             match session::jsonl::list_recent_sessions(
-            &backfill_home,
-            &backfill_workspace_cwd,
-            50,
-            backfill_fs.clone(),
-        )
-        .await
-        {
-            Ok(rows) => rows.into_iter().find(|row| row.message_count > 0),
-            Err(session::jsonl::LoaderError::EmptyDirectory) => None,
-            Err(error) => {
-                tracing::warn!(
-                    app_id = %record.id,
-                    %error,
-                    "init-session backfill catalog listing failed"
-                );
-                None
-            }
-        };
+                &backfill_home,
+                &backfill_workspace_cwd,
+                50,
+                backfill_fs.clone(),
+            )
+            .await
+            {
+                Ok(rows) => rows.into_iter().find(|row| row.message_count > 0),
+                Err(session::jsonl::LoaderError::EmptyDirectory) => None,
+                Err(error) => {
+                    tracing::warn!(
+                        app_id = %record.id,
+                        %error,
+                        "init-session backfill catalog listing failed"
+                    );
+                    None
+                }
+            };
         if let Some(existing) = existing_conversation {
             let session_id = existing.uuid.to_string();
             if let Err(error) = backfill_service
@@ -19731,7 +19735,11 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let lingxi_home = tmp.path().join(".claude");
         let origin_cwd = tmp.path().join("origin").to_string_lossy().to_string();
-        let other_cwd = tmp.path().join("somewhere-else").to_string_lossy().to_string();
+        let other_cwd = tmp
+            .path()
+            .join("somewhere-else")
+            .to_string_lossy()
+            .to_string();
         std::fs::create_dir_all(&origin_cwd).unwrap();
         std::fs::create_dir_all(&other_cwd).unwrap();
         let data_root = tmp.path().to_path_buf();
@@ -19932,7 +19940,11 @@ mod tests {
             self.inner.watch(dir).await
         }
 
-        async fn append_file(&self, path: &str, content: &str) -> Result<(), platform_api::FsError> {
+        async fn append_file(
+            &self,
+            path: &str,
+            content: &str,
+        ) -> Result<(), platform_api::FsError> {
             self.inner.append_file(path, content).await
         }
 
@@ -19943,10 +19955,7 @@ mod tests {
             mode: u32,
         ) -> Result<(), platform_api::FsError> {
             if path.ends_with(&self.target_suffix) {
-                let n = self
-                    .calls
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                    + 1;
+                let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 if n == self.fail_on_call {
                     return Err(platform_api::FsError::Io(
                         "r1-engine-core-002 planted failure".into(),
@@ -20026,8 +20035,7 @@ mod tests {
         });
 
         let result =
-            super::mint_app_init_session(&lingxi_home, &source_cwd, &data_root, fs, &record)
-                .await;
+            super::mint_app_init_session(&lingxi_home, &source_cwd, &data_root, fs, &record).await;
         let error = result.expect_err("the planted 2nd append failure must surface");
         assert!(
             error.contains("persist app init session mode"),
@@ -20248,9 +20256,10 @@ mod tests {
              empty anchor over it, got {after:?}"
         );
 
-        let rows = session::jsonl::list_recent_sessions(&backfill_home, &workspace_cwd, 50, backfill_fs)
-            .await
-            .expect("list sessions after sweep");
+        let rows =
+            session::jsonl::list_recent_sessions(&backfill_home, &workspace_cwd, 50, backfill_fs)
+                .await
+                .expect("list sessions after sweep");
         assert_eq!(
             rows.len(),
             1,

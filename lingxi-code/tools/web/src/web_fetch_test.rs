@@ -1403,6 +1403,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     mod markdown_apply {
         use super::*;
         use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         pub(super) struct CapturingSideQuery {
             pub(super) captured: std::sync::Mutex<Option<String>>,
@@ -1464,6 +1465,171 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             ) -> Result<SideQueryResponse, SideQueryError> {
                 Err(SideQueryError::InvalidResponse("empty text".into()))
             }
+        }
+
+        struct CountingSideQuery {
+            calls: AtomicUsize,
+            reply: String,
+        }
+
+        #[async_trait]
+        impl SideQueryClient for CountingSideQuery {
+            async fn query(
+                &self,
+                _request: SideQueryRequest,
+            ) -> Result<SideQueryResponse, SideQueryError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(SideQueryResponse {
+                    text: Some(self.reply.clone()),
+                    structured: None,
+                    tool_calls: vec![],
+                    #[allow(clippy::default_trait_access)]
+                    usage: Default::default(),
+                    stop_reason: Some("end_turn".into()),
+                    retry_count: 0,
+                })
+            }
+        }
+
+        #[tokio::test]
+        async fn fusion_policy_is_trusted_and_skips_side_query_on_miss_and_hit() {
+            let _cache_guard = crate::testsupport::web_globals_lock().await;
+            let _env = SKIP_ENV_LOCK.lock().await;
+            crate::cache::clear_web_fetch_cache();
+            crate::blocklist::clear_domain_check_cache();
+            let (ctx, http, _sink) = make_web_ctx();
+            http.enqueue(preflight_allow());
+            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "text/html".into())],
+                body: "<h1>Deterministic</h1><p>Body</p>".into(),
+                body_bytes: Vec::new(),
+            }));
+            http.enqueue(preflight_allow());
+            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "text/html".into())],
+                body: "<h1>Deterministic</h1><p>Body</p>".into(),
+                body_bytes: Vec::new(),
+            }));
+            let side_query = std::sync::Arc::new(CountingSideQuery {
+                calls: AtomicUsize::new(0),
+                reply: "SHOULD-NOT-RUN".into(),
+            });
+            let tool = WebFetchTool::new(ctx).with_side_query(side_query.clone());
+
+            // Ordinary Agent behavior remains unchanged: one live retrieval
+            // invokes the existing apply model exactly once.
+            let ordinary = tool
+                .call(
+                    json!({
+                        "url": "https://policy-boundary-ordinary.example/doc",
+                        "prompt": "summarize"
+                    }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ordinary fetch succeeds");
+            assert_eq!(ordinary.data["result"], "SHOULD-NOT-RUN");
+            assert_eq!(side_query.calls.load(Ordering::SeqCst), 1);
+
+            // The execution policy comes from the trusted host context. Model
+            // JSON/name/query_source-looking fields cannot widen it back to
+            // ordinary behavior, and both live + cache-hit paths stay local.
+            let mut fusion_ctx = fresh_ctx();
+            fusion_ctx.tool_execution_policy = ToolExecutionPolicy::FusionPanel;
+            let mut fusion_input = json!({
+                "url": "https://policy-boundary-fusion.example/doc",
+                "prompt": "summarize",
+                "name": "ordinary",
+                "query_source": "WebFetchApply",
+                "tool_execution_policy": "ordinary"
+            });
+            let fusion_miss = tool
+                .call(fusion_input.take(), fusion_ctx.clone(), fresh_tx())
+                .await
+                .expect("Fusion cache miss succeeds");
+            assert_eq!(fusion_miss.data["result"], "# Deterministic\n\nBody");
+            assert_eq!(fusion_miss.data["source"], "network");
+            assert!(fusion_miss.data["fetched_at_ms"].is_u64());
+            assert_eq!(side_query.calls.load(Ordering::SeqCst), 1);
+
+            let fusion_hit = tool
+                .call(
+                    json!({
+                        "url": "https://policy-boundary-fusion.example/doc",
+                        "prompt": "summarize",
+                        "name": "ordinary",
+                        "query_source": "WebFetchApply",
+                        "tool_execution_policy": "ordinary"
+                    }),
+                    fusion_ctx,
+                    fresh_tx(),
+                )
+                .await
+                .expect("Fusion cache hit succeeds");
+            assert_eq!(fusion_hit.data["result"], "# Deterministic\n\nBody");
+            assert_eq!(fusion_hit.data["source"], "cache");
+            assert_eq!(
+                fusion_hit.data["fetched_at_ms"], fusion_miss.data["fetched_at_ms"],
+                "cache hits preserve the original network fetch timestamp"
+            );
+            assert_eq!(side_query.calls.load(Ordering::SeqCst), 1);
+
+            let serialized = serde_json::to_vec(&fusion_hit.data).expect("valid JSON");
+            assert!(serialized.len() <= FUSION_WEBFETCH_RESULT_MAX_BYTES);
+        }
+
+        #[test]
+        fn fusion_result_cap_preserves_unicode_escaping_and_provenance() {
+            let body = format!("{} 😀 \\\"\n", "文".repeat(80_000));
+            let data = cap_fusion_result_data(
+                json!({
+                    "bytes": body.len(),
+                    "code": 200,
+                    "codeText": "OK",
+                    "result": body,
+                    "durationMs": 1,
+                    "url": "https://cap.example/doc"
+                }),
+                FetchSource::Network,
+                123,
+            );
+            let data = data.expect("bounded Fusion result");
+            let serialized = serde_json::to_vec(&data).expect("valid JSON");
+            assert!(serialized.len() <= FUSION_WEBFETCH_RESULT_MAX_BYTES);
+            assert_eq!(data["truncated"], true);
+            assert_eq!(data["source"], "network");
+            assert_eq!(data["fetched_at_ms"], 123);
+            assert_eq!(
+                data["truncation_limit_bytes"],
+                FUSION_WEBFETCH_RESULT_MAX_BYTES
+            );
+            assert!(data["result"]
+                .as_str()
+                .expect("result string")
+                .ends_with(FUSION_WEBFETCH_TRUNCATION_SUFFIX));
+        }
+
+        #[test]
+        fn fusion_result_cap_fails_closed_when_metadata_alone_is_too_large() {
+            let oversized_url =
+                "https://example.com/".to_string() + &"x".repeat(FUSION_WEBFETCH_RESULT_MAX_BYTES);
+            let err = cap_fusion_result_data(
+                json!({
+                    "bytes": 0,
+                    "code": 200,
+                    "codeText": "OK",
+                    "result": "small",
+                    "durationMs": 1,
+                    "url": oversized_url
+                }),
+                FetchSource::Network,
+                123,
+            )
+            .expect_err("metadata overflow must fail closed");
+            assert!(err.contains("64KiB Fusion result limit"), "{err}");
         }
 
         #[tokio::test]

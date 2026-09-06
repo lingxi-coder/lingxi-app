@@ -247,6 +247,7 @@ impl ToolInvoker for RegistryToolInvoker {
             agent_name: ctx.agent_name.clone(),
             team_name: ctx.team_name.clone(),
             origin_session_id: ctx.origin_session_id,
+            tool_execution_policy: ctx.tool_execution_policy,
             content_replacement_state: None,
             session: None,
             subagent_registry: Some(self.registry.clone()),
@@ -767,6 +768,7 @@ mod tests {
                     Option<String>,
                     Option<protocol::MessageId>,
                     Option<protocol::SessionId>,
+                    platform_api::tool_invoker::ToolExecutionPolicy,
                 )>,
             >,
         >,
@@ -822,6 +824,7 @@ mod tests {
                 ctx.team_name.clone(),
                 ctx.assistant_message_id,
                 ctx.origin_session_id,
+                ctx.tool_execution_policy,
             ));
             Ok(ToolCallResult {
                 data: json!({}),
@@ -859,6 +862,8 @@ mod tests {
                 SubagentInvocationContext {
                     parent_agent_id: None,
                     origin_session_id: Some(origin_session_id),
+                    tool_execution_policy:
+                        platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
                     agent_name: Some("researcher".to_string()),
                     team_name: Some("alpha".to_string()),
                     is_async: false,
@@ -880,8 +885,13 @@ mod tests {
             .expect("dispatch ok");
 
         let captured = captured.lock().unwrap();
-        let (agent_name, team_name, captured_message_id, captured_origin_session_id) =
-            captured.as_ref().expect("NameRecordingTool::call ran");
+        let (
+            agent_name,
+            team_name,
+            captured_message_id,
+            captured_origin_session_id,
+            captured_policy,
+        ) = captured.as_ref().expect("NameRecordingTool::call ran");
         assert_eq!(
             agent_name.as_deref(),
             Some("researcher"),
@@ -901,6 +911,57 @@ mod tests {
             *captured_origin_session_id,
             Some(origin_session_id),
             "the trusted originating session reaches ToolUseContext unchanged"
+        );
+        assert_eq!(
+            *captured_policy,
+            platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+            "the trusted execution policy reaches ToolUseContext unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_lease_dispatch_preserves_trusted_execution_policy() {
+        let captured = Arc::new(StdMutex::new(None));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(NameRecordingTool {
+            captured: captured.clone(),
+        }));
+        let invoker = RegistryToolInvoker::new(Arc::new(registry));
+        invoker
+            .invoke_with_workspace_lease(
+                "NameRecordingTool",
+                json!({}),
+                SubagentInvocationContext {
+                    parent_agent_id: None,
+                    origin_session_id: None,
+                    tool_execution_policy:
+                        platform_api::tool_invoker::ToolExecutionPolicy::FusionPanel,
+                    agent_name: None,
+                    team_name: None,
+                    is_async: false,
+                    is_non_interactive_session: false,
+                    can_show_permission_prompts: false,
+                    cwd: None,
+                    tool_use_id: None,
+                    assistant_message_id: None,
+                    depth: 0,
+                    observer: None,
+                    parent_model: None,
+                    parent_model_profile: None,
+                    mode_override: None,
+                    request_source: None,
+                    frozen_command_denies: Vec::new(),
+                },
+                Some(77),
+            )
+            .await
+            .expect("lease-aware dispatch succeeds");
+        let captured = captured.lock().unwrap();
+        let captured = captured.as_ref().expect("tool call ran");
+        assert_eq!(
+            captured.4,
+            platform_api::tool_invoker::ToolExecutionPolicy::FusionPanel,
+            "workspace lease path must not drop the trusted Fusion policy"
         );
     }
 
@@ -1038,6 +1099,7 @@ mod tests {
         SubagentInvocationContext {
             parent_agent_id: None,
             origin_session_id: None,
+            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: None,
             team_name: None,
             is_async: false,
@@ -1156,10 +1218,9 @@ mod tests {
             seen: seen.clone(),
         });
         let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
-        match invoker
-            .invoke("TestEcho", json!({ "a": 1 }), no_ctx())
-            .await
-        {
+        let mut ctx = no_ctx();
+        ctx.tool_execution_policy = platform_api::tool_invoker::ToolExecutionPolicy::FusionPanel;
+        match invoker.invoke("TestEcho", json!({ "a": 1 }), ctx).await {
             Err(ToolInvokerError::Internal(reason)) => {
                 assert!(
                     reason.contains("denied by permission rule Bash"),
@@ -1224,6 +1285,7 @@ mod tests {
         SubagentInvocationContext {
             parent_agent_id: None,
             origin_session_id: None,
+            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: Some("researcher".to_string()),
             team_name: Some("alpha".to_string()),
             is_async: true,
@@ -1365,6 +1427,7 @@ mod tests {
         SubagentInvocationContext {
             parent_agent_id: None,
             origin_session_id: None,
+            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: Some("researcher".to_string()),
             team_name: Some("alpha".to_string()),
             is_async: true,

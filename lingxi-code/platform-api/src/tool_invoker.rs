@@ -14,6 +14,24 @@ use serde_json::Value;
 use std::any::Any;
 use thiserror::Error;
 
+/// Trusted host-selected execution policy for one nested tool invocation.
+///
+/// This is deliberately not serialized and is never derived from model input.
+/// The agent runtime selects it from the resolved agent definition before it
+/// constructs [`SubagentInvocationContext`]. A receiver may narrow behavior
+/// for a trusted policy, but must never widen an ordinary invocation based on
+/// untrusted JSON, a tool name, or telemetry labels.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolExecutionPolicy {
+    /// Normal Agent/subagent behavior, including WebFetch's existing apply
+    /// side-query when the composition root provides one.
+    #[default]
+    Ordinary,
+    /// Hidden Fusion panel behavior. WebFetch may retrieve and convert locally,
+    /// but must not make an internal model/side-query call.
+    FusionPanel,
+}
+
 /// Per-call invocation context handed to a [`ToolInvoker`].
 ///
 /// Carries the identity of the parent agent (used by the recursion-lock test
@@ -28,6 +46,10 @@ pub struct SubagentInvocationContext {
     /// Receivers must propagate this value explicitly and must not infer it
     /// from hook/session metadata.
     pub origin_session_id: Option<SessionId>,
+    /// Trusted host-selected execution policy. This is copied unchanged into
+    /// the concrete tool-use context path, including the
+    /// workspace-lease entrypoint; it is not model-controlled.
+    pub tool_execution_policy: ToolExecutionPolicy,
     /// DISPLAY NAME of the teammate dispatching this tool call, if known
     /// (claude-code `getAgentName()` — the teammate's human name, e.g.
     /// `"researcher"`, NOT the `agent:<uuid>` form). `None` for the main

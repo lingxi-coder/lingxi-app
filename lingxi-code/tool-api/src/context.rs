@@ -7,6 +7,7 @@
 use crate::content_replacement::ContentReplacementState;
 use crate::registry::ToolRegistry;
 use lingxi_core::SessionState;
+use platform_api::tool_invoker::ToolExecutionPolicy;
 use protocol::{AgentId, McpConnectionId, MessageId, SessionId, ToolUseId};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -53,6 +54,10 @@ pub struct ToolUseContext {
     /// immutable identity to keep their cost and budget accounting attached to
     /// the originating conversation.
     pub origin_session_id: Option<SessionId>,
+    /// Trusted host-selected execution policy for this invocation. The nested
+    /// dispatch path copies it from `SubagentInvocationContext`; ordinary
+    /// callers use [`ToolExecutionPolicy::Ordinary`].
+    pub tool_execution_policy: ToolExecutionPolicy,
     /// Shared content-replacement state. Populated in Task 3.
     pub content_replacement_state: Option<Arc<Mutex<ContentReplacementState>>>,
     /// Mutable session state (M4-04). Tools that mutate the conversation
@@ -136,6 +141,7 @@ impl ToolUseContext {
             agent_name: None,
             team_name: None,
             origin_session_id: None,
+            tool_execution_policy: ToolExecutionPolicy::Ordinary,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,

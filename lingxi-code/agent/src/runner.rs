@@ -1923,6 +1923,17 @@ async fn run_subagent_loop(
                     let inv_ctx = platform_api::tool_invoker::SubagentInvocationContext {
                         parent_agent_id: ctx.parent_agent_id,
                         origin_session_id: ctx.origin_session_id,
+                        // This is selected from the host-resolved definition,
+                        // never from the model's tool input or telemetry. The
+                        // hidden Fusion panel definition opts into deterministic
+                        // WebFetch; every other Agent keeps ordinary behavior.
+                        tool_execution_policy: if ctx.agent_definition.agent_type
+                            == platform_api::FUSION_PANEL_TYPE
+                        {
+                            platform_api::tool_invoker::ToolExecutionPolicy::FusionPanel
+                        } else {
+                            platform_api::tool_invoker::ToolExecutionPolicy::Ordinary
+                        },
                         // Swarm identity (claude-code `getAgentName()` /
                         // `getTeammateContext()?.teamName`): a teammate's dispatched
                         // tools see the teammate's DISPLAY name + team name so the

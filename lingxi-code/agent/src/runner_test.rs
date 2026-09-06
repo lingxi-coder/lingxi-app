@@ -283,15 +283,20 @@ fn streamed_tool_use_turn(name: &str, stop: &str) -> Vec<llm_client::LlmEvent> {
 /// `ToolInvoker` that counts invocations and returns a canned value.
 struct CountingInvoker {
     calls: AtomicUsize,
+    policies: Mutex<Vec<platform_api::tool_invoker::ToolExecutionPolicy>>,
 }
 impl CountingInvoker {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             calls: AtomicUsize::new(0),
+            policies: Mutex::new(Vec::new()),
         })
     }
     fn call_count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+    fn policies(&self) -> Vec<platform_api::tool_invoker::ToolExecutionPolicy> {
+        self.policies.lock().unwrap().clone()
     }
 }
 #[async_trait]
@@ -300,9 +305,13 @@ impl platform_api::ToolInvoker for CountingInvoker {
         &self,
         _name: &str,
         _input: serde_json::Value,
-        _ctx: platform_api::tool_invoker::SubagentInvocationContext,
+        ctx: platform_api::tool_invoker::SubagentInvocationContext,
     ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.policies
+            .lock()
+            .unwrap()
+            .push(ctx.tool_execution_policy);
         Ok(serde_json::json!("tool-output"))
     }
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1236,6 +1245,28 @@ async fn loop_single_end_turn_completes_with_aggregated_text() {
     let result = one_completed(&evs);
     assert_eq!(result["text"], "final answer");
     assert_eq!(result["stop_reason"], "end_turn");
+}
+
+#[tokio::test]
+async fn fusion_panel_tools_receive_the_trusted_deterministic_policy() {
+    let api = MockSubagentApiClient::new(vec![
+        Ok(tool_use_response("WebFetch", Some("tool_use"))),
+        Ok(text_response("done", Some("end_turn"))),
+    ]);
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api, Some(invoker.clone()), 3);
+    ctx.agent_definition.agent_type = platform_api::FUSION_PANEL_TYPE.to_string();
+
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let _ = drain(out_rx).await;
+
+    assert_eq!(
+        invoker.policies(),
+        vec![platform_api::tool_invoker::ToolExecutionPolicy::FusionPanel],
+        "the hidden resolved Fusion definition, not model input, selects deterministic WebFetch"
+    );
 }
 
 #[tokio::test]

@@ -55,6 +55,10 @@ pub struct CachedFetch {
     /// nothing was persisted. The binary footer prefers this over `bytes`
     /// (`Ma(persistedSize ?? bytes)`).
     pub persisted_size: Option<usize>,
+    /// Unix epoch milliseconds when the network body was fetched. Retained in
+    /// the cache so Fusion cache-hit results can disclose the original fetch
+    /// provenance instead of stamping a new hit time.
+    pub fetched_at_ms: u64,
 }
 
 impl CachedFetch {
@@ -226,6 +230,7 @@ mod tests {
             bytes: content.len(),
             persisted_path: None,
             persisted_size: None,
+            fetched_at_ms: 0,
         }
     }
 

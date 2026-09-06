@@ -207,6 +207,7 @@ mod tests {
             agent_name: None,
             team_name: None,
             origin_session_id: None,
+            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
             content_replacement_state: None,
             session: None,
             subagent_registry: Some(registry),
@@ -3424,6 +3425,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 platform_api::tool_invoker::SubagentInvocationContext {
                     parent_agent_id: None,
                     origin_session_id: None,
+                    tool_execution_policy:
+                        platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
                     agent_name: None,
                     team_name: None,
                     is_async: true,

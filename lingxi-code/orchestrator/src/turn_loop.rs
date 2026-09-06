@@ -3731,6 +3731,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             agent_name: None,
             team_name: None,
             origin_session_id: None,
+            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
             content_replacement_state: None,
             session: Some(orch.session.clone()),
             subagent_registry: Some(orch.tools.clone()),
@@ -9043,6 +9044,7 @@ mod tool_hook_wiring_tests {
         let ctx = SubagentInvocationContext {
             parent_agent_id: None,
             origin_session_id: None,
+            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: Some("researcher".into()),
             team_name: Some("alpha".into()),
             is_async: false,

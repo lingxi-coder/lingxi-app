@@ -25360,6 +25360,7 @@ mod workspace_lease_forwarding_tests {
         SubagentInvocationContext {
             parent_agent_id: None,
             origin_session_id: None,
+            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: None,
             team_name: None,
             is_async: false,

@@ -23,15 +23,17 @@
 //! script's identity" or "keys on the name" here until a real reader exists;
 //! today there is none.
 //!
-//! ⚠️ Known-unfixed, outside this crate: three sibling comments still assert
-//! the same non-existent symbol and were left untouched because they live in
-//! `apps/engine-mobile`, not here --
-//! `apps/engine-mobile/src/local_apps_build.rs:4747`,
-//! `apps/engine-mobile/tests/component_literal_scan.rs:15-17` and
-//! `apps/engine-mobile/tests/component_literal_allowlist.txt:123`. The scan
-//! one additionally names `BUILTIN_WORKFLOWS.local_app_build_workflow_names()`,
-//! which does not exist either. Correct them from the package that owns
-//! `apps/engine-mobile`; the grep above is the evidence.
+//! The three sibling comments in `apps/engine-mobile` that used to repeat the
+//! same non-existent symbol (`local_apps_build.rs`'s test-module tail,
+//! `tests/component_literal_scan.rs`'s module doc and
+//! `tests/component_literal_allowlist.txt`'s `tasks/src` section) have all
+//! been corrected; the scan one additionally named
+//! `BUILTIN_WORKFLOWS.local_app_build_workflow_names()`, which does not exist
+//! either. What replaced `tool_workflow`'s array is nothing: Phase 9 moved the
+//! Local App workflows into the plugin bundle, so `tool_workflow` no longer
+//! answers "which workflows build a Local App" at all, and the only surviving
+//! enumeration of those basenames is `component_literal_scan.rs`'s
+//! `local_app_workflow_basenames()`.
 //!
 //! [`LocalAppWorkflowTaskScope`] is the replacement authority token: the Host
 //! (the composition binding that just resolved a real `LocalAppPluginBinding`
@@ -77,9 +79,11 @@
 //! authorize exactly the workflow that is about to run, and that the script
 //! is that workflow rather than something wearing its name. `engine-mobile`'s
 //! `apply_materialized_local_app_collections_with_identity` is the seam that
-//! does this and the only production mint today; its comment at the
+//! does this (`workflow_support.rs:1551` and `:1627`); its comment at the
 //! constructor call enumerates the checks that stand between `args` and this
-//! type.
+//! type. It is NOT the only production mint — `resolve_adopted_local_app_build_scope`
+//! (`:1765`) and `launch` (`:1997`) mint too, and the same "resolved, not
+//! told" duty binds them.
 //!
 //! It also does not guarantee the id names an app that exists, or that the
 //! app is in a state where the purpose makes sense. Those are lookups, and
@@ -271,17 +275,24 @@ impl LocalAppWorkflowTaskScope {
     /// 阻塞" -- every purpose blocks deleting the app while the workflow is
     /// non-terminal, not just `Build`.
     ///
-    /// Reachability, so nobody has to grep for it: [`Self::for_build`] is the
-    /// only constructor with a production call site today (see the module
-    /// docs' "the only production mint"). [`Self::for_use_test`] and
-    /// [`Self::for_mcp_authoring`] are called from tests only, because the
-    /// workflows that would mint them do not exist yet (design §18 Phase 4 /
-    /// Phase 6). So "every purpose blocks delete" is enforced for all three
-    /// and exercised in production by one; `registry.rs`'s
+    /// Reachability, so nobody has to grep for it — re-derived at HEAD, because
+    /// the previous version of this note was stale in BOTH directions:
+    ///
+    /// * [`Self::for_build`] — three production mints
+    ///   (`engine-mobile/src/workflow_support.rs:1551`, `:1627`, `:1765`).
+    /// * [`Self::for_mcp_authoring`] — ONE production mint, `launch`
+    ///   (`workflow_support.rs:1997`). The old note said "tests only".
+    /// * [`Self::for_use_test`] — still ZERO production mints. But the old
+    ///   REASON ("the workflow does not exist yet") is also wrong: the use-test
+    ///   workflow script ships in the plugin's `workflows/` directory alongside
+    ///   the build one. It exists and nothing mints its scope, which is a live
+    ///   named-computed-never-wired gap rather than a phase that has not
+    ///   arrived.
+    ///
+    /// So "every purpose blocks delete" is enforced for all three and
+    /// exercised in production by two; `registry.rs`'s
     /// `find_nonterminal_local_app_workflows` carries the same note, and
-    /// `registry_test.rs` pins each purpose at that guard. This is a
-    /// statement about traffic, not a defect: minting a scope no workflow
-    /// needs would be the defect.
+    /// `registry_test.rs` pins each purpose at that guard.
     pub fn blocks_delete(&self) -> bool {
         true
     }

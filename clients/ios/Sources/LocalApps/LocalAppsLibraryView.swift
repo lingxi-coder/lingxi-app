@@ -52,9 +52,15 @@ struct LocalAppsRootView: View {
     /// app's session catalog. The mode is part of the resume identity: Rust
     /// rejects a transcript opened under the other capability profile.
     var onOpenAppSession: (String, String, SessionMode) -> Void = { _, _, _ in }
-    /// Called with `appID` for「新会话」. RootView dismisses this cover and
-    /// starts a fresh conversation in the app's scope.
+    /// Called with `appID` for「新会话」. RootView starts a fresh conversation
+    /// in the app's scope and dismisses this cover once that is accepted.
     var onNewAppSession: (String) -> Void = { _ in }
+    /// Called with `appID` when a DRAFT card whose init-session pin never
+    /// landed is tapped. Deliberately NOT `onNewAppSession`: this one carries
+    /// the create kickoff, so the interview re-arms instead of the tap minting
+    /// yet another silent empty session in the app's scope. See
+    /// `RootView.startDraftAppInterview`.
+    var onStartDraftInterview: (String) -> Void = { _ in }
 
     @State private var path: [LocalAppsRoute] = []
 
@@ -65,7 +71,8 @@ struct LocalAppsRootView: View {
                 path: $path,
                 onDismiss: onDismiss,
                 onOpenAppSession: onOpenAppSession,
-                onNewAppSession: onNewAppSession
+                onNewAppSession: onNewAppSession,
+                onStartDraftInterview: onStartDraftInterview
             )
             .navigationDestination(for: LocalAppsRoute.self) { route in
                 destination(route)
@@ -433,6 +440,7 @@ private struct LocalAppsLibraryScreen: View {
     let onDismiss: () -> Void
     let onOpenAppSession: (String, String, SessionMode) -> Void
     let onNewAppSession: (String) -> Void
+    let onStartDraftInterview: (String) -> Void
     @State private var pendingDelete: LocalAppSummary?
 
     var body: some View {
@@ -541,9 +549,10 @@ private struct LocalAppsLibraryScreen: View {
     /// A SHELL has no detail page worth showing — no brief, no surface, no
     /// runtime — and the one thing the user wants from it is the conversation
     /// that is going to define it. So a draft card resumes the app's pinned
-    /// session (or, if the engine's best-effort mint failed, starts a fresh
-    /// conversation in the app's scope, which is still rooted in its
-    /// workspace). A formed app opens its details as before.
+    /// session, or — if the engine's best-effort mint failed and there is no
+    /// pin — starts a fresh conversation in the app's scope WITH the create
+    /// kickoff, which is what re-arms the interview instead of dropping the
+    /// user into an empty composer. A formed app opens its details as before.
     private func open(_ app: LocalAppSummary) {
         guard app.isDraftShell else {
             path.append(.details(app.id))
@@ -552,7 +561,12 @@ private struct LocalAppsLibraryScreen: View {
         if let sessionID = app.initSessionId {
             onOpenAppSession(app.id, sessionID, .code)
         } else {
-            onNewAppSession(app.id)
+            // No pin: the engine's best-effort init-session mint failed, so
+            // there is nothing to resume. Re-arm the interview with the create
+            // kickoff rather than minting a silent anchor — a shell with no
+            // brief and no kickoff gives the agent nothing to act on, and
+            // tapping the card again would just mint another one.
+            onStartDraftInterview(app.id)
         }
     }
 

@@ -54,6 +54,9 @@ pub struct SideQueryRequest {
     /// callers). Replaces the never-forwarded `thinking_budget` knob.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<llm_client::model::thinking::ThinkingConfig>,
+    /// Output effort inherited by compaction from the live parent request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Value>,
     /// Stop sequences.
     pub stop_sequences: Vec<String>,
     /// COGS tag — see [`QuerySource`].

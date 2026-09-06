@@ -109,7 +109,13 @@ apps/engine-mobile/src/local_app_plugin_binding.rs:lingxi-local-app:local-app-us
 # shell how to proceed: the pre-scaffold operation gate's refusal message and
 # `create`'s `runtime_profile`/`surface` rejection message. Both name only the
 # `create-local-app` skill, never the build workflow it launches.
-apps/engine-mobile/src/local_apps_mcp.rs:lingxi-local-app:create-local-app:2
+# r2-critic-1 (2026-09-04) adds a THIRD, non-model-facing occurrence: the doc
+# comment on `PluginAvailabilityProbe`. It names the qualified skill because
+# that skill IS the thing `PluginManager::disable` unloads, which is the whole
+# reason the gate cannot live at transport level (the local-apps MCP server is
+# connected unconditionally with `disabled: false, always_load: true`). Naming
+# the component the gate protects is the point of the comment; 2 -> 3.
+apps/engine-mobile/src/local_apps_mcp.rs:lingxi-local-app:create-local-app:3
 
 # local_apps_build.rs — the same WP8 exception, on the one refusal an agent
 # meets when it tries to build an app that is still an empty shell. It used to
@@ -128,9 +134,15 @@ apps/engine-mobile/src/local_apps_build.rs:lingxi-local-app:create-local-app:1
 # (both read a task's typed `LocalAppWorkflowTaskScope` instead — see
 # `tasks/src/scope.rs`) and survived only for a twin-agreement test in
 # `engine-mobile` (`local_app_build_workflow_sets_agree`), which is also
-# deleted now that there is no second list left to twin against —
-# `tool_workflow` answers the same question from a typed field
-# (`BuiltinWorkflowDescriptor::is_local_app_build`) instead of its own array.
+# deleted now that there is no second list left to twin against. Note what
+# replaced it and what did NOT: `tool_workflow` answers NOTHING about Local App
+# workflows any more (Phase 9 moved them into the plugin bundle;
+# `tools/workflow/src/builtins.rs` ships only `deep-research` and its
+# `BuiltinWorkflowDescriptor` has just `name`/`description`/`script`/
+# `manual_only`). An earlier revision of this note claimed a typed
+# `BuiltinWorkflowDescriptor::is_local_app_build` field took over — that symbol
+# does not exist and never did. The scanner's own workflow needles now come
+# from `component_literal_scan.rs`'s `local_app_workflow_basenames()`.
 
 # --- tools/workflow/src ----------------------------------------------------
 

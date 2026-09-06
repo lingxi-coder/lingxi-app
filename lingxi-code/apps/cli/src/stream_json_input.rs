@@ -381,10 +381,14 @@ fn parse_history_frame(frame: &Value) -> Option<HistoryInput> {
             if frame.get("subtype").and_then(Value::as_str) != Some("compact_boundary") {
                 return None;
             }
-            let compact_metadata: CompactBoundaryMetadata = serde_json::from_value(
+            let mut compact_metadata: CompactBoundaryMetadata = serde_json::from_value(
                 normalize_compact_metadata_keys(frame.get("compact_metadata")?.clone()),
             )
             .ok()?;
+            compact_metadata.logical_parent_uuid = frame
+                .get("logical_parent_uuid")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             Some(HistoryInput {
                 message: ConversationMessage::compact_boundary(
                     message_id,
@@ -1120,6 +1124,34 @@ mod tests {
             bash,
             FrameAction::BashCommand(BashCommand { command }) if command == "printf hello"
         ));
+    }
+
+    #[test]
+    fn compact_boundary_replay_preserves_parent_and_optional_261_metadata() {
+        let action = process_line(
+            r#"{"type":"system","subtype":"compact_boundary","uuid":"11111111-1111-1111-1111-111111111111","logical_parent_uuid":"parent","compact_metadata":{"trigger":"manual","pre_tokens":42,"precomputed":true,"preserved_messages":{"anchor_uuid":"summary","uuids":["tail"]}}}"#,
+            &mut fresh_seen(),
+        ).unwrap();
+        let FrameAction::History(HistoryInput {
+            message:
+                ConversationMessage::System {
+                    compact_metadata: Some(metadata),
+                    ..
+                },
+            ..
+        }) = action
+        else {
+            panic!("expected typed compact boundary");
+        };
+        assert_eq!(metadata.logical_parent_uuid.as_deref(), Some("parent"));
+        assert_eq!(metadata.precomputed, Some(true));
+        let preserved = metadata.preserved_messages.unwrap();
+        assert_eq!(preserved.uuids, ["tail"]);
+        assert!(preserved.all_uuids.is_empty());
+        assert!(serde_json::to_value(preserved)
+            .unwrap()
+            .get("allUuids")
+            .is_none());
     }
 
     #[test]

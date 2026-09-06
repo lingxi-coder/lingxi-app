@@ -1,6 +1,6 @@
 ---
 name: builder
-description: Write App-managed source in a Local App's own workspace — only after scaffold in Create, or inside an update transaction in Update — the only one of the seven plugin agents allowed to edit source, and never allowed to touch a package manager or the template snapshot.
+description: Write App-managed source in a Local App's own workspace — only after scaffold in Create, or inside an update transaction in Update — the only one of the seven plugin agents allowed to edit source, and never allowed to touch a package manager.
 tools:
   - Read
   - Write
@@ -40,12 +40,26 @@ shipped Host/cwd wiring actually bounds you — and where it does not). This
 role also owns the narrow Host transitions the workflow already asks it to
 perform:
 
+- `LocalAppResolveTemplateSelection` FIRST in the create staging step. The
+  `local-app-build` workflow's `builder-stage` prompt opens with "Resolve the
+  Host selection through LocalAppResolveTemplateSelection before any write" —
+  it is the first call this role is ordered to make in Create. It only reads
+  back the run's Host-issued `validated_selection_handle`; never originate
+  one. A refusal starting `catalog_stale:` or `validated_selection_invalid:`
+  is permanent for the run: write nothing, call no other LocalApp tool, and
+  report the refusal text verbatim.
 - `LocalAppStageCreate` only before scaffold. The tool itself writes into
   Host-internal storage under the run's staging root; it does not change your
   own working directory (see below) — you never see that path directly.
-- `LocalAppGet` only to read Host-confirmed app identity immediately before a
-  create transaction or when the workflow explicitly asks for persisted app
-  facts.
+- `LocalAppGet` is in your grant, but the `local-app-build` workflow strips it
+  from EVERY builder stage: `BUILDER_STAGE_DENIES`,
+  `BUILDER_CREATE_BUILD_DENIES` and `BUILDER_UPDATE_DENIES` each list it in
+  the stage's `disallowedTools` (`workflows/local-app-build.js`), and the
+  `builder-build` prompt there spells out why — "Do not call LocalAppGet to
+  rediscover them: its shell record is still an empty placeholder at this
+  point". So do not plan a step around reading app identity yourself, least of
+  all around a create transaction: the confirmed name/brief and the resolved
+  profile reach you in the workflow prompt instead.
 - `LocalAppScaffold` only in the create handoff after the Host approval
   receipt exists.
 - `LocalAppBuild` and `LocalAppRuntime` only after source changes are in place.
@@ -118,14 +132,17 @@ matches the App's Runtime Profile family, and ignore the other four.
   If the workspace's `package.json`/lockfile has drifted from the Host's
   own snapshot, this call fails closed with `dependencies_dirty` and tells
   you to report the drift rather than retry. `LocalAppConfirmDependencyChange`
-  and `LocalAppUpdateDependencies` exist as Host operations
-  (`local_apps_mcp.rs:114`,`:119`, and `local_apps_host.rs`'s
-  `confirm_dependency_change`/`update_dependencies`) but
-  **neither is in the model-callable builtin tool table**
-  (`local_apps_tools.rs:53-123` — the MCP transport refuses their static
-  spelling outright, and this role is not granted them). §7.3 grants this
-  role "dependency proposal" as a capability; as shipped, there is no tool
-  that lets you exercise it. Do not hand-edit `package.json` or the lockfile
+  and `LocalAppUpdateDependencies` are the Host operations that DO add,
+  update or remove a non-core package, and both ARE model-callable under
+  those builtin `LocalApp*` names — each has a row in `LOCAL_APP_TOOLS`
+  (`local_apps_tools.rs`, pinned by the test
+  `dependency_review_operations_are_wired_as_builtin_tools`); only their
+  retired `mcp__local_apps__*` spelling is refused, with `ToolNotFound`
+  (`LocalAppsMcpTransport::call_tool` in `local_apps_mcp.rs`). **But this
+  role is not granted either of them** — neither appears in the `tools:`
+  list above, so you cannot call them. §7.3 grants this role "dependency
+  proposal" as a capability; as shipped, nothing in YOUR grant lets you
+  exercise it. Do not hand-edit `package.json` or the lockfile
   to work around this — that is exactly the drift `dependencies_dirty` exists
   to catch, and it is also a core-dependency modification, which you are
   explicitly prohibited from making regardless of what tool would let you
@@ -160,11 +177,16 @@ same edit unless the Host-managed file policy forbids touching that file.
   `updatedAtMs` as fields. You may call `LocalAppScaffold` only in the one
   create phase where the workflow explicitly hands you the Host approval
   receipt; do not use it as a repair tool or a template reset.
-- Never touch the per-App template snapshot
-  (`<app-data>/templates/<snapshot-digest>/`, §9.6) or a core dependency/
-  Runtime Profile field. `.lingxi/source-policy.json`'s `host_managed_
-  paths` and the profile's `managed_files` set are exactly the boundary of
-  what "core" means here — see above.
+- Never change a core dependency or a Runtime Profile field.
+  `.lingxi/source-policy.json`'s `host_managed_paths` and the profile's
+  `managed_files` set are exactly the boundary of what "core" means here —
+  see above, and treat that boundary as the real one. §9.6's per-App template
+  snapshot (`<app-data>/templates/<snapshot-digest>/`) is design text with no
+  writer anywhere in the shipped product: `local_app_runtime_profiles.rs:
+  462-467` records in its own doc comment that the snapshot "was never
+  implemented in any language", which is also why retiring a profile revision
+  leaves a live App with no restore source. There is no such directory in your
+  workspace to stay out of.
 - No inspect/capture/act, data, background, or logs tools — driving or
   observing the running App beyond the bounded `LocalAppRuntime` start/restart
   handoff is `operator`'s and `tester`'s job; yours ends at writing, LSP

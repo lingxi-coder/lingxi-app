@@ -525,8 +525,32 @@ pub enum ClientCommand {
             skip_serializing_if = "is_default_git_version_control"
         )]
         git_enabled: bool,
-        // Provider-qualified model reference used by the app creation
-        // workflow. Skipped when the app follows the current session model.
+        // Provider-qualified model reference for the app creation workflow.
+        // Skipped when the app follows the current session model -- which is
+        // what every shipping client sends today: `LocalAppsStore.swift` and
+        // `LocalAppsViewModel.kt` both hard-code the null, there is no picker.
+        //
+        // ⚠ INERT END TO END as of this comment. The engine accepts the
+        // value, trims/byte-caps it (`local_apps::service`) and persists it as
+        // `AppRecord::workflow_model`, and `commit_scaffold` preserves it
+        // across scaffold -- but NOTHING in production reads the stored value
+        // back. Every `.workflow_model` READ site in the workspace is a
+        // `#[cfg(test)]` assertion, and the reader the design named for it,
+        // `apply_local_app_build_default_model`, exists only under
+        // `docs/local-apps/` and in no source tree at all. Setting it has no
+        // side effect either: the scaffold contract
+        // (`local_apps_host::formal_workspace_contract`) renders `name`,
+        // `brief` and `mcp_intent`, never this.
+        //
+        // It is kept rather than dropped because a struct variant's fields are
+        // encoded POSITIONALLY by the generated mobile bindings (see `surface`
+        // below): removing it would silently shift `conversation_id` /
+        // `surface` / `mode` / `request_id` on a client built against an older
+        // binding. Close the gap by restoring a reader, not by deleting a
+        // field mid-struct. `tasks/src/scope.rs`'s module docs hold the
+        // long-form account and the greps behind it; do not upgrade this note
+        // to "the build workflow defaults to it" until a reader actually
+        // exists.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_model: Option<String>,
         // Conversation the app was created from (`origin: chat`). Skipped

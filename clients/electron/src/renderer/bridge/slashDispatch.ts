@@ -42,7 +42,7 @@ export interface DesktopCommandContext {
   chooseProject(): Promise<void>;
   activateProject(path: string): Promise<void>;
   clearSession(): Promise<void>;
-  forceCompact(): Promise<void>;
+  forceCompact(instructions?: string): Promise<void>;
   copyLastResponse(): Promise<boolean>;
   login(): Promise<void>;
   logout(): Promise<void>;

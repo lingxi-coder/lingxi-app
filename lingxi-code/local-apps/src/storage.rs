@@ -18,6 +18,13 @@
 //! point for creation (per-app files first, index last) and deletion (index
 //! entry first, directory last).
 //!
+//! Index-driven enumeration has one cost: a creation that never REACHED that
+//! commit point leaves an `apps/<id>` nothing can see again, holding its id
+//! hostage through [`app_id_present_on_disk`]. The create path therefore lays
+//! down a [`CREATING_MARKER_FILE`] before the first skeleton byte and removes
+//! it after the index commit, and [`load_all`] reclaims marked directories the
+//! index does not list through [`sweep_uncommitted_app_dirs`].
+//!
 //! For MUTATIONS of a listed app the per-app batch is the effective commit
 //! point instead: the batch lands `runtime.json` and finally the `app.json`
 //! record mirror — the order is defined ONCE as [`APP_DOC_WRITE_ORDER`] and
@@ -121,6 +128,17 @@ pub const APP_METADATA_FILE: &str = "app.json";
 pub const SCAFFOLD_RECOVERY_DIR: &str = ".scaffold-recovery";
 /// Journal inside `apps/<id>` describing an in-flight first scaffold.
 pub const SCAFFOLD_RECOVERY_JOURNAL_FILE: &str = "scaffold-recovery.json";
+/// Marker written inside `apps/<id>` BEFORE the create skeleton and removed
+/// after the index commit that publishes the app. A runtime artifact, not a
+/// persisted document — loaders never read its contents.
+///
+/// It exists so [`sweep_uncommitted_app_dirs`] can tell the one directory
+/// shape it is allowed to reclaim (a create that never reached its commit
+/// point) apart from every other directory that happens to be missing from
+/// the index. Without it the sweep would have to reclaim ANY unindexed
+/// `apps/<id>`, which would delete a live app's tree the moment the index
+/// went missing for some other reason.
+pub const CREATING_MARKER_FILE: &str = "creating.marker";
 /// File name for the advisory lock serializing first-scaffold recovery with
 /// the store loader. The lock lives in a private OS temporary directory, not
 /// under the app store: it is runtime coordination state and must not appear
@@ -218,6 +236,12 @@ fn lock_index(root: &Path) -> Result<rooted_fs::RootedFileLock, AppError> {
 #[must_use]
 pub fn app_dir_rel(app_id: &str) -> PathBuf {
     PathBuf::from(APPS_DIR).join(app_id)
+}
+
+/// Root-relative path of the uncommitted-create marker (`apps/<id>/creating.marker`).
+#[must_use]
+pub fn creating_marker_rel(app_id: &str) -> PathBuf {
+    app_dir_rel(app_id).join(CREATING_MARKER_FILE)
 }
 
 /// Root-relative path of the per-app build/deletion lock.
@@ -513,14 +537,105 @@ fn remove_owned_path(path: &Path) -> Result<(), AppError> {
     }
 }
 
-fn copy_tree_entry(source: &Path, destination: &Path) -> Result<(), AppError> {
+/// The relative target of a symlink inside a snapshot tree, refused unless it
+/// stays inside `tree_root`.
+///
+/// LEXICAL, not `canonicalize`: a legitimate link can dangle (a `.bin` shim
+/// whose target has not been written yet), and a snapshot must be judged on
+/// what it SPELLS, not on what happens to exist right now. The link's own
+/// position inside the tree is part of the arithmetic, so
+/// `deps/.bin/vite -> ../vite/bin/vite.js` is contained while
+/// `deps/../../../etc/passwd` is not.
+///
+/// Absolute targets are refused outright even when they currently point inside
+/// the tree: the snapshot is copied to a DIFFERENT path, so an absolute link
+/// would silently keep pointing at the original app's directory.
+fn contained_symlink_target(link: &Path, tree_root: &Path) -> Result<PathBuf, AppError> {
+    use std::path::Component;
+
+    let escape = |reason: &str, target: &Path| {
+        AppError::StorageCorrupt(format!(
+            "scaffold recovery snapshot symlink {} -> {} {reason}",
+            link.display(),
+            target.display()
+        ))
+    };
+    let target = std::fs::read_link(link)
+        .map_err(|error| AppError::Io(format!("read link {}: {error}", link.display())))?;
+    if target.is_absolute() {
+        return Err(escape("must be relative", &target));
+    }
+    let parent_rel = link
+        .parent()
+        .and_then(|parent| parent.strip_prefix(tree_root).ok())
+        .ok_or_else(|| {
+            AppError::StorageCorrupt(format!(
+                "scaffold recovery snapshot symlink {} is outside {}",
+                link.display(),
+                tree_root.display()
+            ))
+        })?;
+    let mut resolved: Vec<std::ffi::OsString> = Vec::new();
+    for component in parent_rel.components().chain(target.components()) {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if resolved.pop().is_none() {
+                    return Err(escape("escapes the snapshot", &target));
+                }
+            }
+            Component::Normal(name) => resolved.push(name.to_os_string()),
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(escape("must be relative", &target));
+            }
+        }
+    }
+    Ok(target)
+}
+
+#[cfg(unix)]
+fn recreate_snapshot_symlink(target: &Path, destination: &Path) -> Result<(), AppError> {
+    std::os::unix::fs::symlink(target, destination).map_err(|error| {
+        AppError::Io(format!(
+            "recreate scaffold recovery symlink {} -> {}: {error}",
+            destination.display(),
+            target.display()
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn recreate_snapshot_symlink(target: &Path, destination: &Path) -> Result<(), AppError> {
+    Err(AppError::StorageCorrupt(format!(
+        "scaffold recovery snapshot symlink {} -> {} is unsupported on this platform",
+        destination.display(),
+        target.display()
+    )))
+}
+
+/// Copy one entry of a snapshot tree. `source_root` is the root of the tree
+/// being copied (the app directory when taking the backup, the backup when
+/// restoring it) and is what symlink containment is judged against — passing
+/// the directory currently being walked instead would let a nested link climb
+/// out one level at a time.
+fn copy_tree_entry(source: &Path, destination: &Path, source_root: &Path) -> Result<(), AppError> {
     let metadata = std::fs::symlink_metadata(source)
         .map_err(|error| AppError::Io(format!("inspect {}: {error}", source.display())))?;
     if metadata.file_type().is_symlink() {
-        return Err(AppError::StorageCorrupt(format!(
-            "scaffold recovery snapshot contains symlink {}",
-            source.display()
-        )));
+        // Reproduced, not followed and not refused. Refusing was the old
+        // behaviour and it made a workspace containing ANY symlink
+        // permanently unscaffoldable: this snapshot is taken BEFORE the wipe
+        // that would have removed the link, so the shell could never get past
+        // its first scaffold.
+        let target = contained_symlink_target(source, source_root)?;
+        if let Some(parent) = destination.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    AppError::Io(format!("create {}: {error}", parent.display()))
+                })?;
+            }
+        }
+        return recreate_snapshot_symlink(&target, destination);
     }
     if metadata.is_dir() {
         private_dir(destination)?;
@@ -530,7 +645,11 @@ fn copy_tree_entry(source: &Path, destination: &Path) -> Result<(), AppError> {
             let entry = entry.map_err(|error| {
                 AppError::Io(format!("read {} entry: {error}", source.display()))
             })?;
-            copy_tree_entry(&entry.path(), &destination.join(entry.file_name()))?;
+            copy_tree_entry(
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                source_root,
+            )?;
         }
         return Ok(());
     }
@@ -581,7 +700,7 @@ fn copy_app_snapshot(source: &Path, destination: &Path) -> Result<(), AppError> 
         {
             continue;
         }
-        copy_tree_entry(&entry.path(), &destination.join(name))?;
+        copy_tree_entry(&entry.path(), &destination.join(name), source)?;
     }
     Ok(())
 }
@@ -647,27 +766,28 @@ fn restore_app_snapshot(root: &Path, journal: &ScaffoldRecoveryJournal) -> Resul
     // Validate the complete source before removing the live app. If the
     // backup is damaged, fail closed and leave the journal for an operator;
     // never turn a corrupted snapshot into a silently empty app.
-    validate_snapshot_tree(&backup)?;
+    validate_snapshot_tree(&backup, &backup)?;
     clear_app_directory_for_restore(&app_dir)?;
     for entry in std::fs::read_dir(&backup)
         .map_err(|error| AppError::Io(format!("read {}: {error}", backup.display())))?
     {
         let entry = entry
             .map_err(|error| AppError::Io(format!("read {} entry: {error}", backup.display())))?;
-        copy_tree_entry(&entry.path(), &app_dir.join(entry.file_name()))?;
+        copy_tree_entry(&entry.path(), &app_dir.join(entry.file_name()), &backup)?;
     }
     Ok(())
 }
 
-fn validate_snapshot_tree(path: &Path) -> Result<(), AppError> {
+fn validate_snapshot_tree(path: &Path, tree_root: &Path) -> Result<(), AppError> {
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         AppError::StorageCorrupt(format!("inspect {}: {error}", path.display()))
     })?;
     if metadata.file_type().is_symlink() {
-        return Err(AppError::StorageCorrupt(format!(
-            "scaffold recovery snapshot contains symlink {}",
-            path.display()
-        )));
+        // Same rule as `copy_tree_entry`, and it has to be: a validator
+        // stricter than the writer would refuse to restore a backup this
+        // module had just written itself.
+        contained_symlink_target(path, tree_root)?;
+        return Ok(());
     }
     if metadata.is_dir() {
         for entry in std::fs::read_dir(path).map_err(|error| {
@@ -676,7 +796,7 @@ fn validate_snapshot_tree(path: &Path) -> Result<(), AppError> {
             let entry = entry.map_err(|error| {
                 AppError::StorageCorrupt(format!("read {} entry: {error}", path.display()))
             })?;
-            validate_snapshot_tree(&entry.path())?;
+            validate_snapshot_tree(&entry.path(), tree_root)?;
         }
     } else if !metadata.is_file() {
         return Err(AppError::StorageCorrupt(format!(
@@ -970,7 +1090,8 @@ impl ScaffoldRecoveryHandle {
         // TRUNCATED backup still named by a live journal, and the next
         // `load_all` would wipe the app we just restored correctly and copy
         // that partial tree over it — `validate_snapshot_tree` only rejects
-        // symlinks, so nothing catches it. A backup left behind by a failed
+        // escaping symlinks and special files, so nothing catches it. A
+        // backup left behind by a failed
         // removal is merely unreachable disk, reclaimed by
         // `sweep_orphaned_scaffold_backups` once the app is deleted; the
         // error is propagated (not warned) so the caller still learns.
@@ -1119,7 +1240,16 @@ pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
     let index_rel = index_rel();
     let body = match rooted_fs::read_to_string_limited(root, &index_rel, MAX_DOC_BYTES) {
         Ok(body) => body,
-        Err(FsError::NotFound(_)) => return Ok(Vec::new()),
+        Err(FsError::NotFound(_)) => {
+            // No index at all, so nothing on disk is committed: every marked
+            // `apps/<id>` here is by definition a create that never reached
+            // its commit point. Sweeping BEFORE the early return is the whole
+            // point — this is exactly the store shape a crash on the very
+            // first create leaves behind, and returning early without it was
+            // how such a store leaked forever.
+            sweep_uncommitted_app_dirs(root, &BTreeSet::new());
+            return Ok(Vec::new());
+        }
         Err(error) => return Err(load_read_error(&index_rel, &error)),
     };
     let index: AppIndexFile = serde_json::from_str(&body).map_err(|error| {
@@ -1158,6 +1288,19 @@ pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
         }
     })?;
     ensure_schema_version(&index_rel, index.schema_version)?;
+    // Reclaim create skeletons stranded by a crash between `save_app_files`
+    // and `save_index_preserving`. It runs here rather than beside the other
+    // two sweeps above because it is the only one that needs to know what the
+    // index lists, and it runs BEFORE the per-record loop so a reclaimed id
+    // is free again by the time this load returns.
+    sweep_uncommitted_app_dirs(
+        root,
+        &index
+            .apps
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<BTreeSet<String>>(),
+    );
 
     let mut apps = Vec::with_capacity(index.apps.len());
     let mut seen_ids = BTreeSet::new();
@@ -1716,6 +1859,184 @@ fn parse_scaffold_backup_owner(backup_name: &str) -> Option<String> {
     prefix.strip_suffix('-').map(str::to_string)
 }
 
+/// How long an uncommitted `apps/<id>` skeleton is left alone before
+/// [`sweep_uncommitted_app_dirs`] reclaims it.
+///
+/// The AGE, not a lock, is what tells an in-flight create apart from a crash
+/// leftover. The creator holds no lock between [`save_app_files`] and
+/// [`save_index_preserving`], so there is nothing a sweeper could wait on that
+/// would prove the skeleton dead; and `rooted_fs` — the only writer this
+/// module goes through, because it is the one that keeps every path inside the
+/// store root — exposes just the BLOCKING `rooted_fs::lock_exclusive`, with no
+/// try-lock. (A non-blocking `File::try_lock_exclusive` DOES exist in this
+/// workspace, `platform-api/src/live_sessions.rs`, but it is std's, taken on a
+/// raw `File` outside the rooted-path guard; adopting it here would mean a new
+/// `rooted_fs` primitive, not a one-line swap. It is a real option if this
+/// design is ever revisited — it is not an absent one.) Age settles it
+/// instead: an in-flight create is seconds old, and no create survives a
+/// process restart, so anything still marked a full day later is definitively
+/// a crash leftover.
+///
+/// The trade is stated plainly: a create that genuinely spanned more than a
+/// day between its skeleton and its index commit would be reclaimed by
+/// another instance's load. Every initializer on this path is a single
+/// short workspace write (`prepare_shell_app` / `write_guided_contract_value`),
+/// so that window is not reachable in practice.
+///
+/// LOCK ORDER — read this before shortening the constant or reusing the sweep.
+/// The sweep takes no lock while it DECIDES, but reclamation runs through
+/// [`delete_app_dir`] -> [`trash_app_dir`], which DOES take the app's
+/// background and build locks, blocking, while [`load_all`] is still holding
+/// the scaffold-recovery lock and the index lock. That is the inverse of the
+/// order a creating or scaffolding host takes them in (per-app lock first, the
+/// index lock at its commit), so on paper it is an ABBA pair. What makes it
+/// unreachable is this constant: to deadlock, some thread would have to be
+/// holding the build lock of an app that is ABSENT from the index and waiting
+/// on the index lock, for a skeleton whose marker is already a full day old —
+/// i.e. a create in flight for 24 hours. Both of the sweep's other conditions
+/// (absent from `indexed`, marker older than this) are load-bearing for that
+/// argument, not just for the data. If a shorter grace is ever wanted, drop
+/// the per-app locks on this path first;
+/// [`recover_scaffold_transaction_locked`] is the precedent for how — it takes
+/// NO per-app lock precisely because `load_all` already holds the index lock.
+const UNCOMMITTED_CREATE_GRACE_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Mark `apps/<id>` as an in-flight, not-yet-committed create.
+///
+/// Called BEFORE the first byte of the skeleton is written; cleared by
+/// [`clear_app_creating`] once `apps/index.json` lists the app. Between those
+/// two points a crash strands the directory, and the marker is the only thing
+/// that later identifies it as reclaimable.
+pub fn mark_app_creating(root: &Path, app_id: &str) -> Result<(), AppError> {
+    ids::validate_app_id(app_id)?;
+    let rel = creating_marker_rel(app_id);
+    // Contents are diagnostic only — the sweep reads the marker's mtime, not
+    // its body — but a human staring at a leaked directory deserves to be
+    // told what the file is.
+    rooted_fs::atomic_write(
+        root,
+        &rel,
+        b"local-apps: this app's create never reached its index commit\n",
+        AtomicWriteOptions::default(),
+    )
+    .map_err(|error| write_error(&rel, &error))
+}
+
+/// Clear the in-flight-create marker for `apps/<id>`.
+///
+/// Best-effort by contract: it runs AFTER the index commit that publishes the
+/// app, so a failure here cannot un-create anything. A marker left behind is
+/// swept by the next [`load_all`] (an indexed app's marker is removed, never
+/// its directory), which is why the caller only logs.
+pub fn clear_app_creating(root: &Path, app_id: &str) -> Result<(), AppError> {
+    ids::validate_app_id(app_id)?;
+    let path = rooted_fs::checked_join(root, &creating_marker_rel(app_id))
+        .map_err(|error| AppError::from_fs("clear create marker", &error))?;
+    remove_owned_path(&path)
+}
+
+/// Best-effort sweep of `apps/<id>` directories whose create never reached
+/// its commit point (r1-failure-paths-007).
+///
+/// `save_app_files` + `AppLayout::initialize` build the skeleton, and
+/// `save_index_preserving` is the commit; a crash in between leaves a
+/// directory that index-driven enumeration can never see again — and, because
+/// [`app_id_present_on_disk`] treats any live directory as a collision, the
+/// id it occupies is burned for good. Nothing else in this module reclaims
+/// it: `sweep_trash` reads `apps/.trash` only, and
+/// `sweep_orphaned_scaffold_backups` reads `apps/.scaffold-recovery` only.
+///
+/// The sweep reclaims a directory only when ALL of these hold, and is
+/// deliberately conservative on every read failure:
+///   1. its name is a valid app id (so `index.json`, `index.lock`, `.trash`
+///      and `.scaffold-recovery` are never candidates);
+///   2. it is a real directory, not a symlink or file squatting the name;
+///   3. it carries a [`CREATING_MARKER_FILE`] — i.e. a create started here and
+///      never finished;
+///   4. `indexed` does not list it (an indexed app is a real app; a stale
+///      marker on one is removed, and the directory is left alone);
+///   5. the marker is older than [`UNCOMMITTED_CREATE_GRACE_MS`], which is
+///      what keeps a CONCURRENT instance's in-flight create safe without the
+///      sweep taking a lock to decide.
+///
+/// Reclamation goes through [`delete_app_dir`], the audited removal primitive:
+/// it renames into `apps/.trash` first (never following the final component)
+/// and also drops the app's `.lingxi-build-state/template-candidates/<id>`
+/// staging, which is the same litter an uncommitted create leaves behind.
+/// That primitive was audited for callers who hold NO index lock, and it
+/// blocks on the app's background and build locks — see the LOCK ORDER
+/// paragraph on [`UNCOMMITTED_CREATE_GRACE_MS`] for why that is safe HERE,
+/// under `load_all`'s index lock, and for what would break it.
+fn sweep_uncommitted_app_dirs(root: &Path, indexed: &BTreeSet<String>) {
+    let Ok(apps_dir) = rooted_fs::checked_join(root, &PathBuf::from(APPS_DIR)) else {
+        return;
+    };
+    let entries = match std::fs::read_dir(&apps_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "apps/ is unreadable; uncommitted-create sweep skipped"
+            );
+            return;
+        }
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !ids::is_valid_app_id(&name) {
+            continue;
+        }
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => {}
+            _ => continue,
+        }
+        let Ok(marker) = rooted_fs::checked_join(root, &creating_marker_rel(&name)) else {
+            continue;
+        };
+        let Ok(marker_meta) = std::fs::symlink_metadata(&marker) else {
+            // No marker: either a committed app or a directory this code did
+            // not create. Not ours to reclaim.
+            continue;
+        };
+        if indexed.contains(&name) {
+            // The create DID commit and only the marker removal was lost.
+            // Reclaim the file, never the app.
+            if let Err(error) = remove_owned_path(&marker) {
+                tracing::warn!(
+                    app_id = %name,
+                    error = %error,
+                    "stale create marker on a committed app could not be removed"
+                );
+            }
+            continue;
+        }
+        let fresh = marker_meta
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_none_or(|age| age.as_millis() < u128::from(UNCOMMITTED_CREATE_GRACE_MS));
+        if fresh {
+            // Either genuinely young (a create in flight in another instance,
+            // right now) or a clock that cannot be read/compared — both mean
+            // "leave it alone".
+            continue;
+        }
+        tracing::warn!(
+            app_id = %name,
+            "reclaiming an app directory whose create never reached its index commit"
+        );
+        if let Err(error) = delete_app_dir(root, &name) {
+            tracing::warn!(
+                app_id = %name,
+                error = %error,
+                "uncommitted app directory could not be reclaimed; leaving it for the next load"
+            );
+        }
+    }
+}
+
 /// Best-effort sweep of `apps/.scaffold-recovery` (r1-engine-core-005).
 ///
 /// A first-scaffold backup's journal lives INSIDE the app directory it
@@ -1822,6 +2143,133 @@ mod tests {
         save_index(root, &records).unwrap();
     }
 
+    /// Build the exact on-disk shape a crash between `save_app_files` and
+    /// `save_index_preserving` leaves behind: a complete `apps/<id>` skeleton
+    /// that `apps/index.json` does not list, still carrying its in-flight
+    /// create marker.
+    fn seed_uncommitted_skeleton(root: &Path, id: &str) {
+        let app = new_app(id);
+        mark_app_creating(root, id).unwrap();
+        save_app_files(root, &app).unwrap();
+    }
+
+    /// Push the create marker's mtime `age_ms` into the past. The sweep reads
+    /// the marker's modification time, so this is what lets a test cross the
+    /// grace period without sleeping through it.
+    fn backdate_creating_marker(root: &Path, id: &str, age_ms: u64) {
+        let path = root.join(APPS_DIR).join(id).join(CREATING_MARKER_FILE);
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_modified(
+            std::time::SystemTime::now() - std::time::Duration::from_millis(age_ms),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_in_flight_create_skeleton_is_left_alone_inside_the_grace_period() {
+        // The concurrency case the sweep must never get wrong: another engine
+        // instance is between its skeleton and its index commit RIGHT NOW.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let committed = new_app("keeper01");
+        save_full(root, std::slice::from_ref(&committed));
+        seed_uncommitted_skeleton(root, "inflight1");
+
+        let loaded = load_all(root).unwrap();
+        assert_eq!(loaded.len(), 1, "the in-flight app is not published");
+        assert!(
+            root.join(APPS_DIR).join("inflight1").is_dir(),
+            "a seconds-old create skeleton must survive another instance's load"
+        );
+        assert!(app_id_present_on_disk(root, "inflight1"));
+    }
+
+    #[test]
+    fn an_aged_uncommitted_create_skeleton_is_reclaimed_and_frees_its_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let committed = new_app("keeper01");
+        save_full(root, std::slice::from_ref(&committed));
+        seed_uncommitted_skeleton(root, "stranded1");
+        backdate_creating_marker(root, "stranded1", UNCOMMITTED_CREATE_GRACE_MS + 60_000);
+        assert!(app_id_present_on_disk(root, "stranded1"));
+
+        let loaded = load_all(root).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].record.id, "keeper01");
+        assert!(
+            !root.join(APPS_DIR).join("stranded1").exists(),
+            "a crash-stranded skeleton must be reclaimed"
+        );
+        assert!(
+            !app_id_present_on_disk(root, "stranded1"),
+            "reclaiming must also free the id the skeleton was burning"
+        );
+        assert!(
+            root.join(APPS_DIR).join("keeper01").is_dir(),
+            "a committed app is untouched by the sweep"
+        );
+    }
+
+    #[test]
+    fn an_aged_uncommitted_skeleton_is_reclaimed_even_when_no_index_was_ever_written() {
+        // The crash-on-the-very-first-create store: `apps/index.json` does not
+        // exist at all, which used to return early before any sweep ran.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_uncommitted_skeleton(root, "firstever");
+        backdate_creating_marker(root, "firstever", UNCOMMITTED_CREATE_GRACE_MS + 60_000);
+        assert!(!root.join(APPS_DIR).join(INDEX_FILE).exists());
+
+        assert!(load_all(root).unwrap().is_empty());
+        assert!(
+            !root.join(APPS_DIR).join("firstever").exists(),
+            "an indexless store must still be swept"
+        );
+    }
+
+    #[test]
+    fn a_committed_app_loses_a_stale_create_marker_but_keeps_its_directory() {
+        // A crash between the index commit and the marker removal.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let app = new_app("survivor");
+        save_full(root, std::slice::from_ref(&app));
+        mark_app_creating(root, "survivor").unwrap();
+        backdate_creating_marker(root, "survivor", UNCOMMITTED_CREATE_GRACE_MS + 60_000);
+
+        let loaded = load_all(root).unwrap();
+        assert_eq!(loaded.len(), 1, "the app itself must survive");
+        assert!(root.join(APPS_DIR).join("survivor").is_dir());
+        assert!(
+            !root
+                .join(APPS_DIR)
+                .join("survivor")
+                .join(CREATING_MARKER_FILE)
+                .exists(),
+            "the stale marker on a committed app must be reclaimed"
+        );
+    }
+
+    #[test]
+    fn an_unmarked_unindexed_directory_is_never_reclaimed() {
+        // Without a marker the sweep has no evidence the directory came from
+        // an unfinished create, so it must keep its hands off however old it
+        // is — deleting on "absent from the index" alone is how a live app
+        // gets destroyed.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        save_full(root, &[]);
+        let unmarked = new_app("unmarked1");
+        save_app_files(root, &unmarked).unwrap();
+
+        assert!(load_all(root).unwrap().is_empty());
+        assert!(
+            root.join(APPS_DIR).join("unmarked1").is_dir(),
+            "an unmarked directory must never be swept"
+        );
+    }
+
     #[test]
     fn load_recovers_a_partial_first_scaffold_before_reading_app_documents() {
         let dir = tempfile::tempdir().unwrap();
@@ -1882,6 +2330,106 @@ mod tests {
             .path()
             .join(scaffold_recovery_journal_rel("scaffold1"))
             .exists());
+    }
+
+    /// Build the "+" button's shell on disk: index row, layout, manifest and
+    /// the guided `workspace/LINGXI.md`. Returns the workspace path.
+    #[cfg(unix)]
+    fn shell_on_disk(root: &Path, app_id: &str) -> PathBuf {
+        let mut app = AppState::create(
+            app_id.into(),
+            "untitled".into(),
+            "original brief".into(),
+            None,
+            1_700_000_000_000,
+        );
+        app.record.scaffolded = false;
+        save_full(root, std::slice::from_ref(&app));
+        let layout = crate::manifest::AppLayout::new(root, app.record.id.clone()).unwrap();
+        layout.initialize().unwrap();
+        let manifest = crate::manifest::AppManifest::for_new_app(app_id, "untitled");
+        crate::manifest::save_manifest(&layout, &manifest).unwrap();
+        let workspace = root.join(layout.workspace_rel());
+        std::fs::write(workspace.join("LINGXI.md"), "guided shell\n").unwrap();
+        workspace
+    }
+
+    /// r1-backlog-scaffold-build-09. The recovery snapshot is taken BEFORE the
+    /// wipe that would have removed the workspace's links, so refusing every
+    /// symlink outright made a shell containing ANY link impossible to
+    /// scaffold — ever, on any retry. A link that stays inside the tree must
+    /// survive the snapshot/rollback round trip AS A LINK.
+    #[test]
+    #[cfg(unix)]
+    fn scaffold_recovery_round_trips_a_contained_relative_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = shell_on_disk(dir.path(), "symlink1");
+        std::fs::create_dir_all(workspace.join("bin")).unwrap();
+        std::os::unix::fs::symlink("../LINGXI.md", workspace.join("bin/contract.md")).unwrap();
+
+        let lock = lock_app_build(dir.path(), "symlink1").unwrap();
+        let recovery =
+            begin_scaffold_recovery(dir.path(), "symlink1", "formed name", "formed brief")
+                .expect("a contained symlink must not block the first scaffold");
+        // What a landing scaffold does: wipe the editable surface, write the
+        // formal contract.
+        std::fs::remove_dir_all(workspace.join("bin")).unwrap();
+        std::fs::write(workspace.join("LINGXI.md"), "formal contract\n").unwrap();
+        recovery.rollback().expect("rollback");
+        drop(lock);
+
+        let link = workspace.join("bin/contract.md");
+        let metadata = std::fs::symlink_metadata(&link)
+            .expect("the rolled-back workspace must have the link back");
+        assert!(
+            metadata.file_type().is_symlink(),
+            "restored as a {:?}, not a symlink",
+            metadata.file_type()
+        );
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            Path::new("../LINGXI.md"),
+            "the link must be reproduced, not dereferenced into a copy"
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("LINGXI.md")).unwrap(),
+            b"guided shell\n",
+            "and the rest of the rollback must still work"
+        );
+    }
+
+    /// The other half: containment is the rule, not "symlinks are fine now".
+    #[test]
+    #[cfg(unix)]
+    fn scaffold_recovery_refuses_an_escaping_or_absolute_symlink() {
+        for (label, target, needle) in [
+            ("escaping", "../../../../etc/passwd", "escapes the snapshot"),
+            ("absolute", "/etc/passwd", "must be relative"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let workspace = shell_on_disk(dir.path(), "symlink2");
+            std::os::unix::fs::symlink(target, workspace.join("stowaway")).unwrap();
+
+            let lock = lock_app_build(dir.path(), "symlink2").unwrap();
+            let error = begin_scaffold_recovery(dir.path(), "symlink2", "formed", "brief")
+                .expect_err("{label}: a link out of the tree must fail closed");
+            drop(lock);
+            assert!(
+                matches!(&error, AppError::StorageCorrupt(_)),
+                "{label}: {error:?}"
+            );
+            assert!(
+                error.to_string().contains(needle),
+                "{label}: expected {needle:?}, got {error}"
+            );
+            assert!(
+                !dir.path()
+                    .join(scaffold_recovery_dir_rel())
+                    .join("symlink2")
+                    .exists(),
+                "{label}: the refused snapshot must not leave a backup behind"
+            );
+        }
     }
 
     #[test]

@@ -159,7 +159,7 @@ pub fn get_compact_prompt(custom_instructions: Option<&str>) -> String {
     prompt.push_str(BASE_COMPACT_PROMPT);
 
     if let Some(custom) = custom_instructions {
-        if !custom.trim().is_empty() {
+        if !trim_compact_text(custom).is_empty() {
             // Binary: `t += `\n\nAdditional Instructions:\n${e}`` — DOUBLE leading
             // `\n` (verified via `od -c` on the 2.1.195 binary JS source at the
             // `t+=` template; the `strings` dump splits real newlines and misled
@@ -172,6 +172,13 @@ pub fn get_compact_prompt(custom_instructions: Option<&str>) -> String {
 
     prompt.push_str(NO_TOOLS_TRAILER);
     prompt
+}
+
+/// Trim exactly the ECMAScript whitespace set used by the compact oracle.
+/// Rust additionally trims U+0085 and omits U+FEFF; either changes prompt bytes.
+#[must_use]
+pub fn trim_compact_text(text: &str) -> &str {
+    text.trim_matches(|ch: char| (ch.is_whitespace() && ch != '\u{0085}') || ch == '\u{feff}')
 }
 
 /// Find the first `[start, end)` span delimited by `open`/`close` (the
@@ -257,11 +264,31 @@ pub fn format_compact_summary(summary: &str) -> String {
             // Inner content lives between the open and close tags.
             let inner_start = start + "<summary>".len();
             let inner_end = end - "</summary>".len();
-            let content = stripped[inner_start..inner_end].trim();
+            let content = trim_compact_text(&stripped[inner_start..inner_end]);
             let mut s = String::with_capacity(stripped.len());
             s.push_str(&stripped[..start]);
             s.push_str("Summary:\n");
-            s.push_str(content);
+            // JS passes a replacement string, not a callback. Its replacement
+            // tokens are expanded even when they originated in the summary.
+            let mut remaining = content;
+            while let Some(dollar) = remaining.find('$') {
+                s.push_str(&remaining[..dollar]);
+                remaining = &remaining[dollar + 1..];
+                let replacement = match remaining.as_bytes().first() {
+                    Some(b'$') => Some("$"),
+                    Some(b'&') => Some(&stripped[start..end]),
+                    Some(b'`') => Some(&stripped[..start]),
+                    Some(b'\'') => Some(&stripped[end..]),
+                    _ => None,
+                };
+                if let Some(replacement) = replacement {
+                    s.push_str(replacement);
+                    remaining = &remaining[1..];
+                } else {
+                    s.push('$');
+                }
+            }
+            s.push_str(remaining);
             s.push_str(&stripped[end..]);
             s
         }
@@ -272,7 +299,7 @@ pub fn format_compact_summary(summary: &str) -> String {
     let collapsed = collapse_blank_lines(&rewritten);
 
     // 4. Final trim.
-    collapsed.trim().to_string()
+    trim_compact_text(&collapsed).to_string()
 }
 
 /// Build the user-facing continuation message — `getCompactUserSummaryMessage`
@@ -305,7 +332,7 @@ pub fn get_compact_user_summary_message(
         "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n{formatted_summary}"
     );
 
-    if let Some(path) = transcript_path {
+    if let Some(path) = transcript_path.filter(|path| !path.is_empty()) {
         base_summary.push_str(&format!(
             "\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: {path}"
         ));
@@ -332,7 +359,7 @@ pub fn get_compact_user_summary_message(
 mod tests {
     use super::*;
 
-    /// Binary oracle for the base prompt embedded in local Claude Code 2.1.212.
+    /// Base prompt is unchanged through the official Claude Code 2.1.261.
     /// The prompt includes the post-2.1.193 anti-spoof rule that prevents text
     /// inside assistant messages from being misreported as genuine user turns.
     #[test]
@@ -340,7 +367,7 @@ mod tests {
         assert_eq!(
             BASE_COMPACT_PROMPT.len(),
             5814,
-            "BASE_COMPACT_PROMPT must match the Claude Code 2.1.212 binary oracle"
+            "BASE_COMPACT_PROMPT must match the Claude Code 2.1.261 binary oracle"
         );
         // Spot-check the two trailing-space lines that account for the
         // 5424→5426 difference vs the older TS source.

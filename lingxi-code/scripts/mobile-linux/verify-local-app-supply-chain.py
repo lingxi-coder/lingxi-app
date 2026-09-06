@@ -831,7 +831,12 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "Never ask unresolved questions in ordinary assistant text",
         "Every collection requires `id`, `name`, and `fields`",
         "Never declare host-owned record metadata",
-        "vite build --outDir dist --emptyOutDir",
+        # The out_dir the host actually passes is `workspace_build_output_rel()`
+        # (`local_apps_build.rs:1364`, `.lingxi-build-state/build-output/` +
+        # `VITE_OUTPUT_DIR`), spliced into `fixed_vite_build_args` at :642-660.
+        # A bare `--outDir dist` in the skill would teach the model the wrong
+        # artifact path, so pin the full production spelling here.
+        "vite build --outDir .lingxi-build-state/build-output/dist --emptyOutDir",
         "build/store/dist/",
         "recommended strategy",
         "task-local workflow",
@@ -1162,13 +1167,22 @@ def validate_agent_prompt_contracts(repo: pathlib.Path) -> None:
         )
 
     build_js = (workflows_dir / "local-app-build.js").read_text(encoding="utf-8")
+    # The three evidence stages (operator/tester/verifier) mutate nothing, so
+    # they call `runVerification` -- the retry-once wrapper around `run` -- while
+    # every mutating stage still calls `run` directly. Accept either spelling:
+    # what this check is actually pinning is that the verifier prompt is built
+    # inline as a template literal and carries `acceptanceChecks`, not which
+    # helper dispatches it.
     verifier_prompt_match = re.search(
-        r"report = await run\(`(.*?)`, \{ agentType: 'verifier', label: `verifier-",
+        r"report = await (?:run|runVerification)\(`(.*?)`, \{ agentType: 'verifier', label: `verifier-",
         build_js,
         re.DOTALL,
     )
     if not verifier_prompt_match:
-        fail("local-app-build.js's verifier prompt call (report = await run(...)) was not found")
+        fail(
+            "local-app-build.js's verifier prompt call "
+            "(report = await run(...) / runVerification(...)) was not found"
+        )
     if "Acceptance checks: ${JSON.stringify(acceptanceChecks)}" not in verifier_prompt_match.group(1):
         fail("local-app-build.js's verifier prompt is never given acceptanceChecks")
     if "designSpecReference" not in build_js or "no design spec was produced for this fast-quality run" not in build_js:
@@ -1238,6 +1252,122 @@ def validate_product_model_name_absence(repo: pathlib.Path) -> None:
 
 def runtime_profile_template_root(repo: pathlib.Path) -> pathlib.Path:
     return repo / "lingxi-code" / "local-apps" / "templates" / "runtime-profiles"
+
+
+# The bytes this verifier attests are read from `runtime_profile_template_root`,
+# but the bytes the product SHIPS are the ones `profile_file!` in
+# lingxi-code/apps/engine-mobile/src/local_app_runtime_profiles.rs pulls in with
+# `include_bytes!` from a SECOND on-disk copy under the plugin tree. An
+# attestation over a tree the binary does not compile is worth nothing the
+# moment the two copies drift, so the two roots are compared byte for byte and
+# the compiled file list is parsed out of the macro call sites rather than
+# guessed.
+COMPILED_PROFILE_MACRO_SOURCE = (
+    "lingxi-code",
+    "apps",
+    "engine-mobile",
+    "src",
+    "local_app_runtime_profiles.rs",
+)
+COMPILED_PROFILE_ROOT_LITERAL = "/../../plugins/lingxi-local-app/assets/templates/"
+# 145 `profile_file!` call sites today, deduplicating to 112 distinct
+# (family, path-under-r1) pairs across the five families. The floor exists so a
+# regex that silently stops matching cannot report "0 files compared, all clear"
+# -- a zero-hit scan is not evidence.
+MIN_COMPILED_PROFILE_FILES = 100
+COMPILED_PROFILE_CALL = re.compile(
+    r'profile_file!\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)'
+)
+
+
+def compiled_runtime_profile_template_root(repo: pathlib.Path) -> pathlib.Path:
+    return repo / "lingxi-code" / "plugins" / "lingxi-local-app" / "assets" / "templates"
+
+
+def compiled_runtime_profile_files(repo: pathlib.Path) -> list[tuple[str, str]]:
+    """(family, path-under-r1) pairs `include_bytes!` compiles into the engine."""
+    source_path = repo.joinpath(*COMPILED_PROFILE_MACRO_SOURCE)
+    try:
+        source = source_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        fail(f"cannot read the compiled runtime-profile macro source {source_path}: {exc}")
+    if COMPILED_PROFILE_ROOT_LITERAL not in source:
+        fail(
+            f"{source_path} no longer builds its include_bytes! paths from "
+            f"'{COMPILED_PROFILE_ROOT_LITERAL}' -- this verifier's idea of which tree the "
+            "product compiles is stale, fix compiled_runtime_profile_template_root()"
+        )
+    pairs = sorted(set(COMPILED_PROFILE_CALL.findall(source)))
+    if len(pairs) < MIN_COMPILED_PROFILE_FILES:
+        fail(
+            f"only {len(pairs)} profile_file! call site(s) parsed out of {source_path}, expected at "
+            f"least {MIN_COMPILED_PROFILE_FILES} -- refusing to report a clean comparison from an "
+            "enumeration this small, the scan is probably broken"
+        )
+    return pairs
+
+
+def compare_runtime_profile_trees(
+    attested_root: pathlib.Path,
+    compiled_root: pathlib.Path,
+    entries: list[tuple[str, str]],
+    selected_profile: str | None = None,
+) -> int:
+    """Byte-compare every compiled template file against the attested copy.
+
+    DIRECTION, and its one blind spot: the loop iterates the COMPILED list, so
+    it catches a compiled file that the attested tree lacks or has different
+    bytes for. The reverse -- a file added under `<family>/r1` in the attested
+    tree that no `profile_file!` call site references -- is attested by
+    validate_runtime_profiles yet never compared here. That set is empty in all
+    five families today: every file under each attested `<family>/r1` (22-23 of
+    them) appears in the compiled list, and the only file the compiled side has
+    beyond it is `inventory.json`, which lives on the plugin side alone. So this
+    is not a live hole; if it stops being empty, add a directory walk of
+    `attested_root` here.
+    """
+    compared = 0
+    for family, relative in entries:
+        if selected_profile is not None and family != selected_profile:
+            continue
+        attested = attested_root / family / "r1" / relative
+        compiled = compiled_root / family / "r1" / relative
+        try:
+            compiled_bytes = compiled.read_bytes()
+        except OSError as exc:
+            fail(f"compiled runtime-profile file is unreadable: {compiled}: {exc}")
+        try:
+            attested_bytes = attested.read_bytes()
+        except OSError as exc:
+            fail(
+                f"the runtime-profile tree this verifier attests is missing a file the engine "
+                f"compiles in: {attested} (compiled from {compiled}): {exc}"
+            )
+        if attested_bytes != compiled_bytes:
+            fail(
+                f"runtime-profile template diverged from the bytes the engine compiles: "
+                f"{attested} != {compiled} -- this verifier would otherwise attest a tree the "
+                "product does not ship"
+            )
+        compared += 1
+    if compared == 0:
+        fail(
+            "compared 0 runtime-profile template files against the compiled tree -- an empty "
+            "comparison is not an all-clear"
+        )
+    return compared
+
+
+def validate_runtime_profile_templates_match_compiled(
+    repo: pathlib.Path,
+    selected_profile: str | None,
+) -> None:
+    compare_runtime_profile_trees(
+        runtime_profile_template_root(repo),
+        compiled_runtime_profile_template_root(repo),
+        compiled_runtime_profile_files(repo),
+        selected_profile,
+    )
 
 
 def expected_runtime_profile_dependencies(profile_name: str) -> dict[str, str]:
@@ -1480,6 +1610,18 @@ def validate_runtime_profiles(
     selected_profile: str | None,
 ) -> None:
     root = runtime_profile_template_root(repo)
+    # Prove these files ARE the files the engine compiles in before this
+    # function attests anything about them -- the two trees are separate copies
+    # on disk.
+    #
+    # SCOPE, precisely. This is NOT the first attestation in the run: `main()`
+    # already ran validate_runtime_profile_lock("react-dom"),
+    # validate_runtime_profile_source_policy, validate_base_seed_profile_relationships
+    # and validate_sbom over the very same tree. The guarantee is weaker and
+    # still sufficient: every path out of `main()` is fail-fast, so no OVERALL
+    # pass can be printed over a tree that drifted from the compiled bytes.
+    # Do not read this comment as "nothing is attested before the comparison".
+    validate_runtime_profile_templates_match_compiled(repo, selected_profile)
     profile_names = [selected_profile] if selected_profile else sorted(RUNTIME_PROFILES)
     for profile_name in profile_names:
         if profile_name not in RUNTIME_PROFILES:

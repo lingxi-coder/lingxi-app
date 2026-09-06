@@ -9,9 +9,9 @@
 //! - Pass 2 (`compact`): keep the last `max(1, keep_recent)` collected IDs,
 //!   clear the rest. Over **user** messages, replace every `ToolResult` whose
 //!   `tool_use_id` is in the clear-set (and not already the cleared placeholder)
-//!   with [`TIME_BASED_MC_CLEARED_MESSAGE`], accumulating `tokens_saved`. A
-//!   no-op result is returned when the clear-set is empty OR `tokens_saved == 0`
-//!   (TS `maybeTimeBasedMicrocompact`, `microCompact.ts:446-530`).
+//!   with [`TIME_BASED_MC_CLEARED_MESSAGE`], accumulating `tokens_saved`.
+//!   Already-persisted previews survive. A no-op result is returned below
+//!   20,000 candidate tokens (2.1.261 `hfn` / `bVn`).
 //!
 //! **Time-gap trigger:** TS `evaluateTimeBasedTrigger`
 //! (`microCompact.ts:422-444`) computes the gap as `now - lastAssistant.timestamp`
@@ -72,12 +72,42 @@ pub fn reset_microcompact_state() {
 }
 
 /// Rough token-count estimate mirroring TS `roughTokenCountEstimation`
-/// (`tokenEstimation.ts:203-208`): `Math.round(content.length / 4)`.
+/// (`tokenEstimation.ts:203-208`): `Math.round(content.length / 4)`, where the
+/// length is measured in JavaScript UTF-16 code units.
 ///
 /// Round-half-up over nonnegative integers is `(len + 2) / 4` in integer math.
 #[must_use]
 fn rough_token_count_estimation(content: &str) -> u64 {
-    (u64::try_from(content.len()).unwrap_or(u64::MAX)).saturating_add(2) / 4
+    crate::post_compact::estimate_content_tokens(content)
+}
+
+/// 2.1.261 `BXo`: previews already point at persisted results and must survive
+/// subsequent keep-recent passes. Structured content is never a placeholder.
+fn already_compacted(content: &str, content_blocks: Option<&[serde_json::Value]>) -> bool {
+    content_blocks.is_none()
+        && (content == TIME_BASED_MC_CLEARED_MESSAGE || content.starts_with("<persisted-output>"))
+}
+
+/// 2.1.261 `FXo`: count the actual wire array, ignoring unrecognized blocks.
+fn tool_result_tokens(content: &str, content_blocks: Option<&[serde_json::Value]>) -> u64 {
+    content_blocks.map_or_else(
+        || rough_token_count_estimation(content),
+        |blocks| {
+            blocks
+                .iter()
+                .map(
+                    |block| match block.get("type").and_then(serde_json::Value::as_str) {
+                        Some("text") => block
+                            .get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .map_or(0, rough_token_count_estimation),
+                        Some("image" | "document") => 2_000,
+                        _ => 0,
+                    },
+                )
+                .sum()
+        },
+    )
 }
 
 /// Configuration controlling time-based microcompact, mirroring TS
@@ -170,6 +200,8 @@ pub fn collect_compactable_tool_ids(messages: &[ConversationMessage]) -> Vec<pro
 pub struct KeepRecentEstimate {
     /// Tool-use ids whose results would be cleared.
     pub clear_set: HashSet<protocol::ToolUseId>,
+    /// Ids with an uncleared result block (`new Set(candidates.map(id))`).
+    pub candidate_ids: HashSet<protocol::ToolUseId>,
     /// Tool-use ids whose results would be kept (the most recent N).
     pub keep_set: HashSet<protocol::ToolUseId>,
     /// Number of tool-result blocks that would be cleared.
@@ -202,6 +234,7 @@ pub fn estimate_keep_recent(
 
     let mut cleared_count = 0usize;
     let mut tokens_saved = 0u64;
+    let mut candidate_ids = HashSet::new();
     if !clear_set.is_empty() {
         for m in messages {
             if let ConversationMessage::User { content, .. } = m {
@@ -209,17 +242,21 @@ pub fn estimate_keep_recent(
                     if let ContentBlock::ToolResult {
                         tool_use_id,
                         content,
+                        content_blocks,
                         ..
                     } = b
                     {
                         // An already-cleared placeholder contributes nothing
                         // (TS `!Wxd` / `!LH_`).
                         if clear_set.contains(tool_use_id)
-                            && content != TIME_BASED_MC_CLEARED_MESSAGE
+                            && !already_compacted(content, content_blocks.as_deref())
                         {
                             cleared_count += 1;
-                            tokens_saved =
-                                tokens_saved.saturating_add(rough_token_count_estimation(content));
+                            candidate_ids.insert(tool_use_id.clone());
+                            tokens_saved = tokens_saved.saturating_add(tool_result_tokens(
+                                content,
+                                content_blocks.as_deref(),
+                            ));
                         }
                     }
                 }
@@ -229,6 +266,7 @@ pub fn estimate_keep_recent(
 
     KeepRecentEstimate {
         clear_set,
+        candidate_ids,
         keep_set,
         cleared_count,
         tokens_saved,
@@ -246,7 +284,7 @@ pub struct Microcompactor {
 pub struct MicrocompactResult {
     /// Messages with eligible tool results replaced by the cleared placeholder.
     pub messages: Vec<ConversationMessage>,
-    /// Number of tool-result blocks that were cleared.
+    /// Number of distinct tool-use ids whose results were cleared.
     pub cleared_count: usize,
     /// Approximate tokens freed by clearing (TS `tokensSaved`).
     pub tokens_saved: u64,
@@ -284,13 +322,12 @@ impl Microcompactor {
         // worth it" question has ONE implementation shared with the
         // context-hint controller instead of two that can drift.
         let KeepRecentEstimate {
-            clear_set,
-            cleared_count,
+            candidate_ids,
             tokens_saved,
             ..
         } = estimate_keep_recent(&messages, self.config.keep_recent);
 
-        if clear_set.is_empty() {
+        if candidate_ids.is_empty() {
             return Self::noop(messages);
         }
 
@@ -320,15 +357,12 @@ impl Microcompactor {
                         .map(|b| {
                             if let ContentBlock::ToolResult {
                                 tool_use_id,
-                                content,
                                 is_error,
                                 provider_tool_use_id,
                                 ..
                             } = &b
                             {
-                                if clear_set.contains(tool_use_id)
-                                    && content != TIME_BASED_MC_CLEARED_MESSAGE
-                                {
+                                if candidate_ids.contains(tool_use_id) {
                                     return ContentBlock::ToolResult {
                                         tool_use_id: tool_use_id.clone(),
                                         content: TIME_BASED_MC_CLEARED_MESSAGE.into(),
@@ -357,7 +391,7 @@ impl Microcompactor {
 
         MicrocompactResult {
             messages: out,
-            cleared_count,
+            cleared_count: candidate_ids.len(),
             tokens_saved,
         }
     }
@@ -415,6 +449,66 @@ mod tests {
             },
             _ => panic!("expected user message"),
         }
+    }
+
+    // Claude Code 2.1.261 hfn / BXo / FXo: persisted previews are already
+    // compacted; nested wire content takes precedence over the display text.
+    #[test]
+    fn oracle_261_persisted_results_are_never_clear_candidates() {
+        let persisted = ToolUseId::new();
+        let large = ToolUseId::new();
+        let recent = ToolUseId::new();
+        let messages = vec![
+            assistant_tool_use("Read", persisted.clone()),
+            user_tool_result(
+                persisted,
+                &format!("<persisted-output>{}", "x".repeat(80_000)),
+            ),
+            assistant_tool_use("Read", large.clone()),
+            user_tool_result(large, &"x".repeat(80_000)),
+            assistant_tool_use("Read", recent.clone()),
+            user_tool_result(recent, "recent"),
+        ];
+        let result = Microcompactor {
+            config: TimeBasedMCConfig {
+                keep_recent: 1,
+                ..Default::default()
+            },
+        }
+        .compact(messages.clone(), SystemTime::UNIX_EPOCH);
+        assert_eq!(result.tokens_saved, 20_000);
+        assert_eq!(result.cleared_count, 1);
+        assert_eq!(result.messages[1], messages[1]);
+        assert_eq!(
+            result_content(&result.messages[3]),
+            TIME_BASED_MC_CLEARED_MESSAGE
+        );
+    }
+
+    #[test]
+    fn oracle_261_microcompact_counts_utf16_and_nested_media() {
+        let old = ToolUseId::new();
+        let recent = ToolUseId::new();
+        let mut nested = user_tool_result(old.clone(), "display text must not be counted");
+        if let ConversationMessage::User { content, .. } = &mut nested {
+            if let ContentBlock::ToolResult { content_blocks, .. } = &mut content[0] {
+                *content_blocks = Some(vec![
+                    json!({"type":"text", "text":"你好😀"}),
+                    json!({"type":"image", "source":{}}),
+                    json!({"type":"document", "source":{}}),
+                    json!({"type":"unknown", "text":"x".repeat(80_000)}),
+                ]);
+            }
+        }
+        let messages = vec![
+            assistant_tool_use("Read", old),
+            nested,
+            assistant_tool_use("Read", recent),
+        ];
+        let estimate = estimate_keep_recent(&messages, 1);
+        assert_eq!(estimate.tokens_saved, 4_001);
+        assert_eq!(rough_token_count_estimation("你好"), 1);
+        assert_eq!(rough_token_count_estimation("😀"), 1);
     }
 
     /// (a) 8 compactable `tool_uses`, `keep_recent=5` → 3 oldest cleared, last 5

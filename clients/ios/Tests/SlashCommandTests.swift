@@ -262,15 +262,25 @@ import XCTest
             let token = try XCTUnwrap(source.send("/compact"))
             await flushTasks()
 
-            guard case let .running(startedAt) = source.model.compactionStatus else {
+            XCTAssertEqual(source.model.compactionStatus, .queued)
+            source.applyForTesting(.compactionStatus(phase: "summarizing", error: nil))
+            guard case let .running(_, startedAt, phaseStartedAt, _) = source.model.compactionStatus else {
                 return XCTFail("expected running compaction status")
             }
             XCTAssertTrue(source.model.requiresBackgroundExecution)
             XCTAssertLessThanOrEqual(abs(startedAt.timeIntervalSinceNow), 1)
-            XCTAssertEqual(ConversationCompactionProgress.percent(elapsed: 0), 0)
-            XCTAssertEqual(ConversationCompactionProgress.percent(elapsed: 4), 4)
-            XCTAssertEqual(ConversationCompactionProgress.percent(elapsed: 90), 63)
-            XCTAssertEqual(ConversationCompactionProgress.percent(elapsed: 10_000), 95)
+            XCTAssertEqual(ConversationCompactionProgress.percent(phase: "summarizing", elapsed: 0), 10)
+            XCTAssertEqual(ConversationCompactionProgress.percent(phase: "summarizing", elapsed: 4), 13)
+            XCTAssertEqual(ConversationCompactionProgress.percent(phase: "summarizing", elapsed: 90), 57)
+            XCTAssertEqual(ConversationCompactionProgress.percent(phase: "summarizing", elapsed: 10_000), 84)
+            source.applyForTesting(.compactionStatus(phase: "summarizing", error: nil))
+            XCTAssertEqual(source.model.compactionStatus, .running(phase: "summarizing", startedAt: startedAt, phaseStartedAt: phaseStartedAt))
+            source.applyForTesting(.compactionStatus(phase: "restoring", error: nil))
+            guard case let .running(phase, operationStart, _, _) = source.model.compactionStatus else {
+                return XCTFail("Expected restoring progress")
+            }
+            XCTAssertEqual(phase, "restoring")
+            XCTAssertEqual(operationStart, startedAt)
 
             source.applyForTesting(.compactionCompleted(
                 messagesBefore: 20,
@@ -283,7 +293,15 @@ import XCTest
                 messagesAfter: 7,
                 bytesSaved: 4096
             ))
-            XCTAssertFalse(source.model.requiresBackgroundExecution)
+            // The compaction event settles the PROGRESS, not the turn: the
+            // engine still owes a slash result, so the background-execution
+            // lease is still legitimately held here. Asserting `false` at this
+            // point was the original spelling of this check and it hid the real
+            // defect below — the lease was never released at ALL.
+            XCTAssertTrue(
+                source.model.requiresBackgroundExecution,
+                "the turn is still open until its slash result arrives"
+            )
 
             source.applyForTesting(.slashCommandResult(
                 turnId: token.clientTurnId,
@@ -295,6 +313,20 @@ import XCTest
                 messagesAfter: 7,
                 bytesSaved: 4096
             ))
+            // A CLI slash turn gets no TurnEnded, so `.slashCommandResult` is
+            // the only place its run can be settled. Before the fix the run
+            // stayed `.running` forever and the conversation held a background
+            // -execution lease for the rest of the session.
+            XCTAssertFalse(
+                source.model.requiresBackgroundExecution,
+                "a settled /compact turn must release the background-execution lease"
+            )
+            guard case let .run(run)? = source.model.items.first(where: {
+                if case .run = $0 { return true } else { return false }
+            }) else {
+                return XCTFail("expected the /compact turn to have a run card")
+            }
+            XCTAssertEqual(run.status, .completed)
         }
 
         func testCompactSlashFailureSettlesProgressWithoutPretendingSuccess() async throws {

@@ -305,6 +305,19 @@ struct TasksStatusPanel: View {
         ForEach(Self.workflowSteps(for: task, resumeState: workflowResumeState)) { step in
             workflowStepRow(step, task: task)
         }
+        // The engine's terminal failure reason. This is the ONLY place a user
+        // who has moved to another session can still learn WHY a task failed:
+        // the transient conversation notice is dropped for a non-active origin
+        // session, but the row list is refreshed on attach and carries `error`.
+        if task.status == .failed, let reason = task.errorText, !reason.isEmpty {
+            Text(reason)
+                .font(.caption2)
+                .foregroundStyle(theme.danger)
+                .lineLimit(3)
+                .padding(.leading, 22)
+                .padding(.top, 3)
+                .accessibilityIdentifier("chat.tasks-panel.failure-reason")
+        }
         if case let .failed(taskID, message) = workflowResumeState, taskID == task.id {
             Text(message)
                 .font(.caption2)

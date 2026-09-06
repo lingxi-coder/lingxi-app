@@ -229,6 +229,7 @@ function validateTaskRow(v: unknown): void {
   validateTaskStatus(task['status']);
   if ('can_resume' in task) assert.ok(isBool(task['can_resume']));
   if ('started_at_ms' in task) assert.ok(isNumber(task['started_at_ms']));
+  if ('error' in task) assert.ok(isString(task['error']));
   if ('stage' in task) assert.ok(isString(task['stage']));
 }
 
@@ -249,6 +250,7 @@ test('ALL_TASK_ROW_DTO_KEYS (src/protocolCoverage.ts) matches TaskRowDto exactly
   assert.deepEqual(Object.keys(ALL_TASK_ROW_DTO_KEYS).sort(), [
     'can_resume',
     'description',
+    'error',
     'stage',
     'started_at_ms',
     'status',
@@ -648,37 +650,6 @@ function validateMcpToolSurface(v: unknown): void {
   }
 }
 
-function validateReceiptStatus(v: unknown): void {
-  const o = rec(v);
-  exactObjectKeys(
-    o,
-    [
-      'receiptId',
-      'appId',
-      'workflowRunId',
-      'approvalContractSha256',
-      'candidateDigest',
-      'issuedAtMs',
-      'expiresAtMs',
-      'consumed',
-      'superseded',
-    ],
-    [],
-    'receipt status',
-  );
-  assert.ok(
-    isString(o['receiptId']) &&
-      isString(o['appId']) &&
-      isString(o['workflowRunId']) &&
-      isString(o['approvalContractSha256']) &&
-      isString(o['candidateDigest']) &&
-      isNumber(o['issuedAtMs']) &&
-      isNumber(o['expiresAtMs']) &&
-      isBool(o['consumed']) &&
-      isBool(o['superseded']),
-  );
-}
-
 function validateRuntimeProfileOption(v: unknown): void {
   const o = rec(v);
   exactObjectKeys(
@@ -721,7 +692,7 @@ function validateCreateConfirmationRequest(v: unknown): void {
   exactObjectKeys(
     o,
     ['requestId', 'appId', 'name', 'brief', 'selectedTemplate', 'runtimeProfile', 'reason'],
-    ['rejected', 'initialTools', 'requiredGates', 'receipt'],
+    ['rejected', 'initialTools', 'requiredGates'],
     'create confirmation request',
   );
   assert.ok(
@@ -752,7 +723,6 @@ function validateCreateConfirmationRequest(v: unknown): void {
     assert.ok(Array.isArray(o['requiredGates']));
     for (const gate of o['requiredGates'] as unknown[]) validateGateStatus(gate);
   }
-  if ('receipt' in o) validateReceiptStatus(o['receipt']);
 }
 
 function validateProposalApprovalRequest(v: unknown): void {
@@ -773,7 +743,6 @@ function validateProposalApprovalRequest(v: unknown): void {
       'requiredFlowChanges',
       'excludedCapabilities',
       'pendingGates',
-      'receipt',
     ],
     'MCP proposal approval request',
   );
@@ -822,7 +791,6 @@ function validateProposalApprovalRequest(v: unknown): void {
     assert.ok(Array.isArray(o['pendingGates']));
     for (const gate of o['pendingGates'] as unknown[]) validateGateStatus(gate);
   }
-  if ('receipt' in o) validateReceiptStatus(o['receipt']);
 }
 
 function validateManagedMcpServer(v: unknown): void {
@@ -1875,6 +1843,10 @@ function validateEvent(name: string, v: unknown): void {
       break;
     case 'cost_update':
       validateCost(o);
+      break;
+    case 'compaction_status':
+      assert.ok(isString(o['phase']));
+      if ('error' in o) assert.ok(isString(o['error']));
       break;
     case 'compaction_completed':
       assert.ok(

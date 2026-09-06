@@ -1203,6 +1203,37 @@ pub enum LocalAppPluginErrorCodeDto {
 pub enum LocalAppVerificationStatusDto {
     Pending,
     Passed,
+    // r3-never-wired-05: `Failed` HAD zero production producers -- that is
+    // history now, and this paragraph must not be read as saying the variant
+    // is unreachable. It has exactly one producer:
+    //
+    //   `apps/engine-mobile/src/local_apps_host.rs:2016-2036` -- the
+    //   managed-MCP inventory loop (which also feeds
+    //   `VerificationSummaryChanged`) marks ONE app `Failed` with
+    //   `code: Some("active_state_corrupt")` when its active catalog's
+    //   recorded `appId`/`buildId` does not match the app and build pointing
+    //   at it. That condition used to `return Err(...)` and abort the WHOLE
+    //   listing, so one corrupt app made every other app vanish from both
+    //   clients. Pinned by the regression test
+    //   `a_corrupt_active_mcp_catalog_fails_only_that_app_and_still_lists_the_others`
+    //   (local_apps_host.rs:13717-13799).
+    //
+    // No `local_apps_verification_summary_active_state_corrupt` key exists in
+    // `clients/translations/` (the only `active_state_corrupt` key there is
+    // `local_apps_error_active_state_corrupt`, which belongs to
+    // `LocalAppPluginErrorCodeDto`, not to this `code`), so both clients fall
+    // back to the engine's English `summary` verbatim via their
+    // `default:`/`else ->` arm while the STATUS badge beside it IS localized
+    // (`local_apps_verification_status_failed`, live in
+    // `LocalAppsViewModel.kt` / `LocalAppsScreen.kt` and on iOS).
+    //
+    // DO NOT delete the variant: it is declaration index 2 of 5, so removing
+    // it shifts `Unverified` and `Unavailable` down one and silently corrupts
+    // installed mobile clients (UniFFI encodes enum variants by declaration
+    // index). That rule is about the ORDINAL, not about reachability -- it
+    // held while there was no producer and it holds now that there is one, so
+    // do not delete this paragraph if the producer above ever goes away.
+    // Enforced by `tests/local_apps_ordinal_lock_test.rs`.
     Failed,
     Unverified,
     Unavailable,
@@ -1320,22 +1351,6 @@ pub struct LocalAppMcpToolSurfaceDto {
     pub permission_ceiling: String,
 }
 
-/// One shared receipt status used by create confirmation and MCP proposal approval.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-#[serde(rename_all = "camelCase")]
-pub struct LocalAppReceiptStatusDto {
-    pub receipt_id: String,
-    pub app_id: String,
-    pub workflow_run_id: String,
-    pub approval_contract_sha256: String,
-    pub candidate_digest: String,
-    pub issued_at_ms: u64,
-    pub expires_at_ms: u64,
-    pub consumed: bool,
-    pub superseded: bool,
-}
-
 /// Native request for one unified create confirmation sheet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -1354,8 +1369,6 @@ pub struct LocalAppCreateConfirmationRequestDto {
     pub initial_tools: Vec<LocalAppMcpToolSurfaceDto>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_gates: Vec<LocalAppGateStatusDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub receipt: Option<LocalAppReceiptStatusDto>,
 }
 
 /// One review-surface dimension whose before/after changed.
@@ -1422,8 +1435,6 @@ pub struct LocalAppMcpProposalApprovalRequestDto {
     pub excluded_capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_gates: Vec<LocalAppGateStatusDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub receipt: Option<LocalAppReceiptStatusDto>,
 }
 
 /// Host-managed widget resource surfaced alongside one Local App MCP server.
@@ -1670,7 +1681,7 @@ mod tests {
         LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto,
         LocalAppMcpToolDiffDto, LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto,
         LocalAppPluginComponentCountsDto, LocalAppPluginErrorCodeDto, LocalAppPluginInventoryDto,
-        LocalAppReceiptStatusDto, LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto,
+        LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto,
         LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto,
         ManagedLocalAppMcpStatusDto, McpAppWidgetDto, PluginActivationStateDto, PluginCommandDto,
         PluginStatusDto,
@@ -1716,20 +1727,6 @@ mod tests {
             visible_meta_json: Some(r#"{"anthropic/requiresUserInteraction":true}"#.into()),
             semantic_flow_json: r#"{"flowId":"local-app-save","source":"active"}"#.into(),
             permission_ceiling: "ask".into(),
-        }
-    }
-
-    fn canonical_receipt() -> LocalAppReceiptStatusDto {
-        LocalAppReceiptStatusDto {
-            receipt_id: "receipt-0001".into(),
-            app_id: "habits-1a2b".into(),
-            workflow_run_id: "wf-0001".into(),
-            approval_contract_sha256: "1".repeat(64),
-            candidate_digest: "2".repeat(64),
-            issued_at_ms: 1_750_000_000_000,
-            expires_at_ms: 1_750_000_030_000,
-            consumed: false,
-            superseded: false,
         }
     }
 
@@ -2047,7 +2044,7 @@ mod tests {
     }
 
     #[test]
-    fn create_confirmation_and_receipt_status_preserve_exact_wire_keys() {
+    fn create_confirmation_preserves_exact_wire_keys() {
         let request = LocalAppCreateConfirmationRequestDto {
             request_id: "create-0001".into(),
             app_id: "habits-1a2b".into(),
@@ -2066,7 +2063,6 @@ mod tests {
             }],
             initial_tools: vec![canonical_tool_surface("save_habit")],
             required_gates: vec![canonical_gate()],
-            receipt: Some(canonical_receipt()),
         };
         let event = AppEventDto::CreateConfirmationRequested {
             request: request.clone(),
@@ -2081,34 +2077,20 @@ mod tests {
             json["request"]["runtimeProfile"]["contractSha256"],
             "8".repeat(64)
         );
-        assert_eq!(
-            json["request"]["receipt"]["expiresAtMs"],
-            1_750_000_030_000_u64
+        assert!(
+            json["request"].get("receipt").is_none(),
+            "r1-backlog-native-confirmation-13 removed `receipt`; the wire must not \
+             carry it again without a coordinated client change: {json}"
         );
         assert_eq!(
             serde_json::from_value::<AppEventDto>(json.clone())
                 .expect("deserialize create confirmation"),
             event
         );
-
-        let missing_receipt_state = {
-            let mut value = json;
-            value["request"]["receipt"]
-                .as_object_mut()
-                .expect("receipt object")
-                .remove("superseded");
-            value
-        };
-        let error = serde_json::from_value::<AppEventDto>(missing_receipt_state)
-            .expect_err("receipt state is required when a receipt object is present");
-        assert!(
-            error.to_string().contains("superseded"),
-            "decode error must name the missing field, got: {error}"
-        );
     }
 
     #[test]
-    fn mcp_proposal_diff_and_managed_inventory_round_trip_with_receipt_states() {
+    fn mcp_proposal_diff_and_managed_inventory_round_trip() {
         let request = LocalAppMcpProposalApprovalRequestDto {
             request_id: "proposal-0001".into(),
             app_id: "habits-1a2b".into(),
@@ -2143,11 +2125,6 @@ mod tests {
             required_flow_changes: vec!["Add a save step for notes.".into()],
             excluded_capabilities: vec!["calendar".into()],
             pending_gates: vec![canonical_gate()],
-            receipt: Some(LocalAppReceiptStatusDto {
-                expires_at_ms: 1_750_000_000_010,
-                superseded: true,
-                ..canonical_receipt()
-            }),
         };
         let event = AppEventDto::McpProposalApprovalRequested {
             request: request.clone(),
@@ -2156,7 +2133,6 @@ mod tests {
         assert_eq!(json["type"], "mcp_proposal_approval_requested");
         assert_eq!(json["request"]["toolDiffs"][0]["kind"], "removed");
         assert_eq!(json["request"]["toolDiffs"][0]["name"], "summarize_habits");
-        assert_eq!(json["request"]["receipt"]["superseded"], true);
         assert_eq!(
             serde_json::from_value::<AppEventDto>(json).expect("deserialize proposal approval"),
             event
@@ -2262,4 +2238,23 @@ mod tests {
             failure
         );
     }
+
+    // ---------------------------------------------------------------------
+    // Ordinal locks for the local-app wire types live in
+    // `client-protocol/tests/local_apps_ordinal_lock_test.rs`, NOT here.
+    //
+    // That file `include_str!`s this one and freezes the declaration order of
+    // `AppRecordDto`, `PluginCommandDto`, `AppEventDto`,
+    // `LocalAppVerificationStatusDto`, `LocalAppCreateConfirmationRequestDto`
+    // and `LocalAppMcpProposalApprovalRequestDto`. UniFFI encodes enum
+    // variants by declaration index and record fields positionally, so an
+    // insertion, removal or reorder inside a frozen prefix silently
+    // reinterprets data on installed clients; `version_guard_test.rs` cannot
+    // see it, because it fingerprints an UNORDERED "<type>::<member>" ->
+    // "<wire type>" map.
+    //
+    // Appending AFTER a frozen prefix is allowed and must NOT be added there.
+    // Run `cargo test -p client-protocol --test local_apps_ordinal_lock_test`
+    // after touching any of those six types.
+    // ---------------------------------------------------------------------
 }

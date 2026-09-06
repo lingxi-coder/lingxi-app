@@ -27,6 +27,20 @@ surface, an empty workspace, and an app-scoped conversation — and hands that
 conversation to you. Its `LINGXI.md` names the app id and says the app has no
 shape yet. Settling what the app IS is your work in that conversation:
 
+**If the shell's workspace contract already handed off to this skill, RESUME AT
+STEP 3.** That contract is the `LINGXI.md` a `+`-created shell carries; it runs
+its own steps 1-4 before it invokes `lingxi-local-app:create-local-app`, and its
+step 5 says so in as many words. By the time you are reading this file through
+that hand-off, the opening question, the one clarification round, the display
+**name**, the **shape** (`dom` or `canvas`) and the MCP choice have all been
+answered in this same conversation. Carry those answers forward verbatim and ask
+none of them a second time — re-asking throws away what the user just told you.
+Step 3 below is where you re-enter, and inside it only the one-line **brief** and
+the runtime sub-profile *within the already-confirmed shape* are still open; the
+name is confirmed, so restate it rather than re-propose it. Steps 1-2 apply only
+when you entered this skill WITHOUT that hand-off — for instance from a
+conversation that never went through a shell contract.
+
 1. Open in ORDINARY ASSISTANT TEXT: ask what they want to build, in one short
    open question, and wait for their answer. Do NOT use `AskUserQuestion` here.
    That tool renders a picker, and on this turn you know nothing about the app,
@@ -238,16 +252,27 @@ The same business logic may serve multiple targets, but each target must use a
 platform adapter/tokens layer rather than a width-only conditional.
 
 For a non-core npm-registry package, propose an add/update/remove with a
-reason. Add/update is designed to go through `LocalAppConfirmDependencyChange`
-and its native one-shot receipt, then `LocalAppUpdateDependencies` — but as
-shipped, neither Host operation is on the model-callable tool surface (absent
-from the builtin `LocalApp*` table, and the MCP transport refuses their static
-spelling by name). There is currently no agent-invocable way to add, update,
-or remove a non-core dependency: propose it and its reason as a finding for
-the workflow/user to resolve outside this agent turn. Never edit package/lock
-or run npm, npx, Yarn, or pnpm directly to work around the gap — that is
-exactly the drift the Host's dependency checks exist to catch. React, Ionic,
-Vite, renderer engines, and other Catalog core packages can change only
+reason, then apply it yourself through the two Host operations that exist for
+exactly this. Call `LocalAppConfirmDependencyChange` with `app_id` and the
+`changes` array: it validates the request against the app's current dependency
+baseline and mints a short-lived one-shot receipt. Then call
+`LocalAppUpdateDependencies` with `app_id` and that `receipt_id`. Both are
+model-callable under their builtin `LocalApp*` names only — each has a row in
+the builtin tool table. The `mcp__local_apps__*` spelling of these two was
+deliberately retired and returns `ToolNotFound`, so never reach for it. Any
+add or update raises the native dependency-review confirmation to the user
+before resolution and fails with `user denied dependency changes` if they
+decline; a pure remove needs no prompt. The receipt is consumed on use and
+goes stale if the baseline moves underneath it, so a `dependencies_dirty`
+error means reconfirm and call again — never route
+around it. `LocalAppUpdateDependencies` resolves the lockfile in staging,
+publishes a dependency snapshot, runs the offline production build and the
+profile launch smoke, then commits package/lock, `node_modules` and the build
+together, restoring the previous dependency and build state on any failure.
+Never edit package/lock or run npm, npx, Yarn, or pnpm directly to work around
+this path — that is exactly the drift the Host's dependency checks exist to
+catch. React, Ionic, Vite, renderer engines, and other Catalog core packages
+are refused by `LocalAppConfirmDependencyChange` itself and can change only
 through a same-family Runtime Profile migration, which is a separate,
 unrelated path.
 
@@ -422,7 +447,12 @@ For update use `operation: "update"` and pass the user-confirmed change as
 `spec` is create-only and ignored on update); for a verification-only run use
 `operation: "verify"`. Both fail closed unless Host can read the persisted
 Runtime Profile and dependency snapshot. `quality_level` is the only quality
-selector. `fast` is rejected after Host resolves a Canvas family. Repair
+selector. `fast` is rejected twice over, and the FIRST rejection lands
+before any Runtime Profile family is resolved: the workflow throws
+`CANVAS_FAST_REJECTED` the moment the selector returns a `template_id` that
+does not begin with `react-dom-`, keying purely on that id prefix. Host's
+`LocalAppStageCreate` then rejects `fast` again for any non-`react_dom`
+family, which is the family-resolved check. Repair
 budgets are fast=1, balanced=1, thorough=2. Host derives writable collection
 ids and all template/profile identity; do not pass `renderer`,
 `runtime_profile`, template paths, or expected collections.
@@ -445,10 +475,13 @@ host with pinned root infra and dependencies before generation begins. The
 workspace `dist/` directory is disposable and must never be treated as source.
 The host mounts this workspace as the sole writable build root (the guest may
 see it at the `project/` path), excludes prior
-`.lingxi-build-state/build-output/dist/`, forces `vite build --outDir dist
---emptyOutDir`, atomically promotes the validated snapshot, and serves only
-`build/store/dist/`. Never configure another `build.outDir`, inspect host
-staging paths, or copy generated output back into editable source.
+`.lingxi-build-state/build-output/dist/`, forces
+`vite build --outDir .lingxi-build-state/build-output/dist --emptyOutDir`
+with `--config vite.config.mjs` pinned — the private staging path, never the
+workspace's own `dist/` — then atomically promotes the validated snapshot and
+serves only `build/store/dist/`. Never configure another `build.outDir`,
+inspect host staging paths, or copy generated output back into editable
+source.
 
 1. **Design** — for `dom`, invoke `$frontend-design` for `balanced` and
    `thorough`, while `fast` folds compact decisions into Generate & Build. For
@@ -483,11 +516,14 @@ staging paths, or copy generated output back into editable source.
    host-managed stacks. No other engine, physics or WebGL wrapper can be
    installed.
 3. **Build** — call `LocalAppBuild`; the host runs the production
-   `vite build --outDir dist --emptyOutDir` equivalent offline from the
-   workspace-backed writable mount with the fixed runtime and the app's
-   materialized dependency snapshot. The output is staged under private
-   `.lingxi-build-state/build-output/` before atomic promotion to
-   `build/store/dist/`.
+   `vite build --outDir .lingxi-build-state/build-output/dist --emptyOutDir
+   --config vite.config.mjs` equivalent offline from the workspace-backed
+   writable mount with the fixed runtime and the app's materialized dependency
+   snapshot. The output therefore lands under private
+   `.lingxi-build-state/build-output/` — not in the workspace `dist/` — before
+   atomic promotion to `build/store/dist/`. The build also fails closed on
+   fresh blocking LSP diagnostics in App-managed JS before Vite ever starts,
+   so repair LSP errors first.
 4. **Verify** — invoke `$frontend-qa`. For `dom`, `fast` checks the confirmed
    primary target, root render, fatal console errors, primary interaction, and
    native WebView path; `balanced` covers all confirmed targets and app states;
@@ -519,8 +555,15 @@ Edit generated source only under `app/`, `src/`, `components/`, `lib/`,
 `index.html`, `vite.config.*`, host metadata under `.lingxi/`,
 `lib/device-context.js`, `lib/lingxi-bridge.js`, and
 `lib/platform-adapter.js` are host-controlled for this workflow. Do not run `npm`, `npx`, `node`, package
-install/uninstall/reconcile commands, or alternate scaffold tools. Keep Vite's
-official `dist/` output default and do not set `build.outDir` to another path.
+install/uninstall/reconcile commands, or alternate scaffold tools. Nothing in
+the host denies these for you: the workspace permission lease is a filesystem
+boundary only and deliberately declines to lease-authorize package managers,
+interpreters and network commands, routing them to the ordinary Shell approval
+path instead — so a plain approval prompt appearing for `npm install` is not
+the host permitting it, and this ban is yours to keep. Never set
+`build.outDir` yourself either: the host passes `--outDir` on the command line
+and pins `--config vite.config.mjs`, so a config-level output path is both
+host-managed and overridden.
 `src/main.*` may be minimally adapted to import the checked-in
 bridge/deviceContext/platform adapter. The build is offline and reads a
 host-materialized dependency snapshot.

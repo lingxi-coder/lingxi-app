@@ -538,38 +538,51 @@ private fun EmptyState() {
 @Composable
 private fun CompactionProgressRow(progress: CompactionProgressUi) {
     val t = LingXiTheme.palette
-    var elapsedMs by remember(progress.startedAtMillis, progress.status) { mutableLongStateOf(0L) }
-    LaunchedEffect(progress.startedAtMillis, progress.status) {
-        if (progress.status != CompactionProgressStatus.Running) return@LaunchedEffect
+    val startedAt = progress.startedAtMillis
+    var elapsedMs by remember(startedAt, progress.phaseStartedAtMillis, progress.status) {
+        mutableLongStateOf(startedAt?.let { (compactionClockMillis() - it).coerceAtLeast(0L) } ?: 0L)
+    }
+    LaunchedEffect(progress.startedAtMillis, progress.phaseStartedAtMillis, progress.status) {
+        if (progress.status != CompactionProgressStatus.Running || startedAt == null) return@LaunchedEffect
         while (true) {
-            elapsedMs = (compactionClockMillis() - progress.startedAtMillis).coerceAtLeast(0L)
+            elapsedMs = (compactionClockMillis() - startedAt).coerceAtLeast(0L)
             delay(1_000)
         }
     }
-    val percent = compactProgressPercent(elapsedMs)
+    val percent = compactProgressPercent(if (progress.unknownPhase) "unknown" else progress.phase, (startedAt ?: 0L) + elapsedMs - (progress.phaseStartedAtMillis ?: 0L))
     val color = when (progress.status) {
         CompactionProgressStatus.Running -> t.accent
-        CompactionProgressStatus.Completed -> t.ok
+        CompactionProgressStatus.Completed, CompactionProgressStatus.Skipped -> t.ok
         CompactionProgressStatus.Failed -> t.danger
     }
     val title = when (progress.status) {
-        CompactionProgressStatus.Running -> stringResource(R.string.chat_compacting_context)
+        CompactionProgressStatus.Running -> stringResource(when (if (progress.unknownPhase) "unknown" else progress.phase) {
+            "queued" -> R.string.chat_compaction_waiting
+            "preparing" -> R.string.chat_compaction_preparing
+            "summarizing" -> R.string.chat_compaction_summarizing
+            "restoring" -> R.string.chat_compaction_restoring
+            else -> R.string.chat_compacting_context
+        })
         CompactionProgressStatus.Completed -> stringResource(R.string.chat_compacted_label)
+        CompactionProgressStatus.Skipped -> stringResource(R.string.chat_compaction_skipped)
         CompactionProgressStatus.Failed -> stringResource(R.string.chat_compaction_failed)
     }
     val detail = when (progress.status) {
-        CompactionProgressStatus.Running -> stringResource(
+        CompactionProgressStatus.Running -> if (percent == null) "" else stringResource(
             R.string.chat_compaction_progress,
             percent,
             elapsedMs / 1_000,
         )
-        CompactionProgressStatus.Completed -> stringResource(
+        CompactionProgressStatus.Completed -> if (progress.messagesBefore == null ||
+            progress.messagesAfter == null || progress.bytesSaved == null
+        ) "100%" else "100% · " + stringResource(
             R.string.chat_compaction_status,
             progress.messagesBefore ?: 0,
             progress.messagesAfter ?: 0,
             formatCompactBytes(progress.bytesSaved ?: 0L),
         )
         CompactionProgressStatus.Failed -> progress.detail.orEmpty()
+        CompactionProgressStatus.Skipped -> ""
     }
 
     Row(
@@ -583,7 +596,7 @@ private fun CompactionProgressRow(progress: CompactionProgressUi) {
         LXIcon(
             name = when (progress.status) {
                 CompactionProgressStatus.Running -> LXIconName.Book
-                CompactionProgressStatus.Completed -> LXIconName.Check
+                CompactionProgressStatus.Completed, CompactionProgressStatus.Skipped -> LXIconName.Check
                 CompactionProgressStatus.Failed -> LXIconName.X
             },
             size = 17.dp,
@@ -591,10 +604,18 @@ private fun CompactionProgressRow(progress: CompactionProgressUi) {
         )
         Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.weight(1f)) {
             Text(title, color = color, fontSize = 12.5f.sp, fontWeight = FontWeight.Medium)
-            Text(detail, color = t.text4, fontSize = 10.5f.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            if (progress.status == CompactionProgressStatus.Running) {
+            if (detail.isNotEmpty()) {
+                Text(detail, color = t.text4, fontSize = 10.5f.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+            if (progress.status == CompactionProgressStatus.Running && percent != null) {
                 LinearProgressIndicator(
                     progress = { percent / 100f },
+                    color = color,
+                    trackColor = t.surfaceActive,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else if (progress.status == CompactionProgressStatus.Running) {
+                LinearProgressIndicator(
                     color = color,
                     trackColor = t.surfaceActive,
                     modifier = Modifier.fillMaxWidth(),

@@ -60,6 +60,13 @@ struct LocalAppSummary: Identifiable, Hashable, Sendable {
     /// One-line description the user gave at creation time.
     var brief: String
     var gitEnabled: Bool = true
+    /// When the record was first written (`AppRecordDto.created_at_ms`).
+    ///
+    /// Immutable for the life of the app, which is what makes it — and not
+    /// `updatedAt` — the honest measure of how long a shell has sat
+    /// unscaffolded. `nil` only for a summary this client built itself
+    /// (fixtures, the UI-test seed); every record off the wire carries one.
+    var createdAt: Date? = nil
     var updatedAt: Date
     var workflow: LocalAppWorkflow
     var workspaceRelativePath: String
@@ -110,11 +117,11 @@ struct LocalAppSummary: Identifiable, Hashable, Sendable {
     /// How long a shell can sit unscaffolded before its card stops claiming
     /// a create is still running.
     ///
-    /// Sized against what `updatedAt` actually measures, which is NOT "last
-    /// sign of life": the engine writes it twice for a shell — once in
-    /// `set_init_session` (seconds after the record appears) and once in
-    /// `commit_scaffold`, which stops it being a shell at all. Everything in
-    /// between — the kickoff, the whole interview with the user, staging,
+    /// Measured from `createdAt`, which is the shell's real age. `updatedAt`
+    /// is NOT "last sign of life": the engine writes it twice for a shell —
+    /// once in `set_init_session` (seconds after the record appears) and once
+    /// in `commit_scaffold`, which stops it being a shell at all. Everything
+    /// in between — the kickoff, the whole interview with the user, staging,
     /// scaffolding, dependency install — moves it not at all. So this window
     /// has to clear a realistic conversation, not just a machine step, or a
     /// healthy create gets branded stalled while the user is still typing.
@@ -123,8 +130,25 @@ struct LocalAppSummary: Identifiable, Hashable, Sendable {
     /// `true` once a still-unscaffolded shell has sat long enough that
     /// "Creating…" would be a lie: the create failed, or this client never
     /// heard back, and nothing else marks that state anywhere in the UI.
+    ///
+    /// Anchored on `createdAt` rather than `updatedAt` because `updatedAt`
+    /// can still be re-stamped after the create it describes is already dead.
+    /// The precondition is NARROW, and worth stating exactly so nobody
+    /// "corrects" this back: `set_init_session` is set-once — only its
+    /// `None` arm writes `updated_at_ms`, and a record that already carries a
+    /// pin is refused with `InvalidRequest` (`local-apps/src/service.rs`) —
+    /// and the boot sweep `continue`s past every already-pinned record before
+    /// it would mint one (`apps/engine-mobile/src/host.rs`). So this is NOT a
+    /// bump on every launch. It is at most ONE bump, and only for a shell
+    /// whose create died before it could pin: on the next launch the backfill
+    /// pins it, `updatedAt` jumps to now, and a window anchored there restarts
+    /// — the card goes back to claiming a create is in flight for another hour
+    /// on a create that has been dead for days. `createdAt` cannot be moved at
+    /// all, which is why it is the anchor even for that one bump.
+    /// Falls back to `updatedAt` when the summary was built without one.
     var isDraftStalled: Bool {
-        isDraftShell && Date().timeIntervalSince(updatedAt) > Self.draftStalledInterval
+        isDraftShell
+            && Date().timeIntervalSince(createdAt ?? updatedAt) > Self.draftStalledInterval
     }
 
     /// The secondary line a shell replaces its normal status line with, or
@@ -290,10 +314,58 @@ enum LocalAppVerificationStatus: String, CaseIterable, Hashable, Sendable {
 
 struct LocalAppVerificationSummary: Hashable, Sendable {
     let status: LocalAppVerificationStatus
+    /// The engine's own sentence, always English: `local_apps_host.rs` builds
+    /// it from string literals and has no notion of the client's locale.
+    /// Kept verbatim as the fallback for a `code` this build does not know.
     let summary: String
+    /// The stable machine code the engine sends alongside `summary`
+    /// (`LocalAppVerificationSummaryDto.code`) precisely so that a client can
+    /// say the same thing out of its own catalog.
     let code: String?
+    /// `false` for a summary this client fabricated rather than decoded off
+    /// the wire (`LocalAppManagedMcpInventoryReader`, which reads the on-disk
+    /// manifest when the engine has not emitted an inventory yet).
+    ///
+    /// It exists because "no code" is MEANINGFUL on the wire — the engine
+    /// omits `code` for exactly one state, a clean MCP pass — and a
+    /// client-built summary that happens to be `passed` with no code means
+    /// nothing of the sort. Without this, the reader's own
+    /// "Published UI verification passed." rendered as the MCP pass sentence.
+    var isHostSourced: Bool = true
 
     var badge: LocalAppStatusBadge { status.badge }
+
+    /// The verification sentence to put on screen.
+    ///
+    /// The four values `code` can take are the four production emitters in
+    /// `apps/engine-mobile/src/local_apps_host.rs`: `needs_setup`,
+    /// `needs_revalidation`, `verification_unavailable`, and NO code at all
+    /// for a clean pass. The `nil` case is the one that matters most — it is
+    /// the state that otherwise still renders the engine's English.
+    ///
+    /// An unrecognized FUTURE code falls back to the engine's raw sentence
+    /// rather than showing nothing, the same rule `localizedGateLabel`
+    /// (`LocalAppApprovalSheets.swift`) follows for gate ids.
+    ///
+    /// `nil` is only read as "passed" when the status agrees AND the summary
+    /// came off the wire. A summary this client synthesizes carries no code by
+    /// design (see `updateManagedInventoryFailure` and
+    /// `LocalAppManagedMcpInventoryReader`), and must keep rendering its own
+    /// message rather than claiming MCP verification passed.
+    var localizedSummary: String {
+        switch code {
+        case "needs_setup":
+            String(localized: "local_apps_verification_summary_needs_setup")
+        case "needs_revalidation":
+            String(localized: "local_apps_verification_summary_needs_revalidation")
+        case "verification_unavailable":
+            String(localized: "local_apps_verification_summary_verification_unavailable")
+        case nil where isHostSourced && status == .passed:
+            String(localized: "local_apps_verification_summary_passed")
+        default:
+            summary
+        }
+    }
 }
 
 struct LocalAppGateStatus: Identifiable, Hashable, Sendable {
@@ -318,18 +390,6 @@ struct LocalAppRejectedCandidate: Identifiable, Hashable, Sendable {
     let reason: String
 
     var id: String { templateID }
-}
-
-struct LocalAppReceiptStatus: Hashable, Sendable {
-    let receiptID: String
-    let appID: String
-    let workflowRunID: String
-    let approvalContractSHA256: String
-    let candidateDigest: String
-    let issuedAt: Date
-    let expiresAt: Date
-    let consumed: Bool
-    let superseded: Bool
 }
 
 struct LocalAppMcpToolSurface: Identifiable, Hashable, Sendable {
@@ -425,7 +485,6 @@ struct LocalAppCreateConfirmationPrompt: Identifiable, Hashable, Sendable {
     let rejected: [LocalAppRejectedCandidate]
     let initialTools: [LocalAppMcpToolSurface]
     let requiredGates: [LocalAppGateStatus]
-    let receipt: LocalAppReceiptStatus?
 
     var id: String { requestID }
 }
@@ -442,7 +501,6 @@ struct LocalAppMcpProposalApprovalPrompt: Identifiable, Hashable, Sendable {
     let requiredFlowChanges: [String]
     let excludedCapabilities: [String]
     let pendingGates: [LocalAppGateStatus]
-    let receipt: LocalAppReceiptStatus?
 
     var id: String { requestID }
     var hasVisibleChanges: Bool {
@@ -568,15 +626,19 @@ struct LocalAppManagedMcpInventory: Identifiable, Hashable, Sendable {
             settingsRevision: 0,
             pinnedToCurrentConversation: false,
             publicationState: publicationState,
+            // Client-built placeholders, not decoded from the wire — see
+            // `LocalAppVerificationSummary.isHostSourced`.
             mcpVerification: LocalAppVerificationSummary(
                 status: .unavailable,
                 summary: "No MCP surface has been authored for this app yet.",
-                code: nil
+                code: nil,
+                isHostSourced: false
             ),
             uiVerification: LocalAppVerificationSummary(
                 status: .unavailable,
                 summary: "No MCP widget is available yet.",
-                code: nil
+                code: nil,
+                isHostSourced: false
             ),
             enabledTools: [],
             widget: nil,

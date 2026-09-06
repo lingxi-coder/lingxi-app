@@ -86,6 +86,7 @@ impl MemorySelector {
             max_retries: 2,
             temperature: Some(0.0),
             thinking: None,
+            effort: None,
             stop_sequences: vec![],
             query_source: QuerySource::MemorySelector,
             skip_system_prompt_prefix: false,

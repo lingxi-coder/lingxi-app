@@ -75,6 +75,9 @@ pub const MAX_BRIEF_BYTES: usize = 4_000;
 pub const MAX_WORKFLOW_MODEL_BYTES: usize = 512;
 /// Maximum `conversation_id` length in bytes.
 pub const MAX_CONVERSATION_ID_BYTES: usize = 128;
+/// Maximum `AppRecord::origin_cwd` length in bytes. A remembered filesystem
+/// path, so it is sized like one rather than like an identifier.
+pub const MAX_ORIGIN_CWD_BYTES: usize = 4_096;
 /// Maximum number of MCP services an `AppMcpIntent::Requested` may name.
 pub const MAX_MCP_INTENT_SERVICES: usize = 16;
 /// Maximum length in bytes of one named MCP service in an `AppMcpIntent`.
@@ -89,15 +92,21 @@ pub const PLACEHOLDER_APP_NAME: &str = "untitled";
 
 /// Creation mode — the single decision point for `AppRecord.scaffolded`'s
 /// initial value.
+///
+/// Exactly ONE variant since protocol v9 made every create a shell. The
+/// create+scaffold-in-one-step mode this enum used to carry is gone: the wire
+/// still spells `AppCreateModeDto::Scaffolded` (the variant holds its UniFFI
+/// ordinal) but the engine rejects that value at the boundary, so no producer
+/// can reach a second mode here. The enum is kept — rather than collapsed into
+/// a `bool` or dropped — so the `scaffolded` decision stays a named,
+/// exhaustively matched one point instead of a literal `false` sprinkled
+/// across the create wrappers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateMode {
     /// The empty shell the "+" button creates: the brief may be empty, and
-    /// the record is written with `scaffolded: false`.
+    /// the record is written with `scaffolded: false`. `scaffolded` flips to
+    /// `true` only at [`AppService::commit_scaffold`].
     Shell,
-    /// Create + scaffold in one step (the `LocalAppCreate` tool path): the
-    /// brief must be non-empty (today's invariant, preserved), and the
-    /// record is written with `scaffolded: true`.
-    Scaffolded,
 }
 
 fn ensure_within(what: &str, len: usize, max: usize) -> Result<(), AppError> {
@@ -879,7 +888,31 @@ impl AppService {
         let name = name.to_string();
         let brief = brief.to_string();
         let mcp_intent = mcp_intent.cloned();
-        let root = self.root.clone();
+        // Readiness is a DISK read (manifest + dependency record), so it runs
+        // on the blocking pool BEFORE `with_app` — the `with_app` closure is
+        // invoked on the async task while the owned state mutex is held, and a
+        // synchronous `read_to_string` there stalls every other app operation
+        // on the same runtime. Pre-reading the record the same way
+        // `create_checkpoint` does keeps the error ORDER identical (missing
+        // app, then already-scaffolded, then readiness); the state mutex never
+        // guarded these files anyway — it guards the in-memory list — so the
+        // check loses no atomicity by moving out from under it, and the
+        // set-once `scaffolded` re-check inside the closure below is still the
+        // arbiter of the commit itself.
+        let record = {
+            let apps = self.state.lock().await;
+            let idx = Self::position(&apps, app_id)?;
+            apps[idx].record.clone()
+        };
+        if record.scaffolded {
+            return Err(AppError::InvalidRequest(format!(
+                "app {} is already scaffolded",
+                record.id
+            )));
+        }
+        let validation_root = self.root.clone();
+        Self::run_blocking(move || Self::validate_scaffold_commit_ready(&validation_root, &record))
+            .await?;
         self.with_app(app_id, move |app, now| {
             if app.record.scaffolded {
                 return (
@@ -889,9 +922,6 @@ impl AppService {
                     ))),
                     Vec::new(),
                 );
-            }
-            if let Err(error) = Self::validate_scaffold_commit_ready(&root, &app.record) {
-                return (Err(error), Vec::new());
             }
             app.record.name = name;
             app.record.brief = brief;
@@ -1037,6 +1067,7 @@ impl AppService {
             name,
             brief,
             conversation_id,
+            None,
             crate::types::DEFAULT_GIT_VERSION_CONTROL,
             None,
             mode,
@@ -1064,6 +1095,7 @@ impl AppService {
             name,
             brief,
             conversation_id,
+            None,
             crate::types::DEFAULT_GIT_VERSION_CONTROL,
             None,
             CreateMode::Shell,
@@ -1085,6 +1117,7 @@ impl AppService {
             name,
             brief,
             conversation_id,
+            None,
             git_enabled,
             None,
             CreateMode::Shell,
@@ -1107,6 +1140,7 @@ impl AppService {
             name,
             brief,
             conversation_id,
+            None,
             git_enabled,
             workflow_model,
             CreateMode::Shell,
@@ -1119,11 +1153,29 @@ impl AppService {
     /// Create a new app with explicit Git/model choices and a pre-commit
     /// initializer that can materialize host-owned scaffold before the app
     /// becomes visible to reloads, snapshots, or observers.
+    ///
+    /// `origin_cwd` is the catalog the creating connection was anchored to —
+    /// see [`AppRecord::origin_cwd`]. This is the ONLY entry point that takes
+    /// it, deliberately: the shorter wrappers are test conveniences, while the
+    /// engine's two real create paths (the client command's `handle_create_app`
+    /// and the agent's `LocalAppCreate` tool) both come through here, so the
+    /// parameter is at least IMPOSSIBLE TO SKIP on a real create path.
+    /// Passing `None` means "no origin scope", NOT "use the current one".
+    ///
+    /// Being impossible to skip is not the same as being supplied, and today
+    /// it is supplied on one of those two paths: `handle_create_app` passes
+    /// its connection cwd, while the agent's `LocalAppCreate` tool
+    /// (`apps/engine-mobile/src/local_apps_mcp.rs`) passes `None` even though
+    /// it binds a `conversation_id`. An app created that way still records
+    /// `None` and still degrades on the boot pin repair — the connection
+    /// layer is the only place that knows that conversation's cwd, so closing
+    /// it is a change there, not here.
     pub async fn create_app_with_git_and_workflow_model_and_initializer<F, Fut>(
         &self,
         name: Option<&str>,
         brief: &str,
         conversation_id: Option<String>,
+        origin_cwd: Option<&str>,
         git_enabled: bool,
         workflow_model: Option<&str>,
         mode: CreateMode,
@@ -1135,11 +1187,6 @@ impl AppService {
         Fut: Future<Output = Result<(), AppError>> + Send + 'static,
     {
         let trimmed_brief = brief.trim();
-        if mode == CreateMode::Scaffolded && trimmed_brief.is_empty() {
-            return Err(AppError::InvalidRequest(
-                "app brief must not be empty".into(),
-            ));
-        }
         ensure_within("app brief", trimmed_brief.len(), MAX_BRIEF_BYTES)?;
         let name = match name
             .map(str::trim)
@@ -1173,6 +1220,24 @@ impl AppService {
                 Ok::<_, AppError>(model.to_string())
             })
             .transpose()?;
+        // Same shape as `workflow_model` above, with ONE deliberate
+        // difference. A blank origin is stored as absent rather than as an
+        // empty string, so the "origin scope unknown" fallback documented on
+        // `AppRecord::origin_cwd` has exactly one spelling — but a NON-blank
+        // origin is stored EXACTLY as given, never trimmed. A cwd is an opaque
+        // filesystem path: on POSIX `"/srv/data "` and `"/srv/data"` are two
+        // different, both legal, directory names, so trimming the stored value
+        // would silently re-point the remembered catalog at a directory the
+        // creator never named — and this field's whole job is to be forked
+        // from later, by code that cannot ask what was meant. Whitespace
+        // decides present-vs-absent here and nothing else.
+        let origin_cwd = origin_cwd
+            .filter(|cwd| !cwd.trim().is_empty())
+            .map(|cwd| {
+                ensure_within("origin cwd", cwd.len(), MAX_ORIGIN_CWD_BYTES)?;
+                Ok::<_, AppError>(cwd.to_string())
+            })
+            .transpose()?;
         let brief = trimmed_brief.to_string();
         let order = self.acquire_emit_order().await;
         // After the queue join, for commit-order-monotonic timestamps (see
@@ -1202,9 +1267,25 @@ impl AppService {
                     );
                     let app_id = app.record.id.clone();
                     app.record.workflow_model = workflow_model;
-                    app.record.scaffolded = mode == CreateMode::Scaffolded;
+                    app.record.origin_cwd = origin_cwd;
+                    // Exhaustive on purpose: a second `CreateMode` would be
+                    // a compile error here rather than a silently `false`
+                    // flag. Only `commit_scaffold` ever writes `true`.
+                    app.record.scaffolded = match mode {
+                        CreateMode::Shell => false,
+                    };
                     let layout = AppLayout::new(root.clone(), app.record.id.clone())?;
                     let prepared: Result<AppState, AppError> = (|| {
+                        // r1-failure-paths-007: the marker goes down BEFORE
+                        // the first skeleton byte and comes up only after the
+                        // index commit below. A crash anywhere between those
+                        // two points strands `apps/<id>` where index-driven
+                        // enumeration can never see it again — and burns the
+                        // id, since `storage::app_id_present_on_disk` counts
+                        // any live directory as a collision. The marker is
+                        // what lets `load_all`'s sweep tell that leftover
+                        // apart from a directory it must not touch.
+                        storage::mark_app_creating(&root, &app.record.id)?;
                         // Per-app files first; the index entry is the commit
                         // point, and the initializer must run on the pinned
                         // scaffold before that point.
@@ -1252,31 +1333,29 @@ impl AppService {
                 .await;
                 return Err(error);
             }
-            if mode == CreateMode::Scaffolded {
-                let validation_root = root.clone();
-                let validation_record = record.clone();
-                if let Err(error) = Self::run_blocking(move || {
-                    Self::validate_scaffold_commit_ready(&validation_root, &validation_record)
-                })
-                .await
-                {
-                    Self::cleanup_uncommitted_create(
-                        root.clone(),
-                        record.id.clone(),
-                        "scaffolded create validation",
-                        &error,
-                    )
-                    .await;
-                    return Err(error);
-                }
-            }
             let mut records = existing_records;
             records.push(record.clone());
             if let Err(error) = Self::run_blocking({
                 let root = root.clone();
                 let records = records.clone();
                 let known = known.clone();
-                move || storage::save_index_preserving(&root, &records, &known)
+                let committed_app_id = record.id.clone();
+                move || {
+                    storage::save_index_preserving(&root, &records, &known)?;
+                    // The app is committed as of the line above, so clearing
+                    // the in-flight marker must never be able to fail the
+                    // create. A marker left behind here is removed by the next
+                    // load's sweep, which leaves an INDEXED app's directory
+                    // alone.
+                    if let Err(error) = storage::clear_app_creating(&root, &committed_app_id) {
+                        tracing::warn!(
+                            app_id = %committed_app_id,
+                            error = %error,
+                            "create marker could not be cleared after commit; the next load will reclaim it"
+                        );
+                    }
+                    Ok(())
+                }
             })
             .await
             {
@@ -1568,9 +1647,7 @@ mod tests {
     use super::*;
     use crate::error::AppErrorCode;
     use crate::events::{NoopAppEventObserver, RecordingAppEventObserver};
-    use crate::manifest::{
-        save_manifest, AppLayout, AppManifest, AppRuntimeProfileBinding, AppTemplateOrigin,
-    };
+    use crate::manifest::{save_manifest, AppLayout, AppRuntimeProfileBinding, AppTemplateOrigin};
     use crate::test_support::FixedClock;
     use crate::types::{AppDependencyRecord, AppDependencyState};
     use crate::AppDependencySnapshot;
@@ -1694,6 +1771,108 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_remembers_the_origin_cwd_and_leaves_no_in_flight_marker() {
+        // r1-backlog-engine-create-10: the origin scope has to SURVIVE the
+        // create, because the consumer (`mint_app_init_session`'s boot-time
+        // pin repair) runs on a later connection whose own cwd is the wrong
+        // catalog to fork from.
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app_with_git_and_workflow_model_and_initializer(
+                Some("Origin"),
+                "an app created from a chat",
+                Some("conv-origin".into()),
+                Some("/home/dev/projects/atlas"),
+                crate::types::DEFAULT_GIT_VERSION_CONTROL,
+                None,
+                CreateMode::Shell,
+                None,
+                |_| async { Ok(()) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            record.origin_cwd.as_deref(),
+            Some("/home/dev/projects/atlas"),
+            "the origin catalog is stored on the record"
+        );
+        // r1-failure-paths-007: a create that reached its commit point must
+        // not leave the in-flight marker behind.
+        assert!(
+            !dir.path()
+                .join(storage::APPS_DIR)
+                .join(&record.id)
+                .join(storage::CREATING_MARKER_FILE)
+                .exists(),
+            "a committed create clears its own marker"
+        );
+        // And it has to be DURABLE, not just in the returned value.
+        let reloaded = harness(dir.path()).await;
+        let apps = reloaded.service.list_apps().await;
+        assert_eq!(apps.len(), 1);
+        assert_eq!(
+            apps[0].origin_cwd.as_deref(),
+            Some("/home/dev/projects/atlas"),
+            "the origin catalog round-trips through apps/index.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_without_an_origin_cwd_stores_absence_not_an_empty_string() {
+        let service = test_service().await;
+        let blank = service
+            .create_app_with_git_and_workflow_model_and_initializer(
+                Some("Blank"),
+                "no origin scope",
+                None,
+                Some("   "),
+                crate::types::DEFAULT_GIT_VERSION_CONTROL,
+                None,
+                CreateMode::Shell,
+                None,
+                |_| async { Ok(()) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            blank.origin_cwd, None,
+            "a blank origin is absence — callers must fall back to their own cwd, \
+             and `Some(\"\")` would defeat that"
+        );
+        let plain = service
+            .create_app(Some("Plain"), "created without an origin", None)
+            .await
+            .unwrap();
+        assert_eq!(plain.origin_cwd, None);
+        // A path is opaque bytes, and trailing whitespace is legal in a POSIX
+        // directory name: only the blank-vs-present decision above may look at
+        // whitespace. Storing a trimmed copy would remember a DIFFERENT
+        // directory than the creator named, on a field whose only consumer
+        // forks from it much later and cannot ask.
+        let padded = service
+            .create_app_with_git_and_workflow_model_and_initializer(
+                Some("Padded"),
+                "an origin whose directory name really ends in a space",
+                None,
+                Some("/srv/data "),
+                crate::types::DEFAULT_GIT_VERSION_CONTROL,
+                None,
+                CreateMode::Shell,
+                None,
+                |_| async { Ok(()) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            padded.origin_cwd.as_deref(),
+            Some("/srv/data "),
+            "a non-blank origin is remembered verbatim, never trimmed"
+        );
     }
 
     #[tokio::test]
@@ -2419,6 +2598,7 @@ mod tests {
                 None,
                 "",
                 None,
+                None,
                 false,
                 Some("openai/gpt-5"),
                 CreateMode::Shell,
@@ -2897,22 +3077,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scaffolded_mode_still_rejects_an_empty_brief() {
-        // The old invariant must NOT be collateral damage of the Shell relaxation.
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let err = h
-            .service
-            .create_app_with_mode(None, "   ", None, CreateMode::Scaffolded, None)
-            .await
-            .expect_err("Scaffolded mode keeps rejecting an empty brief");
-        assert!(
-            matches!(&err, AppError::InvalidRequest(m) if m.contains("brief")),
-            "got {err:?}"
-        );
-    }
-
-    #[tokio::test]
     async fn default_wrappers_create_unscaffolded_records() {
         let dir = tempfile::tempdir().unwrap();
         let h = harness(dir.path()).await;
@@ -2933,83 +3097,13 @@ mod tests {
         assert_eq!(record.workflow_model.as_deref(), Some("openai/gpt-5"));
     }
 
+    /// The three `validate_scaffold_commit_ready` dependency branches, driven
+    /// through the ONE caller that still reaches them. This used to run
+    /// through the create+scaffold mode; that mode is gone, but the branches
+    /// are not — `commit_scaffold` is where a shell publishes, and publishing
+    /// on a failed or drifted dependency record is what must stay refused.
     #[tokio::test]
-    async fn scaffolded_mode_without_runtime_profile_fails_closed() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let error = h
-            .service
-            .create_app_with_mode(None, "a todo list", None, CreateMode::Scaffolded, None)
-            .await
-            .expect_err("legacy scaffolded create must not commit without a runtime profile");
-        assert!(
-            matches!(&error, AppError::InvalidRequest(message) if message.contains("runtime profile")),
-            "{error:?}"
-        );
-        assert!(h.service.list_apps().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn scaffolded_mode_accepts_only_a_ready_matching_dependency_record() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let h = harness(dir.path()).await;
-        let binding = scaffolded_runtime_binding();
-        let snapshot =
-            scaffolded_dependency_snapshot(&binding, &"f".repeat(64), "pnpm@11.22.0/node@24.18.1");
-        let record = h
-            .service
-            .create_app_with_git_and_workflow_model_and_initializer(
-                None,
-                "ready scaffold",
-                None,
-                crate::types::DEFAULT_GIT_VERSION_CONTROL,
-                None,
-                CreateMode::Scaffolded,
-                None,
-                move |record| {
-                    let root = root.clone();
-                    let binding = binding.clone();
-                    let snapshot = snapshot.clone();
-                    async move {
-                        let layout = AppLayout::new(root.clone(), record.id.clone())?;
-                        let mut manifest =
-                            AppManifest::for_new_app(record.id.clone(), record.name.clone());
-                        manifest.surface = Some(binding.family.surface());
-                        manifest.runtime_profile = Some(binding.clone());
-                        manifest.dependency_snapshot = Some(snapshot.clone());
-                        manifest.template_origin = Some(crate::manifest::AppTemplateOrigin {
-                            plugin_id: crate::manifest::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
-                            plugin_version: "builtin".into(),
-                            template_id: format!(
-                                "{}-r{}",
-                                binding.family.as_str().replace('_', "-"),
-                                binding.revision
-                            ),
-                            template_sha256: binding.contract_sha256.clone(),
-                        });
-                        save_manifest(&layout, &manifest)?;
-                        storage::save_dependency_record(
-                            &root,
-                            &scaffolded_dependency_record(
-                                &record.id,
-                                AppDependencyState::Ready,
-                                &snapshot.lockfile_sha256,
-                                &snapshot.toolchain_key,
-                            ),
-                        )?;
-                        Ok(())
-                    }
-                },
-            )
-            .await
-            .expect("scaffolded create commits only once runtime metadata is valid");
-        assert!(record.scaffolded);
-        assert_eq!(h.service.list_apps().await.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn scaffolded_mode_rejects_failed_or_mismatched_dependency_records() {
+    async fn commit_scaffold_rejects_failed_or_mismatched_dependency_records() {
         for (label, state, lockfile_sha256, toolchain_key) in [
             (
                 "failed",
@@ -3030,72 +3124,39 @@ mod tests {
                 "pnpm@0/node@0".to_string(),
             ),
         ] {
-            let dir = tempfile::tempdir().unwrap();
-            let root = dir.path().to_path_buf();
-            let h = harness(dir.path()).await;
+            let service = test_service().await;
+            let shell = service
+                .create_app_with_mode(None, "", None, CreateMode::Shell, None)
+                .await
+                .unwrap();
             let binding = scaffolded_runtime_binding();
+            // The manifest snapshot stays the VERIFIED one in every arm; only
+            // the dependency RECORD drifts, so each arm isolates exactly one
+            // of the three refusal branches.
             let snapshot = scaffolded_dependency_snapshot(
                 &binding,
                 &"f".repeat(64),
                 "pnpm@11.22.0/node@24.18.1",
             );
-            let error = h
-                .service
-                .create_app_with_git_and_workflow_model_and_initializer(
-                    None,
-                    "invalid scaffold",
-                    None,
-                    crate::types::DEFAULT_GIT_VERSION_CONTROL,
-                    None,
-                    CreateMode::Scaffolded,
-                    None,
-                    move |record| {
-                        let root = root.clone();
-                        let binding = binding.clone();
-                        let snapshot = snapshot.clone();
-                        let lockfile_sha256 = lockfile_sha256.clone();
-                        let toolchain_key = toolchain_key.clone();
-                        async move {
-                            let layout = AppLayout::new(root.clone(), record.id.clone())?;
-                            let mut manifest =
-                                AppManifest::for_new_app(record.id.clone(), record.name.clone());
-                            manifest.surface = Some(binding.family.surface());
-                            manifest.runtime_profile = Some(binding.clone());
-                            manifest.dependency_snapshot = Some(snapshot.clone());
-                            manifest.template_origin = Some(crate::manifest::AppTemplateOrigin {
-                                plugin_id: crate::manifest::AppTemplateOrigin::BUILTIN_PLUGIN_ID
-                                    .into(),
-                                plugin_version: "builtin".into(),
-                                template_id: format!(
-                                    "{}-r{}",
-                                    binding.family.as_str().replace('_', "-"),
-                                    binding.revision
-                                ),
-                                template_sha256: binding.contract_sha256.clone(),
-                            });
-                            save_manifest(&layout, &manifest)?;
-                            storage::save_dependency_record(
-                                &root,
-                                &scaffolded_dependency_record(
-                                    &record.id,
-                                    state,
-                                    &lockfile_sha256,
-                                    &toolchain_key,
-                                ),
-                            )?;
-                            Ok(())
-                        }
-                    },
-                )
+            seed_scaffold_commit_ready_state(
+                &service.root,
+                &shell,
+                &binding,
+                &snapshot,
+                &scaffolded_dependency_record(&shell.id, state, &lockfile_sha256, &toolchain_key),
+            );
+            let error = service
+                .commit_scaffold(&shell.id, "A", "b", None, None)
                 .await
                 .expect_err("invalid dependency provenance must fail closed");
             assert!(
                 matches!(&error, AppError::InvalidRequest(message) if message.contains("dependency record")),
                 "{label}: {error:?}"
             );
+            let after = service.record(&shell.id).await.unwrap();
             assert!(
-                h.service.list_apps().await.is_empty(),
-                "{label}: invalid scaffolded create must not publish"
+                !after.scaffolded,
+                "{label}: a refused commit must not publish the shell"
             );
         }
     }

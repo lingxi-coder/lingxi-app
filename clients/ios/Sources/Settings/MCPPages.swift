@@ -436,11 +436,23 @@ private struct ManagedLocalAppMCPEditPage: View {
                     SettingsRow(label: localized("local_apps_mcp_authoring_revision"), value: "\(inventory.authoringRevision)", chevron: false, isLast: true)
                 }
 
+                // `localizedSummary`, never `summary`: the engine builds
+                // `summary` from English literals and sends a machine `code`
+                // beside it so the client can say the same thing in the user's
+                // language. Before this the badge was localized and the
+                // sentence explaining it was not — and the sentence was not
+                // rendered at all, which is what left `code` with no reader.
                 SettingsSection(label: localized("local_apps_mcp_verification_title")) {
-                    SettingsRow(label: localized("local_apps_mcp_ui_verification"), labelView: AnyView(LocalAppStatusBadgeView(badge: inventory.uiVerification.badge)), chevron: false)
+                    SettingsRow(
+                        label: localized("local_apps_mcp_ui_verification"),
+                        labelView: AnyView(LocalAppStatusBadgeView(badge: inventory.uiVerification.badge)),
+                        subView: AnyView(verificationSentence(inventory.uiVerification)),
+                        chevron: false
+                    )
                     SettingsRow(
                         label: localized("local_apps_mcp_mcp_verification"),
                         labelView: AnyView(LocalAppStatusBadgeView(badge: inventory.mcpVerification.badge)),
+                        subView: AnyView(verificationSentence(inventory.mcpVerification)),
                         chevron: false,
                         isLast: true
                     )
@@ -512,6 +524,19 @@ private struct ManagedLocalAppMCPEditPage: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(dot.tint(0.24), lineWidth: 0.5))
         .padding(.bottom, 18)
+    }
+
+    /// The verification sentence under a verification badge.
+    ///
+    /// Deliberately NOT `SettingsRow`'s plain `sub:`, which is
+    /// `lineLimit(1)`: every one of these sentences is a full sentence and a
+    /// one-line truncation would show about three words of it.
+    private func verificationSentence(_ summary: LocalAppVerificationSummary) -> some View {
+        Text(summary.localizedSummary)
+            .font(.system(size: 11.5))
+            .foregroundStyle(t.text4)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func readOnlyToolField(label: String, value: String) -> some View {

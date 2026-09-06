@@ -741,6 +741,7 @@ fn spawn_query(
                 max_retries: 0,
                 temperature: Some(0.0),
                 thinking: None,
+                effort: None,
                 stop_sequences: Vec::new(),
                 query_source: QuerySource::VisionDelegation,
                 skip_system_prompt_prefix: true,

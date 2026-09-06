@@ -149,14 +149,15 @@ impl AutocompactHandler {
     }
 
     /// The current window override from `LINGXI_AUTO_COMPACT_WINDOW`, or `None`
-    /// when the var is unset / not a positive integer — mirroring
-    /// `compaction::thresholds`' `parse_positive_u64` gate (0 / non-numeric are
-    /// ignored, leaving the model default = `auto`).
+    /// when the var has no positive JS integer prefix. Keep parsing and the
+    /// 100k–1M clamp aligned with the live threshold resolver.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn env_window() -> Option<u64> {
         std::env::var(WINDOW_ENV_VAR)
             .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .filter(|&n| n > 0)
+            .map(|raw| platform_api::env::parse_int_env(&raw))
+            .filter(|value| !value.is_nan() && *value > 0.0)
+            .map(|value| value.clamp(100_000.0, 1_000_000.0) as u64)
     }
 
     /// Render the no-argument status block (`M$m`) for a resolved window
@@ -392,6 +393,20 @@ mod tests {
                 }
                 other => panic!("expected Done, got {other:?}"),
             }
+        }
+        std::env::remove_var(WINDOW_ENV_VAR);
+    }
+
+    #[test]
+    fn env_window_matches_latest_js_prefix_and_clamp() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for (raw, expected) in [
+            ("1", 100_000),
+            ("250000 tokens", 250_000),
+            ("2000000", 1_000_000),
+        ] {
+            std::env::set_var(WINDOW_ENV_VAR, raw);
+            assert_eq!(AutocompactHandler::env_window(), Some(expected));
         }
         std::env::remove_var(WINDOW_ENV_VAR);
     }

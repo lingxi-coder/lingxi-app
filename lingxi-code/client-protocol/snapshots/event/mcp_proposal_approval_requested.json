@@ -75,18 +75,7 @@
           "available": true,
           "detail": "Will run after approval."
         }
-      ],
-      "receipt": {
-        "receiptId": "receipt-0001",
-        "appId": "habits-1a2b",
-        "workflowRunId": "wf-0001",
-        "approvalContractSha256": "1111111111111111111111111111111111111111111111111111111111111111",
-        "candidateDigest": "2222222222222222222222222222222222222222222222222222222222222222",
-        "issuedAtMs": 1750000000000,
-        "expiresAtMs": 1750000030000,
-        "consumed": false,
-        "superseded": true
-      }
+      ]
     }
   }
 }

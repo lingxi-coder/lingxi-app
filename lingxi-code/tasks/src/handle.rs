@@ -131,6 +131,15 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
         TaskState::LocalWorkflow(w) => (None, None, None, Some(w.workflow_id.clone()), None, None),
         _ => (None, None, None, None, None, None),
     };
+    // Terminal failure reason. `local_workflow` records the fatal script/engine
+    // error on its `WorkflowTerminalOutcome`; `local_agent` stores the runner's
+    // reason on the state directly (registry `set_agent_outcome`). Every other
+    // task type has no reason seam and stays `None`.
+    let error = match s {
+        TaskState::LocalWorkflow(w) => w.outcome.error.clone(),
+        TaskState::LocalAgent(a) => a.error.clone(),
+        _ => None,
+    };
     // F005: `local_fusion` carries its current progress-stage label (the same
     // text the Agent-tool path forwards as `subagent_activity`) so a
     // `/fusion` task's DTO/list entry can render live progress. Every other
@@ -152,6 +161,7 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
         name,
         forked_skill_name,
         is_backgrounded,
+        error,
         stage,
     }
 }

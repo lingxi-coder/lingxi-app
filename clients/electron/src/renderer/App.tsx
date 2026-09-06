@@ -7,7 +7,6 @@ import {
   BetaTopBar,
   ErrorBanner,
 } from './components/BetaDesktop';
-import { DesktopCommandPalette } from './components/DesktopCommandPalette';
 import { ComputerAccessPrompt } from './components/ComputerAccessPrompt';
 import { AskUserQuestionPrompt } from './components/AskUserQuestionPrompt';
 import { PermissionPrompt } from './components/PermissionPrompt';
@@ -21,7 +20,6 @@ import { RuntimeCenterInspector, RuntimeCenterOverview } from './components/Runt
 export function App() {
   const [theme, setTheme] = useState<ThemeMode>('dark');
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
-  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const palette = useMemo(() => tokens(theme === 'dark'), [theme]);
   const bridge = useBridge();
   const workspace = bridge.bootstrap?.workspace;
@@ -41,22 +39,12 @@ export function App() {
     const preference = bridge.bootstrap?.settings.theme;
     return watchThemePreference(preference, window.matchMedia('(prefers-color-scheme: dark)'), setTheme);
   }, [bridge.bootstrap?.settings.theme]);
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!isCommandPaletteShortcut(event)) return;
-      event.preventDefault();
-      setCommandPaletteOpen((open) => !open);
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
   const changeTheme = (value: ThemeMode) => {
     setTheme(value);
     void bridge.setThemePreference(value).catch(() => undefined);
   };
   const openSettings = (route?: Pick<SettingsRoute, 'pageId' | 'providerId' | 'pendingModelReference'>) => {
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    setCommandPaletteOpen(false);
     setSettingsRoute({ ...route, restoreFocus: () => opener?.focus() });
   };
 
@@ -150,14 +138,6 @@ export function App() {
           {!bridge.sessionLoading && <RuntimeCenterInspector bridge={bridge} />}
         </SettingsBackground>
 
-        <DesktopCommandPalette
-          open={commandPaletteOpen}
-          bridge={bridge}
-          theme={theme}
-          onClose={() => setCommandPaletteOpen(false)}
-          onOpenSettingsPage={(pageId) => openSettings(pageId ? { pageId } : undefined)}
-        />
-
         {settingsRoute && (
           <SettingsScreen
             bridge={bridge}
@@ -176,15 +156,6 @@ export function App() {
       </div>
     </Theme.Provider>
   );
-}
-
-export function isCommandPaletteShortcut(
-  event: Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'key' | 'metaKey' | 'shiftKey'>,
-): boolean {
-  return !event.altKey
-    && !event.shiftKey
-    && (event.metaKey || event.ctrlKey)
-    && event.key.toLowerCase() === 'k';
 }
 
 export function setSettingsBackgroundInert(

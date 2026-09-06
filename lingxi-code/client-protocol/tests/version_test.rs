@@ -33,12 +33,15 @@ fn version_is_semver() {
     }
 }
 
-/// Shared provider model catalogs pin the contract at `12.0.0`.
-/// The JSON addition is additive, but the UniFFI-generated mobile bindings gain
-/// a new event and record layout.
+/// The `receipt` removal (r1-backlog-native-confirmation-13) pins the contract
+/// at `13.0.0`. Both request records lost their LAST field and
+/// `LocalAppReceiptStatusDto` went with them, so no surviving field moved
+/// ordinal — but the structural guard treats any REMOVED indexed leaf as
+/// breaking, and the UniFFI-generated mobile records lose a member, so this is
+/// a real major bump.
 #[test]
-fn version_is_twelve_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "12.0.0");
+fn version_is_thirteen_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "13.0.0");
 }
 
 fn repository_root() -> PathBuf {

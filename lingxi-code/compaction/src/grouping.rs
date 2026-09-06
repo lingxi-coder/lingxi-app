@@ -12,7 +12,9 @@
 //! This replaces the prior "split on every user message" boundary, matching TS
 //! so PTL head-truncation drops the correct round boundaries.
 
-use protocol::{ConversationMessage, MessageId};
+use crate::post_compact::estimate_content_tokens;
+use protocol::{ContentBlock, ConversationMessage, MessageId};
+use serde_json::Value;
 
 /// A contiguous range of messages forming one API round.
 #[derive(Debug, Clone)]
@@ -65,12 +67,94 @@ pub fn group_messages_by_api_round(messages: &[ConversationMessage]) -> Vec<ApiR
     groups
 }
 
-/// Cheap token estimator: 4 chars per token across text content.
+/// Claude Code 2.1.261 `Og` / `xno` / `M0` / `HXr`: estimate each API content
+/// block independently, using JS UTF-16 length and round-half-up. System
+/// transcript markers carry no API message content and contribute zero.
 #[must_use]
 pub fn estimate_tokens_for_range(msgs: &[ConversationMessage]) -> u64 {
     msgs.iter()
-        .map(|m| u64::try_from(m.text_content().len()).unwrap_or(u64::MAX) / 4)
+        .map(|message| match message {
+            ConversationMessage::User { content, .. }
+            | ConversationMessage::Assistant { content, .. } => {
+                content.iter().map(estimate_block_tokens).sum()
+            }
+            ConversationMessage::System { .. } => 0,
+        })
         .sum()
+}
+
+fn estimate_block_tokens(block: &ContentBlock) -> u64 {
+    match block {
+        ContentBlock::Text { text } => estimate_content_tokens(text),
+        ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        } => {
+            u64::try_from(utf16_code_units.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(2)
+                / 4
+        }
+        ContentBlock::ToolUse { name, input, .. } => estimate_tool_use_tokens(name, input),
+        ContentBlock::ToolResult {
+            content,
+            content_blocks,
+            ..
+        } => content_blocks.as_ref().map_or_else(
+            || estimate_content_tokens(content),
+            |blocks| blocks.iter().map(estimate_json_block_tokens).sum(),
+        ),
+        ContentBlock::Thinking { thinking, .. } => estimate_content_tokens(thinking),
+        ContentBlock::RedactedThinking { data } => estimate_content_tokens(data),
+        ContentBlock::Image { .. } | ContentBlock::Document { .. } => 2_000,
+        // Remaining provider blocks use the oracle's JSON-string fallback.
+        _ => estimate_content_tokens(
+            &serde_json::to_string(block).expect("content block serializes"),
+        ),
+    }
+}
+
+fn estimate_tool_use_tokens(name: &str, input: &Value) -> u64 {
+    let input = if input.is_null() {
+        "{}".into()
+    } else {
+        input.to_string()
+    };
+    estimate_content_tokens(&format!("{name}{input}"))
+}
+
+fn estimate_json_content_tokens(content: &Value) -> u64 {
+    match content {
+        Value::String(text) => estimate_content_tokens(text),
+        Value::Array(blocks) => blocks.iter().map(estimate_json_block_tokens).sum(),
+        _ => 0,
+    }
+}
+
+fn estimate_json_block_tokens(block: &Value) -> u64 {
+    if let Some(text) = block.as_str() {
+        return estimate_content_tokens(text);
+    }
+    match block.get("type").and_then(Value::as_str) {
+        Some("text") => block
+            .get("text")
+            .and_then(Value::as_str)
+            .map_or(0, estimate_content_tokens),
+        Some("image" | "document") => 2_000,
+        Some("tool_result") => block.get("content").map_or(0, estimate_json_content_tokens),
+        Some("tool_use") => estimate_tool_use_tokens(
+            block.get("name").and_then(Value::as_str).unwrap_or(""),
+            block.get("input").unwrap_or(&Value::Null),
+        ),
+        Some("thinking") => block
+            .get("thinking")
+            .and_then(Value::as_str)
+            .map_or(0, estimate_content_tokens),
+        Some("redacted_thinking") => block
+            .get("data")
+            .and_then(Value::as_str)
+            .map_or(0, estimate_content_tokens),
+        _ => estimate_content_tokens(&block.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -78,6 +162,57 @@ mod tests {
     use super::*;
     use protocol::{ContentBlock, MessageId, ToolUseId};
     use serde_json::json;
+
+    #[test]
+    fn oracle_261_estimates_each_wire_block_with_utf16_rounding() {
+        let message = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "你好".into(),
+                },
+                ContentBlock::Text {
+                    text: "😀".into()
+                },
+                ContentBlock::ToolUse {
+                    id: ToolUseId::new(),
+                    name: "Read".into(),
+                    input: json!({}),
+                    provider_id: None,
+                },
+                ContentBlock::Thinking {
+                    thinking: "reason".into(),
+                    signature: Some("ignored".repeat(100)),
+                },
+                ContentBlock::RedactedThinking { data: "abc".into() },
+            ],
+            stop_reason: None,
+        };
+        // vc: round(2/4) + round(2/4) + round(6/4) + round(6/4) + round(3/4).
+        assert_eq!(estimate_tokens_for_range(&[message]), 7);
+    }
+
+    #[test]
+    fn oracle_261_estimates_nested_wire_results_instead_of_display_text() {
+        let message = ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: ToolUseId::new(),
+                content: "display".repeat(1000),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: Some(vec![
+                    json!({"type":"text", "text":"你好😀"}),
+                    json!({"type":"image", "source":{}}),
+                    json!({"type":"document", "source":{}}),
+                ]),
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        assert_eq!(estimate_tokens_for_range(&[message]), 4_001);
+    }
 
     fn assistant_with_id(id: MessageId, tool: &str) -> ConversationMessage {
         ConversationMessage::Assistant {

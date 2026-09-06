@@ -745,6 +745,13 @@ struct Drawer: View {
         .padding(12)
         .background(group.scope == activeScope ? t.surfaceActive : t.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(t.border, lineWidth: 0.6))
+        // `.accessibilityIdentifier` on a container REPLACES every descendant's
+        // identifier unless the container is declared a containing element.
+        // Without `children: .contain` this card id swallowed
+        // `drawer.workspace.pin.*`, `drawer.workspace.collapse.*`,
+        // `drawer.workspace.new.*` and every `drawer.session.*` row inside it,
+        // so `app.buttons["drawer.workspace.new.global"]` resolved to nothing.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("drawer.workspace.\(group.key)")
     }
 
@@ -789,6 +796,9 @@ struct Drawer: View {
         .padding(12)
         .background(t.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(t.border, lineWidth: 0.6))
+        // Same clobber as `conversationGroupCard`: without `children: .contain`
+        // this card id overwrites the `drawer.workspace.pin.*` button inside it.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("drawer.workspace.\(group.key)")
     }
 

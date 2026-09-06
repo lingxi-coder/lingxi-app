@@ -307,6 +307,8 @@ pub struct MockOutputStream {
     /// inherit the no-op and every attachment test would pass whether or not
     /// the orchestrator emitted anything.
     attachments: Arc<Mutex<Vec<platform_api::AttachmentKind>>>,
+    /// Compaction lifecycle is separate from transcript events.
+    compaction_phases: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockOutputStream {
@@ -317,7 +319,13 @@ impl MockOutputStream {
             events: Arc::new(Mutex::new(Vec::new())),
             denials: Arc::new(Mutex::new(Vec::new())),
             attachments: Arc::new(Mutex::new(Vec::new())),
+            compaction_phases: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Snapshot observed compaction phases, including start and terminal status.
+    pub async fn compaction_phase_snapshot(&self) -> Vec<String> {
+        self.compaction_phases.lock().await.clone()
     }
 
     /// Snapshot the attachments emitted so far, in emission order.
@@ -460,6 +468,27 @@ impl OutputStream for MockOutputStream {
             cost: cost.clone(),
         });
     }
+    async fn emit_compaction_started(&self) {
+        self.emit_compaction_phase("preparing").await;
+    }
+
+    async fn emit_compaction_phase(&self, phase: &str) {
+        self.compaction_phases.lock().await.push(phase.to_string());
+    }
+
+    async fn emit_compaction_skipped(&self) {
+        self.emit_compaction_phase("skipped").await;
+    }
+
+    async fn emit_compaction_finished(&self, error: Option<&str>) {
+        self.emit_compaction_phase(match error {
+            None => "complete",
+            Some("Compaction canceled.") => "cancelled",
+            Some(_) => "error",
+        })
+        .await;
+    }
+
     async fn emit_compaction_completed(
         &self,
         messages_before: u32,
@@ -810,6 +839,8 @@ pub struct MockOrchestratorHandle {
     files_in_context: StdMutex<Vec<PathBuf>>,
     /// Pre-loaded model listings returned by `list_model_listings`.
     model_listings: StdMutex<Vec<platform_api::ModelListing>>,
+    /// Local slash-command transcript pairs requested by a host.
+    slash_command_transcript: StdMutex<Vec<(String, String)>>,
     /// Every `body` passed to `emit_background_system_notice`, in call order
     /// (WP6/F006: the Fusion completion sink's best-effort UI notice).
     background_notices: StdMutex<Vec<String>>,
@@ -860,6 +891,7 @@ impl MockOrchestratorHandle {
             available_models: StdMutex::new(Vec::new()),
             files_in_context: StdMutex::new(Vec::new()),
             model_listings: StdMutex::new(Vec::new()),
+            slash_command_transcript: StdMutex::new(Vec::new()),
             background_notices: StdMutex::new(Vec::new()),
         }
     }
@@ -1011,6 +1043,12 @@ impl MockOrchestratorHandle {
     pub fn set_model_listings(&self, listings: Vec<platform_api::ModelListing>) {
         *self.model_listings.lock().unwrap() = listings;
     }
+
+    /// Transcript pairs supplied through [`OrchestratorHandle::append_slash_command_transcript`].
+    pub fn slash_command_transcript(&self) -> Vec<(String, String)> {
+        self.slash_command_transcript.lock().unwrap().clone()
+    }
+
     /// Every `body` passed to `emit_background_system_notice` so far, in
     /// call order.
     pub fn background_notices(&self) -> Vec<String> {
@@ -1028,6 +1066,18 @@ impl Default for MockOrchestratorHandle {
 impl OrchestratorHandle for MockOrchestratorHandle {
     async fn current_session_id(&self) -> SessionId {
         self.session_id
+    }
+
+    async fn append_slash_command_transcript(
+        &self,
+        raw: &str,
+        display: &str,
+    ) -> Result<(), HandleError> {
+        self.slash_command_transcript
+            .lock()
+            .unwrap()
+            .push((raw.to_string(), display.to_string()));
+        Ok(())
     }
 
     async fn clear_session(&self) -> Result<(), HandleError> {

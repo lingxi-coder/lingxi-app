@@ -692,6 +692,12 @@ pub struct TaskRowDto {
     /// Wall-clock start time, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<u64>,
+    /// Terminal failure reason for a [`TaskStatusDto::Failed`] row, when the
+    /// producing handler reported one (`TaskRecord.error`). Clients render it
+    /// next to `description` so a failed background task is not a bare id.
+    /// APPENDED field, additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     /// `local_fusion` only (F005): the run's current progress-stage label
     /// (e.g. "Running panels 2/3"), lowered from `TaskRecord.stage`. `None`
     /// for every other task type, and before the first progress event lands.

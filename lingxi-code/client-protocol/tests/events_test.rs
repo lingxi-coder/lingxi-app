@@ -25,9 +25,9 @@ use client_protocol::local_apps::{
     AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto, LocalAppCreateConfirmationRequestDto,
     LocalAppGateStatusDto, LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto,
     LocalAppMcpToolDiffDto, LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto,
-    LocalAppPluginErrorCodeDto, LocalAppReceiptStatusDto, LocalAppRejectedCandidateDto,
-    LocalAppTemplateSummaryDto, LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto,
-    ManagedLocalAppMcpServerDto, ManagedLocalAppMcpStatusDto, McpAppWidgetDto,
+    LocalAppPluginErrorCodeDto, LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto,
+    LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto,
+    ManagedLocalAppMcpStatusDto, McpAppWidgetDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use client_protocol::permission::PermissionResolutionDto;
@@ -804,17 +804,6 @@ fn dependency_change_confirmation_round_trips_with_supply_chain_policy() {
 
 #[test]
 fn phase8_local_app_events_round_trip_with_exact_nested_keys() {
-    let receipt = LocalAppReceiptStatusDto {
-        receipt_id: "receipt-0001".to_string(),
-        app_id: "habits-1a2b".to_string(),
-        workflow_run_id: "wf-0001".to_string(),
-        approval_contract_sha256: "1".repeat(64),
-        candidate_digest: "2".repeat(64),
-        issued_at_ms: 1_750_000_000_000,
-        expires_at_ms: 1_750_000_030_000,
-        consumed: false,
-        superseded: true,
-    };
     let tool = LocalAppMcpToolSurfaceDto {
         name: "save_habit".to_string(),
         title: Some("Track habits".to_string()),
@@ -869,7 +858,6 @@ fn phase8_local_app_events_round_trip_with_exact_nested_keys() {
                         available: true,
                         detail: None,
                     }],
-                    receipt: Some(receipt.clone()),
                 },
             },
         },
@@ -893,7 +881,6 @@ fn phase8_local_app_events_round_trip_with_exact_nested_keys() {
                     required_flow_changes: vec!["Add a save step".to_string()],
                     excluded_capabilities: vec!["calendar".to_string()],
                     pending_gates: vec![],
-                    receipt: Some(receipt.clone()),
                 },
             },
         },
@@ -964,8 +951,12 @@ fn phase8_local_app_events_round_trip_with_exact_nested_keys() {
     let expected = [
         (
             "create_confirmation_requested",
-            "/event/request/receipt/superseded",
-            serde_json::Value::Bool(true),
+            // Was `/event/request/receipt/superseded` until
+            // r1-backlog-native-confirmation-13 removed the field. Re-cut onto
+            // `requiredGates`, which is the record's LAST field now, so this
+            // pointer keeps probing the deepest nested leaf the way it did.
+            "/event/request/requiredGates/0/gateId",
+            serde_json::Value::String("ui_runner".to_string()),
         ),
         (
             "mcp_proposal_approval_requested",
@@ -1076,5 +1067,29 @@ fn audio_op_variants_round_trip_with_expected_tags() {
         assert_eq!(json["type"], tag, "AudioOpDto::{op:?} tag mismatch");
         let back: AudioOpDto = serde_json::from_value(json).expect("deserialize AudioOpDto");
         assert_eq!(back, op);
+    }
+}
+
+/// Progress is independent of successful compaction counts and survives idle commands.
+#[test]
+fn compaction_status_round_trips_with_optional_error() {
+    for (phase, error) in [
+        ("preparing", None),
+        ("summarizing", None),
+        ("restoring", None),
+        ("complete", None),
+        ("error", Some("summary failed")),
+        ("cancelled", Some("Compaction canceled.")),
+    ] {
+        let event = ClientEvent::CompactionStatus {
+            phase: phase.into(),
+            error: error.map(str::to_string),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "compaction_status");
+        assert_eq!(json["phase"], phase);
+        assert_eq!(json.get("error").and_then(serde_json::Value::as_str), error);
+        let decoded: ClientEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, event);
     }
 }

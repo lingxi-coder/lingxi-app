@@ -196,6 +196,12 @@ private fun AgentSummaryRow(agent: SessionAgentUi) {
     }
 }
 
+/**
+ * Test tag for the terminal failure reason under a FAILED task row. Mirrors the
+ * iOS accessibility identifier `chat.tasks-panel.failure-reason`.
+ */
+internal const val TASK_FAILURE_REASON_TAG: String = "tag.executionStatusTaskFailureReason"
+
 @Composable
 private fun TaskSummaryRow(
     task: BackgroundTaskUi,
@@ -209,6 +215,26 @@ private fun TaskSummaryRow(
         Column(Modifier.padding(start = 7.dp).weight(1f)) {
             Text(task.description.ifBlank { workflow?.currentPhaseTitle ?: task.taskId }, color = palette.text2, fontSize = 11.5f.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(workflow?.latestLog ?: taskStatusText(task.status), color = palette.text4, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            // The engine's terminal failure reason (`TaskRowDto.error` /
+            // `TaskStatusChanged.error`, carried on `BackgroundTaskUi.error`).
+            // This is the ONLY surface a user who was in another session when
+            // the task failed can still learn WHY from: the transient
+            // `statusLine` notice is suppressed for a non-visible origin
+            // session (ChatViewModel `TaskStatusChanged`), while the durable
+            // row re-delivered as `ClientEvent.TaskRow` still carries `error`.
+            // Mirrors iOS TasksStatusPanel.workflowRows (the bare reason in
+            // danger under a `.failed` row).
+            val failureReason = task.error?.takeIf { it.isNotBlank() }
+            if (task.status == TaskStatusDto.FAILED && failureReason != null) {
+                Text(
+                    failureReason,
+                    color = palette.danger,
+                    fontSize = 10.sp,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 2.dp).testTag(TASK_FAILURE_REASON_TAG),
+                )
+            }
         }
         if (task.canResume && task.status == TaskStatusDto.PAUSED) {
             IconButton(onClick = { onResume(task.taskId) }, enabled = !resuming) {

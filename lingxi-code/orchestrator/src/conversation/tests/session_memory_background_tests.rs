@@ -60,6 +60,8 @@ impl SideQueryClient for BlockingSideQuery {
 fn cache_safe_params() -> sidequery::CacheSafeParams {
     sidequery::CacheSafeParams {
         system_prompt: Arc::from("SYS"),
+        tools: Vec::new(),
+        effort: None,
         user_context: std::collections::HashMap::new(),
         system_context: std::collections::HashMap::new(),
         tool_use_options: ToolUseOptions {
@@ -77,6 +79,43 @@ fn cache_safe_params() -> sidequery::CacheSafeParams {
         transcript_path: None,
         generation: 0,
     }
+}
+
+#[tokio::test]
+async fn compact_snapshot_keeps_request_tool_schema_profile_and_effort() {
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let orch = ConversationOrchestrator::new(
+        crate::OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::path::PathBuf::from("/tmp"),
+    )
+    .with_cache_safe_slot(slot.clone());
+    orch.session.lock().await.model_profile = Some("parent-provider".into());
+    orch.set_effort(Some("high".into()));
+    let tools = vec![serde_json::json!({
+        "name": "Read", "description": "Read text 🧭",
+        "input_schema": {"type": "object", "properties": {}},
+        "defer_loading": true,
+    })];
+    orch.save_cache_safe_params(Some("parent prompt"), "claude-sonnet-4-6", &tools)
+        .await;
+    let captured = slot.get_last().await.unwrap();
+    assert_eq!(captured.tools, tools);
+    assert_eq!(captured.effort, Some(serde_json::json!("high")));
+    assert_eq!(captured.system_prompt.as_ref(), "parent prompt");
+    assert_eq!(
+        captured.tool_use_options.model_profile.as_deref(),
+        Some("parent-provider")
+    );
+    assert_eq!(
+        captured.tool_use_options.main_loop_model,
+        "claude-sonnet-4-6"
+    );
 }
 
 #[tokio::test]

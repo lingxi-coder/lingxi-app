@@ -2429,6 +2429,91 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertNil(landing.initSessionID)
         }
 
+        /// Two landings, one slot: the FIRST must still be delivered.
+        ///
+        /// `RootView.landCreatedAppIfReady` refuses to consume while a turn is
+        /// streaming, while `pendingWidgetSetup` is armed, and while Settings
+        /// is open. A second create finishing inside any of those windows used
+        /// to OVERWRITE the held landing (`createdAppLanding = landing`), and
+        /// the single one-shot `consumeCreatedAppLanding()` then drained only
+        /// the newest — the first app was created, listed in the library, and
+        /// never handed off at all. Android buffers a `Channel` for exactly
+        /// this (`LocalAppsViewModel.createdAppLandingChannel`).
+        ///
+        /// Order is asserted, not just membership: the older landing is the one
+        /// the user has been waiting on longest.
+        func testASecondLandingQueuesBehindTheFirstInsteadOfReplacingIt() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            _ = await store.createShellApp(armLibraryFallback: true)
+            let firstKey = try XCTUnwrap(sentCreateRequestID(submitted))
+            store.handle(event: .appEvent(event: .appCreated(
+                record: shellRecord(id: "first", name: "untitled"), requestId: firstKey)))
+            store.handle(event: .appEvent(event: .appRecordChanged(
+                record: shellRecord(id: "first", name: "untitled", initSessionId: "s-1"))))
+
+            // Vacuity guard: without this the queue assertions below could pass
+            // over a slot that was empty the whole time.
+            XCTAssertEqual(
+                store.createdAppLanding?.appID, "first",
+                "the first landing must be published before the second one arrives")
+
+            submitted.removeAll()
+            _ = await store.createShellApp(armLibraryFallback: true)
+            let secondKey = try XCTUnwrap(sentCreateRequestID(submitted))
+            store.handle(event: .appEvent(event: .appCreated(
+                record: shellRecord(id: "second", name: "untitled"), requestId: secondKey)))
+            store.handle(event: .appEvent(event: .appRecordChanged(
+                record: shellRecord(id: "second", name: "untitled", initSessionId: "s-2"))))
+
+            XCTAssertEqual(
+                store.createdAppLanding?.appID, "first",
+                "the newcomer must queue BEHIND the held landing, not replace it")
+
+            let head = try XCTUnwrap(store.consumeCreatedAppLanding())
+            XCTAssertEqual(head.appID, "first")
+            XCTAssertEqual(head.initSessionID, "s-1")
+            XCTAssertEqual(
+                store.createdAppLanding?.appID, "second",
+                "draining the head must PROMOTE the backlog, or the observed "
+                    + "property never changes again and RootView's onChange sink "
+                    + "is never re-driven for the queued landing")
+
+            let next = try XCTUnwrap(store.consumeCreatedAppLanding())
+            XCTAssertEqual(next.appID, "second")
+            XCTAssertEqual(next.initSessionID, "s-2")
+            XCTAssertNil(store.consumeCreatedAppLanding(), "the queue is drained")
+        }
+
+        /// Republishing for the SAME app supersedes in place.
+        ///
+        /// The two producers for one app are the pin arriving on
+        /// `AppRecordChanged` and the pin-wait stop-loss giving up; queuing
+        /// both would take the user into the same app twice.
+        func testARepublishedLandingForTheSameAppSupersedesRatherThanQueues() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            _ = await store.createShellApp(armLibraryFallback: true)
+            let key = try XCTUnwrap(sentCreateRequestID(submitted))
+            store.handle(event: .appEvent(event: .appCreated(
+                record: shellRecord(id: "notes", name: "untitled"), requestId: key)))
+            store.handle(event: .appEvent(event: .appRecordChanged(
+                record: shellRecord(id: "notes", name: "untitled", initSessionId: "s-1"))))
+            XCTAssertEqual(store.createdAppLanding?.appID, "notes", "vacuity guard")
+
+            store.restoreCreatedAppLanding(
+                LocalAppsStore.CreatedAppLanding(appID: "notes", initSessionID: "s-1"))
+
+            XCTAssertEqual(store.consumeCreatedAppLanding()?.appID, "notes")
+            XCTAssertNil(
+                store.consumeCreatedAppLanding(),
+                "one app must not be handed off twice")
+        }
+
         /// The production stop-loss is THIRTY seconds, and a fresh store uses
         /// it.
         ///
@@ -3047,6 +3132,45 @@ final class LocalAppsStoreTests: XCTestCase {
                     + "the queue, not dropped — the engine still holds its token")
         }
 
+        /// A `Rejected` is NOT a failed send, and must NOT restore the sheet.
+        ///
+        /// The restore above exists because a transport failure leaves the
+        /// engine still holding the approval token. A `Rejected` is the
+        /// opposite state: `host.rs`'s two resolve arms throw it on exactly
+        /// one condition — the engine no longer holds this request ("unknown
+        /// or expired"). Restoring there re-presents a sheet whose every
+        /// button takes the identical path again, next to an alert saying the
+        /// interaction is no longer pending.
+        func testAnExpiredCreateConfirmationIsDroppedRatherThanRePresented() async throws {
+            let store = LocalAppsStore()
+            var sendAttempts = 0
+            store.configure { _ in
+                sendAttempts += 1
+                throw ClientError.Rejected(
+                    message: "unknown or expired Local App create confirmation")
+            }
+
+            store.handle(event: .appEvent(event: .createConfirmationRequested(
+                request: createConfirmationRequest(requestId: "create-1", appId: "tracker", name: "Tracker")
+            )))
+            store.handle(event: .appEvent(event: .createConfirmationRequested(
+                request: createConfirmationRequest(requestId: "create-2", appId: "notes", name: "Notes")
+            )))
+            XCTAssertEqual(store.pendingCreateConfirmation?.requestID, "create-1")
+
+            await store.resolvePendingCreateConfirmation(true)
+
+            XCTAssertEqual(sendAttempts, 1)
+            XCTAssertEqual(
+                store.pendingCreateConfirmation?.requestID, "create-2",
+                "an expired confirmation must be dropped and the queue left "
+                    + "advanced — restoring it hands the user a sheet that can "
+                    + "never be answered successfully")
+            XCTAssertEqual(
+                store.errorMessage,
+                String(localized: "local_apps_error_operation_interaction_invalid"))
+        }
+
         /// The next queued confirmation must not be withheld for the whole
         /// duration of THIS resolve's engine round-trip — it is very likely a
         /// DIFFERENT app's create, unrelated to whatever is slow about this
@@ -3307,10 +3431,15 @@ final class LocalAppsStoreTests: XCTestCase {
         /// deleting the key later fails this test instead of silently
         /// rendering `local_apps_draft_card_title` to the user.
         func testAShellRendersTheDraftCopyAndHidesItsNameAndBrief() {
+            // Both stamps are "now": this test is about the draft COPY, and a
+            // shell has to be genuinely fresh to render the non-stalled line.
+            // `createdAtMs` is what the staleness window measures — it used to
+            // measure `updatedAtMs`, and the fixture set only that.
+            let nowMs = UInt64(Date().timeIntervalSince1970 * 1_000)
             let shell = LocalAppsProtocolAdapter.app(
                 shellRecord(
                     id: "shell", name: "untitled",
-                    updatedAtMs: UInt64(Date().timeIntervalSince1970 * 1_000)))
+                    createdAtMs: nowMs, updatedAtMs: nowMs))
 
             XCTAssertFalse(shell.scaffolded, "the flag must come off the wire")
             XCTAssertTrue(shell.isDraftShell)
@@ -3337,15 +3466,15 @@ final class LocalAppsStoreTests: XCTestCase {
         /// Every terminal create failure used to leave a card that read
         /// "Creating…" forever: `draftStatusLine` was a pure function of
         /// `isDraftShell` alone, with no notion of how long it had been
-        /// stuck. A shell whose `updatedAt` is far in the past has not
-        /// scaffolded in any bounded window the create flow itself waits on,
-        /// so its card must say so instead of still claiming to be in
-        /// progress.
+        /// stuck. A shell CREATED far enough in the past has not scaffolded in
+        /// any bounded window the create flow itself waits on, so its card
+        /// must say so instead of still claiming to be in progress.
         func testAStalledShellRendersAFailedCopyInsteadOfCreatingForever() {
             let now = Date().timeIntervalSince1970
             let freshShell = LocalAppsProtocolAdapter.app(
                 shellRecord(
                     id: "fresh", name: "untitled",
+                    createdAtMs: UInt64(now * 1_000),
                     updatedAtMs: UInt64(now * 1_000)))
             XCTAssertFalse(freshShell.isDraftStalled, "just created — still within the create flow's own window")
             XCTAssertEqual(
@@ -3356,9 +3485,12 @@ final class LocalAppsStoreTests: XCTestCase {
             // `commit_scaffold` — the entire interview with the user happens
             // between those two writes with the timestamp frozen — so a shell
             // half an hour old is routinely a create that is still going.
+            // Both stamps move together here: this is a shell that really was
+            // created 30 minutes ago and has been interviewed since.
             let midInterview = LocalAppsProtocolAdapter.app(
                 shellRecord(
                     id: "interviewing", name: "untitled",
+                    createdAtMs: UInt64((now - 30 * 60) * 1_000),
                     updatedAtMs: UInt64((now - 30 * 60) * 1_000)))
             XCTAssertFalse(
                 midInterview.isDraftStalled,
@@ -3366,7 +3498,7 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(
                 midInterview.draftStatusLine, String(localized: "local_apps_draft_card_subtitle"))
 
-            // `shellRecord`'s default `updatedAtMs` (2ms past epoch) is, by
+            // `shellRecord`'s default `createdAtMs` (1ms past epoch) is, by
             // construction, always past the staleness window.
             let stalledShell = LocalAppsProtocolAdapter.app(
                 shellRecord(id: "stuck", name: "untitled"))
@@ -3512,6 +3644,196 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(store.pendingWidgetSetup?.appID, "notes")
         }
 
+        // ── r3-never-wired-09: the engine's verification `code` ───────────
+
+        /// Every value `LocalAppVerificationSummaryDto.code` can carry maps to
+        /// the client's own catalog, INCLUDING `nil`.
+        ///
+        /// The four production emitters are in `local_apps_host.rs`:
+        /// `needs_setup`, `needs_revalidation`, `verification_unavailable`,
+        /// and no code at all for a clean MCP pass. The `nil` case is the one
+        /// that matters most — it is the state that otherwise still renders
+        /// the engine's English.
+        ///
+        /// Each key is asserted to differ BOTH from the raw key (so deleting
+        /// the key from the catalog fails here instead of putting
+        /// `local_apps_verification_summary_passed` on screen) and from the
+        /// engine sentence it replaces (so a mapping that quietly falls
+        /// through to `summary` cannot pass).
+        func testVerificationSummaryLocalizesEveryEngineCodeIncludingTheNilPass() {
+            let cases: [(code: String?, status: LocalAppVerificationStatus, key: String)] = [
+                ("needs_setup", .unverified, "local_apps_verification_summary_needs_setup"),
+                (
+                    "needs_revalidation", .unverified,
+                    "local_apps_verification_summary_needs_revalidation"
+                ),
+                (
+                    "verification_unavailable", .unavailable,
+                    "local_apps_verification_summary_verification_unavailable"
+                ),
+                (nil, .passed, "local_apps_verification_summary_passed"),
+            ]
+            for (code, status, key) in cases {
+                let engineEnglish = "ENGINE SENTENCE for \(code ?? "nil")"
+                let summary = LocalAppVerificationSummary(
+                    status: status, summary: engineEnglish, code: code)
+                let localized = String(localized: String.LocalizationValue(stringLiteral: key))
+                XCTAssertEqual(
+                    summary.localizedSummary, localized,
+                    "code \(code ?? "nil") must render the client catalog's sentence")
+                XCTAssertNotEqual(
+                    summary.localizedSummary, key,
+                    "\(key) must resolve in the catalog, not fall through as its own name")
+                XCTAssertNotEqual(
+                    summary.localizedSummary, engineEnglish,
+                    "code \(code ?? "nil") must NOT fall through to the engine's English")
+            }
+        }
+
+        /// An unrecognized future code keeps the engine's sentence rather than
+        /// showing nothing — the same rule `localizedGateLabel` follows for
+        /// gate ids. `active_state_corrupt` is a real one: the engine emits it
+        /// (`local_apps_host.rs`, the catalog-identity mismatch) and no key
+        /// exists for it yet.
+        func testAnUnknownVerificationCodeFallsBackToTheEngineSentence() {
+            let summary = LocalAppVerificationSummary(
+                status: .failed,
+                summary: "The approved MCP catalog does not match this app and build.",
+                code: "active_state_corrupt")
+
+            XCTAssertEqual(
+                summary.localizedSummary,
+                "The approved MCP catalog does not match this app and build.")
+        }
+
+        /// A summary this CLIENT built has no wire code, so "no code" must not
+        /// be read as the engine's one no-code state.
+        ///
+        /// `LocalAppManagedMcpInventoryReader` builds a `passed` UI
+        /// verification off the on-disk manifest with no code; without the
+        /// `isHostSourced` guard its "Published UI verification passed."
+        /// rendered as the MCP pass sentence.
+        func testAClientBuiltPassedSummaryKeepsItsOwnSentence() {
+            let clientBuilt = LocalAppVerificationSummary(
+                status: .passed,
+                summary: "Published UI verification passed.",
+                code: nil,
+                isHostSourced: false)
+
+            XCTAssertEqual(clientBuilt.localizedSummary, "Published UI verification passed.")
+            XCTAssertNotEqual(
+                clientBuilt.localizedSummary,
+                String(localized: "local_apps_verification_summary_passed"))
+        }
+
+        // ── r4-never-wired-07: `AppRecordDto.created_at_ms` ────────────────
+
+        /// The shell staleness window runs from CREATION, not from the last
+        /// mutation.
+        ///
+        /// `set_init_session` is set-once (only its `None` arm writes
+        /// `updated_at_ms`; a pinned record is refused) and the boot sweep
+        /// skips already-pinned records, so the re-stamp below is not a
+        /// once-per-launch event. It is the one case that survives both
+        /// guards: a shell whose create died BEFORE it could pin. The next
+        /// launch's backfill pins it and `updated_at_ms` jumps to now — so a
+        /// window anchored on `updated_at_ms` restarts on a create that has
+        /// been dead for days, and the card claims it is still in flight.
+        /// `created_at_ms` is immune, which is what this pins.
+        func testAShellStalenessIsMeasuredFromCreationNotLastUpdate() {
+            let nowMs = UInt64(Date().timeIntervalSince1970 * 1_000)
+            let threeDaysAgoMs = nowMs - UInt64(3 * 24 * 60 * 60 * 1_000)
+
+            let backfilled = LocalAppsProtocolAdapter.app(
+                shellRecord(
+                    id: "abandoned", name: "untitled",
+                    createdAtMs: threeDaysAgoMs, updatedAtMs: nowMs))
+
+            XCTAssertEqual(
+                backfilled.createdAt,
+                Date(timeIntervalSince1970: TimeInterval(threeDaysAgoMs) / 1_000),
+                "created_at_ms must be decoded off the wire, not dropped")
+            XCTAssertTrue(
+                backfilled.isDraftStalled,
+                "a shell created three days ago is stalled however recently the "
+                    + "boot backfill touched its record")
+            XCTAssertEqual(
+                backfilled.draftStatusLine,
+                String(localized: "local_apps_draft_card_subtitle_stalled"))
+
+            let fresh = LocalAppsProtocolAdapter.app(
+                shellRecord(
+                    id: "creating", name: "untitled",
+                    createdAtMs: nowMs, updatedAtMs: nowMs))
+            XCTAssertFalse(fresh.isDraftStalled, "a shell created seconds ago is still creating")
+        }
+
+        // ── r1-backlog-native-confirmation-15: the expired rejection ───────
+
+        /// The engine's "unknown or expired" rejection must not reach the user
+        /// as raw English.
+        ///
+        /// `ClientError` is flat by design, so there is no code to switch on;
+        /// what makes this localizable is the CALL SITE — `host.rs`'s
+        /// `ResolveCreateConfirmation` arm has exactly one `Err` path.
+        func testAnExpiredCreateConfirmationRejectionIsLocalized() async throws {
+            let store = LocalAppsStore()
+            let engineEnglish = "unknown or expired Local App create confirmation"
+            store.configure { _ in throw ClientError.Rejected(message: engineEnglish) }
+
+            store.handle(event: .appEvent(event: .createConfirmationRequested(
+                request: createConfirmationRequest(
+                    requestId: "create-1", appId: "tracker", name: "Tracker")
+            )))
+            await store.resolvePendingCreateConfirmation(true)
+
+            XCTAssertEqual(
+                store.errorMessage,
+                String(localized: "local_apps_error_operation_interaction_invalid"))
+            XCTAssertNotEqual(
+                store.errorMessage, engineEnglish,
+                "the engine's English must not reach the alert")
+            XCTAssertFalse(
+                store.errorMessage?.contains("ClientError") ?? false,
+                "UniFFI's errorDescription is String(reflecting:) — the Swift debug "
+                    + "dump must not reach the alert either")
+        }
+
+        /// The MCP proposal answer takes the same path, and a NON-rejection
+        /// failure keeps its own description rather than being relabelled
+        /// "no longer pending".
+        func testANonRejectionApprovalFailureIsNotRelabelled() async throws {
+            struct Offline: LocalizedError {
+                var errorDescription: String? { "the socket dropped" }
+            }
+            let store = LocalAppsStore()
+            store.configure { _ in throw Offline() }
+
+            // A NON-empty diff: an empty-diff proposal is auto-declined by the
+            // store, so the sheet would never be pending for this test to answer.
+            store.handle(event: .appEvent(event: .mcpProposalApprovalRequested(
+                request: mcpProposalRequest(
+                    requestId: "mcp-1", appId: "tracker",
+                    diffs: [
+                        .init(
+                            kind: .added,
+                            name: "added_tool",
+                            before: nil,
+                            after: toolSurface(name: "added_tool", title: "Added"),
+                            changedFields: []
+                        )
+                    ])
+            )))
+            XCTAssertEqual(store.pendingMcpProposalApproval?.requestID, "mcp-1")
+            await store.resolvePendingMcpProposalApproval(true)
+
+            XCTAssertEqual(store.errorMessage, "the socket dropped")
+            XCTAssertNotEqual(
+                store.errorMessage,
+                String(localized: "local_apps_error_operation_interaction_invalid"),
+                "only a Rejected means 'no longer pending'")
+        }
+
         // ── Fixtures ──────────────────────────────────────────────────────
 
         /// The `request_id` the store actually put on the wire.
@@ -3538,11 +3860,13 @@ final class LocalAppsStoreTests: XCTestCase {
             brief: String,
             scaffolded: Bool,
             initSessionId: String? = nil,
-            // `2`ms-past-epoch by default, same fixed placeholder every one of
-            // these fixtures used before `LocalAppSummary.isDraftStalled`
-            // existed. A caller exercising that staleness window passes an
-            // explicit value instead — everyone else keeps the old constant,
-            // so this default changes NOTHING for the tests that predate it.
+            // `1`/`2`ms-past-epoch by default, the same fixed placeholders
+            // every one of these fixtures used before
+            // `LocalAppSummary.isDraftStalled` existed. A caller exercising
+            // that staleness window passes explicit values instead —
+            // everyone else keeps the old constants, so these defaults change
+            // NOTHING for the tests that predate them.
+            createdAtMs: UInt64 = 1,
             updatedAtMs: UInt64 = 2
         ) -> AppRecordDto {
             AppRecordDto(
@@ -3550,7 +3874,7 @@ final class LocalAppsStoreTests: XCTestCase {
                 name: name,
                 brief: brief,
                 gitEnabled: true,
-                createdAtMs: 1,
+                createdAtMs: createdAtMs,
                 updatedAtMs: updatedAtMs,
                 workflowState: .draft,
                 conversationId: nil,
@@ -3566,11 +3890,13 @@ final class LocalAppsStoreTests: XCTestCase {
             id: String,
             name: String,
             initSessionId: String? = nil,
+            createdAtMs: UInt64 = 1,
             updatedAtMs: UInt64 = 2
         ) -> AppRecordDto {
             wireRecord(
                 id: id, name: name, brief: "", scaffolded: false,
-                initSessionId: initSessionId, updatedAtMs: updatedAtMs)
+                initSessionId: initSessionId,
+                createdAtMs: createdAtMs, updatedAtMs: updatedAtMs)
         }
 
         /// An app whose scaffold has landed.
@@ -3616,8 +3942,7 @@ final class LocalAppsStoreTests: XCTestCase {
                 reason: "Best match for the requested workflow",
                 rejected: [.init(templateId: "template.canvas", reason: "Needs multiple panes")],
                 initialTools: [toolSurface(name: "read_value", title: "Read Value")],
-                requiredGates: [gateStatus(id: "runner", status: .pending, available: false)],
-                receipt: receiptStatus(appId: appId)
+                requiredGates: [gateStatus(id: "runner", status: .pending, available: false)]
             )
         }
 
@@ -3640,8 +3965,7 @@ final class LocalAppsStoreTests: XCTestCase {
                 toolDiffs: diffs,
                 requiredFlowChanges: requiredFlowChanges,
                 excludedCapabilities: excludedCapabilities,
-                pendingGates: pendingGates,
-                receipt: receiptStatus(appId: appId)
+                pendingGates: pendingGates
             )
         }
 
@@ -3656,20 +3980,6 @@ final class LocalAppsStoreTests: XCTestCase {
                 downloadStatus: "ready",
                 available: true,
                 reason: nil
-            )
-        }
-
-        private func receiptStatus(appId: String) -> LocalAppReceiptStatusDto {
-            LocalAppReceiptStatusDto(
-                receiptId: "receipt-\(appId)",
-                appId: appId,
-                workflowRunId: "workflow-\(appId)",
-                approvalContractSha256: String(repeating: "c", count: 64),
-                candidateDigest: String(repeating: "d", count: 64),
-                issuedAtMs: 1,
-                expiresAtMs: 2,
-                consumed: false,
-                superseded: false
             )
         }
 
@@ -4236,6 +4546,390 @@ final class LocalAppsStoreTests: XCTestCase {
         XCTAssertTrue(
             code.contains("reArmedCreatedAppLandingID = appID"),
             "the latch must be set, or the guard above never becomes false")
+    }
+
+    /// One declaration's source, comment lines stripped, sliced by brace depth.
+    ///
+    /// Comments are removed BEFORE counting so a `{` quoted in prose cannot
+    /// desynchronise the depth — and so no assertion below can be satisfied by
+    /// a sentence that merely describes the code.
+    private func declarationSource(_ declaration: String, in source: String) throws -> String {
+        let start = try XCTUnwrap(
+            source.range(of: declaration), "\(declaration) not found — read the wrong file?")
+        let tail = source[start.lowerBound...]
+        let stripped = tail
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+        var depth = 0
+        var opened = false
+        var index = stripped.startIndex
+        while index < stripped.endIndex {
+            switch stripped[index] {
+            case "{":
+                depth += 1
+                opened = true
+            case "}":
+                depth -= 1
+                if opened, depth == 0 { return String(stripped[..<stripped.index(after: index)]) }
+            default:
+                break
+            }
+            index = stripped.index(after: index)
+        }
+        XCTFail("unbalanced braces slicing \(declaration)")
+        return stripped
+    }
+
+    /// A REFUSED scope switch must not cost the user the cover as well.
+    ///
+    /// Every local-app re-entry path used to be
+    /// `navigation.closePresentedRoute()` followed by a `switchScope(...)`
+    /// whose `Bool` was discarded. `switchScope` refuses SYNCHRONOUSLY for
+    /// either of two reasons (`projectSwitching`, or
+    /// `ConversationSessionMutationPolicy` holding the session), so a refused
+    /// tap dismissed the library, did nothing, and said nothing — the user was
+    /// left on the chat with no way back to the row they had just tapped.
+    /// Android's draft-landing collector states the same contract in
+    /// `RootScreen.kt`: "Close it only on success."
+    func testLocalAppReEntryPathsCloseTheCoverOnlyAfterAnAcceptedSwitch() throws {
+        let source = try clientSource("Sources/App/RootView.swift")
+        let entryPoints = [
+            "private func openAppSession(",
+            "private func startNewAppSession(",
+            "private func startDraftAppInterview(",
+        ]
+        // A gate that silently scans nothing reports "all clear", so say what
+        // it actually covered.
+        print("local-app re-entry paths audited: \(entryPoints.count)")
+        for declaration in entryPoints {
+            let body = try declarationSource(declaration, in: source)
+
+            // Vacuity guards: this really is a slice of a re-entry path.
+            XCTAssertTrue(
+                body.contains("switchScope("),
+                "\(declaration) must still be the site that requests the switch")
+            let close = try XCTUnwrap(
+                body.range(of: "navigation.closePresentedRoute()"),
+                "\(declaration) must still dismiss the cover on the success path")
+
+            let refusal = try XCTUnwrap(
+                body.range(of: "guard switchScope("),
+                "\(declaration) must BRANCH on switchScope's result; discarding it is what made a refused tap silent")
+            XCTAssertTrue(
+                body.contains("localAppsStore.reportScopeSwitchRefused("),
+                "\(declaration)'s refusal path must report — routed through the store because while the cover is up LocalAppsRootView's alert is the only presenter that can show it")
+            XCTAssertTrue(
+                refusal.lowerBound < close.lowerBound,
+                "\(declaration) must close the cover AFTER the switch is accepted; closing first strands the user outside the library on a refusal")
+        }
+    }
+
+    /// Tapping a PIN-LESS draft card must re-arm the interview.
+    ///
+    /// A draft shell whose best-effort init-session mint failed has no session
+    /// to resume, and the pin-less branch used to call `onNewAppSession` —
+    /// `switchScope(..., startNew: true)` with no `initialPrompt`. That mints a
+    /// silent anchor on EVERY tap and never re-arms the create interview, which
+    /// is the entire point of the card. It has to send the same kickoff the
+    /// create landing sends.
+    func testAPinlessDraftCardTapCarriesTheCreateKickoff() throws {
+        let rootView = try clientSource("Sources/App/RootView.swift")
+        let interview = try declarationSource("private func startDraftAppInterview(", in: rootView)
+        XCTAssertTrue(
+            interview.contains("switchScope("),
+            "vacuity guard: the sliced body must still request the switch")
+        XCTAssertTrue(
+            interview.contains("initialPrompt: LocalAppKickoff.message"),
+            "the draft tap must ride the kickoff on the switch itself, so it is sent by the attempt that actually landed the session")
+        XCTAssertTrue(
+            interview.contains("startNew: true"),
+            "there is no pin to resume, so the tap has to mint the session")
+
+        // …and the library must actually ROUTE the pin-less branch here. The
+        // fix is worthless if `open(_:)` still calls `onNewAppSession`.
+        let library = try clientSource("Sources/LocalApps/LocalAppsLibraryView.swift")
+        let open = try declarationSource("private func open(_ app: LocalAppSummary)", in: library)
+        XCTAssertTrue(
+            open.contains("onOpenAppSession(app.id, sessionID, .code)"),
+            "vacuity guard: the pinned branch must still resume the pin")
+        XCTAssertTrue(
+            open.contains("onStartDraftInterview(app.id)"),
+            "the pin-less branch must route to the kickoff-carrying path, not to onNewAppSession, which is 「新会话」 and deliberately carries no prompt")
+        XCTAssertFalse(
+            open.contains("onNewAppSession("),
+            "onNewAppSession is the session catalog's 「新会话」; using it for a draft card is the defect this test pins")
+    }
+
+    /// Every `drawer.*` identifier the UI tests drive must have a producer.
+    ///
+    /// The drawer's create entry points — `drawer.apps.create` and
+    /// `drawer.apps.library` — are the only end-to-end coverage the local-app
+    /// create flow has, and the whole family of drawer identifiers had rotted
+    /// out from under it: `drawer.tab.chats`/`drawer.tab.projects`/
+    /// `drawer.tab.crons` (the rawValues are `chat`/`code`/`cron` and there is
+    /// no projects tab), `drawer.scope.global`/`drawer.scope.project.<name>`
+    /// (scopes are `drawer.workspace.<workspaceKey>` cards now),
+    /// `drawer.apps.view-all`, `drawer.apps.row.<id>` and
+    /// `drawer.shortcut.cron`. An id with no producer never resolves: a tap on
+    /// it fails loudly, but an `XCTAssertFalse(...exists)` on it is VACUOUSLY
+    /// true and pins nothing at all — two of them were sitting green.
+    ///
+    /// Textual on purpose. XCUITest cannot run in this bundle, so the check
+    /// that survives is "the identifier the test names is one `Sources/`
+    /// actually emits".
+    ///
+    /// That is necessary and NOT sufficient: a producer in `Sources/` still
+    /// resolves to nothing at runtime if a container above it carries its own
+    /// identifier. `testAccessibilityContainersCarryingAnIdentifierDeclareChildrenContain`
+    /// below asserts that structural precondition; do not read this test as
+    /// proof that an identifier is addressable.
+    func testEveryDrawerIdentifierTheUITestsDriveHasASourceProducer() throws {
+        let drawer = try clientSource("Sources/Drawer/Drawer.swift")
+        let uiTests = try clientSource("UITests/LingxiCodeUITests.swift")
+
+        // Tab ids are interpolated over `DrawerSection`, so enumerate the cases
+        // from the type itself rather than trusting a prefix — a prefix would
+        // readmit `drawer.tab.projects`, a tab that does not exist.
+        var exact = Set(DrawerSection.allCases.map { "drawer.tab.\($0.rawValue)" })
+        var prefixes: Set<String> = []
+        let producers = try NSRegularExpression(
+            pattern: #"\.accessibilityIdentifier\("(drawer[^"]*)"\)"#)
+        let drawerRange = NSRange(drawer.startIndex ..< drawer.endIndex, in: drawer)
+        for match in producers.matches(in: drawer, range: drawerRange) {
+            guard let range = Range(match.range(at: 1), in: drawer) else { continue }
+            let literal = String(drawer[range])
+            if let interpolation = literal.range(of: #"\("#) {
+                prefixes.insert(String(literal[..<interpolation.lowerBound]))
+            } else {
+                exact.insert(literal)
+            }
+        }
+        prefixes.remove("drawer.tab.")
+
+        XCTAssertTrue(
+            exact.contains("drawer.apps.create") && exact.contains("drawer.apps.library"),
+            """
+            vacuity guard: the producer scan must have found the drawer's local-app \
+            create entry points, or it is reading the wrong file
+            """)
+        XCTAssertTrue(
+            prefixes.contains("drawer.workspace."),
+            "vacuity guard: the interpolated workspace-card producer must have been found")
+
+        let consumers = try NSRegularExpression(pattern: #""(drawer\.[A-Za-z0-9_.\-]*)"#)
+        let code = uiTests
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+        let codeRange = NSRange(code.startIndex ..< code.endIndex, in: code)
+        var used: Set<String> = []
+        for match in consumers.matches(in: code, range: codeRange) {
+            guard let range = Range(match.range(at: 1), in: code) else { continue }
+            used.insert(String(code[range]))
+        }
+        // A gate that silently scans nothing reports "all clear".
+        print("drawer identifiers: \(exact.count) exact producers, \(prefixes.count) interpolated, \(used.count) driven by the UI tests")
+        XCTAssertGreaterThanOrEqual(
+            used.count, 8,
+            "vacuity guard: the UI tests drive far more than a handful of drawer ids")
+
+        let orphans = used
+            .filter { id in !exact.contains(id) && !prefixes.contains(where: id.hasPrefix) }
+            .sorted()
+        XCTAssertEqual(
+            orphans, [],
+            """
+            these identifiers are driven by LingxiCodeUITests and produced by nothing \
+            in Sources/Drawer/Drawer.swift, so the assertions naming them can only \
+            fail (a tap) or pass for free (an exists check)
+            """)
+    }
+
+    private struct A11yContainer {
+        let line: Int
+        let identifier: String
+        let encloses: [String]
+        let declaresContain: Bool
+    }
+
+    /// Textual model of "is this `.accessibilityIdentifier` sitting on a
+    /// container that encloses other identifiers, and does it declare
+    /// `children: .contain`?".
+    ///
+    /// For each identifier line it walks back over the modifier chain (and the
+    /// comments in it) to the view the chain is attached to. If that view ends
+    /// in `}`, the matching `{` bounds the element; every identifier lexically
+    /// inside is a descendant, and so is every identifier in a view member the
+    /// span references by name (the drawer's `sessionRow` is reached that way,
+    /// exactly as `AskUserQuestionCard`'s `actions` is).
+    private func accessibilityContainers(in source: String) -> [A11yContainer] {
+        let lines = source.components(separatedBy: "\n")
+        // Blank out string literals so `{`/`}` inside copy cannot skew nesting.
+        let braceLines: [String] = lines.map { line in
+            var out = ""
+            var inString = false
+            var escaped = false
+            for ch in line {
+                if escaped { escaped = false; continue }
+                if inString, ch == "\\" { escaped = true; continue }
+                if ch == "\"" { inString.toggle(); continue }
+                if !inString { out.append(ch) }
+            }
+            return out
+        }
+        let idLines = lines.indices.filter { lines[$0].contains(".accessibilityIdentifier(") }
+        let idSet = Set(idLines)
+
+        func identifierLiteral(_ line: String) -> String {
+            guard let open = line.range(of: ".accessibilityIdentifier(\"") else { return "" }
+            let rest = line[open.upperBound...]
+            guard let close = rest.firstIndex(of: "\"") else { return String(rest) }
+            return String(rest[..<close])
+        }
+        // Forward brace match: the last line of the block opened on `start`.
+        func blockEnd(from start: Int) -> Int? {
+            var depth = 0
+            for n in start ..< braceLines.count {
+                for ch in braceLines[n] {
+                    if ch == "{" { depth += 1 } else if ch == "}" {
+                        depth -= 1
+                        if depth == 0 { return n }
+                    }
+                }
+            }
+            return nil
+        }
+        // Backward brace match: the line carrying the `{` that `end`'s `}` closes.
+        func blockStart(from end: Int) -> Int? {
+            var depth = 0
+            for n in stride(from: end, through: 0, by: -1) {
+                for ch in braceLines[n].reversed() {
+                    if ch == "}" { depth += 1 } else if ch == "{" {
+                        depth -= 1
+                        if depth == 0 { return n }
+                    }
+                }
+            }
+            return nil
+        }
+
+        // name -> body span, for `func`/`var` members the containers reference.
+        let memberPattern = try? NSRegularExpression(
+            pattern: #"^\s*(?:private\s+|fileprivate\s+|public\s+)?(?:func|var)\s+(\w+)\b"#)
+        var members: [(name: String, start: Int, end: Int)] = []
+        for (i, brace) in braceLines.enumerated() where brace.contains("{") {
+            let range = NSRange(brace.startIndex ..< brace.endIndex, in: brace)
+            guard let match = memberPattern?.firstMatch(in: brace, range: range),
+                  let nameRange = Range(match.range(at: 1), in: brace),
+                  let end = blockEnd(from: i)
+            else { continue }
+            members.append((String(brace[nameRange]), i, end))
+        }
+
+        func descendants(from start: Int, to end: Int) -> [String] {
+            var seen: Set<String> = []
+            var found: Set<Int> = []
+            var work = [(start, end)]
+            while let (a, b) = work.popLast() {
+                guard seen.insert("\(a)-\(b)").inserted else { continue }
+                found.formUnion(idSet.filter { $0 > a && $0 < b })
+                // A `} label: {` receiver matches to its own line: an empty span,
+                // not a crash.
+                let body = a + 1 < b ? braceLines[(a + 1) ..< b].joined(separator: "\n") : ""
+                let bodyRange = NSRange(body.startIndex ..< body.endIndex, in: body)
+                for member in members where !(member.start >= a && member.end <= b) {
+                    guard let reference = try? NSRegularExpression(
+                        pattern: #"(?<![\w.])"# + NSRegularExpression.escapedPattern(for: member.name) + #"(?![\w])"#)
+                    else { continue }
+                    if reference.firstMatch(in: body, range: bodyRange) != nil {
+                        work.append((member.start, member.end))
+                    }
+                }
+            }
+            return found.sorted().map { identifierLiteral(lines[$0]) }
+        }
+
+        var containers: [A11yContainer] = []
+        for i in idLines {
+            var j = i - 1
+            while j >= 0 {
+                let trimmed = lines[j].trimmingCharacters(in: .whitespaces)
+                if trimmed.isEmpty || trimmed.hasPrefix(".") || trimmed.hasPrefix("//") { j -= 1 } else { break }
+            }
+            guard j >= 0, lines[j].trimmingCharacters(in: .whitespaces).hasPrefix("}"),
+                  let start = blockStart(from: j)
+            else { continue }
+            let enclosed = descendants(from: start, to: j)
+            guard !enclosed.isEmpty else { continue }
+            let chain = lines[(j + 1) ..< i].joined(separator: "\n")
+            containers.append(A11yContainer(
+                line: i + 1,
+                identifier: identifierLiteral(lines[i]),
+                encloses: enclosed,
+                declaresContain: chain.contains(".accessibilityElement(children: .contain)")))
+        }
+        return containers
+    }
+
+    /// A producer in `Sources/` is NOT an element XCUITest can address.
+    ///
+    /// `.accessibilityIdentifier` applied to a SwiftUI **container** propagates
+    /// down and REPLACES every descendant's identifier unless the container
+    /// also declares `.accessibilityElement(children: .contain)`. Found
+    /// empirically 2026-08-23 in `AskUserQuestionCard.swift`, where one card id
+    /// swallowed all of `chat.ask.cancel`/`prev`/`next`/`submit`/`other.N`.
+    ///
+    /// The producer test above is textual by construction and can only prove
+    /// the string EXISTS in `Sources/` — the wrong thing to prove for a
+    /// never-wired hook. `drawer.workspace.new.*`, `drawer.workspace.pin.*`,
+    /// `drawer.workspace.collapse.*` and every `drawer.session.*` row sit
+    /// inside `conversationGroupCard`'s outer `VStack`, which carries
+    /// `drawer.workspace.<key>`; with no `children: .contain` on that VStack
+    /// `app.buttons["drawer.workspace.new.global"].tap()` resolved to nothing
+    /// and the UI test failed on the tap. So assert the STRUCTURAL
+    /// precondition: a container carrying an identifier while enclosing other
+    /// identifiers must declare `children: .contain`.
+    func testAccessibilityContainersCarryingAnIdentifierDeclareChildrenContain() throws {
+        // `AskUserQuestionCard` is the recorded reference case and is already
+        // remediated: scanning it proves the detector FINDS containers rather
+        // than reporting a vacuous zero from a file it failed to parse.
+        let subjects: [(path: String, mustEnclose: [String])] = [
+            ("Sources/Drawer/Drawer.swift", [
+                "drawer.workspace.new.\\(group.key)",
+                "drawer.workspace.pin.\\(group.key)",
+                "drawer.workspace.collapse.\\(group.key)",
+                "drawer.session.\\(scope.workspaceKey).\\(row.id)",
+            ]),
+            ("Sources/Conversation/AskUserQuestionCard.swift", ["chat.ask.submit", "chat.ask.cancel"]),
+        ]
+        var totalContainers = 0
+        for subject in subjects {
+            let containers = accessibilityContainers(in: try clientSource(subject.path))
+            totalContainers += containers.count
+            // A gate that silently scans nothing reports "all clear".
+            print("\(subject.path): \(containers.count) identifier-carrying container(s) — "
+                + containers.map { "line \($0.line) \($0.identifier) encloses \($0.encloses)" }.joined(separator: "; "))
+            XCTAssertFalse(
+                containers.isEmpty,
+                "vacuity guard: \(subject.path) has a known identifier-carrying container; finding none means the scan is reading nothing")
+            let enclosedEverywhere = Set(containers.flatMap(\.encloses))
+            for expected in subject.mustEnclose {
+                XCTAssertTrue(
+                    enclosedEverywhere.contains(expected),
+                    "vacuity guard: \(expected) is known to sit inside an identifier-carrying container in \(subject.path)")
+            }
+            let clobbering = containers.filter { !$0.declaresContain }
+            XCTAssertEqual(
+                clobbering.map { "line \($0.line): \($0.identifier) clobbers \($0.encloses)" }, [],
+                """
+                a SwiftUI container's .accessibilityIdentifier OVERWRITES every \
+                descendant's identifier; these containers enclose other identifiers \
+                without declaring .accessibilityElement(children: .contain), so the \
+                ids inside them exist in Sources/ but no XCUITest query can resolve them
+                """)
+        }
+        XCTAssertGreaterThanOrEqual(totalContainers, 3, "vacuity guard: three container cases are known across these two files")
     }
 
     /// The create confirmation sheet decoded `corePackages`, `cacheStatus`,

@@ -92,4 +92,18 @@
 /// record consumed by Android/iOS/Desktop settings and picker filtering. The
 /// JSON addition is wire-additive, but the UniFFI-generated native enums and
 /// records change shape, so mobile bindings version-lock with the host.
-pub const CLIENT_PROTOCOL_VERSION: &str = "12.0.0";
+///
+/// Bumped to 13.0.0 for the `receipt` removal (r1-backlog-native-confirmation-13).
+/// `LocalAppCreateConfirmationRequestDto::receipt` and
+/// `LocalAppMcpProposalApprovalRequestDto::receipt` had no production emitter --
+/// both sheets are raised BEFORE the user answers, while `McpReceiptBook::issue`
+/// mints only after approval -- and with both gone `LocalAppReceiptStatusDto`
+/// had no production producer or reader either, so the record went too. Both
+/// fields were LAST in their records, so nothing that survives moved ordinal;
+/// the bump is required because the structural guard treats any REMOVED indexed
+/// leaf as breaking, not because a surviving field shifted.
+///
+/// `CompactionStatus` is appended after every existing ClientEvent variant;
+/// existing native ordinals and field layouts are unchanged. Per §0.10 this
+/// additive lifecycle event keeps 13.0.0 and updates the contract index only.
+pub const CLIENT_PROTOCOL_VERSION: &str = "13.0.0";

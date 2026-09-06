@@ -30,19 +30,6 @@ macro_rules! profile_file {
     };
 }
 
-macro_rules! shared_widget_file {
-    ($path:literal) => {
-        (
-            concat!("app/mcp-widget/", $path),
-            include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../plugins/lingxi-local-app/assets/templates/shared/mcp-widget/r2/",
-                $path
-            )) as &[u8],
-        )
-    };
-}
-
 pub(crate) const REACT_DOM_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("react-dom", ".gitignore"),
     profile_file!("react-dom", "package.json"),
@@ -185,6 +172,32 @@ pub(crate) const BABYLON_3D_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("babylon-3d", "public/.gitkeep"),
 ];
 
+// r1-critic-01: these four R2 sets used to append `shared_widget_file!`'s
+// `app/mcp-widget/*` starter (package.json, index.html, vite.config.mjs,
+// src/main.jsx, src/widget.jsx) from
+// `plugins/lingxi-local-app/assets/templates/shared/mcp-widget/r2/`. That
+// starter's package.json declares eight dependencies —
+// `@modelcontextprotocol/ext-apps`, `@modelcontextprotocol/sdk`,
+// `@vitejs/plugin-react`, `react`, `react-dom`, `vite`,
+// `vite-plugin-singlefile`, `zod` — of which `ext-apps` and
+// `vite-plugin-singlefile` (imported directly by `src/widget.jsx` and
+// `vite.config.mjs`) are in NONE of these profiles' root `package.json`, in
+// no `pnpm-workspace.yaml` `packages:` entry (there is none), and in no
+// `pnpm-lock.yaml` (`grep -c` for either name across the four families'
+// lockfiles is 0). Every app built from one of these R2 profiles was
+// therefore seeded with a widget starter that cannot resolve its own
+// imports the moment anything tries to build it.
+//
+// The three shared managed files the widget's package.json would need
+// entries alongside (`package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`)
+// are the SAME bytes `REACT_DOM_R1`/`CANVAS_2D_R1`/etc. use — see
+// `REACT_DOM_MANAGED_FILES` and friends below — and `PUBLISHED_R1_CONTRACTS`
+// pins their r1 digest as immutable, so wiring the widget's dependencies in
+// by editing those shared files is not a same-lane fix: it would first need
+// the r1/r2 managed-file split this module does not have. Removing the
+// unbuildable starter from the editable set is the safe half of the fix
+// available here; re-adding it needs the dependency/workspace wiring above
+// done first, not just the files copied back in.
 pub(crate) const REACT_DOM_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("react-dom", "app/main.jsx"),
     profile_file!("react-dom", "app/app.jsx"),
@@ -195,11 +208,6 @@ pub(crate) const REACT_DOM_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("react-dom", "app/screens/detail-screen.jsx"),
     profile_file!("react-dom", "src/stores/app-store.js"),
     profile_file!("react-dom", "public/.gitkeep"),
-    shared_widget_file!("package.json"),
-    shared_widget_file!("index.html"),
-    shared_widget_file!("vite.config.mjs"),
-    shared_widget_file!("src/main.jsx"),
-    shared_widget_file!("src/widget.jsx"),
 ];
 
 pub(crate) const CANVAS_2D_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
@@ -211,11 +219,6 @@ pub(crate) const CANVAS_2D_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("canvas-2d", "app/screens/game-screen.jsx"),
     profile_file!("canvas-2d", "src/stores/game-store.js"),
     profile_file!("canvas-2d", "public/.gitkeep"),
-    shared_widget_file!("package.json"),
-    shared_widget_file!("index.html"),
-    shared_widget_file!("vite.config.mjs"),
-    shared_widget_file!("src/main.jsx"),
-    shared_widget_file!("src/widget.jsx"),
 ];
 
 pub(crate) const THREE_3D_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
@@ -227,11 +230,6 @@ pub(crate) const THREE_3D_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("three-3d", "app/screens/game-screen.jsx"),
     profile_file!("three-3d", "src/stores/game-store.js"),
     profile_file!("three-3d", "public/.gitkeep"),
-    shared_widget_file!("package.json"),
-    shared_widget_file!("index.html"),
-    shared_widget_file!("vite.config.mjs"),
-    shared_widget_file!("src/main.jsx"),
-    shared_widget_file!("src/widget.jsx"),
 ];
 
 pub(crate) const PHASER_2D_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
@@ -243,11 +241,6 @@ pub(crate) const PHASER_2D_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("phaser-2d", "app/screens/game-screen.jsx"),
     profile_file!("phaser-2d", "src/stores/game-store.js"),
     profile_file!("phaser-2d", "public/.gitkeep"),
-    shared_widget_file!("package.json"),
-    shared_widget_file!("index.html"),
-    shared_widget_file!("vite.config.mjs"),
-    shared_widget_file!("src/main.jsx"),
-    shared_widget_file!("src/widget.jsx"),
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -1044,8 +1037,23 @@ mod tests {
         }
     }
 
+    /// r1-critic-01: the `app/mcp-widget/*` starter used to be seeded into
+    /// every R2 profile via `shared_widget_file!`, but its package.json
+    /// depends on `@modelcontextprotocol/ext-apps` and
+    /// `vite-plugin-singlefile` — both imported directly by its own
+    /// `src/widget.jsx` / `vite.config.mjs` — and neither package is
+    /// declared by any profile's root `package.json`, listed under any
+    /// `pnpm-workspace.yaml` `packages:` entry (there is none), or present in
+    /// any profile's `pnpm-lock.yaml`. Every app built from an R2 profile was
+    /// shipping a starter that could never resolve its own imports. This
+    /// test used to assert the OPPOSITE — that the starter is present — and
+    /// stayed green the whole time the seeded starter was unbuildable,
+    /// because presence was never cross-checked against resolvability. It
+    /// now asserts the starter is gone, so accidentally reintroducing it
+    /// (without first fixing the dependency wiring the comment on the
+    /// `*_R2_EDITABLE_FILES` constants above describes) fails here again.
     #[test]
-    fn r2_profiles_include_the_shared_mcp_widget_starter() {
+    fn r2_profiles_no_longer_seed_the_unbuildable_shared_mcp_widget_starter() {
         for contract in [REACT_DOM_R2, CANVAS_2D_R2, THREE_3D_R2, PHASER_2D_R2] {
             for path in [
                 "app/mcp-widget/package.json",
@@ -1055,11 +1063,11 @@ mod tests {
                 "app/mcp-widget/src/widget.jsx",
             ] {
                 assert!(
-                    contract
+                    !contract
                         .editable_files
                         .iter()
                         .any(|(candidate, _)| *candidate == path),
-                    "{} r{} missing shared MCP widget file {}",
+                    "{} r{} must not seed the unbuildable shared MCP widget file {}",
                     contract.family,
                     contract.revision,
                     path

@@ -347,6 +347,11 @@ pub enum ClientEvent {
         status: TaskStatusDto,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin_session_id: Option<String>,
+        /// Failure reason accompanying a `failed` transition, when the
+        /// producing handler reported one. APPENDED field (additive default
+        /// `None`) — clients render it instead of a bare task id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 
     CommandsChanged {
@@ -568,6 +573,17 @@ pub enum ClientEvent {
 
     ProviderModelCatalog {
         providers: Vec<ProviderModelCatalogEntryDto>,
+    },
+
+    /// Observed compaction lifecycle, including attempts that fail or are cancelled.
+    /// Connection-scoped so an idle manual `/compact` can publish live progress.
+    /// Appended to preserve every existing UniFFI enum ordinal.
+    CompactionStatus {
+        /// `preparing`, `summarizing`, `restoring`, `complete`, `skipped`, `error`, or `cancelled`.
+        /// A string allows clients to ignore future phases without decode failures.
+        phase: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 }
 

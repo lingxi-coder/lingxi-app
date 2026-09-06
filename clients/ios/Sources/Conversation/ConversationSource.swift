@@ -906,7 +906,7 @@ final class ConversationModel: ObservableObject {
         if streaming || backgroundTasks.contains(where: { $0.status.requiresExecutionLease }) {
             return true
         }
-        if case .running = compactionStatus {
+        if compactionStatus?.isActive == true {
             return true
         }
         return items.contains { item in
@@ -2638,7 +2638,8 @@ final class MockConversationSource: ConversationSource {
         private func acceptTurnEvent(_ event: ClientEvent) -> Bool {
             switch event {
             case .askUserQuestion, .askUserQuestionResolved, .permissionRequestResolved,
-                 .taskStatusChanged, .taskRow, .workflowResumed, .planUpdated, .coordinatorStatus:
+                 .taskStatusChanged, .taskRow, .workflowResumed, .planUpdated, .coordinatorStatus,
+                 .compactionStatus, .compactionCompleted:
                 // Deliberately OUTSIDE the turn gate: the engine's broker
                 // replays a still-pending AskUserQuestion (and resolves it)
                 // after a foreground re-connect, a background task's status
@@ -2838,7 +2839,7 @@ final class MockConversationSource: ConversationSource {
             model.isCancelling = false
             model.slashCommandPending = true
             model.compactionStatus = Self.isCompactSlash(raw)
-                ? .running(startedAt: Date())
+                ? .queued
                 : nil
             model.turnCompletion = nil
             turnSpeechSequence = 0
@@ -3404,8 +3405,10 @@ final class MockConversationSource: ConversationSource {
             description: String?,
             status: BackgroundTaskSnapshot.Status,
             canResume: Bool = false,
-            startedAtMs: UInt64? = nil
+            startedAtMs: UInt64? = nil,
+            errorText: String? = nil
         ) {
+            let reason = errorText.flatMap { $0.isEmpty ? nil : $0 }
             if let index = model.backgroundTasks.firstIndex(where: { $0.id == id }) {
                 if !(model.backgroundTasks[index].status.isTerminal && !status.isTerminal) {
                     model.backgroundTasks[index].status = status
@@ -3415,6 +3418,12 @@ final class MockConversationSource: ConversationSource {
                 }
                 model.backgroundTasks[index].canResume = canResume || model.backgroundTasks[index].canResume
                 model.backgroundTasks[index].startedAtMs = startedAtMs ?? model.backgroundTasks[index].startedAtMs
+                // Never clear a reason already learned from the other source
+                // (`TaskRow` backfill vs. the `TaskStatusChanged` push) — only
+                // ever fill it in.
+                if let reason {
+                    model.backgroundTasks[index].errorText = reason
+                }
             } else {
                 model.backgroundTasks.append(BackgroundTaskSnapshot(
                     id: id,
@@ -3422,6 +3431,7 @@ final class MockConversationSource: ConversationSource {
                     status: status,
                     canResume: canResume,
                     startedAtMs: startedAtMs,
+                    errorText: reason,
                     workflow: nil
                 ))
             }
@@ -4444,6 +4454,24 @@ final class MockConversationSource: ConversationSource {
                     status: isError ? "failed" : "idle",
                     latestActivity: isError ? display : String(localized: "chat_completed")
                 )
+                // A CLI slash turn ends HERE — there is no TurnEnded for it — so
+                // it must settle its run the way `.turnEnded` does. Without this
+                // the run card stays `.running` forever and, because
+                // `clearTurnPointers` drops the active-run pointer on the next
+                // line, nothing can ever settle it again: the conversation keeps
+                // claiming `requiresBackgroundExecution` for the rest of the
+                // session. `/compact` made it visible (the compaction card
+                // finishes while the lease does not), but every CLI slash
+                // command leaked the same way.
+                //
+                // Guarded on an EXISTING run: `finishActiveRun` goes through
+                // `updateActiveRun` -> `ensureActiveRun`, which CREATES a run
+                // when there is none. A locally-handled slash command has no
+                // run, and settling one into existence appended a spurious run
+                // card after the command output.
+                if activeRunItemIndex.map({ model.items.indices.contains($0) }) == true {
+                    finishActiveRun(isError ? .failed : .completed)
+                }
                 publishActiveTurnCompletion(isError ? .failed : .completed)
                 clearTurnPointers(keepEpoch: false)
                 requestSessionCatalogRefreshAfterSettledTurn()
@@ -4529,7 +4557,8 @@ final class MockConversationSource: ConversationSource {
                         description: task.description,
                         status: mapped,
                         canResume: task.canResume,
-                        startedAtMs: task.startedAtMs
+                        startedAtMs: task.startedAtMs,
+                        errorText: task.error
                     )
                 }
 
@@ -4561,7 +4590,7 @@ final class MockConversationSource: ConversationSource {
                 guard acceptTurnEvent(event) else { return }
                 model.planTasks = tasks.map(Self.planTask(from:))
 
-            case let .taskStatusChanged(taskId, status, originSessionId):
+            case let .taskStatusChanged(taskId, status, originSessionId, taskError):
                 // Allowlisted through the turn gate: a background task
                 // normally finishes after its spawning turn already ended.
                 guard acceptTurnEvent(event) else { return }
@@ -4573,7 +4602,12 @@ final class MockConversationSource: ConversationSource {
                 }
                 if let mapped = Self.backgroundTaskStatus(status) {
                     let known = model.backgroundTasks.contains { $0.id == taskId }
-                    upsertBackgroundTask(id: taskId, description: nil, status: mapped)
+                    upsertBackgroundTask(
+                        id: taskId,
+                        description: nil,
+                        status: mapped,
+                        errorText: taskError
+                    )
                     if !known {
                         // First sighting via a push — pull the row list so
                         // the panel can show the human description instead
@@ -4581,11 +4615,23 @@ final class MockConversationSource: ConversationSource {
                         refreshBackgroundTasks()
                     }
                 }
+                // Name the task by its human description when one is already
+                // known (a `TaskRow` reply, or an earlier push that triggered
+                // the refresh above); fall back to the bare id only when it is
+                // genuinely all we have.
+                let label = model.backgroundTasks
+                    .first { $0.id == taskId }
+                    .map(\.descriptionText)
+                    .flatMap { $0.isEmpty ? nil : $0 }
+                    ?? taskId
+                let reason = taskError.flatMap { $0.isEmpty ? nil : $0 }
                 let text: String?
                 switch status {
-                case .completed: text = String(localized: "chat_task_completed \(taskId)")
-                case .failed: text = String(localized: "chat_task_failed \(taskId)")
-                case .cancelled: text = String(localized: "chat_task_cancelled \(taskId)")
+                case .completed: text = String(localized: "chat_task_completed \(label)")
+                case .failed:
+                    text = reason.map { String(localized: "chat_task_failed_reason \(label) \($0)") }
+                        ?? String(localized: "chat_task_failed \(label)")
+                case .cancelled: text = String(localized: "chat_task_cancelled \(label)")
                 case .pending, .running, .paused: text = nil
                 @unknown default: text = nil
                 }
@@ -4775,6 +4821,10 @@ final class MockConversationSource: ConversationSource {
             case let .costUpdate(_, _, _, _, _, formatted):
                 guard acceptTurnEvent(event) else { return }
                 updateActiveRun { $0.costFormatted = formatted }
+
+            case let .compactionStatus(phase, error):
+                guard acceptTurnEvent(event) else { return }
+                model.compactionStatus = .reducing(model.compactionStatus, phase: phase, error: error)
 
             case let .compactionCompleted(messagesBefore, messagesAfter, bytesSaved, _):
                 guard acceptTurnEvent(event) else { return }
@@ -5151,9 +5201,13 @@ final class MockConversationSource: ConversationSource {
                 )
                 print("[LingxiCode] turn error kind=\(kind) accepted=\(accepted) message=\(message)")
                 guard accepted else { return }
-                if case .running = model.compactionStatus,
+                if model.compactionStatus?.isActive == true,
                    message.lowercased().hasPrefix("force_compact failed:") {
-                    let detail = message.dropFirst("force_compact failed:".count)
+                    let detail = message
+                        .replacingOccurrences(
+                            of: "^force_compact failed:\\s*", with: "",
+                            options: [.regularExpression, .caseInsensitive]
+                        )
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                         .replacingOccurrences(
                             of: "^handle action failed:\\s*",

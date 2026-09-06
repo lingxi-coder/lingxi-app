@@ -357,6 +357,37 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
+    async fn emit_compaction_started(&self) {
+        self.emit_compaction_phase("preparing").await;
+    }
+
+    async fn emit_compaction_skipped(&self) {
+        self.emit_compaction_phase("skipped").await;
+    }
+
+    async fn emit_compaction_phase(&self, phase: &str) {
+        self.sink
+            .emit(ClientEvent::CompactionStatus {
+                phase: phase.to_string(),
+                error: None,
+            })
+            .await;
+    }
+
+    async fn emit_compaction_finished(&self, error: Option<&str>) {
+        let phase = match error {
+            None => "complete",
+            Some("Compaction canceled.") => "cancelled",
+            Some(_) => "error",
+        };
+        self.sink
+            .emit(ClientEvent::CompactionStatus {
+                phase: phase.to_string(),
+                error: error.map(str::to_string),
+            })
+            .await;
+    }
+
     async fn emit_compaction_completed(
         &self,
         messages_before: u32,
@@ -722,6 +753,43 @@ mod tests {
                 assert_eq!(stop_reason.as_deref(), Some("max_tokens"));
             }
             other => panic!("expected TurnEnded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_status_reports_actual_phases_and_terminal_outcomes() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        stream.emit_compaction_started().await;
+        stream.emit_compaction_phase("summarizing").await;
+        stream.emit_compaction_phase("restoring").await;
+        stream.emit_compaction_finished(None).await;
+        stream
+            .emit_compaction_finished(Some("summary failed"))
+            .await;
+        stream
+            .emit_compaction_finished(Some("Compaction canceled."))
+            .await;
+        stream.emit_compaction_skipped().await;
+        let events = sink.events().await;
+        let expected = [
+            ("preparing", None),
+            ("summarizing", None),
+            ("restoring", None),
+            ("complete", None),
+            ("error", Some("summary failed")),
+            ("cancelled", Some("Compaction canceled.")),
+            ("skipped", None),
+        ];
+        assert_eq!(events.len(), expected.len());
+        for (event, (phase, error)) in events.iter().zip(expected) {
+            assert_eq!(
+                event,
+                &ClientEvent::CompactionStatus {
+                    phase: phase.into(),
+                    error: error.map(str::to_string),
+                }
+            );
         }
     }
 

@@ -201,8 +201,8 @@ pub enum AutoCompactWindowSource {
     Experiment,
     /// `"model-default"` — a per-model default window.
     ///
-    /// Unreachable in LingXi: `N8` selects it from the `byS` model set and the
-    /// `ovp` model-overrides table, neither of which the port carries.
+    /// The 2.1.261 `Pko` restricted-window set, Sonnet 5's ordinary CLI table
+    /// default, or a registered native-1M model with auto-compact enabled.
     ModelDefault,
     /// `"unknown-model"` (NEW in 2.1.238) — auto-compact will hold the session
     /// inside the window it *assumes* for a model this build does not recognize.
@@ -299,11 +299,8 @@ fn model_window_is_assumed(model: &str) -> bool {
 /// suffix/beta tables. `C1r(e)` (an unresolved Bedrock
 /// `application-inference-profile`) has no port analogue.
 ///
-/// Deferred: the oracle validates the env value through `dXe(…, Lli=1e5,
-/// hRa=1e6)` and then floors it with `Math.max(Lli, effective)`. The port's
-/// pre-existing [`parse_positive_u64`] rule is kept verbatim so this refactor
-/// does not move [`effective_context_window_size`]; the clamp is a separate,
-/// pre-existing divergence.
+/// The env branch shares the 2.1.261 `GS` / `kte` numeric parser and 100k–1M
+/// clamp through [`resolve_auto_compact_env_window`].
 #[must_use]
 pub fn resolve_auto_compact_window(
     model: &str,
@@ -314,7 +311,7 @@ pub fn resolve_auto_compact_window(
     let model_window = context_window_for_model(model, betas);
 
     if let Ok(raw) = std::env::var("LINGXI_AUTO_COMPACT_WINDOW") {
-        if let Some(configured) = parse_positive_u64(&raw) {
+        if let Some(configured) = resolve_auto_compact_env_window(&raw) {
             return ResolvedAutoCompactWindow {
                 window: model_window.min(configured),
                 configured,
@@ -331,7 +328,17 @@ pub fn resolve_auto_compact_window(
         };
     }
 
-    // clientdata / experiment / model-default: see AutoCompactWindowSource.
+    // Clientdata / experiment inputs are unavailable in this crate. Resolve
+    // the checked-in ordinary CLI model defaults before the fallback source.
+    if let Some(configured) =
+        model_default_compact_window(model, model_window, auto_compact_enabled)
+    {
+        return ResolvedAutoCompactWindow {
+            window: model_window.min(configured),
+            configured,
+            source: AutoCompactWindowSource::ModelDefault,
+        };
+    }
 
     let source = if auto_compact_enabled
         && !env_truthy(DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT_ENV)
@@ -348,6 +355,62 @@ pub fn resolve_auto_compact_window(
         configured: model_window,
         source,
     }
+}
+
+/// The locally decidable 2.1.261 `GS` model-default branches. `model_window`
+/// already incorporates explicit 1M opt-ins and the existing model registry.
+/// Remote Cowork / local-agent table rows and served clientdata belong to
+/// their hosts; the ordinary CLI uses Sonnet 5's table default of 1M.
+fn model_default_compact_window(model: &str, model_window: u64, enabled: bool) -> Option<u64> {
+    let canonical = llm_client::model::thinking::canonical(model);
+    // The shared thinking canonicalizer predates Opus 5; preserve the same
+    // provider/date suffix matching that the context-window registry applies.
+    let canonical = if canonical.contains("claude-opus-5") {
+        "claude-opus-5"
+    } else {
+        canonical.as_str()
+    };
+    let restricted_default = matches!(
+        canonical,
+        "claude-sonnet-4-6" | "claude-opus-4-6" | "claude-opus-4-8" | "claude-opus-5"
+    );
+    // 2.1.261 `qL` / `YL`: a registered native-1M model, not an arbitrary
+    // model that obtained a 1M window through a suffix or beta header.
+    let native_1m = matches!(
+        canonical,
+        "claude-sonnet-5"
+            | "claude-opus-4-7"
+            | "claude-opus-4-8"
+            | "claude-opus-5"
+            | "claude-fable-5-1"
+            | "claude-mythos-5-1"
+            | "claude-mythos-preview"
+    );
+    let disabled_1m = is_1m_context_disabled();
+    // `d<1e6 && (Pko.has(o) || Iko(...))` is intentionally independent of
+    // auto-compact enabled. A 1M opt-in skips this 200k branch entirely.
+    if model_window < 1_000_000 && (restricted_default || disabled_1m && native_1m) {
+        return Some(200_000);
+    }
+    if !enabled {
+        return None;
+    }
+    // `Rko` is gated by auto-compact enabled; the CLI row is a configured
+    // 1M even if another input made the model's actual window smaller.
+    if canonical == "claude-sonnet-5" {
+        return Some(1_000_000);
+    }
+    (model_window >= 1_000_000 && native_1m && !disabled_1m).then_some(model_window)
+}
+
+/// Resolve the explicit window knob like Claude Code 2.1.261 `GS` / `kte`:
+/// parse integer env notation, reject nonpositive/NaN, then clamp to 100k–1M.
+/// Exposed so the `/autocompact` status uses the same value as the runtime.
+#[must_use]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub fn resolve_auto_compact_env_window(raw: &str) -> Option<u64> {
+    let value = platform_api::env::parse_int_env(raw);
+    (!value.is_nan() && value > 0.0).then(|| value.clamp(100_000.0, 1_000_000.0) as u64)
 }
 
 /// `Gpe()` — `CLAUDE_CODE_DISABLE_1M_CONTEXT`.
@@ -520,11 +583,8 @@ fn reset_unknown_model_notice_latch() {
 ///
 /// Mirrors `getEffectiveContextWindowSize` (`autoCompact.ts:33-49`) — the
 /// oracle's `USe(e,t)`, which is `N8(e,n).window − min(max_output, avp)`. The
-/// window half is delegated to [`resolve_auto_compact_window`] so there is
-/// exactly ONE derivation of it; every branch that survives in the port returns
-/// the same number this function returned before the source taxonomy landed
-/// (`unknown-model` and `auto` both yield the bare model window), so the value
-/// is unchanged.
+/// window half is delegated to [`resolve_auto_compact_window`] so the runtime
+/// and window-source reporting share one derivation.
 ///
 /// `settings_window` is `None` here: the port has no writable
 /// `autoCompactWindow` setting (its only knob is `LINGXI_AUTO_COMPACT_WINDOW`),
@@ -551,7 +611,7 @@ pub fn auto_compact_threshold(model: &str, betas: &[String]) -> u64 {
     let autocompact_threshold = effective_context_window.saturating_sub(AUTOCOMPACT_BUFFER_TOKENS);
 
     if let Ok(raw) = std::env::var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE") {
-        if let Ok(parsed) = raw.trim().parse::<f64>() {
+        if let Some(parsed) = parse_float_prefix(&raw) {
             if parsed.is_finite() && parsed > 0.0 && parsed <= 100.0 {
                 // Math.floor(effective * (pct / 100)).
                 #[allow(
@@ -624,7 +684,10 @@ pub fn calculate_token_warning_state(
     let is_above_auto_compact_threshold =
         auto_compact_enabled && token_usage >= autocompact_threshold;
 
-    let actual_context_window = effective_context_window_size(model, betas);
+    // 2.1.261 `UTn` uses the full model window for the blocking ceiling,
+    // independently of a smaller configured auto-compact window.
+    let actual_context_window = context_window_for_model(model, betas)
+        .saturating_sub(max_output_tokens_for_model(model).min(MAX_OUTPUT_TOKENS_FOR_SUMMARY));
     let default_blocking_limit = actual_context_window.saturating_sub(MANUAL_COMPACT_BUFFER_TOKENS);
 
     // Allow override for testing (positive integer wins, else the default).
@@ -690,19 +753,26 @@ fn env_truthy(name: &str) -> bool {
     platform_api::env::is_env_truthy(std::env::var(name).ok().as_deref())
 }
 
-/// Parse a base-10 unsigned integer that must be `> 0`; returns `None`
-/// otherwise. Mirrors the `parseInt(...)` + `!isNaN && > 0` env-override guard
-/// (JS `parseInt` reads a leading digit run, so a numeric prefix is accepted).
+/// Shared integer env coercion (`tl`), including scientific/grouped notation.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn parse_positive_u64(raw: &str) -> Option<u64> {
-    let digits: String = raw
-        .trim_start()
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    if digits.is_empty() {
-        return None;
-    }
-    digits.parse::<u64>().ok().filter(|&v| v > 0)
+    let value = platform_api::env::parse_int_env(raw);
+    (!value.is_nan() && value > 0.0).then_some(value as u64)
+}
+
+/// JS `parseFloat` accepts the longest valid decimal prefix, unlike Rust's
+/// whole-string parser. Infinity is irrelevant to the `(0, 100]` caller gate.
+fn parse_float_prefix(raw: &str) -> Option<f64> {
+    static PREFIX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    PREFIX
+        .get_or_init(|| {
+            regex::Regex::new(r"^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+                .expect("valid decimal prefix regex")
+        })
+        .find(raw.trim_start())?
+        .as_str()
+        .parse()
+        .ok()
 }
 
 /// Test-only: serializes every test in this crate that reads or writes the
@@ -797,10 +867,10 @@ mod tests {
                 AutoCompactWindowSource::Auto
             );
 
-            // A Claude-family id is treated as recognized.
+            // A recognized 200k Claude model uses its checked-in default.
             assert_eq!(
                 resolve_auto_compact_window(MODEL, &[], None, true).source,
-                AutoCompactWindowSource::Auto
+                AutoCompactWindowSource::ModelDefault
             );
 
             // `vyS(e,r)`: a 1M opt-in is never called unrecognized.
@@ -953,6 +1023,77 @@ mod tests {
             "unknown-model"
         );
         assert_eq!(AutoCompactWindowSource::Auto.as_str(), "auto");
+    }
+
+    #[test]
+    fn oracle_261_cli_model_defaults_preserve_native_1m_windows() {
+        with_clean_env(|| {
+            for (model, expected) in [
+                ("claude-sonnet-4-6", 200_000),
+                ("claude-opus-4-6", 200_000),
+                ("claude-opus-4-8", 1_000_000),
+                ("claude-opus-5", 1_000_000),
+                ("claude-opus-5-20260901", 1_000_000),
+                ("claude-sonnet-5", 1_000_000),
+            ] {
+                let resolved = resolve_auto_compact_window(model, &[], None, true);
+                assert_eq!(
+                    resolved.source,
+                    AutoCompactWindowSource::ModelDefault,
+                    "{model}"
+                );
+                assert_eq!(resolved.window, expected, "{model}");
+                assert_eq!(resolved.configured, expected, "{model}");
+            }
+            let sonnet_disabled = resolve_auto_compact_window("claude-sonnet-5", &[], None, false);
+            assert_eq!(sonnet_disabled.source, AutoCompactWindowSource::Auto);
+            assert_eq!(sonnet_disabled.window, 1_000_000);
+        });
+    }
+
+    #[test]
+    fn oracle_261_explicit_1m_on_non_native_models_skips_restricted_default() {
+        with_clean_env(|| {
+            for model in ["claude-sonnet-4-6", "claude-opus-4-6"] {
+                let with_suffix =
+                    resolve_auto_compact_window(&format!("{model}[1m]"), &[], None, true);
+                let with_beta = resolve_auto_compact_window(
+                    model,
+                    &[crate::CONTEXT_1M_BETA_HEADER.into()],
+                    None,
+                    true,
+                );
+                for resolved in [with_suffix, with_beta] {
+                    assert_eq!(resolved.source, AutoCompactWindowSource::Auto, "{model}");
+                    assert_eq!(resolved.window, 1_000_000, "{model}");
+                    assert_eq!(resolved.configured, 1_000_000, "{model}");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn oracle_261_disable_1m_restores_200k_model_default_even_when_auto_disabled() {
+        with_clean_env(|| {
+            std::env::set_var("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1");
+            for model in [
+                "claude-opus-4-8",
+                "claude-opus-5",
+                "claude-sonnet-5",
+                "claude-fable-5-1",
+            ] {
+                for enabled in [false, true] {
+                    let resolved = resolve_auto_compact_window(model, &[], None, enabled);
+                    assert_eq!(
+                        resolved.source,
+                        AutoCompactWindowSource::ModelDefault,
+                        "{model}"
+                    );
+                    assert_eq!(resolved.window, 200_000, "{model}");
+                    assert_eq!(resolved.configured, 200_000, "{model}");
+                }
+            }
+        });
     }
 
     #[test]
@@ -1134,11 +1275,40 @@ mod tests {
     // --- env overrides ----------------------------------------------------- //
 
     #[test]
+    fn oracle_261_window_env_uses_numeric_parser_and_clamps_100k_to_1m() {
+        with_clean_env(|| {
+            for (raw, expected) in [
+                ("50000", 100_000),
+                ("150_000", 150_000),
+                ("+2e5", 200_000),
+                ("9000000", 1_000_000),
+            ] {
+                std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", raw);
+                let resolved = resolve_auto_compact_window(MODEL, &[], None, true);
+                assert_eq!(resolved.configured, expected, "{raw}");
+                assert_eq!(resolved.window, expected.min(200_000), "{raw}");
+            }
+        });
+    }
+
+    #[test]
+    fn oracle_261_blocking_limit_uses_full_model_window() {
+        with_clean_env(|| {
+            std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", "100000");
+            assert!(!calculate_token_warning_state(100_000, MODEL, &[], true).is_at_blocking_limit);
+            assert!(calculate_token_warning_state(177_000, MODEL, &[], true).is_at_blocking_limit);
+            std::env::set_var("LINGXI_BLOCKING_LIMIT_OVERRIDE", "150_000");
+            assert!(!calculate_token_warning_state(149_999, MODEL, &[], true).is_at_blocking_limit);
+            assert!(calculate_token_warning_state(150_000, MODEL, &[], true).is_at_blocking_limit);
+        });
+    }
+
+    #[test]
     fn auto_compact_window_clamps_context() {
         with_clean_env(|| {
-            // Clamp context window to 50_000. reserved = 20_000 → effective = 30_000.
+            // 50k is floored to the 100k minimum; reserve 20k → effective 80k.
             std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", "50000");
-            assert_eq!(effective_context_window_size(MODEL, &[]), 30_000);
+            assert_eq!(effective_context_window_size(MODEL, &[]), 80_000);
             // A clamp larger than the real window is a no-op (min picks the smaller).
             std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", "999999");
             assert_eq!(effective_context_window_size(MODEL, &[]), EFFECTIVE);
@@ -1165,6 +1335,18 @@ mod tests {
             // Zero / negative ignored.
             std::env::set_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE", "0");
             assert_eq!(auto_compact_threshold(MODEL, &[]), AUTOCOMPACT);
+        });
+    }
+
+    #[test]
+    fn oracle_261_percent_override_accepts_js_parse_float_prefix() {
+        with_clean_env(|| {
+            for raw in ["10percent", "  +1e1%", "10e+"] {
+                std::env::set_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE", raw);
+                assert_eq!(auto_compact_threshold(MODEL, &[]), 18_000, "{raw}");
+            }
+            std::env::set_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE", ".5suffix");
+            assert_eq!(auto_compact_threshold(MODEL, &[]), 900);
         });
     }
 

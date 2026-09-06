@@ -17,7 +17,6 @@
 //! without a runner). The old `[stub-summary attempt=…]` marker is gone — see
 //! the divergence note on [`Autocompactor::compact`].
 
-use crate::thresholds::MAX_OUTPUT_TOKENS_FOR_SUMMARY;
 use cost::Usage;
 use protocol::ConversationMessage;
 use sidequery::{CacheSafeParamsSlot, ForkedAgentRequest, ForkedAgentRunner, QuerySource};
@@ -39,6 +38,8 @@ pub struct CompactionResult {
     pub summary_model: String,
     /// Resulting messages (typically a single summary system message).
     pub summary_messages: Vec<ConversationMessage>,
+    /// Trimmed model text, before the continuation wrapper, for `PostCompact`.
+    pub raw_summary_text: String,
     /// #58: the verbatim tail of recent messages preserved across the
     /// compaction boundary (`messagesToPreserve` from `DRn`, usage-zeroed via
     /// [`crate::partial::zero_preserved_tail_usage`] = TS `k4e`). Empty on the
@@ -56,7 +57,7 @@ pub enum CompactionError {
     #[error(transparent)]
     Api(#[from] llm_client::LlmError),
     /// Exhausted PTL retries without success.
-    #[error("max retries exceeded")]
+    #[error("exhausted")]
     MaxRetriesExceeded,
     /// Autocompact does not apply to this state.
     #[error("not applicable")]
@@ -65,6 +66,12 @@ pub enum CompactionError {
     /// while preserving a valid recent tail.
     #[error("Not enough messages to compact.")]
     NotEnoughMessages,
+    /// The provider returned no usable summary or an explicit API error.
+    #[error("{0}")]
+    Summary(String),
+    /// Media still exceeds provider limits after one stripped retry.
+    #[error("media_unstrippable")]
+    MediaUnstrippable,
     /// Internal logic error.
     #[error("internal: {0}")]
     Internal(String),
@@ -75,7 +82,7 @@ pub struct AutocompactConfig {
     /// Model used for summarization.
     pub summary_model: String,
     /// Maximum output tokens for the summary.
-    pub max_output_tokens: u64,
+    pub max_output_tokens: Option<u64>,
     /// User prompt instructing the summarizer.
     pub compact_user_prompt: String,
 }
@@ -84,7 +91,7 @@ impl Default for AutocompactConfig {
     fn default() -> Self {
         Self {
             summary_model: "claude-opus-4-6".into(),
-            max_output_tokens: MAX_OUTPUT_TOKENS_FOR_SUMMARY,
+            max_output_tokens: None,
             // Byte-faithful base compact prompt (TS `getCompactPrompt(None)`),
             // including the no-tools preamble/trailer.
             compact_user_prompt: crate::prompt::get_compact_prompt(None),
@@ -180,7 +187,7 @@ impl Autocompactor {
         messages: Vec<ConversationMessage>,
         custom_instructions: Option<&str>,
     ) -> Result<CompactionResult, CompactionError> {
-        self.compact_impl(messages, custom_instructions, false)
+        self.compact_impl(messages, custom_instructions, false, None)
             .await
     }
 
@@ -202,18 +209,31 @@ impl Autocompactor {
         messages: Vec<ConversationMessage>,
         custom_instructions: Option<&str>,
     ) -> Result<CompactionResult, CompactionError> {
-        self.compact_impl(messages, custom_instructions, true).await
+        self.compact_impl(messages, custom_instructions, true, None)
+            .await
+    }
+
+    /// Rescue a provider overflow, preserving recent rounds and using the
+    /// reported token gap to choose the first summarize prefix (2.1.261 x0e).
+    pub async fn compact_reactive_with_instructions(
+        &self,
+        messages: Vec<ConversationMessage>,
+        custom_instructions: Option<&str>,
+        initial_token_gap: Option<u64>,
+    ) -> Result<CompactionResult, CompactionError> {
+        self.compact_impl(messages, custom_instructions, true, initial_token_gap)
+            .await
     }
 
     async fn compact_impl(
         &self,
         messages: Vec<ConversationMessage>,
         custom_instructions: Option<&str>,
-        manual: bool,
+        preserve_tail: bool,
+        initial_token_gap: Option<u64>,
     ) -> Result<CompactionResult, CompactionError> {
         let pre = crate::grouping::estimate_tokens_for_range(&messages);
-
-        if manual
+        if preserve_tail
             && !self
                 .forked_runner
                 .as_ref()
@@ -224,27 +244,39 @@ impl Autocompactor {
             ));
         }
 
-        // #58 suffix-preserving split (`DRn`/`Nto` with `s = 1`): choose the
-        // smallest preserved tail (largest summarize set) whose summarize
-        // prefix still contains an assistant message. Applies to BOTH the auto
-        // and manual paths (binary-verified: manual `/compact` routes through
-        // the same group compactor). `None` ⇒ no valid prefix: the manual path
-        // errors with the byte-exact `dQt` string (`Nto`'s `too_few_groups`
-        // bail), while auto falls back to full-replacement (pre-#58
-        // behaviour, empty preserved tail). The tail is usage-zeroed (`k4e`)
-        // and carried out so `apply_post_compact` can splice it after the
-        // summary.
-        let split = crate::partial::select_preserved_tail(&messages);
-        if manual && split.is_none() {
+        let groups = crate::grouping::group_messages_by_api_round(&messages);
+        if preserve_tail && groups.len() < 2 {
             return Err(CompactionError::NotEnoughMessages);
         }
-        let preserved_tail: Vec<ConversationMessage> = split
-            .as_ref()
-            .map(|s| crate::partial::zero_preserved_tail_usage(s.to_preserve.clone()))
-            .unwrap_or_default();
-        let recent_messages_preserved = !preserved_tail.is_empty();
+        let group_tokens: Vec<_> = groups.iter().map(|group| group.estimated_tokens).collect();
+        let mut groups_preserved = usize::from(preserve_tail);
+        if preserve_tail && groups.len() > 3 {
+            if let Some(gap) = initial_token_gap {
+                let remaining_gap = gap.saturating_sub(*group_tokens.last().unwrap_or(&0));
+                if remaining_gap > 0 {
+                    groups_preserved += preserved_group_step(
+                        &group_tokens[..groups.len() - 1],
+                        Some(remaining_gap),
+                    );
+                }
+            }
+        }
+        let split_prefix = |preserved: usize| {
+            let split_at = groups
+                .get(groups.len().saturating_sub(preserved))
+                .map_or(0, |group| group.start);
+            let prefix = &messages[..split_at];
+            prefix
+                .iter()
+                .any(|message| matches!(message, ConversationMessage::Assistant { .. }))
+                .then_some(split_at)
+        };
+        let mut split_at = if preserve_tail {
+            split_prefix(groups_preserved).ok_or(CompactionError::NotEnoughMessages)?
+        } else {
+            messages.len()
+        };
 
-        // Plan 08 path — closes C2. Wired summarizer via the forked runner.
         if let (Some(runner), Some(slot)) = (&self.forked_runner, &self.cache_slot) {
             let mut cache_params = slot
                 .get_last()
@@ -260,169 +292,212 @@ impl Autocompactor {
             } else {
                 cache_params.tool_use_options.main_loop_model.clone()
             };
-
-            // #58: summarize the ACTUAL current prefix, not the last cache-slot
-            // history clone. The slot is captured immediately after an API call
-            // and therefore predates the assistant reply appended afterwards;
-            // truncating that stale clone by the preserved-tail length silently
-            // dropped the newest assistant turn. We still reuse the slot's
-            // system prompt / model metadata, but replay exactly the messages
-            // selected from this invocation's live history.
-            cache_params.fork_context_messages = split
-                .as_ref()
-                .map_or_else(|| messages.clone(), |split| split.to_summarize.clone());
-
-            // Strip image blocks from the replayed context before the summary
-            // request — the text summarizer must not receive raw image data
-            // (TS `stripImagesFromMessages`, `compact.ts:145-200`, applied at the
-            // summary call site). `get_last` returned an owned clone, so this
-            // only affects this summary request, not the stored slot.
-            cache_params.fork_context_messages =
-                crate::strip_media::strip_images_from_messages(cache_params.fork_context_messages);
-
-            // COMPACT.2: prompt-too-long (PTL) retry loop — TS `compact.ts:445-491`.
-            // CC-1180: when the compact request ITSELF hits prompt-too-long, drop
-            // the oldest API-round groups from the replayed fork context and retry,
-            // up to `MAX_PTL_RETRIES` times, rather than leaving the user stuck. TS
-            // detects PTL by the summary text starting with
-            // `PROMPT_TOO_LONG_ERROR_MESSAGE`; we mirror that check on
-            // `final_text`, and thread the truncated set through
-            // `cache_safe_params.fork_context_messages` each attempt (TS's
-            // `retryCacheSafeParams.forkContextMessages = truncated`).
-            let mut ptl_attempts: u32 = 0;
-            let result = loop {
-                let req = ForkedAgentRequest {
-                    prompt_messages: vec![ConversationMessage::user(
-                        protocol::MessageId::new(),
-                        if custom_instructions.is_some_and(|s| !s.trim().is_empty()) {
-                            crate::prompt::get_compact_prompt(custom_instructions)
-                        } else {
-                            self.config.compact_user_prompt.clone()
-                        },
-                    )],
-                    cache_safe_params: cache_params.clone(),
-                    fork_label: "compaction".into(),
-                    query_source: QuerySource::Compaction,
-                    max_output_tokens: Some(
-                        u32::try_from(self.config.max_output_tokens).unwrap_or(u32::MAX),
-                    ),
-                };
-                let result = runner
-                    .run(req)
-                    .await
-                    .map_err(|e| CompactionError::Internal(e.to_string()))?;
-
-                // Not a prompt-too-long summary → accept it (TS `break`).
-                if !result
-                    .final_text
-                    .starts_with(crate::prompt_too_long::PROMPT_TOO_LONG_ERROR_MESSAGE)
-                {
-                    break result;
-                }
-
-                // The compact request itself hit prompt-too-long: truncate the
-                // oldest API-round groups and retry. `None` (nothing safe left to
-                // drop) or exhausting `MAX_PTL_RETRIES` surfaces the failure — TS
-                // throws `ERROR_MESSAGE_PROMPT_TOO_LONG`; the Rust port models
-                // "exhausted PTL retries" as `MaxRetriesExceeded`.
-                ptl_attempts += 1;
-                let truncated = if ptl_attempts <= crate::thresholds::MAX_PTL_RETRIES {
-                    crate::ptl_retry::truncate_head_for_ptl_retry(
-                        cache_params.fork_context_messages.clone(),
-                        crate::prompt_too_long::prompt_too_long_token_gap(&result.final_text),
-                    )
-                } else {
-                    None
-                };
-                let Some(truncated) = truncated else {
-                    return Err(CompactionError::MaxRetriesExceeded);
-                };
-                cache_params.fork_context_messages = truncated;
+            let mut summarize = messages[..split_at].to_vec();
+            let mut stripped_media = false;
+            let mut head_truncations = 0;
+            let prompt = if custom_instructions
+                .is_some_and(|text| !crate::prompt::trim_compact_text(text).is_empty())
+            {
+                crate::prompt::get_compact_prompt(custom_instructions)
+            } else {
+                self.config.compact_user_prompt.clone()
             };
-
-            // Claude rejects a summary response with no text instead of
-            // wrapping an empty string in the continuation template. Treat it
-            // as a hard failure so `/compact` cannot report a second form of
-            // fake success when a provider returns an empty assistant message.
-            // The string differs per path (binary-verified): manual `/compact`
-            // surfaces `Error during compaction: <detail>` (Juy's catch over
-            // pIg's `summarization produced empty response` detail), while the
-            // auto path (`Pto`) throws the unprefixed `Failed to generate…`.
-            if result.final_text.is_empty() {
-                return Err(CompactionError::Internal(if manual {
-                    "Error during compaction: summarization produced empty response".into()
+            // Ejt reuses its prompt, while each PCo attempt creates a new row.
+            let mut summary_request =
+                ConversationMessage::user(protocol::MessageId::new(), prompt.clone());
+            let result = loop {
+                if preserve_tail {
+                    summary_request =
+                        ConversationMessage::user(protocol::MessageId::new(), prompt.clone());
+                }
+                cache_params.fork_context_messages = if stripped_media {
+                    crate::strip_media::strip_images_from_messages(summarize.clone())
                 } else {
-                    "Failed to generate conversation summary - response did not contain valid text content"
-                        .into()
+                    summarize.clone()
+                };
+                let req = ForkedAgentRequest {
+                    prompt_messages: vec![summary_request.clone()],
+                    cache_safe_params: cache_params.clone(),
+                    fork_label: if preserve_tail {
+                        "reactive-compact"
+                    } else {
+                        "compact"
+                    }
+                    .into(),
+                    query_source: QuerySource::Compaction,
+                    max_output_tokens: self
+                        .config
+                        .max_output_tokens
+                        .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
+                };
+                let response = runner.run(req).await;
+                let token_gap = match response {
+                    Ok(result) => {
+                        if !result
+                            .final_text
+                            .starts_with(crate::prompt_too_long::PROMPT_TOO_LONG_ERROR_MESSAGE)
+                        {
+                            break result;
+                        }
+                        crate::prompt_too_long::prompt_too_long_token_gap(&result.final_text)
+                    }
+                    Err(sidequery::ForkError::Api(sidequery::SideQueryError::Api(
+                        llm_client::LlmError::ContextOverflow { token_gap },
+                    ))) => token_gap,
+                    Err(sidequery::ForkError::Api(sidequery::SideQueryError::Api(error)))
+                        if is_media_compaction_error(&error) =>
+                    {
+                        if stripped_media {
+                            return Err(CompactionError::MediaUnstrippable);
+                        }
+                        stripped_media = true;
+                        continue;
+                    }
+                    Err(sidequery::ForkError::Api(sidequery::SideQueryError::Api(error))) => {
+                        return Err(CompactionError::Api(error));
+                    }
+                    Err(error) => return Err(CompactionError::Summary(error.to_string())),
+                };
+
+                if preserve_tail {
+                    // x0e keeps more trailing rounds after PTL. The oldest
+                    // conversation remains in every request and in the result.
+                    let summarized_groups = groups.len().saturating_sub(groups_preserved);
+                    groups_preserved += preserved_group_step(
+                        &group_tokens[..summarized_groups],
+                        (token_gap > 0).then_some(token_gap),
+                    );
+                    split_at = split_prefix(groups_preserved)
+                        .ok_or(CompactionError::MaxRetriesExceeded)?;
+                    summarize = messages[..split_at].to_vec();
+                } else {
+                    // Ejt full automatic compaction retries only the summary
+                    // request, with up to three oldest-group truncations.
+                    if head_truncations >= crate::thresholds::MAX_PTL_RETRIES {
+                        return Err(CompactionError::MaxRetriesExceeded);
+                    }
+                    summarize = crate::ptl_retry::truncate_head_for_ptl_retry(summarize, token_gap)
+                        .ok_or(CompactionError::MaxRetriesExceeded)?;
+                    head_truncations += 1;
+                }
+            };
+            let raw_summary_text = crate::prompt::trim_compact_text(&result.final_text).to_owned();
+            if raw_summary_text.is_empty() {
+                return Err(CompactionError::Summary(if preserve_tail {
+                    "summarization produced empty response".into()
+                } else {
+                    "Failed to generate conversation summary - response did not contain valid text content".into()
                 }));
             }
-
-            // Strip <analysis>, rewrite <summary> → Summary:, then wrap in the
-            // continuation message — the TS `compact.ts` summary-request path.
-            // #58: `recent_messages_preserved` adds the "Recent messages are
-            // preserved verbatim." sentence when a tail rides after the summary.
             let summary_text = crate::prompt::get_compact_user_summary_message(
-                &result.final_text,
-                /* suppress_follow_up_questions */ true,
+                &raw_summary_text,
+                true,
                 cache_params
                     .transcript_path
                     .as_deref()
                     .and_then(std::path::Path::to_str),
-                recent_messages_preserved,
+                false,
             );
-
+            let summary_messages = vec![ConversationMessage::compact_summary(
+                protocol::MessageId::new(),
+                summary_text,
+            )];
             return Ok(CompactionResult {
                 pre_compact_token_count: pre,
-                post_compact_token_count: (summary_text.len() as u64) / 4,
+                post_compact_token_count: crate::grouping::estimate_tokens_for_range(
+                    &summary_messages,
+                ),
                 true_post_compact_token_count: result.usage.tokens.input,
                 compaction_usage: Some(result.usage),
                 summary_model,
-                summary_messages: vec![ConversationMessage::compact_summary(
-                    protocol::MessageId::new(),
-                    summary_text,
-                )],
-                // #58: the usage-zeroed verbatim tail, spliced after the summary
-                // by `apply_post_compact`. Empty ⇒ full-replacement path.
-                messages_to_preserve: preserved_tail,
+                summary_messages,
+                raw_summary_text,
+                messages_to_preserve: if preserve_tail {
+                    crate::partial::zero_preserved_tail_usage(messages[split_at..].to_vec())
+                } else {
+                    Vec::new()
+                },
             });
         }
 
-        // An explicit user command must never claim success without a model
-        // summary. Keep the deterministic fallback only for the legacy
-        // automatic-test path; every full/manual compact requires real wiring.
-        // Fallback: no runner is wired, so no model summary is possible.
-        // Emit a deterministic, clearly-labelled continuation message built
-        // through the SAME format_compact_summary / continuation pipeline so
-        // downstream history shape is consistent. NOTE: the production CLI
-        // always uses `with_forked_runner`, so this branch is never hit by a
-        // wired binary — it exists only for default/unwired construction
-        // (e.g. the orchestrator e2e test). The `[stub-summary attempt=…]`
-        // marker is intentionally gone.
-        let unwired_summary = format!(
-            "<summary>\n[autocompact fallback: no forked summarizer wired; {} messages elided]\n</summary>",
-            messages.len()
-        );
-        let summary_text = crate::prompt::get_compact_user_summary_message(
-            &unwired_summary,
-            /* suppress_follow_up_questions */ true,
-            /* transcript_path */ None,
-            recent_messages_preserved,
-        );
+        // Default construction remains a deterministic automatic-test seam.
+        // User-requested/manual and overflow rescue always require a real model.
+        let raw_summary_text = format!("<summary>\n[autocompact fallback: no forked summarizer wired; {} messages elided]\n</summary>", messages.len());
+        let summary_text =
+            crate::prompt::get_compact_user_summary_message(&raw_summary_text, true, None, false);
+        let summary_messages = vec![ConversationMessage::compact_summary(
+            protocol::MessageId::new(),
+            summary_text,
+        )];
+        let post = crate::grouping::estimate_tokens_for_range(&summary_messages);
         Ok(CompactionResult {
             pre_compact_token_count: pre,
-            post_compact_token_count: (summary_text.len() as u64) / 4,
-            true_post_compact_token_count: (summary_text.len() as u64) / 4,
+            post_compact_token_count: post,
+            true_post_compact_token_count: post,
             compaction_usage: Some(Usage::default()),
             summary_model: self.config.summary_model.clone(),
-            summary_messages: vec![ConversationMessage::compact_summary(
-                protocol::MessageId::new(),
-                summary_text,
-            )],
-            // #58: carry the preserved tail through the fallback too, so the
-            // history shape is consistent across both construction paths.
-            messages_to_preserve: preserved_tail,
+            summary_messages,
+            raw_summary_text,
+            messages_to_preserve: Vec::new(),
         })
     }
+}
+
+/// 2.1.261 rPn: sum from the summarize tail, falling back to half the
+/// remaining groups when the reported gap would consume nearly all of them.
+fn preserved_group_step(tokens: &[u64], gap: Option<u64>) -> usize {
+    let Some(gap) = gap else {
+        return 1;
+    };
+    let mut total = 0_u64;
+    let mut count = 0;
+    for &tokens in tokens.iter().rev() {
+        total = total.saturating_add(tokens);
+        count += 1;
+        if total >= gap {
+            break;
+        }
+    }
+    if count >= tokens.len().saturating_sub(1) {
+        (tokens.len() / 2).max(1)
+    } else {
+        count
+    }
+}
+
+fn is_media_compaction_error(error: &llm_client::LlmError) -> bool {
+    if matches!(error, llm_client::LlmError::RequestTooLarge) {
+        return true;
+    }
+    let llm_client::LlmError::InvalidRequest { message } = error else {
+        return false;
+    };
+    let message = message.to_lowercase();
+    // Oracle wSo/yIe media classifiers, including structured provider reason tags.
+    [
+        "request_too_large",
+        "image_block",
+        "document_block",
+        "media_budget",
+        "could not process image",
+        "image exceeds",
+        "image dimensions exceed",
+        "image does not match the provided media type",
+        "image cannot be empty",
+        "exceeds api limit",
+        "images exceed the api limit",
+        "unable to resize image",
+        "unable to compress image",
+        "image file is empty",
+        "could not process pdf",
+        "pdf pages",
+        "the pdf specified was not valid",
+        "the pdf specified is password protected",
+        "pdf cannot be empty",
+        "too much media",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 #[cfg(test)]
@@ -490,6 +565,8 @@ mod tests {
             fork_context_messages: prefix,
             transcript_path: None,
             generation: 0,
+            tools: Vec::new(),
+            effort: None,
         }
     }
 
@@ -517,8 +594,9 @@ mod tests {
     /// message count of every request, so the PTL retry tests can assert both the
     /// retry count and that each retry's prompt shrank.
     struct SeqMockClient {
-        texts: Mutex<VecDeque<String>>,
+        texts: Mutex<VecDeque<Result<String, llm_client::LlmError>>>,
         seen_lens: Mutex<Vec<usize>>,
+        seen: Mutex<Vec<SideQueryRequest>>,
     }
 
     #[async_trait]
@@ -528,7 +606,14 @@ mod tests {
             request: SideQueryRequest,
         ) -> Result<SideQueryResponse, SideQueryError> {
             self.seen_lens.lock().unwrap().push(request.messages.len());
-            let text = self.texts.lock().unwrap().pop_front().unwrap_or_default();
+            self.seen.lock().unwrap().push(request);
+            let text = self
+                .texts
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Ok(String::new()))
+                .map_err(SideQueryError::Api)?;
             Ok(SideQueryResponse {
                 text: Some(text),
                 structured: None,
@@ -547,8 +632,9 @@ mod tests {
         prefix: Vec<ConversationMessage>,
     ) -> (Autocompactor, Arc<SeqMockClient>) {
         let client = Arc::new(SeqMockClient {
-            texts: Mutex::new(texts.into()),
+            texts: Mutex::new(texts.into_iter().map(Ok).collect()),
             seen_lens: Mutex::new(Vec::new()),
+            seen: Mutex::new(Vec::new()),
         });
         let runner = Arc::new(
             ForkedAgentRunner::new()
@@ -728,7 +814,7 @@ mod tests {
             replayed, expected,
             "the summarizer sees only the summarize prefix, never the preserved tail"
         );
-        assert!(result.summary_messages[0]
+        assert!(!result.summary_messages[0]
             .text_content()
             .contains("Recent messages are preserved verbatim."));
     }
@@ -760,7 +846,7 @@ mod tests {
             .expect_err("an empty model response is not a compact summary");
         assert!(err
             .to_string()
-            .contains("Error during compaction: summarization produced empty response"));
+            .contains("summarization produced empty response"));
     }
 
     #[tokio::test]
@@ -935,6 +1021,186 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_compact_rejects_whitespace_summary() {
+        let history = vec![
+            user_msg("q1"),
+            assistant_text("a1"),
+            user_msg("q2"),
+            assistant_text("a2"),
+        ];
+        let (compactor, _) = wired("\u{feff} \n\t", history.clone()).await;
+        let error = compactor
+            .compact_manual_with_instructions(history, None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "summarization produced empty response");
+    }
+
+    #[tokio::test]
+    async fn manual_ptl_retry_grows_tail_without_dropping_the_oldest_prefix() {
+        let history = vec![
+            user_msg("oldest request"),
+            assistant_text("a1"),
+            user_msg("q2"),
+            assistant_text("a2"),
+            user_msg("q3"),
+            assistant_text("a3"),
+        ];
+        let (compactor, client) = wired_seq(
+            vec![
+                "Prompt is too long".into(),
+                "  <summary>kept</summary>\n".into(),
+            ],
+            history.clone(),
+        )
+        .await;
+        let result = compactor
+            .compact_manual_with_instructions(history, None)
+            .await
+            .unwrap();
+        let requests = client.seen.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_ne!(
+            requests[0].messages.last().unwrap().id(),
+            requests[1].messages.last().unwrap().id()
+        );
+        assert_eq!(requests[1].messages[0].text_content(), "oldest request");
+        assert_eq!(requests[1].messages[1].text_content(), "a1");
+        assert_eq!(
+            result
+                .messages_to_preserve
+                .iter()
+                .map(ConversationMessage::text_content)
+                .collect::<Vec<_>>(),
+            vec!["a2", "q3", "a3"]
+        );
+        assert_eq!(result.raw_summary_text, "<summary>kept</summary>");
+        assert!(!result.summary_messages[0]
+            .text_content()
+            .contains("Recent messages are preserved verbatim."));
+    }
+
+    #[tokio::test]
+    async fn reactive_gap_seeds_tail_before_first_summary_request() {
+        let history = vec![
+            user_msg("oldest"),
+            assistant_text("a1"),
+            user_msg("q2"),
+            assistant_text("a2"),
+            user_msg("q3"),
+            assistant_text("a3"),
+        ];
+        let (compactor, client) = wired("<summary>ok</summary>", history.clone()).await;
+        let result = compactor
+            .compact_reactive_with_instructions(history, None, Some(u64::MAX))
+            .await
+            .unwrap();
+        assert_eq!(result.messages_to_preserve.len(), 3);
+        let request = client.seen.lock().unwrap();
+        assert_eq!(request.as_ref().unwrap().messages.len(), 4);
+        assert_eq!(
+            request.as_ref().unwrap().messages[0].text_content(),
+            "oldest"
+        );
+    }
+
+    #[tokio::test]
+    async fn media_recovery_retries_same_prefix_once_with_stripped_images() {
+        let image = ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Image {
+                source: protocol::ImageSource::Url {
+                    url: "https://example.invalid/image.png".into(),
+                },
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        let history = vec![
+            user_msg("q1"),
+            assistant_text("a1"),
+            image.clone(),
+            assistant_text("a2"),
+        ];
+        let (compactor, client) = wired_seq(Vec::new(), history.clone()).await;
+        *client.texts.lock().unwrap() = VecDeque::from(vec![
+            Err(llm_client::LlmError::RequestTooLarge),
+            Ok("<summary>ok</summary>".into()),
+        ]);
+        let result = compactor
+            .compact_manual_with_instructions(history, None)
+            .await
+            .unwrap();
+        let requests = client.seen.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].messages[2], image);
+        assert_eq!(requests[1].messages[2].text_content(), "[image]");
+        assert_eq!(requests[0].messages[0], requests[1].messages[0]);
+        assert_eq!(result.messages_to_preserve[0].text_content(), "a2");
+    }
+
+    #[tokio::test]
+    async fn repeated_media_failure_is_terminal_without_a_third_request() {
+        let history = vec![
+            user_msg("q1"),
+            assistant_text("a1"),
+            user_msg("q2"),
+            assistant_text("a2"),
+        ];
+        let (compactor, client) = wired_seq(Vec::new(), history.clone()).await;
+        *client.texts.lock().unwrap() =
+            VecDeque::from(vec![Err(llm_client::LlmError::RequestTooLarge); 2]);
+        let error = compactor
+            .compact_manual_with_instructions(history, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CompactionError::MediaUnstrippable));
+        assert_eq!(client.seen.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn typed_overflow_uses_the_same_preserved_tail_ladder() {
+        let history = vec![
+            user_msg("oldest"),
+            assistant_text("a1"),
+            user_msg("q2"),
+            assistant_text("a2"),
+            user_msg("q3"),
+            assistant_text("a3"),
+        ];
+        let (compactor, client) = wired_seq(Vec::new(), history.clone()).await;
+        *client.texts.lock().unwrap() = VecDeque::from(vec![
+            Err(llm_client::LlmError::ContextOverflow { token_gap: 1 }),
+            Ok("<summary>ok</summary>".into()),
+        ]);
+        let result = compactor
+            .compact_manual_with_instructions(history, None)
+            .await
+            .unwrap();
+        assert_eq!(result.messages_to_preserve.len(), 3);
+        assert_eq!(
+            client.seen.lock().unwrap()[1].messages[0].text_content(),
+            "oldest"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_auto_compact_summarizes_all_rounds() {
+        let history = vec![
+            user_msg("q1"),
+            assistant_text("a1"),
+            user_msg("q2"),
+            assistant_text("a2"),
+        ];
+        let (compactor, client) = wired("<summary>all</summary>", history.clone()).await;
+        let result = compactor.compact(history.clone()).await.unwrap();
+        let request = client.seen.lock().unwrap();
+        assert_eq!(request.as_ref().unwrap().messages[..history.len()], history);
+        assert!(result.messages_to_preserve.is_empty());
+    }
+
+    #[tokio::test]
     async fn compact_preserves_recent_tail_for_long_conversation() {
         // A multi-group conversation: [u(q1), aA, u(q2), aB] → three API-round
         // groups (boundary before each new assistant id). `DRn`/select_preserved_tail
@@ -949,7 +1215,10 @@ mod tests {
         ];
         let (compactor, _client) = wired("<summary>S</summary>", prefix.clone()).await;
 
-        let result = compactor.compact(prefix).await.expect("wired compact");
+        let result = compactor
+            .compact_manual_with_instructions(prefix, None)
+            .await
+            .expect("wired compact");
 
         // The preserved tail is non-empty (the last API round).
         assert!(
@@ -961,8 +1230,8 @@ mod tests {
         // The continuation message carries the preserved-tail sentence.
         let summary_text = result.summary_messages[0].text_content();
         assert!(
-            summary_text.contains("Recent messages are preserved verbatim."),
-            "preserved-tail summary must announce the verbatim tail: {summary_text}"
+            !summary_text.contains("Recent messages are preserved verbatim."),
+            "261 preserves the tail without adding the legacy sentence: {summary_text}"
         );
         // The preserved tail is the final assistant reply, carried verbatim.
         let tail_texts: Vec<String> = result
@@ -988,7 +1257,10 @@ mod tests {
         ];
         let (compactor, client) = wired("<summary>S</summary>", prefix.clone()).await;
 
-        let result = compactor.compact(prefix.clone()).await.expect("compact");
+        let result = compactor
+            .compact_manual_with_instructions(prefix.clone(), None)
+            .await
+            .expect("compact");
         let keep = result.messages_to_preserve.len();
         assert!(keep > 0, "precondition: a tail was preserved");
 

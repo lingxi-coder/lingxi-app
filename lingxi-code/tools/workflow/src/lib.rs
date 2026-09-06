@@ -54,11 +54,92 @@ const WORKFLOW_EXTENSIONS: [&str; 4] = [".js", ".mjs", ".ts", ""];
 
 /// The long-form tool description (claude-code v2.1.245 `prompt`), reproduced
 /// byte-for-byte. A trailing newline (should an editor add one to the data file)
-/// is stripped so the API description matches the binary exactly.
-static DESCRIPTION: Lazy<String> = Lazy::new(|| {
+/// is stripped so the ORACLE text matches the binary exactly.
+///
+/// ⛔ This is the oracle, not the shipped text. Never edit
+/// `workflow_description.txt` to change what the model reads — register the
+/// change in `workflow_description_divergences.json` instead, so it carries an
+/// id and a reason. [`DESCRIPTION`] is what actually ships.
+static ORACLE_DESCRIPTION: Lazy<String> = Lazy::new(|| {
     include_str!("workflow_description.txt")
         .trim_end_matches('\n')
         .to_string()
+});
+
+/// One named, reasoned local edit to the oracle description.
+///
+/// The `anchor` is an exact oracle substring that must occur EXACTLY ONCE;
+/// `text` is inserted immediately after it. Anchoring rather than offsetting is
+/// deliberate: when an oracle refresh reworders or removes the anchored passage,
+/// composition fails by divergence id instead of quietly landing the insert in
+/// the wrong paragraph.
+#[derive(Debug, serde::Deserialize)]
+struct DescriptionDivergence {
+    id: String,
+    /// The finding this divergence answers, for the audit trail.
+    #[allow(dead_code)]
+    finding: String,
+    reason: String,
+    anchor: String,
+    text: String,
+}
+
+/// The register of local divergences. See the `_doc` block in the data file for
+/// why the old single-number lock was replaced.
+static DESCRIPTION_DIVERGENCES: Lazy<Vec<DescriptionDivergence>> = Lazy::new(|| {
+    #[derive(serde::Deserialize)]
+    struct Register {
+        divergences: Vec<DescriptionDivergence>,
+    }
+    let register: Register =
+        serde_json::from_str(include_str!("workflow_description_divergences.json"))
+            .expect("workflow_description_divergences.json is valid JSON");
+    register.divergences
+});
+
+/// Apply the register to the oracle text.
+///
+/// Returns `Err` naming the divergence when its anchor is missing or ambiguous
+/// — the loud failure that a byte-count lock could not give, because a count
+/// cannot distinguish an intentional edit from accidental drift.
+fn compose_description(
+    oracle: &str,
+    divergences: &[DescriptionDivergence],
+) -> Result<String, String> {
+    let mut composed = oracle.to_string();
+    for divergence in divergences {
+        match composed.matches(divergence.anchor.as_str()).count() {
+            1 => {}
+            0 => {
+                return Err(format!(
+                    "divergence `{}`: its anchor is no longer present in the Workflow tool \
+                     description. The oracle passage it attaches to was reworded or removed, so \
+                     the insert has nowhere to go. Re-anchor it against the current oracle text \
+                     (or retire the divergence) — do not delete this check.",
+                    divergence.id
+                ));
+            }
+            n => {
+                return Err(format!(
+                    "divergence `{}`: its anchor occurs {n} times, so where the insert lands is \
+                     ambiguous. Lengthen the anchor until it is unique.",
+                    divergence.id
+                ));
+            }
+        }
+        let at = composed
+            .find(divergence.anchor.as_str())
+            .expect("occurrence count checked above")
+            + divergence.anchor.len();
+        composed.insert_str(at, &divergence.text);
+    }
+    Ok(composed)
+}
+
+/// The shipped description: the oracle plus every registered divergence.
+static DESCRIPTION: Lazy<String> = Lazy::new(|| {
+    compose_description(&ORACLE_DESCRIPTION, &DESCRIPTION_DIVERGENCES)
+        .unwrap_or_else(|error| panic!("Workflow tool description: {error}"))
 });
 
 /// The input schema (claude-code v2.1.245 `inputSchema`), reproduced from the
@@ -320,15 +401,16 @@ pub fn read_script_path_after_permission(
 /// `scriptPath` over `name` over `script` (a named workflow must resolve before
 /// an optional inline body can override its source). `read` loads a file's contents
 /// (the host provides real I/O); `name` resolution looks first under the
-/// immutable built-ins, then the project saved-workflow directory
-/// (`.lingxi/workflows/<name>`), then the user config directory
-/// (`$LINGXI_CONFIG_DIR/workflows/<name>` or `~/.lingxi/workflows/<name>`) with
-/// common script extensions, then — when a plugin-workflow registry is
-/// wired (§14) — a plugin's declared/auto-scanned workflow by its namespaced
-/// name. Built-ins win before filesystem lookup so a project checkout cannot
-/// shadow bundled workflow code; the plugin registry is checked LAST so a
-/// project/user file always wins a name collision (oracle precedence
-/// project/user > plugin > built-in — see `workflow::PluginWorkflowRegistry`).
+/// project saved-workflow directory (`.lingxi/workflows/<name>`), then the
+/// user config directory (`$LINGXI_CONFIG_DIR/workflows/<name>` or
+/// `~/.lingxi/workflows/<name>`) with common script extensions, then a
+/// plugin's declared/auto-scanned workflow by its namespaced name (when a
+/// plugin-workflow registry is passed), and only last the immutable
+/// built-ins. A project/user file always wins a name collision; the plugin
+/// registry is checked before built-ins so a plugin can supply a workflow
+/// the built-in table does not, but a saved project/user file still shadows
+/// both (oracle precedence project/user > plugin > built-in — see
+/// `workflow::PluginWorkflowRegistry`).
 pub fn resolve_script_at<R>(
     cwd: &Path,
     spec: &WorkflowLaunchSpec,
@@ -1873,51 +1955,219 @@ mod tests {
         assert_eq!(got, "FROM_USER");
     }
 
+    /// The ORACLE half of the old `description_matches_the_binary_byte_for_byte`.
+    /// Unchanged in substance: `workflow_description.txt` is still pinned to the
+    /// binary, byte for byte. What moved out is the claim that the SHIPPED text
+    /// equals it — that is now [`the_shipped_description_is_the_oracle_plus_the_register`].
     #[test]
-    fn description_matches_the_binary_byte_for_byte() {
-        // v2.1.245 runtime markers of the Workflow tool description, PLUS one
-        // accepted LingXi-only divergence: a `fusion(prompt, opts?)`
-        // paragraph (Agent Fusion — commit f5f27c978 — has no claude-code
-        // 2.1.245 counterpart, so it cannot be byte-locked against the
-        // binary; 20741 = 19200 (the 2.1.245 byte count) + the fusion()
-        // bullet's length). A drift in EITHER direction still fails this
-        // test — grep the diff against `workflow_description.txt` rather
-        // than bumping the number blind.
-        //
-        // WHY THE NUMBER MOVED (round 7, findings [3]/[7]): 20667 -> 20741 is
-        // exactly the 74 bytes of the inline constraint now documented on the
-        // `dimensions?: string[]` option —
-        // `/* lowercase snake_case, at most 12, never a provider/model/panel
-        // name */`. Those are `platform_api::normalize_dimensions`' real rules,
-        // and an undocumented `dimensions: ['Coverage']` is the exact mistake
-        // both findings cite: it is rejected, and until this round the
-        // rejection did not even reach the script as the documented
-        // `WorkflowFusionOptionError`. Nothing else in the description moved.
+    fn oracle_description_matches_the_binary_byte_for_byte() {
+        // v2.1.245 runtime markers of the Workflow tool description.
+        assert_eq!(
+            ORACLE_DESCRIPTION.len(),
+            19200,
+            "oracle description byte length drifted from Claude Code 2.1.245"
+        );
+        assert!(ORACLE_DESCRIPTION.starts_with(
+            "Execute a workflow script that orchestrates multiple subagents deterministically."
+        ));
+        assert!(ORACLE_DESCRIPTION.ends_with("hand-author a continuation script."));
+        assert!(ORACLE_DESCRIPTION.contains("Use the Agent tool (if available)"));
+        assert!(ORACLE_DESCRIPTION.contains("min(16, available CPUs - 2)"));
+        assert!(ORACLE_DESCRIPTION.contains("e.g. 'general-purpose', 'code-reviewer'"));
+        assert!(ORACLE_DESCRIPTION.contains("Before diagnosing why a completed workflow returned an empty or unexpected result, Read <transcriptDir>/journal.jsonl"));
+        // The ${r1e} interpolation resolved to the ▸ group marker.
+        assert!(ORACLE_DESCRIPTION.contains("\"▸ name\" group in /workflows"));
+        // No leftover raw escape sequences.
+        assert!(!ORACLE_DESCRIPTION.contains("\\u2014"));
+    }
+
+    /// Every entry in the register carries the two things a bare byte count
+    /// could never carry: a name and a reason. An anchor that is missing or
+    /// ambiguous is a defect in the register, not a licence to skip the entry.
+    #[test]
+    fn every_description_divergence_is_named_reasoned_and_uniquely_anchored() {
+        assert!(
+            !DESCRIPTION_DIVERGENCES.is_empty(),
+            "the register is empty — if every divergence was retired, restore the plain \
+             byte-for-byte lock rather than leaving this machinery answering nothing"
+        );
+        let mut seen: Vec<&str> = Vec::new();
+        for divergence in DESCRIPTION_DIVERGENCES.iter() {
+            assert!(!divergence.id.trim().is_empty(), "a divergence has no id");
+            assert!(
+                !seen.contains(&divergence.id.as_str()),
+                "duplicate divergence id `{}`",
+                divergence.id
+            );
+            seen.push(&divergence.id);
+            assert!(
+                divergence.reason.trim().len() > 40,
+                "divergence `{}` has no real reason. An unexplained divergence is exactly what \
+                 this register exists to prevent — say what the oracle text gets wrong here.",
+                divergence.id
+            );
+            assert!(
+                !divergence.text.trim().is_empty(),
+                "divergence `{}` inserts nothing",
+                divergence.id
+            );
+            assert_eq!(
+                ORACLE_DESCRIPTION
+                    .matches(divergence.anchor.as_str())
+                    .count(),
+                1,
+                "divergence `{}`: its anchor must occur exactly once in the ORACLE text, so an \
+                 oracle refresh that moves the anchored passage fails here by name",
+                divergence.id
+            );
+        }
+    }
+
+    /// The replacement for the old single number. It still catches an
+    /// unregistered edit to either file — the length has to be the oracle plus
+    /// exactly what the register declares — but it no longer conflates a
+    /// deliberate divergence with accidental drift.
+    #[test]
+    fn the_shipped_description_is_the_oracle_plus_the_register() {
+        let registered: usize = DESCRIPTION_DIVERGENCES.iter().map(|d| d.text.len()).sum();
         assert_eq!(
             DESCRIPTION.len(),
-            20741,
-            "description byte length drifted from Claude Code 2.1.245 + the fusion() addition"
+            ORACLE_DESCRIPTION.len() + registered,
+            "shipped description length is not the oracle plus the registered divergences: \
+             either the oracle drifted, or something was edited into one of the two files \
+             without an entry in workflow_description_divergences.json"
         );
+        for divergence in DESCRIPTION_DIVERGENCES.iter() {
+            assert_eq!(
+                DESCRIPTION.matches(divergence.text.as_str()).count(),
+                1,
+                "divergence `{}` is registered but does not appear exactly once in the shipped \
+                 description",
+                divergence.id
+            );
+            assert!(
+                !ORACLE_DESCRIPTION.contains(divergence.text.as_str()),
+                "divergence `{}` is already in the oracle — retire the entry instead of \
+                 inserting a duplicate",
+                divergence.id
+            );
+        }
+        // The shipped text is still the oracle at both ends: every registered
+        // insert is interior, so a divergence cannot silently re-open the tool
+        // description or change how it closes.
         assert!(DESCRIPTION.starts_with(
             "Execute a workflow script that orchestrates multiple subagents deterministically."
         ));
         assert!(DESCRIPTION.ends_with("hand-author a continuation script."));
-        assert!(DESCRIPTION.contains("Use the Agent tool (if available)"));
-        assert!(DESCRIPTION.contains("min(16, available CPUs - 2)"));
-        assert!(DESCRIPTION.contains("e.g. 'general-purpose', 'code-reviewer'"));
-        assert!(DESCRIPTION.contains("Before diagnosing why a completed workflow returned an empty or unexpected result, Read <transcriptDir>/journal.jsonl"));
-        // The ${r1e} interpolation resolved to the ▸ group marker.
-        assert!(DESCRIPTION.contains("\"▸ name\" group in /workflows"));
-        // No leftover raw escape sequences.
-        assert!(!DESCRIPTION.contains("\\u2014"));
-        // The LingXi-only fusion() addition — see the length comment above.
-        assert!(DESCRIPTION.contains("fusion(prompt: string, opts?:"));
-        assert!(DESCRIPTION.contains("WorkflowFusionOptionError"));
-        // The documented `dimensions` rule (see the byte-count note above):
-        // pin the prose, not just the length, so a same-length edit that drops
-        // it cannot slip through.
-        assert!(DESCRIPTION
-            .contains("lowercase snake_case, at most 12, never a provider/model/panel name"));
+    }
+
+    /// The composition must be able to go RED, and to say WHICH entry failed.
+    /// Without this the register is a mechanism nobody has watched fail.
+    #[test]
+    fn a_divergence_whose_anchor_drifted_fails_by_name() {
+        let drifted = vec![DescriptionDivergence {
+            id: "planted-anchor-drift".into(),
+            finding: "self-test".into(),
+            reason: "planted by the test to prove composition can fail loudly".into(),
+            anchor: "this sentence is not in the Workflow tool description".into(),
+            text: "unreachable".into(),
+        }];
+        let error = compose_description(&ORACLE_DESCRIPTION, &drifted)
+            .expect_err("a missing anchor must not compose silently");
+        assert!(
+            error.contains("planted-anchor-drift"),
+            "the failure must NAME the divergence; got: {error}"
+        );
+
+        let ambiguous = vec![DescriptionDivergence {
+            id: "planted-ambiguous-anchor".into(),
+            finding: "self-test".into(),
+            reason: "planted by the test to prove an ambiguous anchor is refused".into(),
+            anchor: "the".into(),
+            text: "unreachable".into(),
+        }];
+        let error = compose_description(&ORACLE_DESCRIPTION, &ambiguous)
+            .expect_err("an anchor with many matches must not compose");
+        assert!(
+            error.contains("planted-ambiguous-anchor") && error.contains("ambiguous"),
+            "the failure must name the divergence and say why; got: {error}"
+        );
+    }
+
+    /// The divergence this register was built for: without it the tool
+    /// description forbids the local-app create flow's only hand-off.
+    #[test]
+    fn the_shipped_description_permits_the_local_app_create_handoff() {
+        assert!(
+            !ORACLE_DESCRIPTION.contains("lingxi-local-app:create-local-app"),
+            "the oracle must stay free of product-specific carve-outs; that is what the \
+             register is for"
+        );
+        assert!(
+            DESCRIPTION.contains("lingxi-local-app:create-local-app"),
+            "the create flow has the MODEL self-invoke the skill, which none of the oracle's \
+             five opt-in clauses covers, so the shipped description must add the sixth"
+        );
+        // It must land inside the opt-in list, not after the closing "do NOT
+        // call this tool" sentence, or the model reads it as unrelated prose.
+        let opt_in = DESCRIPTION
+            .find("Explicit opt-in means one of:")
+            .expect("the opt-in list must exist");
+        let closing = DESCRIPTION
+            .find("For any other task")
+            .expect("the closing prohibition must exist");
+        let clause = DESCRIPTION
+            .find("lingxi-local-app:create-local-app")
+            .expect("checked above");
+        assert!(
+            opt_in < clause && clause < closing,
+            "the added clause must sit inside the opt-in list ({opt_in}..{closing}), got {clause}"
+        );
+    }
+
+    /// The second registered divergence: the `fusion()` script hook. Agent
+    /// Fusion has no claude-code counterpart, so the oracle cannot document a
+    /// hook the shipped runtime provides — a script that never learns `fusion()`
+    /// exists cannot call it. Asserted on both sides so the bullet can neither
+    /// vanish from the shipped text nor creep into the oracle.
+    #[test]
+    fn the_shipped_description_documents_the_fusion_hook() {
+        assert!(
+            !ORACLE_DESCRIPTION.contains("fusion(prompt: string, opts?:"),
+            "the oracle must stay free of LingXi-only hooks; that is what the register is for"
+        );
+        assert!(
+            DESCRIPTION.contains("fusion(prompt: string, opts?:"),
+            "the shipped description must document the fusion() script hook"
+        );
+        assert!(
+            DESCRIPTION.contains("WorkflowFusionOptionError"),
+            "the catchable rejection names must be documented, or a script cannot handle them"
+        );
+        // `platform_api::normalize_dimensions`' real rules. Pinned as prose, not
+        // just as length: an undocumented `dimensions: ['Coverage']` is rejected,
+        // and until it was written down the rejection did not even reach the
+        // script as a named error.
+        assert!(
+            DESCRIPTION
+                .contains("lowercase snake_case, at most 12, never a provider/model/panel name"),
+            "the dimensions rule must stay documented on the option it constrains"
+        );
+        // It belongs in the script-body hook list, next to the other hooks a
+        // script can call — not in the prose after it.
+        let hooks = DESCRIPTION
+            .find("Script body hooks:")
+            .expect("the hook list must exist");
+        let bullet = DESCRIPTION
+            .find("- fusion(prompt: string")
+            .expect("checked above");
+        let after_hooks = DESCRIPTION
+            .find("Subagents are told their final text IS the return value")
+            .expect("the paragraph after the hook list must exist");
+        assert!(
+            hooks < bullet && bullet < after_hooks,
+            "the fusion() bullet must sit inside the hook list ({hooks}..{after_hooks}), got {bullet}"
+        );
     }
 
     /// Drift gate for the `fusion()` bullet's documented resolved-object shape.

@@ -104,6 +104,11 @@ impl AppState {
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
                 conversation_id,
+                // The origin scope is a create-path fact the constructor's
+                // callers (seed/test helpers) do not have. `AppService`'s
+                // create path fills it in right after construction, the same
+                // way it does for `workflow_model` and `scaffolded`.
+                origin_cwd: None,
                 workspace_rel,
                 // Every direct caller of this constructor (seed/test
                 // helpers plus the service's Scaffolded-mode path) builds an

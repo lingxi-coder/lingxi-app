@@ -25,6 +25,7 @@
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -38,6 +39,7 @@ struct InvokedSkillEntry {
     content: String,
     content_exact_utf16: Option<Vec<u16>>,
     invoked_at_ms: i64,
+    insertion_order: u64,
     session_id: Option<String>,
     agent_id: Option<String>,
 }
@@ -65,6 +67,12 @@ impl<'a> InvokedSkillScopeRef<'a> {
 /// The process-global registry (`Pt.invokedSkills`), keyed `"{agentId}:{name}"`.
 static REGISTRY: Lazy<Mutex<HashMap<String, InvokedSkillEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+// Native v2.1.261 `le.record` uses Map.set (byte 156638452), retaining the
+// original position when an existing key is overwritten. `JLn` preserves that
+// order before `bXo` stably sorts by invokedAt, so same-millisecond invocations
+// must not inherit HashMap's randomized iteration order.
+static NEXT_INSERTION_ORDER: AtomicU64 = AtomicU64::new(0);
 
 fn lock() -> std::sync::MutexGuard<'static, HashMap<String, InvokedSkillEntry>> {
     REGISTRY
@@ -122,16 +130,22 @@ pub fn register_scoped(
     scope: InvokedSkillScopeRef<'_>,
 ) {
     let key = registry_key(scope, skill_name);
+    let mut registry = lock();
+    let insertion_order = registry.get(&key).map_or_else(
+        || NEXT_INSERTION_ORDER.fetch_add(1, Ordering::Relaxed),
+        |entry| entry.insertion_order,
+    );
     let entry = InvokedSkillEntry {
         skill_name: skill_name.to_string(),
         skill_path: skill_path.to_path_buf(),
         content: content.to_string(),
         content_exact_utf16: None,
         invoked_at_ms: now_ms(),
+        insertion_order,
         session_id: scope.session_id.map(str::to_string),
         agent_id: scope.agent_id.map(str::to_string),
     };
-    lock().insert(key, entry);
+    registry.insert(key, entry);
 }
 
 /// `kGo(agentId)` — the registry rows whose `agentId` matches, projected into
@@ -146,11 +160,15 @@ pub fn filter_for_agent(agent_id: Option<&str>) -> Vec<SkillRestoreCandidate> {
 /// The registry rows whose session + agent scope matches exactly.
 #[must_use]
 pub fn filter_for_scope(scope: InvokedSkillScopeRef<'_>) -> Vec<SkillRestoreCandidate> {
-    lock()
+    let registry = lock();
+    let mut rows = registry
         .iter()
         .filter(|(_, e)| {
             e.session_id.as_deref() == scope.session_id && e.agent_id.as_deref() == scope.agent_id
         })
+        .collect::<Vec<_>>();
+    rows.sort_unstable_by_key(|(_, entry)| entry.insertion_order);
+    rows.into_iter()
         .map(|(key, e)| SkillRestoreCandidate {
             key: key.clone(),
             name: e.skill_name.clone(),
@@ -227,7 +245,9 @@ pub fn write_back(key: &str, content: &str, content_exact_utf16: Option<&[u16]>)
 /// binary surface.
 #[doc(hidden)]
 pub fn reset_for_test() {
-    lock().clear();
+    let mut registry = lock();
+    registry.clear();
+    NEXT_INSERTION_ORDER.store(0, Ordering::Relaxed);
 }
 
 /// Test-only: the stored content for `key`, or `None` if absent. Lets tests
@@ -293,6 +313,48 @@ mod tests {
         let agent = filter_for_agent(Some("agent:x"));
         assert_eq!(agent.len(), 1);
         assert_eq!(agent[0].key, "agent:x:build");
+    }
+
+    #[test]
+    fn equal_timestamps_restore_in_registry_insertion_order() {
+        let _g = guard();
+        let expected = (0..12).map(|i| format!("skill-{i}")).collect::<Vec<_>>();
+        for name in &expected {
+            register(name, Path::new("/s"), "body", None);
+        }
+        // Force the millisecond collision that the native Map + stable sort
+        // handles without relying on wall-clock scheduling in this test.
+        for entry in lock().values_mut() {
+            entry.invoked_at_ms = 42;
+        }
+        let restored = restore_post_compact_skills(filter_for_agent(None), &[]);
+        assert_eq!(
+            restored.iter().map(|skill| &skill.name).collect::<Vec<_>>(),
+            expected.iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn overwriting_a_skill_preserves_its_map_position_on_timestamp_ties() {
+        let _g = guard();
+        for name in ["first", "second", "third"] {
+            register(name, Path::new("/s"), "body", None);
+        }
+        register("first", Path::new("/updated"), "updated", None);
+        write_back(":second", "persisted", None);
+        for entry in lock().values_mut() {
+            entry.invoked_at_ms = 42;
+        }
+        let restored = restore_post_compact_skills(filter_for_agent(None), &[]);
+        assert_eq!(
+            restored
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
+        assert_eq!(restored[0].content, "updated");
+        assert_eq!(restored[1].content, "persisted");
     }
 
     #[test]

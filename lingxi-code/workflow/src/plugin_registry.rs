@@ -33,15 +33,6 @@
 //! name does, so the two orders cannot disagree on any reachable input
 //! regardless.
 //!
-//! ⚠️ AUD-WF-04, known-unfixed: `resolve_script_at`'s OWN doc comment
-//! (`tools/workflow/src/lib.rs`, above the `pub fn`) still describes the old,
-//! inverted order — "looks first under the immutable built-ins", "Built-ins
-//! win before filesystem lookup", "the plugin registry is checked LAST". Its
-//! body has not done that for some time; the paragraph above matches the code.
-//! That file is outside this work package, so when the two disagree, believe
-//! this one and the body, and fix the sibling doc from the package that owns
-//! `tools/workflow`.
-//!
 //! Namespacing likewise means a project/user collision only happens if such a
 //! file is itself literally named `<plugin>:<name>.js`.
 //!

@@ -856,25 +856,127 @@ mod tests {
         }
     }
 
-    /// The lease allow-list is a THIRD hand-written copy of a subset of these
-    /// names. A rename that misses it silently drops the build loop's lease
-    /// authorization.
+    /// r2-tests-honesty-012: the REVERSE of the guard above, which was
+    /// forward-only. `every_tool_has_a_permission_default_row` catches a tool
+    /// that lost its row; nothing caught a ROW that outlived its tool. An
+    /// orphaned `LocalApp*` row is not cosmetic — `is_divergence_tool` keys
+    /// the Plan-mode auto-allow carve-out off the `LocalApp` prefix, so a
+    /// stale `AllowByDefault` row keeps granting a name nobody audits.
+    ///
+    /// THREE guards stand on `defaults_per_tool`'s table, not one:
+    /// `init_defaults`'s `debug_assert_eq!(m.len(), 79)`, the test
+    /// `table_splits_into_the_parity_set_and_the_mobile_divergence`'s
+    /// `oracle == 44` / `divergence == 35`, and the test
+    /// `the_counts_in_this_module_doc_are_the_counts_in_the_table`'s four
+    /// hand-bumped `assert_eq!`s over `is_divergence_tool` x `PromptDefault`
+    /// -- 23 oracle-deny, 21 oracle-allow, 14 divergence-allow, 21
+    /// divergence-deny. None of the three catches this. All seven numbers
+    /// count `TOOL_DEFAULTS` alone, so a tool DELETED from `LOCAL_APP_TOOLS`
+    /// with its row left behind moves not one of them; they fail by naming a
+    /// NUMBER rather than the offending row; a removal paired with an addition
+    /// inside one bucket cancels out; and they live in a crate that cannot see
+    /// `LOCAL_APP_TOOLS` at all. `permission::tool_default_names` was added
+    /// for this test.
     #[test]
-    fn the_lease_allowlist_names_are_real_tools() {
-        let known: std::collections::BTreeSet<&str> =
+    fn every_local_app_permission_row_names_a_real_tool() {
+        let declared: std::collections::BTreeSet<&str> =
             LOCAL_APP_TOOLS.iter().map(|&(name, _, _)| name).collect();
-        for name in [
+        let rows: Vec<&str> = permission::tool_default_names()
+            .into_iter()
+            .filter(|name| name.starts_with("LocalApp"))
+            .collect();
+        // Vacuity guard FIRST: prove the needle can hit. A
+        // `tool_default_names` that returned nothing would make the orphan
+        // check below pass for the wrong reason.
+        assert!(
+            rows.len() >= LOCAL_APP_TOOLS.len(),
+            "vacuity: permission::tool_default_names returned only {} LocalApp row(s) for {} \
+             declared tools, so the orphan check below would be comparing against nothing; \
+             rows={rows:?}",
+            rows.len(),
+            LOCAL_APP_TOOLS.len()
+        );
+        let orphans: Vec<&str> = rows
+            .iter()
+            .copied()
+            .filter(|name| !declared.contains(name))
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "permission::defaults_per_tool has LocalApp row(s) {orphans:?} naming no tool in \
+             LOCAL_APP_TOOLS -- a renamed or deleted tool left its permission row behind, and \
+             `is_divergence_tool` still hands that name the Plan-mode carve-out"
+        );
+        assert_eq!(
+            rows.len(),
+            LOCAL_APP_TOOLS.len(),
+            "with no orphans, the two tables must be the same size; rows={rows:?}, \
+             declared={declared:?}"
+        );
+    }
+
+    /// This does not retype the lease allow-list: it drives the PRODUCTION
+    /// entry point (`permission::WorkspacePermissionLeaseRegistry::
+    /// allows_for_token`, which wraps the private `allows_for_lease` `matches!`
+    /// arm) with a real lease over every declared `LocalApp*` tool name and
+    /// asserts the resulting true/false split against the known five-name set.
+    /// A prior version of this test only asserted the five names are members
+    /// of `LOCAL_APP_TOOLS` — that compared a test constant to a test
+    /// constant and would stay green even if the production arm were
+    /// narrowed to zero names. This would fail on that mutation: every
+    /// `allows_for_token` call would return `false` and the loop below would
+    /// panic on the first expected-true name.
+    #[test]
+    fn the_lease_allowlist_matches_the_production_arm() {
+        const LEASE_AUTHORIZED: &[&str] = &[
             "LocalAppBuild",
             "LocalAppLogs",
             "LocalAppRuntime",
             "LocalAppManifest",
             "LocalAppQueryData",
-        ] {
+        ];
+        let known: std::collections::BTreeSet<&str> =
+            LOCAL_APP_TOOLS.iter().map(|&(name, _, _)| name).collect();
+        for name in LEASE_AUTHORIZED {
             assert!(
                 known.contains(name),
                 "lease allow-list names unknown tool {name}"
             );
         }
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let app_id = "app-lease-probe";
+        let workspace = root.path().join("apps").join(app_id).join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let registry = permission::WorkspacePermissionLeaseRegistry::new();
+        let lease = registry
+            .begin_local_app(app_id, &workspace)
+            .expect("canonical local-app layout must grant a lease");
+        let token = Some(lease.token());
+        // The `LocalApp*` branch of `allows_for_lease` returns before
+        // consulting `roots`, so a dummy value proves nothing was skipped.
+        let roots = permission::FsRoots {
+            cwd: root.path().to_path_buf(),
+            home: None,
+            lingxi_home: root.path().to_path_buf(),
+        };
+        let input = serde_json::json!({"app_id": app_id});
+
+        for &(name, _, _) in LOCAL_APP_TOOLS {
+            let expected = LEASE_AUTHORIZED.contains(&name);
+            let actual = registry.allows_for_token(token, name, &input, &roots);
+            assert_eq!(
+                actual, expected,
+                "{name}: production lease allow-list disagrees with the known set"
+            );
+        }
+        // Vacuity guard: the mismatched app_id path of the same production
+        // call must still refuse, proving `input` above was actually load-bearing.
+        let wrong_app_input = serde_json::json!({"app_id": "someone-elses-app"});
+        assert!(
+            !registry.allows_for_token(token, "LocalAppBuild", &wrong_app_input, &roots),
+            "a mismatched app_id must never be authorized by this lease"
+        );
     }
 
     /// These are builtins, not MCP. Reporting `is_mcp` would put them back on

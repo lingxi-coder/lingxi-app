@@ -1,6 +1,8 @@
 package com.lingxi.code.localapps
 
+import com.lingxi.code.R
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -145,6 +147,128 @@ class LocalAppsContractTest {
                 mcpVerification = null,
                 uiVerification = null,
             ),
+        )
+    }
+
+    /**
+     * The engine's verification `summary` is a fixed English sentence and
+     * `code` is the localization key for it. The engine emits FIVE codes today
+     * (the five `LocalAppVerificationSummaryDto` constructions in
+     * `local_apps_host.rs`: :1994 `needs_setup`, :2025 `active_state_corrupt`,
+     * :2072 `needs_revalidation`, :2078 ABSENCE with status Passed, :2123
+     * `verification_unavailable`). FOUR of them are localized here; the fifth,
+     * `active_state_corrupt`, deliberately has no client key — the engine's own
+     * comment at local_apps_host.rs:2031-2036 says so — and is covered by the
+     * fallback test below, the way iOS covers it in LocalAppsStoreTests.swift.
+     *
+     * The distinctness assertion is a vacuity guard: four arms all resolving to
+     * the same id (or to 0) would satisfy every equality below individually.
+     */
+    @Test
+    fun `every verification code maps to its own localized summary`() {
+        val ids = listOf(
+            R.string.local_apps_verification_summary_needs_setup,
+            R.string.local_apps_verification_summary_needs_revalidation,
+            R.string.local_apps_verification_summary_verification_unavailable,
+            R.string.local_apps_verification_summary_passed,
+        )
+        assertEquals("vacuity guard: the four keys must be four distinct ids", 4, ids.toSet().size)
+
+        assertEquals(
+            R.string.local_apps_verification_summary_needs_setup,
+            localAppVerificationSummaryRes(LocalAppVerificationStatus.Unverified, "needs_setup"),
+        )
+        assertEquals(
+            R.string.local_apps_verification_summary_needs_revalidation,
+            localAppVerificationSummaryRes(LocalAppVerificationStatus.Unverified, "needs_revalidation"),
+        )
+        assertEquals(
+            R.string.local_apps_verification_summary_verification_unavailable,
+            localAppVerificationSummaryRes(LocalAppVerificationStatus.Unavailable, "verification_unavailable"),
+        )
+        assertEquals(
+            "a null code with status Passed is the fourth value, not a missing one",
+            R.string.local_apps_verification_summary_passed,
+            localAppVerificationSummaryRes(LocalAppVerificationStatus.Passed, null),
+        )
+    }
+
+    /**
+     * `active_state_corrupt` is the engine's FIFTH code (local_apps_host.rs:2025,
+     * status Failed) and the one it ships with no client key on purpose, so it
+     * is the real production case for this arm — not a hypothetical. iOS pins
+     * the same code in LocalAppsStoreTests.swift. The arbitrary code after it
+     * keeps the future-proofing half honest, and the two null cases guard the
+     * other direction: guessing the "passed" copy for a null code whose status
+     * is NOT Passed would put words in the engine's mouth.
+     */
+    @Test
+    fun `an unknown verification code falls back to the engine sentence`() {
+        assertNull(localAppVerificationSummaryRes(LocalAppVerificationStatus.Failed, "active_state_corrupt"))
+        assertNull(localAppVerificationSummaryRes(LocalAppVerificationStatus.Failed, "some_future_code"))
+        assertNull(localAppVerificationSummaryRes(LocalAppVerificationStatus.Pending, null))
+        assertNull(localAppVerificationSummaryRes(LocalAppVerificationStatus.Unverified, null))
+    }
+
+    /**
+     * The two gate ids the host defines today, and the fallback for a third.
+     * Mirrors iOS's `localizedGateLabel` / `localizedGateDetail`.
+     */
+    @Test
+    fun `gate ids map to localized labels and the runner detail`() {
+        assertEquals(
+            "vacuity guard: the two gate labels must be distinct ids",
+            2,
+            setOf(
+                R.string.local_apps_create_confirm_gate_mcp_qa_label,
+                R.string.local_apps_create_confirm_gate_ui_runner_label,
+            ).size,
+        )
+        assertEquals(
+            R.string.local_apps_create_confirm_gate_mcp_qa_label,
+            localAppGateLabelRes("mcp_qa"),
+        )
+        assertEquals(
+            R.string.local_apps_create_confirm_gate_ui_runner_label,
+            localAppGateLabelRes("ui_runner"),
+        )
+        assertNull("an unknown id renders the engine's own label", localAppGateLabelRes("ui-smoke"))
+        assertNull("an unidentified gate renders the engine's own label", localAppGateLabelRes(""))
+
+        assertEquals(
+            R.string.local_apps_create_confirm_gate_ui_runner_unavailable_detail,
+            localAppGateDetailRes("ui_runner", available = false),
+        )
+        assertNull(
+            "an AVAILABLE runner sends no detail worth translating",
+            localAppGateDetailRes("ui_runner", available = true),
+        )
+        assertNull(localAppGateDetailRes("mcp_qa", available = false))
+    }
+
+    /**
+     * The unavailable-runner marker is id-INDEPENDENT, unlike the detail line
+     * above. iOS renders it on `if !gate.available` in both sheets
+     * (LocalAppApprovalSheets.swift:140 and :315) without looking at the id, so
+     * an unavailable `mcp_qa` gate must say so on Android too — before this the
+     * key existed in all five locales with ZERO Android consumers and the
+     * Android sheets showed only the status badge.
+     */
+    @Test
+    fun `an unavailable gate is marked whatever its id`() {
+        assertEquals(
+            R.string.local_apps_create_confirm_gate_runner_unavailable,
+            localAppGateUnavailableRes(available = false),
+        )
+        assertNull(
+            "an available runner needs no marker",
+            localAppGateUnavailableRes(available = true),
+        )
+        assertNotEquals(
+            "the id-independent marker and the ui_runner detail are different copy, " +
+                "and a missing UI runner renders both",
+            R.string.local_apps_create_confirm_gate_runner_unavailable,
+            R.string.local_apps_create_confirm_gate_ui_runner_unavailable_detail,
         )
     }
 }

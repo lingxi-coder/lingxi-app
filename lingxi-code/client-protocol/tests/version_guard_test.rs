@@ -312,6 +312,10 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::CostUpdate.session_duration_secs", "u64");
     put("ClientEvent::CostUpdate.formatted", "String");
 
+    put("ClientEvent::CompactionStatus", "compaction_status");
+    put("ClientEvent::CompactionStatus.phase", "String");
+    put("ClientEvent::CompactionStatus.error", "Option<String>");
+
     put("ClientEvent::CompactionCompleted", "compaction_completed");
     put("ClientEvent::CompactionCompleted.messages_before", "u32");
     put("ClientEvent::CompactionCompleted.messages_after", "u32");
@@ -528,6 +532,7 @@ fn current_contract_index() -> ContractIndex {
         "ClientEvent::TaskStatusChanged.origin_session_id",
         "Option<String>",
     );
+    put("ClientEvent::TaskStatusChanged.error", "Option<String>");
 
     put("ClientEvent::CommandsChanged", "commands_changed");
     put(
@@ -1539,6 +1544,7 @@ fn current_contract_index() -> ContractIndex {
     put("TaskRowDto.description", "String");
     put("TaskRowDto.can_resume", "bool");
     put("TaskRowDto.started_at_ms", "Option<u64>");
+    put("TaskRowDto.error", "Option<String>");
     put("TaskRowDto.stage", "Option<String>");
 
     put("TaskStatusDto::Pending", "pending");
@@ -2163,18 +2169,6 @@ fn current_contract_index() -> ContractIndex {
     );
     put("LocalAppMcpToolSurfaceDto.semantic_flow_json", "String");
     put("LocalAppMcpToolSurfaceDto.permission_ceiling", "String");
-    put("LocalAppReceiptStatusDto.receipt_id", "String");
-    put("LocalAppReceiptStatusDto.app_id", "String");
-    put("LocalAppReceiptStatusDto.workflow_run_id", "String");
-    put(
-        "LocalAppReceiptStatusDto.approval_contract_sha256",
-        "String",
-    );
-    put("LocalAppReceiptStatusDto.candidate_digest", "String");
-    put("LocalAppReceiptStatusDto.issued_at_ms", "u64");
-    put("LocalAppReceiptStatusDto.expires_at_ms", "u64");
-    put("LocalAppReceiptStatusDto.consumed", "bool");
-    put("LocalAppReceiptStatusDto.superseded", "bool");
     put("LocalAppCreateConfirmationRequestDto.request_id", "String");
     put("LocalAppCreateConfirmationRequestDto.app_id", "String");
     put("LocalAppCreateConfirmationRequestDto.name", "String");
@@ -2199,10 +2193,6 @@ fn current_contract_index() -> ContractIndex {
     put(
         "LocalAppCreateConfirmationRequestDto.required_gates",
         "Vec<LocalAppGateStatusDto>",
-    );
-    put(
-        "LocalAppCreateConfirmationRequestDto.receipt",
-        "Option<LocalAppReceiptStatusDto>",
     );
     put("LocalAppMcpToolFieldDto::Name", "name");
     put("LocalAppMcpToolFieldDto::Title", "title");
@@ -2271,10 +2261,6 @@ fn current_contract_index() -> ContractIndex {
     put(
         "LocalAppMcpProposalApprovalRequestDto.pending_gates",
         "Vec<LocalAppGateStatusDto>",
-    );
-    put(
-        "LocalAppMcpProposalApprovalRequestDto.receipt",
-        "Option<LocalAppReceiptStatusDto>",
     );
     put("McpAppWidgetDto.resource_uri", "String");
     put("McpAppWidgetDto.mime_type", "String");
@@ -3183,6 +3169,7 @@ fn contract_index_covers_every_dto() {
             description: String::new(),
             can_resume: false,
             started_at_ms: None,
+            error: None,
             stage: None,
         },
         CoordinatorWorkerDto {

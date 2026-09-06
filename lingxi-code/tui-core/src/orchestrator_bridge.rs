@@ -329,20 +329,18 @@ pub enum TurnEvent {
     /// render-loop channel as turn output, so an open `/workflows` view updates
     /// immediately without a timer or registry poll.
     MultiAgent(crate::multiagent::MultiAgentEvent),
-    /// A `/compact` (or otherwise forced) compaction pass began. The CLI's
-    /// compact closure sends this SYNCHRONOUSLY before awaiting the multi-second
-    /// `force_compact()` round-trip so the TUI shows claude-code's
-    /// `Compacting conversation…` spinner + time-based progress bar immediately
-    /// (the summarization stream carries no real progress; the bar is an
-    /// exponential time estimate — see [`crate::spinner_status::compact_progress_percent`]).
-    /// NOT emitted by [`BridgeOutputStream`]; sent directly like
-    /// [`Self::SystemNotice`]. Paired with [`Self::CompactEnded`].
+    /// The summary pass started. Retained for direct embedders; production
+    /// progress uses `CompactPhase` for separate preparation and summary clocks.
     CompactStarted,
     /// The compaction pass finished (success or failure): the TUI clears the
     /// `Compacting conversation…` spinner/progress bar. The terminal
     /// `Compacted (ctrl+o to see full summary)` line arrives separately as a
     /// [`Self::SystemNotice`]. Paired with [`Self::CompactStarted`].
     CompactEnded,
+    /// Engine-observed compaction lifecycle, independent of the manual task
+    /// completion acknowledgement. Terminal phases clear progress without
+    /// releasing the manual submit guard before its boundary event arrives.
+    CompactPhase { phase: String },
     /// Captured output of a `!`-prefixed bash-mode command (run off the model
     /// path). Rendered as a `UserBashOutput` cell — ANSI-parsed stdout then
     /// error-tinted stderr. Sent by the CLI `on_bash` closure after the
@@ -560,13 +558,27 @@ impl OutputStream for BridgeOutputStream {
         });
     }
 
-    /// A compaction pass (manual `/compact` or auto/reactive) began in the
-    /// orchestrator: forward as [`TurnEvent::CompactStarted`] so the TUI shows
-    /// claude-code's `Compacting conversation…` spinner + time-based progress
-    /// bar. Without this override the trait's default no-op swallows the
-    /// signal and the pass is invisible-then-instant.
     async fn emit_compaction_started(&self) {
-        let _ = self.tx.send(TurnEvent::CompactStarted);
+        self.emit_compaction_phase("preparing").await;
+    }
+
+    async fn emit_compaction_phase(&self, phase: &str) {
+        let _ = self.tx.send(TurnEvent::CompactPhase {
+            phase: phase.into(),
+        });
+    }
+
+    async fn emit_compaction_skipped(&self) {
+        self.emit_compaction_phase("skipped").await;
+    }
+
+    async fn emit_compaction_finished(&self, error: Option<&str>) {
+        self.emit_compaction_phase(match error {
+            None => "complete",
+            Some("Compaction canceled.") => "cancelled",
+            Some(_) => "error",
+        })
+        .await;
     }
 
     async fn emit_compaction_completed(
@@ -700,7 +712,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emit_compaction_started_translates_to_compact_started() {
+    async fn emit_compaction_started_prepares_without_starting_the_summary_clock() {
         // The orchestrator emits this before every compaction pass (manual
         // AND auto); the bridge must forward it or the TUI's `Compacting
         // conversation…` progress UI never appears.
@@ -708,7 +720,35 @@ mod tests {
         let bridge = BridgeOutputStream::new(tx);
         platform_api::OutputStream::emit_compaction_started(&bridge).await;
         let ev = rx.recv().await.unwrap();
-        assert!(matches!(ev, TurnEvent::CompactStarted));
+        assert!(matches!(ev, TurnEvent::CompactPhase { phase } if phase == "preparing"));
+    }
+
+    #[tokio::test]
+    async fn compaction_phases_and_failure_finish_reach_the_tui() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        bridge.emit_compaction_phase("summarizing").await;
+        bridge.emit_compaction_phase("restoring").await;
+        bridge
+            .emit_compaction_finished(Some("summary failed"))
+            .await;
+        bridge
+            .emit_compaction_finished(Some("Compaction canceled."))
+            .await;
+        bridge.emit_compaction_finished(None).await;
+        bridge.emit_compaction_skipped().await;
+        for expected in [
+            "summarizing",
+            "restoring",
+            "error",
+            "cancelled",
+            "complete",
+            "skipped",
+        ] {
+            assert!(
+                matches!(rx.recv().await.unwrap(), TurnEvent::CompactPhase { phase } if phase == expected)
+            );
+        }
     }
 
     #[tokio::test]

@@ -416,6 +416,11 @@ async fn blocking_pre_compact_hook_skips_compaction_but_not_the_turn() {
     // Turn must still succeed despite the blocked PreCompact pass.
     orch.run_turn("hello").await.expect("turn must not fail");
 
+    assert_eq!(
+        output.compaction_phase_snapshot().await,
+        ["preparing", "error"]
+    );
+
     // The hook fired ...
     assert!(
         probe.pre_fired.load(Ordering::SeqCst),
@@ -501,6 +506,12 @@ async fn manual_compact_runs_reload_session_start_then_post_compact() {
         .expect("manual compaction");
 
     assert_eq!(
+        probe.post_summary.lock().unwrap().as_deref(),
+        Some("<summary>hook lifecycle summary</summary>"),
+        "PostCompact receives the original summary, before continuation formatting"
+    );
+
+    assert_eq!(
         *probe.lifecycle_order.lock().unwrap(),
         vec![
             "pre".to_string(),
@@ -513,4 +524,102 @@ async fn manual_compact_runs_reload_session_start_then_post_compact() {
     assert!(history.iter().any(|message| message
         .text_content()
         .contains("SessionStart hook additional context: post-compact hook context")));
+}
+
+struct InstructionHook {
+    id: &'static str,
+    stdout: &'static str,
+}
+
+#[async_trait]
+impl BuiltinHookHandler for InstructionHook {
+    fn id(&self) -> &str {
+        self.id
+    }
+    async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+        HookResult {
+            outcome: HookOutcome::Success,
+            stdout: self.stdout.into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            response: None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct CaptureSummaryPrompt(Mutex<Option<String>>);
+
+#[async_trait]
+impl sidequery::SideQueryClient for CaptureSummaryPrompt {
+    async fn query(
+        &self,
+        request: sidequery::SideQueryRequest,
+    ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+        *self.0.lock().unwrap() = request
+            .messages
+            .last()
+            .map(ConversationMessage::text_content);
+        Ok(sidequery::SideQueryResponse {
+            text: Some("<summary>ok</summary>".into()),
+            structured: None,
+            tool_calls: Vec::new(),
+            usage: cost::Usage::default(),
+            stop_reason: Some("end_turn".into()),
+            retry_count: 0,
+        })
+    }
+}
+
+#[tokio::test]
+async fn pre_compact_stdout_is_js_trimmed_and_joined_with_blank_lines() {
+    let hooks = hook_executor_with(vec![
+        (
+            Arc::new(InstructionHook {
+                id: "first",
+                stdout: "\u{feff} first \n",
+            }),
+            builtin_hook("first", HookEventType::PreCompact),
+        ),
+        (
+            Arc::new(InstructionHook {
+                id: "second",
+                stdout: "\tsecond\u{feff}",
+            }),
+            builtin_hook("second", HookEventType::PreCompact),
+        ),
+    ])
+    .await;
+    let client = Arc::new(CaptureSummaryPrompt::default());
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let runner = Arc::new(
+        sidequery::ForkedAgentRunner::new().with_side_query_client(client.clone(), "test".into()),
+    );
+    let compactor = Arc::new(compaction::CompactionOrchestrator::with_autocompactor(
+        compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+        u64::MAX,
+    ));
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        hooks,
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_cache_safe_slot(slot)
+    .with_compaction(compactor);
+    seed_history(&orch, 6).await;
+    orch.force_compact_with_instructions_and_cancel(
+        Some("focus"),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        client.0.lock().unwrap().as_deref(),
+        Some(compaction::prompt::get_compact_prompt(Some("focus\n\nfirst\n\nsecond")).as_str())
+    );
 }

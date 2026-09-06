@@ -43,6 +43,7 @@ import { DiffView } from '../src/renderer/components/DiffView';
 import { Disclosure } from '../src/renderer/components/Disclosure';
 import { PermissionPrompt } from '../src/renderer/components/PermissionPrompt';
 import { Stage } from '../src/renderer/components/Stage';
+import { parseSlashCommandMessage } from '../src/renderer/components/slashCommandMessage';
 import { ToolCall, toolIconName } from '../src/renderer/components/ToolCall';
 import {
   ASSISTANT_NARRATION_COLLAPSE_MAX_CHARS,
@@ -92,14 +93,14 @@ function renderCompaction(item: CompactionRunItem): string {
   return render(React.createElement(Stage, { liveItems: [item], sessionKey: 'session-a' }));
 }
 
-test('compaction status exposes CLI-compatible estimated progress and terminal summaries', () => {
-  const running = renderCompaction({ type: 'compaction', id: 'compact-1', status: 'running' });
+test('compaction status shows phase-bounded estimates and engine-confirmed completion', () => {
+  const running = renderCompaction({ type: 'compaction', id: 'compact-1', status: 'running', phase: 'summarizing', phaseStartedAt: Date.now() });
   assert.match(running, /role="status"/);
-  assert.match(running, /Compacting context/);
+  assert.match(running, /Summarizing conversation/);
   assert.match(running, /class="compact-progress-track"/);
-  assert.match(running, /aria-label="Compaction in progress"/);
-  assert.match(running, /aria-valuenow="0"/);
-  assert.match(running, />0% · 0s<\/span>/);
+  assert.match(running, /aria-label="Estimated progress"/);
+  assert.match(running, /aria-valuenow="10"/);
+  assert.match(running, />Estimated progress: 10% · 0s<\/span>/);
   assert.match(running, /--sweep-base:/);
   assert.match(running, /--sweep-highlight:/);
 
@@ -124,11 +125,29 @@ test('compaction status exposes CLI-compatible estimated progress and terminal s
   assert.match(failed, /provider rate limited/);
 });
 
-test('compaction progress matches the CLI exponential estimate and never claims completion', () => {
-  assert.equal(compactProgressPercent(0), 0);
-  assert.equal(compactProgressPercent(4_000), 4);
-  assert.equal(compactProgressPercent(90_000), 63);
-  assert.equal(compactProgressPercent(10_000_000), 95);
+test('compaction renders engine stages and keeps cancellation distinct from failure', () => {
+  for (const [phase, title] of Object.entries({
+    queued: 'Waiting for engine', preparing: 'Preparing compaction',
+    summarizing: 'Summarizing conversation', restoring: 'Restoring context',
+  })) {
+    const html = renderCompaction({ type: 'compaction', id: 'compact', status: 'running', phase: phase as CompactionRunItem['phase'] });
+    assert.match(html, new RegExp(title));
+    if (phase === 'queued') assert.doesNotMatch(html, /aria-valuenow/);
+    else assert.match(html, /aria-valuenow/);
+  }
+  const cancelled = renderCompaction({ type: 'compaction', id: 'compact', status: 'cancelled' });
+  assert.match(cancelled, /Compaction cancelled/);
+  assert.doesNotMatch(cancelled, /role="alert"|role="progressbar"/);
+  const noOp = renderCompaction({ type: 'compaction', id: 'compact', status: 'complete' });
+  assert.match(noOp, /Compaction finished/);
+  assert.doesNotMatch(noOp, /0 → 0|0 B saved/);
+});
+
+test('compaction progress matches shared hybrid phase boundaries', () => {
+  const oracle = JSON.parse(readFileSync(new URL('../../../lingxi-code/client-protocol/snapshots/compaction_hybrid_progress.json', import.meta.url), 'utf8'));
+  for (const { phase, elapsed_ms, percent } of oracle.cases) {
+    assert.equal(compactProgressPercent(phase, elapsed_ms), percent, `${elapsed_ms}ms`);
+  }
 });
 
 // ── Message collapse defaults and accessible markup ──────────────────────────
@@ -219,6 +238,30 @@ test('user messages use a neutral rounded Codex-style bubble', () => {
   assert.match(html, /border-radius:22px/);
   assert.match(html, /border:0/);
   assert.doesNotMatch(html, /accentBg/);
+});
+
+test('slash command message parsing is strict and keeps command arguments', () => {
+  assert.deepEqual(parseSlashCommandMessage('/cron list'), { name: 'cron', arguments: 'list' });
+  assert.deepEqual(parseSlashCommandMessage('  /code-review --fix  '), { name: 'code-review', arguments: '--fix' });
+  assert.equal(parseSlashCommandMessage('/path/to/file'), null);
+  assert.equal(parseSlashCommandMessage('/cron\nlist'), null);
+  assert.equal(parseSlashCommandMessage('please run /cron list'), null);
+});
+
+test('user slash commands replace the visible slash with a semantic icon', () => {
+  const html = renderStage({ type: 'narration', id: 'slash-1', role: 'user', text: '/cron list' });
+  assert.match(html, /class="user-slash-command"/);
+  assert.match(html, /data-command-name="cron"/);
+  assert.match(html, /data-command-icon="clock"/);
+  assert.match(html, />cron<\/span>/);
+  assert.match(html, />list<\/span>/);
+  assert.doesNotMatch(html, />\/cron<\/span>/);
+});
+
+test('assistant slash-like text keeps its literal slash rendering', () => {
+  const html = renderStage({ type: 'narration', id: 'slash-2', role: 'assistant', text: '/cron list' });
+  assert.doesNotMatch(html, /class="user-slash-command"/);
+  assert.match(html, />\/cron list<\/span>/);
 });
 
 test('active agent thinking shimmers the text without a leading indicator', () => {

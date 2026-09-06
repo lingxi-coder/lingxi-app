@@ -36,15 +36,14 @@
 
 use crate::cache_safe_params::CacheSafeParams;
 use crate::purposes::QuerySource;
-use crate::side_query::{SideQueryClient, SideQueryRequest};
+use crate::side_query::{SideQueryClient, SideQueryError, SideQueryRequest};
 use protocol::ConversationMessage;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
 
-/// Output cap applied to a single-turn forked call when the request does not
-/// override it. Mirrors `MAX_OUTPUT_TOKENS_FOR_SUMMARY` from the compaction
-/// path — single-turn forks today are summarization-shaped.
+/// Legacy output cap for non-compaction single-turn forks without an override.
+/// Compaction inherits the main model's ordinary request budget instead.
 const DEFAULT_FORK_MAX_TOKENS: u32 = 20_000;
 
 /// Coarse purpose tag for a forked agent. Mirrors [`QuerySource`] for the
@@ -101,6 +100,9 @@ pub enum ForkError {
     /// not completed a turn yet.
     #[error("no cache-safe params available")]
     NoCacheSafeParams,
+    /// Provider failure, retained for compaction's overflow and media retries.
+    #[error(transparent)]
+    Api(#[from] SideQueryError),
     /// Internal logic error.
     #[error("internal: {0}")]
     Internal(String),
@@ -191,8 +193,9 @@ impl ForkedAgentRunner {
     /// 2. Reuse the parent's already-rendered `system_prompt` verbatim and set
     ///    `skip_system_prompt_prefix` so the client does not prepend its own
     ///    engine prefix (which would break the cache hit).
-    /// 3. Expose no tools — this is the single-turn path; lowering
-    ///    `tool_use_options` into a tool loop is the multi-turn runner's job.
+    /// 3. Compaction preserves the parent's tool schemas for the cache prefix.
+    ///    It still issues only one request and never executes tool calls.
+    ///    Other single-turn forks expose no tools.
     /// 4. Issue exactly one [`SideQueryClient::query`] and map its response.
     ///
     /// When no backend is wired the runner returns the legacy
@@ -203,7 +206,7 @@ impl ForkedAgentRunner {
     ///
     /// # Errors
     ///
-    /// Returns [`ForkError::Internal`] when the wired
+    /// Returns [`ForkError::Api`] when the wired
     /// [`SideQueryClient::query`] call fails.
     pub async fn run(&self, req: ForkedAgentRequest) -> Result<ForkedAgentResult, ForkError> {
         let Some((client, model)) = &self.side_query else {
@@ -221,16 +224,27 @@ impl ForkedAgentRunner {
         let mut messages = cp.fork_context_messages.clone();
         messages.extend(req.prompt_messages.iter().cloned());
 
-        let request = SideQueryRequest {
-            // Inherit the live parent's model from the cache-safe snapshot.
-            // The runner's construction-time model is only a fallback for old
-            // callers that leave `main_loop_model` empty; otherwise `/model`
-            // switches must affect subsequent compaction/recap side queries.
-            model: if cp.tool_use_options.main_loop_model.trim().is_empty() {
-                model.clone()
+        // Inherit the live parent's model so /model switches affect later forks.
+        let model = if cp.tool_use_options.main_loop_model.trim().is_empty() {
+            model.clone()
+        } else {
+            cp.tool_use_options.main_loop_model.clone()
+        };
+        // cc 2.1.261 PCo supplies no max_tokens override to the compaction
+        // fork. The 20k threshold reserve is not a summarization output cap.
+        let max_tokens = req.max_output_tokens.unwrap_or_else(|| {
+            if req.query_source == QuerySource::Compaction {
+                u32::try_from(
+                    llm_client::model::context_window::default_output_tokens_for_model(&model),
+                )
+                .unwrap_or(u32::MAX)
             } else {
-                cp.tool_use_options.main_loop_model.clone()
-            },
+                DEFAULT_FORK_MAX_TOKENS
+            }
+        });
+
+        let request = SideQueryRequest {
+            model,
             profile: cp.tool_use_options.model_profile.clone(),
             // Replay the parent's already-rendered system prompt verbatim;
             // `user_context` / `system_context` were inputs the parent used to
@@ -238,18 +252,28 @@ impl ForkedAgentRunner {
             // break the byte-identical layout the cache relies on).
             system_prompt: Some(cp.system_prompt.to_string()),
             messages,
-            // Single-turn: no tool loop. Lowering `cp.tool_use_options` into a
-            // `Vec<Value>` is the multi-turn runner's responsibility.
-            tools: Vec::new(),
+            // cc 2.1.261 preserves the parent's tools on compact requests.
+            // The text-only prompt and lack of a tool loop prevent execution;
+            // removing the schemas would invalidate the shared cache prefix.
+            tools: if req.query_source == QuerySource::Compaction {
+                cp.tools.clone()
+            } else {
+                Vec::new()
+            },
             tool_choice: None,
             output_format: None,
-            max_tokens: req.max_output_tokens.unwrap_or(DEFAULT_FORK_MAX_TOKENS),
+            max_tokens,
             // Host owns retry policy for forked calls.
             max_retries: 0,
             temperature: None,
             // cc 2.1.198: the forked (compaction) call inherits the session
             // thinking config wired at the composition root; `None` = legacy.
             thinking: self.session_thinking,
+            effort: if req.query_source == QuerySource::Compaction {
+                cp.effort.clone()
+            } else {
+                None
+            },
             stop_sequences: Vec::new(),
             query_source: req.query_source.clone(),
             // The prefix is already baked into `system_prompt`; any extra
@@ -257,10 +281,7 @@ impl ForkedAgentRunner {
             skip_system_prompt_prefix: true,
         };
 
-        let resp = client
-            .query(request)
-            .await
-            .map_err(|e| ForkError::Internal(e.to_string()))?;
+        let resp = client.query(request).await.map_err(ForkError::Api)?;
 
         Ok(ForkedAgentResult {
             final_text: resp.text.unwrap_or_default(),
@@ -306,10 +327,9 @@ mod tests {
         }
     }
 
-    /// Mock `SideQueryClient` that always fails, so the `run` error-mapping
-    /// path (`SideQueryError` -> `ForkError::Internal`) can be exercised.
+    /// Mock `SideQueryClient` that always fails so typed errors can be checked.
     struct FailingClient {
-        message: String,
+        error: SideQueryError,
     }
 
     #[async_trait]
@@ -318,7 +338,7 @@ mod tests {
             &self,
             _request: SideQueryRequest,
         ) -> Result<SideQueryResponse, SideQueryError> {
-            Err(SideQueryError::InvalidResponse(self.message.clone()))
+            Err(self.error.clone())
         }
     }
 
@@ -352,6 +372,8 @@ mod tests {
                 user_context: std::collections::HashMap::new(),
                 system_context: std::collections::HashMap::new(),
                 tool_use_options: tool_use_options(),
+                tools: Vec::new(),
+                effort: None,
                 fork_context_messages: prefix,
                 transcript_path: None,
                 generation: 7,
@@ -375,6 +397,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_preserves_each_parent_provider_route() {
+        for (profile, model) in [
+            ("anthropic-profile", "claude-model"),
+            ("openai-profile", "openai-model"),
+            ("google-profile", "gemini-model"),
+            ("custom-profile", "custom-model"),
+        ] {
+            let client = Arc::new(MockClient {
+                seen: Mutex::new(None),
+                canned_text: "SUMMARY".into(),
+                canned_usage: Usage::default(),
+            });
+            let runner = ForkedAgentRunner::new()
+                .with_side_query_client(client.clone(), "startup-model".into());
+            let mut req =
+                request_with(vec![user_msg("history")], vec![user_msg("summarize")], None);
+            req.cache_safe_params.tool_use_options.main_loop_model = model.into();
+            req.cache_safe_params.tool_use_options.model_profile = Some(profile.into());
+            runner.run(req).await.expect("provider-routed summary");
+            let sent = client
+                .seen
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("summary request");
+            assert_eq!(sent.model, model);
+            assert_eq!(sent.profile.as_deref(), Some(profile));
+        }
+    }
+
+    #[tokio::test]
     async fn run_with_client_builds_prefix_first_request_and_maps_result() {
         let mut canned_usage = Usage::default();
         canned_usage.tokens.input = 11;
@@ -395,6 +448,25 @@ mod tests {
             Some(512),
         );
         req.cache_safe_params.tool_use_options.model_profile = Some("parent-profile".into());
+        let parent_tools = vec![
+            serde_json::json!({
+                "name": "Read",
+                "description": "Read the file exactly as requested.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"file_path": {"type": "string"}},
+                    "required": ["file_path"]
+                }
+            }),
+            serde_json::json!({
+                "name": "Bash",
+                "description": "Run a shell command.",
+                "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}},
+                "cache_control": {"type": "ephemeral"}
+            }),
+        ];
+        req.cache_safe_params.tools = parent_tools.clone();
+        req.cache_safe_params.effort = Some(serde_json::json!("high"));
 
         let result = runner.run(req).await.expect("wired run succeeds");
 
@@ -423,8 +495,15 @@ mod tests {
         assert_eq!(sent.system_prompt.as_deref(), Some("PARENT SYSTEM PROMPT"));
         assert_eq!(sent.max_tokens, 512); // honored override
         assert_eq!(sent.max_retries, 0);
-        assert!(sent.tools.is_empty(), "single-turn: no tools");
-        assert!(sent.tool_choice.is_none());
+        assert_eq!(sent.effort, Some(serde_json::json!("high")));
+        assert_eq!(
+            sent.tools, parent_tools,
+            "compaction must preserve the parent's tool prefix and order"
+        );
+        assert!(
+            sent.tool_choice.is_none(),
+            "the compact text-only prompt does not add tool_choice:none"
+        );
         assert!(sent.skip_system_prompt_prefix);
         assert_eq!(sent.query_source, QuerySource::Compaction);
 
@@ -475,11 +554,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_with_client_maps_query_failure_to_internal() {
-        // The wired single-turn path promises `SideQueryError` ->
-        // `ForkError::Internal` with the underlying message forwarded.
+    async fn run_with_client_preserves_query_failure() {
         let client = Arc::new(FailingClient {
-            message: "boom".into(),
+            error: SideQueryError::InvalidResponse("boom".into()),
         });
         let runner = ForkedAgentRunner::new().with_side_query_client(client, "m".into());
 
@@ -490,16 +567,70 @@ mod tests {
             .expect_err("failing client surfaces error");
 
         match err {
-            ForkError::Internal(msg) => {
-                // `Display` of the source error is forwarded verbatim.
-                assert!(msg.contains("boom"), "message not forwarded: {msg}");
+            ForkError::Api(SideQueryError::InvalidResponse(msg)) => {
+                assert_eq!(msg, "boom");
             }
-            other => panic!("expected ForkError::Internal, got {other:?}"),
+            other => panic!("expected original invalid response, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn run_with_client_defaults_max_tokens_when_unset() {
+    async fn run_with_client_preserves_compaction_api_error_types() {
+        for expected in [
+            llm_client::LlmError::ContextOverflow { token_gap: 12_345 },
+            llm_client::LlmError::RequestTooLarge,
+            llm_client::LlmError::InvalidRequest {
+                message: "image exceeds 5 MB maximum".into(),
+            },
+        ] {
+            let client = Arc::new(FailingClient {
+                error: SideQueryError::Api(expected.clone()),
+            });
+            let runner = ForkedAgentRunner::new().with_side_query_client(client, "m".into());
+            let err = runner
+                .run(request_with(vec![], vec![user_msg("prompt")], None))
+                .await
+                .expect_err("API failure must retain its retry classification");
+            assert_eq!(err.to_string(), expected.to_string());
+            match err {
+                ForkError::Api(SideQueryError::Api(actual)) => assert_eq!(actual, expected),
+                other => panic!("expected original provider error, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_uses_live_parent_model_default_when_output_cap_unset() {
+        for parent_model in ["claude-opus-4-6", "claude-3-opus-20240229", ""] {
+            let client = Arc::new(MockClient {
+                seen: Mutex::new(None),
+                canned_text: "summary".into(),
+                canned_usage: Usage::default(),
+            });
+            let runner = ForkedAgentRunner::new()
+                .with_side_query_client(client.clone(), "claude-sonnet-4-6".into());
+            let mut req = request_with(vec![], vec![user_msg("prompt")], None);
+            req.cache_safe_params.tool_use_options.main_loop_model = parent_model.into();
+
+            runner.run(req).await.expect("compaction succeeds");
+
+            let sent = client.seen.lock().unwrap().clone().unwrap();
+            let expected_model = if parent_model.is_empty() {
+                "claude-sonnet-4-6"
+            } else {
+                parent_model
+            };
+            assert_eq!(sent.model, expected_model);
+            assert_eq!(
+                u64::from(sent.max_tokens),
+                llm_client::model::context_window::default_output_tokens_for_model(expected_model),
+                "compaction must inherit the ordinary request budget for {expected_model}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn non_compaction_fork_defaults_max_tokens_when_unset() {
         let client = Arc::new(MockClient {
             seen: Mutex::new(None),
             canned_text: String::new(),
@@ -507,7 +638,14 @@ mod tests {
         });
         let runner = ForkedAgentRunner::new().with_side_query_client(client.clone(), "m".into());
 
-        let req = request_with(vec![], vec![user_msg("only-prompt")], None);
+        let mut req = request_with(vec![], vec![user_msg("only-prompt")], None);
+        req.query_source = QuerySource::SessionMemoryExtraction;
+        req.cache_safe_params.tools = vec![serde_json::json!({
+            "name": "Read",
+            "description": "Read a file.",
+            "input_schema": {"type": "object"}
+        })];
+        req.cache_safe_params.effort = Some(serde_json::json!("high"));
         let result = runner.run(req).await.expect("run succeeds");
 
         // Empty text maps to an empty String, not a panic.
@@ -515,6 +653,14 @@ mod tests {
 
         let sent = client.seen.lock().unwrap().clone().unwrap();
         assert_eq!(sent.max_tokens, DEFAULT_FORK_MAX_TOKENS);
+        assert!(
+            sent.effort.is_none(),
+            "non-compaction forks retain their effort policy"
+        );
+        assert!(
+            sent.tools.is_empty(),
+            "non-compaction forks retain their tool policy"
+        );
         // No prefix => messages are exactly the fork's prompt.
         let order: Vec<String> = sent
             .messages

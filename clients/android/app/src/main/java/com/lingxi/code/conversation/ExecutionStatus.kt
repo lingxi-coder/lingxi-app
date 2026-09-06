@@ -11,6 +11,14 @@ data class BackgroundTaskUi(
     val status: TaskStatusDto,
     val canResume: Boolean,
     val startedAtMs: ULong?,
+    /**
+     * Terminal failure reason reported by the engine (`TaskRowDto.error` /
+     * `TaskStatusChanged.error`). Only a FAILED row carries one. This is the
+     * only surface a user who has moved to another session can still learn the
+     * reason from: the transient status line is suppressed for a non-visible
+     * origin session, while the refreshed row list still carries `error`.
+     */
+    val error: String? = null,
 )
 
 data class SessionAgentUi(
@@ -36,6 +44,7 @@ fun TaskRowDto.toBackgroundTaskUi(): BackgroundTaskUi = BackgroundTaskUi(
     status = status,
     canResume = canResume,
     startedAtMs = startedAtMs,
+    error = error,
 )
 
 fun SessionAgentSummaryDto.toSessionAgentUi(): SessionAgentUi = SessionAgentUi(

@@ -465,6 +465,7 @@ impl WebFetchTool {
             max_retries: 1,
             temperature: None,
             thinking: None,
+            effort: None,
             stop_sequences: vec![],
             query_source: QuerySource::WebFetchApply,
             skip_system_prompt_prefix: true,

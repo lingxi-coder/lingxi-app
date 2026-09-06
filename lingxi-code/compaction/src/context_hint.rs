@@ -3,7 +3,7 @@
 //!
 //! This is a CLIENT-SERVER negotiation, not a local compaction policy. When the
 //! main REPL thread is about to send a request that a keep-recent microcompact
-//! could shrink by at least [`microcompact::MICROCOMPACT_MIN_TOKENS_SAVED`], the
+//! could shrink by at least [`MICROCOMPACT_MIN_TOKENS_SAVED`], the
 //! client adds a beta header plus
 //! `context_hint: {enabled: true, target_tokens_saved: N}` to the body, telling
 //! the server "I can free N tokens if you need me to". The server may then:
@@ -40,9 +40,9 @@
 //! builds the facts from any decoded error.
 
 use crate::microcompact::{
-    self, estimate_keep_recent, Microcompactor, TimeBasedMCConfig, MICROCOMPACT_MIN_TOKENS_SAVED,
+    estimate_keep_recent, Microcompactor, TimeBasedMCConfig, MICROCOMPACT_MIN_TOKENS_SAVED,
 };
-use protocol::{ContentBlock, ConversationMessage};
+use protocol::ConversationMessage;
 use std::collections::HashSet;
 use std::time::SystemTime;
 
@@ -76,42 +76,11 @@ pub fn context_hint_enabled() -> bool {
     }
 }
 
-/// Token estimate over the WHOLE content array — oracle `tP` → `koy` → `Sct`.
-///
-/// Deliberately NOT [`crate::grouping::estimate_tokens_for_range`], which sums
-/// `text_content()` and therefore counts ONLY `Text` blocks. That makes it blind
-/// to tool results — precisely what this feature clears — so the pre/post pair
-/// would be identical and `tokens_saved` a constant zero. (A test asserting
-/// post < pre is what caught that.)
+/// Use the same per-block token estimator as compaction and PTL retry (2.1.261
+/// `Og`), including nested results and JS UTF-16 text lengths.
 #[must_use]
 fn estimate_message_tokens(messages: &[ConversationMessage]) -> u64 {
-    let mut total = 0u64;
-    for m in messages {
-        let blocks = match m {
-            ConversationMessage::User { content, .. }
-            | ConversationMessage::Assistant { content, .. } => content,
-            ConversationMessage::System { content, .. } => {
-                total = total.saturating_add(chars_to_tokens(content.len()));
-                continue;
-            }
-        };
-        for b in blocks {
-            let len = match b {
-                ContentBlock::Text { text } => text.len(),
-                ContentBlock::ToolResult { content, .. } => content.len(),
-                ContentBlock::ToolUse { input, .. } => input.to_string().len(),
-                _ => 0,
-            };
-            total = total.saturating_add(chars_to_tokens(len));
-        }
-    }
-    total
-}
-
-/// `Math.round(len / 4)` in integer math, matching the estimator microcompact
-/// already uses for `tokensSaved`.
-fn chars_to_tokens(len: usize) -> u64 {
-    (u64::try_from(len).unwrap_or(u64::MAX)).saturating_add(2) / 4
+    crate::grouping::estimate_tokens_for_range(messages)
 }
 
 /// The HTTP facts the oracle's four classifiers key on.
@@ -286,7 +255,7 @@ pub struct HintEdits {
 /// `<persisted-output>Tool result saved to: …</persisted-output>` instead of the
 /// bare placeholder. LingXi's [`Microcompactor`] has no persist callback — a
 /// SEPARATE, already-tracked gap ("keep-recent microcompact persist callback").
-/// Cleared results therefore get [`microcompact::TIME_BASED_MC_CLEARED_MESSAGE`]
+/// Cleared results therefore get [`crate::microcompact::TIME_BASED_MC_CLEARED_MESSAGE`]
 /// here. Wiring persist belongs with that gap, not this one; doing it inside
 /// this module would fork a second persistence path.
 #[must_use]
@@ -335,7 +304,7 @@ pub fn apply_hint_edits(messages: Vec<ConversationMessage>) -> HintEdits {
     HintEdits {
         log_line,
         messages: result.messages,
-        cleared_ids: estimate.clear_set,
+        cleared_ids: estimate.candidate_ids,
         mc_applied: true,
         mc_tokens_saved: result.tokens_saved,
         pre_compact_token_estimate: pre,
@@ -540,7 +509,7 @@ impl ContextHintController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{MessageId, ToolUseId};
+    use protocol::{ContentBlock, MessageId, ToolUseId};
 
     /// `n` compactable tool_use/tool_result pairs, each result big enough that
     /// clearing all but the last 5 clears the 20 000-token floor.

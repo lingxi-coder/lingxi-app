@@ -2983,6 +2983,22 @@ impl CommandRouter for EngineCommandRouter {
             Some(result) => result,
             None => self.dispatcher.as_ref()?.dispatch(raw).await,
         };
+        if parse_slash_command(raw).is_some_and(|parsed| parsed.name.eq_ignore_ascii_case("cron")) {
+            let display = match &result {
+                platform_api::SlashDispatchResult::Handled { display }
+                | platform_api::SlashDispatchResult::Unknown { display, .. } => Some(display),
+                _ => None,
+            };
+            if let Some(display) = display {
+                if let Err(error) = self
+                    .handle
+                    .append_slash_command_transcript(raw, display)
+                    .await
+                {
+                    tracing::warn!(error = %error, "could not persist /cron transcript display");
+                }
+            }
+        }
         let after = self.capture_slash_authority().await;
         Some(SlashDispatchOutcome {
             result,
@@ -3770,6 +3786,9 @@ impl CommandRouter for EngineCommandRouter {
                             task_id: rec.task_id,
                             status: client_adapter::lowering::lower_task_status(&rec.status),
                             origin_session_id: None,
+                            // A user stop is `killed`, never `failed` — no
+                            // handler-reported reason to forward.
+                            error: None,
                         })
                         .await;
                     }

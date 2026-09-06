@@ -130,6 +130,7 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   turn_event_replay: true,
   cost_update: true,
   compaction_completed: true,
+  compaction_status: true,
   session_started: true,
   session_ended: true,
   session_resumed: true,
@@ -232,8 +233,9 @@ export const ALL_MANAGED_LOCAL_APP_MCP_STATUS_TYPES: Record<ManagedLocalAppMcpSt
 
 /**
  * The same closure as above, over `TaskRowDto`'s FIELD names rather than a
- * union's `type` tags — `listings.rs`'s `TaskRowDto` gained a 7th field,
- * `stage` (F005, `/fusion` progress), and nothing tied this
+ * union's `type` tags — `listings.rs`'s `TaskRowDto` grew two fields on two
+ * branches at once (`error`, the terminal failure reason, and `stage`, F005's
+ * `/fusion` progress label), and nothing tied this
  * hand-maintained interface to the Rust struct it mirrors: dropping a field
  * here is a silent `npm test` pass (`tsx` transpiles without type-checking)
  * with no runtime symptom until a consumer tries to read the missing member.
@@ -247,6 +249,7 @@ export const ALL_TASK_ROW_DTO_KEYS: Record<keyof TaskRowDto, true> = {
   description: true,
   can_resume: true,
   started_at_ms: true,
+  error: true,
   stage: true,
 };
 

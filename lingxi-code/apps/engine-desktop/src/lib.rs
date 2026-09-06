@@ -31,6 +31,7 @@ mod agent_skill_loader;
 pub mod auto_mode_propose;
 mod background_agent;
 mod connect;
+mod cron_command;
 pub mod file_changed_watch;
 pub mod fork_resume;
 mod fusion_command;
@@ -13192,6 +13193,9 @@ pub async fn build(
     let worktree_command_handler: Arc<dyn BuiltinCommandHandler> = Arc::new(
         DesktopWorktreeCommandHandler::new(tool_ctx.clone(), worktree_state_persister.clone()),
     );
+    let cron_command_handler: Arc<dyn BuiltinCommandHandler> = Arc::new(
+        cron_command::DesktopCronCommandHandler::new(tool_ctx.clone()),
+    );
     // The wakeup cell for the registered `ScheduleWakeup` tool — surfaced on
     // `DesktopRuntime` so the bridge composition root fills it once the
     // per-connection queue + spawner exist (`boot::assemble`).
@@ -14158,6 +14162,11 @@ pub async fn build(
         task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
     )));
     reg.register_builtin_handler(worktree_command_handler);
+    if cron_scheduler_enabled(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref()) {
+        // `/cron` is an explicit management action. Keep it out of the model
+        // permission loop and invoke the same validated cron tools directly.
+        reg.register_builtin_handler(cron_command_handler);
+    }
     reg.register_builtin_handler(Arc::new(fusion_command::DesktopFusionCommandHandler::new(
         task_registry.clone(),
         fusion_executor.clone(),

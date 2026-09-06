@@ -840,23 +840,29 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
     /// Strict no-op when no slot is wired (every test + any binary that has not
     /// wired the forked runner), so it adds zero work — and crucially no history
     /// clone — off the production path. When wired, it stores the CURRENT
-    /// `session.history` as `fork_context_messages`: callers invoke this right
-    /// after the model call returns successfully but BEFORE appending the
-    /// assistant reply, so the snapshot is exactly the message set the model
-    /// saw (including any PTL truncation / reactive compaction the call applied).
+    /// `session.history` as `fork_context_messages`. Callers seed it before a
+    /// request so first-call overflow can compact, then refresh it after a
+    /// successful call before appending the assistant reply. Transient request
+    /// reminders stay outside this stored history prefix.
     ///
-    /// `user_context` / `system_context` / `tool_use_options` are not consulted
-    /// by the single-turn forked summary path (it exposes no tools and replays
-    /// `system_prompt` + `fork_context_messages` verbatim — see
-    /// `sidequery::ForkedAgentRunner::run`), so they are filled minimally; only
-    /// `system_prompt` and `fork_context_messages` drive the cache hit.
-    pub(crate) async fn save_cache_safe_params(&self, system: Option<&str>, model: &str) {
+    /// Freeze the tools from this request too: rebuilding or removing them in
+    /// a compaction fork changes the cached prefix.
+    pub(crate) async fn save_cache_safe_params(
+        &self,
+        system: Option<&str>,
+        model: &str,
+        tools: &[serde_json::Value],
+    ) {
         let Some(slot) = self.model_runtime.cache_safe_slot.as_ref() else {
             return;
         };
-        let (fork_context_messages, session_id) = {
+        let (fork_context_messages, session_id, model_profile) = {
             let s = self.session.lock().await;
-            (s.model_context_history(), s.session_id)
+            (
+                s.model_context_history(),
+                s.session_id,
+                s.model_profile.clone(),
+            )
         };
         let transcript_path = self
             .transcript
@@ -864,15 +870,24 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
             .as_ref()
             .map(|writer| writer.active_path())
             .unwrap_or_else(|| self.computed_transcript_path(&session_id));
+        let effort = self
+            .model_runtime
+            .current_effort
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .map(serde_json::Value::String);
         slot.save(sidequery::CacheSafeParams {
             system_prompt: system.unwrap_or("").into(),
+            tools: tools.to_vec(),
+            effort,
             user_context: std::collections::HashMap::new(),
             system_context: std::collections::HashMap::new(),
             tool_use_options: tool_api::ToolUseOptions {
                 debug: false,
                 verbose: false,
                 main_loop_model: model.to_string(),
-                model_profile: None,
+                model_profile,
                 max_budget_nano_usd: None,
                 mcp_clients: Vec::new(),
                 is_non_interactive_session: false,
@@ -885,6 +900,16 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
             generation: 0,
         })
         .await;
+    }
+
+    /// Seed a resumed session before its first proactive summary can run.
+    pub(crate) async fn seed_compact_cache_safe_params(&self, system: Option<&str>) {
+        if self.model_runtime.cache_safe_slot.is_none() {
+            return;
+        }
+        let model = self.session.lock().await.model.clone();
+        let tools = self.build_wire_tools().await;
+        self.save_cache_safe_params(system, &model, &tools).await;
     }
 
     /// FORK (codex #5 follow-up): record the rendered system-prompt bytes this

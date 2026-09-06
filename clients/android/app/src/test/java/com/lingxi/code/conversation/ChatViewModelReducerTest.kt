@@ -44,6 +44,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -288,11 +289,18 @@ class ChatViewModelReducerTest {
         assertTrue(source.commands.single() is ClientCommand.ForceCompact)
         assertEquals("/compact", vm.state.value.messages.single().text)
         assertEquals(CompactionProgressStatus.Running, vm.state.value.compaction?.status)
+        assertNull(vm.state.value.compaction?.startedAtMillis)
+        vm.reduceClientEvent(ClientEvent.CompactionStatus("summarizing", null))
+        val summaryStart = vm.state.value.compaction?.startedAtMillis
+        assertNotNull(summaryStart)
+        vm.reduceClientEvent(ClientEvent.CompactionStatus("summarizing", null))
+        vm.reduceClientEvent(ClientEvent.CompactionStatus("restoring", null))
+        assertEquals(summaryStart, vm.state.value.compaction?.startedAtMillis)
         assertTrue(vm.state.value.requiresBackgroundExecution)
-        assertEquals(0, compactProgressPercent(0))
-        assertEquals(4, compactProgressPercent(4_000))
-        assertEquals(63, compactProgressPercent(90_000))
-        assertEquals(95, compactProgressPercent(10_000_000))
+        assertEquals(10, compactProgressPercent("summarizing", 0))
+        assertEquals(13, compactProgressPercent("summarizing", 4_000))
+        assertEquals(57, compactProgressPercent("summarizing", 90_000))
+        assertEquals(84, compactProgressPercent("summarizing", 10_000_000))
         vm.send("must not overlap compaction")
         assertEquals(1, vm.state.value.messages.size)
 
@@ -347,13 +355,13 @@ class ChatViewModelReducerTest {
         )
 
         vm.send("start an asynchronous task")
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null, null))
         vm.reduce(ReplyEvent.End)
         runCurrent()
 
         assertEquals(listOf(true), execution.activeStates)
 
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, null))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, null, null))
         runCurrent()
         assertEquals(listOf(true, false), execution.activeStates)
     }
@@ -698,7 +706,7 @@ class ChatViewModelReducerTest {
         // The remaining lease is the unrelated workflow task, not the parked
         // recovered turn's unmatched tool/run state.
         vm.reduceClientEvent(
-            ClientEvent.TaskStatusChanged("workflow-1", TaskStatusDto.PAUSED, null),
+            ClientEvent.TaskStatusChanged("workflow-1", TaskStatusDto.PAUSED, null, null),
         )
         runCurrent()
         assertFalse(vm.state.value.requiresBackgroundExecution)
@@ -804,11 +812,11 @@ class ChatViewModelReducerTest {
             backgroundExecution = execution,
         )
 
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null, null))
         runCurrent()
         assertEquals(listOf(true), execution.activeStates)
 
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.PAUSED, null))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.PAUSED, null, null))
         runCurrent()
 
         assertFalse(vm.state.value.activeBackgroundTaskIds.contains("task-1"))
@@ -832,6 +840,7 @@ class ChatViewModelReducerTest {
                 taskId = "task-b",
                 status = TaskStatusDto.RUNNING,
                 originSessionId = "session-b",
+                error = null,
             ),
         )
         runCurrent()
@@ -845,6 +854,7 @@ class ChatViewModelReducerTest {
                 taskId = "task-a",
                 status = TaskStatusDto.RUNNING,
                 originSessionId = "session-a",
+                error = null,
             ),
         )
         assertEquals("后台任务 task-a 运行中", vm.state.value.statusLine)
@@ -859,7 +869,7 @@ class ChatViewModelReducerTest {
             backgroundExecution = execution,
         )
 
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null, null))
         runCurrent()
         assertEquals(listOf(true), execution.activeStates)
 
@@ -872,7 +882,7 @@ class ChatViewModelReducerTest {
             execution.activeStates,
         )
 
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, null))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, null, null))
         runCurrent()
         assertEquals(listOf(true, false), execution.activeStates)
     }

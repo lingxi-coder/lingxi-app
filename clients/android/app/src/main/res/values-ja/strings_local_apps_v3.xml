@@ -21,6 +21,7 @@
     <string name="chat_task_status_paused">バックグラウンドタスク %1$s を一時停止しました</string>
     <string name="chat_task_status_completed">バックグラウンドタスク %1$s が完了しました</string>
     <string name="chat_task_status_failed">バックグラウンドタスク %1$s が失敗しました</string>
+    <string name="chat_task_status_failed_reason">バックグラウンドタスク %1$s が失敗しました: %2$s</string>
     <string name="chat_task_status_cancelled">バックグラウンドタスク %1$s をキャンセルしました</string>
     <string name="drawer_app_scope_label">アプリ・%1$s</string>
     <string name="drawer_app_sessions_empty">このアプリにはまだ会話がありません。</string>

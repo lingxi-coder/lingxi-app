@@ -279,11 +279,70 @@ pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) 
     }
 }
 
-/// Drive a one-shot `--output-format stream-json` conversation.
-///
-/// Emits `system/init` → `system/status` → [streaming frames via the trait
-/// impls on `stream`] → exit.  The `stream` is already installed as the
-/// orchestrator's output sink (set up in `lib.rs`).
+/// Recognize only the built-in /compact command, preserving its focus text.
+fn compact_command_instructions(prompt: &str) -> Option<&str> {
+    let tail = prompt.trim().strip_prefix("/compact")?;
+    (tail.is_empty() || tail.starts_with(char::is_whitespace)).then(|| tail.trim())
+}
+
+async fn run_stream_compact_command(
+    argv: &Argv,
+    runtime: &Runtime,
+    stream: &StreamJsonStream,
+    instructions: &str,
+    command_uuid: Option<&str>,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let started = std::time::Instant::now();
+    let uuid = command_uuid.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_string);
+    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let result = runtime
+        .orchestrator
+        .force_compact_with_instructions_and_cancel(
+            (!instructions.is_empty()).then_some(instructions),
+            cancel,
+        )
+        .await;
+    // A successful boundary emits the init frame immediately before itself.
+    // A failed attempt has no boundary but still completes a local SDK command.
+    if result.is_err() {
+        stream.emit_init().await;
+    }
+    let failure = result.err().map(|error| {
+        let message = error.to_string();
+        let mut display = command_core::compact::compact_failure_display(&message);
+        if display == "No messages to compact" {
+            display.insert_str(0, "Error: ");
+        }
+        (
+            display,
+            command_core::compact::compact_failure_is_error(&message),
+        )
+    });
+    stream
+        .emit_compact_command_output(
+            instructions,
+            &uuid,
+            &timestamp,
+            failure
+                .as_ref()
+                .map(|(display, is_error)| (display.as_str(), *is_error)),
+            argv.verbose,
+            argv.replay_user_messages,
+        )
+        .await;
+    let cost = runtime.orchestrator.snapshot_cost().await;
+    stream
+        .emit_compact_command_result(
+            &cost,
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            failure.as_ref().map(|(display, _)| display.as_str()),
+        )
+        .await;
+}
+
+/// Drive a one-shot stream-json conversation or local /compact command.
+/// The stream is already installed as the orchestrator's output sink.
 pub async fn run_stream_json_print(
     argv: &Argv,
     runtime: &Runtime,
@@ -300,8 +359,9 @@ pub async fn run_stream_json_print(
         return exit_codes::ARGV_ERROR;
     }
 
-    // Slash commands bypass the API; stream-json doesn't apply.
-    if prompt.starts_with('/') {
+    // /compact is a local SDK command with compaction status and replay frames.
+    // Other local-command transports retain their existing dispatch policy.
+    if prompt.starts_with('/') && compact_command_instructions(&prompt).is_none() {
         eprintln!("lingxi-cli: slash commands not supported in stream-json mode");
         return exit_codes::ARGV_ERROR;
     }
@@ -416,6 +476,20 @@ pub async fn run_stream_json_print(
     // are emitted. All subsequent emit_* calls push onto the mpsc channel;
     // the drain task is the sole stdout writer.
     stream.ensure_drain_started().await;
+
+    if let Some(instructions) = compact_command_instructions(&prompt) {
+        run_stream_compact_command(
+            argv,
+            runtime,
+            &stream,
+            instructions,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        stream.flush().await;
+        return exit_codes::SUCCESS;
+    }
 
     // ① system/init frame
     stream.emit_init().await;
@@ -1787,11 +1861,10 @@ pub async fn run_stream_json_input_loop(
     // the drain task is the sole stdout writer.
     stream.ensure_drain_started().await;
 
-    // ① system/init frame (emitted once before any turns).
-    stream.emit_init().await;
-
-    // ② system/status frame (the init "requesting" handshake).
-    stream.emit_status().await;
+    // Defer the initial conversation frames until the first model turn.
+    // A leading /compact has its own status → init lifecycle and must not
+    // acquire an unrelated "requesting" status before it starts.
+    let mut emitted_initial_conversation_frames = false;
 
     // Phase 0 (0b): spawn the streaming stdin router. Frames arrive AS THEY
     // ARE SENT (not buffered to EOF), routed by type onto three channels:
@@ -2141,10 +2214,16 @@ pub async fn run_stream_json_input_loop(
             cancel.cancel();
         }
 
+        if !emitted_initial_conversation_frames && compact_command_instructions(&prompt).is_none() {
+            stream.emit_init().await;
+            stream.emit_status().await;
+            emitted_initial_conversation_frames = true;
+        }
+
         // Under --replay-user-messages, re-emit the inbound user frame as
         // isReplay:true (the initial-prompt ack for each new turn). Echo the
         // ORIGINAL uuid + content so the host can correlate the ack.
-        if argv.replay_user_messages {
+        if argv.replay_user_messages && compact_command_instructions(&prompt).is_none() {
             let ack_uuid = turn
                 .uuid
                 .clone()
@@ -2195,6 +2274,26 @@ pub async fn run_stream_json_input_loop(
         // P5 Phase 2: register this turn's token so a `can_use_tool`
         // `deny+interrupt` response (§3.4) can abort the whole turn.
         control_plane.set_active_turn(cancel.clone()).await;
+
+        if let Some(instructions) = compact_command_instructions(&prompt) {
+            run_stream_compact_command(
+                argv,
+                runtime,
+                &stream,
+                instructions,
+                turn.uuid.as_deref(),
+                cancel.clone(),
+            )
+            .await;
+            control_plane.clear_active_turn().await;
+            cancel_bridge.abort();
+            if let Some(uuid) = turn.uuid.as_deref() {
+                queue_lifecycle.emit(uuid, crate::queued_commands::LIFECYCLE_COMPLETED);
+            }
+            let _ = cancel_tx.send(false);
+            last_turn_err = None;
+            continue;
+        }
 
         // Probe handle: after the turn, `is_cancelled()` distinguishes an
         // interrupt-aborted turn from a completed one (binary `mCo(reason)`).
@@ -4632,6 +4731,17 @@ mod tests {
     use session::jsonl::project_dir_name;
     use std::time::{Duration, SystemTime};
     use uuid::Uuid;
+
+    #[test]
+    fn stream_compact_recognition_preserves_focus_without_matching_other_commands() {
+        assert_eq!(compact_command_instructions("/compact"), Some(""));
+        assert_eq!(
+            compact_command_instructions(" /compact  retain API\nchanges "),
+            Some("retain API\nchanges")
+        );
+        assert_eq!(compact_command_instructions("/compactor"), None);
+        assert_eq!(compact_command_instructions("explain /compact"), None);
+    }
 
     // FIX #2: a failed `/resume` switch must NOT kill a live session. When a
     // session is in progress the loop re-mounts IT (never exits); only with no

@@ -2,6 +2,7 @@ package com.lingxi.code.localapps
 
 import android.content.Context
 import androidx.compose.runtime.Immutable
+import com.lingxi.code.R
 import com.lingxi.code.model.SessionMode
 
 /**
@@ -171,6 +172,48 @@ data class LocalAppVerificationSummary(
     val summary: String,
     val code: String? = null,
 )
+
+/**
+ * The localized copy for one verification summary, or `null` when this client
+ * has nothing better than the engine's own [LocalAppVerificationSummary.summary].
+ *
+ * The engine writes `summary` as a fixed English sentence — it has no notion of
+ * the client's locale — and pairs it with a machine-readable [code] that IS the
+ * localization key. It emits FIVE codes today, from the five
+ * `LocalAppVerificationSummaryDto` constructions in `local_apps_host.rs`:
+ *
+ *  - `"needs_setup"` (:1994, status Unverified)
+ *  - `"active_state_corrupt"` (:2025, status Failed) — see below
+ *  - `"needs_revalidation"` (:2072, status Unverified)
+ *  - ABSENCE, i.e. `null` alongside [LocalAppVerificationStatus.Passed] (:2078)
+ *  - `"verification_unavailable"` (:2123, status Unavailable)
+ *
+ * Only four are mapped here. `"active_state_corrupt"` deliberately has no
+ * client key — the engine's own comment at `local_apps_host.rs:2031-2036` says
+ * so — and therefore takes the `else ->` arm and renders the engine's English
+ * sentence, with the STATUS badge beside it still localized. It is named in the
+ * `code` field precisely so a failure can never land on the `null` arm, which
+ * would claim verification passed.
+ *
+ * The ABSENCE case is not a missing code: it is the "everything verified"
+ * summary, and the one state that otherwise still renders English. A `null`
+ * code with any OTHER status is deliberately NOT mapped: nothing in the engine
+ * produces that pair today, and guessing the "passed" copy for a summary whose
+ * status is not Passed would be worse than the English sentence the engine
+ * actually chose. An unrecognized future code falls back the same way — same
+ * rule the gate labels below follow.
+ */
+fun localAppVerificationSummaryRes(
+    status: LocalAppVerificationStatus,
+    code: String?,
+): Int? = when (code) {
+    "needs_setup" -> R.string.local_apps_verification_summary_needs_setup
+    "needs_revalidation" -> R.string.local_apps_verification_summary_needs_revalidation
+    "verification_unavailable" -> R.string.local_apps_verification_summary_verification_unavailable
+    null -> R.string.local_apps_verification_summary_passed
+        .takeIf { status == LocalAppVerificationStatus.Passed }
+    else -> null
+}
 
 internal fun localAppStatusBadges(
     workflow: LocalAppWorkflow,
@@ -491,11 +534,62 @@ data class LocalAppApprovalInitialTool(
 
 @Immutable
 data class LocalAppApprovalGate(
+    /**
+     * The engine's stable identifier for the gate (`mcp_qa`, `ui_runner`) —
+     * the only part of the wire `LocalAppGateStatusDto` that is not locale-bound
+     * prose.
+     *
+     * Carried rather than dropped because [name] and [detail] arrive as fixed
+     * English (`pending_verification_gates` in `local_apps_host.rs`), so this
+     * id is the ONLY thing a client can localize on. Defaulted to the empty
+     * string so an unidentified gate falls back to the engine's own strings,
+     * which is also what an unrecognized id does.
+     */
+    val gateId: String = "",
     val name: String,
     val status: LocalAppVerificationStatus,
     val available: Boolean,
     val detail: String? = null,
 )
+
+/**
+ * The localized label for one approval gate, or `null` to render the engine's
+ * own English [LocalAppApprovalGate.name].
+ *
+ * Mirrors iOS's `localizedGateLabel` (LocalAppApprovalSheets.swift): the host
+ * defines exactly two ids today and sends their labels as fixed English; an
+ * unrecognized future id falls through to the raw string rather than to
+ * nothing.
+ */
+fun localAppGateLabelRes(gateId: String): Int? = when (gateId) {
+    "mcp_qa" -> R.string.local_apps_create_confirm_gate_mcp_qa_label
+    "ui_runner" -> R.string.local_apps_create_confirm_gate_ui_runner_label
+    else -> null
+}
+
+/**
+ * The localized detail line for one approval gate, or `null` to render the
+ * engine's own [LocalAppApprovalGate.detail].
+ *
+ * Mirrors iOS's `localizedGateDetail`: only the UI runner's UNAVAILABLE detail
+ * has client copy — an available runner sends no detail worth translating.
+ */
+fun localAppGateDetailRes(gateId: String, available: Boolean): Int? =
+    R.string.local_apps_create_confirm_gate_ui_runner_unavailable_detail
+        .takeIf { gateId == "ui_runner" && !available }
+
+/**
+ * The "runner unavailable" marker, or `null` when the gate's runner is present.
+ *
+ * Deliberately id-INDEPENDENT, exactly as iOS is: `LocalAppApprovalSheets.swift`
+ * renders this string beside the badge on `if !gate.available` in BOTH sheets
+ * (:140 create-confirmation, :315 MCP proposal) whatever the gate id, so an
+ * unavailable `mcp_qa` gate says so too. [localAppGateDetailRes] is the
+ * narrower, id-SPECIFIC sentence and the two stack: a missing UI runner renders
+ * the marker AND its own detail, which is what iOS shows.
+ */
+fun localAppGateUnavailableRes(available: Boolean): Int? =
+    R.string.local_apps_create_confirm_gate_runner_unavailable.takeIf { !available }
 
 @Immutable
 data class LocalAppApprovalToolSurface(
@@ -623,6 +717,18 @@ data class LocalAppsUiState(
     val pendingApprovalSheet: LocalAppApprovalSheet? = null,
     val bridgeResults: Map<LocalAppBridgeRequestKey, LocalAppBridgeResult> = emptyMap(),
     val pendingUiAction: LocalAppPendingUiAction? = null,
+    /**
+     * Whether a `CreateApp` this client started is still unresolved — the
+     * observed twin of `LocalAppsViewModel.pendingCreateRequestId`, published
+     * by `publishCreateInFlight`.
+     *
+     * Every create entry point renders from this rather than from a local flag
+     * around its own call: the create resolves OUT OF BAND on `AppCreated` /
+     * `AppOperationFailed` (or the 30s stop-loss), tens of seconds after the
+     * command itself returns, and a flag scoped to the call re-enables the
+     * button for that whole window.
+     */
+    val createInFlight: Boolean = false,
     val error: String? = null,
     val distributionMode: LocalAppRuntimeMode,
 ) {

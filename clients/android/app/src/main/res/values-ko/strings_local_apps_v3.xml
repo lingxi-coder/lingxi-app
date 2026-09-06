@@ -21,6 +21,7 @@
     <string name="chat_task_status_paused">백그라운드 작업 %1$s이(가) 일시중지되었습니다</string>
     <string name="chat_task_status_completed">백그라운드 작업 %1$s이(가) 완료되었습니다</string>
     <string name="chat_task_status_failed">백그라운드 작업 %1$s이(가) 실패했습니다</string>
+    <string name="chat_task_status_failed_reason">백그라운드 작업 %1$s이(가) 실패했습니다: %2$s</string>
     <string name="chat_task_status_cancelled">백그라운드 작업 %1$s이(가) 취소되었습니다</string>
     <string name="drawer_app_scope_label">앱 · %1$s</string>
     <string name="drawer_app_sessions_empty">이 앱에는 아직 대화가 없습니다.</string>

@@ -117,9 +117,9 @@ fn every_rebuilt_request_snapshot_re_appends_the_turn_reminders() {
     );
 
     // Every rebuild-from-raw-history path routes through the shared helper:
-    // the 529 fallback, the PTL truncation retry and the non-streaming
-    // fallback in streaming; the three rebuilds inside
-    // `call_api_with_ptl_recovery` in batched.
+    // the 529 fallback, PTL recovery and the non-streaming fallback in
+    // streaming; context hint, context collapse and reactive compaction in
+    // batched. The destructive main-request head-truncation retry is gone.
     assert_eq!(
         STREAMING.matches("orch.reattach_outgoing_context(").count(),
         3,
@@ -128,7 +128,7 @@ fn every_rebuilt_request_snapshot_re_appends_the_turn_reminders() {
     );
     assert_eq!(
         BATCHED.matches("orch.reattach_outgoing_context(").count(),
-        4,
+        3,
         "BATCHED recovery and context-collapse rebuilds must each reattach"
     );
 

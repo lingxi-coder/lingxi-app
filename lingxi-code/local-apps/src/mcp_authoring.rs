@@ -182,8 +182,6 @@ pub struct McpCandidateJournal {
     pub tool_surface_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub consumed_receipt_sha256: Option<String>,
     pub integrity_sha256: String,
 }
 
@@ -904,10 +902,6 @@ impl McpCandidateJournal {
                 .is_some_and(|digest| !valid_digest(digest))
             || self
                 .previous_catalog_sha256
-                .as_deref()
-                .is_some_and(|digest| !valid_digest(digest))
-            || self
-                .consumed_receipt_sha256
                 .as_deref()
                 .is_some_and(|digest| !valid_digest(digest))
         {
@@ -2023,7 +2017,6 @@ mod tests {
             approval_contract_sha256: zero.clone(),
             tool_surface_sha256: zero,
             catalog_sha256: None,
-            consumed_receipt_sha256: None,
             integrity_sha256: String::new(),
         }
         .seal()

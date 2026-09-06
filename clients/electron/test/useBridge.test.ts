@@ -508,7 +508,7 @@ test('the runSlashCommand dispatch-failure catch resets cancellation runtime; th
   );
 });
 
-test('opening either Desktop command surface refreshes the live slash catalog', () => {
+test('opening the composer slash popup refreshes the live slash catalog', () => {
   const bridgeSource = useBridgeSource();
   assert.match(
     bridgeSource,
@@ -523,12 +523,6 @@ test('opening either Desktop command surface refreshes the live slash catalog', 
     'opening inline slash completion must recover a catalog missed during startup.',
   );
 
-  const paletteSource = readFileSync(join(process.cwd(), 'src/renderer/components/DesktopCommandPalette.tsx'), 'utf8');
-  assert.match(
-    paletteSource,
-    /if \(!open\) return;[\s\S]*?void bridge\.refreshSlashCommands\(\)\.catch\(\(\) => undefined\)/,
-    'opening the command palette must refresh the same live engine catalog.',
-  );
 });
 
 test('a slash-turn claim is cleared on session reset events, not just turn_started (FINDING 2)', () => {

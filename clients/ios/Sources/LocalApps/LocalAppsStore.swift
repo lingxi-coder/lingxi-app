@@ -100,6 +100,21 @@ final class LocalAppsStore {
     /// `switchScope` submits `cancelAndWait()`, so landing mid-turn would kill
     /// the very turn that produced the app.
     private(set) var createdAppLanding: CreatedAppLanding?
+    /// Landings published while [`createdAppLanding`] was still occupied — the
+    /// BACKLOG behind the observed head.
+    ///
+    /// This slot used to be one overwritable Optional where Android buffers a
+    /// channel (`LocalAppsViewModel.createdAppLandingChannel`, consumed by
+    /// `RootScreen`), and `RootView.landCreatedAppIfReady` refuses to consume
+    /// while a turn is streaming, while `pendingWidgetSetup` is armed, or
+    /// while Settings is open. A second create finishing inside any of those
+    /// windows therefore REPLACED the first, and the single
+    /// `consumeCreatedAppLanding()` then drained only the newest — the first
+    /// app was created, listed in the library, and never handed off at all.
+    ///
+    /// FIFO: the older landing is the one the user has been waiting on
+    /// longest, so it stays at the head and the newcomer queues behind it.
+    @ObservationIgnored private var queuedCreatedAppLandings: [CreatedAppLanding] = []
     /// The landing built on `AppCreated`, held until `AppRecordChanged` can
     /// attach the init-session pin the engine mints immediately afterwards.
     @ObservationIgnored private var landingAwaitingPin: CreatedAppLanding?
@@ -370,7 +385,7 @@ final class LocalAppsStore {
             // engine round-trip left it stuck behind an unrelated prompt for
             // no reason.
             presentNextCreateConfirmation()
-            let sent = await send(
+            let outcome = await sendApprovalResolution(
                 .pluginCommand(
                     command: .resolveCreateConfirmation(
                         requestId: prompt.requestID,
@@ -378,7 +393,7 @@ final class LocalAppsStore {
                     )
                 )
             )
-            if !sent {
+            if case .notDelivered = outcome {
                 // The result was discarded here before: a failed send left
                 // the engine holding the approval token with no answer, and
                 // the sheet already gone with nothing to re-answer it.
@@ -387,6 +402,12 @@ final class LocalAppsStore {
                 // Whatever `presentNextCreateConfirmation()` already pulled
                 // up in the meantime goes back to the FRONT of the queue
                 // rather than being dropped.
+                //
+                // `refusedAsStale` deliberately does NOT restore. The engine
+                // has already dropped this request; bringing the sheet back
+                // would put an unanswerable prompt in front of the user
+                // alongside the alert that says it is no longer pending, and
+                // every retry would take the same path forever.
                 if let displaced = pendingCreateConfirmation {
                     createConfirmationQueue.insert(displaced, at: 0)
                 }
@@ -400,7 +421,7 @@ final class LocalAppsStore {
             // Drained immediately for the same reason as the create
             // confirmation above — see its comment.
             presentNextMcpProposalApproval()
-            _ = await send(
+            _ = await sendApprovalResolution(
                 .pluginCommand(
                     command: .resolveMcpProposalApproval(
                         requestId: prompt.requestID,
@@ -1046,6 +1067,26 @@ final class LocalAppsStore {
         errorMessage = String(localized: "local_apps_creation_result_unknown")
     }
 
+    /// A scope switch this store's UI asked `RootView` for was REFUSED.
+    ///
+    /// `RootView.switchScope` returns a bare `Bool`, so the caller picks the
+    /// copy from the two reasons its guard tests; both keys already exist and
+    /// are the ones Android reports at the matching two sites —
+    /// `ChatViewModel.refuseWhileDurableTurnParked` sends
+    /// `chat_error_finish_background_turn_first` and
+    /// `ChatViewModel.switchWorkspaceSource`'s streaming / pending-transition
+    /// branch sends `chat_error_stop_before_switch_project`.
+    ///
+    /// Routed through the store rather than `projectStore.errorMessage`
+    /// because every caller is a tap made INSIDE the local-apps cover, and
+    /// while that cover is up `LocalAppsRootView`'s own alert is the presenter
+    /// that owns the error channel (`RootView.localAppErrorPresenterIsFree`
+    /// yields to `presentedRoute`). A message put anywhere else would have no
+    /// presenter until the user closed the cover.
+    func reportScopeSwitchRefused(_ message: String) {
+        errorMessage = message
+    }
+
     /// Arm the stop-loss for one pin still awaited on `landingAwaitingPin`.
     private func armPinWaitTimeout(appID: String) {
         pinWaitTimeoutTask?.cancel()
@@ -1077,7 +1118,7 @@ final class LocalAppsStore {
         landingAwaitingPin = nil
         var landing = armed
         landing.initSessionID = nil
-        createdAppLanding = landing
+        publishCreatedAppLanding(landing)
     }
 
     /// Disarm the pending create — but ONLY if `requestID` is the one still in
@@ -1111,10 +1152,39 @@ final class LocalAppsStore {
         publishWidgetSnapshotNow()
     }
 
-    /// Take the post-creation landing, if any. One-shot.
+    /// Take the post-creation landing at the head of the queue, if any.
+    /// One-shot per landing: draining the head PROMOTES the next queued one
+    /// rather than clearing the slot, which is what makes the observed
+    /// property change again and re-drives `RootView`'s
+    /// `onChange(of: localAppsStore.createdAppLanding)` sink for the backlog.
     func consumeCreatedAppLanding() -> CreatedAppLanding? {
-        defer { createdAppLanding = nil }
-        return createdAppLanding
+        let head = createdAppLanding
+        createdAppLanding = queuedCreatedAppLandings.isEmpty
+            ? nil
+            : queuedCreatedAppLandings.removeFirst()
+        return head
+    }
+
+    /// Publish one landing without losing whatever is already queued.
+    ///
+    /// Same-app republication SUPERSEDES in place instead of queuing: the two
+    /// producers for one app are the pin arriving on `AppRecordChanged` and
+    /// the pin-wait stop-loss giving up, and delivering both would take the
+    /// user into the same app twice.
+    private func publishCreatedAppLanding(_ landing: CreatedAppLanding) {
+        guard let head = createdAppLanding else {
+            createdAppLanding = landing
+            return
+        }
+        if head.appID == landing.appID {
+            createdAppLanding = landing
+            return
+        }
+        if let index = queuedCreatedAppLandings.firstIndex(where: { $0.appID == landing.appID }) {
+            queuedCreatedAppLandings[index] = landing
+            return
+        }
+        queuedCreatedAppLandings.append(landing)
     }
 
     /// Re-arm a landing `RootView` already consumed but could not deliver —
@@ -1128,7 +1198,14 @@ final class LocalAppsStore {
     /// path's guard does not test whatever refused the switch, so an
     /// unlatched re-arm is a fresh retry window every time — see
     /// `RootView.openCreatedAppSession`'s per-app latch.
+    ///
+    /// The re-armed landing is OLDER than anything published since it was
+    /// consumed, so it goes back at the head and whatever took the slot in the
+    /// meantime is pushed to the front of the backlog rather than overwritten.
     func restoreCreatedAppLanding(_ landing: CreatedAppLanding) {
+        if let displaced = createdAppLanding, displaced.appID != landing.appID {
+            queuedCreatedAppLandings.insert(displaced, at: 0)
+        }
         createdAppLanding = landing
     }
 
@@ -1551,7 +1628,7 @@ final class LocalAppsStore {
                     clearPinWaitTimeout()
                     var landing = armed
                     landing.initSessionID = summary.initSessionId
-                    createdAppLanding = landing
+                    publishCreatedAppLanding(landing)
                 }
                 lastRefreshAt = .now
                 scheduleWidgetSnapshotPublish()
@@ -1896,7 +1973,7 @@ final class LocalAppsStore {
             case .mcpProposal:
                 command = .resolveMcpProposalApproval(requestId: promptID, approved: approved)
             }
-            _ = await send(.pluginCommand(command: command))
+            _ = await sendApprovalResolution(.pluginCommand(command: command))
         }
 
         private func updateManagedInventoryFailure(appID: String, message: String) {
@@ -1916,8 +1993,22 @@ final class LocalAppsStore {
                     publicationState: inventory.publicationState,
                     mcpVerification: LocalAppVerificationSummary(
                         status: .failed,
+                        // NO code. `summary` here is this command's own
+                        // failure text, not the sentence the engine's last
+                        // `code` described, and `localizedSummary` keys off
+                        // `code` — carrying the stale one forward would put
+                        // the previous verification's copy on screen in place
+                        // of the error the user needs to read.
                         summary: message,
-                        code: inventory.mcpVerification.code
+                        code: nil,
+                        // And `isHostSourced: false`, because this summary is
+                        // built HERE, not decoded from the wire. It is unread
+                        // today — `localizedSummary`'s host-sourced arm is
+                        // `code == nil && status == .passed` and this status
+                        // is hardcoded `.failed` — but a client-built summary
+                        // flying the wire-sourced default is a trap primed for
+                        // whoever changes that status.
+                        isHostSourced: false
                     ),
                     uiVerification: inventory.uiVerification,
                     enabledTools: inventory.enabledTools,
@@ -2109,6 +2200,68 @@ final class LocalAppsStore {
                 return false
             }
         }
+
+        /// `send`, for the two approval-sheet answers only.
+        ///
+        /// `ClientError` is flat by design — a rejection carries an English
+        /// `message` and no code — so a client normally cannot localize one.
+        /// These two commands are the exception, because the CALL SITE
+        /// supplies what the payload does not: `host.rs`'s
+        /// `ResolveCreateConfirmation` and `ResolveMcpProposalApproval` arms
+        /// each have exactly one `Err` path, "unknown or expired Local App
+        /// create confirmation" / "… MCP proposal approval", and `submit`
+        /// dispatches straight into that match with no earlier guard. So a
+        /// `Rejected` arriving HERE has exactly one meaning, and
+        /// `local_apps_error_operation_interaction_invalid`
+        /// ("That interaction is no longer pending.") already says it in every
+        /// locale — the same sentence `AppErrorCodeDto.interactionInvalid`
+        /// gets.
+        ///
+        /// Every other failure keeps `localizedDescription`. That is not a
+        /// good string either — UniFFI's generated `errorDescription` is
+        /// `String(reflecting: self)`, so a transport failure reaches the
+        /// alert as a Swift debug dump — but fixing that belongs to whoever
+        /// owns the whole error-presentation path, not to this call site.
+        /// What became of an approval answer.
+        ///
+        /// Three cases and not a `Bool`, because the two failures need
+        /// OPPOSITE recovery. `notDelivered` (no engine handle, or any
+        /// non-`Rejected` throw) leaves the engine still holding the approval
+        /// token with nobody answering it, so the prompt has to come back.
+        /// `refusedAsStale` is the engine saying it has already forgotten this
+        /// request — `host.rs`'s two resolve arms throw `ClientError.Rejected`
+        /// on exactly that, "unknown or expired" — so re-presenting the sheet
+        /// hands the user a button that can never succeed, next to an alert
+        /// telling them so.
+        private enum ApprovalResolutionOutcome {
+            case delivered
+            case refusedAsStale
+            case notDelivered
+        }
+
+        private func sendApprovalResolution(
+            _ command: ClientCommand
+        ) async -> ApprovalResolutionOutcome {
+            guard let submitCommand else {
+                errorMessage = String(localized: "local_apps_error_engine_not_connected")
+                return .notDelivered
+            }
+            do {
+                try await submitCommand(command)
+                return .delivered
+            } catch let error as ClientError {
+                if case .Rejected = error {
+                    errorMessage = String(
+                        localized: "local_apps_error_operation_interaction_invalid")
+                    return .refusedAsStale
+                }
+                errorMessage = error.localizedDescription
+                return .notDelivered
+            } catch {
+                errorMessage = error.localizedDescription
+                return .notDelivered
+            }
+        }
     #endif
 }
 
@@ -2283,15 +2436,21 @@ struct LocalAppManagedMcpInventoryReader {
             settingsRevision: settingsRevision,
             pinnedToCurrentConversation: false,
             publicationState: app.workflow,
+            // `isHostSourced: false` — these two are read off the on-disk
+            // manifest, not decoded from a `LocalAppVerificationSummaryDto`.
+            // Their `code` slot carries a digest or nothing, neither of which
+            // is a wire code, so they must render their own sentence.
             mcpVerification: LocalAppVerificationSummary(
                 status: verificationDigest.isEmpty ? .unverified : .passed,
                 summary: verificationDigest.isEmpty ? "MCP verification pending." : "MCP verification evidence available.",
-                code: verificationDigest.isEmpty ? nil : verificationDigest
+                code: verificationDigest.isEmpty ? nil : verificationDigest,
+                isHostSourced: false
             ),
             uiVerification: LocalAppVerificationSummary(
                 status: app.workflow == .publishedVerified ? .passed : .unverified,
                 summary: app.workflow == .publishedVerified ? "Published UI verification passed." : "UI verification pending.",
-                code: nil
+                code: nil,
+                isHostSourced: false
             ),
             enabledTools: enabledTools,
             widget: nil,

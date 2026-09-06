@@ -257,10 +257,14 @@ fun LocalAppApprovalSheetDialog(
                                 label = stringResource(R.string.local_apps_create_confirm_required_gates),
                                 value = sheet.gates.joinToString("\n") { gate ->
                                     buildString {
-                                        append(gate.name)
+                                        append(localAppGateLabel(gate, context))
                                         append(" · ")
                                         append(gate.status.label(context))
-                                        gate.detail?.takeIf { it.isNotBlank() }?.let {
+                                        localAppGateUnavailable(gate, context)?.let {
+                                            append(" · ")
+                                            append(it)
+                                        }
+                                        localAppGateDetail(gate, context)?.takeIf { it.isNotBlank() }?.let {
                                             append(" · ")
                                             append(it)
                                         }
@@ -314,10 +318,14 @@ fun LocalAppApprovalSheetDialog(
                                 label = stringResource(R.string.local_apps_create_confirm_required_gates),
                                 value = sheet.pendingGates.joinToString("\n") { gate ->
                                     buildString {
-                                        append(gate.name)
+                                        append(localAppGateLabel(gate, context))
                                         append(" · ")
                                         append(gate.status.label(context))
-                                        gate.detail?.takeIf { it.isNotBlank() }?.let {
+                                        localAppGateUnavailable(gate, context)?.let {
+                                            append(" · ")
+                                            append(it)
+                                        }
+                                        localAppGateDetail(gate, context)?.takeIf { it.isNotBlank() }?.let {
                                             append(" · ")
                                             append(it)
                                         }
@@ -471,7 +479,17 @@ private fun LocalAppsLibraryScreen(
                     // No form. The button creates an empty shell app and the
                     // conversation that follows is where its shape, its name and
                     // its requirements get settled.
-                    IconButton(onClick = { onAction(LocalAppsAction.Create) }) {
+                    //
+                    // Disabled for as long as the create is unresolved, not
+                    // merely for the round trip that starts it: the outcome
+                    // arrives out of band up to `CREATE_RESULT_TIMEOUT_MS`
+                    // later, and until then a second tap is refused by the view
+                    // model with an error toast. `state.createInFlight` is the
+                    // observed twin of that latch (iOS: `isCreateInFlight`).
+                    IconButton(
+                        onClick = { onAction(LocalAppsAction.Create) },
+                        enabled = !state.createInFlight,
+                    ) {
                         Icon(Icons.Rounded.Add, contentDescription = stringResource(R.string.local_apps_create))
                     }
                 },
@@ -500,6 +518,7 @@ private fun LocalAppsLibraryScreen(
 
                 state.filteredApps.isEmpty() -> EmptyApps(
                     onCreate = { onAction(LocalAppsAction.Create) },
+                    createInFlight = state.createInFlight,
                 )
 
                 else -> LazyColumn(
@@ -555,7 +574,7 @@ private fun RuntimeModeBanner(mode: LocalAppRuntimeMode) {
 }
 
 @Composable
-private fun EmptyApps(onCreate: () -> Unit) {
+private fun EmptyApps(onCreate: () -> Unit, createInFlight: Boolean) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
@@ -566,7 +585,12 @@ private fun EmptyApps(onCreate: () -> Unit) {
         Text(stringResource(R.string.local_apps_empty), style = MaterialTheme.typography.titleMedium)
         Text(stringResource(R.string.local_apps_empty_detail), style = MaterialTheme.typography.bodyMedium)
         Spacer(Modifier.height(16.dp))
-        Button(onClick = onCreate) { Text(stringResource(R.string.local_apps_create)) }
+        // Gated on the same latch as the top bar's 「+」: this screen is the
+        // other way into a create, and leaving it live would let one create
+        // start while another is still unresolved.
+        Button(onClick = onCreate, enabled = !createInFlight) {
+            Text(stringResource(R.string.local_apps_create))
+        }
     }
 }
 
@@ -1944,8 +1968,14 @@ private fun VerificationSummaryRow(
     label: String,
     summary: LocalAppVerificationSummary,
 ) {
+    // The engine's `summary` is a fixed English sentence; `code` is what names
+    // the client's own copy for it. An unrecognized (or absent) code renders
+    // the engine's sentence rather than nothing — see
+    // `localAppVerificationSummaryRes`.
+    val bodyRes = localAppVerificationSummaryRes(summary.status, summary.code)
+    val body = if (bodyRes != null) stringResource(bodyRes) else summary.summary
     Text(
-        text = "$label · ${summary.status.label()} · ${summary.summary}",
+        text = "$label · ${summary.status.label()} · $body",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.fillMaxWidth(),
@@ -2009,6 +2039,38 @@ private fun LocalAppVerificationStatus.label(): String = when (this) {
     LocalAppVerificationStatus.Unverified -> stringResource(R.string.local_apps_verification_status_unverified)
     LocalAppVerificationStatus.Unavailable -> stringResource(R.string.local_apps_verification_status_unavailable)
 }
+
+/**
+ * The gate's label in the user's language, falling back to the engine's own
+ * English `name` for an id this client does not know.
+ *
+ * Mirrors iOS's `localizedGateLabel` (LocalAppApprovalSheets.swift): the host
+ * has no notion of the client's locale and sends fixed English, so the only
+ * localizable thing on the wire is `gateId`.
+ */
+private fun localAppGateLabel(
+    gate: LocalAppApprovalGate,
+    context: android.content.Context,
+): String = localAppGateLabelRes(gate.gateId)?.let(context::getString) ?: gate.name
+
+/**
+ * The "runner unavailable" marker beside a gate's status, or `null` when the
+ * runner is present. Mirrors iOS's `if !gate.available` badge
+ * (LocalAppApprovalSheets.swift:140 and :315), which is id-independent; unlike
+ * [localAppGateLabel] there is no engine-supplied fallback, because the wire
+ * carries `available` as a bool and no English sentence for it.
+ */
+private fun localAppGateUnavailable(
+    gate: LocalAppApprovalGate,
+    context: android.content.Context,
+): String? = localAppGateUnavailableRes(gate.available)?.let(context::getString)
+
+/** As [localAppGateLabel], for the gate's detail line. */
+private fun localAppGateDetail(
+    gate: LocalAppApprovalGate,
+    context: android.content.Context,
+): String? = localAppGateDetailRes(gate.gateId, gate.available)?.let(context::getString)
+    ?: gate.detail
 
 private fun LocalAppVerificationStatus.label(context: android.content.Context): String = when (this) {
     LocalAppVerificationStatus.Pending -> context.getString(R.string.local_apps_verification_status_pending)

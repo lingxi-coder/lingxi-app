@@ -988,7 +988,8 @@ struct RootView: View {
                 activeConversationID: activeSession,
                 onDismiss: { navigation.closePresentedRoute() },
                 onOpenAppSession: openAppSession,
-                onNewAppSession: startNewAppSession
+                onNewAppSession: startNewAppSession,
+                onStartDraftInterview: startDraftAppInterview
             )
         case .sessionDetails(let sessionID):
             SessionDetailsView(
@@ -1025,18 +1026,47 @@ struct RootView: View {
                 activeConversationID: activeSession,
                 onDismiss: { navigation.closePresentedRoute() },
                 onOpenAppSession: openAppSession,
-                onNewAppSession: startNewAppSession
+                onNewAppSession: startNewAppSession,
+                onStartDraftInterview: startDraftAppInterview
             )
         case .sessionDetails:
             EmptyView()
         }
     }
 
-    /// A tapped row of an app's session catalog: dismiss the local-apps cover
-    /// and continue that conversation inside the app's scope.
+    /// Copy for a refused `switchScope`, chosen from the two reasons its own
+    /// guard tests — read back here because the function returns a bare
+    /// `Bool`. Both keys already exist and are exactly what Android reports at
+    /// the matching two sites (`ChatViewModel.refuseWhileDurableTurnParked`
+    /// and `switchWorkspaceSource`'s streaming / pending-transition branch),
+    /// so the two clients say the same thing for the same refusal.
+    private var scopeSwitchRefusalMessage: String {
+        ConversationSessionMutationPolicy.allowsCallerMutation(
+            hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
+            hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
+            isCancelling: source.model.isCancelling
+        )
+            // The policy is clear, so `projectSwitching` is what refused: a
+            // switch is already in flight.
+            ? String(localized: "chat_error_stop_before_switch_project")
+            : String(localized: "chat_error_finish_background_turn_first")
+    }
+
+    /// A tapped row of an app's session catalog: continue that conversation
+    /// inside the app's scope, and dismiss the local-apps cover ONLY once the
+    /// switch has been accepted.
+    ///
+    /// Order matters and is the same contract Android's draft-landing collector
+    /// states (`RootScreen.kt`, the non-in-place branch): closing the cover
+    /// before knowing whether the switch was accepted strands the user outside
+    /// the library with nothing shown and no way back to the row they tapped.
+    /// `switchScope` refuses synchronously, so the tap either lands or reports.
     private func openAppSession(appID: String, sessionID: String, mode: SessionMode) {
+        guard switchScope(to: .localApp(appID), mode: mode, resumeSessionID: sessionID) else {
+            localAppsStore.reportScopeSwitchRefused(scopeSwitchRefusalMessage)
+            return
+        }
         navigation.closePresentedRoute()
-        switchScope(to: .localApp(appID), mode: mode, resumeSessionID: sessionID)
     }
 
     /// Open the intake conversation the create sheet armed.
@@ -1174,11 +1204,39 @@ struct RootView: View {
         }
     }
 
-    /// 「新会话」in an app's session catalog: dismiss the cover and start a
-    /// fresh conversation in the app's scope.
+    /// 「新会话」in an app's session catalog: start a fresh conversation in the
+    /// app's scope, and drop the cover only once that was accepted — see
+    /// `openAppSession` for why the order is load-bearing.
     private func startNewAppSession(appID: String) {
+        guard switchScope(to: .localApp(appID), mode: .code, startNew: true) else {
+            localAppsStore.reportScopeSwitchRefused(scopeSwitchRefusalMessage)
+            return
+        }
         navigation.closePresentedRoute()
-        switchScope(to: .localApp(appID), mode: .code, startNew: true)
+    }
+
+    /// Tapping a DRAFT card whose init-session pin is missing — the engine's
+    /// best-effort mint failed, so there is no interview session to resume.
+    ///
+    /// Not `startNewAppSession`: that mints a silent anchor, and a draft shell
+    /// with no kickoff leaves the user staring at an empty composer in an app
+    /// that has no brief, no surface and no runtime — the interview that is the
+    /// entire point of the card never re-arms, and every subsequent tap on the
+    /// same card mints another empty session. Sending the same
+    /// `LocalAppKickoff.message` the create landing sends
+    /// (`openCreatedAppSession` above) re-arms that interview instead, and it
+    /// is the one key both clients read so the copy cannot drift.
+    private func startDraftAppInterview(appID: String) {
+        guard switchScope(
+            to: .localApp(appID),
+            mode: .code,
+            startNew: true,
+            initialPrompt: LocalAppKickoff.message
+        ) else {
+            localAppsStore.reportScopeSwitchRefused(scopeSwitchRefusalMessage)
+            return
+        }
+        navigation.closePresentedRoute()
     }
 
     private var currentWorkspaceGuestPath: String {

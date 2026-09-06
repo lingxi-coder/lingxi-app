@@ -33,7 +33,8 @@ visionDelegationEnabled: true
         private func row(
             id: String,
             status: TaskStatusDto,
-            description: String = "local-app-build workflow"
+            description: String = "local-app-build workflow",
+            error: String? = nil
         ) -> TaskRowDto {
             TaskRowDto(
                 taskId: id,
@@ -42,6 +43,7 @@ visionDelegationEnabled: true
                 description: description,
                 canResume: false,
                 startedAtMs: nil,
+                error: error,
                 stage: nil
             )
         }
@@ -136,7 +138,7 @@ visionDelegationEnabled: true
             let source = makeSource()
 
             source.applyForTesting(.taskStatusChanged(
-                taskId: "wmo6xnbac", status: .running, originSessionId: nil
+                taskId: "wmo6xnbac", status: .running, originSessionId: nil, error: nil
             ))
             XCTAssertEqual(source.model.backgroundTasks.map(\.id), ["wmo6xnbac"])
             XCTAssertEqual(source.model.backgroundTasks.first?.descriptionText, "")
@@ -156,16 +158,76 @@ visionDelegationEnabled: true
             source.applyForTesting(.taskStatusChanged(
                 taskId: "workflow-a",
                 status: .running,
-                originSessionId: "session-a"
+                originSessionId: "session-a", error: nil
             ))
             XCTAssertTrue(source.model.backgroundTasks.isEmpty)
 
             source.applyForTesting(.taskStatusChanged(
                 taskId: "workflow-b",
                 status: .running,
-                originSessionId: "session-b"
+                originSessionId: "session-b", error: nil
             ))
             XCTAssertEqual(source.model.backgroundTasks.map(\.id), ["workflow-b"])
+        }
+
+        /// r3-failure-paths-07 — a failed task must reach the user as
+        /// "<what it was> failed: <why>", never as a bare 9-char id.
+        func testFailedTaskNoticeNamesTheAppAndTheReason() {
+            let source = makeSource()
+            source.applyForTesting(.taskRow(task: row(
+                id: "wmo6xnbac",
+                status: .running,
+                description: "Create app \u{201C}Recipe Box\u{201D}"
+            )))
+
+            source.applyForTesting(.taskStatusChanged(
+                taskId: "wmo6xnbac",
+                status: .failed,
+                originSessionId: nil,
+                error: "step 2 `build` exited 1"
+            ))
+
+            let notices: [ConversationExecutionNotice] = source.model.items.compactMap {
+                if case let .notice(notice) = $0 { return notice }
+                return nil
+            }
+            // Vacuity guard: without a notice the two assertions below would
+            // pass over an empty collection.
+            XCTAssertEqual(notices.count, 1, "the failure must produce exactly one notice")
+            XCTAssertTrue(
+                notices[0].text.contains("Create app \u{201C}Recipe Box\u{201D}"),
+                "the notice names the task, not the id: \(notices[0].text)"
+            )
+            XCTAssertTrue(
+                notices[0].text.contains("step 2 `build` exited 1"),
+                "the notice names the reason: \(notices[0].text)"
+            )
+            XCTAssertFalse(
+                notices[0].text.contains("wmo6xnbac"),
+                "the bare id is the fallback, not the label: \(notices[0].text)"
+            )
+            XCTAssertEqual(
+                source.model.backgroundTasks.first?.errorText,
+                "step 2 `build` exited 1",
+                "the panel row keeps the reason for a user who left the session"
+            )
+        }
+
+        /// The other half of r3-failure-paths-07: a `TaskRow` refresh — the
+        /// only surface reached when the push was dropped for a non-active
+        /// origin session — still carries the reason onto the panel.
+        func testTaskRowBackfillsTheFailureReasonWithoutAPush() {
+            let source = makeSource()
+            source.applyForTesting(.taskRow(task: row(
+                id: "wmo6xnbac",
+                status: .failed,
+                description: "Create app \u{201C}Recipe Box\u{201D}",
+                error: "step 2 `build` exited 1"
+            )))
+            XCTAssertEqual(
+                source.model.backgroundTasks.first?.errorText,
+                "step 2 `build` exited 1"
+            )
         }
 
         /// Status transitions update the row in place, and the terminal
@@ -176,18 +238,22 @@ visionDelegationEnabled: true
             source.applyForTesting(.taskRow(task: row(id: "wmo6xnbac", status: .pending)))
 
             source.applyForTesting(.taskStatusChanged(
-                taskId: "wmo6xnbac", status: .running, originSessionId: nil
+                taskId: "wmo6xnbac", status: .running, originSessionId: nil, error: nil
             ))
             XCTAssertEqual(source.model.backgroundTasks.first?.status, .running)
 
             source.applyForTesting(.taskStatusChanged(
-                taskId: "wmo6xnbac", status: .completed, originSessionId: nil
+                taskId: "wmo6xnbac", status: .completed, originSessionId: nil, error: nil
             ))
             XCTAssertEqual(source.model.backgroundTasks.first?.status, .completed)
             XCTAssertEqual(source.model.backgroundTasks.count, 1)
             XCTAssertTrue(
                 source.model.items.contains { item in
-                    if case let .notice(notice) = item { return notice.text.contains("wmo6xnbac") }
+                    // The notice now names the task by its human description
+                    // (the `TaskRow` above supplied one), not by the bare id.
+                    if case let .notice(notice) = item {
+                        return notice.text.contains("local-app-build workflow")
+                    }
                     return false
                 },
                 "the terminal status keeps appending the transcript notice"
@@ -209,7 +275,7 @@ visionDelegationEnabled: true
                 let description = "workflow \(terminalSnapshotStatus)"
 
                 source.applyForTesting(.taskStatusChanged(
-                    taskId: taskID, status: terminalWireStatus, originSessionId: nil
+                    taskId: taskID, status: terminalWireStatus, originSessionId: nil, error: nil
                 ))
                 XCTAssertEqual(source.model.backgroundTasks.first?.status, terminalSnapshotStatus)
                 XCTAssertEqual(
@@ -231,7 +297,7 @@ visionDelegationEnabled: true
                 )
 
                 source.applyForTesting(.taskStatusChanged(
-                    taskId: taskID, status: .running, originSessionId: nil
+                    taskId: taskID, status: .running, originSessionId: nil, error: nil
                 ))
                 XCTAssertEqual(
                     source.model.backgroundTasks.first?.status,
@@ -405,7 +471,7 @@ visionDelegationEnabled: true
         func testWorkflowTaskStatusStaysTerminalWhenLateProgressArrives() {
             let source = makeSource()
             source.applyForTesting(.taskStatusChanged(
-                taskId: "wf-task", status: .completed, originSessionId: nil
+                taskId: "wf-task", status: .completed, originSessionId: nil, error: nil
             ))
 
             source.applyWorkflowProgressForTesting(

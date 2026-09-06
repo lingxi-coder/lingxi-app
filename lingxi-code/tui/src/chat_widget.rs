@@ -58,8 +58,7 @@ use crate::transcript::Transcript;
 const FOCUS_VIEW_ENABLED_NOTICE: &str = "Focus view enabled";
 const FOCUS_VIEW_DISABLED_NOTICE: &str = "Focus view disabled";
 const FOCUS_VIEW_FULLSCREEN_REQUIRED_NOTICE: &str = "Focus view needs the fullscreen renderer.";
-const FOCUS_VIEW_SETTINGS_ENFORCED_NOTICE: &str =
-    "Focus view is enabled by settings (viewMode: focus). Focus view needs the fullscreen renderer.";
+const FOCUS_VIEW_SETTINGS_ENFORCED_NOTICE: &str = "Focus view is enabled by settings (viewMode: focus). Focus view needs the fullscreen renderer.";
 const AGENTS_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_millis(750);
 
 /// What one routed key press or paste means to the owning event loop.
@@ -288,6 +287,7 @@ fn is_live_turn_event(event: &TurnEvent) -> bool {
             | TurnEvent::TerminalSequence { .. }
             | TurnEvent::CompactionCompleted { .. }
             | TurnEvent::CompactStarted
+            | TurnEvent::CompactPhase { .. }
             | TurnEvent::CompactEnded
             | TurnEvent::RateLimit { .. }
             | TurnEvent::RawUtilization { .. }
@@ -320,6 +320,7 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         | TurnEvent::ContextPressure { .. }
         | TurnEvent::TerminalSequence { .. }
         | TurnEvent::CompactStarted
+        | TurnEvent::CompactPhase { .. }
         | TurnEvent::CompactEnded
         | TurnEvent::RawUtilization { .. }
         | TurnEvent::CommandCatalogRefreshed { .. }
@@ -376,13 +377,12 @@ pub struct ChatWidget {
     ready_compact: Option<(String, CancellationToken)>,
     /// When the in-flight turn began, for the spinner's elapsed-seconds counter.
     turn_started_at: Option<std::time::Instant>,
-    /// When a `/compact` (forced) compaction pass began, or `None` when not
-    /// compacting. Drives claude-code's `Compacting conversation…` spinner +
-    /// time-based progress bar (the bar's percent eases from this instant).
-    /// Set on [`TurnEvent::CompactStarted`], cleared on
-    /// [`TurnEvent::CompactEnded`]. Compaction runs off the turn loop, so it
-    /// never overlaps a live `turn_started_at`.
+    /// Start of the current engine-confirmed compaction phase. Drives the
+    /// phase-local estimate and elapsed display; forward phases reset it,
+    /// repeated phases preserve it, and terminal events clear it.
     compacting_started_at: Option<std::time::Instant>,
+    compacting_phase: Option<String>,
+    compacting_unknown_phase: bool,
     /// Active API retry-backoff status (Claude Code's `SystemAPIErrorMessage`).
     /// `Some` while an API request is backing off before its next attempt; the
     /// spinner shows `"<message> · Retrying in Ns… (attempt X/Y)"` with a live
@@ -637,6 +637,8 @@ impl ChatWidget {
             ready_compact: None,
             turn_started_at: None,
             compacting_started_at: None,
+            compacting_phase: None,
+            compacting_unknown_phase: false,
             api_retry: None,
             activity: None,
             active_tool_id: None,
@@ -1173,6 +1175,7 @@ impl ChatWidget {
                 &event,
                 TurnEvent::CompactionCompleted { .. }
                     | TurnEvent::CompactStarted
+                    | TurnEvent::CompactPhase { .. }
                     | TurnEvent::CompactEnded
             );
         let is_initial_session_cost =
@@ -1435,6 +1438,7 @@ impl ChatWidget {
                 // runs off-turn, so no TurnEnded interleaves with it.
                 if self.current_compaction.is_none() {
                     self.compacting_started_at = None;
+                    self.compacting_phase = None;
                 }
                 // (Gap B) `current_todo` is per-turn — clear it so the next
                 // turn's spinner doesn't keep showing the previous turn's
@@ -1556,18 +1560,58 @@ impl ChatWidget {
                 // spinner/bar here. `current_compaction` is left alone — only
                 // the manual flow sets it, and its `CompactEnded` clears it.
                 self.compacting_started_at = None;
+                self.compacting_phase = None;
             }
-            // A forced compaction pass began: show claude-code's
-            // `Compacting conversation…` spinner + time-based progress bar
-            // (percent eases from this instant). Cleared on `CompactEnded`.
+            // Compatibility start events enter the summary phase.
             TurnEvent::CompactStarted => {
-                self.compacting_started_at = Some(std::time::Instant::now());
+                self.apply_turn_event(TurnEvent::CompactPhase {
+                    phase: "summarizing".into(),
+                });
+            }
+            TurnEvent::CompactPhase { phase } => {
+                let rank = |phase: &str| match phase {
+                    "preparing" => 1,
+                    "summarizing" => 2,
+                    "restoring" => 3,
+                    _ => 0,
+                };
+                if matches!(
+                    phase.as_str(),
+                    "complete" | "error" | "cancelled" | "skipped"
+                ) {
+                    let was_active = self.compacting_phase.is_some();
+                    self.compacting_started_at = None;
+                    self.compacting_phase = None;
+                    if phase == "skipped" && was_active {
+                        self.transcript.push_message(RenderedMessage::SystemText {
+                            body: "No compaction needed".into(),
+                            timestamp: 0,
+                            is_error: false,
+                        });
+                    }
+                } else if rank(&phase) == 0 {
+                    // Keep the last known phase clock underneath the generic
+                    // busy display so a later event cannot restart its estimate.
+                    self.compacting_unknown_phase = true;
+                    self.compacting_phase.get_or_insert(phase);
+                } else {
+                    self.compacting_unknown_phase = false;
+                    if self
+                        .compacting_phase
+                        .as_deref()
+                        .is_none_or(|current| rank(&phase) > rank(current))
+                    {
+                        self.compacting_started_at = Some(std::time::Instant::now());
+                        self.compacting_phase = Some(phase);
+                    }
+                }
             }
             // Compaction finished (success or failure): clear the spinner/bar.
             // The `Compacted …` (or error) line arrives as a separate
             // `SystemNotice`.
             TurnEvent::CompactEnded => {
                 self.compacting_started_at = None;
+                self.compacting_phase = None;
                 self.current_compaction = None;
             }
             TurnEvent::RateLimit {
@@ -2527,6 +2571,7 @@ impl ChatWidget {
     #[must_use]
     pub fn needs_animated_redraw(&self) -> bool {
         self.current_turn.is_some()
+            || self.compacting_phase.is_some()
             || self.compacting_started_at.is_some()
             || self.api_retry.is_some()
             || self.pending_backgrounding.is_some()
@@ -4942,17 +4987,36 @@ impl ChatWidget {
     /// The pane's task-status input, recomputed from the widget's turn state
     /// (the pane holds no turn state of its own — plan Phase 5 boundary).
     fn pane_status(&self) -> BottomPaneStatus {
-        // A forced compaction (off the turn loop) takes precedence: it shows
-        // claude-code's `Compacting conversation…` spinner + time-based progress
-        // bar instead of the turn verb/counter. It never overlaps a live turn.
-        if let Some(started) = self.compacting_started_at {
-            let pct =
-                crate::spinner_status::compact_progress_percent(started.elapsed().as_millis());
+        if self.compacting_phase.is_some() || self.compacting_started_at.is_some() {
+            let phase = if self.compacting_unknown_phase {
+                "unknown"
+            } else {
+                self.compacting_phase.as_deref().unwrap_or("unknown")
+            };
+            let elapsed = self
+                .compacting_started_at
+                .map_or(0.0, |started| started.elapsed().as_millis() as f64);
+            let pct = crate::spinner_status::compact_progress_percent(phase, elapsed);
+            let label = match phase {
+                "preparing" => "Preparing compaction",
+                "summarizing" => "Compacting conversation",
+                "restoring" => "Restoring context",
+                _ => "Compacting conversation",
+            };
             return BottomPaneStatus {
                 running: true,
-                text: format!("{} Compacting conversation\u{2026}", self.spinner_frame()),
+                text: format!(
+                    "{} {label}…{} ({}s)",
+                    self.spinner_frame(),
+                    if pct.is_some() {
+                        " · Estimated progress"
+                    } else {
+                        ""
+                    },
+                    (elapsed / 1000.0) as u64
+                ),
                 cost: self.cost.clone(),
-                compact_percent: Some(pct),
+                compact_percent: pct,
             };
         }
         BottomPaneStatus {
@@ -4997,6 +5061,7 @@ impl ChatWidget {
                     // cannot start until the first task's `CompactEnded` lands.
                     token.cancel();
                     self.compacting_started_at = None;
+                    self.compacting_phase = None;
                     return ChatOutcome::Continue;
                 }
                 if let Some(token) = self.current_turn.as_ref() {
@@ -7841,6 +7906,84 @@ mod tests {
             !after.running && after.compact_percent.is_none(),
             "compaction end returns to idle"
         );
+    }
+
+    #[test]
+    fn compact_unknown_has_no_estimate_and_all_terminal_phases_stop_progress() {
+        for terminal in ["complete", "error", "cancelled", "skipped"] {
+            let mut widget = widget();
+            widget.apply_turn_event(TurnEvent::TurnStarted);
+            widget.apply_turn_event(TurnEvent::CompactPhase {
+                phase: "future_phase".into(),
+            });
+            assert!(widget.pane_status().running);
+            assert_eq!(widget.pane_status().compact_percent, None);
+            widget.apply_turn_event(TurnEvent::CompactPhase {
+                phase: "preparing".into(),
+            });
+            assert_eq!(widget.pane_status().compact_percent, Some(0));
+            widget.apply_turn_event(TurnEvent::CompactPhase {
+                phase: terminal.into(),
+            });
+            assert_eq!(widget.pane_status().compact_percent, None);
+            assert!(widget.compacting_phase.is_none());
+            widget.apply_turn_event(TurnEvent::CompactPhase {
+                phase: terminal.into(),
+            });
+            assert_eq!(widget.pane_status().compact_percent, None);
+        }
+    }
+
+    #[test]
+    fn compact_engine_phases_start_once_and_finish_without_waiting_for_turn_end() {
+        let (mut widget, _mock) = widget_with_orchestrator();
+        assert!(matches!(widget.cmd_compact(""), ChatOutcome::Compact(_, _)));
+        widget.apply_turn_event(TurnEvent::CompactPhase {
+            phase: "preparing".into(),
+        });
+        assert_eq!(widget.pane_status().compact_percent, Some(0));
+        widget.apply_turn_event(TurnEvent::CompactPhase {
+            phase: "summarizing".into(),
+        });
+        let start = std::time::Instant::now() - std::time::Duration::from_secs(90);
+        widget.compacting_started_at = Some(start);
+        for phase in ["summarizing", "preparing"] {
+            widget.apply_turn_event(TurnEvent::CompactPhase {
+                phase: phase.into(),
+            });
+            assert_eq!(widget.compacting_started_at, Some(start));
+            assert_eq!(widget.pane_status().compact_percent, Some(57));
+        }
+        widget.apply_turn_event(TurnEvent::CompactPhase {
+            phase: "restoring".into(),
+        });
+        let restoration_start = widget.compacting_started_at;
+        assert_ne!(restoration_start, Some(start));
+        assert_eq!(widget.pane_status().compact_percent, Some(85));
+        widget.apply_turn_event(TurnEvent::CompactPhase {
+            phase: "summarizing".into(),
+        });
+        assert_eq!(widget.compacting_started_at, restoration_start);
+        widget.apply_turn_event(TurnEvent::CompactPhase {
+            phase: "future_phase".into(),
+        });
+        assert_eq!(widget.pane_status().compact_percent, None);
+        widget.apply_turn_event(TurnEvent::CompactPhase {
+            phase: "preparing".into(),
+        });
+        assert_eq!(widget.compacting_started_at, restoration_start);
+        assert_eq!(widget.pane_status().compact_percent, Some(85));
+        widget.apply_turn_event(TurnEvent::CompactPhase {
+            phase: "error".into(),
+        });
+        assert!(widget.compacting_started_at.is_none());
+        assert!(widget.compacting_phase.is_none());
+        assert!(
+            widget.current_compaction.is_some(),
+            "manual guard remains until the command returns"
+        );
+        widget.apply_turn_event(TurnEvent::CompactEnded);
+        assert!(widget.current_compaction.is_none());
     }
 
     /// An AUTO/reactive compaction (mid-turn) has no `CompactEnded` sender:

@@ -84,11 +84,7 @@ pub(crate) fn format_number(n: u64) -> String {
 /// `↓` while receiving (any response/thinking delta seen, or a tool running).
 #[must_use]
 pub(crate) fn mode_arrow(receiving: bool) -> &'static str {
-    if receiving {
-        ARROW_DOWN
-    } else {
-        ARROW_UP
-    }
+    if receiving { ARROW_DOWN } else { ARROW_UP }
 }
 
 /// Build the trailing status parenthetical for the spinner: `"(5s)"` early, or
@@ -115,17 +111,18 @@ pub(crate) fn status_paren(elapsed_ms: u128, response_chars: u64, receiving: boo
 pub(crate) const COMPACT_BAR_FILL: char = '\u{25B0}';
 pub(crate) const COMPACT_BAR_EMPTY: char = '\u{25B1}';
 
-/// claude-code `nGd(e)`: the compaction progress percent as a time-based
-/// exponential estimate (there is no real per-token progress). `elapsed_ms`
-/// eases toward 100% with time-constant 90s and is capped at 95%:
-/// `min(95, round((1 - e^(-t/90)) * 100))` where `t` is elapsed seconds. Because
-/// `elapsed` is monotonic, so is the result — matching claude-code's
-/// `Math.max(prev, nGd(...))` guard without extra state. At ~4s → `4%`.
+/// Estimated progress within an engine-confirmed phase. Only success reaches 100%.
 #[must_use]
-pub(crate) fn compact_progress_percent(elapsed_ms: u128) -> u16 {
-    let t = (elapsed_ms as f64) / 1000.0;
-    let r = 1.0 - (-t / 90.0).exp();
-    (r * 100.0).round().clamp(0.0, 95.0) as u16
+pub(crate) fn compact_progress_percent(phase: &str, elapsed_ms: f64) -> Option<u16> {
+    let (base, span, tau, cap) = match phase {
+        "preparing" => (0.0, 10.0, 5.0, 9.0),
+        "summarizing" => (10.0, 75.0, 90.0, 84.0),
+        "restoring" => (85.0, 14.0, 10.0, 99.0),
+        "complete" => return Some(100),
+        _ => return None,
+    };
+    let seconds = elapsed_ms.max(0.0) / 1000.0;
+    Some((base + (span * (1.0 - (-seconds / tau).exp())).round()).min(cap) as u16)
 }
 
 /// The compaction bar width claude-code uses: `Ge = min(40, cols - 8)`, and the
@@ -154,16 +151,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compact_progress_percent_matches_ngd_estimate() {
-        // t=0 → 0%; the exponential is monotonic and capped at 95%.
-        assert_eq!(compact_progress_percent(0), 0);
-        // ~4s → round((1-e^(-4/90))*100) = round(4.35) = 4% (matches the
-        // captured `4%` frame from the real binary).
-        assert_eq!(compact_progress_percent(4_000), 4);
-        // 90s (one time-constant) → round((1-e^-1)*100) = round(63.2) = 63%.
-        assert_eq!(compact_progress_percent(90_000), 63);
-        // Far out — capped at 95, never 100.
-        assert_eq!(compact_progress_percent(10_000_000), 95);
+    fn compact_progress_matches_shared_hybrid_cases() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../client-protocol/snapshots/compaction_hybrid_progress.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            assert_eq!(
+                compact_progress_percent(
+                    case["phase"].as_str().unwrap(),
+                    case["elapsed_ms"].as_f64().unwrap()
+                )
+                .map(u64::from),
+                case["percent"].as_u64(),
+                "{case}"
+            );
+        }
     }
 
     #[test]

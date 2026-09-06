@@ -1369,6 +1369,7 @@ async fn refresh_slash_commands_reads_live_registry_catalog() {
     use tokio::sync::RwLock;
 
     let mut reg = CommandRegistry::new();
+    command_core::register_bundled_skills(&mut reg, true);
     reg.register_command(SlashCommand {
         name: "deploy".to_string(),
         description: "ship it".to_string(),
@@ -1412,6 +1413,14 @@ async fn refresh_slash_commands_reads_live_registry_catalog() {
                     cmd.name == "deploy" && cmd.description == "ship it" && cmd.source == "project"
                 }),
                 "expected live registry command in catalog, got {commands:?}"
+            );
+            assert!(
+                commands.iter().any(|cmd| {
+                    cmd.name == "cron"
+                        && cmd.source == "bundled"
+                        && cmd.argument_hint.as_deref() == Some("<schedule or action>")
+                }),
+                "expected the enabled /cron bundle in the Desktop catalog, got {commands:?}"
             );
         }
         other => panic!("expected SlashCommandCatalog, got {other:?}"),
@@ -1511,6 +1520,36 @@ impl SlashCommandDispatcher for MutatingDispatcher {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn cron_display_result_is_persisted_for_session_resume() {
+    use command_api::registry::CommandRegistry;
+    use tokio::sync::RwLock;
+
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    let shared = Arc::new(RwLock::new(CommandRegistry::new()));
+    let router = EngineCommandRouter::new(
+        handle.clone() as Arc<dyn OrchestratorHandle>,
+        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
+        Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
+        Some(Arc::new(MutatingDispatcher {
+            registry: shared.clone(),
+        })),
+        Some(shared),
+    );
+
+    let outcome = router.dispatch_slash("/cron list").await.expect("dispatch");
+    assert_eq!(
+        outcome.result,
+        SlashDispatchResult::Handled {
+            display: "/cron list".to_string(),
+        },
+    );
+    assert_eq!(
+        handle.slash_command_transcript(),
+        vec![("/cron list".to_string(), "/cron list".to_string())],
+    );
 }
 
 #[tokio::test]
@@ -2555,12 +2594,32 @@ async fn force_compact_completion_routes_over_ws_without_an_active_turn() {
         .bind(gate, Arc::new(NoopTurnDriver))
         .bind_router(router);
 
+    let output = client_adapter::AdapterOutputStream::new(connection.event_sink());
     let endpoint = McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(connection))
         .await
         .expect("endpoint must start");
     endpoint.set_auth_token(E2E_TOKEN.to_string());
     let mut ws = connect(endpoint.port()).await;
     send_hello(&mut ws).await;
+
+    // The production orchestrator emits to this owned sink. Idle compaction
+    // phases must still reach the wire while no conversation turn is active.
+    platform_api::OutputStream::emit_compaction_started(&output).await;
+    platform_api::OutputStream::emit_compaction_phase(&output, "summarizing").await;
+    platform_api::OutputStream::emit_compaction_phase(&output, "restoring").await;
+    platform_api::OutputStream::emit_compaction_finished(&output, None).await;
+    for phase in ["preparing", "summarizing", "restoring", "complete"] {
+        match next_frame(&mut ws).await {
+            Frame::Event(ClientEvent::CompactionStatus {
+                phase: actual,
+                error,
+            }) => {
+                assert_eq!(actual, phase);
+                assert!(error.is_none());
+            }
+            other => panic!("expected idle CompactionStatus over WS, got {other:?}"),
+        }
+    }
 
     send_command(&mut ws, &ClientCommand::ForceCompact).await;
 

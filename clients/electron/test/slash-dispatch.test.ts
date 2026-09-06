@@ -82,7 +82,7 @@ function recordingContext() {
     chooseProject: async () => { calls.push('chooseProject'); },
     activateProject: async (path: string) => { calls.push(`activateProject:${path}`); },
     clearSession: async () => { calls.push('clearSession'); },
-    forceCompact: async () => { calls.push('forceCompact'); },
+    forceCompact: async (instructions?: string) => { calls.push(instructions ? `forceCompact:${instructions}` : 'forceCompact'); },
     copyLastResponse: async () => { calls.push('copyLastResponse'); return true; },
     login: async () => { calls.push('login'); },
     logout: async () => { calls.push('logout'); },
@@ -148,6 +148,7 @@ test('Desktop-owned slash commands call real GUI and IPC actions', async () => {
   assert.deepEqual(await run('/help'), ['showHelp']);
   assert.deepEqual(await run('/clear'), ['clearSession']);
   assert.deepEqual(await run('/compact'), ['forceCompact']);
+  assert.deepEqual(await run('/compact focus on the API changes'), ['forceCompact:focus on the API changes']);
   assert.deepEqual(await run('/login'), ['login']);
   assert.deepEqual(await run('/logout'), ['logout']);
   assert.deepEqual(await run('/add-dir /tmp/work'), [

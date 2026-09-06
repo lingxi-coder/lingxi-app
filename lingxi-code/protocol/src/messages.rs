@@ -300,6 +300,7 @@ pub struct PreservedMessages {
     /// UUIDs participating in the reconstructed chain.
     pub uuids: Vec<String>,
     /// UUIDs of all preserved messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub all_uuids: Vec<String>,
 }
 
@@ -349,6 +350,9 @@ pub struct CompactBoundaryMetadata {
     /// Number of messages replaced by the summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messages_summarized: Option<u32>,
+    /// Whether the summary was generated in the background before being applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub precomputed: Option<bool>,
     /// Deferred tools discovered before compaction.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pre_compact_discovered_tools: Vec<String>,

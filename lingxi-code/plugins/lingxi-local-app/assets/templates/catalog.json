@@ -7,7 +7,7 @@
       "family": "react_dom",
       "revision": 2,
       "surface": "dom",
-      "summary": "DOM app shell with Ionic React routing plus a starter MCP widget project",
+      "summary": "DOM app shell with Ionic React routing",
       "recommendedFor": [
         "forms",
         "data pages",
@@ -16,7 +16,7 @@
       "notFor": [
         "custom game loop"
       ],
-      "contractSha256": "46c46a541e932106fa47a0e7cbfacc0548668ec3ce2a98289d32ef37044da610",
+      "contractSha256": "fabf1aaa60614923b299dabc63a9c99d6ca2b42a8e00d22729cadbef0528ff5c",
       "inventorySha256": "13ad59f15f1767688c507318611424b3157346ef53c3d22e1f053207e4b7dee7",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
@@ -31,7 +31,7 @@
       "family": "canvas_2d",
       "revision": 2,
       "surface": "canvas",
-      "summary": "Whole-surface 2D canvas runtime with a bounded frame loop and MCP widget starter",
+      "summary": "Whole-surface 2D canvas runtime with a bounded frame loop",
       "recommendedFor": [
         "2D visualization",
         "custom canvas",
@@ -40,7 +40,7 @@
       "notFor": [
         "ordinary forms"
       ],
-      "contractSha256": "931a6e28e26922052bb5cc262e984654a8b8fdb0f559b641e5f5d9d35cdc1d4f",
+      "contractSha256": "a190bb3fa63cbb835ab726783512a465b0210f4505c0b3a6921713c35129b3ef",
       "inventorySha256": "9f6aae99d72b6e29384aa60980f6b8c08bf3c3b9c61a8421d4a6e74c3d488122",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
@@ -55,7 +55,7 @@
       "family": "three_3d",
       "revision": 2,
       "surface": "canvas",
-      "summary": "Three.js 3D scene runtime with lifecycle helpers plus MCP widget starter",
+      "summary": "Three.js 3D scene runtime with lifecycle helpers",
       "recommendedFor": [
         "3D scene",
         "WebGL visualization",
@@ -64,7 +64,7 @@
       "notFor": [
         "ordinary forms"
       ],
-      "contractSha256": "d63030e0fb54a4342b46043c77c960be191cbcd57246b4f7a8655ef14b60a375",
+      "contractSha256": "09c508cbde423c9ee45e73eb05dab7f9d60c3547962df3adbfa1869c2b9a5259",
       "inventorySha256": "8a10ee6d98ff66cfe61f62936e07ccd437787554e2a9525171659caee6addc55",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
@@ -79,7 +79,7 @@
       "family": "phaser_2d",
       "revision": 2,
       "surface": "canvas",
-      "summary": "Scene-based 2D game runtime with sprite support plus MCP widget starter",
+      "summary": "Scene-based 2D game runtime with sprite support",
       "recommendedFor": [
         "multi-scene game",
         "sprites",
@@ -90,7 +90,7 @@
         "ordinary forms",
         "static data pages"
       ],
-      "contractSha256": "ea76a88e82fca8327cad5911db35268e324da0d7021d36f76e89ebdf03dde024",
+      "contractSha256": "af4ed3e15f2189dfbdf33a944ab8b317d6b70bbd9fd384e5ce4cbee005c6af23",
       "inventorySha256": "3b809779e2f661b2ed62c89cc97c1cabedb4209d8bb35146e8913f06e40f940b",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [

@@ -979,12 +979,14 @@ impl TaskRegistry {
     /// `scope.rs`'s `every_purpose_blocks_delete` (that one only proves the
     /// predicate's answer, not that this function asks it).
     ///
-    /// Only the `Build` arm is reachable in production today: `for_build` is
-    /// the sole scope constructor with a non-test call site, because the
-    /// `UseTest` and `McpAuthoring` workflows do not exist yet (design §18
-    /// Phase 4 / Phase 6). Those two arms are therefore live contract and
-    /// dead traffic -- correct, and exercised only by the tests named above,
-    /// until the workflows that mint them land.
+    /// Two of the three arms are reachable in production: `for_build` (three
+    /// mints in `engine-mobile/src/workflow_support.rs`) and
+    /// `for_mcp_authoring` (one, in `launch`). `for_use_test` has no
+    /// production mint -- but not because its workflow is unbuilt: the use-test
+    /// workflow script ships, and nothing mints its scope. That arm is
+    /// live contract and dead traffic, exercised only by the tests named
+    /// above. See `scope.rs`'s `blocks_delete` for the per-constructor
+    /// line numbers.
     pub async fn find_nonterminal_local_app_workflows(&self, app_id: &str) -> Vec<String> {
         let tasks = self.tasks.read().await;
         tasks

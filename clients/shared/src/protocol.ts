@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '12.0.0';
+export const CLIENT_PROTOCOL_VERSION = '13.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -992,6 +992,8 @@ export interface TaskRowDto {
   description: string;
   can_resume?: boolean;
   started_at_ms?: number;
+  /** Terminal failure reason for a `failed` row, when the handler reported one. */
+  error?: string;
   /** `local_fusion` only (F005): the run's current progress-stage label. */
   stage?: string;
 }
@@ -1686,18 +1688,6 @@ export interface LocalAppMcpToolSurfaceDto {
   permissionCeiling: string;
 }
 
-export interface LocalAppReceiptStatusDto {
-  receiptId: string;
-  appId: string;
-  workflowRunId: string;
-  approvalContractSha256: string;
-  candidateDigest: string;
-  issuedAtMs: number;
-  expiresAtMs: number;
-  consumed: boolean;
-  superseded: boolean;
-}
-
 export type ManagedLocalAppMcpStatusDto =
   | 'disabled'
   | 'needs_setup'
@@ -1717,7 +1707,6 @@ export interface LocalAppCreateConfirmationRequestDto {
   rejected?: LocalAppRejectedCandidateDto[];
   initialTools?: LocalAppMcpToolSurfaceDto[];
   requiredGates?: LocalAppGateStatusDto[];
-  receipt?: LocalAppReceiptStatusDto;
 }
 
 export type LocalAppMcpToolFieldDto =
@@ -1754,7 +1743,6 @@ export interface LocalAppMcpProposalApprovalRequestDto {
   requiredFlowChanges?: string[];
   excludedCapabilities?: string[];
   pendingGates?: LocalAppGateStatusDto[];
-  receipt?: LocalAppReceiptStatusDto;
 }
 
 export interface McpAppWidgetDto {
@@ -2013,6 +2001,7 @@ export type ClientEvent =
   // ── Listing / screen events ─────────────────────────────────────────────────
   | { type: 'model_list'; models: string[]; current: string; details?: ModelDetailsDto[] }
   | { type: 'provider_model_catalog'; providers: ProviderModelCatalogEntryDto[] }
+  | { type: 'compaction_status'; phase: string; error?: string }
   | { type: 'model_changed'; model: string }
   | { type: 'permission_mode_changed'; mode: PermissionModeId }
   | {
@@ -2131,6 +2120,8 @@ export type ClientEvent =
       task_id: string;
       status: TaskStatusDto;
       origin_session_id?: string;
+      /** Failure reason accompanying a `failed` transition, when reported. */
+      error?: string;
     }
   | {
       type: 'workflow_resumed';

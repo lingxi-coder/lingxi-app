@@ -29,7 +29,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 /// 签入的 plugin workflow 脚本目录。
@@ -774,4 +774,371 @@ fn mcp_authoring_workflow_validates_zero_tool_candidates_and_executes_approval_p
     assert!(zero_tool_result.contains("\"status\":\"mcp_authoring_required\""));
     assert!(zero_tool_result.contains("\"candidate_preserved\":true"));
     assert!(zero_tool_result.contains("\"validation\""));
+}
+
+// ---------------------------------------------------------------------------
+// Durable regression locks for the three `local-app-build.js` behaviour changes
+// (retry-on-transient-agent-failure, structured `verification_failed` return,
+// and the 4-way half-confirmed naming ternaries).
+//
+// These were authored and proved red-then-green by the lane that made those
+// changes, which could not land them: `plugins/**` was its only owned path and
+// this file is the ONLY place in the repo that drives these scripts through the
+// real QuickJS runtime. Folded in here so the locks outlive the scratchpad.
+//
+// ⚠️ HONESTY NOTE: this lane re-ran them GREEN but did NOT re-establish their
+// redness, because the mutation site is `local-app-build.js`, a file another
+// lane owns and is concurrently editing — planting there is a write across a
+// disjoint-owner boundary. Their discriminating power rests on the authoring
+// lane's red runs, not on a plant performed here.
+// ---------------------------------------------------------------------------
+
+/// The checked-in build workflow, read from disk (not `include_str!`) so a
+/// stale build artifact cannot serve an old copy.
+fn build_workflow_script() -> String {
+    std::fs::read_to_string(workflow_dir().join("local-app-build.js"))
+        .expect("read local-app-build.js")
+}
+
+/// A minimal well-formed verified-host `create` launch, plus whatever the
+/// caller wants layered on top.
+fn build_create_args(extra: serde_json::Value) -> serde_json::Value {
+    let mut base = serde_json::json!({
+        "operation": "create",
+        "app_id": "aaaa1111",
+        "spec": "A small form app",
+        "quality_level": "balanced",
+        "workflow_run_id": "wf_regression",
+        "host_context": {
+            "source": "verified_host",
+            "operation": "create",
+            "app_id": "aaaa1111",
+            "workflow_run_id": "wf_regression",
+            "selector_capability": "sel_00000000000000000000000000000000",
+            "template_catalog": {
+                "catalog_digest": "digest",
+                "available_template_ids": ["react-dom-r2"]
+            },
+            "staging": {"isolated": true, "final_publish": false}
+        }
+    });
+    for (key, value) in extra.as_object().expect("extra must be an object") {
+        base.as_object_mut()
+            .expect("base is an object")
+            .insert(key.clone(), value.clone());
+    }
+    base
+}
+
+/// A verifier report that passes — but with `degraded_verification` set, so a
+/// test can prove the flag is SURFACED on an `ok:true` run rather than gated on.
+fn passing_verifier_report() -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "findings": [],
+        "checked_matrix": ["smoke"],
+        "browser_available": true,
+        "webview_checked": true,
+        "degraded_verification": true,
+        "data_roundtrip": {"status": "passed"},
+        "render_check": {"status": "passed"},
+        "motion_check": {"status": "passed"},
+        "summary": "hermetic pass"
+    })
+}
+
+/// A verifier report that fails with a blocking acceptance finding.
+fn failing_verifier_report() -> serde_json::Value {
+    serde_json::json!({
+        "ok": false,
+        "findings": [{
+            "kind": "acceptance",
+            "severity": "blocking",
+            "evidence": "the save button does nothing"
+        }],
+        "checked_matrix": ["smoke"],
+        "browser_available": false,
+        "webview_checked": true,
+        "degraded_verification": true,
+        "data_roundtrip": {"status": "passed"},
+        "render_check": {"status": "passed"},
+        "motion_check": {"status": "passed"},
+        "summary": "acceptance failed"
+    })
+}
+
+/// Canned answers for the non-verification stages. `None` means "this stage is
+/// operator/tester/verifier — the test decides".
+fn canned_stage_reply(label: &str) -> Option<String> {
+    Some(match label {
+        "template-selector" => serde_json::json!({
+            "catalog_digest": "digest",
+            "template_id": "react-dom-r2",
+            "reason": "ordinary form",
+            "rejected": [],
+            "validated_selection_handle": "vsel_0123456789abcdef0123456789abcdef"
+        })
+        .to_string(),
+        "native-create-approval" => serde_json::json!({
+            "approved": true,
+            "receipt_id": "mcp-create-receipt",
+            "status": "create_approved_no_mcp"
+        })
+        .to_string(),
+        "designer" => serde_json::json!({
+            "runtime_family": "react_dom",
+            "acceptance_checks": [],
+            "summary": "design"
+        })
+        .to_string(),
+        "builder-stage" => serde_json::json!({
+            "ok": true,
+            "dependency_input_sha256": "a".repeat(64),
+            "summary": "staged"
+        })
+        .to_string(),
+        _ if label == "builder-build" || label.starts_with("repair-") => serde_json::json!({
+            "ok": true,
+            "preview_url": "http://127.0.0.1:20000",
+            "summary": "built"
+        })
+        .to_string(),
+        _ => return None,
+    })
+}
+
+fn stage_label(options: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(options)
+        .unwrap_or(serde_json::Value::Null)
+        .get("label")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// r4-failure-paths-05: ONE transient verification-stage failure (the host
+/// hands back the null sentinel) is retried once and the create still
+/// completes. Also pins the degradation half: the verifier's own
+/// `degraded_verification` must reach the caller on an `ok:true` run.
+#[test]
+fn a_single_transient_verification_agent_failure_is_retried_once() {
+    let src = build_workflow_script();
+    let operator_calls = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&operator_calls);
+    let outcome = workflow::run_with_progress(
+        &src,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    if let Some(canned) = canned_stage_reply(&label) {
+                        return canned;
+                    }
+                    if label.starts_with("operator-")
+                        && seen.fetch_add(1, Ordering::SeqCst) == 0
+                    {
+                        return workflow::WF_NULL_SENTINEL.to_string();
+                    }
+                    passing_verifier_report().to_string()
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    );
+    let outcome = outcome.unwrap_or_else(|error| {
+        panic!("a single transient operator failure must not abort the create: {error}")
+    });
+    let result = outcome.result.expect("workflow result");
+    assert_eq!(
+        operator_calls.load(Ordering::SeqCst),
+        2,
+        "the operator must be dispatched exactly twice (fail, then retry), got {result}"
+    );
+    assert!(result.contains("\"ok\":true"), "{result}");
+    // 8 nominal stages + the one retried operator call.
+    assert!(
+        result.contains("\"agent_calls\":9"),
+        "agent_calls must count the retry: {result}"
+    );
+    assert!(
+        result.contains("\"degraded_verification\":true"),
+        "the verifier's degraded_verification must be surfaced on an ok:true run: {result}"
+    );
+}
+
+/// The other half of the retry: a SECOND consecutive failure is still
+/// terminal, and the abort names the stage. Without this, `runVerification`
+/// could swallow failures forever and the test above would still pass.
+#[test]
+fn a_persistent_verification_agent_failure_is_still_terminal() {
+    let src = build_workflow_script();
+    let outcome = workflow::run_with_progress(
+        &src,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    if let Some(canned) = canned_stage_reply(&label) {
+                        return canned;
+                    }
+                    if label.starts_with("operator-") {
+                        return workflow::WF_NULL_SENTINEL.to_string();
+                    }
+                    passing_verifier_report().to_string()
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    );
+    let error = outcome.expect_err("a persistently failing operator must abort the run");
+    assert!(
+        error.to_string().contains("operator-0"),
+        "the abort must name the stage: {error}"
+    );
+}
+
+/// r4-failure-paths-04: a create that exhausts its repair budget returns a
+/// STRUCTURED result rather than throwing an anonymous Error, so the findings,
+/// the already-serving preview URL and the create receipt survive to the
+/// caller instead of being flattened into a message string.
+#[test]
+fn create_verification_exhaustion_returns_a_structured_result() {
+    let src = build_workflow_script();
+    let outcome = workflow::run_with_progress(
+        &src,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    canned_stage_reply(&label)
+                        .unwrap_or_else(|| failing_verifier_report().to_string())
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    );
+    let outcome = outcome.unwrap_or_else(|error| {
+        panic!("create verification exhaustion must return a structured result, not throw: {error}")
+    });
+    let result = outcome.result.expect("workflow result");
+    assert!(
+        result.contains("\"status\":\"verification_failed\""),
+        "{result}"
+    );
+    assert!(result.contains("\"repair_rounds\":1"), "{result}");
+    assert!(
+        result.contains("the save button does nothing"),
+        "the findings must survive: {result}"
+    );
+    assert!(
+        result.contains("http://127.0.0.1:20000"),
+        "the already-serving preview_url must survive: {result}"
+    );
+    assert!(
+        result.contains("mcp-create-receipt"),
+        "the create receipt must survive: {result}"
+    );
+}
+
+/// r4-workflow-runtime-03, half-confirmed launch: a launch carrying ONLY the
+/// confirmed display name (no brief) must send that name verbatim to both
+/// naming stages, and must NOT be reported to the model as carrying nothing.
+#[test]
+fn a_name_only_confirmed_launch_reaches_both_naming_stages_verbatim() {
+    let src = build_workflow_script();
+    let prompts_seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&prompts_seen);
+    workflow::run_with_progress(
+        &src,
+        move |prompts, options| {
+            prompts
+                .iter()
+                .zip(options.iter())
+                .map(|(prompt, options)| {
+                    sink.lock().expect("prompt sink").push(prompt.clone());
+                    canned_stage_reply(&stage_label(options))
+                        .unwrap_or_else(|| passing_verifier_report().to_string())
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({"name": "Recipe Box"})).to_string()),
+        None,
+    )
+    .expect("a name-only create must run");
+    let seen = prompts_seen.lock().expect("prompt sink");
+    let find = |needle: &str| {
+        seen.iter()
+            .find(|prompt| prompt.contains(needle))
+            .cloned()
+            .unwrap_or_else(|| panic!("no prompt contained {needle:?}"))
+    };
+    let stage = find("Call LocalAppStageCreate with app_id=");
+    assert!(
+        stage.contains("name=\"Recipe Box\""),
+        "the confirmed display name must reach LocalAppStageCreate verbatim: {stage}"
+    );
+    assert!(
+        !stage.contains("carried no user-confirmed values"),
+        "a name-only launch must not be reported as carrying nothing: {stage}"
+    );
+    let scaffold = find("Call LocalAppScaffold with app_id=");
+    assert!(
+        scaffold.contains("name=\"Recipe Box\""),
+        "the confirmed display name must reach LocalAppScaffold verbatim: {scaffold}"
+    );
+}
+
+/// The fourth arm of the same ternary: a launch with NEITHER half confirmed
+/// still falls back to prose and never emits an empty `name=""` argument,
+/// which would read to the model as a confirmed empty name.
+#[test]
+fn a_launch_with_no_confirmed_values_falls_back_to_prose() {
+    let src = build_workflow_script();
+    let prompts_seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&prompts_seen);
+    workflow::run_with_progress(
+        &src,
+        move |prompts, options| {
+            prompts
+                .iter()
+                .zip(options.iter())
+                .map(|(prompt, options)| {
+                    sink.lock().expect("prompt sink").push(prompt.clone());
+                    canned_stage_reply(&stage_label(options))
+                        .unwrap_or_else(|| passing_verifier_report().to_string())
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    )
+    .expect("a bare create must run");
+    let seen = prompts_seen.lock().expect("prompt sink");
+    let stage = seen
+        .iter()
+        .find(|prompt| prompt.contains("Call LocalAppStageCreate with app_id="))
+        .expect("stage prompt");
+    assert!(!stage.contains("name=\"\""), "{stage}");
+    assert!(stage.contains("carried no user-confirmed values"), "{stage}");
 }

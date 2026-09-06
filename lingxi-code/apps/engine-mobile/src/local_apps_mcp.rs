@@ -222,20 +222,6 @@ pub trait LocalAppsMcpHost: Send + Sync {
     async fn execute_mcp_flow(&self, input: Value) -> Result<Value, String> {
         self.flow_execute(input).await
     }
-    /// Initialize host metadata and the host-owned scaffold for a freshly
-    /// created app so the workflow can edit source immediately without any
-    /// package-manager or template bootstrap step.
-    ///
-    /// `runtime_profile` is the pinned runtime authority. `surface` is carried
-    /// separately so legacy callers that only know the shape can still request
-    /// the engine-free default (`dom -> react_dom`, `canvas -> canvas_2d`).
-    async fn scaffold_app(
-        &self,
-        record: local_apps::AppRecord,
-        surface: local_apps::AppSurface,
-        runtime_profile: Option<local_apps::AppRuntimeProfile>,
-    ) -> Result<(), String>;
-
     /// Run the whole `LocalAppScaffold` transaction (§C.1) for an app the
     /// user created as an empty shell: reserve, validate, land the manifest
     /// stamp / wiped-and-seeded source tree / formal `LINGXI.md` under the
@@ -269,6 +255,36 @@ pub type InitSessionMinter = dyn Fn(
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
     + Send
     + Sync;
+
+/// Built-in Local App plugin availability probe, attached by the mobile
+/// composition root (`build_mobile_inner`, beside the plugin manager that
+/// answers it).
+///
+/// r2-critic-1 (the coverage half): `handle_create_app` gates the
+/// `ClientCommand::CreateApp` path on
+/// `PluginManager::plugin_state(..) == Loaded`, but the agent-facing
+/// `LocalAppCreate` tool never enters that handler — it reaches
+/// `AppService::create_app_with_git_and_workflow_model_and_initializer`
+/// straight from this transport's `"create"` branch and mints the init session
+/// itself. Gating at the TRANSPORT level is not an option either: the
+/// local-apps MCP server is connected unconditionally at bootstrap
+/// (`disabled: false, always_load: true`) and `set_builtin_plugin_enabled`
+/// only calls `PluginManager::disable`, which unloads the plugin's components
+/// (the `lingxi-local-app:create-local-app` skill the create flow hands off
+/// to) and leaves this transport connected and listed. So the same question
+/// has to be asked INSIDE the create branch, through this probe.
+///
+/// Deliberately fail-CLOSED: an unattached probe refuses `create` rather than
+/// waving it through, so a composition root that forgets to wire it produces a
+/// loud refusal instead of the exact silent hole this gate exists to close.
+pub type PluginAvailabilityProbe =
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send + Sync;
+
+/// The single refusal sentence both create gates speak, so the ClientCommand
+/// path and the MCP tool path cannot drift into two different explanations of
+/// one condition. Both raise it as `AppError::NotYetAvailable`, so both also
+/// carry `AppErrorCode::NotYetAvailable`.
+pub const LOCAL_APP_PLUGIN_UNAVAILABLE: &str = "the Local App plugin is disabled or unavailable";
 
 /// Provider operations that stay reachable while an app is still an empty
 /// workspace (`AppRecord::scaffolded == false`).
@@ -471,7 +487,18 @@ pub struct LocalAppsMcpTransport {
     host: OnceLock<Arc<dyn LocalAppsMcpHost>>,
     registry: OnceLock<std::sync::Weak<mcp::McpRegistry>>,
     session_id: OnceLock<Arc<SessionIdProvider>>,
+    /// The connection's working directory, remembered at boot. Unlike
+    /// [`SessionIdProvider`] this needs no closure: a connection's cwd is fixed
+    /// for its whole life. r1-backlog-engine-create-10 — an app the AGENT
+    /// creates through `LocalAppCreate` must record the same ORIGIN scope the
+    /// library's create path records (`host.rs`'s `Some(self.session_cwd)`),
+    /// or a boot-repaired pin forks from whatever cwd the sweep happens to
+    /// have. Absent (tests, or a transport built before boot attaches it)
+    /// means "origin unknown", which `AppRecord::origin_cwd` spells `None`.
+    origin_cwd: OnceLock<String>,
     init_session_minter: OnceLock<Arc<InitSessionMinter>>,
+    /// See [`PluginAvailabilityProbe`]: absent means "refuse `create`".
+    plugin_available: OnceLock<Arc<PluginAvailabilityProbe>>,
     agent_session_id: Option<String>,
     call_budget: Option<Arc<AgentCallBudget>>,
     connections: StdMutex<HashSet<McpConnectionId>>,
@@ -593,8 +620,14 @@ impl LocalAppsMcpTransport {
         if let Some(value) = self.session_id.get() {
             let _ = scoped.session_id.set(value.clone());
         }
+        if let Some(value) = self.origin_cwd.get() {
+            let _ = scoped.origin_cwd.set(value.clone());
+        }
         if let Some(value) = self.init_session_minter.get() {
             let _ = scoped.init_session_minter.set(value.clone());
+        }
+        if let Some(value) = self.plugin_available.get() {
+            let _ = scoped.plugin_available.set(value.clone());
         }
         scoped.local_app_calls = Arc::clone(&self.local_app_calls);
         scoped.cancellations = Arc::clone(&self.cancellations);
@@ -612,7 +645,9 @@ impl LocalAppsMcpTransport {
             host: OnceLock::new(),
             registry: OnceLock::new(),
             session_id: OnceLock::new(),
+            origin_cwd: OnceLock::new(),
             init_session_minter: OnceLock::new(),
+            plugin_available: OnceLock::new(),
             agent_session_id: None,
             call_budget: None,
             connections: StdMutex::new(HashSet::new()),
@@ -710,8 +745,14 @@ impl LocalAppsMcpTransport {
         if let Some(value) = self.session_id.get() {
             let _ = scoped.session_id.set(value.clone());
         }
+        if let Some(value) = self.origin_cwd.get() {
+            let _ = scoped.origin_cwd.set(value.clone());
+        }
         if let Some(value) = self.init_session_minter.get() {
             let _ = scoped.init_session_minter.set(value.clone());
+        }
+        if let Some(value) = self.plugin_available.get() {
+            let _ = scoped.plugin_available.set(value.clone());
         }
         scoped.local_app_calls = Arc::clone(&self.local_app_calls);
         scoped.cancellations = Arc::clone(&self.cancellations);
@@ -757,6 +798,33 @@ impl LocalAppsMcpTransport {
         provider: Arc<SessionIdProvider>,
     ) -> Result<(), Arc<SessionIdProvider>> {
         self.session_id.set(provider)
+    }
+
+    /// Attach the connection's working directory (engine host boot), so an
+    /// agent-created app records the same origin scope the library's create
+    /// path records. See the `origin_cwd` field for why this is a plain
+    /// `OnceLock<String>` rather than a provider closure.
+    pub fn attach_origin_cwd(&self, cwd: String) -> Result<(), String> {
+        self.origin_cwd.set(cwd)
+    }
+
+    /// Attach the built-in Local App plugin availability probe (engine host
+    /// boot). See [`PluginAvailabilityProbe`] for why the create branch needs
+    /// it even though the transport itself is always connected.
+    pub fn attach_plugin_availability(
+        &self,
+        probe: Arc<PluginAvailabilityProbe>,
+    ) -> Result<(), Arc<PluginAvailabilityProbe>> {
+        self.plugin_available.set(probe)
+    }
+
+    /// Fail-closed: no probe attached ⇒ the Local App plugin is not known to
+    /// be loaded ⇒ `create` is refused.
+    async fn local_app_plugin_is_available(&self) -> bool {
+        match self.plugin_available.get() {
+            Some(probe) => probe().await,
+            None => false,
+        }
     }
 
     pub fn attach_service(&self, service: Arc<AppService>) -> Result<(), Arc<AppService>> {
@@ -2472,6 +2540,21 @@ impl LocalAppsMcpTransport {
                 }))
             }
             "create" => {
+                // r2-critic-1 (coverage half): the SECOND live create entry
+                // point. `handle_create_app` refuses when the built-in Local
+                // App plugin is not `Loaded`; this branch never enters that
+                // handler, so it asks the same question here — before any
+                // record is minted or any init session is forked — and answers
+                // it with the same `AppError::NotYetAvailable` +
+                // `LOCAL_APP_PLUGIN_UNAVAILABLE` sentence, so the agent and the
+                // library sheet get one explanation, not two. Transport-level
+                // gating would not work: this server is connected
+                // unconditionally at bootstrap and `disable()` leaves it up.
+                if !self.local_app_plugin_is_available().await {
+                    return Ok(Self::app_error(AppError::NotYetAvailable(
+                        LOCAL_APP_PLUGIN_UNAVAILABLE.into(),
+                    )));
+                }
                 let brief = Self::required_string(&input, "brief")?;
                 let name = input.get("name").and_then(Value::as_str);
                 if input.get("runtime_profile").is_some() || input.get("surface").is_some() {
@@ -2502,6 +2585,11 @@ impl LocalAppsMcpTransport {
                         name,
                         brief,
                         conversation_id,
+                        // r1-backlog-engine-create-10: the app's ORIGIN scope.
+                        // `None` here (no cwd attached) means "unknown", and
+                        // the caller falls back to its own cwd — today's
+                        // behaviour — rather than to an empty path.
+                        self.origin_cwd.get().map(String::as_str),
                         git_enabled,
                         workflow_model.as_deref(),
                         local_apps::CreateMode::Shell,
@@ -2550,13 +2638,30 @@ impl LocalAppsMcpTransport {
                                     orphan_removed = removed,
                                     "local-apps MCP create: init-session pin failed"
                                 );
+                                // r3-never-wired-03: no mobile build installs a
+                                // tracing subscriber, so the `tracing::warn!`
+                                // above is dropped on the floor on device.
+                                // `eprintln!` is not: it is what the on-device
+                                // diagnostics above in this crate rely on
+                                // (see host.rs's `[permission-roots-diagnostic]`
+                                // / `[turn-diagnostic]` prints).
+                                eprintln!(
+                                    "[local-apps] MCP create: init-session pin failed app_id={} error={error} orphan_removed={removed}",
+                                    record.id
+                                );
                             }
                         },
-                        Err(error) => tracing::warn!(
-                            app_id = %record.id,
-                            error = %error,
-                            "local-apps MCP create: init-session mint failed"
-                        ),
+                        Err(error) => {
+                            tracing::warn!(
+                                app_id = %record.id,
+                                error = %error,
+                                "local-apps MCP create: init-session mint failed"
+                            );
+                            eprintln!(
+                                "[local-apps] MCP create: init-session mint failed app_id={} error={error}",
+                                record.id
+                            );
+                        }
                     }
                 }
                 let mut result = json!({
@@ -4835,6 +4940,13 @@ mod tests {
             .expect("load app service"),
         );
         assert!(transport.attach_service(Arc::clone(&service)).is_ok());
+        // The create gate is fail-closed (see `PluginAvailabilityProbe`), so a
+        // transport that stands in for a healthy engine must say the built-in
+        // plugin is loaded. `create_is_refused_when_no_plugin_probe_is_attached`
+        // below covers the unattached case on purpose.
+        assert!(transport
+            .attach_plugin_availability(Arc::new(|| Box::pin(async { true })))
+            .is_ok());
         (transport, service)
     }
 
@@ -4880,14 +4992,6 @@ mod tests {
             unreachable!("not exercised by export tests")
         }
         async fn read_app_events(&self, _input: Value) -> Result<Value, String> {
-            unreachable!("not exercised by export tests")
-        }
-        async fn scaffold_app(
-            &self,
-            _record: local_apps::AppRecord,
-            _surface: local_apps::AppSurface,
-            _runtime_profile: Option<local_apps::AppRuntimeProfile>,
-        ) -> Result<(), String> {
             unreachable!("not exercised by export tests")
         }
         async fn scaffold_shell_app(&self, _input: Value) -> Result<Value, String> {
@@ -5027,6 +5131,85 @@ mod tests {
         assert_eq!(app["brief"], "一个记事本 app");
     }
 
+    /// Bare transport + service, WITHOUT the plugin availability probe
+    /// `attached_transport` installs — the two tests below own that gap.
+    async fn unprobed_transport(
+        root: &std::path::Path,
+    ) -> (LocalAppsMcpTransport, Arc<AppService>) {
+        let transport = LocalAppsMcpTransport::new(root.to_path_buf());
+        let service = Arc::new(
+            AppService::load(
+                root,
+                Arc::new(local_apps::test_support::FixedClock::new(1)),
+                Arc::new(local_apps::NoopAppEventObserver),
+            )
+            .await
+            .expect("load app service"),
+        );
+        assert!(transport.attach_service(Arc::clone(&service)).is_ok());
+        assert!(transport
+            .attach_host(Arc::new(RecordingScaffoldHost {
+                calls: StdMutex::new(Vec::new()),
+                failure: None,
+            }))
+            .is_ok());
+        (transport, service)
+    }
+
+    /// r2-critic-1 (coverage half): `handle_create_app`'s plugin gate does not
+    /// cover the agent-facing `LocalAppCreate` tool, which reaches
+    /// `AppService::create_app_…` straight from this transport. With the
+    /// built-in plugin reported NOT loaded the tool must refuse — with the
+    /// same typed code and the same sentence the ClientCommand path uses — and
+    /// must not mint a record on the way.
+    #[tokio::test]
+    async fn create_tool_is_refused_when_the_builtin_plugin_is_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, service) = unprobed_transport(root.path()).await;
+        assert!(transport
+            .attach_plugin_availability(Arc::new(|| Box::pin(async { false })))
+            .is_ok());
+
+        let result = transport
+            .call("create", json!({ "brief": "一个记事本 app" }))
+            .await
+            .expect("a domain refusal is a tool result, not a transport error");
+        assert!(result.is_error, "got {result:?}");
+        let text = result.content.to_string();
+        assert!(
+            text.contains("not_yet_available") && text.contains(LOCAL_APP_PLUGIN_UNAVAILABLE),
+            "the refusal must carry the shared typed code and sentence: {text}"
+        );
+        assert!(
+            service.list_apps().await.is_empty(),
+            "a refused create must not mint a record"
+        );
+    }
+
+    /// The gate is fail-closed: a build that never attaches the probe refuses
+    /// rather than silently restoring the hole. (`attached_transport` attaches
+    /// a permissive probe, which is why every other create test still runs.)
+    #[tokio::test]
+    async fn create_tool_is_refused_when_no_plugin_probe_is_attached() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, service) = unprobed_transport(root.path()).await;
+
+        let result = transport
+            .call("create", json!({ "brief": "一个记事本 app" }))
+            .await
+            .expect("a domain refusal is a tool result, not a transport error");
+        assert!(result.is_error, "got {result:?}");
+        assert!(
+            result.content.to_string().contains(LOCAL_APP_PLUGIN_UNAVAILABLE),
+            "got {:?}",
+            result.content
+        );
+        assert!(
+            service.list_apps().await.is_empty(),
+            "an unprobed create must not mint a record"
+        );
+    }
+
     /// Minimal [`LocalAppsMcpHost`] doubles used by `create` tests record the
     /// shell-preparation call. Every unrelated method is unreachable there.
     /// A host that hands back a frame, so the dispatch layer's image handling
@@ -5082,14 +5265,6 @@ mod tests {
             unreachable!("not exercised by these tests")
         }
         async fn read_app_events(&self, _input: Value) -> Result<Value, String> {
-            unreachable!("not exercised by these tests")
-        }
-        async fn scaffold_app(
-            &self,
-            _record: local_apps::AppRecord,
-            _surface: local_apps::AppSurface,
-            _runtime_profile: Option<local_apps::AppRuntimeProfile>,
-        ) -> Result<(), String> {
             unreachable!("not exercised by these tests")
         }
         async fn scaffold_shell_app(&self, _input: Value) -> Result<Value, String> {
@@ -5268,15 +5443,6 @@ mod tests {
         }
         async fn read_app_events(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")
-        }
-        async fn scaffold_app(
-            &self,
-            record: local_apps::AppRecord,
-            _surface: local_apps::AppSurface,
-            _runtime_profile: Option<local_apps::AppRuntimeProfile>,
-        ) -> Result<(), String> {
-            self.calls.lock().expect("lock").push(record.id);
-            self.failure.map_or(Ok(()), |message| Err(message.into()))
         }
         async fn scaffold_shell_app(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")
@@ -5596,13 +5762,22 @@ mod tests {
 
     // ---- SHELL GATE (Task 10) -----------------------------------------
 
-    /// A transport over a real store holding ONE app created in `mode`.
+    /// Which state the fixture app is left in. Not `local_apps::CreateMode`:
+    /// every create is a shell, and `Formed` is reached the only way it ever
+    /// is in production — by forming the shell afterwards.
+    #[derive(Clone, Copy)]
+    enum AppFixture {
+        Shell,
+        Formed,
+    }
+
+    /// A transport over a real store holding ONE app in `fixture`'s state.
     ///
     /// No host is attached on purpose: every gated operation must refuse
     /// BEFORE it reaches the host, so a test that needed one would be
     /// testing the wrong layer.
     async fn transport_with_app(
-        mode: local_apps::CreateMode,
+        fixture: AppFixture,
     ) -> (TempDir, LocalAppsMcpTransport, Arc<AppService>, String) {
         let root = TempDir::new().expect("tempdir");
         let service = Arc::new(
@@ -5618,15 +5793,15 @@ mod tests {
             .create_app_with_mode(None, "", None, local_apps::CreateMode::Shell, None)
             .await
             .expect("create app");
-        let record = match mode {
-            local_apps::CreateMode::Shell => {
+        let record = match fixture {
+            AppFixture::Shell => {
                 assert!(
                     !shell.scaffolded,
                     "the fixture must actually be the shell state this test names"
                 );
                 shell
             }
-            local_apps::CreateMode::Scaffolded => {
+            AppFixture::Formed => {
                 prepare_formed_runtime_fixture(&service, &shell, root.path()).await
             }
         };
@@ -5840,8 +6015,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_non_allowlisted_operation_is_gated_on_a_shell() {
-        let (_root, transport, _service, app_id) =
-            transport_with_app(local_apps::CreateMode::Shell).await;
+        let (_root, transport, _service, app_id) = transport_with_app(AppFixture::Shell).await;
         let gated = gated_operations();
         assert!(
             !gated.is_empty(),
@@ -5870,8 +6044,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_allowlisted_operations_pass_the_gate_on_a_shell() {
-        let (_root, transport, _service, app_id) =
-            transport_with_app(local_apps::CreateMode::Shell).await;
+        let (_root, transport, _service, app_id) = transport_with_app(AppFixture::Shell).await;
         for operation in SHELL_ALLOWED_OPERATIONS {
             let outcome = transport
                 .call(operation, json!({"app_id": app_id.clone()}))
@@ -5890,8 +6063,7 @@ mod tests {
     /// stuck as an empty workspace. This is the test that catches that.
     #[tokio::test]
     async fn scaffold_itself_is_not_gated_because_the_gate_keys_on_the_operation() {
-        let (root, transport, service, app_id) =
-            transport_with_app(local_apps::CreateMode::Shell).await;
+        let (root, transport, service, app_id) = transport_with_app(AppFixture::Shell).await;
         // A REAL host, because "not gated" alone would still be satisfied by an
         // arm that dispatches into nothing. The assertion below is that the
         // shell's only way out actually WORKS end to end through this
@@ -5927,8 +6099,7 @@ mod tests {
     /// catch-all as `ToolNotFound`).
     #[tokio::test]
     async fn the_gate_covers_the_dynamic_dispatch_path_too() {
-        let (_root, transport, _service, app_id) =
-            transport_with_app(local_apps::CreateMode::Shell).await;
+        let (_root, transport, _service, app_id) = transport_with_app(AppFixture::Shell).await;
         let scoped = transport
             .scoped_for_app(&app_id)
             .expect("app-scoped transport");
@@ -5956,8 +6127,7 @@ mod tests {
     /// not a gate on the shell phase, it is a gate on everything.
     #[tokio::test]
     async fn a_formed_app_passes_the_gate_for_every_operation() {
-        let (_root, transport, _service, app_id) =
-            transport_with_app(local_apps::CreateMode::Scaffolded).await;
+        let (_root, transport, _service, app_id) = transport_with_app(AppFixture::Formed).await;
         for &(_, operation, _) in crate::local_apps_tools::LOCAL_APP_TOOLS {
             let outcome = transport
                 .call(operation, json!({"app_id": app_id.clone()}))
@@ -5975,8 +6145,7 @@ mod tests {
     /// ids do not exist. The handler's own not-found error is the right one.
     #[tokio::test]
     async fn an_unknown_app_is_not_answered_by_the_shell_gate() {
-        let (_root, transport, _service, _app_id) =
-            transport_with_app(local_apps::CreateMode::Shell).await;
+        let (_root, transport, _service, _app_id) = transport_with_app(AppFixture::Shell).await;
         let outcome = transport.call("get", json!({"app_id": "zzzzzzzz"})).await;
         assert!(!was_gated(&outcome), "got {outcome:?}");
         let outcome = transport
@@ -5987,8 +6156,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_exposes_the_host_derived_runtime_profile_status() {
-        let (_root, transport, _service, shell_id) =
-            transport_with_app(local_apps::CreateMode::Shell).await;
+        let (_root, transport, _service, shell_id) = transport_with_app(AppFixture::Shell).await;
         let shell = transport
             .call("get", json!({"app_id": shell_id}))
             .await
@@ -5997,8 +6165,7 @@ mod tests {
 
         // A formed fixture carries the same persisted runtime facts as a real
         // scaffolded app, so the host-derived status should be the healthy one.
-        let (_root, transport, _service, formed_id) =
-            transport_with_app(local_apps::CreateMode::Scaffolded).await;
+        let (_root, transport, _service, formed_id) = transport_with_app(AppFixture::Formed).await;
         let formed = transport
             .call("get", json!({"app_id": formed_id}))
             .await

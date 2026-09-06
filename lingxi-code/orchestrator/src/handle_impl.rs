@@ -1300,6 +1300,53 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(())
     }
 
+    async fn append_slash_command_transcript(
+        &self,
+        raw: &str,
+        display: &str,
+    ) -> Result<(), HandleError> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Ok(());
+        }
+
+        let mut messages = vec![protocol::ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::Text {
+                text: raw.to_string(),
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        }];
+        if !display.trim().is_empty() {
+            messages.push(protocol::ConversationMessage::Assistant {
+                id: protocol::MessageId::new(),
+                content: vec![protocol::ContentBlock::Text {
+                    text: display.to_string(),
+                }],
+                stop_reason: None,
+            });
+        }
+
+        let _turn_guard = self.turn_gate.lock().await;
+        let target = self.session.lock().await.session_id;
+        for message in messages {
+            let persisted_uuid = self
+                .persist_model_excluded_meta_to_session(target, &message)
+                .await?;
+            {
+                let mut session = self.session.lock().await;
+                session.model_context_excluded_messages.insert(message.id());
+                session.history.push(message);
+            }
+            if let Some(uuid) = persisted_uuid {
+                *self.transcript.last_jsonl_uuid.lock().await = Some(uuid);
+            }
+        }
+        Ok(())
+    }
+
     async fn append_meta_user_message_to_session(
         &self,
         session_id: &str,

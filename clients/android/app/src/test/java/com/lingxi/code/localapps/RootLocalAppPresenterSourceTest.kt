@@ -209,7 +209,13 @@ class RootLocalAppPresenterSourceTest {
                 "switch succeeding but the session never reporting ready silently dropped the kickoff " +
                 "with no error and no retry",
             2,
-            Regex("reportCreatedAppLandingExhausted\\(\\)").findAll(landing).count(),
+            // Matched WITH the receiver. The bare name also appears in a
+            // prose comment in this region (the one explaining why the kickoff
+            // consumer is now the banner's sole owner), and a needle without
+            // `localAppsViewModel.` counts that comment as a third call site:
+            // the assertion then fails at 3 with both real branches intact.
+            Regex("localAppsViewModel\\.reportCreatedAppLandingExhausted\\(\\)")
+                .findAll(landing).count(),
         )
     }
 

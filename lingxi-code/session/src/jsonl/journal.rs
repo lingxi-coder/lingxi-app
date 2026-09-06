@@ -17,6 +17,7 @@ use serde_json::Value;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 /// Current envelope schema.  Unknown versions are never skipped: doing so
@@ -159,18 +160,35 @@ pub enum JournalError {
     InvalidRoot(String),
 }
 
-/// Root-pinned journal owner.  A `DurableJournal` is cheap to clone by value
-/// and carries the exact identity of the opened session directory.
+/// Root-pinned journal owner. A `DurableJournal` is cheap to clone by value and
+/// carries the exact identity of the opened session directory.
+///
+/// Production mutation requires the canonical session's exclusive writer
+/// claim. All cooperating writers must use this type and its `ledger.lock`;
+/// within that boundary clones share a validated-prefix index and appends do
+/// not rescan historical payloads. Metadata changes trigger a full replay, but
+/// the cache does not claim to detect a hostile writer that rewrites bytes and
+/// restores every observable file attribute. The WAL, never this derivative
+/// index, remains authoritative on recovery.
 #[derive(Debug, Clone)]
 pub struct DurableJournal {
     root: PathBuf,
     identity: RootIdentity,
     max_record_bytes: usize,
+    /// Derivative metadata shared by clones of one pinned writer. The WAL is
+    /// still authoritative; this index is discarded and rebuilt whenever its
+    /// exact-handle fingerprint no longer describes a known append-only
+    /// prefix.
+    index: Arc<Mutex<Option<JournalIndex>>>,
+    #[cfg(test)]
+    diagnostics: Arc<JournalDiagnostics>,
 }
 
 struct JournalScan {
     replay: JournalReplay,
-    matching_event: Option<JournalEntry>,
+    locations: std::collections::HashMap<String, JournalRecordLocation>,
+    validated_len: u64,
+    fingerprint: Option<JournalFileFingerprint>,
 }
 
 struct JournalScanState {
@@ -182,31 +200,90 @@ struct JournalScanState {
     seen: std::collections::HashMap<String, JournalRecordLocation>,
     next_revision: Option<u64>,
     last_revision: u64,
-    matching_event: Option<JournalEntry>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct JournalRecordLocation {
     offset: u64,
     content_len: usize,
+    journal_revision: u64,
+}
+
+#[derive(Debug)]
+struct JournalIndex {
+    journal_present: bool,
+    validated_len: u64,
+    last_revision: u64,
+    locations: std::collections::HashMap<String, JournalRecordLocation>,
+    fingerprint: Option<JournalFileFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JournalFileFingerprint {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+    #[cfg(windows)]
+    creation_ticks: u64,
+    #[cfg(windows)]
+    last_write_ticks: u64,
+    #[cfg(windows)]
+    attributes: u32,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct JournalDiagnostics {
+    scanned_records: std::sync::atomic::AtomicU64,
+    indexed_record_reads: std::sync::atomic::AtomicU64,
+    full_scans: std::sync::atomic::AtomicU64,
+    suffix_scans: std::sync::atomic::AtomicU64,
+    fail_next_append_sync: std::sync::atomic::AtomicBool,
+    fail_next_parent_sync: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JournalDiagnosticSnapshot {
+    scanned_records: u64,
+    indexed_record_reads: u64,
+    full_scans: u64,
+    suffix_scans: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum JournalScanKind {
+    Full,
+    Suffix,
 }
 
 impl JournalScanState {
     fn new() -> Self {
+        Self::after_revision(0)
+    }
+
+    fn after_revision(last_revision: u64) -> Self {
         Self {
             entries: Vec::new(),
             seen: std::collections::HashMap::new(),
-            next_revision: Some(1),
-            last_revision: 0,
-            matching_event: None,
+            next_revision: last_revision.checked_add(1),
+            last_revision,
         }
     }
 
     fn accept<F>(
         &mut self,
         envelope: JournalEnvelope<Value>,
-        matching_id: Option<&str>,
         location: JournalRecordLocation,
+        prior_locations: Option<&std::collections::HashMap<String, JournalRecordLocation>>,
         compare_prior: F,
     ) -> Result<Option<JournalEntry>, JournalError>
     where
@@ -229,7 +306,10 @@ impl JournalScanState {
         self.last_revision = envelope.journal_revision;
         self.next_revision = envelope.journal_revision.checked_add(1);
 
-        let duplicate = if let Some(previous) = self.seen.get(&envelope.event_id).copied() {
+        let previous = self.seen.get(&envelope.event_id).copied().or_else(|| {
+            prior_locations.and_then(|locations| locations.get(&envelope.event_id).copied())
+        });
+        let duplicate = if let Some(previous) = previous {
             if !compare_prior(previous, &envelope.event)? {
                 return Err(JournalError::EventConflict {
                     event_id: envelope.event_id.clone(),
@@ -240,15 +320,6 @@ impl JournalScanState {
             self.seen.insert(envelope.event_id.clone(), location);
             false
         };
-        if matching_id.is_some_and(|event_id| event_id == envelope.event_id)
-            && self.matching_event.is_none()
-        {
-            self.matching_event = Some(JournalEntry {
-                journal_revision: envelope.journal_revision,
-                event_id: envelope.event_id.clone(),
-                event: envelope.event.clone(),
-            });
-        }
         if duplicate {
             Ok(None)
         } else {
@@ -257,6 +328,82 @@ impl JournalScanState {
                 event_id: envelope.event_id,
                 event: envelope.event,
             }))
+        }
+    }
+}
+
+impl JournalIndex {
+    fn from_scan(scan: &mut JournalScan) -> Self {
+        Self {
+            journal_present: scan.replay.journal_present,
+            validated_len: scan.validated_len,
+            last_revision: scan.replay.last_revision,
+            locations: std::mem::take(&mut scan.locations),
+            fingerprint: scan.fingerprint.clone(),
+        }
+    }
+}
+
+impl JournalFileFingerprint {
+    fn from_file(file: &fs::File) -> Result<Self, JournalError> {
+        let metadata = file
+            .metadata()
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        Ok(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            created: metadata.created().ok(),
+            #[cfg(unix)]
+            device: {
+                use std::os::unix::fs::MetadataExt;
+                metadata.dev()
+            },
+            #[cfg(unix)]
+            inode: {
+                use std::os::unix::fs::MetadataExt;
+                metadata.ino()
+            },
+            #[cfg(unix)]
+            changed_seconds: {
+                use std::os::unix::fs::MetadataExt;
+                metadata.ctime()
+            },
+            #[cfg(unix)]
+            changed_nanoseconds: {
+                use std::os::unix::fs::MetadataExt;
+                metadata.ctime_nsec()
+            },
+            #[cfg(windows)]
+            creation_ticks: {
+                use std::os::windows::fs::MetadataExt;
+                metadata.creation_time()
+            },
+            #[cfg(windows)]
+            last_write_ticks: {
+                use std::os::windows::fs::MetadataExt;
+                metadata.last_write_time()
+            },
+            #[cfg(windows)]
+            attributes: {
+                use std::os::windows::fs::MetadataExt;
+                metadata.file_attributes()
+            },
+        })
+    }
+
+    fn same_leaf(&self, other: &Self) -> bool {
+        #[cfg(unix)]
+        {
+            return self.device == other.device && self.inode == other.inode;
+        }
+        #[cfg(windows)]
+        {
+            return self.creation_ticks == other.creation_ticks
+                && self.attributes == other.attributes;
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            self.created == other.created
         }
     }
 }
@@ -297,6 +444,9 @@ impl DurableJournal {
             root,
             identity,
             max_record_bytes: DEFAULT_MAX_RECORD_BYTES,
+            index: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            diagnostics: Arc::new(JournalDiagnostics::default()),
         }
     }
 
@@ -304,6 +454,14 @@ impl DurableJournal {
     #[must_use]
     pub fn with_max_record_bytes(mut self, max_record_bytes: usize) -> Self {
         self.max_record_bytes = max_record_bytes.max(1);
+        // A clone may already have validated records under a different bound.
+        // The configured scanner limit is part of the index interpretation, so
+        // changing it starts a fresh derivative cache for this view.
+        self.index = Arc::new(Mutex::new(None));
+        #[cfg(test)]
+        {
+            self.diagnostics = Arc::new(JournalDiagnostics::default());
+        }
         self
     }
 
@@ -330,15 +488,17 @@ impl DurableJournal {
     }
 
     fn read_locked(&self) -> Result<JournalReplay, JournalError> {
-        Ok(self.scan_locked(true, None, None)?.replay)
+        let mut scan = self.scan_locked(true, None)?;
+        self.replace_index_from_scan(&mut scan);
+        Ok(scan.replay)
     }
 
     fn scan_locked(
         &self,
         collect_entries: bool,
-        matching_id: Option<&str>,
-        mut visitor: Option<&mut dyn FnMut(JournalEntry)>,
+        visitor: Option<&mut dyn FnMut(JournalEntry)>,
     ) -> Result<JournalScan, JournalError> {
+        self.note_scan(JournalScanKind::Full);
         let relative = Path::new(JOURNAL_FILE_NAME);
         let file = match open_read_file_pinned(&self.root, relative, Some(&self.identity)) {
             Ok(file) => file,
@@ -350,15 +510,66 @@ impl DurableJournal {
                         repaired_final_tail: false,
                         journal_present: false,
                     },
-                    matching_event: None,
+                    locations: std::collections::HashMap::new(),
+                    validated_len: 0,
+                    fingerprint: None,
                 });
             }
             Err(error) => return Err(error.into()),
         };
+        let mut scan = self.scan_file_locked(file, 0, 0, None, collect_entries, visitor)?;
+        scan.fingerprint = self.current_fingerprint_locked()?;
+        Ok(scan)
+    }
+
+    fn scan_suffix_locked(
+        &self,
+        start_offset: u64,
+        last_revision: u64,
+        prior_locations: &std::collections::HashMap<String, JournalRecordLocation>,
+    ) -> Result<JournalScan, JournalError> {
+        self.note_scan(JournalScanKind::Suffix);
+        let relative = Path::new(JOURNAL_FILE_NAME);
+        let mut file = open_read_file_pinned(&self.root, relative, Some(&self.identity))?;
+        let length = JournalFileFingerprint::from_file(&file)?.len;
+        if length < start_offset {
+            return Err(JournalError::Corrupted {
+                offset: length,
+                reason: "journal shrank before suffix validation".into(),
+            });
+        }
+        file.seek(SeekFrom::Start(start_offset))
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        let mut scan = self.scan_file_locked(
+            file,
+            start_offset,
+            last_revision,
+            Some(prior_locations),
+            false,
+            None,
+        )?;
+        scan.fingerprint = self.current_fingerprint_locked()?;
+        Ok(scan)
+    }
+
+    fn scan_file_locked(
+        &self,
+        file: fs::File,
+        start_offset: u64,
+        last_revision: u64,
+        prior_locations: Option<&std::collections::HashMap<String, JournalRecordLocation>>,
+        collect_entries: bool,
+        mut visitor: Option<&mut dyn FnMut(JournalEntry)>,
+    ) -> Result<JournalScan, JournalError> {
+        let relative = Path::new(JOURNAL_FILE_NAME);
         let mut reader = BufReader::with_capacity(16 * 1024, file);
-        let mut state = JournalScanState::new();
+        let mut state = if start_offset == 0 {
+            JournalScanState::new()
+        } else {
+            JournalScanState::after_revision(last_revision)
+        };
         let mut line = Vec::new();
-        let mut line_offset = 0_u64;
+        let mut line_offset = start_offset;
         let mut repaired_final_tail = false;
         let mut missing_final_delimiter = false;
         let mut truncate_final_tail_at = None;
@@ -388,6 +599,7 @@ impl DurableJournal {
             line.extend_from_slice(&available[..content_len]);
             reader.consume(take);
             if newline.is_some() {
+                self.note_scanned_record();
                 let envelope =
                     serde_json::from_slice::<JournalEnvelope<Value>>(&line).map_err(|error| {
                         JournalError::Corrupted {
@@ -398,10 +610,12 @@ impl DurableJournal {
                 let location = JournalRecordLocation {
                     offset: line_offset,
                     content_len: line.len(),
+                    journal_revision: envelope.journal_revision,
                 };
                 if let Some(entry) =
-                    state.accept(envelope, matching_id, location, |prior, event| {
-                        self.event_at(prior).map(|previous| previous == *event)
+                    state.accept(envelope, location, prior_locations, |prior, event| {
+                        self.entry_at(prior)
+                            .map(|previous| previous.event == *event)
                     })?
                 {
                     if collect_entries {
@@ -424,15 +638,18 @@ impl DurableJournal {
         }
 
         if !line.is_empty() {
+            self.note_scanned_record();
             match serde_json::from_slice::<JournalEnvelope<Value>>(&line) {
                 Ok(envelope) => {
                     let location = JournalRecordLocation {
                         offset: line_offset,
                         content_len: line.len(),
+                        journal_revision: envelope.journal_revision,
                     };
                     if let Some(entry) =
-                        state.accept(envelope, matching_id, location, |prior, event| {
-                            self.event_at(prior).map(|previous| previous == *event)
+                        state.accept(envelope, location, prior_locations, |prior, event| {
+                            self.entry_at(prior)
+                                .map(|previous| previous.event == *event)
                         })?
                     {
                         if collect_entries {
@@ -441,6 +658,15 @@ impl DurableJournal {
                             visitor(entry);
                         }
                     }
+                    let physical_record_len =
+                        line.len()
+                            .checked_add(1)
+                            .ok_or(JournalError::RecordTooLarge {
+                                limit: self.max_record_bytes,
+                            })?;
+                    line_offset = line_offset
+                        .checked_add(u64::try_from(physical_record_len).unwrap_or(u64::MAX))
+                        .ok_or(JournalError::RevisionOverflow)?;
                     missing_final_delimiter = true;
                 }
                 Err(_) => {
@@ -468,11 +694,221 @@ impl DurableJournal {
                 repaired_final_tail,
                 journal_present: true,
             },
-            matching_event: state.matching_event,
+            locations: state.seen,
+            validated_len: line_offset,
+            fingerprint: None,
         })
     }
 
-    fn event_at(&self, location: JournalRecordLocation) -> Result<Value, JournalError> {
+    fn current_fingerprint_locked(&self) -> Result<Option<JournalFileFingerprint>, JournalError> {
+        match open_read_file_pinned(
+            &self.root,
+            Path::new(JOURNAL_FILE_NAME),
+            Some(&self.identity),
+        ) {
+            Ok(file) => Ok(Some(JournalFileFingerprint::from_file(&file)?)),
+            Err(FsError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn replace_index_from_scan(&self, scan: &mut JournalScan) {
+        *self
+            .index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(JournalIndex::from_scan(scan));
+    }
+
+    fn reconcile_index_locked(
+        &self,
+        cached: &mut Option<JournalIndex>,
+    ) -> Result<(), JournalError> {
+        let current = self.current_fingerprint_locked()?;
+        let action_is_suffix = cached.as_ref().is_some_and(|index| {
+            matches!((&index.fingerprint, &current), (Some(previous), Some(observed))
+                if index.journal_present
+                    && previous.same_leaf(observed)
+                    && previous.len == index.validated_len
+                    && observed.len > index.validated_len)
+        });
+        let unchanged = cached.as_ref().is_some_and(|index| {
+            index.fingerprint == current
+                && index.validated_len == current.as_ref().map_or(0, |fingerprint| fingerprint.len)
+        });
+        if unchanged {
+            return Ok(());
+        }
+        if action_is_suffix {
+            let index = cached
+                .as_mut()
+                .expect("suffix action requires cached index");
+            let mut scan = self.scan_suffix_locked(
+                index.validated_len,
+                index.last_revision,
+                &index.locations,
+            )?;
+            index.locations.extend(std::mem::take(&mut scan.locations));
+            index.validated_len = scan.validated_len;
+            index.last_revision = scan.replay.last_revision;
+            index.journal_present = scan.replay.journal_present;
+            index.fingerprint = scan.fingerprint;
+            return Ok(());
+        }
+
+        // Missing/replaced/truncated or metadata-detectable same-length edits
+        // get a complete authoritative rebuild. The cache is not evidence and
+        // is replaced only after the entire scan succeeds.
+        let mut scan = self.scan_locked(false, None)?;
+        *cached = Some(JournalIndex::from_scan(&mut scan));
+        Ok(())
+    }
+
+    fn validate_synced_fingerprint(
+        &self,
+        previous: Option<&JournalFileFingerprint>,
+        journal_present: bool,
+        validated_len: u64,
+        observed: Option<JournalFileFingerprint>,
+    ) -> Result<Option<JournalFileFingerprint>, JournalError> {
+        if !journal_present {
+            return if observed.is_none() && validated_len == 0 {
+                Ok(None)
+            } else {
+                Err(JournalError::Corrupted {
+                    offset: validated_len,
+                    reason: "missing journal changed during durability sync".into(),
+                })
+            };
+        }
+        let observed = observed.ok_or_else(|| JournalError::Corrupted {
+            offset: validated_len,
+            reason: "journal disappeared during durability sync".into(),
+        })?;
+        if observed.len != validated_len
+            || previous.is_some_and(|previous| !previous.same_leaf(&observed))
+        {
+            return Err(JournalError::Corrupted {
+                offset: validated_len,
+                reason: "journal identity or length changed during durability sync".into(),
+            });
+        }
+        Ok(Some(observed))
+    }
+
+    #[cfg(test)]
+    fn note_scan(&self, kind: JournalScanKind) {
+        use std::sync::atomic::Ordering;
+        match kind {
+            JournalScanKind::Full => {
+                self.diagnostics.full_scans.fetch_add(1, Ordering::Relaxed);
+            }
+            JournalScanKind::Suffix => {
+                self.diagnostics
+                    .suffix_scans
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[cfg(not(test))]
+    fn note_scan(&self, _kind: JournalScanKind) {}
+
+    #[cfg(test)]
+    fn note_scanned_record(&self) {
+        self.diagnostics
+            .scanned_records
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(not(test))]
+    fn note_scanned_record(&self) {}
+
+    #[cfg(test)]
+    fn note_indexed_record_read(&self) {
+        self.diagnostics
+            .indexed_record_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(not(test))]
+    fn note_indexed_record_read(&self) {}
+
+    #[cfg(test)]
+    fn diagnostic_snapshot(&self) -> JournalDiagnosticSnapshot {
+        use std::sync::atomic::Ordering;
+        JournalDiagnosticSnapshot {
+            scanned_records: self.diagnostics.scanned_records.load(Ordering::Relaxed),
+            indexed_record_reads: self
+                .diagnostics
+                .indexed_record_reads
+                .load(Ordering::Relaxed),
+            full_scans: self.diagnostics.full_scans.load(Ordering::Relaxed),
+            suffix_scans: self.diagnostics.suffix_scans.load(Ordering::Relaxed),
+        }
+    }
+
+    #[cfg(test)]
+    fn reset_diagnostics(&self) {
+        use std::sync::atomic::Ordering;
+        self.diagnostics.scanned_records.store(0, Ordering::Relaxed);
+        self.diagnostics
+            .indexed_record_reads
+            .store(0, Ordering::Relaxed);
+        self.diagnostics.full_scans.store(0, Ordering::Relaxed);
+        self.diagnostics.suffix_scans.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn fail_next_append_sync_for_test(&self) {
+        self.diagnostics
+            .fail_next_append_sync
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn fail_next_parent_sync_for_test(&self) {
+        self.diagnostics
+            .fail_next_parent_sync
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn check_append_sync_failpoint(&self) -> Result<(), JournalError> {
+        if self
+            .diagnostics
+            .fail_next_append_sync
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(FsError::Io("synthetic journal append sync failure".into()).into());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    fn check_append_sync_failpoint(&self) -> Result<(), JournalError> {
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn check_parent_sync_failpoint(&self) -> Result<(), JournalError> {
+        if self
+            .diagnostics
+            .fail_next_parent_sync
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(FsError::Io("synthetic journal parent sync failure".into()).into());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    fn check_parent_sync_failpoint(&self) -> Result<(), JournalError> {
+        Ok(())
+    }
+
+    fn entry_at(&self, location: JournalRecordLocation) -> Result<JournalEntry, JournalError> {
+        self.note_indexed_record_read();
         let relative = Path::new(JOURNAL_FILE_NAME);
         let mut file = open_read_file_pinned(&self.root, relative, Some(&self.identity))?;
         file.seek(SeekFrom::Start(location.offset))
@@ -487,23 +923,36 @@ impl DurableJournal {
                     reason: error.to_string(),
                 }
             })?;
-        Ok(envelope.event)
+        if envelope.journal_revision != location.journal_revision {
+            return Err(JournalError::Corrupted {
+                offset: location.offset,
+                reason: "indexed journal revision changed".into(),
+            });
+        }
+        Ok(JournalEntry {
+            journal_revision: envelope.journal_revision,
+            event_id: envelope.event_id,
+            event: envelope.event,
+        })
     }
 
     /// Make a validated, already-present prefix durable before it can seed
     /// success acknowledgements after process recovery. Syncing the directory
     /// as well closes the crash window where complete file bytes were visible
     /// but the first directory entry had never been persisted.
-    fn sync_durable_prefix_locked(&self, journal_present: bool) -> Result<(), JournalError> {
+    fn sync_durable_prefix_locked(
+        &self,
+        journal_present: bool,
+    ) -> Result<Option<JournalFileFingerprint>, JournalError> {
         if !journal_present {
-            return Ok(());
+            return Ok(None);
         }
         let relative = Path::new(JOURNAL_FILE_NAME);
         let file = open_append_file_pinned(&self.root, relative, Some(&self.identity))?;
         file.sync_all()
             .map_err(|error| FsError::Io(error.to_string()))?;
         sync_parent_pinned(&self.root, relative, Some(&self.identity))?;
-        Ok(())
+        Ok(Some(JournalFileFingerprint::from_file(&file)?))
     }
 
     /// Validate/replay the authoritative WAL.  A recoverable tail is repaired
@@ -522,8 +971,15 @@ impl DurableJournal {
         F: FnMut(JournalEntry),
     {
         let _lock = self.lock()?;
-        let scan = self.scan_locked(false, None, Some(&mut visitor))?;
-        self.sync_durable_prefix_locked(scan.replay.journal_present)?;
+        let mut scan = self.scan_locked(false, Some(&mut visitor))?;
+        let synced = self.sync_durable_prefix_locked(scan.replay.journal_present)?;
+        scan.fingerprint = self.validate_synced_fingerprint(
+            scan.fingerprint.as_ref(),
+            scan.replay.journal_present,
+            scan.validated_len,
+            synced,
+        )?;
+        self.replace_index_from_scan(&mut scan);
         Ok(scan.replay)
     }
 
@@ -531,9 +987,35 @@ impl DurableJournal {
     /// the validated prefix before returning it as durable truth.
     pub fn find_event_durable(&self, event_id: &str) -> Result<Option<JournalEntry>, JournalError> {
         let _lock = self.lock()?;
-        let scan = self.scan_locked(false, Some(event_id), None)?;
-        self.sync_durable_prefix_locked(scan.replay.journal_present)?;
-        Ok(scan.matching_event)
+        let mut cached = self
+            .index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.reconcile_index_locked(&mut cached)?;
+        let index = cached
+            .as_mut()
+            .expect("journal index is initialized by reconciliation");
+        let location = index.locations.get(event_id).copied();
+        let entry = location
+            .map(|location| self.entry_at(location))
+            .transpose()?;
+        if entry
+            .as_ref()
+            .is_some_and(|entry| entry.event_id != event_id)
+        {
+            return Err(JournalError::Corrupted {
+                offset: location.map_or(0, |location| location.offset),
+                reason: "indexed journal event id changed".into(),
+            });
+        }
+        let synced = self.sync_durable_prefix_locked(index.journal_present)?;
+        index.fingerprint = self.validate_synced_fingerprint(
+            index.fingerprint.as_ref(),
+            index.journal_present,
+            index.validated_len,
+            synced,
+        )?;
+        Ok(entry)
     }
 
     /// Append a typed event exactly once, assigning the next journal revision.
@@ -546,10 +1028,30 @@ impl DurableJournal {
         let event_id = event_id.into();
         let event = serde_json::to_value(event)?;
         let _lock = self.lock()?;
-        let scan = self.scan_locked(false, Some(&event_id), None)?;
-        if let Some(previous) = scan.matching_event {
+        let mut cached = self
+            .index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.reconcile_index_locked(&mut cached)?;
+        let index = cached
+            .as_mut()
+            .expect("journal index is initialized by reconciliation");
+        if let Some(location) = index.locations.get(&event_id).copied() {
+            let previous = self.entry_at(location)?;
+            if previous.event_id != event_id {
+                return Err(JournalError::Corrupted {
+                    offset: location.offset,
+                    reason: "indexed journal event id changed".into(),
+                });
+            }
             if previous.event == event {
-                self.sync_durable_prefix_locked(scan.replay.journal_present)?;
+                let synced = self.sync_durable_prefix_locked(index.journal_present)?;
+                index.fingerprint = self.validate_synced_fingerprint(
+                    index.fingerprint.as_ref(),
+                    index.journal_present,
+                    index.validated_len,
+                    synced,
+                )?;
                 return Ok(JournalAppend {
                     journal_revision: previous.journal_revision,
                     duplicate: true,
@@ -559,12 +1061,11 @@ impl DurableJournal {
         }
         let envelope = JournalEnvelope {
             schema_version: JOURNAL_SCHEMA_VERSION,
-            journal_revision: scan
-                .replay
+            journal_revision: index
                 .last_revision
                 .checked_add(1)
                 .ok_or(JournalError::RevisionOverflow)?,
-            event_id,
+            event_id: event_id.clone(),
             event,
         };
         let mut line = serde_json::to_vec(&envelope)?;
@@ -581,15 +1082,49 @@ impl DurableJournal {
         )?;
         file.write_all(&line)
             .map_err(|error| FsError::Io(error.to_string()))?;
+        self.check_append_sync_failpoint()?;
         file.sync_all()
             .map_err(|error| FsError::Io(error.to_string()))?;
-        if !scan.replay.journal_present {
+        if !index.journal_present {
+            self.check_parent_sync_failpoint()?;
             sync_parent_pinned(
                 &self.root,
                 Path::new(JOURNAL_FILE_NAME),
                 Some(&self.identity),
             )?;
         }
+        let expected_len = index
+            .validated_len
+            .checked_add(u64::try_from(line.len()).unwrap_or(u64::MAX))
+            .ok_or(JournalError::RevisionOverflow)?;
+        let written = JournalFileFingerprint::from_file(&file)?;
+        let current =
+            self.current_fingerprint_locked()?
+                .ok_or_else(|| JournalError::Corrupted {
+                    offset: index.validated_len,
+                    reason: "journal disappeared after append".into(),
+                })?;
+        if !written.same_leaf(&current)
+            || written.len != expected_len
+            || current.len != expected_len
+        {
+            return Err(JournalError::Corrupted {
+                offset: index.validated_len,
+                reason: "journal identity or length changed during append".into(),
+            });
+        }
+        index.locations.insert(
+            event_id,
+            JournalRecordLocation {
+                offset: index.validated_len,
+                content_len: line.len().saturating_sub(1),
+                journal_revision: envelope.journal_revision,
+            },
+        );
+        index.validated_len = expected_len;
+        index.last_revision = envelope.journal_revision;
+        index.journal_present = true;
+        index.fingerprint = Some(current);
         Ok(JournalAppend {
             journal_revision: envelope.journal_revision,
             duplicate: false,
@@ -783,6 +1318,363 @@ mod tests {
         assert!(replay.journal_present);
         assert_eq!(replay.entries.len(), 2_000);
         assert_eq!(replay.last_revision, 2_000);
+    }
+
+    #[test]
+    fn validated_prefix_index_makes_subsequent_appends_linear() {
+        let (dir, journal) = journal();
+        let path = dir.path().join(JOURNAL_FILE_NAME);
+        let mut file = std::fs::File::create(&path).unwrap();
+        for revision in 1..=2_000_u64 {
+            let envelope = JournalEnvelope {
+                schema_version: JOURNAL_SCHEMA_VERSION,
+                journal_revision: revision,
+                event_id: format!("seed-{revision}"),
+                event: json!({"total": revision}),
+            };
+            serde_json::to_writer(&mut file, &envelope).unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+        file.sync_all().unwrap();
+        drop(file);
+
+        assert_eq!(journal.replay().unwrap().last_revision, 2_000);
+        assert_eq!(journal.diagnostic_snapshot().scanned_records, 2_000);
+        journal.reset_diagnostics();
+
+        let mut last = None;
+        for revision in 2_001..=3_000_u64 {
+            last = Some(
+                journal
+                    .append_once(format!("new-{revision}"), &json!({"total": revision}))
+                    .unwrap(),
+            );
+        }
+
+        assert_eq!(last.unwrap().journal_revision, 3_000);
+        assert_eq!(
+            journal.diagnostic_snapshot(),
+            JournalDiagnosticSnapshot {
+                scanned_records: 0,
+                indexed_record_reads: 0,
+                full_scans: 0,
+                suffix_scans: 0,
+            },
+            "appends on the unchanged owned prefix must not decode old WAL records"
+        );
+    }
+
+    #[test]
+    fn durable_replay_publishes_its_post_sync_fingerprint_for_the_first_append() {
+        let (_dir, journal) = journal();
+        journal.append_once("m1", &json!({"total": 1})).unwrap();
+        assert_eq!(
+            journal.replay_durable_with(|_| {}).unwrap().last_revision,
+            1
+        );
+        journal.reset_diagnostics();
+
+        let appended = journal.append_once("m2", &json!({"total": 2})).unwrap();
+
+        assert_eq!(appended.journal_revision, 2);
+        assert_eq!(
+            journal.diagnostic_snapshot(),
+            JournalDiagnosticSnapshot {
+                scanned_records: 0,
+                indexed_record_reads: 0,
+                full_scans: 0,
+                suffix_scans: 0,
+            },
+            "production hydration sync must leave the append cache warm"
+        );
+    }
+
+    #[test]
+    fn clones_share_the_thin_index_and_duplicates_read_one_record() {
+        let (_dir, journal) = journal();
+        journal.append_once("m1", &json!({"total": 1})).unwrap();
+        let clone = journal.clone();
+        journal.reset_diagnostics();
+
+        clone.append_once("m2", &json!({"total": 2})).unwrap();
+        let found = journal.find_event_durable("m1").unwrap().unwrap();
+        assert_eq!(found.event, json!({"total": 1}));
+        let duplicate = clone.append_once("m2", &json!({"total": 2})).unwrap();
+
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.journal_revision, 2);
+        assert_eq!(
+            journal.diagnostic_snapshot(),
+            JournalDiagnosticSnapshot {
+                scanned_records: 0,
+                indexed_record_reads: 2,
+                full_scans: 0,
+                suffix_scans: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn cooperating_handle_validates_only_the_new_suffix() {
+        let (dir, first) = journal();
+        first.append_once("m1", &json!({"total": 1})).unwrap();
+        let second = DurableJournal::open(dir.path()).unwrap();
+        second.append_once("m2", &json!({"total": 2})).unwrap();
+        first.reset_diagnostics();
+
+        let appended = first.append_once("m3", &json!({"total": 3})).unwrap();
+
+        assert_eq!(appended.journal_revision, 3);
+        assert_eq!(
+            first.diagnostic_snapshot(),
+            JournalDiagnosticSnapshot {
+                scanned_records: 1,
+                indexed_record_reads: 0,
+                full_scans: 0,
+                suffix_scans: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn complete_unacknowledged_suffix_is_reconciled_as_a_durable_duplicate() {
+        let (dir, journal) = journal();
+        journal.append_once("m1", &json!({"total": 1})).unwrap();
+        let envelope = JournalEnvelope {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            journal_revision: 2,
+            event_id: "m2".to_string(),
+            event: json!({"total": 2}),
+        };
+        let path = dir.path().join(JOURNAL_FILE_NAME);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        serde_json::to_writer(&mut file, &envelope).unwrap();
+        drop(file);
+        journal.reset_diagnostics();
+
+        let duplicate = journal.append_once("m2", &json!({"total": 2})).unwrap();
+
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.journal_revision, 2);
+        assert!(std::fs::read(&path).unwrap().ends_with(b"\n"));
+        assert_eq!(journal.diagnostic_snapshot().scanned_records, 1);
+        assert_eq!(journal.diagnostic_snapshot().suffix_scans, 1);
+        assert_eq!(journal.diagnostic_snapshot().indexed_record_reads, 1);
+    }
+
+    #[test]
+    fn torn_suffix_is_repaired_before_the_next_indexed_append() {
+        let (dir, journal) = journal();
+        journal.append_once("m1", &json!({"total": 1})).unwrap();
+        let path = dir.path().join(JOURNAL_FILE_NAME);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{broken");
+        std::fs::write(&path, bytes).unwrap();
+        journal.reset_diagnostics();
+
+        let appended = journal.append_once("m2", &json!({"total": 2})).unwrap();
+
+        assert_eq!(appended.journal_revision, 2);
+        assert!(!appended.duplicate);
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("{broken"));
+        assert_eq!(journal.diagnostic_snapshot().scanned_records, 1);
+        assert_eq!(journal.diagnostic_snapshot().suffix_scans, 1);
+    }
+
+    #[test]
+    fn failed_append_sync_keeps_the_old_prefix_for_exact_retry_reconciliation() {
+        let (_dir, journal) = journal();
+        journal.append_once("m1", &json!({"total": 1})).unwrap();
+        journal.fail_next_append_sync_for_test();
+        assert!(matches!(
+            journal.append_once("m2", &json!({"total": 2})),
+            Err(JournalError::Fs(FsError::Io(message)))
+                if message.contains("append sync failure")
+        ));
+        journal.reset_diagnostics();
+
+        let retry = journal.append_once("m2", &json!({"total": 2})).unwrap();
+
+        assert!(retry.duplicate);
+        assert_eq!(retry.journal_revision, 2);
+        assert_eq!(journal.diagnostic_snapshot().scanned_records, 1);
+        assert_eq!(journal.diagnostic_snapshot().suffix_scans, 1);
+        assert_eq!(journal.replay().unwrap().entries.len(), 2);
+    }
+
+    #[test]
+    fn failed_first_parent_sync_is_reconciled_without_a_second_record() {
+        let (_dir, journal) = journal();
+        journal.fail_next_parent_sync_for_test();
+        assert!(matches!(
+            journal.append_once("m1", &json!({"total": 1})),
+            Err(JournalError::Fs(FsError::Io(message)))
+                if message.contains("parent sync failure")
+        ));
+        journal.reset_diagnostics();
+
+        let retry = journal.append_once("m1", &json!({"total": 1})).unwrap();
+
+        assert!(retry.duplicate);
+        assert_eq!(retry.journal_revision, 1);
+        assert_eq!(journal.diagnostic_snapshot().full_scans, 1);
+        assert_eq!(journal.diagnostic_snapshot().scanned_records, 1);
+        assert_eq!(journal.replay().unwrap().entries.len(), 1);
+    }
+
+    #[test]
+    fn replacement_and_truncation_never_reuse_the_stale_prefix_index() {
+        let (dir, journal) = journal();
+        journal.append_once("m1", &json!({"total": 1})).unwrap();
+        journal.append_once("m2", &json!({"total": 2})).unwrap();
+        let path = dir.path().join(JOURNAL_FILE_NAME);
+        let first_line = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        let replacement = dir.path().join("replacement.jsonl");
+        std::fs::write(&replacement, format!("{first_line}\n")).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        journal.reset_diagnostics();
+
+        let replacement_append = journal
+            .append_once("replacement-m2", &json!({"total": 2}))
+            .unwrap();
+        assert_eq!(replacement_append.journal_revision, 2);
+        assert_eq!(journal.diagnostic_snapshot().full_scans, 1);
+        assert_eq!(journal.diagnostic_snapshot().scanned_records, 1);
+
+        let first_line_len = u64::try_from(first_line.len() + 1).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(first_line_len)
+            .unwrap();
+        journal.reset_diagnostics();
+        let truncation_append = journal
+            .append_once("truncated-m2", &json!({"total": 3}))
+            .unwrap();
+        assert_eq!(truncation_append.journal_revision, 2);
+        assert_eq!(journal.diagnostic_snapshot().full_scans, 1);
+        assert_eq!(journal.diagnostic_snapshot().scanned_records, 1);
+    }
+
+    #[test]
+    fn corrupt_incremental_suffix_does_not_publish_a_partial_index() {
+        let (dir, journal) = journal();
+        journal.append_once("m1", &json!({"total": 1})).unwrap();
+        let path = dir.path().join(JOURNAL_FILE_NAME);
+        let gap = JournalEnvelope {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            journal_revision: 3,
+            event_id: "gap".to_string(),
+            event: json!({"total": 3}),
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        serde_json::to_writer(&mut file, &gap).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        journal.reset_diagnostics();
+
+        assert!(matches!(
+            journal.append_once("m2", &json!({"total": 2})),
+            Err(JournalError::RevisionGap {
+                actual: 3,
+                expected: 2
+            })
+        ));
+        assert_eq!(journal.diagnostic_snapshot().suffix_scans, 1);
+        assert_eq!(journal.diagnostic_snapshot().scanned_records, 1);
+        assert!(matches!(
+            journal.append_once("m2", &json!({"total": 2})),
+            Err(JournalError::RevisionGap {
+                actual: 3,
+                expected: 2
+            })
+        ));
+        assert_eq!(journal.diagnostic_snapshot().suffix_scans, 2);
+    }
+
+    #[test]
+    fn conflicting_incremental_duplicate_fails_without_replacing_the_index() {
+        let (dir, journal) = journal();
+        journal.append_once("m1", &json!({"total": 1})).unwrap();
+        let path = dir.path().join(JOURNAL_FILE_NAME);
+        let conflict = JournalEnvelope {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            journal_revision: 2,
+            event_id: "m1".to_string(),
+            event: json!({"total": 9}),
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        serde_json::to_writer(&mut file, &conflict).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        journal.reset_diagnostics();
+
+        assert!(matches!(
+            journal.append_once("m2", &json!({"total": 2})),
+            Err(JournalError::EventConflict { event_id }) if event_id == "m1"
+        ));
+        assert_eq!(journal.diagnostic_snapshot().suffix_scans, 1);
+        assert_eq!(journal.diagnostic_snapshot().scanned_records, 1);
+        assert_eq!(journal.diagnostic_snapshot().indexed_record_reads, 1);
+        assert!(matches!(
+            journal.append_once("m2", &json!({"total": 2})),
+            Err(JournalError::EventConflict { event_id }) if event_id == "m1"
+        ));
+        assert_eq!(journal.diagnostic_snapshot().suffix_scans, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_leaf_never_reuses_the_validated_prefix() {
+        use std::os::unix::fs::symlink;
+
+        let (dir, journal) = journal();
+        journal.append_once("m1", &json!({"total": 1})).unwrap();
+        let path = dir.path().join(JOURNAL_FILE_NAME);
+        let saved = dir.path().join("saved-ledger.jsonl");
+        std::fs::rename(&path, &saved).unwrap();
+        symlink(&saved, &path).unwrap();
+
+        assert!(matches!(
+            journal.append_once("m2", &json!({"total": 2})),
+            Err(JournalError::Fs(_))
+        ));
+    }
+
+    #[test]
+    fn same_length_prefix_corruption_forces_a_full_rebuild() {
+        let (dir, journal) = journal();
+        journal.append_once("m1", &json!({"total": 1})).unwrap();
+        let path = dir.path().join(JOURNAL_FILE_NAME);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[0] = b'!';
+        std::fs::write(&path, bytes).unwrap();
+        journal.reset_diagnostics();
+
+        assert!(matches!(
+            journal.append_once("m2", &json!({"total": 2})),
+            Err(JournalError::Corrupted { offset: 0, .. })
+        ));
+        assert_eq!(journal.diagnostic_snapshot().full_scans, 1);
+        assert_eq!(journal.diagnostic_snapshot().scanned_records, 1);
     }
 
     #[test]

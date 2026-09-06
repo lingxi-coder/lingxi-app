@@ -493,6 +493,16 @@ pub struct LocalFusionTaskState {
     /// for legacy/external task producers that do not expose the seam.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_timeout_ms: Option<u64>,
+    /// Exact panel count resolved before this task was published, when the
+    /// executor exposed one during preparation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_panels: Option<u8>,
+    /// Monotonic deadline captured at registry activation. This is deliberately
+    /// in-memory only: persisted rows use `base.start_time` as a legacy
+    /// wall-clock fallback because a monotonic instant has no process-stable
+    /// representation.
+    #[serde(skip)]
+    pub fusion_activation_deadline: Option<tokio::time::Instant>,
     /// Truthful parent-session publication state, independent from the
     /// computational terminal status. New runs begin `Pending` and only a
     /// sink receipt can move this to a terminal state.
@@ -703,6 +713,8 @@ mod taskstate_scope_readback_tripwire {
             usage: None,
             stage: None,
             effective_timeout_ms: None,
+            planned_panels: None,
+            fusion_activation_deadline: None,
             publication_status: platform_api::FusionPublicationStatus::Published,
             publication_error: None,
             result_published: true,

@@ -416,6 +416,16 @@ pub async fn acquire(
 ) -> Result<ReservationLease, FusionError> {
     let session_has_max = budget.max_session_nano_usd().is_some();
     let quote = quote(config, resolved, request, catalog, prices, session_has_max)?;
+    acquire_quoted(quote, budget).await
+}
+
+/// Reserve an already captured quote. Preparation owns the catalog/config
+/// snapshot and computes this quote without taking a hold; activation uses
+/// this helper so mutable prices cannot silently change the reservation basis.
+pub(crate) async fn acquire_quoted(
+    quote: FusionQuote,
+    budget: Arc<dyn BudgetEnforcerHandle>,
+) -> Result<ReservationLease, FusionError> {
     match budget.reserve_nano_usd(quote.reserved_nano_usd).await {
         Ok(id) => Ok(ReservationLease {
             budget,

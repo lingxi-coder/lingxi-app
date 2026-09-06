@@ -17,6 +17,8 @@ use tempfile::tempdir;
 use test_harness::mocks::MockRuntimeSpawner;
 use tokio::sync::{oneshot, Mutex as TokioMutex};
 
+const TEST_CONVERSATION_ID: &str = "sess:11111111-2222-4333-8444-555555555555";
+
 struct MockInvoker;
 
 #[async_trait]
@@ -303,6 +305,42 @@ impl BlockingCancelAwareExecutor {
             started: StdMutex::new(Some(started)),
             runs: AtomicUsize::new(0),
         })
+    }
+}
+
+/// Natural result fixture used to prove the handler leaves a worker in place
+/// when the shared control has already crossed into Finalizing. The runner
+/// deliberately ignores cancellation so the test can release the natural
+/// result after kill/drain loses the atomic request_cancel arbitration.
+struct NaturalAfterFinalizingExecutor {
+    started: StdMutex<Option<oneshot::Sender<()>>>,
+    release: TokioMutex<Option<oneshot::Receiver<()>>>,
+}
+
+impl NaturalAfterFinalizingExecutor {
+    fn new(started: oneshot::Sender<()>, release: oneshot::Receiver<()>) -> Arc<Self> {
+        Arc::new(Self {
+            started: StdMutex::new(Some(started)),
+            release: TokioMutex::new(Some(release)),
+        })
+    }
+}
+
+#[async_trait]
+impl FusionExecutor for NaturalAfterFinalizingExecutor {
+    async fn run(
+        &self,
+        _request: FusionRequest,
+        _inherit: FusionInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        if let Some(tx) = self.started.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        if let Some(release) = self.release.lock().await.take() {
+            let _ = release.await;
+        }
+        Ok(dummy_result())
     }
 }
 
@@ -905,7 +943,7 @@ fn dummy_request() -> FusionRequest {
         cross_provider: true,
         parent_profile: "openai".into(),
         parent_model: "gpt-5.4".into(),
-        conversation_id: Some("conv".into()),
+        conversation_id: Some(TEST_CONVERSATION_ID.into()),
         workflow_run_id: None,
     }
 }
@@ -974,7 +1012,7 @@ async fn handler_waits_for_activation_before_running_executor() {
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             make_ctx(fs),
         )
@@ -1006,7 +1044,7 @@ async fn handler_waits_for_activation_before_running_executor() {
 }
 
 #[tokio::test]
-async fn handler_carries_effective_timeout_into_the_runtime_inheritance_snapshot() {
+async fn handler_uses_prepared_timeout_without_a_legacy_caller_override() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let status_sink = Arc::new(RecordingSink::default());
@@ -1023,13 +1061,19 @@ async fn handler_carries_effective_timeout_into_the_runtime_inheritance_snapshot
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             make_ctx(fs),
         )
         .await
         .expect("spawn succeeds");
-    assert_eq!(handle.fusion_timeout_ms, Some(3_600_000));
+    assert_eq!(
+        handle
+            .fusion_prepared_summary
+            .as_ref()
+            .map(|summary| summary.duration_ms),
+        Some(3_600_000)
+    );
 
     for _ in 0..200 {
         if status_sink
@@ -1042,8 +1086,8 @@ async fn handler_carries_effective_timeout_into_the_runtime_inheritance_snapshot
     }
     assert_eq!(
         *executor.observed.lock().unwrap(),
-        vec![Some(3_600_000)],
-        "the runtime must receive the timeout captured before task publication"
+        vec![None],
+        "the legacy inheritance override stays unset; the prepared adapter owns the deadline"
     );
 }
 
@@ -1070,7 +1114,7 @@ async fn spawn_forwards_fusion_progress_into_set_fusion_stage() {
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             make_ctx(fs),
         )
@@ -1123,7 +1167,7 @@ async fn finalize_fusion_outcome_marks_result_published_after_the_completion_sin
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             make_ctx(fs),
         )
@@ -1173,7 +1217,7 @@ async fn kill_preserves_terminalizing_fusion_window() {
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             ctx.clone(),
         )
@@ -1224,7 +1268,7 @@ async fn drain_pending_kills_preserves_terminalizing_fusion_window() {
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             make_ctx(fs),
         )
@@ -1252,6 +1296,108 @@ async fn drain_pending_kills_preserves_terminalizing_fusion_window() {
 
     assert_eq!(status_sink.last_status(), Some(TaskStatus::Completed));
     assert_eq!(status_sink.calls(), vec!["status", "outcome", "status"]);
+}
+
+#[tokio::test]
+async fn kill_request_cancel_loses_to_an_atomic_finalizing_claim() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let status_sink = Arc::new(RecordingStatusSink::default());
+    let completion_sink = Arc::new(CountingCompletionSink::default());
+    let handler = make_handler(
+        NaturalAfterFinalizingExecutor::new(started_tx, release_rx),
+        output_manager,
+        status_sink.clone(),
+        completion_sink.clone(),
+    );
+    let ctx = make_ctx(fs);
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
+            },
+            ctx.clone(),
+        )
+        .await
+        .expect("spawn succeeds");
+    started_rx.await.expect("natural runner starts");
+
+    let control = handler
+        .workers
+        .lock()
+        .await
+        .get(&handle.task_id)
+        .expect("worker remains registered")
+        .control
+        .clone();
+    assert!(control.begin_finalizing(), "test claims the natural result");
+    handler
+        .kill(&handle.task_id, ctx)
+        .await
+        .expect("kill losing finalizing arbitration is a no-op");
+    let _ = release_tx.send(());
+
+    for _ in 0..200 {
+        if status_sink.last_status() == Some(TaskStatus::Completed) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(status_sink.last_status(), Some(TaskStatus::Completed));
+    assert_eq!(completion_sink.0.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn drain_pending_kill_request_cancel_loses_to_an_atomic_finalizing_claim() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let status_sink = Arc::new(RecordingStatusSink::default());
+    let completion_sink = Arc::new(CountingCompletionSink::default());
+    let handler = make_handler(
+        NaturalAfterFinalizingExecutor::new(started_tx, release_rx),
+        output_manager,
+        status_sink.clone(),
+        completion_sink.clone(),
+    );
+    let ctx = make_ctx(fs);
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
+            },
+            ctx,
+        )
+        .await
+        .expect("spawn succeeds");
+    started_rx.await.expect("natural runner starts");
+
+    let control = handler
+        .workers
+        .lock()
+        .await
+        .get(&handle.task_id)
+        .expect("worker remains registered")
+        .control
+        .clone();
+    assert!(control.begin_finalizing(), "test claims the natural result");
+    (handle.cleanup.as_ref().expect("cleanup seam"))();
+    handler.drain_pending_kills().await;
+    let _ = release_tx.send(());
+
+    for _ in 0..200 {
+        if status_sink.last_status() == Some(TaskStatus::Completed) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(status_sink.last_status(), Some(TaskStatus::Completed));
+    assert_eq!(completion_sink.0.load(Ordering::SeqCst), 1);
 }
 
 /// [Finding 18]: the branch inserted a genuine suspension point —
@@ -1284,7 +1430,7 @@ async fn kill_landing_during_the_progress_forwarder_await_does_not_discard_a_suc
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             ctx.clone(),
         )
@@ -1355,7 +1501,7 @@ async fn kill_while_running_lets_executor_observe_cancellation_and_status_killed
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             ctx.clone(),
         )
@@ -1429,7 +1575,7 @@ async fn kill_discloses_realized_usage_the_progress_channel_already_reported() {
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             ctx.clone(),
         )
@@ -1506,7 +1652,7 @@ async fn failing_executor_records_error_before_failed_status_and_spools_it() {
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             make_ctx(fs.clone()),
         )
@@ -1535,6 +1681,7 @@ async fn failing_executor_records_error_before_failed_status_and_spools_it() {
         status_sink.events(),
         vec![
             "status:Running".to_string(),
+            "egress_and_usage:0:true".to_string(),
             format!("error:{error}"),
             "status:Failed".to_string(),
         ]
@@ -1582,7 +1729,7 @@ async fn failing_executor_that_already_spent_tokens_discloses_partial_usage_befo
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             make_ctx(fs),
         )
@@ -1663,7 +1810,7 @@ async fn failing_executor_that_already_egressed_discloses_nonempty_egress_profil
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             make_ctx(fs),
         )
@@ -1720,7 +1867,7 @@ async fn ok_executor_records_egress_and_usage_before_completed_status() {
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             make_ctx(fs),
         )
@@ -1800,7 +1947,7 @@ async fn kill_while_running_ends_status_killed_exactly_once() {
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             ctx.clone(),
         )
@@ -1911,7 +2058,7 @@ async fn a_sink_that_never_publishes_does_not_revert_a_completed_run_to_failed()
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             make_ctx(fs),
         )
@@ -2002,7 +2149,7 @@ async fn completed_fusion_reports_subagent_tokens_as_local_agents_four_bucket_to
         .spawn(
             TaskSpawnInput::LocalFusion {
                 request: dummy_request(),
-                conversation_id: "conv".into(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
             },
             make_ctx(fs),
         )
@@ -2035,4 +2182,41 @@ buckets Fusion already carries"
         usage.tool_uses, 7,
         "provider_requests must still map to <tool_uses> unchanged"
     );
+}
+
+#[tokio::test]
+async fn error_facts_disclose_possible_egress_even_when_usage_is_unknown() {
+    let status_sink = Arc::new(RecordingStatusSink::default());
+    let sink: Arc<dyn TaskStatusSink> = status_sink.clone();
+    let facts = FusionRunFacts {
+        possible_egress: vec!["openai".into()],
+        ..FusionRunFacts::default()
+    };
+
+    // No progress payload is available: the reliable possible-egress fact is
+    // still projected, while usage remains explicitly unknown.
+    disclose_facts_or_partial_usage(&sink, "task", &facts, None, None).await;
+
+    let entries = status_sink.egress_and_usage();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].1, vec!["openai"]);
+    assert!(entries[0].2.is_none());
+}
+
+#[tokio::test]
+async fn error_facts_union_confirmed_and_possible_egress_without_duplicates() {
+    let status_sink = Arc::new(RecordingStatusSink::default());
+    let sink: Arc<dyn TaskStatusSink> = status_sink.clone();
+    let facts = FusionRunFacts {
+        confirmed_egress: vec!["openai".into()],
+        possible_egress: vec!["anthropic".into(), "openai".into()],
+        ..FusionRunFacts::default()
+    };
+
+    disclose_facts_or_partial_usage(&sink, "task", &facts, None, None).await;
+
+    let entries = status_sink.egress_and_usage();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].1, vec!["anthropic", "openai"]);
+    assert!(entries[0].2.is_none());
 }

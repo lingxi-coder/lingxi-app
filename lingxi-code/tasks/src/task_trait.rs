@@ -1,7 +1,10 @@
 //! Generic `Task` trait — implemented per [`TaskType`](crate::id::TaskType).
 
 use async_trait::async_trait;
-use platform_api::{FileSystem, RuntimeSpawner, SubagentInheritance, SubagentSpawnRequest};
+use platform_api::{
+    FileSystem, FusionActivation, FusionPreparedSummary, RuntimeSpawner, SubagentInheritance,
+    SubagentSpawnRequest,
+};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -256,10 +259,18 @@ pub struct TaskHandle {
     /// registry publishes the task. `None` for every non-Fusion task and for
     /// hosts that do not expose a timeout snapshot.
     pub(crate) fusion_timeout_ms: Option<u64>,
+    /// Prepared Fusion identity/duration/panel summary copied into the task
+    /// row before `TaskCreated`. `None` for legacy handlers and non-Fusion
+    /// tasks.
+    pub(crate) fusion_prepared_summary: Option<FusionPreparedSummary>,
     /// One-shot worker activation owned by the registry handoff. Dropping an
     /// unactivated handle cancels handlers whose callback owns a readiness
     /// sender, so a cancelled registry spawn cannot launch partial work.
     activation: Option<Box<dyn FnOnce() + Send + 'static>>,
+    /// Fusion-specific activation callback. The registry captures the
+    /// monotonic activation instant before any post-publication scheduling
+    /// wait, then passes that exact instant through this callback.
+    fusion_activation: Option<Box<dyn FnOnce(FusionActivation) + Send + 'static>>,
 }
 
 impl TaskHandle {
@@ -269,7 +280,9 @@ impl TaskHandle {
             task_id: task_id.into(),
             cleanup,
             fusion_timeout_ms: None,
+            fusion_prepared_summary: None,
             activation: None,
+            fusion_activation: None,
         }
     }
 
@@ -277,6 +290,13 @@ impl TaskHandle {
     #[must_use]
     pub fn with_fusion_timeout_ms(mut self, timeout_ms: Option<u64>) -> Self {
         self.fusion_timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Attach the immutable summary captured during Fusion preparation.
+    #[must_use]
+    pub fn with_fusion_prepared_summary(mut self, summary: FusionPreparedSummary) -> Self {
+        self.fusion_prepared_summary = Some(summary);
         self
     }
 
@@ -291,11 +311,31 @@ impl TaskHandle {
         self
     }
 
+    /// Attach a Fusion activation callback that receives the exact monotonic
+    /// instant captured by the registry after TaskCreated hooks complete.
+    #[must_use]
+    pub fn with_fusion_activation<F>(mut self, activation: F) -> Self
+    where
+        F: FnOnce(FusionActivation) + Send + 'static,
+    {
+        self.fusion_activation = Some(Box::new(activation));
+        self
+    }
+
     /// Release the prepared worker exactly once. Handles without a barrier are
     /// already runnable, so this is a no-op for legacy handlers.
     pub fn activate(&mut self) {
-        if let Some(activation) = self.activation.take() {
-            activation();
+        self.activate_at(FusionActivation::now());
+    }
+
+    /// Release the prepared worker using a caller-captured Fusion instant.
+    /// Legacy activation callbacks remain source-compatible and simply ignore
+    /// the supplied timestamp.
+    pub fn activate_at(&mut self, activation: FusionActivation) {
+        if let Some(activation_callback) = self.fusion_activation.take() {
+            activation_callback(activation);
+        } else if let Some(activation_callback) = self.activation.take() {
+            activation_callback();
         }
     }
 }

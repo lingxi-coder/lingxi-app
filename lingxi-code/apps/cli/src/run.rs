@@ -3067,14 +3067,13 @@ fn checked_fusion_print_deadline(
     monotonic_now.checked_add(wait_budget)
 }
 
-/// Translate the effective timeout captured when a task was spawned into a
-/// monotonic print-mode deadline. The budget starts at the first observation,
-/// after the caller has received the task id and registry activation has
-/// completed; subtracting `TaskStateBase::start_time` would incorrectly charge
-/// a slow `TaskCreated` hook before the Fusion worker can run. A missing
-/// snapshot is intentionally unbounded here: production Fusion handlers
-/// always capture one, while legacy/external task producers should be allowed
-/// to finish rather than be cut off by a second stale default.
+/// Translate the effective timeout captured when a task was activated into a
+/// monotonic print-mode deadline. The registry publishes `start_time` at the
+/// same activation boundary as the prepared Fusion control, so TaskCreated
+/// hook time is excluded while queue/scheduling time after activation counts.
+/// A missing snapshot is intentionally unbounded here: production Fusion
+/// handlers always capture one, while legacy/external task producers should be
+/// allowed to finish rather than be cut off by a second stale default.
 fn fusion_print_deadline(
     state: &tasks::state::TaskState,
     monotonic_now: tokio::time::Instant,
@@ -3082,10 +3081,33 @@ fn fusion_print_deadline(
     let tasks::state::TaskState::LocalFusion(fusion) = state else {
         return None;
     };
+    if let Some(activation_deadline) = fusion.fusion_activation_deadline {
+        return activation_deadline.checked_add(std::time::Duration::from_millis(
+            FUSION_PRINT_FINALIZE_MARGIN_MS,
+        ));
+    }
+    let elapsed = fusion.base.start_time.elapsed().unwrap_or_default();
+    fusion_print_deadline_with_elapsed(state, monotonic_now, elapsed)
+}
+
+/// Deterministic core of [`fusion_print_deadline`]. Keeping elapsed time as an
+/// explicit input lets tests model a post-activation scheduling delay without
+/// sleeping or restarting the run's deadline at the first poll.
+fn fusion_print_deadline_with_elapsed(
+    state: &tasks::state::TaskState,
+    monotonic_now: tokio::time::Instant,
+    elapsed: std::time::Duration,
+) -> Option<tokio::time::Instant> {
+    let tasks::state::TaskState::LocalFusion(fusion) = state else {
+        return None;
+    };
     let timeout_ms = fusion.effective_timeout_ms?;
-    let wait_budget = std::time::Duration::from_millis(
-        timeout_ms.saturating_add(FUSION_PRINT_FINALIZE_MARGIN_MS),
-    );
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let wait_budget = timeout
+        .saturating_add(std::time::Duration::from_millis(
+            FUSION_PRINT_FINALIZE_MARGIN_MS,
+        ))
+        .saturating_sub(elapsed);
     checked_fusion_print_deadline(monotonic_now, wait_budget)
 }
 
@@ -7120,6 +7142,8 @@ mod tests {
             usage: None,
             stage: None,
             effective_timeout_ms: None,
+            planned_panels: None,
+            fusion_activation_deadline: None,
             publication_status: platform_api::FusionPublicationStatus::Published,
             publication_error: None,
             // Every existing caller of this helper wants "the run is fully
@@ -7688,22 +7712,103 @@ mod tests {
         let tasks::state::TaskState::LocalFusion(fusion) = &mut state else {
             unreachable!("fusion_state always builds a LocalFusion state");
         };
-        // A registry row can be timestamped before a slow TaskCreated hook
-        // allows activation. The waiter must start from its first observation
-        // instead of charging that pre-activation interval.
-        fusion.base.start_time = std::time::UNIX_EPOCH;
         // Deliberately much longer than the old duplicated default. The
         // waiter must honor this per-run snapshot rather than a CLI literal.
         fusion.effective_timeout_ms = Some(3_600_000);
 
         let monotonic_now = tokio::time::Instant::now();
-        let deadline = fusion_print_deadline(&state, monotonic_now)
-            .expect("captured timeout must produce a deadline");
+        let deadline =
+            fusion_print_deadline_with_elapsed(&state, monotonic_now, std::time::Duration::ZERO)
+                .expect("captured timeout must produce a deadline");
         assert_eq!(
             deadline
                 .checked_duration_since(monotonic_now)
                 .expect("deadline is in the future"),
             std::time::Duration::from_millis(3_600_000 + FUSION_PRINT_FINALIZE_MARGIN_MS)
+        );
+    }
+
+    #[test]
+    fn fusion_print_deadline_excludes_hook_delay_but_charges_scheduling_delay() {
+        let mut state = fusion_state(tasks::state::TaskStatus::Running, None, None);
+        let tasks::state::TaskState::LocalFusion(fusion) = &mut state else {
+            unreachable!("fusion_state always builds a LocalFusion state");
+        };
+        fusion.effective_timeout_ms = Some(1_000);
+        let now = tokio::time::Instant::now();
+        let full_budget = std::time::Duration::from_millis(1_000 + FUSION_PRINT_FINALIZE_MARGIN_MS);
+
+        // TaskCreated hook time is before activation and therefore contributes
+        // no elapsed budget at the activation boundary.
+        let after_hook = fusion_print_deadline_with_elapsed(&state, now, std::time::Duration::ZERO)
+            .expect("activation must produce a deadline")
+            .checked_duration_since(now)
+            .expect("deadline is in the future");
+        assert_eq!(after_hook, full_budget);
+
+        // A later queue/scheduling delay is after activation and must reduce
+        // the remaining Fusion budget rather than restarting it at first poll.
+        let scheduling_delay = std::time::Duration::from_millis(275);
+        let after_queue = fusion_print_deadline_with_elapsed(&state, now, scheduling_delay)
+            .expect("activation must produce a deadline")
+            .checked_duration_since(now)
+            .expect("deadline is in the future");
+        assert_eq!(after_queue, full_budget - scheduling_delay);
+
+        let expired = fusion_print_deadline_with_elapsed(
+            &state,
+            now,
+            full_budget + std::time::Duration::from_millis(1),
+        )
+        .expect("an expired fallback deadline is still representable")
+        .checked_duration_since(now)
+        .expect("deadline equals now");
+        assert_eq!(expired, std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn fusion_print_deadline_prefers_monotonic_activation_and_ignores_wall_rollback() {
+        let mut state = fusion_state(tasks::state::TaskStatus::Running, None, None);
+        let now = tokio::time::Instant::now();
+        let activation_delay = std::time::Duration::from_millis(275);
+        let activation = now
+            .checked_sub(activation_delay)
+            .expect("controlled activation instant is representable");
+        {
+            let tasks::state::TaskState::LocalFusion(fusion) = &mut state else {
+                unreachable!("fusion_state always builds a LocalFusion state");
+            };
+            fusion.effective_timeout_ms = Some(1_000);
+            fusion.fusion_activation_deadline =
+                activation.checked_add(std::time::Duration::from_secs(1));
+            fusion.base.start_time = std::time::SystemTime::now()
+                .checked_add(std::time::Duration::from_secs(3_600))
+                .expect("future wall-clock fixture is representable");
+        }
+
+        let deadline =
+            fusion_print_deadline(&state, now).expect("monotonic activation deadline must be used");
+        assert_eq!(
+            deadline
+                .checked_duration_since(now)
+                .expect("finalize margin keeps the deadline in the future"),
+            std::time::Duration::from_millis(FUSION_PRINT_FINALIZE_MARGIN_MS + 1_000)
+                - activation_delay
+        );
+
+        {
+            let tasks::state::TaskState::LocalFusion(fusion) = &mut state else {
+                unreachable!("fusion_state always builds a LocalFusion state");
+            };
+            fusion.fusion_activation_deadline = None;
+        }
+        let fallback =
+            fusion_print_deadline(&state, now).expect("legacy wall-clock fallback remains bounded");
+        assert_eq!(
+            fallback
+                .checked_duration_since(now)
+                .expect("wall-clock rollback falls back to the full captured budget"),
+            std::time::Duration::from_millis(1_000 + FUSION_PRINT_FINALIZE_MARGIN_MS)
         );
     }
 

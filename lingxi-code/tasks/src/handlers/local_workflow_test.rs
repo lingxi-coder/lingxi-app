@@ -480,6 +480,29 @@ fn workflow_fusion_uses_runtime_preset_and_resolves_a_missing_parent_profile() {
     assert_eq!(request.parent_profile, "openai");
 }
 
+#[test]
+fn workflow_fusion_rejects_an_empty_parent_run_id_before_preparation() {
+    let executor: Arc<dyn FusionExecutor> = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        },
+        3,
+        Ok(workflow_fusion_result()),
+    );
+
+    let error = parse_workflow_fusion_request(
+        Some(&executor),
+        "review this",
+        "{}",
+        "  ",
+        Some("gpt-5.4"),
+        Some("openai"),
+    )
+    .expect_err("an empty workflow run id must fail before prepare");
+    assert!(matches!(error, FusionError::InvalidRequest(message) if message.contains("non-empty workflow run id")));
+}
+
 /// Mirrors `RejectedFusionExecutor` (apps/engine-desktop) — a
 /// composition-root-pinned rejection surfaced through `preflight_error()`
 /// while `agent_surface().enabled` stays `false`.
@@ -2764,7 +2787,13 @@ async fn workflow_fusion_round_trips_a_compact_result() {
 
     let value: serde_json::Value =
         serde_json::from_str(outcome.result.as_deref().expect("result")).expect("json");
-    assert_eq!(value["run_id"], "fu_test");
+    let returned_run_id = value["run_id"]
+        .as_str()
+        .expect("fusion result must carry its trusted run id");
+    let parsed_run_id = platform_api::FusionRunId::parse(returned_run_id)
+        .expect("prepared Fusion must return a canonical trusted run id");
+    assert_eq!(parsed_run_id.to_string(), returned_run_id);
+    assert_ne!(returned_run_id, "fu_test");
     // Exact key-set assertion, not `.get("report").is_none()` — `PanelOutcome`
     // (platform-api/src/fusion.rs) never had a `report`/`candidate_answer`
     // field to begin with, so those two checks passed vacuously regardless

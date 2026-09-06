@@ -9,6 +9,8 @@ mod tests {
         arc_mock_budget, arc_mock_mailbox, arc_mock_spawner, arc_mock_task_registry,
         MockBudgetEnforcerHandle, MockSubagentSpawner,
     };
+    use std::sync::Mutex as StdMutex;
+    use tokio::sync::oneshot;
 
     /// The binary's LEAN gate `m = qk(model)` (`tool_api::dh_simple_system_prompt`)
     /// selects the SHORT Agent-tool prompt for the current-generation models.
@@ -714,6 +716,82 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         }
     }
 
+    /// Prepared success fixture whose sealed facts prove fewer children were
+    /// allocated than the compact result's panel list suggests. The third
+    /// panel has a runtime timeout/panic category, so category-only accounting
+    /// would overcharge it; the terminal allocation fact is authoritative.
+    struct PreparedAllocationFusion {
+        result: platform_api::FusionResult,
+        allocated_panels: u8,
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for PreparedAllocationFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            Ok(self.result.clone())
+        }
+
+        fn prepare(
+            self: Arc<Self>,
+            submission: platform_api::FusionSubmission,
+        ) -> Result<platform_api::PreparedFusionRun, platform_api::FusionError> {
+            let identity = submission.identity.clone();
+            let control = platform_api::FusionRunControl::new(
+                identity.clone(),
+                1_000,
+                submission.inherit.cancel.clone(),
+                platform_api::FusionRunFactsRecorder::default(),
+            );
+            let runner_control = control.clone();
+            let result = self.result.clone();
+            let allocated_panels = self.allocated_panels;
+            Ok(platform_api::PreparedFusionRun::new(
+                platform_api::FusionPreparedSummary {
+                    identity,
+                    duration_ms: 1_000,
+                    planned_panels: Some(3),
+                },
+                control,
+                move |_activation, _progress| {
+                    let runner_control = runner_control.clone();
+                    let mut result = result.clone();
+                    async move {
+                        runner_control
+                            .facts()
+                            .set_allocated_panels(allocated_panels);
+                        result.run_id = runner_control.identity().run_id.to_string();
+                        platform_api::FusionRunOutcome::from_control(&runner_control, Ok(result))
+                    }
+                },
+            ))
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn resolve_parent_profile(
+            &self,
+            _parent_model: &str,
+            explicit_profile: Option<&str>,
+        ) -> Option<String> {
+            explicit_profile
+                .map(str::to_string)
+                .or_else(|| Some("resolved-profile".into()))
+        }
+    }
+
     /// Enabled Fusion whose `run()` always returns a scripted [`FusionError`]
     /// — for F008's error-mapping and spawn-quota-on-Err tests.
     struct ErroringFusion {
@@ -1114,7 +1192,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             .expect("NeedsParent is Ok");
         assert_eq!(result.model_content.as_deref(), Some("FUSION_FINAL"));
         assert_eq!(result.data["status"], "needs_parent");
-        assert_eq!(result.data["runId"], "fu_test");
+        let returned_run_id = result.data["runId"]
+            .as_str()
+            .expect("Fusion tool result must carry its trusted run id");
+        let parsed_run_id = platform_api::FusionRunId::parse(returned_run_id)
+            .expect("prepared Fusion must return a canonical trusted run id");
+        assert_eq!(parsed_run_id.to_string(), returned_run_id);
+        assert_ne!(returned_run_id, "fu_test");
         assert!(!result.is_error);
         assert_eq!(
             registry.get_total_agent_spawns(),
@@ -1313,6 +1397,50 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             2,
             "a `not_dispatched` panel never reached the spawner and must not \
              stay charged against the session's lifetime spawn quota"
+        );
+    }
+
+    #[tokio::test]
+    async fn fusion_ok_result_prefers_sealed_allocated_facts_over_panel_categories() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            arc_mock_spawner(),
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let mut result = sample_fusion_result(platform_api::FusionStatus::Completed);
+        // The third panel timed out/panicked before its allocation receipt was
+        // observed. Its category is not proof of non-dispatch, so the legacy
+        // category-only path would charge all three slots.
+        result.panels[2] = platform_api::PanelOutcome {
+            panel_id: "P3".into(),
+            status: platform_api::PanelRunStatus::TimedOut,
+            duration_ms: 0,
+            error_category: Some("panic".into()),
+            error_detail: Some("panel timed out before allocation receipt".into()),
+            usage: None,
+        };
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(PreparedAllocationFusion {
+            result,
+            allocated_panels: 2,
+        }));
+        tool.call(
+            serde_json::json!({
+                "description": "deliberate",
+                "prompt": "review this",
+                "subagent_type": "fusion"
+            }),
+            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_tx(),
+        )
+        .await
+        .expect("prepared result succeeds");
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            2,
+            "sealed allocated_panels=2 is authoritative even when result categories count 3"
         );
     }
 
@@ -1814,7 +1942,17 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// resolves on its own — used to prove the spawn-quota reservation
     /// survives `call_fusion`'s OWN future being dropped mid-flight, not
     /// just an `Ok`/`Err` return from it.
-    struct NeverCompletesFusion;
+    struct NeverCompletesFusion {
+        started: Arc<StdMutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    impl NeverCompletesFusion {
+        fn new(started: oneshot::Sender<()>) -> Arc<Self> {
+            Arc::new(Self {
+                started: Arc::new(StdMutex::new(Some(started))),
+            })
+        }
+    }
 
     #[async_trait::async_trait]
     impl platform_api::FusionExecutor for NeverCompletesFusion {
@@ -1824,6 +1962,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             _inherit: platform_api::FusionInheritance,
             _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
         ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            if let Some(tx) = self.started.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
             std::future::pending().await
         }
 
@@ -1848,12 +1989,103 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         }
     }
 
+    /// A prepared executor that reports an explicit zero-allocation terminal
+    /// fact when cancellation reaches its detached runner. This is the
+    /// production-shaped counterpart to the legacy run-only fixture above.
+    struct PreparedKnownZeroNeverCompletesFusion {
+        started: Arc<StdMutex<Option<oneshot::Sender<()>>>>,
+        settled: Arc<StdMutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    impl PreparedKnownZeroNeverCompletesFusion {
+        fn new(started: oneshot::Sender<()>, settled: oneshot::Sender<()>) -> Arc<Self> {
+            Arc::new(Self {
+                started: Arc::new(StdMutex::new(Some(started))),
+                settled: Arc::new(StdMutex::new(Some(settled))),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for PreparedKnownZeroNeverCompletesFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            std::future::pending().await
+        }
+
+        fn prepare(
+            self: Arc<Self>,
+            submission: platform_api::FusionSubmission,
+        ) -> Result<platform_api::PreparedFusionRun, platform_api::FusionError> {
+            let identity = submission.identity.clone();
+            let control = platform_api::FusionRunControl::new(
+                identity.clone(),
+                1_000,
+                submission.inherit.cancel.clone(),
+                platform_api::FusionRunFactsRecorder::default(),
+            );
+            let runner_control = control.clone();
+            let cancel = submission.inherit.cancel.clone();
+            let started = self.started.clone();
+            let settled = self.settled.clone();
+            Ok(platform_api::PreparedFusionRun::new(
+                platform_api::FusionPreparedSummary {
+                    identity,
+                    duration_ms: 1_000,
+                    planned_panels: Some(3),
+                },
+                control,
+                move |_activation, _progress| {
+                    let runner_control = runner_control.clone();
+                    let started = started.clone();
+                    let settled = settled.clone();
+                    async move {
+                        if let Some(tx) = started.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                        cancel.cancelled().await;
+                        runner_control.facts().set_known_zero();
+                        if let Some(tx) = settled.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                        platform_api::FusionRunOutcome::from_control(
+                            &runner_control,
+                            Err(platform_api::FusionError::Cancelled),
+                        )
+                    }
+                },
+            ))
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+
+        fn resolve_parent_profile(
+            &self,
+            _parent_model: &str,
+            explicit_profile: Option<&str>,
+        ) -> Option<String> {
+            explicit_profile
+                .map(str::to_string)
+                .or_else(|| Some("resolved-profile".into()))
+        }
+    }
+
     /// [round-2 review, finding 4] A parent that owns the Fusion call future
-    /// may still drop it while cancellation wins a biased select. This
-    /// defensive regression models that ownership boundary against an
-    /// executor that never resolves on its own and asserts the reservation is
-    /// still released. The production dispatcher marks Fusion cooperative,
-    /// so this test is not a claim about the dispatcher's current policy.
+    /// may still drop it while cancellation wins a biased select. The
+    /// prepared runner publishes an explicit zero-allocation terminal fact;
+    /// the owned finalizer must await that sealed outcome before refunding.
     #[tokio::test]
     async fn fusion_dropped_future_by_parent_releases_the_full_reservation() {
         use platform_api::task_registry::TaskRegistryHandle;
@@ -1865,7 +2097,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(NeverCompletesFusion));
+        let (started_tx, started_rx) = oneshot::channel();
+        let (settled_tx, settled_rx) = oneshot::channel();
+        let tool = AgentTool::new(bctx).with_fusion(PreparedKnownZeroNeverCompletesFusion::new(
+            started_tx, settled_tx,
+        ));
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
@@ -1873,7 +2109,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
         let cancel_for_task = cancel.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let _ = started_rx.await;
             cancel_for_task.cancel();
         });
         // Keep the owned future inside the race's scope. Leaving this block
@@ -1899,6 +2135,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         };
         assert!(!completed, "fusion call must not complete on its own");
 
+        settled_rx
+            .await
+            .expect("prepared runner must publish its explicit zero-allocation fact");
+
         for _ in 0..2000 {
             if registry.get_total_agent_spawns() == 0 {
                 break;
@@ -1908,8 +2148,55 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert_eq!(
             registry.get_total_agent_spawns(),
             0,
-            "call_fusion's future was dropped before any panel spawned — the \
-             reservation must not leak"
+            "the sealed zero-allocation fact must refund the full reservation"
+        );
+    }
+
+    #[tokio::test]
+    async fn fusion_dropped_legacy_run_only_future_keeps_unknown_reservation_charged() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            arc_mock_spawner(),
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let (started_tx, started_rx) = oneshot::channel();
+        let tool = AgentTool::new(bctx).with_fusion(NeverCompletesFusion::new(started_tx));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.cancel = Some(cancel.clone());
+        let cancel_for_task = cancel.clone();
+        tokio::spawn(async move {
+            let _ = started_rx.await;
+            cancel_for_task.cancel();
+        });
+        let completed = {
+            let call_future = tool.call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                ctx,
+                fresh_tx(),
+            );
+            tokio::pin!(call_future);
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => false,
+                _ = &mut call_future => true,
+            }
+        };
+        assert!(!completed);
+        for _ in 0..200 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            3,
+            "legacy run-only hangs expose no terminal allocation fact, so quota remains conservatively charged"
         );
     }
 
@@ -1918,9 +2205,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// `FusionSpawnReservationGuard::drop` — the defensive path for an
     /// arbitrary parent dropping the owned call future before either match
     /// arm runs. (The production dispatcher now keeps Fusion cooperative.) Emits
-    /// `PanelsDispatched { total: 2 }` and then never resolves, so the
-    /// dropped future must leave exactly the 2 resolved panels charged out
-    /// of the 3 reserved.
+    /// `PanelsDispatched { total: 2 }` and then waits for cooperative cancel,
+    /// so the dropped caller future leaves settlement to the terminal
+    /// supervisor and exactly the 2 resolved panels charged out of 3.
     struct DispatchesFewerPanelsThenHangsFusion {
         /// [round-12 review, finding 3] `None` keeps the pre-round-12
         /// fixture shape (no allocation figure published); `Some(n)` makes
@@ -1934,7 +2221,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         async fn run(
             &self,
             _request: platform_api::FusionRequest,
-            _inherit: platform_api::FusionInheritance,
+            inherit: platform_api::FusionInheritance,
             progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
         ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
             if let Some(tx) = progress {
@@ -1950,7 +2237,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                     })
                     .await;
             }
-            std::future::pending().await
+            inherit.cancel.cancelled().await;
+            Err(platform_api::FusionError::Cancelled)
         }
 
         fn agent_surface(&self) -> platform_api::FusionAgentSurface {
@@ -2411,27 +2699,117 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// separate atomic operations. If an arbitrary parent drops the Fusion
     /// future between those observations, the proven allocation must still
     /// remain charged even though the resolved-total latch is momentarily 0.
-    #[test]
-    fn fusion_drop_preserves_an_allocation_seen_before_the_resolved_latch() {
+    #[tokio::test]
+    async fn fusion_drop_preserves_an_allocation_seen_before_the_resolved_latch() {
         use platform_api::task_registry::TaskRegistryHandle;
         let registry = arc_mock_task_registry();
         registry
             .try_reserve_total_agent_spawns(3, u64::MAX)
             .expect("reserve three slots");
+        let identity = platform_api::FusionRunIdentity::new(
+            platform_api::FusionRunId::generated(),
+            None,
+            platform_api::FusionOrigin::Agent,
+            Some("test".into()),
+        );
+        let control = platform_api::FusionRunControl::new(
+            identity.clone(),
+            1_000,
+            tokio_util::sync::CancellationToken::new(),
+            platform_api::FusionRunFactsRecorder::default(),
+        );
+        let runner_control = control.clone();
+        let prepared = platform_api::PreparedFusionRun::new(
+            platform_api::FusionPreparedSummary {
+                identity,
+                duration_ms: 1_000,
+                planned_panels: Some(3),
+            },
+            control.clone(),
+            move |_activation, _progress| {
+                let runner_control = runner_control.clone();
+                async move {
+                    platform_api::FusionRunOutcome::from_control(
+                        &runner_control,
+                        Err(platform_api::FusionError::Internal),
+                    )
+                }
+            },
+        );
+        let activation = tokio::spawn(async move {
+            prepared
+                .activate(platform_api::FusionActivation::now(), None)
+                .await
+        });
         let guard = FusionSpawnReservationGuard::new(
             registry.clone(),
             3,
+            control,
             Arc::new(std::sync::atomic::AtomicU64::new(0)),
             Arc::new(std::sync::atomic::AtomicU64::new(1)),
             Arc::new(std::sync::atomic::AtomicBool::new(true)),
         );
 
+        // The owned supervisor publishes a stable terminal envelope; no
+        // immediate Drop-time read is permitted.
         drop(guard);
+        let _ = activation.await;
+        for _ in 0..200 {
+            if registry.get_total_agent_spawns() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
         assert_eq!(
             registry.get_total_agent_spawns(),
             1,
             "one synchronously observed child must stay charged"
         );
+    }
+
+    #[tokio::test]
+    async fn fusion_dropped_prepared_run_refunds_before_activation_without_waiting() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let registry = arc_mock_task_registry();
+        registry
+            .try_reserve_total_agent_spawns(3, u64::MAX)
+            .expect("reserve three slots");
+        let identity = platform_api::FusionRunIdentity::new(
+            platform_api::FusionRunId::generated(),
+            None,
+            platform_api::FusionOrigin::Agent,
+            Some("never-polled".into()),
+        );
+        let control = platform_api::FusionRunControl::new(
+            identity.clone(),
+            1_000,
+            tokio_util::sync::CancellationToken::new(),
+            platform_api::FusionRunFactsRecorder::default(),
+        );
+        let prepared = platform_api::PreparedFusionRun::failed(
+            platform_api::FusionPreparedSummary {
+                identity,
+                duration_ms: 1_000,
+                planned_panels: Some(3),
+            },
+            control.clone(),
+            platform_api::FusionError::Internal,
+        );
+        let guard = FusionSpawnReservationGuard::new(
+            registry.clone(),
+            3,
+            control,
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+
+        // Dropping an armed prepared run seals exact zero dispatch. The guard
+        // can settle synchronously from that terminal envelope, even if no
+        // activation poll ever happened.
+        drop(prepared);
+        drop(guard);
+        assert_eq!(registry.get_total_agent_spawns(), 0);
     }
 
     #[tokio::test]

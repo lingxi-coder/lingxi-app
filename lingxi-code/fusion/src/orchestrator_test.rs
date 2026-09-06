@@ -2,8 +2,7 @@
 
 use super::*;
 use crate::config::FusionRuntimeConfig;
-use crate::model_resolver::CatalogModel;
-use crate::model_resolver::ResolvedPanel;
+use crate::model_resolver::{CatalogModel, ModelSource, ResolvedPanel};
 use async_trait::async_trait;
 use platform_api::subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
@@ -12,11 +11,12 @@ use platform_api::subagent_spawn::{
 use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use platform_api::{
     budget::{BudgetEnforcerHandle, BudgetError},
-    BudgetReservationId, EvidenceKind, FusionAnalysis, FusionContradiction, FusionDecision,
-    FusionError, FusionExecutor, FusionInheritance, FusionModelHints, FusionModelRef,
-    FusionNeedsParentReason, FusionOrigin, FusionPreset, FusionRecommendation, FusionRequest,
-    FusionStatus, PanelClaim, PanelEvidence, PanelPosition, PanelReport, PanelRunStatus,
-    RiskSeverity, WorkflowQueryWatchdog, DEFAULT_FUSION_DIMENSIONS,
+    BudgetReservationId, EvidenceKind, FusionActivation, FusionAnalysis, FusionContradiction,
+    FusionDecision, FusionError, FusionExecutor, FusionInheritance, FusionModelHints,
+    FusionModelRef, FusionNeedsParentReason, FusionOrigin, FusionPreset, FusionRecommendation,
+    FusionRequest, FusionRunId, FusionRunIdentity, FusionStatus, FusionSubmission, PanelClaim,
+    PanelEvidence, PanelPosition, PanelReport, PanelRunStatus, RiskSeverity, WorkflowQueryWatchdog,
+    DEFAULT_FUSION_DIMENSIONS,
 };
 use protocol::AgentId;
 use serde_json::{json, Value};
@@ -26,9 +26,10 @@ use sidequery::{
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use telemetry::{AnalyticsBus, AnalyticsValue, InMemorySink};
+use std::sync::{Arc, Condvar, Mutex};
+use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, InMemorySink, LogEventMetadata};
 use tokio::sync::Notify;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 struct InertInvoker;
@@ -74,6 +75,151 @@ impl BudgetEnforcerHandle for DenyReserveBudget {
         Err(BudgetError::Exceeded {
             current_nano_usd: 1,
         })
+    }
+}
+
+struct BlockingReserveBudget {
+    started: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl BudgetEnforcerHandle for BlockingReserveBudget {
+    async fn check_and_charge(&self, _: u64) -> Result<(), BudgetError> {
+        Ok(())
+    }
+
+    async fn snapshot_total_nano_usd(&self) -> u64 {
+        0
+    }
+
+    fn max_session_nano_usd(&self) -> Option<u64> {
+        Some(u64::MAX)
+    }
+
+    async fn reserve_nano_usd(&self, _: u64) -> Result<BudgetReservationId, BudgetError> {
+        let _drop_guard = PendingQueryGuard(Arc::clone(&self.dropped));
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
+struct BlockingStartedSink {
+    started: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
+}
+
+struct ArmPricePanicSink {
+    panic_on_read: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl AnalyticsSink for ArmPricePanicSink {
+    async fn log_event(&self, name: &str, _metadata: LogEventMetadata) {
+        if name == telemetry::tengu::fusion::ANALYSIS_COMPLETED {
+            self.panic_on_read.store(true, Ordering::SeqCst);
+        }
+    }
+
+    async fn log_event_async(&self, name: &str, metadata: LogEventMetadata) {
+        self.log_event(name, metadata).await;
+    }
+
+    fn name(&self) -> &str {
+        "arm_fusion_price_panic"
+    }
+}
+
+struct BlockingTerminalSink {
+    blocked_name: &'static str,
+    started: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl AnalyticsSink for BlockingTerminalSink {
+    async fn log_event(&self, name: &str, _metadata: LogEventMetadata) {
+        if name == self.blocked_name {
+            let _drop_guard = PendingQueryGuard(Arc::clone(&self.dropped));
+            self.started.notify_one();
+            std::future::pending::<()>().await;
+        }
+    }
+
+    async fn log_event_async(&self, name: &str, metadata: LogEventMetadata) {
+        self.log_event(name, metadata).await;
+    }
+
+    fn name(&self) -> &str {
+        "blocking_fusion_terminal"
+    }
+}
+
+struct SyncBlockingAllocationSpawner {
+    first: AtomicBool,
+    entered: Arc<Notify>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
+#[async_trait]
+impl SubagentSpawner for SyncBlockingAllocationSpawner {
+    async fn spawn(
+        &self,
+        _request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        unreachable!("Fusion panels use the observer-aware workflow spawn path")
+    }
+
+    async fn spawn_workflow_with_observer(
+        &self,
+        request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<String>>,
+        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        _watchdog: WorkflowQueryWatchdog,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        if !self.first.swap(true, Ordering::SeqCst) {
+            self.entered.notify_one();
+            let (released, wake) = &*self.release;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+            if let Some(observer) = observer {
+                observer.on_allocated(
+                    &platform_api::subagent_spawn::SubagentObservation::Allocated {
+                        agent_id: AgentId::new(),
+                        agent_type: platform_api::FUSION_PANEL_TYPE.to_string(),
+                        name: request.name,
+                        model: request.model.unwrap_or_default(),
+                        model_profile: request.model_profile,
+                        persistent: false,
+                        initial_message_index: 0,
+                    },
+                );
+            }
+        }
+        std::future::pending().await
+    }
+}
+
+#[async_trait]
+impl AnalyticsSink for BlockingStartedSink {
+    async fn log_event(&self, name: &str, _metadata: LogEventMetadata) {
+        if name == telemetry::tengu::fusion::STARTED {
+            let _drop_guard = PendingQueryGuard(Arc::clone(&self.dropped));
+            self.started.notify_one();
+            std::future::pending::<()>().await;
+        }
+    }
+
+    async fn log_event_async(&self, name: &str, metadata: LogEventMetadata) {
+        self.log_event(name, metadata).await;
+    }
+
+    fn name(&self) -> &str {
+        "blocking_fusion_started"
     }
 }
 
@@ -211,6 +357,231 @@ fn test_config() -> FusionRuntimeConfig {
     cfg.total_timeout_ms = 8_000;
     cfg.min_successful_panels = 2;
     cfg
+}
+
+#[derive(Clone)]
+struct MutableCatalog(Arc<Mutex<Vec<CatalogModel>>>);
+
+impl ModelSource for MutableCatalog {
+    fn list(&self) -> Vec<CatalogModel> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+struct MutableUnitPrices {
+    nano_per_token: Arc<AtomicU64>,
+}
+
+struct TogglePanicPrices {
+    panic_on_read: Arc<AtomicBool>,
+}
+
+struct PanicAfterArmedReads {
+    armed: Arc<AtomicBool>,
+    reads: AtomicUsize,
+    panic_at: usize,
+}
+
+impl FusionPriceBook for TogglePanicPrices {
+    fn rates_for(&self, _profile: &str, _model: &str) -> Option<ModelRates> {
+        assert!(
+            !self.panic_on_read.load(Ordering::SeqCst),
+            "injected price-book panic"
+        );
+        Some(ModelRates {
+            input_nano_usd_per_token: 1,
+            output_nano_usd_per_token: 1,
+            per_request_nano_usd: 0,
+            cache_read_nano_usd_per_token: 1,
+            cache_write_nano_usd_per_token: 1,
+            reasoning_nano_usd_per_token: 1,
+            cache_write_rate_is_ttl_approximated: false,
+        })
+    }
+}
+
+impl FusionPriceBook for PanicAfterArmedReads {
+    fn rates_for(&self, _profile: &str, _model: &str) -> Option<ModelRates> {
+        if self.armed.load(Ordering::SeqCst)
+            && self.reads.fetch_add(1, Ordering::SeqCst) + 1 == self.panic_at
+        {
+            panic!("injected price-book panic after an exact settlement")
+        }
+        Some(ModelRates {
+            input_nano_usd_per_token: 1,
+            output_nano_usd_per_token: 1,
+            per_request_nano_usd: 0,
+            cache_read_nano_usd_per_token: 1,
+            cache_write_nano_usd_per_token: 1,
+            reasoning_nano_usd_per_token: 1,
+            cache_write_rate_is_ttl_approximated: false,
+        })
+    }
+}
+
+impl FusionPriceBook for MutableUnitPrices {
+    fn rates_for(&self, _profile: &str, _model: &str) -> Option<ModelRates> {
+        let rate = self.nano_per_token.load(Ordering::SeqCst);
+        Some(ModelRates {
+            input_nano_usd_per_token: rate,
+            output_nano_usd_per_token: rate,
+            per_request_nano_usd: 0,
+            cache_read_nano_usd_per_token: rate,
+            cache_write_nano_usd_per_token: rate,
+            reasoning_nano_usd_per_token: rate,
+            cache_write_rate_is_ttl_approximated: false,
+        })
+    }
+}
+
+#[derive(Default)]
+struct QuoteRecordingBudget {
+    reserved: Mutex<Vec<u64>>,
+    committed: Mutex<Vec<u64>>,
+}
+
+#[async_trait]
+impl BudgetEnforcerHandle for QuoteRecordingBudget {
+    async fn check_and_charge(&self, _: u64) -> Result<(), BudgetError> {
+        Ok(())
+    }
+
+    async fn snapshot_total_nano_usd(&self) -> u64 {
+        0
+    }
+
+    fn max_session_nano_usd(&self) -> Option<u64> {
+        Some(u64::MAX)
+    }
+
+    async fn reserve_nano_usd(&self, nano_usd: u64) -> Result<BudgetReservationId, BudgetError> {
+        self.reserved.lock().unwrap().push(nano_usd);
+        Ok(BudgetReservationId::from_raw(1))
+    }
+
+    async fn commit_reservation(
+        &self,
+        _id: BudgetReservationId,
+        actual_nano_usd: u64,
+    ) -> Result<(), BudgetError> {
+        self.committed.lock().unwrap().push(actual_nano_usd);
+        Ok(())
+    }
+}
+
+struct FailingCommitBudget;
+
+#[async_trait]
+impl BudgetEnforcerHandle for FailingCommitBudget {
+    async fn check_and_charge(&self, _: u64) -> Result<(), BudgetError> {
+        Ok(())
+    }
+
+    async fn snapshot_total_nano_usd(&self) -> u64 {
+        0
+    }
+
+    fn max_session_nano_usd(&self) -> Option<u64> {
+        Some(u64::MAX)
+    }
+
+    async fn reserve_nano_usd(&self, _: u64) -> Result<BudgetReservationId, BudgetError> {
+        Ok(BudgetReservationId::from_raw(1))
+    }
+
+    async fn commit_reservation(
+        &self,
+        _id: BudgetReservationId,
+        _actual_nano_usd: u64,
+    ) -> Result<(), BudgetError> {
+        Err(BudgetError::Internal("injected commit failure".into()))
+    }
+}
+
+#[derive(Clone)]
+struct ScopeAwareBudget {
+    expected: protocol::SessionId,
+    scopes: Arc<Mutex<Vec<protocol::SessionId>>>,
+    scoped_reserves: Arc<AtomicUsize>,
+    scoped: bool,
+}
+
+#[async_trait]
+impl BudgetEnforcerHandle for ScopeAwareBudget {
+    async fn check_and_charge(&self, _: u64) -> Result<(), BudgetError> {
+        Ok(())
+    }
+
+    async fn snapshot_total_nano_usd(&self) -> u64 {
+        0
+    }
+
+    fn scoped_for_session(
+        &self,
+        session_id: protocol::SessionId,
+    ) -> Option<Arc<dyn BudgetEnforcerHandle>> {
+        self.scopes.lock().unwrap().push(session_id);
+        (session_id == self.expected).then(|| {
+            Arc::new(Self {
+                scoped: true,
+                ..self.clone()
+            }) as Arc<dyn BudgetEnforcerHandle>
+        })
+    }
+
+    async fn reserve_nano_usd(&self, _nano_usd: u64) -> Result<BudgetReservationId, BudgetError> {
+        if !self.scoped {
+            return Err(BudgetError::Internal(
+                "unscoped budget view reached activation".into(),
+            ));
+        }
+        self.scoped_reserves.fetch_add(1, Ordering::SeqCst);
+        Ok(BudgetReservationId::NOOP)
+    }
+}
+
+struct CancelOnFirstAllocationSpawner {
+    allocation_gate: CancellationToken,
+    cancel: CancellationToken,
+    allocated: AtomicBool,
+}
+
+#[async_trait]
+impl SubagentSpawner for CancelOnFirstAllocationSpawner {
+    async fn spawn(
+        &self,
+        _request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        unreachable!("Fusion panels use the observer-aware workflow spawn path")
+    }
+
+    async fn spawn_workflow_with_observer(
+        &self,
+        request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<String>>,
+        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        _watchdog: WorkflowQueryWatchdog,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.allocation_gate.cancelled().await;
+        if !self.allocated.swap(true, Ordering::SeqCst) {
+            if let Some(observer) = observer {
+                let event = platform_api::subagent_spawn::SubagentObservation::Allocated {
+                    agent_id: AgentId::new(),
+                    agent_type: platform_api::FUSION_PANEL_TYPE.to_string(),
+                    name: request.name,
+                    model: request.model.unwrap_or_default(),
+                    model_profile: request.model_profile,
+                    persistent: false,
+                    initial_message_index: 0,
+                };
+                observer.on_allocated(&event);
+            }
+            self.cancel.cancel();
+        }
+        std::future::pending::<Result<SubagentResult, SubagentSpawnError>>().await
+    }
 }
 
 struct FakeSpawner {
@@ -700,6 +1071,8 @@ struct ScriptedAnalyst {
     analyst_reasoning_output: AtomicU64,
     /// Same, but for the synthesizer's `query` response usage.
     synth_reasoning_output: AtomicU64,
+    arm_price_panic_after_analyst: Mutex<Option<Arc<AtomicBool>>>,
+    arm_price_panic_after_synth: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl ScriptedAnalyst {
@@ -720,7 +1093,17 @@ impl ScriptedAnalyst {
             last_analyst_user: Mutex::new(None),
             analyst_reasoning_output: AtomicU64::new(0),
             synth_reasoning_output: AtomicU64::new(0),
+            arm_price_panic_after_analyst: Mutex::new(None),
+            arm_price_panic_after_synth: Mutex::new(None),
         })
+    }
+
+    fn arm_price_panic_after_analyst(&self, flag: Arc<AtomicBool>) {
+        *self.arm_price_panic_after_analyst.lock().unwrap() = Some(flag);
+    }
+
+    fn arm_price_panic_after_synth(&self, flag: Arc<AtomicBool>) {
+        *self.arm_price_panic_after_synth.lock().unwrap() = Some(flag);
     }
 }
 
@@ -782,20 +1165,28 @@ impl SideQueryClient for ScriptedAnalyst {
         *self.last_synth.lock().unwrap() = Some((request.model.clone(), request.profile.clone()));
         *self.last_synth_user.lock().unwrap() = Some(synth_user_text(&request));
         match self.synth.lock().unwrap().pop_front() {
-            Some(Ok(text)) => Ok(SideQueryResponse {
-                text: Some(text),
-                structured: None,
-                tool_calls: Vec::new(),
-                usage: cost::Usage {
-                    tokens: cost::TokenUsage {
-                        reasoning_output: self.synth_reasoning_output.load(Ordering::SeqCst),
-                        ..cost::TokenUsage::default()
+            Some(Ok(text)) => {
+                let arm_pricing_panic = self.arm_price_panic_after_synth.lock().unwrap().clone();
+                if let Some(flag) = arm_pricing_panic.as_ref() {
+                    flag.store(true, Ordering::SeqCst);
+                }
+                Ok(SideQueryResponse {
+                    text: Some(text),
+                    structured: None,
+                    tool_calls: Vec::new(),
+                    usage: cost::Usage {
+                        tokens: cost::TokenUsage {
+                            input: u64::from(arm_pricing_panic.is_some()) * 17,
+                            output: u64::from(arm_pricing_panic.is_some()) * 19,
+                            reasoning_output: self.synth_reasoning_output.load(Ordering::SeqCst),
+                            ..cost::TokenUsage::default()
+                        },
+                        ..cost::Usage::default()
                     },
-                    ..cost::Usage::default()
-                },
-                stop_reason: Some("end_turn".into()),
-                retry_count: 0,
-            }),
+                    stop_reason: Some("end_turn".into()),
+                    retry_count: 0,
+                })
+            }
             Some(Err(err)) => Err(err),
             None => Err(SideQueryError::InvalidResponse("no synth".into())),
         }
@@ -839,6 +1230,9 @@ impl SideQueryClient for ScriptedAnalyst {
             }
             AnalystMode::ApiError => unreachable!("handled above"),
         };
+        if let Some(flag) = self.arm_price_panic_after_analyst.lock().unwrap().as_ref() {
+            flag.store(true, Ordering::SeqCst);
+        }
         Ok(StrictStructuredQueryResponse {
             value,
             // Fixed, non-zero usage so `price_realized_usage`'s analyst term
@@ -915,7 +1309,7 @@ async fn orch_with_telemetry(
     )
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum BlockingStage {
     Analysis,
     Synthesis,
@@ -925,6 +1319,22 @@ struct BlockingSideQuery {
     stage: BlockingStage,
     started: Arc<Notify>,
     dropped: Arc<AtomicBool>,
+}
+
+struct PanicSideQuery;
+
+#[async_trait]
+impl SideQueryClient for PanicSideQuery {
+    async fn query(&self, _request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
+        panic!("injected synthesis panic")
+    }
+
+    async fn query_json_schema(
+        &self,
+        _request: StrictStructuredQueryRequest,
+    ) -> Result<StrictStructuredQueryResponse, SideQueryError> {
+        panic!("injected analyst panic")
+    }
 }
 
 struct PendingQueryGuard(Arc<AtomicBool>);
@@ -1070,10 +1480,8 @@ async fn cancel_during_analyst_retry_commits_usage_from_prior_response() {
     // in the cancellation settlement while retry #2 is pending. That second
     // call has already egressed its input, so its missing usage retains the
     // same input-only estimate used for any other attempted judge call.
-    let retry_input_estimate = crate::orchestrator::judge_input_token_estimate(
-        "task",
-        &three_ok_completed_panels(),
-    );
+    let retry_input_estimate =
+        crate::orchestrator::judge_input_token_estimate("task", &three_ok_completed_panels());
     assert_eq!(
         budget.committed.lock().unwrap().clone(),
         vec![36 + 100 + 50 + retry_input_estimate]
@@ -1112,10 +1520,8 @@ async fn analyst_stage_deadline_keeps_usage_from_prior_retry_response() {
     assert!(matches!(result.status, FusionStatus::NeedsParent));
     assert!(dropped.load(Ordering::SeqCst));
     assert!(result.usage.estimated);
-    let retry_input_estimate = crate::orchestrator::judge_input_token_estimate(
-        "task",
-        &three_ok_completed_panels(),
-    );
+    let retry_input_estimate =
+        crate::orchestrator::judge_input_token_estimate("task", &three_ok_completed_panels());
     assert_eq!(
         budget.committed.lock().unwrap().clone(),
         vec![36 + 100 + 50 + retry_input_estimate]
@@ -1379,10 +1785,8 @@ async fn analyst_invalid_json_retries_once() {
         retry_user.contains("retry_reason"),
         "retry must carry the prior decode failure: {retry_user}"
     );
-    let missing_first_attempt = crate::orchestrator::judge_input_token_estimate(
-        "task",
-        &three_ok_completed_panels(),
-    );
+    let missing_first_attempt =
+        crate::orchestrator::judge_input_token_estimate("task", &three_ok_completed_panels());
     assert_eq!(
         result.usage.realized_nano_usd,
         36 + 8 + missing_first_attempt,
@@ -1994,6 +2398,241 @@ async fn failure_telemetry_uses_categories_and_never_records_request_content() {
             assert!(!value.contains("secret.example"));
             assert!(!value.contains("private-command"));
         }
+    }
+}
+
+#[tokio::test]
+async fn commit_failure_emits_exactly_one_failed_terminal_event() {
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let (orch, sink) = orch_with_telemetry(spawner, side, test_config()).await;
+    let orch = orch.with_price_book(Arc::new(priced_book()));
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: Arc::new(FailingCommitBudget),
+        },
+        CancellationToken::new(),
+    );
+
+    let error = orch
+        .run(request("task"), inherit, None)
+        .await
+        .expect_err("commit failure must fail the run");
+    assert_eq!(error, FusionError::BudgetReservationUnavailable);
+
+    let terminal = sink
+        .events()
+        .await
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event.name.as_str(),
+                telemetry::tengu::fusion::COMPLETED
+                    | telemetry::tengu::fusion::FAILED
+                    | telemetry::tengu::fusion::CANCELLED
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0].name, telemetry::tengu::fusion::FAILED);
+    assert!(matches!(
+        terminal[0].metadata.get("error"),
+        Some(AnalyticsValue::String(category)) if category == "budget_reservation_unavailable"
+    ));
+}
+
+#[tokio::test]
+async fn blocked_terminal_analytics_cannot_strand_any_terminal_outcome() {
+    #[derive(Clone, Copy)]
+    enum Case {
+        Completed,
+        Failed,
+        Cancelled,
+    }
+
+    for case in [Case::Completed, Case::Failed, Case::Cancelled] {
+        let blocked_name = match case {
+            Case::Completed => telemetry::tengu::fusion::COMPLETED,
+            Case::Failed => telemetry::tengu::fusion::FAILED,
+            Case::Cancelled => telemetry::tengu::fusion::CANCELLED,
+        };
+        let scripts = match case {
+            Case::Completed => three_ok(),
+            Case::Failed => HashMap::from([
+                ("claude-sonnet-5".into(), FakePanel::Fail),
+                ("gpt-5.6-terra".into(), FakePanel::Fail),
+                ("deepseek-v4-pro".into(), FakePanel::Fail),
+            ]),
+            Case::Cancelled => HashMap::from([
+                ("claude-sonnet-5".into(), FakePanel::Hang),
+                ("gpt-5.6-terra".into(), FakePanel::Hang),
+                ("deepseek-v4-pro".into(), FakePanel::Hang),
+            ]),
+        };
+        let spawner = FakeSpawner::new(scripts);
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(Arc::new(BlockingTerminalSink {
+            blocked_name,
+            started: Arc::clone(&started),
+            dropped: Arc::clone(&dropped),
+        }))
+        .await;
+        let budget = RecordingBudget::new();
+        let cancel = CancellationToken::new();
+        let orchestrator = Arc::new(
+            FusionOrchestrator::new(
+                spawner.clone(),
+                ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+                Arc::new(test_config()),
+                Arc::new(catalog()),
+            )
+            .with_price_book(Arc::new(priced_book()))
+            .with_bus(bus),
+        );
+        let identity = FusionRunIdentity::new(
+            FusionRunId::generated(),
+            None,
+            FusionOrigin::Slash,
+            Some(format!("task-blocked-terminal-{blocked_name}")),
+        );
+        let prepared = Arc::clone(&orchestrator)
+            .prepare(
+                FusionSubmission::new(
+                    request("task"),
+                    inherit_recording_cancel(budget.clone(), cancel.clone()),
+                    identity,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let control = prepared.control();
+        let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+
+        if matches!(case, Case::Cancelled) {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while spawner.live() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("a panel must enter the spawner before cancellation");
+            cancel.cancel();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .expect("the selected terminal analytics event must reach the blocking sink");
+        assert!(control.terminal_outcome().is_none());
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("best-effort analytics must be bounded")
+            .expect("activation waiter");
+        match case {
+            Case::Completed => assert!(outcome.result.is_ok()),
+            Case::Failed => assert_eq!(outcome.result, Err(FusionError::AllPanelsFailed)),
+            Case::Cancelled => assert_eq!(outcome.result, Err(FusionError::Cancelled)),
+        }
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(control.terminal_outcome().is_some());
+        assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn blocked_post_analyst_analytics_respects_cancel_and_operational_deadline() {
+    for cancel_while_blocked in [true, false] {
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(Arc::new(BlockingTerminalSink {
+            blocked_name: telemetry::tengu::fusion::ANALYSIS_COMPLETED,
+            started: Arc::clone(&started),
+            dropped: Arc::clone(&dropped),
+        }))
+        .await;
+        let budget = RecordingBudget::new();
+        let cancel = CancellationToken::new();
+        let mut config = test_config();
+        if !cancel_while_blocked {
+            config.total_timeout_ms = 100;
+        }
+        let mut analyst_catalog = catalog();
+        analyst_catalog.push(CatalogModel {
+            profile: "judge-only".into(),
+            model: "judge-model".into(),
+            hints: FusionModelHints {
+                eligible: true,
+                quality_rank: 100,
+                judge_eligible: true,
+                cost_class: platform_api::FusionCostClass::High,
+                ..FusionModelHints::default()
+            },
+            structured_output: true,
+        });
+        let orchestrator = Arc::new(
+            FusionOrchestrator::new(
+                FakeSpawner::new(three_ok()),
+                ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+                Arc::new(config),
+                Arc::new(analyst_catalog),
+            )
+            .with_price_book(Arc::new(MutableUnitPrices {
+                nano_per_token: Arc::new(AtomicU64::new(1)),
+            }))
+            .with_bus(bus),
+        );
+        let identity = FusionRunIdentity::new(
+            FusionRunId::generated(),
+            None,
+            FusionOrigin::Slash,
+            Some(format!("task-blocked-analysis-{cancel_while_blocked}")),
+        );
+        let prepared = Arc::clone(&orchestrator)
+            .prepare(
+                FusionSubmission::new(
+                    request("task"),
+                    inherit_recording_cancel(budget.clone(), cancel.clone()),
+                    identity,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let control = prepared.control();
+        let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .expect("ANALYSIS_COMPLETED must reach the blocking sink");
+        let facts_while_blocked = control.facts().snapshot();
+        let usage_while_blocked = facts_while_blocked
+            .usage
+            .expect("analyst facts must be latched before analytics");
+        assert_eq!(usage_while_blocked.input_tokens, 3 * 8 + 5);
+        assert_eq!(usage_while_blocked.output_tokens, 3 * 4 + 3);
+        assert!(facts_while_blocked
+            .confirmed_egress
+            .iter()
+            .any(|profile| profile == "judge-only"));
+        if cancel_while_blocked {
+            cancel.cancel();
+        }
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("analytics must yield to cancellation or the operational deadline")
+            .expect("activation waiter");
+        if cancel_while_blocked {
+            assert_eq!(outcome.result, Err(FusionError::Cancelled));
+        } else {
+            assert!(outcome.result.is_ok());
+        }
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(control.terminal_outcome().is_some());
+        assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
     }
 }
 
@@ -3141,8 +3780,10 @@ async fn outer_cancel_after_allocation_corrects_an_initial_zero_progress_snapsho
                 .recv()
                 .await
                 .expect("Fusion progress closed before the dispatch snapshot");
-            if matches!(event.stage, platform_api::FusionStage::PanelsDispatched { .. })
-                && event.panels_allocated == Some(0)
+            if matches!(
+                event.stage,
+                platform_api::FusionStage::PanelsDispatched { .. }
+            ) && event.panels_allocated == Some(0)
             {
                 break;
             }
@@ -3161,8 +3802,10 @@ async fn outer_cancel_after_allocation_corrects_an_initial_zero_progress_snapsho
 
     let mut corrected = false;
     while let Ok(event) = rx.try_recv() {
-        if matches!(event.stage, platform_api::FusionStage::PanelsDispatched { .. })
-            && matches!(event.panels_allocated, Some(count) if count >= 1)
+        if matches!(
+            event.stage,
+            platform_api::FusionStage::PanelsDispatched { .. }
+        ) && matches!(event.panels_allocated, Some(count) if count >= 1)
         {
             corrected = true;
         }
@@ -3349,10 +3992,10 @@ async fn cancel_mid_panel_bar_commit_keeps_known_spend_and_releases_no_hold() {
     release_commit.notify_one();
     let err = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
         .await
-        .expect("cancelled panel-bar run should unwind")
+        .expect("finalizing panel-bar run should settle")
         .expect("join")
         .expect_err("panel bar remains an error");
-    assert_eq!(err, FusionError::Cancelled);
+    assert_eq!(err, FusionError::MinPanelsNotMet);
 
     // One panel completed with 8 input + 4 output at the unit price book.
     assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
@@ -3378,7 +4021,8 @@ async fn dropping_the_whole_run_future_commits_the_surviving_snapshot() {
         ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
     )
     .with_price_book(Arc::new(priced_book()));
-    let inherit = inherit_recording(budget.clone());
+    let cancel = CancellationToken::new();
+    let inherit = inherit_recording_cancel(budget.clone(), cancel.clone());
     let (tx, mut rx) = tokio::sync::mpsc::channel::<platform_api::FusionProgress>(64);
     let handle = tokio::spawn(async move { orch.run(request("task"), inherit, Some(tx)).await });
 
@@ -3405,7 +4049,14 @@ async fn dropping_the_whole_run_future_commits_the_surviving_snapshot() {
     handle.abort();
     let join = handle.await.expect_err("the owner task must be aborted");
     assert!(join.is_cancelled());
-    settle_spawned_drops().await;
+    cancel.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while budget.commit_calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the detached production supervisor must drain and settle after caller drop");
 
     let expected = 12 + 2 * in_flight_panel_floor("task");
     assert_eq!(budget.committed.lock().unwrap().clone(), vec![expected]);
@@ -4046,6 +4697,1075 @@ async fn captured_timeout_is_not_shortened_by_a_later_config_reload() {
         outcome.is_ok(),
         "the captured long timeout must survive the later 1 ms settings edit: {outcome:?}"
     );
+}
+
+#[tokio::test]
+async fn prepared_run_reuses_captured_config_catalog_and_identity() {
+    let config = Arc::new(Mutex::new(test_config()));
+    config.lock().unwrap().total_timeout_ms = 100;
+    let config_source = {
+        let config = Arc::clone(&config);
+        Arc::new(move || Ok(config.lock().unwrap().clone()))
+            as Arc<dyn crate::config::FusionConfigSource>
+    };
+    let catalog_state = Arc::new(Mutex::new(catalog()));
+    let spawner = FakeSpawner::new(three_ok());
+    let orchestrator = Arc::new(FusionOrchestrator::new(
+        spawner,
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        config_source,
+        Arc::new(MutableCatalog(Arc::clone(&catalog_state))),
+    ));
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-prepare-snapshot".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(FusionSubmission::new(request("task"), inherit(), identity.clone()).unwrap())
+        .expect("preparation must resolve the initial snapshot");
+    let prepared_duration = std::time::Duration::from_millis(prepared.summary().duration_ms);
+
+    // Both live sources become unusable after preparation. Activation must
+    // consume the private resolved/config/catalog snapshot, not reload them.
+    config.lock().unwrap().max_panel = 2;
+    catalog_state.lock().unwrap().clear();
+    // Time before activation (including TaskCreated hooks) is excluded.
+    tokio::time::sleep(prepared_duration + std::time::Duration::from_millis(10)).await;
+    let outcome = prepared.activate(FusionActivation::now(), None).await;
+    let result = outcome.result.expect("captured route remains executable");
+    assert_eq!(outcome.identity, identity);
+    assert_eq!(result.run_id, outcome.identity.run_id.as_str());
+    assert_eq!(outcome.facts.resolved_panels, Some(3));
+    assert_eq!(outcome.facts.allocated_panels, Some(3));
+    assert_eq!(outcome.facts.dispatched_panels, Some(3));
+    assert_eq!(outcome.facts.attempts, Some(4));
+}
+
+#[tokio::test]
+async fn prepared_run_reserves_the_captured_quote_after_prices_change() {
+    let config = test_config();
+    let catalog = catalog();
+    let prices_value = Arc::new(AtomicU64::new(1));
+    let prices = Arc::new(MutableUnitPrices {
+        nano_per_token: Arc::clone(&prices_value),
+    });
+    let request = request("task");
+    let resolved = crate::model_resolver::resolve(&request, &config, &catalog).unwrap();
+    let expected_quote = crate::budget::quote(
+        &config,
+        &resolved,
+        &request,
+        &catalog,
+        prices.as_ref(),
+        true,
+    )
+    .unwrap()
+    .reserved_nano_usd;
+    let budget = Arc::new(QuoteRecordingBudget::default());
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: budget.clone(),
+        },
+        CancellationToken::new(),
+    );
+    let orchestrator = Arc::new(
+        FusionOrchestrator::new(
+            FakeSpawner::new(three_ok()),
+            ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+            Arc::new(config),
+            Arc::new(catalog),
+        )
+        .with_price_book(prices),
+    );
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-quote-snapshot".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(FusionSubmission::new(request, inherit, identity).unwrap())
+        .unwrap();
+
+    prices_value.store(100, Ordering::SeqCst);
+    let outcome = prepared.activate(FusionActivation::now(), None).await;
+    assert!(outcome.result.is_ok());
+    assert_eq!(
+        budget.reserved.lock().unwrap().as_slice(),
+        &[expected_quote],
+        "activation must reserve the quote captured at preparation"
+    );
+    assert_eq!(
+        outcome
+            .facts
+            .usage
+            .expect("prepared production facts expose the monetary hold")
+            .reserved_max_nano_usd,
+        expected_quote
+    );
+}
+
+#[tokio::test]
+async fn captured_activation_timestamp_counts_scheduler_delay() {
+    let mut config = test_config();
+    config.total_timeout_ms = 25;
+    let spawner = FakeSpawner::new(HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Hang),
+        ("gpt-5.6-terra".into(), FakePanel::Hang),
+        ("deepseek-v4-pro".into(), FakePanel::Hang),
+    ]));
+    let orchestrator = Arc::new(FusionOrchestrator::new(
+        spawner.clone(),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        Arc::new(config),
+        Arc::new(catalog()),
+    ));
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-scheduler-delay".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(FusionSubmission::new(request("task"), inherit(), identity).unwrap())
+        .unwrap();
+    let duration = std::time::Duration::from_millis(prepared.summary().duration_ms);
+    let queue_delay = std::time::Duration::from_millis(50);
+    assert!(
+        queue_delay < duration,
+        "the outer finalization grace is still live"
+    );
+    let captured_before_queue = Instant::now().checked_sub(queue_delay).unwrap();
+
+    let outcome = prepared
+        .activate(
+            FusionActivation {
+                activated_at: captured_before_queue,
+            },
+            None,
+        )
+        .await;
+    assert_eq!(outcome.result, Err(FusionError::TimedOutEmpty));
+    assert!(outcome.facts.timing.total_ms >= queue_delay.as_millis() as u64);
+    assert!(
+        spawner.prompts().is_empty(),
+        "an already-expired activation must not poll the provider-capable runner"
+    );
+    assert_eq!(outcome.facts.allocated_panels, Some(0));
+    assert_eq!(outcome.facts.dispatched_panels, Some(0));
+}
+
+#[tokio::test]
+async fn prepared_identity_requires_and_uses_its_scoped_budget_view() {
+    let session_id = protocol::SessionId::new();
+    let scopes = Arc::new(Mutex::new(Vec::new()));
+    let scoped_reserves = Arc::new(AtomicUsize::new(0));
+    let budget = Arc::new(ScopeAwareBudget {
+        expected: session_id,
+        scopes: Arc::clone(&scopes),
+        scoped_reserves: Arc::clone(&scoped_reserves),
+        scoped: false,
+    });
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget,
+        },
+        CancellationToken::new(),
+    );
+    let mut scoped_request = request("task");
+    scoped_request.conversation_id = Some(session_id.to_string());
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        Some(session_id),
+        FusionOrigin::Slash,
+        Some("task-scoped-budget".into()),
+    );
+    let orchestrator = Arc::new(orch_scripted(
+        FakeSpawner::new(three_ok()),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+    ));
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(FusionSubmission::new(scoped_request, inherit, identity).unwrap())
+        .expect("the trusted session must produce a scoped budget view");
+    let outcome = prepared.activate(FusionActivation::now(), None).await;
+    assert!(outcome.result.is_ok());
+    assert_eq!(scopes.lock().unwrap().as_slice(), &[session_id]);
+    assert_eq!(scoped_reserves.load(Ordering::SeqCst), 1);
+
+    let mut unscopable_request = request("task");
+    unscopable_request.conversation_id = Some(session_id.to_string());
+    let unscopable_identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        Some(session_id),
+        FusionOrigin::Slash,
+        Some("task-unscopable-budget".into()),
+    );
+    let error = match Arc::clone(&orchestrator).prepare(
+        FusionSubmission::new(
+            unscopable_request,
+            inherit_cancel(CancellationToken::new()),
+            unscopable_identity,
+        )
+        .unwrap(),
+    ) {
+        Ok(_) => panic!("a trusted session must never silently use an unscoped budget"),
+        Err(error) => error,
+    };
+    assert_eq!(error, FusionError::BudgetReservationUnavailable);
+
+    let mut direct_request = request("task");
+    direct_request.conversation_id = Some(session_id.to_string());
+    let direct_error = orchestrator
+        .run(
+            direct_request,
+            inherit_cancel(CancellationToken::new()),
+            None,
+        )
+        .await
+        .expect_err("the production run compatibility shim must fail closed too");
+    assert_eq!(direct_error, FusionError::BudgetReservationUnavailable);
+}
+
+#[tokio::test]
+async fn prepared_cancel_before_allocation_seals_exact_zero_facts() {
+    let cancel = CancellationToken::new();
+    let budget = Arc::new(CancelOnReserveBudget {
+        cancel: cancel.clone(),
+        committed: Mutex::new(Vec::new()),
+        release_calls: AtomicUsize::new(0),
+    });
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: budget.clone(),
+        },
+        cancel,
+    );
+    let orchestrator = Arc::new(
+        orch_scripted(
+            FakeSpawner::new(three_ok()),
+            ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        )
+        .with_price_book(Arc::new(priced_book())),
+    );
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-zero-allocation".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(FusionSubmission::new(request("task"), inherit, identity).unwrap())
+        .unwrap();
+    let outcome = prepared.activate(FusionActivation::now(), None).await;
+
+    assert_eq!(outcome.result, Err(FusionError::Cancelled));
+    assert_eq!(outcome.facts.allocated_panels, Some(0));
+    assert_eq!(outcome.facts.dispatched_panels, Some(0));
+    assert_eq!(outcome.facts.attempts, Some(0));
+    let usage = outcome.facts.usage.expect("known zero usage");
+    assert_eq!(usage.realized_nano_usd, 0);
+    assert!(!outcome.facts.usage_incomplete);
+    assert_eq!(budget.committed.lock().unwrap().as_slice(), &[0]);
+}
+
+#[tokio::test]
+async fn prepared_cancel_interrupts_a_blocked_started_telemetry_await() {
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let bus = Arc::new(AnalyticsBus::new());
+    bus.attach_sink(Arc::new(BlockingStartedSink {
+        started: Arc::clone(&started),
+        dropped: Arc::clone(&dropped),
+    }))
+    .await;
+    let cancel = CancellationToken::new();
+    let spawner = FakeSpawner::new(three_ok());
+    let orchestrator = Arc::new(
+        orch_scripted(
+            spawner.clone(),
+            ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        )
+        .with_bus(bus),
+    );
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-blocked-started-event".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(
+            FusionSubmission::new(request("task"), inherit_cancel(cancel.clone()), identity)
+                .unwrap(),
+        )
+        .unwrap();
+    let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .expect("STARTED telemetry must enter the blocking sink");
+
+    cancel.cancel();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .expect("cancellation must interrupt STARTED telemetry")
+        .expect("activation waiter");
+
+    assert_eq!(outcome.result, Err(FusionError::Cancelled));
+    assert!(dropped.load(Ordering::SeqCst));
+    assert!(spawner.prompts().is_empty());
+    assert_eq!(outcome.facts.allocated_panels, Some(0));
+    assert_eq!(outcome.facts.dispatched_panels, Some(0));
+}
+
+#[tokio::test]
+async fn prepared_deadline_interrupts_a_blocked_started_telemetry_await() {
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let bus = Arc::new(AnalyticsBus::new());
+    bus.attach_sink(Arc::new(BlockingStartedSink {
+        started: Arc::clone(&started),
+        dropped: Arc::clone(&dropped),
+    }))
+    .await;
+    let mut config = test_config();
+    config.total_timeout_ms = 25;
+    let spawner = FakeSpawner::new(three_ok());
+    let orchestrator = Arc::new(
+        FusionOrchestrator::new(
+            spawner.clone(),
+            ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+            Arc::new(config),
+            Arc::new(catalog()),
+        )
+        .with_bus(bus),
+    );
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-blocked-started-deadline".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(FusionSubmission::new(request("task"), inherit(), identity).unwrap())
+        .unwrap();
+    let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .expect("STARTED telemetry must enter the blocking sink");
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .expect("operational deadline must interrupt STARTED telemetry")
+        .expect("activation waiter");
+
+    assert_eq!(outcome.result, Err(FusionError::TimedOutEmpty));
+    assert!(dropped.load(Ordering::SeqCst));
+    assert!(spawner.prompts().is_empty());
+    assert_eq!(outcome.facts.allocated_panels, Some(0));
+    assert_eq!(outcome.facts.dispatched_panels, Some(0));
+}
+
+#[tokio::test]
+async fn prepared_cancel_interrupts_a_blocked_budget_reservation() {
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let budget = Arc::new(BlockingReserveBudget {
+        started: Arc::clone(&started),
+        dropped: Arc::clone(&dropped),
+    });
+    let cancel = CancellationToken::new();
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget,
+        },
+        cancel.clone(),
+    );
+    let spawner = FakeSpawner::new(three_ok());
+    let orchestrator = Arc::new(
+        orch_scripted(
+            spawner.clone(),
+            ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        )
+        .with_price_book(Arc::new(priced_book())),
+    );
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-blocked-reservation".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(FusionSubmission::new(request("task"), inherit, identity).unwrap())
+        .unwrap();
+    let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .expect("reservation must enter the blocking budget");
+
+    cancel.cancel();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .expect("cancellation must interrupt reservation")
+        .expect("activation waiter");
+
+    assert_eq!(outcome.result, Err(FusionError::Cancelled));
+    assert!(dropped.load(Ordering::SeqCst));
+    assert!(spawner.prompts().is_empty());
+    assert_eq!(outcome.facts.allocated_panels, Some(0));
+    assert_eq!(outcome.facts.dispatched_panels, Some(0));
+}
+
+#[tokio::test]
+async fn prepared_deadline_interrupts_a_blocked_budget_reservation() {
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let budget = Arc::new(BlockingReserveBudget {
+        started: Arc::clone(&started),
+        dropped: Arc::clone(&dropped),
+    });
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget,
+        },
+        CancellationToken::new(),
+    );
+    let mut config = test_config();
+    config.total_timeout_ms = 25;
+    let spawner = FakeSpawner::new(three_ok());
+    let orchestrator = Arc::new(
+        FusionOrchestrator::new(
+            spawner.clone(),
+            ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+            Arc::new(config),
+            Arc::new(catalog()),
+        )
+        .with_price_book(Arc::new(priced_book())),
+    );
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-reservation-deadline".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(FusionSubmission::new(request("task"), inherit, identity).unwrap())
+        .unwrap();
+    let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .expect("reservation must enter the blocking budget");
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .expect("operational deadline must interrupt reservation")
+        .expect("activation waiter");
+
+    assert_eq!(outcome.result, Err(FusionError::TimedOutEmpty));
+    assert!(dropped.load(Ordering::SeqCst));
+    assert!(spawner.prompts().is_empty());
+    assert_eq!(outcome.facts.allocated_panels, Some(0));
+    assert_eq!(outcome.facts.dispatched_panels, Some(0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_waits_for_aborted_panel_tasks_to_join_before_sealing_facts() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let spawner = Arc::new(SyncBlockingAllocationSpawner {
+        first: AtomicBool::new(false),
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    });
+    let cancel = CancellationToken::new();
+    let orchestrator = Arc::new(FusionOrchestrator::new(
+        spawner,
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        Arc::new(test_config()),
+        Arc::new(catalog()),
+    ));
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-join-before-terminal".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(
+            FusionSubmission::new(request("task"), inherit_cancel(cancel.clone()), identity)
+                .unwrap(),
+        )
+        .unwrap();
+    let control = prepared.control();
+    let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .expect("one panel must enter the synchronous allocation boundary");
+
+    cancel.cancel();
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert!(
+        control.terminal_outcome().is_none(),
+        "terminal facts cannot seal while an aborted panel can still report allocation"
+    );
+    assert!(!waiter.is_finished());
+
+    let (released, wake) = &*release;
+    *released.lock().unwrap() = true;
+    wake.notify_all();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .expect("joined cancellation must finish after the callback is released")
+        .expect("activation waiter");
+
+    assert_eq!(outcome.result, Err(FusionError::Cancelled));
+    assert_eq!(outcome.facts.allocated_panels, Some(1));
+    assert!(outcome
+        .facts
+        .dispatched_panels
+        .is_some_and(|count| count >= 1));
+}
+
+#[tokio::test]
+async fn prepared_cancel_after_one_allocation_keeps_the_synchronous_fact() {
+    let cancel = CancellationToken::new();
+    let allocation_gate = CancellationToken::new();
+    let spawner = Arc::new(CancelOnFirstAllocationSpawner {
+        allocation_gate: allocation_gate.clone(),
+        cancel: cancel.clone(),
+        allocated: AtomicBool::new(false),
+    });
+    let orchestrator = Arc::new(FusionOrchestrator::new(
+        spawner,
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        Arc::new(test_config()),
+        Arc::new(catalog()),
+    ));
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-one-allocation".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(FusionSubmission::new(request("task"), inherit_cancel(cancel), identity).unwrap())
+        .unwrap();
+    let (progress_tx, progress_rx) = tokio::sync::mpsc::channel(1);
+    drop(progress_rx);
+    let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), Some(progress_tx)));
+    tokio::task::yield_now().await;
+    allocation_gate.cancel();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .expect("allocation-triggered cancel must settle")
+        .expect("activation waiter");
+
+    assert_eq!(outcome.result, Err(FusionError::Cancelled));
+    assert_eq!(outcome.facts.allocated_panels, Some(1));
+    assert!(outcome
+        .facts
+        .dispatched_panels
+        .is_some_and(|count| count >= 1));
+    assert!(outcome.facts.usage_incomplete);
+}
+
+#[tokio::test]
+async fn prepared_cancel_mid_panel_keeps_usage_with_a_closed_progress_sink() {
+    let spawner = FakeSpawner::new(HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Report(report("A"))),
+        ("gpt-5.6-terra".into(), FakePanel::Report(report("B"))),
+        ("deepseek-v4-pro".into(), FakePanel::Hang),
+    ]));
+    let cancel = CancellationToken::new();
+    let orchestrator = Arc::new(orch_scripted(
+        spawner,
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+    ));
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-panel-cancel".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(
+            FusionSubmission::new(request("task"), inherit_cancel(cancel.clone()), identity)
+                .unwrap(),
+        )
+        .unwrap();
+    let (progress_tx, progress_rx) = tokio::sync::mpsc::channel(1);
+    drop(progress_rx);
+    let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), Some(progress_tx)));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    cancel.cancel();
+    let outcome = waiter.await.expect("activation waiter");
+
+    assert_eq!(outcome.result, Err(FusionError::Cancelled));
+    assert_eq!(outcome.facts.allocated_panels, Some(3));
+    assert!(outcome
+        .facts
+        .usage
+        .as_ref()
+        .is_some_and(|usage| usage.output_tokens >= 8));
+    assert!(outcome.facts.usage_incomplete);
+    assert!(!outcome.facts.confirmed_egress.is_empty());
+    assert!(!outcome.facts.possible_egress.is_empty());
+}
+
+#[tokio::test]
+async fn prepared_cancel_mid_analyst_and_synth_preserves_egress_facts() {
+    for stage in [BlockingStage::Analysis, BlockingStage::Synthesis] {
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let side = Arc::new(BlockingSideQuery {
+            stage,
+            started: Arc::clone(&started),
+            dropped: Arc::clone(&dropped),
+        });
+        let cancel = CancellationToken::new();
+        let orchestrator = Arc::new(FusionOrchestrator::new(
+            FakeSpawner::new(three_ok()),
+            side,
+            Arc::new(test_config()),
+            Arc::new(catalog()),
+        ));
+        let identity = FusionRunIdentity::new(
+            FusionRunId::generated(),
+            None,
+            FusionOrigin::Slash,
+            Some(format!("task-side-query-{stage:?}")),
+        );
+        let prepared = Arc::clone(&orchestrator)
+            .prepare(
+                FusionSubmission::new(request("task"), inherit_cancel(cancel.clone()), identity)
+                    .unwrap(),
+            )
+            .unwrap();
+        let (progress_tx, progress_rx) = tokio::sync::mpsc::channel(1);
+        drop(progress_rx);
+        let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), Some(progress_tx)));
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .expect("side query must start");
+        cancel.cancel();
+        let outcome = waiter.await.expect("activation waiter");
+
+        assert_eq!(outcome.result, Err(FusionError::Cancelled));
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(outcome.facts.allocated_panels, Some(3));
+        assert!(outcome
+            .facts
+            .usage
+            .as_ref()
+            .is_some_and(|usage| usage.output_tokens >= 12));
+        assert!(outcome.facts.usage_incomplete);
+        assert!(outcome
+            .facts
+            .possible_egress
+            .iter()
+            .any(|profile| profile == "anthropic"));
+    }
+}
+
+#[tokio::test]
+async fn dropping_prepared_activation_waiter_does_not_drop_the_owned_run() {
+    let budget = RecordingBudget::new();
+    let cancel = CancellationToken::new();
+    let orchestrator = Arc::new(
+        orch_scripted(
+            FakeSpawner::new(HashMap::from([
+                ("claude-sonnet-5".into(), FakePanel::Report(report("A"))),
+                ("gpt-5.6-terra".into(), FakePanel::Hang),
+                ("deepseek-v4-pro".into(), FakePanel::Hang),
+            ])),
+            ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        )
+        .with_price_book(Arc::new(priced_book())),
+    );
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-dropped-waiter".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(
+            FusionSubmission::new(
+                request("task"),
+                inherit_recording_cancel(budget.clone(), cancel.clone()),
+                identity,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let control = prepared.control();
+    let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    waiter.abort();
+    let _ = waiter.await;
+    cancel.cancel();
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), control.wait_terminal())
+        .await
+        .expect("the owned run must terminalize after its caller disappears");
+    assert_eq!(outcome.result, Err(FusionError::Cancelled));
+    assert!(outcome
+        .facts
+        .allocated_panels
+        .is_some_and(|count| count > 0));
+    assert!(outcome.facts.usage.is_some());
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(budget.held.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn prepared_runner_panic_settles_before_sealing_stable_facts() {
+    let panic_on_read = Arc::new(AtomicBool::new(false));
+    let budget = Arc::new(QuoteRecordingBudget::default());
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: budget.clone(),
+        },
+        CancellationToken::new(),
+    );
+    let orchestrator = Arc::new(
+        orch_scripted(
+            FakeSpawner::new(three_ok()),
+            ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        )
+        .with_price_book(Arc::new(TogglePanicPrices {
+            panic_on_read: Arc::clone(&panic_on_read),
+        })),
+    );
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-runner-panic".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(FusionSubmission::new(request("task"), inherit, identity).unwrap())
+        .unwrap();
+    panic_on_read.store(true, Ordering::SeqCst);
+    let outcome = prepared.activate(FusionActivation::now(), None).await;
+
+    assert_eq!(outcome.result, Err(FusionError::Internal));
+    assert!(outcome
+        .facts
+        .dispatched_panels
+        .is_some_and(|count| count > 0));
+    assert!(outcome.facts.usage_incomplete);
+    assert!(!outcome.facts.possible_egress.is_empty());
+    assert_eq!(budget.committed.lock().unwrap().as_slice(), &[0]);
+}
+
+#[tokio::test]
+async fn production_run_compatibility_shim_contains_runner_panics() {
+    let budget = Arc::new(QuoteRecordingBudget::default());
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: budget.clone(),
+        },
+        CancellationToken::new(),
+    );
+    let orchestrator = FusionOrchestrator::new(
+        FakeSpawner::new(three_ok()),
+        Arc::new(PanicSideQuery),
+        Arc::new(test_config()),
+        Arc::new(catalog()),
+    )
+    .with_price_book(Arc::new(priced_book()));
+
+    let result = orchestrator.run(request("task"), inherit, None).await;
+
+    assert_eq!(result, Err(FusionError::Internal));
+    assert_eq!(budget.committed.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn analyst_response_facts_survive_its_immediate_pricing_panic() {
+    let panic_on_read = Arc::new(AtomicBool::new(false));
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    side.arm_price_panic_after_analyst(Arc::clone(&panic_on_read));
+    let commit_started = Arc::new(Notify::new());
+    let release_commit = Arc::new(Notify::new());
+    let budget = Arc::new(HangingCommitBudget {
+        commit_started: Arc::clone(&commit_started),
+        release_commit: Arc::clone(&release_commit),
+        commit_calls: AtomicUsize::new(0),
+        release_calls: AtomicUsize::new(0),
+        held: AtomicBool::new(false),
+        committed: Mutex::new(Vec::new()),
+    });
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: budget.clone(),
+        },
+        CancellationToken::new(),
+    );
+    let mut analyst_catalog = catalog();
+    analyst_catalog.push(CatalogModel {
+        profile: "judge-only".into(),
+        model: "judge-model".into(),
+        hints: FusionModelHints {
+            eligible: true,
+            quality_rank: 100,
+            judge_eligible: true,
+            cost_class: platform_api::FusionCostClass::High,
+            ..FusionModelHints::default()
+        },
+        structured_output: true,
+    });
+    let orchestrator = Arc::new(
+        FusionOrchestrator::new(
+            FakeSpawner::new(three_ok()),
+            side,
+            Arc::new(test_config()),
+            Arc::new(analyst_catalog),
+        )
+        .with_price_book(Arc::new(PanicAfterArmedReads {
+            armed: panic_on_read,
+            reads: AtomicUsize::new(0),
+            // Three panels plus the analyst are priced in the response
+            // observer. The next refresh's first read panics, after an exact
+            // monetary snapshot already exists for the same known usage.
+            panic_at: 5,
+        })),
+    );
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-analyst-response-pricing-panic".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(FusionSubmission::new(request("task"), inherit, identity).unwrap())
+        .unwrap();
+    let control = prepared.control();
+    let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), commit_started.notified())
+        .await
+        .expect("panic cleanup must start committing the last safe amount");
+    assert!(
+        control.terminal_outcome().is_none(),
+        "terminal cannot seal before the cleanup commit acknowledges"
+    );
+    release_commit.notify_one();
+    let outcome = waiter.await.expect("activation waiter");
+
+    assert_eq!(outcome.result, Err(FusionError::Internal));
+    let usage = outcome
+        .facts
+        .usage
+        .expect("analyst usage facts must survive");
+    assert_eq!(usage.input_tokens, 3 * 8 + 5);
+    assert_eq!(usage.output_tokens, 3 * 4 + 3);
+    assert_eq!(usage.provider_requests, 4);
+    assert_eq!(usage.realized_nano_usd, 3 * (8 + 4) + 5 + 3);
+    assert_eq!(
+        budget.committed.lock().unwrap().as_slice(),
+        &[usage.realized_nano_usd]
+    );
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
+    assert!(outcome.facts.usage_incomplete);
+    assert!(outcome
+        .facts
+        .confirmed_egress
+        .iter()
+        .any(|profile| profile == "judge-only"));
+}
+
+#[tokio::test]
+async fn synth_response_facts_survive_its_immediate_pricing_panic() {
+    let panic_on_read = Arc::new(AtomicBool::new(false));
+    let side = ScriptedAnalyst::new(AnalystMode::Merge, vec![Ok("merged".into())]);
+    side.arm_price_panic_after_synth(Arc::clone(&panic_on_read));
+    let budget = Arc::new(QuoteRecordingBudget::default());
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: budget.clone(),
+        },
+        CancellationToken::new(),
+    );
+    let orchestrator = Arc::new(
+        orch_scripted(FakeSpawner::new(three_ok()), side)
+            .with_price_book(Arc::new(TogglePanicPrices { panic_on_read })),
+    );
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-synth-response-pricing-panic".into()),
+    );
+    let mut synth_request = request("task");
+    synth_request.parent_profile = "parent-only".into();
+    synth_request.parent_model = "parent-model".into();
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(FusionSubmission::new(synth_request, inherit, identity).unwrap())
+        .unwrap();
+
+    let outcome = prepared.activate(FusionActivation::now(), None).await;
+
+    assert_eq!(outcome.result, Err(FusionError::Internal));
+    let usage = outcome.facts.usage.expect("synth usage facts must survive");
+    assert_eq!(usage.input_tokens, 3 * 8 + 5 + 17);
+    assert_eq!(usage.output_tokens, 3 * 4 + 3 + 19);
+    assert_eq!(usage.provider_requests, 5);
+    assert_eq!(
+        budget.committed.lock().unwrap().as_slice(),
+        &[usage.realized_nano_usd]
+    );
+    assert!(outcome.facts.usage_incomplete);
+    assert!(outcome
+        .facts
+        .confirmed_egress
+        .iter()
+        .any(|profile| profile == "parent-only"));
+}
+
+#[tokio::test]
+async fn late_final_pricing_panic_keeps_lease_owned_until_commit_ack() {
+    let panic_on_read = Arc::new(AtomicBool::new(false));
+    let bus = Arc::new(AnalyticsBus::new());
+    bus.attach_sink(Arc::new(ArmPricePanicSink {
+        panic_on_read: Arc::clone(&panic_on_read),
+    }))
+    .await;
+    let commit_started = Arc::new(Notify::new());
+    let release_commit = Arc::new(Notify::new());
+    let budget = Arc::new(HangingCommitBudget {
+        commit_started: Arc::clone(&commit_started),
+        release_commit: Arc::clone(&release_commit),
+        commit_calls: AtomicUsize::new(0),
+        release_calls: AtomicUsize::new(0),
+        held: AtomicBool::new(false),
+        committed: Mutex::new(Vec::new()),
+    });
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: budget.clone(),
+        },
+        CancellationToken::new(),
+    );
+    let orchestrator = Arc::new(
+        orch_scripted(
+            FakeSpawner::new(three_ok()),
+            ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        )
+        .with_price_book(Arc::new(TogglePanicPrices {
+            panic_on_read: Arc::clone(&panic_on_read),
+        }))
+        .with_bus(bus),
+    );
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-late-pricing-panic".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(FusionSubmission::new(request("task"), inherit, identity).unwrap())
+        .unwrap();
+    let control = prepared.control();
+    let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), commit_started.notified())
+        .await
+        .expect("panic cleanup must retain and commit the reservation lease");
+    assert!(control.is_finalizing());
+    assert!(
+        control.terminal_outcome().is_none(),
+        "terminal publication must wait for the cleanup commit acknowledgement"
+    );
+    assert!(control
+        .facts()
+        .snapshot()
+        .usage
+        .is_some_and(|usage| usage.output_tokens > 0));
+
+    release_commit.notify_one();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .expect("cleanup commit must unblock terminal publication")
+        .expect("activation waiter");
+
+    assert_eq!(outcome.result, Err(FusionError::Internal));
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
+    assert!(!budget.held.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn prepared_finalizing_claim_outlives_cancel_and_seals_after_commit() {
+    let cancel = CancellationToken::new();
+    let commit_started = Arc::new(Notify::new());
+    let release_commit = Arc::new(Notify::new());
+    let budget = Arc::new(HangingCommitBudget {
+        commit_started: Arc::clone(&commit_started),
+        release_commit: Arc::clone(&release_commit),
+        commit_calls: AtomicUsize::new(0),
+        release_calls: AtomicUsize::new(0),
+        held: AtomicBool::new(false),
+        committed: Mutex::new(Vec::new()),
+    });
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: budget.clone(),
+        },
+        cancel.clone(),
+    );
+    let orchestrator = Arc::new(
+        orch_scripted(
+            FakeSpawner::new(three_ok()),
+            ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        )
+        .with_price_book(Arc::new(priced_book())),
+    );
+    let identity = FusionRunIdentity::new(
+        FusionRunId::generated(),
+        None,
+        FusionOrigin::Slash,
+        Some("task-finalizing-race".into()),
+    );
+    let prepared = Arc::clone(&orchestrator)
+        .prepare(FusionSubmission::new(request("task"), inherit, identity).unwrap())
+        .unwrap();
+    let control = prepared.control();
+    let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+    tokio::time::timeout(std::time::Duration::from_secs(2), commit_started.notified())
+        .await
+        .expect("finalization must reach the budget commit");
+    assert!(control.is_finalizing());
+    assert!(control.terminal_outcome().is_none());
+    cancel.cancel();
+    tokio::task::yield_now().await;
+    assert!(
+        control.terminal_outcome().is_none(),
+        "terminal cannot publish before the in-flight commit acknowledges"
+    );
+    release_commit.notify_one();
+    let outcome = waiter.await.expect("activation waiter");
+
+    assert!(outcome.result.is_ok());
+    assert!(control.terminal_outcome().is_some());
+    assert_eq!(budget.commit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.release_calls.load(Ordering::SeqCst), 0);
+    assert!(!budget.held.load(Ordering::SeqCst));
 }
 
 /// Fixture for `analyst_overlaps_panel_telemetry_uses_canonical_model_key`:

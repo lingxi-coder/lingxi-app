@@ -5016,12 +5016,19 @@ impl fusion::FusionConfigSource for DesktopFusionConfigSource {
 /// exactly as the F007 doc comment promises ("takes effect on the NEXT run,
 /// not the next process restart"), rather than only after a restart.
 struct DesktopFusionExecutor {
-    inner: fusion::FusionOrchestrator,
+    inner: Arc<fusion::FusionOrchestrator>,
     cfg: DesktopConfig,
 }
 
 #[async_trait::async_trait]
 impl platform_api::FusionExecutor for DesktopFusionExecutor {
+    fn prepare(
+        self: Arc<Self>,
+        submission: platform_api::FusionSubmission,
+    ) -> Result<platform_api::PreparedFusionRun, platform_api::FusionError> {
+        Arc::clone(&self.inner).prepare(submission)
+    }
+
     fn effective_timeout_ms(&self) -> Option<u64> {
         self.inner.effective_timeout_ms()
     }
@@ -5090,7 +5097,7 @@ fn desktop_fusion_executor(
         .with_bus(bus)
         .with_price_book(Arc::new(DesktopFusionPriceBook::new(pricing)));
     Arc::new(DesktopFusionExecutor {
-        inner,
+        inner: Arc::new(inner),
         cfg: cfg.clone(),
     })
 }

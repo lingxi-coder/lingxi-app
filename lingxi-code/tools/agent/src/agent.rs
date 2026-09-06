@@ -25,8 +25,9 @@ use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use platform_api::budget::BudgetError;
 use platform_api::fusion::{
-    FusionAgentSurface, FusionExecutor, FusionInheritance, FusionModelRef, FusionOrigin,
-    FusionPreset, FusionProgress, FusionRequest, FusionStage, FusionStatus, FUSION_MAX_PANEL,
+    FusionActivation, FusionAgentSurface, FusionExecutor, FusionInheritance, FusionModelRef,
+    FusionOrigin, FusionPreset, FusionProgress, FusionRequest, FusionRunControl, FusionRunId,
+    FusionRunIdentity, FusionStage, FusionStatus, FusionSubmission, FUSION_MAX_PANEL,
     FUSION_MIN_PANEL,
 };
 use platform_api::subagent_spawn::{
@@ -961,12 +962,16 @@ fn fusion_error_is_preflight(err: &platform_api::FusionError) -> bool {
 ///
 /// The normal arms release exactly what they decide to release and then
 /// call [`Self::disarm`]; if the future is instead dropped before either
-/// arm runs, `Drop` releases whatever is still outstanding — using the same
-/// "did a panel genuinely spawn" signal the `Err(Cancelled)` arm uses, so
-/// the drop path and the normal path agree.
+/// arm runs, `Drop` transfers whatever is still outstanding to an owned
+/// terminal finalizer. That finalizer waits for stable prepared facts before
+/// applying the same allocation truth the normal `Err(Cancelled)` arm uses.
 struct FusionSpawnReservationGuard {
     registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
     outstanding: u64,
+    /// The prepared run's lifecycle authority. A dropped Agent waiter must
+    /// defer settlement until this control publishes stable terminal facts;
+    /// allocation callbacks can still race an immediate snapshot.
+    control: FusionRunControl,
     /// [round-5 review, finding 10] 0 = the forwarder never saw a progress
     /// event that [`panels_proven_spawned`] accepts as proof a panel task
     /// reached the spawner; otherwise the RESOLVED panel count that event
@@ -1010,10 +1015,48 @@ fn allocation_capped_charge(resolved: u64, allocated: u64, allocated_observed: b
     }
 }
 
+/// Settle one dropped reservation from the terminal facts, falling back to
+/// legacy progress latches only when the prepared envelope did not provide a
+/// count. The facts argument is already terminal-stable when present.
+fn settle_dropped_fusion_reservation(
+    registry: &Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    outstanding: u64,
+    facts: Option<platform_api::FusionRunFacts>,
+    resolved_panels: &Arc<std::sync::atomic::AtomicU64>,
+    allocated_panels: &Arc<std::sync::atomic::AtomicU64>,
+    allocated_panels_observed: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    let resolved = facts
+        .as_ref()
+        .and_then(|facts| facts.resolved_panels)
+        .map(u64::from)
+        .unwrap_or_else(|| resolved_panels.load(std::sync::atomic::Ordering::Relaxed));
+    let allocated = facts
+        .as_ref()
+        .and_then(|facts| facts.allocated_panels)
+        .map(u64::from)
+        .unwrap_or_else(|| allocated_panels.load(std::sync::atomic::Ordering::Relaxed));
+    let allocated_observed = facts
+        .as_ref()
+        .is_some_and(|facts| facts.allocated_panels.is_some())
+        || allocated_panels_observed.load(std::sync::atomic::Ordering::Relaxed);
+    let charge_basis = resolved.max(allocated);
+    let charge = allocation_capped_charge(charge_basis, allocated, allocated_observed);
+    let release = if charge_basis == 0 {
+        outstanding
+    } else {
+        outstanding.saturating_sub(charge)
+    };
+    if release > 0 {
+        registry.release_total_agent_spawn_reservations(release);
+    }
+}
+
 impl FusionSpawnReservationGuard {
     fn new(
         registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
         panel_n: u64,
+        control: FusionRunControl,
         resolved_panels: Arc<std::sync::atomic::AtomicU64>,
         allocated_panels: Arc<std::sync::atomic::AtomicU64>,
         allocated_panels_observed: Arc<std::sync::atomic::AtomicBool>,
@@ -1021,6 +1064,7 @@ impl FusionSpawnReservationGuard {
         Self {
             registry,
             outstanding: panel_n,
+            control,
             resolved_panels,
             allocated_panels,
             allocated_panels_observed,
@@ -1050,51 +1094,41 @@ impl Drop for FusionSpawnReservationGuard {
         if self.outstanding == 0 {
             return;
         }
-        // Only reached when `call_fusion`'s future was dropped before an
-        // `Ok`/`Err` arm ran to `disarm()` it — mirror the `Err` arm's own
-        // release decision: [round-2 review, finding 13; round-3 review,
-        // findings 11/19] the forwarder only records a resolved panel count
-        // when `panels_proven_spawned` says a panel task has genuinely
-        // reached the spawner — never on the `completed: 0` event
-        // `run_panel_stage` emits before any panel task is spawned.
-        //
-        // [round-5 review, finding 10] When panels DID spawn, only the
-        // panels the resolver actually settled on may stay charged: the
-        // reservation was taken at the WANTED count before resolution ran,
-        // so `outstanding - resolved` slots belong to panels that never
-        // existed. Same surplus trim the `Ok` and `Err` arms perform.
-        //
-        // [round-12 review, finding 3] The charge is additionally capped at
-        // the panels the SPAWNER provably allocated a child for, when the
-        // executor published that figure — the resolved count includes
-        // panels the spawner rejected pre-allocation, which the `Ok` arm has
-        // always filtered out. An explicit `Some(0)` remains a real zero;
-        // only a missing figure falls back conservatively. See
-        // [`allocation_capped_charge`].
-        let resolved = self
-            .resolved_panels
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let allocated = self
-            .allocated_panels
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let allocated_observed = self
-            .allocated_panels_observed
-            .load(std::sync::atomic::Ordering::Relaxed);
-        // The forwarder writes the resolved and allocated latches separately.
-        // A parent can drop this future after observing the allocation write
-        // but before observing the resolved-total write from the same event.
-        // Preserve that proven child instead of treating `resolved == 0` as
-        // proof that no panel exists; this mirrors the normal Err arm.
-        let charge_basis = resolved.max(allocated);
-        let charge = allocation_capped_charge(charge_basis, allocated, allocated_observed);
-        let release = if charge_basis == 0 {
-            self.outstanding
-        } else {
-            self.outstanding.saturating_sub(charge)
-        };
-        if release > 0 {
-            self.registry
-                .release_total_agent_spawn_reservations(release);
+        // The caller's future can be dropped while a synchronous allocation
+        // receipt is still racing the progress forwarder. Move the remaining
+        // reservation into an owned finalizer and wait for the prepared run's
+        // terminal notification before projecting its final facts. If no
+        // runtime is available (for example during process teardown), retain
+        // the charge conservatively rather than refunding from a stale view.
+        let outstanding = self.outstanding;
+        let registry = self.registry.clone();
+        let control = self.control.clone();
+        let resolved_panels = self.resolved_panels.clone();
+        let allocated_panels = self.allocated_panels.clone();
+        let allocated_panels_observed = self.allocated_panels_observed.clone();
+        if let Some(outcome) = self.control.terminal_outcome() {
+            // A terminal envelope is already stable, so this path is safe even
+            // when Drop runs during runtime teardown with no current handle.
+            settle_dropped_fusion_reservation(
+                &registry,
+                outstanding,
+                Some(outcome.facts),
+                &resolved_panels,
+                &allocated_panels,
+                &allocated_panels_observed,
+            );
+        } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let outcome = control.wait_terminal().await;
+                settle_dropped_fusion_reservation(
+                    &registry,
+                    outstanding,
+                    Some(outcome.facts),
+                    &resolved_panels,
+                    &allocated_panels,
+                    &allocated_panels_observed,
+                );
+            });
         }
         self.outstanding = 0;
     }
@@ -1493,7 +1527,51 @@ impl AgentTool {
         // the request unscoped (the parser intentionally has no session
         // dependency and keeps this wire field `None` for other callers).
         request.conversation_id = origin_session_id.map(|session_id| session_id.to_string());
-        let panel_n = u64::from(fusion_panel_count(&parsed, surface));
+        let parent_registry = ctx
+            .subagent_registry
+            .clone()
+            .unwrap_or_else(|| Arc::new(tool_api::ToolRegistry::new()));
+        let mut invoker_impl =
+            tool_api::tool_invoker_impl::RegistryToolInvoker::new(parent_registry);
+        if let Some(gate) = self.ctx.permission_gate.clone() {
+            invoker_impl = invoker_impl.with_gate(gate);
+        }
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                tool_invoker: Arc::new(invoker_impl),
+                budget: budget.clone(),
+            },
+            ctx.cancel.clone().unwrap_or_default(),
+        );
+        let identity = FusionRunIdentity::new(
+            FusionRunId::generated(),
+            origin_session_id,
+            FusionOrigin::Agent,
+            Some(invocation_id.to_string()),
+        );
+        let prepared = match executor.clone().prepare(FusionSubmission {
+            request,
+            inherit,
+            identity,
+        }) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                Self::emit_failed(
+                    bus,
+                    invocation_id,
+                    "fusion_invalid_request",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(fusion_tool_error(error));
+            }
+        };
+        let prepared_summary = prepared.summary().clone();
+        let prepared_control = prepared.control();
+        let panel_n = prepared_summary
+            .planned_panels
+            .map(u64::from)
+            .unwrap_or_else(|| u64::from(fusion_panel_count(&parsed, surface)));
         let cap = max_subagents_per_session();
         // [round-2 review, findings 4 & 13] `panel_stage_observed` must exist
         // BEFORE the reservation so the drop-safety guard below can be
@@ -1525,6 +1603,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             reservation_guard = Some(FusionSpawnReservationGuard::new(
                 Arc::clone(registry),
                 panel_n,
+                prepared_control.clone(),
                 Arc::clone(&panel_stage_observed),
                 Arc::clone(&panels_allocated_observed),
                 Arc::clone(&panels_allocated_figure_seen),
@@ -1550,23 +1629,6 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             parsed.prompt.chars().count(),
         )
         .await;
-
-        let parent_registry = ctx
-            .subagent_registry
-            .clone()
-            .unwrap_or_else(|| Arc::new(tool_api::ToolRegistry::new()));
-        let mut invoker_impl =
-            tool_api::tool_invoker_impl::RegistryToolInvoker::new(parent_registry);
-        if let Some(gate) = self.ctx.permission_gate.clone() {
-            invoker_impl = invoker_impl.with_gate(gate);
-        }
-        let inherit = FusionInheritance::new(
-            SubagentInheritance {
-                tool_invoker: Arc::new(invoker_impl),
-                budget: budget.clone(),
-            },
-            ctx.cancel.clone().unwrap_or_default(),
-        );
 
         let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel::<FusionProgress>(32);
         let forward_progress = progress.clone();
@@ -1639,9 +1701,12 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             }
         });
 
-        let outcome = executor.run(request, inherit, Some(prog_tx)).await;
+        let outcome = prepared
+            .activate(FusionActivation::now(), Some(prog_tx))
+            .await;
         let _ = forwarder.await;
-        match outcome {
+        let facts = outcome.facts;
+        match outcome.result {
             Ok(result) => {
                 // F008: `panel_n` reserved the WANTED panel count before
                 // model resolution ran; a successful run may have actually
@@ -1658,14 +1723,21 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 // killed the slot before its task ever called the spawner).
                 // Counting those as "spawned" under-releases the reservation
                 // and permanently over-charges the session's lifetime spawn
-                // quota for subagents that never existed. Use the same
-                // "did this panel actually reach the spawner" predicate
-                // `dispatched_egress_profiles` and `fusion_error_is_preflight`
-                // already rely on for the identical distinction.
+                // quota for subagents that never existed. A prepared
+                // executor's sealed allocation fact is stronger than these
+                // compact categories: a panel can time out or panic before
+                // its allocation receipt reaches the result. Keep the
+                // category predicate only for legacy adapters with no exact
+                // allocation fact.
                 if let Some(guard) = reservation_guard.as_mut() {
-                    let spawned =
-                        u64::try_from(fusion_panels_that_reached_the_spawner(&result.panels))
-                            .unwrap_or(panel_n);
+                    let spawned = facts
+                        .allocated_panels
+                        .map(u64::from)
+                        .unwrap_or_else(|| {
+                            u64::try_from(fusion_panels_that_reached_the_spawner(&result.panels))
+                                .unwrap_or(panel_n)
+                        })
+                        .min(panel_n);
                     let surplus = panel_n.saturating_sub(spawned);
                     guard.release(surplus);
                     // The remaining (spawned) count is deliberately kept
@@ -1706,12 +1778,14 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 // `panels_proven_spawned` recognizes as proof a panel
                 // task genuinely reached the spawner to tell the two cases
                 // apart.
-                let resolved_panels =
-                    panel_stage_observed.load(std::sync::atomic::Ordering::Relaxed);
-                let allocated_panels =
-                    panels_allocated_observed.load(std::sync::atomic::Ordering::Relaxed);
-                let allocated_panels_observed =
-                    panels_allocated_figure_seen.load(std::sync::atomic::Ordering::Relaxed);
+                let resolved_panels = facts.resolved_panels.map(u64::from).unwrap_or_else(|| {
+                    panel_stage_observed.load(std::sync::atomic::Ordering::Relaxed)
+                });
+                let allocated_panels = facts.allocated_panels.map(u64::from).unwrap_or_else(|| {
+                    panels_allocated_observed.load(std::sync::atomic::Ordering::Relaxed)
+                });
+                let allocated_panels_observed = facts.allocated_panels.is_some()
+                    || panels_allocated_figure_seen.load(std::sync::atomic::Ordering::Relaxed);
                 let has_allocated_fact = allocated_panels_observed && allocated_panels > 0;
                 let releases_full_reservation = fusion_error_is_preflight(&err)
                     || (matches!(err, platform_api::FusionError::Cancelled)

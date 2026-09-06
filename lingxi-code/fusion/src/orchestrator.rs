@@ -1,7 +1,7 @@
 //! Fusion state machine. Implements [`platform_api::FusionExecutor`].
 
 use crate::analyst::{AnalystError, AnalystUsage};
-use crate::budget::{self, FusionPriceBook, ReservationLease};
+use crate::budget::{self, FusionPriceBook, FusionQuote, ReservationLease};
 use crate::config::{FusionConfigSource, FusionRuntimeConfig};
 use crate::decision::{interpret, panel_by_id, successful, HostDecision};
 use crate::model_resolver::{self, ModelSource, ResolvedPanel, ResolvedSet};
@@ -11,19 +11,48 @@ use crate::synthesizer::{synthesize, SynthError};
 use async_trait::async_trait;
 use platform_api::subagent_spawn::SubagentSpawner;
 use platform_api::{
-    normalize_dimensions, FusionAgentSurface, FusionAnalysis, FusionDecision, FusionError,
-    FusionExecutor, FusionInheritance, FusionNeedsParentReason, FusionOrigin, FusionPreset,
-    FusionProgress, FusionRequest, FusionResult, FusionStage, FusionStatus, FusionTiming,
-    FusionUsage, PanelOutcome, PanelRunStatus, FUSION_MIN_PANEL,
+    normalize_dimensions, FusionActivation, FusionAgentSurface, FusionAnalysis, FusionDecision,
+    FusionError, FusionExecutor, FusionInheritance, FusionNeedsParentReason, FusionOrigin,
+    FusionPreparedSummary, FusionPreset, FusionProgress, FusionRequest, FusionResult,
+    FusionRunControl, FusionRunFactsRecorder, FusionRunId, FusionRunIdentity, FusionRunOutcome,
+    FusionStage, FusionStatus, FusionSubmission, FusionTiming, FusionUsage, PanelOutcome,
+    PanelRunStatus, PreparedFusionRun, FUSION_MIN_PANEL,
 };
 use sidequery::SideQueryClient;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::AnalyticsBus;
 use tokio::sync::mpsc::Sender;
+use tokio::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
+
+/// Catch a panic while polling an owned orchestration future. The prepared
+/// supervisor still holds the lease/fact cells outside this future, so it can
+/// synchronously settle them before publishing the terminal envelope.
+struct CatchPanicFuture<F> {
+    inner: F,
+}
+
+impl<F> std::future::Future for CatchPanicFuture<F>
+where
+    F: std::future::Future + Unpin,
+{
+    type Output = Result<F::Output, ()>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            std::pin::Pin::new(&mut self.inner).poll(cx)
+        })) {
+            Ok(std::task::Poll::Ready(output)) => std::task::Poll::Ready(Ok(output)),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(_) => std::task::Poll::Ready(Err(())),
+        }
+    }
+}
 
 /// Extra headroom the OUTER `run()` deadline carries past
 /// `config.total_timeout_ms` (F004 review fix).
@@ -49,8 +78,15 @@ use tokio::sync::mpsc::Sender;
 /// `lease.commit`, telemetry) after an inner stage has already degraded.
 const FINALIZE_GRACE_MS: u64 = 250;
 
+/// Analytics is non-authoritative and must never keep a settled computation
+/// in Finalizing. Ordinary in-memory/queued sinks complete immediately; a
+/// stalled external sink gets this small best-effort tail, capped again by
+/// the run's captured outer deadline.
+const TERMINAL_TELEMETRY_GRACE_MS: u64 = 100;
+
 /// Injected Fusion orchestrator. Settings, catalog, spawner, and side-query
 /// client live here; [`FusionInheritance`] carries the parent session handles.
+#[derive(Clone)]
 pub struct FusionOrchestrator {
     spawner: Arc<dyn SubagentSpawner>,
     side_query: Arc<dyn SideQueryClient>,
@@ -93,6 +129,10 @@ struct AnalysisOutcome {
     /// `FusionUsage.estimated` at `finalize_result` so the run never claims
     /// an exact total over a figure that is known-short.
     analyst_usage_incomplete: bool,
+    /// Whether the analyst provider boundary was actually entered. A run can
+    /// exhaust its operational deadline after panels but before this stage;
+    /// that path must not invent analyst cost or egress.
+    analyst_attempted: bool,
 }
 
 impl FusionOrchestrator {
@@ -134,119 +174,60 @@ impl FusionOrchestrator {
         self
     }
 
-    /// Time left until `config.total_timeout_ms` from `started` (F004).
-    /// Never negative — once the deadline has passed this returns
-    /// [`Duration::ZERO`], which `tokio::time::timeout` treats as an
-    /// immediate elapse rather than panicking.
-    fn remaining(config: &FusionRuntimeConfig, started: Instant) -> Duration {
-        Duration::from_millis(
-            config
-                .total_timeout_ms
-                .saturating_sub(millis_since(started)),
-        )
+    fn operational_deadline(
+        config: &FusionRuntimeConfig,
+        started: Instant,
+    ) -> Result<Instant, FusionError> {
+        started
+            .checked_add(Duration::from_millis(config.total_timeout_ms))
+            .ok_or(FusionError::Internal)
     }
 
-    /// `run_inner` stage 1/3: validate the request, resolve the panel/analyst
-    /// set, emit `STARTED`, then quote and reserve the budget hold. Split out
-    /// of `run_inner` purely to keep that function under the line-count lint
-    /// — same telemetry, same ordering, same early-return-on-error shape.
+    fn remaining_until(deadline: Instant) -> Duration {
+        deadline.saturating_duration_since(Instant::now())
+    }
+
+    fn ensure_operational_time(deadline: Instant) -> Result<(), FusionError> {
+        if deadline <= Instant::now() {
+            Err(FusionError::TimedOutEmpty)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Reserve a route resolved during `prepare`. Resolution and quoting are
+    /// deliberately side-effect free; only activation may acquire the
+    /// monetary lease and therefore consume the parent's budget handle.
     #[allow(clippy::too_many_arguments)]
-    async fn resolve_and_reserve(
+    async fn reserve_resolved(
         &self,
-        config: &FusionRuntimeConfig,
-        request: FusionRequest,
+        quote: &FusionQuote,
         inherit: &FusionInheritance,
         progress: &Option<Sender<FusionProgress>>,
-        run_id: &str,
-        // [Round-4 review findings 1/2/3/19 — cancel path never settles] The
-        // lease is moved into this cell the INSTANT it is acquired (below),
-        // not returned as a plain local: `run()`'s outer `select!` can drop
-        // the whole `run_inner` future the moment `cancel` fires (see the
-        // doc on `realized_tokens`'s `run_inner` parameter), and even the
-        // `inherit.cancel.is_cancelled()` check a few lines below this one
-        // returns `Err` without ever handing a plain-local lease back to a
-        // caller who could commit it. Whoever settles the lease (this
-        // function's own `is_cancelled` early-out, `run_inner`'s
-        // `check_panel_bar`-failure arm, `finalize_result`, or — if none of
-        // those ever run because this future was dropped — `run()`'s own
-        // outer `Err` arm) takes it back out with `.lock().ok().and_then(|mut
-        // g| g.take())`.
+        operational_deadline: Instant,
         lease_cell: &Arc<Mutex<Option<SettlementLease>>>,
-        // Settlement figure latched alongside the lease — see the
-        // `StageSettlement` doc comment for what it holds at each stage
-        // boundary of a run.
         settlement: &Arc<Mutex<Option<(u64, bool)>>>,
-    ) -> Result<(FusionRequest, ResolvedSet), FusionError> {
-        let request_for_fail = request.clone();
-        let request = match validate_request(request) {
-            Ok(request) => request,
-            Err(error) => {
-                let mut md = fusion_event_metadata(&request_for_fail);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
-                add_fusion_error_metadata(&mut md, &error);
-                self.bus
-                    .log_event(telemetry::tengu::fusion::FAILED, md)
-                    .await;
-                return Err(error);
-            }
-        };
-        progress::emit(
-            progress,
-            FusionStage::ResolvingModels,
-            None,
-            FusionStage::ResolvingModels.label(),
-        );
-        let resolved = match model_resolver::resolve(&request, config, self.catalog.as_ref()) {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                let mut md = fusion_event_metadata(&request);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
-                add_fusion_error_metadata(&mut md, &error);
-                self.bus
-                    .log_event(telemetry::tengu::fusion::FAILED, md)
-                    .await;
-                return Err(error);
-            }
-        };
-        self.emit_started(&request, &resolved, run_id).await;
+        facts: &FusionRunFactsRecorder,
+    ) -> Result<(), FusionError> {
         progress::emit(
             progress,
             FusionStage::ReservingBudget,
             None,
             FusionStage::ReservingBudget.label(),
         );
-        match budget::acquire(
-            config,
-            &resolved,
-            &request,
-            self.catalog.as_ref(),
-            self.prices.as_ref(),
-            inherit.budget(),
-        )
-        .await
-        {
+        let acquire = budget::acquire_quoted(quote.clone(), inherit.budget());
+        tokio::pin!(acquire);
+        let acquired = tokio::select! {
+            biased;
+            result = &mut acquire => result,
+            () = inherit.cancel.cancelled() => return Err(FusionError::Cancelled),
+            () = tokio::time::sleep_until(operational_deadline) => {
+                return Err(FusionError::TimedOutEmpty);
+            }
+        };
+        match acquired {
             Ok(lease) => {
-                // [Round-4 review findings 1/2/3/19] Stash the lease (and
-                // the settlement figure that pairs with it) the moment it
-                // exists — BEFORE the `is_cancelled` check two lines below,
-                // which used to return `Err` with the lease as a doomed
-                // plain local, dropped uncommitted
-                // (`ReservationLease::drop` only releases the hold).
-                //
-                // [Round-5 review item 16] The figure at THIS boundary is
-                // exact zero: the lease exists, but not one panel task has
-                // been handed to the spawner yet (`run_panel_stage` has not
-                // even emitted `PANEL_STARTED`), so no provider call can
-                // have happened. It used to latch one priced turn of
-                // `panel::panel_prompt` per RESOLVED panel here, which
-                // charged a cancel landing in this window — the
-                // `is_cancelled` early-out immediately below is one of
-                // them — for money that was provably never spent. The
-                // per-panel floor is installed by `panel::run_panels`
-                // instead, the moment each panel task actually reaches the
-                // spawner (`panel::PanelDispatch`), and `estimated` is
-                // `true` from the start because every later refresh in this
-                // run may still be an estimate.
+                facts.set_reserved_max_nano_usd(quote.reserved_nano_usd);
                 if let Ok(mut guard) = settlement.lock() {
                     *guard = Some((0, true));
                 }
@@ -257,41 +238,26 @@ impl FusionOrchestrator {
                     });
                 }
             }
-            Err(error) => {
-                let mut md = fusion_event_metadata(&request);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
-                md.insert(
-                    "panel_count".into(),
-                    AnalyticsValue::Int(saturating_i64(resolved.panels.len())),
-                );
-                add_fusion_error_metadata(&mut md, &error);
-                self.bus
-                    .log_event(telemetry::tengu::fusion::FAILED, md)
-                    .await;
-                return Err(error);
-            }
-        };
-
-        if inherit.cancel.is_cancelled() {
-            let mut md = fusion_event_metadata(&request);
-            md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
-            md.insert(
-                "panel_count".into(),
-                AnalyticsValue::Int(saturating_i64(resolved.panels.len())),
-            );
-            self.bus
-                .log_event(telemetry::tengu::fusion::CANCELLED, md)
-                .await;
-            return Err(FusionError::Cancelled);
+            Err(error) => return Err(error),
         }
 
-        Ok((request, resolved))
+        if inherit.cancel.is_cancelled() {
+            return Err(FusionError::Cancelled);
+        }
+        Ok(())
     }
 
     /// `resolve_and_reserve` helper: emit the `STARTED` telemetry event once
     /// the panel/analyst set is resolved. Split out purely to keep the
     /// caller under the line-count lint.
-    async fn emit_started(&self, request: &FusionRequest, resolved: &ResolvedSet, run_id: &str) {
+    async fn emit_started(
+        &self,
+        request: &FusionRequest,
+        resolved: &ResolvedSet,
+        run_id: &str,
+        cancel: &CancellationToken,
+        operational_deadline: Instant,
+    ) {
         let mut md = fusion_event_metadata(request);
         md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
         md.insert(
@@ -317,9 +283,65 @@ impl FusionOrchestrator {
                     == model_resolver::canonical_key(&resolved.analyst.model)
             })),
         );
-        self.bus
-            .log_event(telemetry::tengu::fusion::STARTED, md)
+        self.log_running_event(
+            telemetry::tengu::fusion::STARTED,
+            md,
+            cancel,
+            operational_deadline,
+        )
+        .await;
+    }
+
+    async fn emit_preparation_failed(
+        &self,
+        request: &FusionRequest,
+        run_id: &str,
+        progress: &Option<Sender<FusionProgress>>,
+        error: &FusionError,
+    ) {
+        let mut md = fusion_event_metadata(request);
+        md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
+        add_fusion_error_metadata(&mut md, error);
+        self.log_terminal_event(telemetry::tengu::fusion::FAILED, md, None)
             .await;
+        progress::emit(
+            progress,
+            FusionStage::Failed,
+            None,
+            FusionStage::Failed.label(),
+        );
+    }
+
+    async fn log_terminal_event(
+        &self,
+        name: &str,
+        metadata: LogEventMetadata,
+        outer_deadline: Option<Instant>,
+    ) {
+        let now = Instant::now();
+        let local_deadline = now
+            .checked_add(Duration::from_millis(TERMINAL_TELEMETRY_GRACE_MS))
+            .unwrap_or(now);
+        let deadline =
+            outer_deadline.map_or(local_deadline, |deadline| deadline.min(local_deadline));
+        let _ = tokio::time::timeout_at(deadline, self.bus.log_event(name, metadata)).await;
+    }
+
+    async fn log_running_event(
+        &self,
+        name: &str,
+        metadata: LogEventMetadata,
+        cancel: &CancellationToken,
+        operational_deadline: Instant,
+    ) {
+        let event = self.bus.log_event(name, metadata);
+        tokio::pin!(event);
+        tokio::select! {
+            biased;
+            () = &mut event => {},
+            () = cancel.cancelled() => {},
+            () = tokio::time::sleep_until(operational_deadline) => {},
+        }
     }
 
     /// `run_inner` stage 2/3: run every panel (concurrent, progress-emitting)
@@ -338,6 +360,9 @@ impl FusionOrchestrator {
         progress: &Option<Sender<FusionProgress>>,
         run_id: &str,
         started: Instant,
+        operational_deadline: Instant,
+        facts: &FusionRunFactsRecorder,
+        panel_tasks: &panel::PanelTaskBarrier,
         // [Round-4 rework, item 2] The three survives-a-drop cells, threaded
         // all the way down into `panel::run_panels` so a cancel landing
         // mid-fan-out — after some panels have already finished with real,
@@ -367,10 +392,19 @@ impl FusionOrchestrator {
                 "panel_slot".into(),
                 AnalyticsValue::Int(saturating_i64(index + 1)),
             );
-            self.bus
-                .log_event(telemetry::tengu::fusion::PANEL_STARTED, md)
-                .await;
+            self.log_running_event(
+                telemetry::tengu::fusion::PANEL_STARTED,
+                md,
+                &inherit.cancel,
+                operational_deadline,
+            )
+            .await;
+            if inherit.cancel.is_cancelled() {
+                return Err(FusionError::Cancelled);
+            }
+            Self::ensure_operational_time(operational_deadline)?;
         }
+        Self::ensure_operational_time(operational_deadline)?;
         // F005: `run_panels` emits `RunningPanels{completed:k,total}` (with the
         // finishing panel's anonymous id) after EVERY `join_next`, so the
         // longest stage of a run — up to `panel_total_timeout_ms` per panel —
@@ -391,8 +425,14 @@ impl FusionOrchestrator {
             parent_profile: &request.parent_profile,
             parent_model: &request.parent_model,
             request_prompt: &request.prompt,
+            reserved_max_nano_usd: facts
+                .snapshot()
+                .usage
+                .map_or(0, |usage| usage.reserved_max_nano_usd),
+            facts: facts.clone(),
+            started,
         };
-        let mut panels = match panel::run_panels(
+        let mut panels = match panel::run_panels_supervised(
             Arc::clone(&self.spawner),
             inherit,
             config,
@@ -403,32 +443,15 @@ impl FusionOrchestrator {
             &request.prompt,
             &resolved.panels,
             run_id,
-            Self::remaining(config, started),
+            Self::remaining_until(operational_deadline),
             progress,
             Some(&sink),
+            panel_tasks,
         )
         .await
         {
             Ok(panels) => panels,
-            Err(error) => {
-                let mut md = fusion_event_metadata(request);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
-                md.insert(
-                    "panel_count".into(),
-                    AnalyticsValue::Int(saturating_i64(resolved.panels.len())),
-                );
-                if matches!(error, FusionError::Cancelled) {
-                    self.bus
-                        .log_event(telemetry::tengu::fusion::CANCELLED, md)
-                        .await;
-                } else {
-                    add_fusion_error_metadata(&mut md, &error);
-                    self.bus
-                        .log_event(telemetry::tengu::fusion::FAILED, md)
-                        .await;
-                }
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
         panel::anonymize(&mut panels, run_id);
         let panels_ms = millis_since(panel_started);
@@ -469,7 +492,12 @@ impl FusionOrchestrator {
             } else {
                 telemetry::tengu::fusion::PANEL_FAILED
             };
-            self.bus.log_event(event, md).await;
+            self.log_running_event(event, md, &inherit.cancel, operational_deadline)
+                .await;
+            if inherit.cancel.is_cancelled() {
+                return Err(FusionError::Cancelled);
+            }
+            Self::ensure_operational_time(operational_deadline)?;
         }
         Ok((panels, panels_ms))
     }
@@ -483,6 +511,12 @@ impl FusionOrchestrator {
         progress: Option<Sender<FusionProgress>>,
         run_id: String,
         started: Instant,
+        operational_deadline: Instant,
+        resolved: ResolvedSet,
+        quote: FusionQuote,
+        facts: FusionRunFactsRecorder,
+        control: FusionRunControl,
+        panel_tasks: panel::PanelTaskBarrier,
         // Review-round3 item 27 (rework): a plain local variable here is
         // invisible to `run()`'s outer `Err` handling once this whole
         // future is DROPPED (the outer cancel race) or abandoned
@@ -520,27 +554,33 @@ impl FusionOrchestrator {
         // most precise figure available. See `StageSettlement`, whose doc
         // comment tabulates what this cell holds at every boundary.
         settlement: Arc<Mutex<Option<(u64, bool)>>>,
-        // [Round-4 review item 19 rework] Flipped `true` at the very top of
-        // `finalize_result`, before ANY of its irreversible side effects
-        // (the terminal progress emit, the lease commit, the COMPLETED
-        // telemetry log) run. `run()`'s outer select disables its cancel
-        // arm once this is `true` — see the guard on `cancel.cancelled()`
-        // below — so a cancellation landing after finalize has started can
-        // no longer drop the (partially or fully) finished future and
-        // report a run that already reached `Completed` as `Cancelled`.
-        finalizing: Arc<AtomicBool>,
     ) -> Result<FusionResult, FusionError> {
-        let (request, resolved) = self
-            .resolve_and_reserve(
-                config,
-                request,
-                &inherit,
-                &progress,
-                &run_id,
-                &lease_cell,
-                &settlement,
-            )
-            .await?;
+        Self::ensure_operational_time(operational_deadline)?;
+        let request = validate_request(request)?;
+        self.emit_started(
+            &request,
+            &resolved,
+            &run_id,
+            &inherit.cancel,
+            operational_deadline,
+        )
+        .await;
+        if inherit.cancel.is_cancelled() {
+            return Err(FusionError::Cancelled);
+        }
+        Self::ensure_operational_time(operational_deadline)?;
+        self.reserve_resolved(
+            &quote,
+            &inherit,
+            &progress,
+            operational_deadline,
+            &lease_cell,
+            &settlement,
+            &facts,
+        )
+        .await?;
+        facts.set_resolved_panels(u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX));
+        Self::ensure_operational_time(operational_deadline)?;
 
         let (panels, panels_ms) = self
             .run_panel_stage(
@@ -551,6 +591,9 @@ impl FusionOrchestrator {
                 &progress,
                 &run_id,
                 started,
+                operational_deadline,
+                &facts,
+                &panel_tasks,
                 &realized_tokens,
                 &resolved_egress,
                 &settlement,
@@ -570,6 +613,14 @@ impl FusionOrchestrator {
             parent_model: &request.parent_model,
             request_prompt: &request.prompt,
             panels: &panels,
+            operational_deadline,
+            cancel: inherit.cancel.clone(),
+            reserved_max_nano_usd: facts
+                .snapshot()
+                .usage
+                .map_or(0, |usage| usage.reserved_max_nano_usd),
+            facts: facts.clone(),
+            started,
         };
         // Panels are the earliest point in `run_inner` where real,
         // already-billed provider spend exists. Record it now so a cancel
@@ -590,6 +641,13 @@ impl FusionOrchestrator {
             *guard = dispatched_egress_profiles(&panels);
         }
         if let Err(error) = check_panel_bar(&panels, &request, config) {
+            // Settling real panel spend is irreversible even when the
+            // computation result is an error. Take the same finalization
+            // claim as the success path before committing so a concurrent
+            // TaskStop cannot replace this truthful terminal.
+            if !control.begin_finalizing() {
+                return Err(FusionError::Cancelled);
+            }
             // The bar failing (not enough successful panels, or an
             // incomplete set under `partial_ok: false`) does not mean
             // nothing was spent: any panel with `Some(usage)` already made a
@@ -652,25 +710,13 @@ impl FusionOrchestrator {
                 dispatched_egress_profiles(&panels),
             );
 
-            let mut md = fusion_event_metadata(&request);
-            md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
-            add_panel_counts(&mut md, &panels);
-            md.insert(
-                "duration_ms".into(),
-                AnalyticsValue::Int(saturating_i64(panels_ms)),
-            );
-            add_fusion_error_metadata(&mut md, &error);
-            let event = if matches!(error, FusionError::Cancelled) {
-                telemetry::tengu::fusion::CANCELLED
-            } else {
-                telemetry::tengu::fusion::FAILED
-            };
-            self.bus.log_event(event, md).await;
             return Err(error);
         }
 
-        let outcome = self
-            .analyze_and_decide(
+        let outcome = tokio::select! {
+            biased;
+            () = inherit.cancel.cancelled() => return Err(FusionError::Cancelled),
+            outcome = self.analyze_and_decide(
                 config,
                 &request,
                 &resolved,
@@ -680,8 +726,8 @@ impl FusionOrchestrator {
                 started,
                 &resolved_egress,
                 &stage_settlement,
-            )
-            .await;
+            ) => outcome,
+        };
 
         self.finalize_result(
             outcome,
@@ -693,7 +739,7 @@ impl FusionOrchestrator {
             &progress,
             run_id,
             started,
-            &finalizing,
+            &control,
         )
         .await
     }
@@ -720,14 +766,13 @@ impl FusionOrchestrator {
         progress: &Option<Sender<FusionProgress>>,
         run_id: String,
         started: Instant,
-        // [Round-4 review item 19 rework] See the field doc on `run_inner`'s
-        // own `finalizing` parameter. Must be set before the FIRST
-        // irreversible side effect below (the terminal `progress::emit`) —
-        // everything after this point is real, observable work that must
-        // not be silently discarded by an outer cancel race.
-        finalizing: &Arc<AtomicBool>,
+        // The control phase is set before the FIRST irreversible side effect
+        // below (the terminal `progress::emit`).
+        control: &FusionRunControl,
     ) -> Result<FusionResult, FusionError> {
-        finalizing.store(true, Ordering::SeqCst);
+        if !control.begin_finalizing() {
+            return Err(FusionError::Cancelled);
+        }
         let AnalysisOutcome {
             decision,
             final_text,
@@ -739,6 +784,7 @@ impl FusionOrchestrator {
             priced_synth,
             synth_attempted,
             analyst_usage_incomplete,
+            analyst_attempted,
         } = outcome;
 
         let status = match &decision {
@@ -761,7 +807,9 @@ impl FusionOrchestrator {
         // prompt reached a provider it never touched (this run still
         // completes when `partial_ok` covers the rejection).
         let mut egress: Vec<String> = dispatched_egress_profiles(panels).unwrap_or_default();
-        egress.push(resolved.analyst.profile.clone());
+        if analyst_attempted {
+            egress.push(resolved.analyst.profile.clone());
+        }
         // `Merged` is only the SUCCESS outcome of the synthesizer stage —
         // `synthesize` issues its side query to `request.parent_profile`
         // (carrying the prompt, the full analysis, and every panel's
@@ -771,14 +819,7 @@ impl FusionOrchestrator {
         // on those arms too — otherwise a run whose synthesizer call failed
         // or timed out under-reports a provider that demonstrably received
         // every panel's answer.
-        if matches!(
-            decision,
-            FusionDecision::Merged
-                | FusionDecision::NeedsParent {
-                    reason: FusionNeedsParentReason::SynthesisFailed
-                        | FusionNeedsParentReason::SynthesisTimedOut,
-                }
-        ) {
+        if synth_attempted {
             egress.push(request.parent_profile.clone());
         }
         egress.sort();
@@ -792,20 +833,18 @@ impl FusionOrchestrator {
         // function). `None` would mean this future was somehow resumed
         // after having already been settled elsewhere — treat that as
         // already handled rather than panicking or double-committing.
-        let lease = lease_cell.lock().ok().and_then(|mut guard| guard.take());
-        usage.reserved_max_nano_usd = lease
-            .as_ref()
-            .map_or(0, |lease| lease.quote().reserved_nano_usd);
+        usage.reserved_max_nano_usd = lease_cell
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|lease| lease.quote().reserved_nano_usd))
+            .unwrap_or_default();
         let (priced_nano_usd, priced_estimated) = price_realized_usage(
             self.catalog.as_ref(),
             self.prices.as_ref(),
             panels,
             &resolved.analyst,
             priced_analyst.as_ref().map(|(u, calls)| (u, *calls)),
-            // Reaching `finalize_result` means `analyze_and_decide` ran,
-            // which always attempts the analyst (see the comment on
-            // `price_realized_usage`'s `analyst_attempted` parameter).
-            true,
+            analyst_attempted,
             &request.parent_profile,
             &request.parent_model,
             priced_synth.as_ref(),
@@ -823,21 +862,17 @@ impl FusionOrchestrator {
         // fires, so the run would claim `estimated: false` over a number
         // that is silently missing real, already-billed spend.
         usage.estimated = usage.estimated || priced_estimated || analyst_usage_incomplete;
+        let facts = control.facts();
+        facts.replace_usage(usage.clone(), usage.estimated);
+        for profile in &egress {
+            facts.add_possible_egress(profile.clone());
+        }
+        // Keep the lease in the supervisor-owned cell until all panicable
+        // pricing is complete. A pricing panic then leaves cleanup ownership
+        // intact instead of detaching settlement through Drop.
+        let lease = lease_cell.lock().ok().and_then(|mut guard| guard.take());
         if let Some(lease) = lease {
             if let Err(error) = lease.commit(usage.realized_nano_usd).await {
-                let mut md = fusion_event_metadata(request);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
-                add_panel_counts(&mut md, panels);
-                add_usage_metadata(&mut md, &usage);
-                add_egress_metadata(&mut md, &egress);
-                md.insert(
-                    "duration_ms".into(),
-                    AnalyticsValue::Int(saturating_i64(millis_since(started))),
-                );
-                add_fusion_error_metadata(&mut md, &error);
-                self.bus
-                    .log_event(telemetry::tengu::fusion::FAILED, md)
-                    .await;
                 return Err(error);
             }
         }
@@ -848,12 +883,8 @@ impl FusionOrchestrator {
             analyst_ms,
             synthesizer_ms,
         };
-        self.emit_completed(
-            request, panels, &run_id, &usage, &egress, &decision, &timing,
-        )
-        .await;
-
-        Ok(FusionResult {
+        facts.set_timing(timing.clone());
+        let result = FusionResult {
             schema_version: platform_api::FUSION_SCHEMA_VERSION,
             run_id,
             status,
@@ -864,7 +895,20 @@ impl FusionOrchestrator {
             usage,
             timing,
             egress_profiles: egress,
-        })
+        };
+        self.emit_completed(
+            request,
+            panels,
+            &result.run_id,
+            &result.usage,
+            &result.egress_profiles,
+            &result.decision,
+            &result.timing,
+            control.deadline(),
+        )
+        .await;
+
+        Ok(result)
     }
 
     /// `finalize_result` helper: emit the `COMPLETED` telemetry event once
@@ -880,6 +924,7 @@ impl FusionOrchestrator {
         egress: &[String],
         decision: &FusionDecision,
         timing: &FusionTiming,
+        outer_deadline: Option<Instant>,
     ) {
         let decision_label = match decision {
             FusionDecision::Picked { .. } => "picked",
@@ -911,9 +956,12 @@ impl FusionOrchestrator {
             "synthesis_duration_ms".into(),
             AnalyticsValue::Int(saturating_i64(timing.synthesizer_ms)),
         );
-        self.bus
-            .log_event(telemetry::tengu::fusion::COMPLETED, completion_md)
-            .await;
+        self.log_terminal_event(
+            telemetry::tengu::fusion::COMPLETED,
+            completion_md,
+            outer_deadline,
+        )
+        .await;
     }
 
     /// `run_inner` stage 3/3: run the analyst, `interpret` its verdict, and
@@ -944,7 +992,7 @@ impl FusionOrchestrator {
             None,
             FusionStage::Analyzing.label(),
         );
-        let (analysis_outcome, analyst_ms) = self
+        let (analysis_outcome, analyst_ms, analyst_attempted) = self
             .run_analyst_call(
                 config,
                 request,
@@ -976,6 +1024,7 @@ impl FusionOrchestrator {
                     &mut usage,
                     &mut priced_analyst,
                     &mut analyst_usage_incomplete,
+                    analyst_attempted,
                     stage_settlement,
                 );
                 self.analysis_failed_outcome(
@@ -986,6 +1035,7 @@ impl FusionOrchestrator {
                     FusionNeedsParentReason::AnalysisParseFailed,
                     "analysis_parse_failed",
                     "analyst JSON could not be parsed",
+                    stage_settlement,
                 )
                 .await
             }
@@ -1001,6 +1051,7 @@ impl FusionOrchestrator {
                     &mut usage,
                     &mut priced_analyst,
                     &mut analyst_usage_incomplete,
+                    analyst_attempted,
                     stage_settlement,
                 );
                 self.analysis_failed_outcome(
@@ -1013,6 +1064,7 @@ impl FusionOrchestrator {
                     },
                     "structured_output_unsupported",
                     "analyst structured output is unsupported",
+                    stage_settlement,
                 )
                 .await
             }
@@ -1022,6 +1074,7 @@ impl FusionOrchestrator {
                     &mut usage,
                     &mut priced_analyst,
                     &mut analyst_usage_incomplete,
+                    analyst_attempted,
                     stage_settlement,
                 );
                 self.analysis_failed_outcome(
@@ -1034,6 +1087,7 @@ impl FusionOrchestrator {
                     },
                     "analysis_failed",
                     &format!("analyst call failed: {category}"),
+                    stage_settlement,
                 )
                 .await
             }
@@ -1073,6 +1127,7 @@ impl FusionOrchestrator {
             priced_synth,
             synth_attempted,
             analyst_usage_incomplete,
+            analyst_attempted,
         }
     }
 
@@ -1105,6 +1160,7 @@ impl FusionOrchestrator {
         usage: &mut FusionUsage,
         priced_analyst: &mut Option<(cost::Usage, u32)>,
         analyst_usage_incomplete: &mut bool,
+        analyst_attempted: bool,
         // [Round-5 review items 1/2/4] A failed analyst call still ran:
         // whatever real usage `acc` recovered must reach the
         // survives-a-drop cells too, or a cancel/timeout landing in the
@@ -1112,7 +1168,7 @@ impl FusionOrchestrator {
         // builds a summary) would settle the panel-only figure.
         stage_settlement: &StageSettlement<'_>,
     ) {
-        *analyst_usage_incomplete = true;
+        *analyst_usage_incomplete = analyst_attempted;
         if acc.calls > 0 {
             let settlement_usage = stage_settlement.analyst_usage_with_missing_estimates(&acc);
             add_cost_usage(usage, &settlement_usage, acc.calls);
@@ -1122,10 +1178,10 @@ impl FusionOrchestrator {
             priced_analyst
                 .as_ref()
                 .map(|(usage, calls)| (usage, *calls)),
-            true,
+            analyst_attempted,
             None,
             false,
-            true,
+            analyst_attempted,
         );
     }
 
@@ -1180,9 +1236,13 @@ impl FusionOrchestrator {
             AnalyticsValue::Int(saturating_i64(analyst_ms)),
         );
         add_usage_metadata(&mut md, usage);
-        self.bus
-            .log_event(telemetry::tengu::fusion::ANALYSIS_COMPLETED, md)
-            .await;
+        self.log_running_event(
+            telemetry::tengu::fusion::ANALYSIS_COMPLETED,
+            md,
+            &stage_settlement.cancel,
+            stage_settlement.operational_deadline,
+        )
+        .await;
         match interpret(&analysis, panels) {
             HostDecision::Pick { panel_id } => {
                 progress::emit(
@@ -1254,7 +1314,19 @@ impl FusionOrchestrator {
     ) -> (
         Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)>,
         u64,
+        bool,
     ) {
+        let operational_deadline = stage_settlement.operational_deadline;
+        if operational_deadline <= Instant::now() {
+            return (
+                Err((
+                    AnalystError::Failed("timeout".into()),
+                    AnalystUsage::default(),
+                )),
+                0,
+                false,
+            );
+        }
         // [Round-3 review B2, reworked] Fold the analyst's profile into the
         // survives-a-drop egress latch right here, before the call below is
         // issued — this is the one place in `run_inner`'s call graph where
@@ -1297,14 +1369,14 @@ impl FusionOrchestrator {
         // cancelled mid-flight and `AnalystUsage::default()` (empty) is the
         // honest answer; `record_failed_analyst_usage` still marks the run
         // `estimated` for it.
-        let remaining_for_analyst = Self::remaining(config, started);
-        let mut latest = AnalystUsage::default();
+        let latest = Arc::new(Mutex::new(AnalystUsage::default()));
+        let observed_latest = Arc::clone(&latest);
         let mut observe = |snapshot: &AnalystUsage, incomplete: bool| {
-            latest = snapshot.clone();
-            let settlement_usage =
-                stage_settlement.analyst_usage_with_missing_estimates(snapshot);
-            let analyst_usage =
-                (snapshot.calls > 0).then_some((&settlement_usage, snapshot.calls));
+            if let Ok(mut latest) = observed_latest.lock() {
+                *latest = snapshot.clone();
+            }
+            let settlement_usage = stage_settlement.analyst_usage_with_missing_estimates(snapshot);
+            let analyst_usage = (snapshot.calls > 0).then_some((&settlement_usage, snapshot.calls));
             stage_settlement.refresh(
                 analyst_usage,
                 true,
@@ -1313,23 +1385,24 @@ impl FusionOrchestrator {
                 incomplete || snapshot.incomplete || snapshot.unreported_calls > 0,
             );
         };
-        let analysis_outcome = match tokio::time::timeout(
-            remaining_for_analyst,
-            crate::analyst::analyze_with_observer(
+        let analysis_outcome = tokio::select! {
+            biased;
+            () = tokio::time::sleep_until(operational_deadline) => {
+                let latest = latest
+                    .lock()
+                    .map_or_else(|poisoned| poisoned.into_inner().clone(), |latest| latest.clone());
+                Err((AnalystError::Failed("timeout".into()), latest))
+            }
+            outcome = crate::analyst::analyze_with_observer(
                 Arc::clone(&self.side_query),
                 config,
                 request,
                 &resolved.analyst,
                 panels,
                 &mut observe,
-            ),
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(_) => Err((AnalystError::Failed("timeout".into()), latest)),
+            ) => outcome,
         };
-        (analysis_outcome, millis_since(analyst_started))
+        (analysis_outcome, millis_since(analyst_started), true)
     }
 
     /// `run_synthesis` helper: the `SYNTHESIS_FAILED` telemetry both
@@ -1342,6 +1415,7 @@ impl FusionOrchestrator {
         run_id: &str,
         synthesizer_ms: u64,
         error_label: &str,
+        stage_settlement: &StageSettlement<'_>,
     ) {
         let mut md = fusion_event_metadata(request);
         md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
@@ -1354,9 +1428,13 @@ impl FusionOrchestrator {
             "error".into(),
             AnalyticsValue::String(error_label.to_string()),
         );
-        self.bus
-            .log_event(telemetry::tengu::fusion::SYNTHESIS_FAILED, md)
-            .await;
+        self.log_running_event(
+            telemetry::tengu::fusion::SYNTHESIS_FAILED,
+            md,
+            &stage_settlement.cancel,
+            stage_settlement.operational_deadline,
+        )
+        .await;
     }
 
     /// `run_synthesis` helper [Round-5 review item 9]: a synthesizer call
@@ -1413,6 +1491,7 @@ impl FusionOrchestrator {
         reason: FusionNeedsParentReason,
         error_label: &str,
         message: &str,
+        stage_settlement: &StageSettlement<'_>,
     ) -> (FusionDecision, String, Option<FusionAnalysis>, u64) {
         let mut md = fusion_event_metadata(request);
         md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
@@ -1425,9 +1504,13 @@ impl FusionOrchestrator {
             "error".into(),
             AnalyticsValue::String(error_label.to_string()),
         );
-        self.bus
-            .log_event(telemetry::tengu::fusion::ANALYSIS_FAILED, md)
-            .await;
+        self.log_running_event(
+            telemetry::tengu::fusion::ANALYSIS_FAILED,
+            md,
+            &stage_settlement.cancel,
+            stage_settlement.operational_deadline,
+        )
+        .await;
         (
             FusionDecision::NeedsParent { reason },
             needs_parent_text(panels, message, None),
@@ -1459,6 +1542,26 @@ impl FusionOrchestrator {
         priced_analyst: Option<(cost::Usage, u32)>,
         analyst_usage_incomplete: bool,
     ) -> (FusionDecision, String, Option<FusionAnalysis>, u64) {
+        let operational_deadline = stage_settlement.operational_deadline;
+        if operational_deadline <= Instant::now() {
+            self.emit_synthesis_failed(
+                request,
+                panels,
+                run_id,
+                0,
+                "synthesis_timed_out",
+                stage_settlement,
+            )
+            .await;
+            return (
+                FusionDecision::NeedsParent {
+                    reason: FusionNeedsParentReason::SynthesisTimedOut,
+                },
+                needs_parent_text(panels, "synthesizer timed out", Some(&analysis)),
+                Some(analysis),
+                0,
+            );
+        }
         // T1 item 1: set unconditionally, before the call and its own
         // timeout race — every path below (success, timeout, failure) is a
         // genuine ATTEMPT that may have reached and been billed by the
@@ -1495,21 +1598,18 @@ impl FusionOrchestrator {
         // which already exists) rather than letting the run blow past
         // `total_timeout_ms` and lose everything to the outer
         // `TimedOutEmpty`.
-        let remaining_for_synth = Self::remaining(config, started);
-        let synth = match tokio::time::timeout(
-            remaining_for_synth,
-            synthesize(
+        let synth = tokio::select! {
+            biased;
+            () = tokio::time::sleep_until(operational_deadline) => {
+                Err((SynthError::TimedOut, cost::Usage::default()))
+            }
+            outcome = synthesize(
                 Arc::clone(&self.side_query),
                 config,
                 request,
                 &analysis,
                 panels,
-            ),
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(_) => Err((SynthError::TimedOut, cost::Usage::default())),
+            ) => outcome,
         };
         let synthesizer_ms = millis_since(synth_started);
         match synth {
@@ -1534,9 +1634,13 @@ impl FusionOrchestrator {
                     AnalyticsValue::Int(saturating_i64(synthesizer_ms)),
                 );
                 add_usage_metadata(&mut md, usage);
-                self.bus
-                    .log_event(telemetry::tengu::fusion::SYNTHESIS_COMPLETED, md)
-                    .await;
+                self.log_running_event(
+                    telemetry::tengu::fusion::SYNTHESIS_COMPLETED,
+                    md,
+                    &stage_settlement.cancel,
+                    stage_settlement.operational_deadline,
+                )
+                .await;
                 (FusionDecision::Merged, text, Some(analysis), synthesizer_ms)
             }
             Err((error, lost_usage)) => {
@@ -1560,8 +1664,15 @@ impl FusionOrchestrator {
                         "synthesizer failed",
                     ),
                 };
-                self.emit_synthesis_failed(request, panels, run_id, synthesizer_ms, error_label)
-                    .await;
+                self.emit_synthesis_failed(
+                    request,
+                    panels,
+                    run_id,
+                    synthesizer_ms,
+                    error_label,
+                    stage_settlement,
+                )
+                .await;
                 (
                     FusionDecision::NeedsParent { reason },
                     needs_parent_text(panels, message, Some(&analysis)),
@@ -1571,10 +1682,255 @@ impl FusionOrchestrator {
             }
         }
     }
+
+    /// Supervise a prepared snapshot. Resolution and the quote have already
+    /// completed; this function is the only place where the activation-time
+    /// reservation, panel dispatch, settlement, and terminal result happen.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_prepared_snapshot(
+        &self,
+        config: FusionRuntimeConfig,
+        request: FusionRequest,
+        inherit: FusionInheritance,
+        progress: Option<Sender<FusionProgress>>,
+        control: FusionRunControl,
+        facts: FusionRunFactsRecorder,
+        resolved: ResolvedSet,
+        quote: FusionQuote,
+        started: Instant,
+    ) -> Result<FusionResult, FusionError> {
+        let run_id = control.identity().run_id.to_string();
+        let deadline = control.deadline().ok_or(FusionError::Internal)?;
+        let operational_deadline = Self::operational_deadline(&config, started)?;
+        if operational_deadline <= Instant::now() || deadline <= Instant::now() {
+            facts.set_timing(FusionTiming {
+                total_ms: millis_since(started),
+                ..FusionTiming::default()
+            });
+            return Err(FusionError::TimedOutEmpty);
+        }
+        let realized_tokens: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+        let resolved_egress: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
+        let lease_cell: Arc<Mutex<Option<SettlementLease>>> = Arc::new(Mutex::new(None));
+        let settlement: Arc<Mutex<Option<(u64, bool)>>> = Arc::new(Mutex::new(None));
+        let panel_tasks = panel::PanelTaskBarrier::default();
+        let cancel = control.cancel();
+        let mut run_future = Box::pin(CatchPanicFuture {
+            inner: Box::pin(self.run_inner(
+                &config,
+                request.clone(),
+                inherit,
+                progress.clone(),
+                run_id.clone(),
+                started,
+                operational_deadline,
+                resolved,
+                quote,
+                facts.clone(),
+                control.clone(),
+                panel_tasks.clone(),
+                Arc::clone(&realized_tokens),
+                Arc::clone(&resolved_egress),
+                Arc::clone(&lease_cell),
+                Arc::clone(&settlement),
+            )),
+        });
+        let outcome = tokio::select! {
+            biased;
+            result = run_future.as_mut() => match result {
+                Ok(result) => result,
+                Err(()) => Err(FusionError::Internal),
+            },
+            () = cancel.cancelled() => {
+                if control.is_finalizing() {
+                    match run_future.as_mut().await {
+                        Ok(result) => result,
+                        Err(()) => Err(FusionError::Internal),
+                    }
+                } else {
+                    let _ = control.claim_terminal();
+                    // Drive cancellation cleanup to completion. In
+                    // particular, `run_panels` aborts and joins every child
+                    // before the facts snapshot or reservation is settled.
+                    let _ = run_future.as_mut().await;
+                    Err(FusionError::Cancelled)
+                }
+            },
+            () = tokio::time::sleep_until(deadline) => {
+                // Once finalization has taken the control claim, dropping the
+                // future would detach the budget commit and publish terminal
+                // facts before money settled. The configured outer duration
+                // already includes FINALIZE_GRACE_MS; if that tail is still
+                // pending, let its owned commit finish instead of stealing it.
+                if control.is_finalizing() {
+                    match run_future.as_mut().await {
+                        Ok(result) => result,
+                        Err(()) => Err(FusionError::Internal),
+                    }
+                } else {
+                    let _ = control.claim_terminal();
+                    cancel.cancel();
+                    // A full-deadline timeout is a terminal decision, but it
+                    // is not permission to leave spawned panels mutating
+                    // allocation/usage facts in the background.
+                    let _ = run_future.as_mut().await;
+                    Err(FusionError::TimedOutEmpty)
+                }
+            }
+        };
+        panel_tasks.abort_and_wait().await;
+        // Every terminal branch above has either observed `run_inner` ready
+        // or explicitly driven its cancellation cleanup through the panel
+        // JoinSet drain. It is now safe to seal the facts and settlement.
+        drop(run_future);
+        if let Err(error) = &outcome {
+            let priced = settlement
+                .lock()
+                .ok()
+                .and_then(|guard| *guard)
+                .unwrap_or((0, false));
+            if let Some(lease) = lease_cell.lock().ok().and_then(|mut guard| guard.take()) {
+                let _ = lease.commit(priced.0).await;
+            }
+            let snapshot = facts.snapshot();
+            let mut usage = snapshot.usage.clone().unwrap_or_default();
+            usage.realized_nano_usd = priced.0;
+            let any_dispatch = snapshot.dispatched_panels.is_some_and(|count| count > 0);
+            usage.estimated |= priced.1 && any_dispatch;
+            let usage_incomplete = snapshot.usage_incomplete || usage.estimated;
+            facts.replace_usage(usage, usage_incomplete);
+            let mut timing = snapshot.timing;
+            timing.total_ms = millis_since(started);
+            facts.set_timing(timing);
+            let stage = if matches!(error, FusionError::Cancelled) {
+                FusionStage::Cancelled
+            } else {
+                FusionStage::Failed
+            };
+            let label = stage.label();
+            if let Some(tokens) = realized_tokens.lock().ok().and_then(|guard| *guard) {
+                progress::emit_with_realized_tokens(
+                    &progress,
+                    stage,
+                    label,
+                    tokens,
+                    resolved_egress.lock().ok().and_then(|guard| guard.clone()),
+                );
+            } else {
+                progress::emit(&progress, stage, None, label);
+            }
+            let mut md = fusion_event_metadata(&request);
+            md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
+            md.insert(
+                "duration_ms".into(),
+                AnalyticsValue::Int(saturating_i64(millis_since(started))),
+            );
+            add_fusion_error_metadata(&mut md, error);
+            let event = if matches!(error, FusionError::Cancelled) {
+                telemetry::tengu::fusion::CANCELLED
+            } else {
+                telemetry::tengu::fusion::FAILED
+            };
+            self.log_terminal_event(event, md, Some(deadline)).await;
+        }
+        outcome
+    }
 }
 
 #[async_trait]
 impl FusionExecutor for FusionOrchestrator {
+    fn prepare(
+        self: Arc<Self>,
+        submission: FusionSubmission,
+    ) -> Result<PreparedFusionRun, FusionError> {
+        let FusionSubmission {
+            request,
+            inherit,
+            identity,
+        } = submission;
+        let submission = FusionSubmission::new(request, inherit, identity)?;
+        let FusionSubmission {
+            request,
+            inherit,
+            identity,
+        } = submission;
+        let inherit = scope_inheritance_to_identity(&identity, inherit)?;
+        let mut config = self.config_source.load()?;
+        if let Some(captured_total) = inherit
+            .effective_timeout_ms
+            .map(|timeout_ms| timeout_ms.saturating_sub(FINALIZE_GRACE_MS))
+        {
+            config.total_timeout_ms = captured_total;
+        }
+        let request = validate_request(request)?;
+        let catalog = self.catalog.list();
+        let resolved = model_resolver::resolve(&request, &config, &catalog)?;
+        // Quote during preparation so an invalid price/configuration fails
+        // before TaskCreated. The actual reservation remains activation-only.
+        let quote = budget::quote(
+            &config,
+            &resolved,
+            &request,
+            &catalog,
+            self.prices.as_ref(),
+            inherit.budget().max_session_nano_usd().is_some(),
+        )?;
+        let duration_ms = inherit
+            .effective_timeout_ms
+            .unwrap_or_else(|| config.total_timeout_ms.saturating_add(FINALIZE_GRACE_MS));
+        let summary = FusionPreparedSummary {
+            identity: identity.clone(),
+            duration_ms,
+            planned_panels: Some(u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX)),
+        };
+        let control = FusionRunControl::new(
+            identity,
+            duration_ms,
+            inherit.cancel.clone(),
+            FusionRunFactsRecorder::default(),
+        );
+        let facts = control.facts();
+        facts.set_resolved_panels(u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX));
+        // This exact zero is provisional until a provider-capable boundary is
+        // reached. It lets pre-reservation failures remain distinguishable
+        // from legacy runners that expose no facts at all.
+        facts.set_known_zero();
+        let mut snapshot_orchestrator = (*self).clone();
+        snapshot_orchestrator.catalog = Arc::new(catalog);
+        let snapshot_orchestrator = Arc::new(snapshot_orchestrator);
+        Ok(PreparedFusionRun::new(
+            summary,
+            control.clone(),
+            move |activation: FusionActivation, progress| {
+                let orchestrator = Arc::clone(&snapshot_orchestrator);
+                let control = control.clone();
+                let facts = facts.clone();
+                let request = request.clone();
+                let inherit = inherit.clone();
+                let config = config.clone();
+                let resolved = resolved.clone();
+                let quote = quote.clone();
+                async move {
+                    let started = activation.activated_at;
+                    let result = orchestrator
+                        .run_prepared_snapshot(
+                            config,
+                            request,
+                            inherit,
+                            progress,
+                            control.clone(),
+                            facts.clone(),
+                            resolved,
+                            quote,
+                            started,
+                        )
+                        .await;
+                    FusionRunOutcome::from_control(&control, result)
+                }
+            },
+        ))
+    }
+
     fn effective_timeout_ms(&self) -> Option<u64> {
         // Match the outer `run()` deadline, including the small tail grace
         // used for settlement and telemetry after an inner stage expires.
@@ -1590,252 +1946,50 @@ impl FusionExecutor for FusionOrchestrator {
         inherit: FusionInheritance,
         progress: Option<Sender<FusionProgress>>,
     ) -> Result<FusionResult, FusionError> {
-        let started = Instant::now();
-        let run_id = new_run_id();
-        let request_for_terminal = request.clone();
-        // Bind the budget view before any asynchronous Fusion work starts.
-        // A run may outlive the active conversation after a session switch;
-        // valid persisted session ids therefore settle into their origin's
-        // ledger. Test/library callers sometimes use labels rather than the
-        // wire `sess:<uuid>` form, so malformed or absent ids retain the
-        // legacy inherited handle instead of changing request validation.
-        let inherit = scope_inheritance_to_request(&request, inherit);
-        let cancel = inherit.cancel.clone();
-        // F007: reload the effective config for THIS run rather than reading
-        // a config frozen at construction — a settings edit or the §11 kill
-        // switch (`fusion.enabled=false`) must take effect on the next run,
-        // not the next process restart.
-        let mut config = match self.config_source.load() {
-            Ok(config) => config,
+        // Keep the trait's legacy entrypoint for fake/source compatibility,
+        // but route the production orchestrator through the same immutable
+        // preparation snapshot and owned supervisor used by every host.
+        let request_for_failure = request.clone();
+        let parent_operation_id = if request.origin == FusionOrigin::Workflow {
+            request.workflow_run_id.clone()
+        } else {
+            None
+        };
+        let identity = match FusionRunIdentity::for_legacy_request(&request, parent_operation_id) {
+            Ok(identity) => identity,
             Err(error) => {
-                let mut md = fusion_event_metadata(&request_for_terminal);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id));
-                add_fusion_error_metadata(&mut md, &error);
-                self.bus
-                    .log_event(telemetry::tengu::fusion::FAILED, md)
-                    .await;
-                progress::emit(
+                let run_id = FusionRunId::generated();
+                self.emit_preparation_failed(
+                    &request_for_failure,
+                    run_id.as_str(),
                     &progress,
-                    FusionStage::Failed,
-                    None,
-                    FusionStage::Failed.label(),
-                );
+                    &error,
+                )
+                .await;
                 return Err(error);
             }
         };
-        // The task handler captures the effective outer deadline before
-        // publication and carries it through `FusionInheritance`. Keep the
-        // actual run on that same timeout even when mutable settings changed
-        // between spawn and worker activation. Legacy callers leave the
-        // snapshot unset and retain the live-config behavior.
-        let captured_total = inherit
-            .effective_timeout_ms
-            .map(|timeout_ms| timeout_ms.saturating_sub(FINALIZE_GRACE_MS));
-        if let Some(total_timeout_ms) = captured_total {
-            config.total_timeout_ms = total_timeout_ms;
-        }
-        // FINALIZE_GRACE_MS: this outer timeout must never fire BEFORE an inner
-        // per-stage deadline (built from `Self::remaining(&config, started)`) —
-        // see the constant's doc comment for why a zero-margin outer deadline
-        // is flaky.
-        let total = std::time::Duration::from_millis(
-            inherit
-                .effective_timeout_ms
-                .unwrap_or_else(|| config.total_timeout_ms.saturating_add(FINALIZE_GRACE_MS)),
-        );
-        // Review-round3 item 27 (rework): shared with `run_inner` so the
-        // cancel/timeout arms below can still report realized panel spend
-        // after `run_inner`'s own future is dropped/abandoned — see the
-        // parameter doc on `run_inner` for why a plain local can't do this.
-        let realized_tokens: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
-        // [Round-3 review B2] Same survives-a-drop rationale as
-        // `realized_tokens` above, for the resolved egress profile list
-        // instead of the token count — `run_inner` latches it as soon as
-        // `resolve_and_reserve` returns, well before any panel completes,
-        // so it is available here even when the cancel/timeout arm below
-        // wins the race and drops `run_inner`'s own future/stack.
-        let resolved_egress: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
-        // [Round-4 review findings 1/2/3/19 — cancel path never settles]
-        // Same survives-a-drop rationale, for the reservation lease itself
-        // (and the priced-so-far settlement paired with it). Before this
-        // fix the lease lived as a plain local inside `run_inner`/
-        // `resolve_and_reserve`, so EVERY path that ends this future
-        // early — this select's cancel arm, the outer total-timeout arm,
-        // and even `resolve_and_reserve`'s own `is_cancelled` early-out —
-        // dropped it uncommitted: `ReservationLease::drop` only RELEASES
-        // the hold, so real, already-billed provider spend never reached
-        // `CostTracker::total_nano_usd` and a `--max-budget` session never
-        // saw it. See `resolve_and_reserve`'s parameter doc for how the
-        // cell is populated and drained.
-        let lease_cell: Arc<Mutex<Option<SettlementLease>>> = Arc::new(Mutex::new(None));
-        let settlement: Arc<Mutex<Option<(u64, bool)>>> = Arc::new(Mutex::new(None));
-        // [Round-4 review item 19 rework] Flipped by `finalize_result`
-        // before ANY of its irreversible side effects — see the field docs
-        // on `run_inner`'s and `finalize_result`'s own `finalizing`
-        // parameters. Read by the cancel arm's guard just below.
-        let finalizing: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-        let run_future = tokio::time::timeout(
-            total,
-            self.run_inner(
-                &config,
-                request,
-                inherit,
-                progress.clone(),
-                run_id.clone(),
-                started,
-                Arc::clone(&realized_tokens),
-                Arc::clone(&resolved_egress),
-                Arc::clone(&lease_cell),
-                Arc::clone(&settlement),
-                Arc::clone(&finalizing),
-            ),
-        );
-        // [Round-4 review item 19 rework] Hoisted out of the `select!` and
-        // pinned on the stack — the old code built this future inline as a
-        // `select!` branch expression, which the macro drops whenever the
-        // OTHER branch wins; pinning it in a named local lets the cancel
-        // arm below drive it to completion instead of discarding it once
-        // `finalize_result` has already started its irreversible work.
-        let mut run_future = std::pin::pin!(run_future);
-        let outcome = tokio::select! {
-            biased;
-            // [Round-4 review item 19 rework] A `tokio::select!` `if`
-            // precondition is evaluated ONCE, when this (non-looped) select
-            // is first polled — NOT freshly on every subsequent poll (see
-            // `tokio::select!`'s own doc comment, "Re-entering `select!` due
-            // to a loop clears the disabled bit"; this call is not in a
-            // loop). So a precondition here (`if !finalizing.load(..)`)
-            // would be evaluated once while `finalizing` is still `false`
-            // and would stay wrongly "enabled" for this select's entire
-            // lifetime — it must instead be checked INSIDE the handler
-            // below, at the moment this arm is actually selected.
-            () = cancel.cancelled() => {
-                if finalizing.load(Ordering::SeqCst) {
-                    // `finalize_result` has already begun its irreversible
-                    // side effects (the terminal progress emit at minimum,
-                    // possibly already the lease commit too) — dropping
-                    // `run_future` now would throw away a (partially or
-                    // fully) completed `FusionResult` and report a run that
-                    // already emitted terminal `Completed` progress as
-                    // `Cancelled`. `run_future` is the SAME pinned local
-                    // declared above (not rebuilt here), so awaiting it now
-                    // simply resumes it from wherever it was parked —
-                    // "whoever finalized first wins", the same rule
-                    // `local_fusion`'s own `finalizing` claim already
-                    // applies one layer down.
-                    match run_future.await {
-                        Ok(result) => result,
-                        Err(_elapsed) => {
-                            let mut md = fusion_event_metadata(&request_for_terminal);
-                            md.insert(
-                                "run_id".into(),
-                                AnalyticsValue::String(run_id.clone()),
-                            );
-                            md.insert(
-                                "duration_ms".into(),
-                                AnalyticsValue::Int(saturating_i64(millis_since(started))),
-                            );
-                            md.insert(
-                                "error".into(),
-                                AnalyticsValue::String("total_timeout".into()),
-                            );
-                            self.bus
-                                .log_event(telemetry::tengu::fusion::FAILED, md)
-                                .await;
-                            Err(FusionError::TimedOutEmpty)
-                        }
-                    }
-                } else {
-                    let mut md = fusion_event_metadata(&request_for_terminal);
-                    md.insert("run_id".into(), AnalyticsValue::String(run_id.clone()));
-                    md.insert(
-                        "duration_ms".into(),
-                        AnalyticsValue::Int(saturating_i64(millis_since(started))),
-                    );
-                    self.bus
-                        .log_event(telemetry::tengu::fusion::CANCELLED, md)
-                        .await;
-                    Err(FusionError::Cancelled)
-                }
-            }
-            result = &mut run_future => if let Ok(result) = result {
-                result
-            } else {
-                let mut md = fusion_event_metadata(&request_for_terminal);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id));
-                md.insert(
-                    "duration_ms".into(),
-                    AnalyticsValue::Int(saturating_i64(millis_since(started))),
-                );
-                md.insert(
-                    "error".into(),
-                    AnalyticsValue::String("total_timeout".into()),
-                );
-                self.bus
-                    .log_event(telemetry::tengu::fusion::FAILED, md)
+        let run_id = identity.run_id.to_string();
+        let submission = match FusionSubmission::new(request, inherit, identity) {
+            Ok(submission) => submission,
+            Err(error) => {
+                self.emit_preparation_failed(&request_for_failure, &run_id, &progress, &error)
                     .await;
-                Err(FusionError::TimedOutEmpty)
+                return Err(error);
             }
         };
-        if let Err(error) = &outcome {
-            // [Round-4 review findings 1/2/3/19 — cancel path never
-            // settles] `lease_cell` still holds the lease whenever NEITHER
-            // of `run_inner`'s own commit points (`check_panel_bar`'s
-            // failure arm, `finalize_result`) ran before this future ended
-            // — settle it now with the most precise estimate latched so
-            // far, rather than letting it fall through to
-            // `ReservationLease::drop`'s bare release. When the cell is
-            // already empty, `run_inner` itself already took the lease to
-            // commit (or attempt to) before this outcome was produced —
-            // nothing to do here, and nothing is double-charged.
-            if let Some(lease) = lease_cell.lock().ok().and_then(|mut guard| guard.take()) {
-                let (priced_nano_usd, _estimated) = settlement
-                    .lock()
-                    .ok()
-                    .and_then(|guard| *guard)
-                    .unwrap_or((0, false));
-                let _ = lease.commit(priced_nano_usd).await;
+        let prepared = match Arc::new(self.clone()).prepare(submission) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.emit_preparation_failed(&request_for_failure, &run_id, &progress, &error)
+                    .await;
+                return Err(error);
             }
-            let stage = if matches!(error, FusionError::Cancelled) {
-                FusionStage::Cancelled
-            } else {
-                FusionStage::Failed
-            };
-            let label = stage.label();
-            // Review-round3 item 27 (rework): before this fix every path
-            // through this shared choke point (the outer cancel race, the
-            // outer total-timeout race, AND `finalize_result`'s
-            // `lease.commit` failure — all of them return `Err` here, not
-            // just `check_panel_bar`'s) hardcoded `realized_output_tokens:
-            // None`, so a caller tracking a separate token budget (the
-            // `local_workflow` `fusion()` bridge arm) never learned about
-            // real, already-billed panel spend on those paths and its
-            // budget ceiling never engaged. Use whatever `run_inner`
-            // managed to record before its own future was dropped/timed
-            // out, when there is one.
-            // [Round-3 review B2] Mirror the same "use whatever survived
-            // the drop" treatment for the resolved egress list: a run that
-            // reached `resolve_and_reserve` before this outer cancel/timeout
-            // won the race really did dispatch to these profiles, and the
-            // failure disclosure should say so even though `run_inner`'s
-            // own stack is gone.
-            let egress = resolved_egress.lock().ok().and_then(|guard| guard.clone());
-            match realized_tokens.lock().ok().and_then(|guard| *guard) {
-                Some(tokens) => {
-                    progress::emit_with_realized_tokens(
-                        &progress,
-                        stage.clone(),
-                        label,
-                        tokens,
-                        egress,
-                    );
-                }
-                None => {
-                    progress::emit(&progress, stage.clone(), None, label);
-                }
-            }
-        }
-        outcome
+        };
+        prepared
+            .activate(FusionActivation::now(), progress)
+            .await
+            .into_legacy_result()
     }
 
     fn agent_surface(&self) -> FusionAgentSurface {
@@ -1900,22 +2054,18 @@ fn validate_request(mut request: FusionRequest) -> Result<FusionRequest, FusionE
     Ok(request)
 }
 
-fn scope_inheritance_to_request(
-    request: &FusionRequest,
+fn scope_inheritance_to_identity(
+    identity: &FusionRunIdentity,
     mut inherit: FusionInheritance,
-) -> FusionInheritance {
-    let Some(session_id) = request
-        .conversation_id
-        .as_deref()
-        .and_then(protocol::SessionId::parse_prefixed)
-    else {
-        return inherit;
+) -> Result<FusionInheritance, FusionError> {
+    let Some(session_id) = identity.session_id else {
+        return Ok(inherit);
     };
     let Some(budget) = inherit.budget().scoped_for_session(session_id) else {
-        return inherit;
+        return Err(FusionError::BudgetReservationUnavailable);
     };
     inherit.subagent.budget = budget;
-    inherit
+    Ok(inherit)
 }
 
 pub(crate) fn check_panel_bar(
@@ -2103,6 +2253,11 @@ struct StageSettlement<'a> {
     /// The finished, anonymized panel set — fixed for the whole life of
     /// this borrow (every stage below only reads it).
     panels: &'a [PanelInternal],
+    operational_deadline: Instant,
+    cancel: CancellationToken,
+    reserved_max_nano_usd: u64,
+    facts: FusionRunFactsRecorder,
+    started: Instant,
 }
 
 impl StageSettlement<'_> {
@@ -2130,39 +2285,109 @@ impl StageSettlement<'_> {
         synth_attempted: bool,
         analyst_usage_incomplete: bool,
     ) {
+        let mut output_tokens = aggregate_panel_usage(self.panels).output_tokens;
+        if let Some((usage, _)) = analyst_usage {
+            output_tokens = output_tokens.saturating_add(usage.tokens.output);
+        }
+        if let Some(usage) = synth_usage {
+            output_tokens = output_tokens.saturating_add(usage.tokens.output);
+        }
         if let Ok(mut guard) = self.realized_tokens.lock() {
-            // Same field `add_cost_usage` rolls into `FusionUsage::output_tokens`
-            // for these two calls, so a cancelled run discloses the same
-            // token total a completed one would (`local_workflow`'s
-            // `fusion()` bridge charges its own budget from this number).
-            let mut output_tokens = aggregate_panel_usage(self.panels).output_tokens;
-            if let Some((usage, _)) = analyst_usage {
-                output_tokens = output_tokens.saturating_add(usage.tokens.output);
-            }
-            if let Some(usage) = synth_usage {
-                output_tokens = output_tokens.saturating_add(usage.tokens.output);
-            }
             *guard = Some(output_tokens);
         }
+
+        let previous_priced = self
+            .settlement
+            .lock()
+            .ok()
+            .and_then(|guard| *guard)
+            .unwrap_or((0, true));
+        let mut usage = aggregate_panel_usage(self.panels);
+        if let Some((analyst, calls)) = analyst_usage {
+            add_cost_usage(&mut usage, analyst, calls);
+        }
+        if let Some(synth) = synth_usage {
+            add_cost_usage(&mut usage, synth, 1);
+        }
+        let usage_was_estimated = usage.estimated;
+        usage.realized_nano_usd = previous_priced.0;
+        usage.reserved_max_nano_usd = self.reserved_max_nano_usd;
+        // Provider usage and egress are reliable before pricing. Publish a
+        // conservative monetary snapshot first so a panicable price-book
+        // lookup cannot erase a response that already crossed the wire.
+        usage.estimated = true;
+        self.facts.replace_usage(usage.clone(), true);
+
+        let panels_incomplete = self.panels.iter().any(|panel| {
+            !panel::is_never_dispatched_category(panel.error_category.as_deref())
+                && panel.usage.as_ref().is_none_or(|usage| usage.estimated)
+        });
+        let attempts_incomplete = panels_incomplete
+            || (analyst_attempted && analyst_usage.is_none())
+            || (synth_attempted && synth_usage.is_none());
+        if attempts_incomplete {
+            self.facts.mark_attempts_unknown();
+        } else {
+            self.facts.replace_attempts(Some(usage.provider_requests));
+        }
+        if let Some(profiles) = dispatched_egress_profiles(self.panels) {
+            for profile in profiles {
+                self.facts.add_possible_egress(profile);
+            }
+        }
+        for panel in self.panels.iter().filter(|panel| {
+            panel
+                .usage
+                .as_ref()
+                .is_some_and(|usage| !usage.estimated || usage.provider_requests > 0)
+        }) {
+            self.facts.add_confirmed_egress(panel.profile.clone());
+        }
+        if analyst_attempted {
+            self.facts.add_possible_egress(self.analyst.profile.clone());
+            if analyst_usage.is_some() {
+                self.facts
+                    .add_confirmed_egress(self.analyst.profile.clone());
+            }
+        }
+        if synth_attempted {
+            self.facts
+                .add_possible_egress(self.parent_profile.to_string());
+            if synth_usage.is_some() {
+                self.facts
+                    .add_confirmed_egress(self.parent_profile.to_string());
+            }
+        }
+        self.facts.set_timing(FusionTiming {
+            total_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            ..Default::default()
+        });
+
+        let (priced_nano_usd, priced_estimated) = price_realized_usage(
+            self.catalog,
+            self.prices,
+            self.panels,
+            self.analyst,
+            analyst_usage,
+            analyst_attempted,
+            self.parent_profile,
+            self.parent_model,
+            synth_usage,
+            synth_attempted,
+            self.request_prompt,
+        );
         if let Ok(mut guard) = self.settlement.lock() {
-            let (priced_nano_usd, priced_estimated) = price_realized_usage(
-                self.catalog,
-                self.prices,
-                self.panels,
-                self.analyst,
-                analyst_usage,
-                analyst_attempted,
-                self.parent_profile,
-                self.parent_model,
-                synth_usage,
-                synth_attempted,
-                self.request_prompt,
-            );
             *guard = Some((
                 priced_nano_usd,
                 priced_estimated || analyst_usage_incomplete,
             ));
         }
+        usage.realized_nano_usd = priced_nano_usd;
+        usage.estimated = usage_was_estimated || priced_estimated || analyst_usage_incomplete;
+        self.facts.replace_usage(
+            usage,
+            priced_estimated || analyst_usage_incomplete || attempts_incomplete,
+        );
     }
 }
 
@@ -2212,7 +2437,7 @@ fn panel_outcome(panel: &PanelInternal) -> PanelOutcome {
     }
 }
 
-fn aggregate_panel_usage(panels: &[PanelInternal]) -> FusionUsage {
+pub(crate) fn aggregate_panel_usage(panels: &[PanelInternal]) -> FusionUsage {
     let mut acc = FusionUsage::default();
     for panel in panels {
         if let Some(usage) = &panel.usage {
@@ -2719,10 +2944,6 @@ fn reason_line(reason: &FusionNeedsParentReason) -> String {
     }
 }
 
-fn new_run_id() -> String {
-    format!("fu_{}", uuid::Uuid::new_v4().simple())
-}
-
 fn millis_since(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -2935,6 +3156,11 @@ mod record_failed_analyst_usage_tests {
                 parent_model: "model",
                 request_prompt: "task",
                 panels: &[],
+                operational_deadline: Instant::now() + Duration::from_secs(60),
+                cancel: CancellationToken::new(),
+                reserved_max_nano_usd: 0,
+                facts: FusionRunFactsRecorder::default(),
+                started: Instant::now(),
             }
         }
     }
@@ -2963,6 +3189,7 @@ mod record_failed_analyst_usage_tests {
             &mut usage,
             &mut priced_analyst,
             &mut incomplete,
+            true,
             &fixture.cell(),
         );
         assert!(
@@ -3017,6 +3244,7 @@ counted in FusionUsage, not just priced into realized_nano_usd"
             &mut usage,
             &mut priced_analyst,
             &mut incomplete,
+            true,
             &fixture.cell(),
         );
         assert!(incomplete);

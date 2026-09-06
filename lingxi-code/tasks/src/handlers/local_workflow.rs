@@ -42,9 +42,10 @@ use platform_api::filesystem::FileSystem;
 use platform_api::subagent_spawn::{SelectedAgentMeta, SubagentListingEntry};
 use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use platform_api::{
-    BackgroundTaskHandle, BudgetEnforcerHandle, FusionError, FusionExecutor, FusionInheritance,
-    FusionModelRef, FusionOrigin, FusionPreset, RuntimeSpawner, SubagentInheritance,
-    SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
+    BackgroundTaskHandle, BudgetEnforcerHandle, FusionActivation, FusionError, FusionExecutor,
+    FusionInheritance, FusionModelRef, FusionOrigin, FusionPreset, FusionRunId,
+    FusionRunIdentity, FusionSubmission, RuntimeSpawner, SubagentInheritance, SubagentResult,
+    SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -620,6 +621,11 @@ fn parse_workflow_fusion_request(
     let Some(executor) = executor else {
         return Err(FusionError::UnavailableOnPlatform);
     };
+    if run_id.trim().is_empty() {
+        return Err(FusionError::InvalidRequest(
+            "workflow fusion requires a non-empty workflow run id".into(),
+        ));
+    }
     // F008: a composition-root-pinned rejection (an invalid `fusion.*`
     // setting at boot — see `RejectedFusionExecutor`) is surfaced AS ITSELF,
     // before the `enabled` gate below, so a workflow's `fusion()` call sees
@@ -2960,8 +2966,29 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                                     budget: budget.clone(),
                                 },
                                 fusion_cancel.clone(),
-                            )
-                            .with_effective_timeout_ms(executor.effective_timeout_ms());
+                            );
+                            let identity = FusionRunIdentity::new(
+                                FusionRunId::generated(),
+                                workflow_session_uuid
+                                    .as_deref()
+                                    .and_then(protocol::SessionId::parse_prefixed),
+                                FusionOrigin::Workflow,
+                                workflow_run_id.clone(),
+                            );
+                            let prepared_result = executor.clone().prepare(FusionSubmission {
+                                request,
+                                inherit,
+                                identity,
+                            });
+                            let preparation_error = prepared_result
+                                .as_ref()
+                                .err()
+                                .map(ToString::to_string);
+                            if let Some(error) = preparation_error {
+                                wf_throw(&error)
+                            } else {
+                            let prepared = prepared_result
+                                .expect("Fusion preparation error was checked above");
                             // KNOWN GAP (G012, tracked as a cross-lane
                             // residual — see local_workflow_test.rs's removed
                             // `workflow_fusion_run_inherits_the_workflow_
@@ -3028,11 +3055,13 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                                 }
                                 last_realized_output_tokens
                             });
-                            let run_result =
-                                executor.run(request, inherit, Some(fusion_prog_tx)).await;
+                            let outcome = prepared
+                                .activate(FusionActivation::now(), Some(fusion_prog_tx))
+                                .await;
                             let last_realized_output_tokens =
                                 progress_forwarder.await.unwrap_or(None);
-                            match run_result {
+                            let facts = outcome.facts;
+                            match outcome.result {
                                 Ok(result) => {
                                     spent.fetch_add(result.usage.output_tokens, Ordering::Relaxed);
                                     match serde_json::to_string(&result) {
@@ -3053,13 +3082,16 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                                     }
                                 }
                                 Err(error) => {
-                                    if let Some(tokens) = last_realized_output_tokens {
+                                    if let Some(usage) = facts.usage {
+                                        spent.fetch_add(usage.output_tokens, Ordering::Relaxed);
+                                    } else if let Some(tokens) = last_realized_output_tokens {
                                         spent.fetch_add(tokens, Ordering::Relaxed);
                                     }
                                     wf_throw(&error.to_string())
                                 }
                             }
                         }
+                            }
                         Err(error) => wf_throw(&error.to_string()),
                     }
                 };
@@ -3648,6 +3680,19 @@ impl Task for LocalWorkflowHandler {
                 "local_workflow handler received a non-LocalWorkflow spawn input".into(),
             ));
         };
+
+        // A workflow may carry a trusted originating session, but a malformed
+        // value must never silently degrade to the process-wide budget view.
+        // Validate before allocating task/spool state; `None` remains valid for
+        // standalone hosts that intentionally have no session binding.
+        if session_uuid
+            .as_deref()
+            .is_some_and(|raw| protocol::SessionId::parse_prefixed(raw).is_none())
+        {
+            return Err(TaskError::Internal(
+                "workflow session_uuid must be a valid session id".into(),
+            ));
+        }
 
         // A local-app build may only run with a lease bound to the exact app
         // workspace. Do this validation before allocating task/spool state so

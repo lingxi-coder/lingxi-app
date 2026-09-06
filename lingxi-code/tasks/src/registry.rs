@@ -15,8 +15,8 @@ use agent::{StateMachinePool, SubagentApiClient};
 use async_trait::async_trait;
 use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 use platform_api::{
-    BackgroundTaskHandle, BudgetEnforcerHandle, FileSystem, FusionCompletionSink, FusionExecutor,
-    ProcessRunner, RuntimeSpawner, Sandbox, SubagentSpawner, ToolInvoker,
+    BackgroundTaskHandle, BudgetEnforcerHandle, FileSystem, FusionActivation, FusionCompletionSink,
+    FusionExecutor, ProcessRunner, RuntimeSpawner, Sandbox, SubagentSpawner, ToolInvoker,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -797,6 +797,13 @@ impl TaskRegistry {
         {
             fusion.effective_timeout_ms = Some(timeout_ms);
         }
+        if let (Some(summary), TaskState::LocalFusion(fusion)) =
+            (handle.fusion_prepared_summary.as_ref(), &mut state)
+        {
+            fusion.run_id = Some(summary.identity.run_id.to_string());
+            fusion.effective_timeout_ms = Some(summary.duration_ms);
+            fusion.planned_panels = summary.planned_panels;
+        }
         // 4. Publish every registry artifact as one transaction from the point
         //    of view of task readers. Holding the task write lock while the
         //    secondary guards are acquired prevents `list` / `get` / `kill`
@@ -829,11 +836,30 @@ impl TaskRegistry {
         self.fire_task_created(&id, task_type, &description_for_hook)
             .await;
 
-        // This is the commit point for handler-owned workers. Before this line,
-        // dropping the registry future drops the unconsumed activation and the
-        // prepared worker exits without starting. No await follows activation,
-        // so callers cannot observe a partially committed successful spawn.
-        handle.activate();
+        // This is the commit point for handler-owned workers. Capture the
+        // activation timestamps BEFORE the state write below: any scheduling
+        // delay after this point belongs to the already-running Fusion budget,
+        // while the awaited TaskCreated hook above does not. The Fusion worker
+        // receives the same monotonic instant through its activation callback.
+        let activation = FusionActivation::now();
+        let activation_start_time = SystemTime::now();
+        let fusion_deadline = handle.fusion_prepared_summary.as_ref().and_then(|summary| {
+            activation
+                .activated_at
+                .checked_add(std::time::Duration::from_millis(summary.duration_ms))
+        });
+        if handle.fusion_prepared_summary.is_some() {
+            let mut tasks = self.tasks.write().await;
+            if let Some(task) = tasks.get_mut(&id) {
+                task.base_mut().start_time = activation_start_time;
+                if let TaskState::LocalFusion(fusion) = task {
+                    fusion.fusion_activation_deadline = fusion_deadline;
+                }
+            }
+        }
+        // No await follows activation, so callers cannot observe a partially
+        // committed successful spawn.
+        handle.activate_at(activation);
         publication_guard.disarm();
 
         Ok(id)
@@ -2388,6 +2414,8 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             usage: None,
             stage: None,
             effective_timeout_ms: None,
+            planned_panels: None,
+            fusion_activation_deadline: None,
             publication_status: platform_api::FusionPublicationStatus::Pending,
             publication_error: None,
             result_published: false,

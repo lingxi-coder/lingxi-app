@@ -12,8 +12,10 @@ use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use async_trait::async_trait;
 use platform_api::{
-    BackgroundTaskHandle, BudgetEnforcerHandle, FusionCompletionSink, FusionError, FusionExecutor,
-    FusionInheritance, FusionPublicationReceipt, FusionResult, FusionStatus, RuntimeSpawner,
+    BackgroundTaskHandle, BudgetEnforcerHandle, FusionActivation, FusionCompletionSink,
+    FusionError, FusionExecutor, FusionInheritance, FusionOrigin, FusionPreparedSummary,
+    FusionPublicationReceipt, FusionResult, FusionRunFacts, FusionRunId, FusionRunIdentity,
+    FusionRunOutcome, FusionStatus, FusionSubmission, PreparedFusionRun, RuntimeSpawner,
     SubagentInheritance, ToolInvoker,
 };
 use std::collections::HashMap;
@@ -38,7 +40,7 @@ const FUSION_KILL_COMPLETION_GRACE: std::time::Duration = std::time::Duration::f
 struct WorkerCancel {
     handle: BackgroundTaskHandle,
     runtime: Arc<dyn RuntimeSpawner>,
-    cancel: CancellationToken,
+    control: platform_api::FusionRunControl,
     /// Worker completion signal, fired (via [`WorkerCompletionSignal`]'s
     /// `Drop`) once the spawned worker future is fully done — naturally, or
     /// forcibly on `runtime.cancel`'s own abort. `kill`/`drain_pending_kills`
@@ -46,7 +48,6 @@ struct WorkerCancel {
     /// back to the hard abort, so a cooperative `cancel()` gets a real chance
     /// to run `FusionOrchestrator::run`'s own finalize path (F012).
     completion_rx: StdMutex<Option<oneshot::Receiver<()>>>,
-    finalizing: bool,
 }
 
 /// Fires its held oneshot on drop, unconditionally — whichever path the
@@ -75,7 +76,7 @@ impl Drop for WorkerCompletionSignal {
 /// abort that bypasses `FusionOrchestrator::run`'s cooperative cancel branch —
 /// F012). Mirrors `local_workflow::cancel_workflow_worker`.
 async fn cancel_fusion_worker(rec: WorkerCancel) -> Result<(), TaskError> {
-    rec.cancel.cancel();
+    rec.control.cancel().cancel();
     let completion_rx = rec
         .completion_rx
         .lock()
@@ -103,7 +104,7 @@ async fn cancel_fusion_worker(rec: WorkerCancel) -> Result<(), TaskError> {
 /// of `spawn` purely to keep that function under the line-count lint — same
 /// ordering, same branches, same side effects.
 async fn finalize_fusion_outcome(
-    outcome: &Result<FusionResult, FusionError>,
+    outcome: &FusionRunOutcome,
     output_manager: &TaskOutputManager,
     worker_spool_path: &std::path::Path,
     worker_task_id: &str,
@@ -122,7 +123,7 @@ async fn finalize_fusion_outcome(
     // `platform_api::FusionProgress::egress_profiles`.
     last_egress_profiles: Option<Vec<String>>,
 ) {
-    match outcome {
+    match &outcome.result {
         Ok(result) => {
             let body =
                 serde_json::to_string_pretty(result).unwrap_or_else(|_| result.final_text.clone());
@@ -199,9 +200,10 @@ async fn finalize_fusion_outcome(
             // transition, so the notification drain (terminal-status-gated)
             // never observes a `Killed` task whose partial usage hasn't
             // landed yet.
-            disclose_partial_usage(
+            disclose_facts_or_partial_usage(
                 status_sink,
                 worker_task_id,
+                &outcome.facts,
                 last_realized_output_tokens,
                 last_egress_profiles,
             )
@@ -214,9 +216,10 @@ async fn finalize_fusion_outcome(
             let _ = output_manager
                 .append(worker_spool_path, &err.to_string())
                 .await;
-            disclose_partial_usage(
+            disclose_facts_or_partial_usage(
                 status_sink,
                 worker_task_id,
+                &outcome.facts,
                 last_realized_output_tokens,
                 last_egress_profiles,
             )
@@ -276,14 +279,53 @@ async fn disclose_partial_usage(
     }
 }
 
+/// Prefer the prepared run's reliable receipt on error. Progress remains only
+/// a compatibility fallback for a legacy executor whose adapter could not
+/// observe exact usage/counts.
+async fn disclose_facts_or_partial_usage(
+    status_sink: &Arc<dyn TaskStatusSink>,
+    worker_task_id: &str,
+    facts: &FusionRunFacts,
+    last_realized_output_tokens: Option<u64>,
+    last_egress_profiles: Option<Vec<String>>,
+) {
+    let mut egress = facts.confirmed_egress.clone();
+    egress.extend(facts.possible_egress.iter().cloned());
+    egress.sort();
+    egress.dedup();
+    let usage = facts
+        .usage
+        .as_ref()
+        .map(|usage| platform_api::task_registry::AgentRunUsage {
+            subagent_tokens: usage
+                .input_tokens
+                .saturating_add(usage.cache_write_tokens)
+                .saturating_add(usage.cache_read_tokens)
+                .saturating_add(usage.output_tokens),
+            tool_uses: u64::from(usage.provider_requests),
+            duration_ms: facts.timing.total_ms,
+        });
+    if usage.is_some() || !egress.is_empty() {
+        status_sink
+            .set_fusion_egress_and_usage(worker_task_id, egress, usage)
+            .await;
+        return;
+    }
+    disclose_partial_usage(
+        status_sink,
+        worker_task_id,
+        last_realized_output_tokens,
+        last_egress_profiles,
+    )
+    .await;
+}
+
 /// Owned inputs the fusion background worker future needs, collected into a
 /// struct so `spawn` can build it in one call instead of moving a dozen
 /// separate captures into the closure — the struct itself is what keeps
 /// `spawn` under the argument-count and line-count lints.
 struct FusionWorkerArgs {
-    executor: Arc<dyn FusionExecutor>,
-    inherit: FusionInheritance,
-    request: platform_api::FusionRequest,
+    prepared: Option<PreparedFusionRun>,
     conversation_id: String,
     sink: Arc<dyn FusionCompletionSink>,
     status_sink: Arc<dyn TaskStatusSink>,
@@ -291,7 +333,7 @@ struct FusionWorkerArgs {
     output_manager: Arc<TaskOutputManager>,
     worker_spool_path: std::path::PathBuf,
     worker_task_id: String,
-    activation_rx: Option<oneshot::Receiver<()>>,
+    activation_rx: Option<oneshot::Receiver<FusionActivation>>,
     /// Held for its `Drop` side effect only — fires the completion signal
     /// unconditionally once this future is done, whichever path it exits
     /// through. Never read.
@@ -306,9 +348,7 @@ struct FusionWorkerArgs {
 /// lint — same ordering, same finalize race handling, same side effects.
 async fn run_fusion_worker(args: FusionWorkerArgs) {
     let FusionWorkerArgs {
-        executor,
-        inherit,
-        request,
+        prepared,
         conversation_id,
         sink,
         status_sink,
@@ -319,12 +359,21 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
         activation_rx,
         completion_signal: _completion_signal,
     } = args;
-    if let Some(activation_rx) = activation_rx {
-        if activation_rx.await.is_err() {
-            workers.lock().await.remove(&worker_task_id);
-            return;
+    let activation = if let Some(activation_rx) = activation_rx {
+        match activation_rx.await {
+            Ok(activation) => activation,
+            Err(_) => {
+                workers.lock().await.remove(&worker_task_id);
+                return;
+            }
         }
-    }
+    } else {
+        FusionActivation::now()
+    };
+    let Some(prepared) = prepared else {
+        workers.lock().await.remove(&worker_task_id);
+        return;
+    };
     status_sink
         .set_status(&worker_task_id, TaskStatus::Running)
         .await;
@@ -339,17 +388,8 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
     let forward_task_id = worker_task_id.clone();
     // [Finding 14; round-3 review B2 follow-up] Track the LAST
     // `realized_output_tokens` AND `egress_profiles` the orchestrator emits
-    // (it does so when a post-fan-out failure follows real panel spend —
-    // `fusion::orchestrator::run_inner`'s `check_panel_bar` arm, and on the
-    // outer cancel/timeout choke point in `FusionOrchestrator::run`) so a
-    // terminal `Err` below can disclose what already egressed instead of
-    // the task notification silently omitting `<usage>`/`<egress-profiles>`
-    // for a run that really burned tokens and really reached those
-    // providers. `FusionError` itself carries neither payload, so these
-    // progress-channel values are the only carrier available at this seam.
-    // Only a `Some` overwrites the running latch — a later event with
-    // `None` (the ordinary case for most progress stages) must not erase
-    // an earlier `Some`.
+    // as a compatibility fallback for legacy executors. Reliable prepared
+    // facts are preferred at terminalization.
     let forwarder = tokio::spawn(async move {
         let mut last_realized_output_tokens: Option<u64> = None;
         let mut last_egress_profiles: Option<Vec<String>> = None;
@@ -367,30 +407,19 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
         (last_realized_output_tokens, last_egress_profiles)
     });
 
-    let outcome = executor.run(request, inherit, Some(prog_tx)).await;
+    // `PreparedFusionRun::activate` owns the common panic boundary and always
+    // publishes the terminal envelope. Do not wrap it here: an outer panic
+    // conversion could fabricate an outcome without publishing the control's
+    // terminal receipt, leaving quota/task waiters blocked forever.
+    let outcome = prepared.activate(activation, Some(prog_tx)).await;
     // Natural completion and TaskStop race on this same worker-map lock.
-    // Whichever removes/marks the record first owns the terminal
-    // transition. Once finalizing wins, kill must not abort the
-    // commit→completion-sink window.
-    //
-    // [Finding 18] Claim `finalizing` BEFORE `forwarder.await`, not after:
-    // the forwarder task must be rescheduled and can itself take
-    // contended registry locks per buffered stage event, so awaiting it
-    // first widens the race window in which a concurrent `kill` (which
-    // short-circuits only on `finalizing`) can see the record still
-    // un-claimed and discard an already-successful `Ok(FusionResult)` as
-    // `Killed` with none of its terminal side effects run. Claiming first
-    // makes `kill` land on the same "already finalizing" short-circuit
-    // whether it arrives before or during the forwarder drain; the
-    // forwarder's own stage writes are harmless either way since `kill`
-    // no longer touches the record once `finalizing` is set.
+    // The prepared control is the lifecycle authority. Once it reaches
+    // Finalizing or Terminal, kill cannot remove the record from underneath
+    // the commit→completion-sink window.
     let may_finalize = {
         let mut workers = workers.lock().await;
         match workers.get_mut(&worker_task_id) {
-            Some(rec) => {
-                rec.finalizing = true;
-                true
-            }
+            Some(_) => true,
             None => false,
         }
     };
@@ -411,9 +440,10 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
         // progress channel before the record was removed. A no-op when
         // nothing ever egressed (both `last_*` are `None`), matching
         // `disclose_partial_usage`'s own guard.
-        disclose_partial_usage(
+        disclose_facts_or_partial_usage(
             &status_sink,
             &worker_task_id,
+            &outcome.facts,
             last_realized_output_tokens,
             last_egress_profiles,
         )
@@ -491,10 +521,13 @@ impl LocalFusionHandler {
             }
             let rec = {
                 let mut workers = self.workers.lock().await;
-                if workers.get(&task_id).is_some_and(|rec| rec.finalizing) {
-                    None
-                } else {
+                let cancel_won = workers
+                    .get(&task_id)
+                    .is_some_and(|rec| rec.control.request_cancel());
+                if cancel_won {
                     workers.remove(&task_id)
+                } else {
+                    None
                 }
             };
             let Some(rec) = rec else { continue };
@@ -533,6 +566,19 @@ impl Task for LocalFusionHandler {
             ));
         };
 
+        // The task input is the host-trusted session identity. Validate it
+        // before allocating a spool or publishing any task artifacts so a
+        // malformed slash request cannot become an unscoped run or leave an
+        // orphaned output file behind. The task input is the only trusted
+        // source for the originating session; request text is compatibility
+        // data and never supplies identity.
+        let trusted_session = protocol::SessionId::parse_prefixed(&conversation_id);
+        if trusted_session.is_none() {
+            return Err(TaskError::Internal(
+                "fusion task conversation_id must be a valid session id".into(),
+            ));
+        }
+
         let task_id = crate::id::generate_task_id(TaskType::LocalFusion);
         let spool_path = self
             .output_manager
@@ -542,19 +588,51 @@ impl Task for LocalFusionHandler {
 
         let cancel = CancellationToken::new();
         let executor = self.executor.clone();
-        // Capture the executor's effective per-run timeout before the worker
-        // is handed to the registry. The same snapshot is carried through
-        // FusionInheritance so the orchestrator's actual deadline cannot
-        // diverge if settings change before activation.
-        let effective_timeout_ms = executor.effective_timeout_ms();
         let inherit = FusionInheritance::new(
             SubagentInheritance {
                 tool_invoker: self.tool_invoker.clone(),
                 budget: self.budget.clone(),
             },
             cancel.clone(),
-        )
-        .with_effective_timeout_ms(effective_timeout_ms);
+        );
+        let mut request = request;
+        // The task input is the host-trusted session identity. Keep request
+        // text from selecting another ledger (or silently becoming an
+        // unscoped legacy identity) by replacing the compatibility field with
+        // this value before preparation.
+        request.conversation_id = trusted_session.map(|_| conversation_id.clone());
+        let identity = FusionRunIdentity::new(
+            FusionRunId::generated(),
+            trusted_session,
+            FusionOrigin::Slash,
+            Some(task_id.clone()),
+        );
+        // Preparation failures are represented by an inert worker. Do not
+        // reload mutable settings merely to populate that fallback row.
+        let fallback_duration_ms = 0;
+        let fallback_summary = FusionPreparedSummary {
+            identity: identity.clone(),
+            duration_ms: fallback_duration_ms,
+            planned_panels: None,
+        };
+        let prepared = match executor.clone().prepare(FusionSubmission {
+            request,
+            inherit,
+            identity: identity.clone(),
+        }) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let control = platform_api::FusionRunControl::new(
+                    identity,
+                    fallback_duration_ms,
+                    cancel.clone(),
+                    platform_api::FusionRunFactsRecorder::default(),
+                );
+                PreparedFusionRun::failed(fallback_summary.clone(), control, error)
+            }
+        };
+        let prepared_summary = prepared.summary().clone();
+        let prepared_control = prepared.control();
         let sink = self.sink.clone();
         let status_sink = self.status_sink.clone();
         let workers = self.workers.clone();
@@ -570,9 +648,7 @@ impl Task for LocalFusionHandler {
         let (completion_tx, completion_rx) = oneshot::channel();
 
         let worker = Box::pin(run_fusion_worker(FusionWorkerArgs {
-            executor,
-            inherit,
-            request,
+            prepared: Some(prepared),
             conversation_id,
             sink,
             status_sink,
@@ -598,9 +674,8 @@ impl Task for LocalFusionHandler {
             WorkerCancel {
                 handle: bg_handle,
                 runtime: ctx.runtime.clone(),
-                cancel,
+                control: prepared_control,
                 completion_rx: StdMutex::new(Some(completion_rx)),
-                finalizing: false,
             },
         );
         drop(workers);
@@ -615,10 +690,10 @@ impl Task for LocalFusionHandler {
         });
 
         let handle =
-            TaskHandle::new(task_id, Some(cleanup)).with_fusion_timeout_ms(effective_timeout_ms);
+            TaskHandle::new(task_id, Some(cleanup)).with_fusion_prepared_summary(prepared_summary);
         Ok(match activation_tx {
-            Some(activation_tx) => handle.with_activation(move || {
-                let _ = activation_tx.send(());
+            Some(activation_tx) => handle.with_fusion_activation(move |activation| {
+                let _ = activation_tx.send(activation);
             }),
             None => handle,
         })
@@ -630,14 +705,21 @@ impl Task for LocalFusionHandler {
         }
         let rec = {
             let mut workers = self.workers.lock().await;
-            if workers.get(task_id).is_some_and(|rec| rec.finalizing) {
+            let Some(rec) = workers.get(task_id) else {
+                return Ok(());
+            };
+            // Claim cancellation atomically with the lifecycle phase check.
+            // A separate is_finalizing()/is_terminal() read lets natural
+            // finalization win immediately afterward while kill still removes
+            // the worker and suppresses publication.
+            if !rec.control.request_cancel() {
                 return Ok(());
             }
-            workers.remove(task_id)
+            workers
+                .remove(task_id)
+                .expect("worker record was present for the cancellation claim")
         };
-        if let Some(rec) = rec {
-            cancel_fusion_worker(rec).await?;
-        }
+        cancel_fusion_worker(rec).await?;
         if !self.status_sink.is_terminal(task_id).await {
             self.status_sink
                 .set_status(task_id, TaskStatus::Killed)

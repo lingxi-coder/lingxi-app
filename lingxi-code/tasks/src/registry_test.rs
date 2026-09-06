@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 use tempfile::tempdir;
 use test_harness::mocks::MockRuntimeSpawner;
+use tokio::sync::oneshot;
 
 // ---- In-memory FileSystem (mirrors the other handler/registry tests) ----
 
@@ -1119,6 +1120,53 @@ struct CancellationActivationHandler {
     cleanup_calls: Arc<AtomicUsize>,
 }
 
+struct FusionActivationTimestampHandler {
+    task_id: String,
+    activation_tx: StdMutex<Option<oneshot::Sender<tokio::time::Instant>>>,
+}
+
+#[async_trait]
+impl Task for FusionActivationTimestampHandler {
+    fn name(&self) -> &str {
+        "fusion-activation-timestamp"
+    }
+
+    fn task_type(&self) -> TaskType {
+        TaskType::LocalFusion
+    }
+
+    async fn spawn(
+        &self,
+        _input: TaskSpawnInput,
+        _ctx: TaskContext,
+    ) -> Result<TaskHandle, TaskError> {
+        let task_id = self.task_id.clone();
+        let identity = platform_api::FusionRunIdentity::new(
+            platform_api::FusionRunId::generated(),
+            None,
+            platform_api::FusionOrigin::Slash,
+            Some(task_id.clone()),
+        );
+        let summary = platform_api::FusionPreparedSummary {
+            identity,
+            duration_ms: 1_000,
+            planned_panels: Some(3),
+        };
+        let activation_tx = self.activation_tx.lock().unwrap().take();
+        Ok(TaskHandle::new(task_id, None)
+            .with_fusion_prepared_summary(summary)
+            .with_fusion_activation(move |activation| {
+                if let Some(tx) = activation_tx {
+                    let _ = tx.send(activation.activated_at);
+                }
+            }))
+    }
+
+    async fn kill(&self, _task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl Task for CancellationActivationHandler {
     fn name(&self) -> &str {
@@ -1308,6 +1356,93 @@ async fn spawn_activates_worker_only_after_full_registration_and_task_created() 
     assert!(
         activated.load(Ordering::SeqCst),
         "registry activates the prepared worker before returning"
+    );
+}
+
+#[tokio::test]
+async fn fusion_activation_timestamp_is_published_after_task_created_hook() {
+    let (_d, mut registry) = make_registry();
+    let firer = GatedCreatedFirer::new();
+    registry = registry.with_task_created_firer(firer.clone());
+    let (activation_tx, mut activation_rx) = oneshot::channel();
+    registry.register_handler(
+        TaskType::LocalFusion,
+        Arc::new(FusionActivationTimestampHandler {
+            task_id: "factivation".into(),
+            activation_tx: StdMutex::new(Some(activation_tx)),
+        }),
+    );
+    let registry = Arc::new(registry);
+
+    let spawn_registry = registry.clone();
+    let spawn = tokio::spawn(async move {
+        spawn_registry
+            .spawn(
+                TaskType::LocalFusion,
+                TaskSpawnInput::LocalFusion {
+                    request: platform_api::FusionRequest {
+                        schema_version: 1,
+                        origin: platform_api::FusionOrigin::Slash,
+                        prompt: "review this".into(),
+                        preset: platform_api::FusionPreset::Quality,
+                        models: None,
+                        dimensions: vec!["coverage".into()],
+                        partial_ok: true,
+                        max_panel: None,
+                        cross_provider: false,
+                        parent_profile: "openai".into(),
+                        parent_model: "gpt-5.4".into(),
+                        conversation_id: Some("11111111-2222-4333-8444-555555555555".into()),
+                        workflow_run_id: None,
+                    },
+                    conversation_id: "11111111-2222-4333-8444-555555555555".into(),
+                },
+                "Fusion quality same-provider: review this".into(),
+            )
+            .await
+    });
+    firer
+        .started
+        .acquire()
+        .await
+        .expect("TaskCreated hook starts")
+        .forget();
+    assert!(
+        activation_rx.try_recv().is_err(),
+        "the worker must not activate while TaskCreated is still waiting"
+    );
+    let hook_release_at = SystemTime::now();
+    firer.release.add_permits(1);
+
+    let task_id = spawn
+        .await
+        .expect("spawn task joins")
+        .expect("spawn succeeds");
+    let activated_at = activation_rx
+        .await
+        .expect("registry passes the captured Fusion activation instant");
+    let state = registry
+        .get(&task_id)
+        .await
+        .expect("Fusion state remains published");
+    let TaskState::LocalFusion(fusion) = state else {
+        panic!("expected LocalFusion state");
+    };
+    assert!(
+        fusion.base.start_time <= SystemTime::now(),
+        "activation wall time is published before spawn returns"
+    );
+    assert!(
+        fusion
+            .base
+            .start_time
+            .duration_since(hook_release_at)
+            .is_ok(),
+        "TaskCreated hook time must not be published as Fusion start time"
+    );
+    assert!(
+        activated_at <= tokio::time::Instant::now(),
+        "the captured monotonic activation instant is not taken after worker scheduling"
     );
 }
 
@@ -1868,6 +2003,8 @@ fn local_fusion_state_for_test(id: &str, output_dir: &std::path::Path) -> TaskSt
         usage: None,
         stage: None,
         effective_timeout_ms: None,
+        planned_panels: None,
+        fusion_activation_deadline: None,
         publication_status: platform_api::FusionPublicationStatus::Pending,
         publication_error: None,
         result_published: false,

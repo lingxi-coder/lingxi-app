@@ -12,19 +12,18 @@ use platform_api::subagent_spawn::{
     SubagentSpawnRequest, SubagentSpawner, SubagentUsage, SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX,
 };
 use platform_api::{
-    validate_panel_report, FusionError, FusionInheritance, FusionProgress, FusionStage,
-    FusionUsage, PanelReport, PanelRunStatus, WorkflowQueryWatchdog, FUSION_MIN_PANEL,
+    validate_panel_report, FusionError, FusionInheritance, FusionProgress, FusionRunFactsRecorder,
+    FusionStage, FusionUsage, PanelReport, PanelRunStatus, WorkflowQueryWatchdog, FUSION_MIN_PANEL,
     FUSION_PANEL_TYPE,
 };
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Notify;
-use tokio::task::JoinSet;
-use tokio::time::timeout;
+use tokio::task::{AbortHandle, JoinSet};
+use tokio::time::{Duration, Instant};
 
 /// [Round-4 rework, item 2] Live sink for a panel stage's realized spend,
 /// updated by `run_panels` after EVERY panel reaches a terminal outcome
@@ -52,6 +51,9 @@ pub struct RealizedSpendSink<'a> {
     pub parent_profile: &'a str,
     pub parent_model: &'a str,
     pub request_prompt: &'a str,
+    pub reserved_max_nano_usd: u64,
+    pub facts: FusionRunFactsRecorder,
+    pub started: Instant,
 }
 
 impl RealizedSpendSink<'_> {
@@ -91,29 +93,77 @@ impl RealizedSpendSink<'_> {
         if let Ok(mut guard) = self.resolved_egress.lock() {
             *guard = dispatched_profiles_so_far(collected, &in_flight);
         }
-        if let Ok(mut guard) = self.settlement.lock() {
-            // `price_realized_usage` prices a `&[PanelInternal]`, not the
-            // `(index, PanelInternal)` pairs `collected` holds — a small
-            // clone of whatever has finished so far (never more than
-            // `total` panels) is cheap next to the provider round-trips
-            // that produced them.
-            let mut priced_so_far: Vec<PanelInternal> =
-                collected.iter().map(|(_, panel)| panel.clone()).collect();
-            priced_so_far.extend(in_flight.iter().cloned());
-            *guard = Some(price_realized_usage(
-                self.catalog,
-                self.prices,
-                &priced_so_far,
-                self.analyst,
-                None,
-                false,
-                self.parent_profile,
-                self.parent_model,
-                None,
-                false,
-                self.request_prompt,
-            ));
+        self.facts
+            .set_allocated_panels(u8::try_from(dispatch.allocated_count()).unwrap_or(u8::MAX));
+        self.facts
+            .set_dispatched_panels(u8::try_from(dispatch.reached_count()).unwrap_or(u8::MAX));
+        let mut observed: Vec<PanelInternal> =
+            collected.iter().map(|(_, panel)| panel.clone()).collect();
+        observed.extend(in_flight.iter().cloned());
+        let mut usage = crate::orchestrator::aggregate_panel_usage(&observed);
+        let incomplete = !in_flight.is_empty()
+            || collected.iter().any(|(_, panel)| {
+                !is_never_dispatched_category(panel.error_category.as_deref())
+                    && panel.usage.as_ref().is_none_or(|usage| usage.estimated)
+            });
+        let previous_priced = self
+            .settlement
+            .lock()
+            .ok()
+            .and_then(|guard| *guard)
+            .unwrap_or((0, true));
+        usage.realized_nano_usd = previous_priced.0;
+        usage.reserved_max_nano_usd = self.reserved_max_nano_usd;
+        // Latch provider-returned tokens/counts before consulting the injected
+        // price book. If pricing panics, the supervisor still publishes these
+        // reliable facts and settles the last successfully priced snapshot.
+        usage.estimated = true;
+        self.facts.replace_usage(usage.clone(), true);
+        if incomplete {
+            self.facts.mark_attempts_unknown();
+        } else {
+            self.facts.replace_attempts(Some(usage.provider_requests));
         }
+        self.facts.replace_possible_egress(
+            dispatched_profiles_so_far(collected, &in_flight).unwrap_or_default(),
+        );
+        for panel in collected.iter().map(|(_, panel)| panel).filter(|panel| {
+            panel
+                .usage
+                .as_ref()
+                .is_some_and(|usage| !usage.estimated || usage.provider_requests > 0)
+        }) {
+            self.facts.add_confirmed_egress(panel.profile.clone());
+        }
+        self.facts.set_timing(platform_api::FusionTiming {
+            total_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            ..Default::default()
+        });
+
+        // `price_realized_usage` is injected/panicable. It deliberately runs
+        // after every non-monetary fact above is durable in the recorder.
+        let mut priced_so_far: Vec<PanelInternal> =
+            collected.iter().map(|(_, panel)| panel.clone()).collect();
+        priced_so_far.extend(in_flight.iter().cloned());
+        let priced = price_realized_usage(
+            self.catalog,
+            self.prices,
+            &priced_so_far,
+            self.analyst,
+            None,
+            false,
+            self.parent_profile,
+            self.parent_model,
+            None,
+            false,
+            self.request_prompt,
+        );
+        if let Ok(mut guard) = self.settlement.lock() {
+            *guard = Some(priced);
+        }
+        usage.realized_nano_usd = priced.0;
+        usage.estimated = priced.1 || incomplete;
+        self.facts.replace_usage(usage, priced.1 || incomplete);
     }
 }
 
@@ -318,6 +368,13 @@ impl PanelDispatch {
             .count()
     }
 
+    fn reached_count(&self) -> usize {
+        self.reached
+            .iter()
+            .filter(|flag| flag.load(Ordering::SeqCst))
+            .count()
+    }
+
     fn any_reached_spawner(&self) -> bool {
         self.reached.iter().any(|flag| flag.load(Ordering::SeqCst))
     }
@@ -352,12 +409,18 @@ struct PanelAllocationObserver {
     index: usize,
     progress: Option<Sender<FusionProgress>>,
     total: usize,
+    facts: Option<FusionRunFactsRecorder>,
 }
 
 impl PanelAllocationObserver {
     fn publish_allocation(&self) {
         if !self.dispatch.mark_allocated(self.index) {
             return;
+        }
+        if let Some(facts) = &self.facts {
+            facts.set_allocated_panels(
+                u8::try_from(self.dispatch.allocated_count()).unwrap_or(u8::MAX),
+            );
         }
         let stage = FusionStage::PanelsDispatched {
             total: u8::try_from(self.total).unwrap_or(u8::MAX),
@@ -504,6 +567,71 @@ pub fn panel_report_json_schema() -> Value {
 /// slot's [`PanelInternal`]), how long it ran, and how it finished.
 type PanelTaskOutput = (usize, ResolvedPanel, String, Duration, PanelFinish);
 
+/// Supervisor-visible completion barrier for panel tasks.
+///
+/// `JoinSet::drop` requests abort but does not wait for each task future to be
+/// dropped. Keeping this barrier outside the orchestration future lets the
+/// owned Fusion supervisor wait until synchronous allocation callbacks and
+/// task-local cleanup can no longer mutate terminal facts, including when the
+/// orchestration future itself panics.
+#[derive(Clone, Default)]
+pub(crate) struct PanelTaskBarrier {
+    inner: Arc<PanelTaskBarrierInner>,
+}
+
+#[derive(Default)]
+struct PanelTaskBarrierInner {
+    abort_handles: Mutex<Vec<AbortHandle>>,
+    active: AtomicUsize,
+    drained: Notify,
+}
+
+struct PanelTaskDone(Arc<PanelTaskBarrierInner>);
+
+impl Drop for PanelTaskDone {
+    fn drop(&mut self) {
+        if self.0.active.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.drained.notify_one();
+        }
+    }
+}
+
+impl PanelTaskBarrier {
+    fn begin(&self) -> PanelTaskDone {
+        self.inner.active.fetch_add(1, Ordering::SeqCst);
+        PanelTaskDone(Arc::clone(&self.inner))
+    }
+
+    fn register(&self, handle: AbortHandle) {
+        self.inner
+            .abort_handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(handle);
+    }
+
+    pub(crate) async fn abort_and_wait(&self) {
+        let handles = {
+            let mut handles = self
+                .inner
+                .abort_handles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *handles)
+        };
+        for handle in handles {
+            handle.abort();
+        }
+        loop {
+            let drained = self.inner.drained.notified();
+            if self.inner.active.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            drained.await;
+        }
+    }
+}
+
 /// The stall-detector deadline passed to each panel's [`WorkflowQueryWatchdog`].
 ///
 /// Must never exceed `panel_total_timeout_ms`: the panel's own hard timeout
@@ -535,7 +663,7 @@ fn spawn_panel_tasks(
     config: &FusionRuntimeConfig,
     panels: &[ResolvedPanel],
     run_id: &str,
-    overall_deadline: Duration,
+    overall_deadline_at: Instant,
     schema: &str,
     generic_prompt: &str,
     max_input_bytes: u64,
@@ -545,6 +673,8 @@ fn spawn_panel_tasks(
     // — flipped a second time from the spawner's own `Allocated`
     // observation once a child really exists. See `PanelDispatch`.
     dispatch: &Arc<PanelDispatch>,
+    facts: Option<&FusionRunFactsRecorder>,
+    task_barrier: &PanelTaskBarrier,
 ) -> (JoinSet<PanelTaskOutput>, HashMap<tokio::task::Id, usize>) {
     let mut join_set = JoinSet::new();
     let mut task_index: HashMap<tokio::task::Id, usize> = HashMap::with_capacity(panels.len());
@@ -556,6 +686,11 @@ fn spawn_panel_tasks(
     // `anonymize` will use, so `Fusion P{n}` in the Runtime Center and
     // `P{n}` in the reported outcome always name the same panel.
     let anon_rank = anon_rank_by_spawn_index(run_id, panels.len());
+    let panel_deadline = Instant::now()
+        .checked_add(Duration::from_millis(config.panel_total_timeout_ms))
+        .map_or(overall_deadline_at, |deadline| {
+            deadline.min(overall_deadline_at)
+        });
     let progress = progress.clone();
     for (index, panel) in panels.iter().cloned().enumerate() {
         let spawner = Arc::clone(spawner);
@@ -567,8 +702,6 @@ fn spawn_panel_tasks(
         let run_id = run_id.to_string();
         let max_turns = config.panel_max_turns;
         let max_out = config.panel_max_output_tokens_per_turn;
-        let panel_total_timeout =
-            Duration::from_millis(config.panel_total_timeout_ms).min(overall_deadline);
         let panel_watchdog = WorkflowQueryWatchdog {
             stall_timeout_ms: panel_stall_timeout_ms(config),
             max_retries: 0,
@@ -577,7 +710,10 @@ fn spawn_panel_tasks(
         let dispatch = Arc::clone(dispatch);
         let progress = progress.clone();
         let total = panels.len();
+        let facts = facts.cloned();
+        let task_done = task_barrier.begin();
         let abort_handle = join_set.spawn(async move {
+            let _task_done = task_done;
             let started = Instant::now();
             let request = spawn_request(
                 &panel,
@@ -594,65 +730,79 @@ fn spawn_panel_tasks(
                 tool_invoker: subagent.tool_invoker,
                 budget: subagent.budget,
             };
-            let outcome = tokio::select! {
-                biased;
-                // [Round-5 review item 16] A cancel that lands before this
-                // task ever called the spawner made no provider call, so it
-                // must NOT be settled with the in-flight estimate the
-                // mid-flight cancel below legitimately gets.
-                () = cancel.cancelled() => PanelFinish::Cancelled {
-                    dispatched: dispatch.reached_spawner(index),
-                },
-                result = timeout(
-                    panel_total_timeout,
-                    // [Round-5 review items 8/12] The mark lives INSIDE this
-                    // future's body, not beside the `select!`: a `select!`
-                    // branch expression is built eagerly (even when the
-                    // biased cancel arm above wins), while this line runs
-                    // only once this branch is actually polled — i.e. only
-                    // once the spawner call is genuinely about to be made.
-                    async {
-                        dispatch.mark(index);
-                        // [Round-6 blocking B1] The `observer` slot, which
-                        // used to be `None`, is what turns "we called the
-                        // spawner" into "a subagent exists": the pool emits
-                        // `Allocated` the instant it hands this panel a
-                        // child slot. Without it, a panel killed by the bar
-                        // while still INSIDE a slow rejection (the spawner
-                        // connects the panel's inline MCP servers before it
-                        // can refuse) was indistinguishable from one cut
-                        // down mid-stream.
-                        let allocation_observer: Arc<dyn SubagentSpawnObserver> =
-                            Arc::new(PanelAllocationObserver {
-                                dispatch: Arc::clone(&dispatch),
-                                index,
-                                progress: progress.clone(),
-                                total,
-                            });
-                        spawner
-                            .spawn_workflow_with_observer(
-                                request,
-                                inherit,
-                                None,
-                                Some(allocation_observer),
-                                panel_watchdog,
-                            )
-                            .await
+            let outcome = if panel_deadline <= Instant::now() {
+                PanelFinish::TotalTimedOut
+            } else {
+                tokio::select! {
+                    biased;
+                    // [Round-5 review item 16] A cancel that lands before this
+                    // task ever called the spawner made no provider call, so it
+                    // must NOT be settled with the in-flight estimate the
+                    // mid-flight cancel below legitimately gets.
+                    () = cancel.cancelled() => PanelFinish::Cancelled {
+                        dispatched: dispatch.reached_spawner(index),
                     },
-                ) => {
-                    match result {
-                        Ok(Ok(terminal)) => PanelFinish::Done(terminal),
-                        Ok(Err(err)) => PanelFinish::Failed {
-                            category: "spawn".into(),
-                            detail: Some(sanitize_detail(&err.to_string())),
+                    result = tokio::time::timeout_at(
+                        panel_deadline,
+                        // [Round-5 review items 8/12] The mark lives INSIDE this
+                        // future's body, not beside the `select!`: a `select!`
+                        // branch expression is built eagerly (even when the
+                        // biased cancel arm above wins), while this line runs
+                        // only once this branch is actually polled — i.e. only
+                        // once the spawner call is genuinely about to be made.
+                        async {
+                            dispatch.mark(index);
+                            if let Some(facts) = &facts {
+                                facts.set_dispatched_panels(
+                                    u8::try_from(dispatch.reached_count()).unwrap_or(u8::MAX),
+                                );
+                                facts.mark_attempts_unknown();
+                                facts.add_possible_egress(panel.profile.clone());
+                            }
+                            // [Round-6 blocking B1] The `observer` slot, which
+                            // used to be `None`, is what turns "we called the
+                            // spawner" into "a subagent exists": the pool emits
+                            // `Allocated` the instant it hands this panel a
+                            // child slot. Without it, a panel killed by the bar
+                            // while still INSIDE a slow rejection (the spawner
+                            // connects the panel's inline MCP servers before it
+                            // can refuse) was indistinguishable from one cut
+                            // down mid-stream.
+                            let allocation_observer: Arc<dyn SubagentSpawnObserver> =
+                                Arc::new(PanelAllocationObserver {
+                                    dispatch: Arc::clone(&dispatch),
+                                    index,
+                                    progress: progress.clone(),
+                                    total,
+                                    facts: facts.clone(),
+                                });
+                            spawner
+                                .spawn_workflow_with_observer(
+                                    request,
+                                    inherit,
+                                    None,
+                                    Some(allocation_observer),
+                                    panel_watchdog,
+                                )
+                                .await
                         },
-                        Err(_) => PanelFinish::TotalTimedOut,
+                    ) => {
+                        match result {
+                            Ok(Ok(terminal)) => PanelFinish::Done(terminal),
+                            Ok(Err(err)) => PanelFinish::Failed {
+                                category: "spawn".into(),
+                                detail: Some(sanitize_detail(&err.to_string())),
+                            },
+                            Err(_) => PanelFinish::TotalTimedOut,
+                        }
                     }
                 }
             };
             (index, panel, spawn_prompt, started.elapsed(), outcome)
         });
-        task_index.insert(abort_handle.id(), index);
+        let task_id = abort_handle.id();
+        task_barrier.register(abort_handle);
+        task_index.insert(task_id, index);
     }
     (join_set, task_index)
 }
@@ -699,6 +849,38 @@ pub async fn run_panels(
     run_id: &str,
     overall_deadline: Duration,
     progress: &Option<Sender<FusionProgress>>,
+    sink: Option<&RealizedSpendSink<'_>>,
+) -> Result<Vec<PanelInternal>, FusionError> {
+    let task_barrier = PanelTaskBarrier::default();
+    let result = run_panels_supervised(
+        spawner,
+        inherit,
+        config,
+        partial_ok,
+        task_prompt,
+        panels,
+        run_id,
+        overall_deadline,
+        progress,
+        sink,
+        &task_barrier,
+    )
+    .await;
+    task_barrier.abort_and_wait().await;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_panels_supervised(
+    spawner: Arc<dyn SubagentSpawner>,
+    inherit: &FusionInheritance,
+    config: &FusionRuntimeConfig,
+    partial_ok: bool,
+    task_prompt: &str,
+    panels: &[ResolvedPanel],
+    run_id: &str,
+    overall_deadline: Duration,
+    progress: &Option<Sender<FusionProgress>>,
     // [Round-4 rework, item 2] `None` in tests that don't exercise the
     // survives-a-drop cells; `Some` from `FusionOrchestrator::run_panel_stage`
     // on every real run, so a cancel landing mid-fan-out — see the four
@@ -707,6 +889,7 @@ pub async fn run_panels(
     // still leaves them holding whatever really happened before it did. See
     // `RealizedSpendSink`.
     sink: Option<&RealizedSpendSink<'_>>,
+    task_barrier: &PanelTaskBarrier,
 ) -> Result<Vec<PanelInternal>, FusionError> {
     let schema = serde_json::to_string(&panel_report_json_schema()).unwrap_or_default();
     let total = panels.len();
@@ -750,18 +933,22 @@ pub async fn run_panels(
     // call from one the pool actually allocated a child for. See
     // `PanelDispatch`.
     let dispatch = Arc::new(PanelDispatch::new(total));
+    let now = Instant::now();
+    let overall_deadline_at = now.checked_add(overall_deadline).unwrap_or(now);
     let (mut join_set, task_index) = spawn_panel_tasks(
         &spawner,
         inherit,
         config,
         panels,
         run_id,
-        overall_deadline,
+        overall_deadline_at,
         &schema,
         &generic_prompt,
         max_input_bytes,
         progress,
         &dispatch,
+        sink.map(|sink| &sink.facts),
+        task_barrier,
     );
 
     let mut collected: Vec<(usize, PanelInternal)> = Vec::with_capacity(total);
@@ -1498,9 +1685,9 @@ fn usage_from_subagent(
 /// successfully BEFORE the terminating failure (provider error, idle-timeout
 /// watchdog, max-turns / structured-output-retry give-up). Unlike
 /// [`usage_from_subagent`] there is no per-turn `assistant_message_count`
-/// available on this path, so `provider_requests` stays `0` (a known,
-/// bounded under-count of the flat per-request fee only — the token counts,
-/// the dominant cost component, are real). Always `estimated: true`: the
+/// available on this path. Non-zero provider-returned cumulative usage still
+/// proves at least one request, so `provider_requests` records that lower
+/// bound; an all-zero payload remains unknown. Always `estimated: true`: the
 /// failing turn's own cost (if the provider billed it at all before erroring)
 /// is never captured here, so this is a floor on real spend, not the exact
 /// total.
@@ -1528,12 +1715,19 @@ fn estimate_in_flight_usage(spawn_prompt: &str) -> FusionUsage {
 }
 
 fn usage_from_failed_subagent(usage: &SubagentUsage) -> FusionUsage {
+    let provider_reported_usage = usage.total_tokens > 0
+        || usage.input_tokens > 0
+        || usage.output_tokens > 0
+        || usage.reasoning_output_tokens > 0
+        || usage.cache_read_input_tokens > 0
+        || usage.cache_creation_input_tokens > 0;
     FusionUsage {
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         reasoning_tokens: usage.reasoning_output_tokens,
         cache_read_tokens: usage.cache_read_input_tokens,
         cache_write_tokens: usage.cache_creation_input_tokens,
+        provider_requests: u32::from(provider_reported_usage),
         estimated: true,
         ..FusionUsage::default()
     }
@@ -2004,6 +2198,10 @@ out the nudge-give-up path"
             priced.input_tokens, 700,
             "must price the REAL provider-reported token counts (via \
 usage_from_failed_subagent), not a prompt-length estimate"
+        );
+        assert_eq!(
+            priced.provider_requests, 1,
+            "non-zero provider-returned usage proves at least one egress attempt"
         );
     }
 
@@ -3017,11 +3215,13 @@ subagent exists for it"
     #[tokio::test]
     async fn only_the_allocated_observation_flips_the_allocated_flag() {
         let dispatch = Arc::new(PanelDispatch::new(2));
+        let facts = FusionRunFactsRecorder::default();
         let observer = PanelAllocationObserver {
             dispatch: Arc::clone(&dispatch),
             index: 1,
             progress: None,
             total: 2,
+            facts: Some(facts.clone()),
         };
         observer.on_event(observation("progress")).await;
         assert!(
@@ -3038,6 +3238,11 @@ exists for panel 1"
         assert!(
             !dispatch.allocated(0),
             "one panel's allocation must never be credited to a sibling index"
+        );
+        assert_eq!(
+            facts.snapshot().allocated_panels,
+            Some(1),
+            "the synchronous allocation receipt must update reliable facts"
         );
         assert!(
             !dispatch.reached_spawner(1),
@@ -3142,6 +3347,14 @@ mod cancel_drain_settlement_tests {
         }
     }
 
+    struct PanicPrices;
+
+    impl FusionPriceBook for PanicPrices {
+        fn rates_for(&self, _profile: &str, _model: &str) -> Option<ModelRates> {
+            panic!("injected late panel pricing panic")
+        }
+    }
+
     const REAL_INPUT_TOKENS: u64 = 180_000;
     const REAL_OUTPUT_TOKENS: u64 = 24_000;
 
@@ -3222,6 +3435,9 @@ mod cancel_drain_settlement_tests {
                 parent_profile: "anthropic",
                 parent_model: "claude-sonnet-5",
                 request_prompt: "task",
+                reserved_max_nano_usd: 0,
+                facts: FusionRunFactsRecorder::default(),
+                started: Instant::now(),
             }
         }
 
@@ -3255,6 +3471,65 @@ mod cancel_drain_settlement_tests {
         llm_client::model::count_tokens::approximate_tokens_for_bytes(
             panel_prompt("task").len() as u64
         )
+    }
+
+    #[test]
+    fn provider_usage_facts_are_latched_before_panel_pricing_can_panic() {
+        let realized_tokens = Arc::new(Mutex::new(None));
+        let resolved_egress = Arc::new(Mutex::new(None));
+        let settlement = Arc::new(Mutex::new(Some((17, true))));
+        let facts = FusionRunFactsRecorder::default();
+        let analyst = ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        };
+        let prices = PanicPrices;
+        let catalog = Vec::<CatalogModel>::new();
+        let sink = RealizedSpendSink {
+            realized_tokens: &realized_tokens,
+            resolved_egress: &resolved_egress,
+            settlement: &settlement,
+            catalog: &catalog,
+            prices: &prices,
+            analyst: &analyst,
+            parent_profile: "anthropic",
+            parent_model: "claude-sonnet-5",
+            request_prompt: "task",
+            reserved_max_nano_usd: 99,
+            facts: facts.clone(),
+            started: Instant::now(),
+        };
+        let panels = vec![ResolvedPanel {
+            profile: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        }];
+        let dispatch = PanelDispatch::new(1);
+        dispatch.mark(0);
+        assert!(dispatch.mark_allocated(0));
+        let completed = finish_panel(
+            0,
+            panels[0].clone(),
+            panel_prompt("task"),
+            Duration::from_millis(1),
+            PanelFinish::Done(completed_with_real_usage()),
+        );
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sink.update(&[(0, completed)], &panels, &panel_prompt("task"), &dispatch);
+        }));
+        assert!(panic.is_err());
+
+        let snapshot = facts.snapshot();
+        let usage = snapshot
+            .usage
+            .expect("provider-returned usage must survive a pricing panic");
+        assert_eq!(usage.input_tokens, REAL_INPUT_TOKENS);
+        assert_eq!(usage.output_tokens, REAL_OUTPUT_TOKENS);
+        assert_eq!(usage.provider_requests, 3);
+        assert_eq!(usage.realized_nano_usd, 17);
+        assert_eq!(snapshot.allocated_panels, Some(1));
+        assert_eq!(snapshot.dispatched_panels, Some(1));
+        assert_eq!(snapshot.confirmed_egress, vec!["anthropic"]);
     }
 
     /// The first panel to reach the spawner finishes with real,

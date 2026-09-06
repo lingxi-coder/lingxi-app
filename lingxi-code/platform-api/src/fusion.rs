@@ -13,10 +13,15 @@
 use crate::budget::BudgetEnforcerHandle;
 use crate::subagent_spawn::SubagentInheritance;
 use async_trait::async_trait;
+use futures_core::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::watch;
+use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 /// Wire / persistence schema version for Fusion DTOs.
@@ -239,6 +244,902 @@ impl FusionInheritance {
     #[must_use]
     pub fn budget(&self) -> Arc<dyn BudgetEnforcerHandle> {
         Arc::clone(&self.subagent.budget)
+    }
+}
+
+/// Validated identity minted for one Fusion computation.
+///
+/// The wire format is intentionally kept opaque: current production ids are
+/// `fu_` followed by a compact UUID, while callers and persisted reports only
+/// need a stable, validated string. This avoids coupling platform-api to the
+/// orchestrator's id generator while still rejecting accidental empty or
+/// cross-run ids at the boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct FusionRunId(String);
+
+impl FusionRunId {
+    /// Mint a production-compatible id.
+    #[must_use]
+    pub fn generated() -> Self {
+        Self(format!("fu_{}", uuid::Uuid::new_v4().simple()))
+    }
+
+    /// Validate and retain an existing id.
+    pub fn parse(value: impl Into<String>) -> Result<Self, FusionError> {
+        let value = value.into();
+        let valid = value.strip_prefix("fu_").is_some_and(|suffix| {
+            suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
+        });
+        if valid {
+            Ok(Self(value))
+        } else {
+            Err(FusionError::InvalidRequest(
+                "fusion run id must be `fu_` followed by 32 hexadecimal characters".into(),
+            ))
+        }
+    }
+
+    /// Borrow the wire spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for FusionRunId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for FusionRunId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Trusted identity shared by every Fusion entrypoint and terminal outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FusionRunIdentity {
+    /// Stable `fu_…` run id.
+    pub run_id: FusionRunId,
+    /// Trusted originating session. `None` is retained for legacy/unit callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<protocol::SessionId>,
+    /// Entry surface that started this computation.
+    pub origin: FusionOrigin,
+    /// Opaque host operation id (Agent invocation, task id, or workflow run).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_operation_id: Option<String>,
+}
+
+impl FusionRunIdentity {
+    /// Construct an identity after validating the run id and request origin.
+    pub fn new(
+        run_id: FusionRunId,
+        session_id: Option<protocol::SessionId>,
+        origin: FusionOrigin,
+        parent_operation_id: Option<String>,
+    ) -> Self {
+        Self {
+            run_id,
+            session_id,
+            origin,
+            parent_operation_id,
+        }
+    }
+
+    /// Build a legacy identity from a request's optional conversation id.
+    pub fn for_legacy_request(
+        request: &FusionRequest,
+        parent_operation_id: Option<String>,
+    ) -> Result<Self, FusionError> {
+        let session_id = match request.conversation_id.as_deref() {
+            None => None,
+            Some(raw) => Some(protocol::SessionId::parse_prefixed(raw).ok_or_else(|| {
+                FusionError::InvalidRequest(
+                    "fusion conversation_id must be a prefixed session id".into(),
+                )
+            })?),
+        };
+        Ok(Self::new(
+            FusionRunId::generated(),
+            session_id,
+            request.origin,
+            parent_operation_id,
+        ))
+    }
+}
+
+/// Immutable request/inheritance handoff consumed by `prepare`.
+#[derive(Clone)]
+pub struct FusionSubmission {
+    /// Caller request DTO. Its string session field is compatibility data only
+    /// once `identity.session_id` is present.
+    pub request: FusionRequest,
+    /// Parent handles captured by the caller.
+    pub inherit: FusionInheritance,
+    /// Trusted identity supplied by the host.
+    pub identity: FusionRunIdentity,
+}
+
+impl FusionSubmission {
+    /// Construct and reject a request whose legacy session disagrees with the
+    /// trusted identity.
+    pub fn new(
+        request: FusionRequest,
+        inherit: FusionInheritance,
+        identity: FusionRunIdentity,
+    ) -> Result<Self, FusionError> {
+        if request.origin != identity.origin {
+            return Err(FusionError::InvalidRequest(
+                "fusion origin does not match the trusted run identity".into(),
+            ));
+        }
+        if let Some(raw) = request.conversation_id.as_deref() {
+            if let Some(parsed) = protocol::SessionId::parse_prefixed(raw) {
+                if identity.session_id != Some(parsed) {
+                    return Err(FusionError::InvalidRequest(
+                        "fusion request session does not match the trusted run identity".into(),
+                    ));
+                }
+            } else {
+                return Err(FusionError::InvalidRequest(
+                    "fusion conversation_id is not a session id".into(),
+                ));
+            }
+        }
+        if let Some(parent_operation_id) = identity.parent_operation_id.as_deref() {
+            if parent_operation_id.trim().is_empty() {
+                return Err(FusionError::InvalidRequest(
+                    "fusion parent operation id must be non-empty".into(),
+                ));
+            }
+        }
+        if request.origin == FusionOrigin::Workflow
+            && request
+                .workflow_run_id
+                .as_deref()
+                .is_none_or(|run_id| run_id.trim().is_empty())
+        {
+            return Err(FusionError::InvalidRequest(
+                "workflow fusion request must carry a non-empty workflow run id".into(),
+            ));
+        }
+        if request.origin != FusionOrigin::Workflow && request.workflow_run_id.is_some() {
+            return Err(FusionError::InvalidRequest(
+                "non-workflow fusion request cannot carry a workflow run id".into(),
+            ));
+        }
+        if request.origin == FusionOrigin::Workflow {
+            let parent_operation = identity.parent_operation_id.as_deref().ok_or_else(|| {
+                FusionError::InvalidRequest(
+                    "workflow fusion identity must carry a trusted parent operation".into(),
+                )
+            })?;
+            if request.workflow_run_id.as_deref() != Some(parent_operation) {
+                return Err(FusionError::InvalidRequest(
+                    "fusion workflow run does not match the trusted parent operation".into(),
+                ));
+            }
+        }
+        Ok(Self {
+            request,
+            inherit,
+            identity,
+        })
+    }
+}
+
+/// Summary available to task registries before activation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FusionPreparedSummary {
+    /// Immutable run identity.
+    pub identity: FusionRunIdentity,
+    /// Captured outer duration in milliseconds.
+    pub duration_ms: u64,
+    /// Exact prepared panel count when route resolution could determine it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_panels: Option<u8>,
+}
+
+/// Timestamp captured by the host's activation callback, not by a scheduled
+/// worker after it eventually gets polled.
+#[derive(Debug, Clone, Copy)]
+pub struct FusionActivation {
+    /// Monotonic activation time.
+    pub activated_at: Instant,
+}
+
+impl FusionActivation {
+    /// Capture the current monotonic time.
+    #[must_use]
+    pub fn now() -> Self {
+        Self {
+            activated_at: Instant::now(),
+        }
+    }
+}
+
+/// Reliable run facts. Progress events are a lossy UI projection and never
+/// replace this recorder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FusionRunFacts {
+    /// Number of routes resolved before any provider call, when known.
+    #[serde(default)]
+    pub resolved_panels: Option<u8>,
+    /// Number of child tasks allocated by the spawner, when known.
+    #[serde(default)]
+    pub allocated_panels: Option<u8>,
+    /// Number of panel dispatches that reached a provider-capable spawner,
+    /// when known.
+    #[serde(default)]
+    pub dispatched_panels: Option<u8>,
+    /// Provider/model attempts started, including attempts without usage,
+    /// when known.
+    #[serde(default)]
+    pub attempts: Option<u32>,
+    /// Best-known aggregate usage. `None` means the legacy runner did not
+    /// expose enough information to claim that usage was zero.
+    #[serde(default)]
+    pub usage: Option<FusionUsage>,
+    /// True when a dispatched attempt has an incomplete/estimated figure.
+    pub usage_incomplete: bool,
+    /// Profiles confirmed to have received prompt data.
+    #[serde(default)]
+    pub confirmed_egress: Vec<String>,
+    /// Profiles that may have received data before the run lost certainty.
+    #[serde(default)]
+    pub possible_egress: Vec<String>,
+    /// Final stage timings known to the recorder.
+    pub timing: FusionTiming,
+}
+
+/// Synchronized owner of reliable Fusion facts.
+#[derive(Clone, Default)]
+pub struct FusionRunFactsRecorder(Arc<std::sync::Mutex<FusionRunFacts>>);
+
+impl FusionRunFactsRecorder {
+    /// Snapshot facts without exposing the lock to callers.
+    #[must_use]
+    pub fn snapshot(&self) -> FusionRunFacts {
+        let mut facts = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        facts.confirmed_egress.sort();
+        facts.confirmed_egress.dedup();
+        facts.possible_egress.sort();
+        facts.possible_egress.dedup();
+        facts
+    }
+
+    /// Replace the aggregate usage with the latest authoritative rollup.
+    pub fn replace_usage(&self, usage: FusionUsage, incomplete: bool) {
+        let mut facts = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        facts.usage = Some(usage);
+        facts.usage_incomplete = incomplete;
+    }
+
+    /// Record a terminal/preflight state that provably made no provider call.
+    /// This is deliberately explicit: absence of legacy facts remains
+    /// `None`, not an invented zero.
+    pub fn set_known_zero(&self) {
+        let mut facts = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        facts.allocated_panels = Some(0);
+        facts.dispatched_panels = Some(0);
+        facts.attempts = Some(0);
+        facts.usage = Some(FusionUsage::default());
+        facts.usage_incomplete = false;
+        facts.confirmed_egress.clear();
+        facts.possible_egress.clear();
+    }
+
+    /// Latch a resolved panel count.
+    pub fn set_resolved_panels(&self, count: u8) {
+        let mut facts = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        facts.resolved_panels = Some(facts.resolved_panels.unwrap_or_default().max(count));
+    }
+
+    /// Latch an allocated panel count.
+    pub fn set_allocated_panels(&self, count: u8) {
+        let mut facts = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        facts.allocated_panels = Some(facts.allocated_panels.unwrap_or_default().max(count));
+    }
+
+    /// Latch a dispatched panel count.
+    pub fn set_dispatched_panels(&self, count: u8) {
+        let mut facts = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        facts.dispatched_panels = Some(facts.dispatched_panels.unwrap_or_default().max(count));
+    }
+
+    /// Add model/provider attempts.
+    pub fn add_attempts(&self, attempts: u32) {
+        let mut facts = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        facts.attempts = Some(facts.attempts.unwrap_or_default().saturating_add(attempts));
+    }
+
+    /// Latch a known attempt count without turning a later partial snapshot
+    /// into a second copy of the same attempts.
+    pub fn set_attempts(&self, attempts: u32) {
+        let mut facts = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        facts.attempts = Some(facts.attempts.unwrap_or_default().max(attempts));
+    }
+
+    /// Replace the attempt count with the latest exact value, or `None` when
+    /// work may have reached a provider but the current boundary cannot prove
+    /// how many wire attempts started.
+    pub fn replace_attempts(&self, attempts: Option<u32>) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .attempts = attempts;
+    }
+
+    /// A provider-capable boundary was reached without an exact wire-attempt
+    /// receipt. Preserve known usage while withdrawing a provisional zero.
+    pub fn mark_attempts_unknown(&self) {
+        let mut facts = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        facts.attempts = None;
+        facts.usage_incomplete = true;
+    }
+
+    /// Publish the activation-time monetary hold while preserving any usage
+    /// already observed at the same boundary.
+    pub fn set_reserved_max_nano_usd(&self, reserved_nano_usd: u64) {
+        let mut facts = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        facts
+            .usage
+            .get_or_insert_with(FusionUsage::default)
+            .reserved_max_nano_usd = reserved_nano_usd;
+    }
+
+    /// Merge a confirmed egress profile into the facts.
+    pub fn add_confirmed_egress(&self, profile: impl Into<String>) {
+        let profile = profile.into();
+        let mut facts = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !facts.confirmed_egress.contains(&profile) {
+            facts.confirmed_egress.push(profile);
+        }
+    }
+
+    /// Merge a possible egress profile into the facts.
+    pub fn add_possible_egress(&self, profile: impl Into<String>) {
+        let profile = profile.into();
+        let mut facts = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !facts.possible_egress.contains(&profile) {
+            facts.possible_egress.push(profile);
+        }
+    }
+
+    /// Replace the current conservative egress set. This lets a spawner
+    /// rejection retire a profile that was only provisional while the call
+    /// was in flight, without erasing separately confirmed egress.
+    pub fn replace_possible_egress(&self, mut profiles: Vec<String>) {
+        profiles.sort();
+        profiles.dedup();
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .possible_egress = profiles;
+    }
+
+    /// Replace stage timings.
+    pub fn set_timing(&self, timing: FusionTiming) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .timing = timing;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FusionControlPhase {
+    Prepared,
+    Running,
+    Finalizing,
+    Terminal,
+}
+
+#[derive(Debug)]
+struct FusionControlState {
+    phase: FusionControlPhase,
+    cancel_claimed: bool,
+    activated_at: Option<Instant>,
+    deadline: Option<Instant>,
+    outcome: Option<Arc<FusionRunOutcome>>,
+}
+
+/// Shared cooperative cancellation/deadline/terminal authority.
+#[derive(Clone)]
+pub struct FusionRunControl {
+    identity: FusionRunIdentity,
+    duration: Duration,
+    cancel: CancellationToken,
+    facts: FusionRunFactsRecorder,
+    state: Arc<std::sync::Mutex<FusionControlState>>,
+    terminal_tx: watch::Sender<Option<Arc<FusionRunOutcome>>>,
+}
+
+impl FusionRunControl {
+    /// Construct a prepared control object. The deadline starts only when the
+    /// host supplies the activation timestamp.
+    #[must_use]
+    pub fn new(
+        identity: FusionRunIdentity,
+        duration_ms: u64,
+        cancel: CancellationToken,
+        facts: FusionRunFactsRecorder,
+    ) -> Self {
+        let (terminal_tx, _terminal_rx) = watch::channel(None);
+        Self {
+            identity,
+            duration: Duration::from_millis(duration_ms),
+            cancel,
+            facts,
+            state: Arc::new(std::sync::Mutex::new(FusionControlState {
+                phase: FusionControlPhase::Prepared,
+                cancel_claimed: false,
+                activated_at: None,
+                deadline: None,
+                outcome: None,
+            })),
+            terminal_tx,
+        }
+    }
+
+    /// Identity carried by this control.
+    #[must_use]
+    pub fn identity(&self) -> &FusionRunIdentity {
+        &self.identity
+    }
+
+    /// Shared facts recorder.
+    #[must_use]
+    pub fn facts(&self) -> FusionRunFactsRecorder {
+        self.facts.clone()
+    }
+
+    /// Cancellation token shared with the parent/worker.
+    #[must_use]
+    pub fn cancel(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
+    /// Captured outer duration used by the supervisor.
+    #[must_use]
+    pub fn duration(&self) -> Duration {
+        self.duration
+    }
+
+    /// Activate once. The timestamp is captured by the host handoff.
+    pub fn activate_at(&self, activated_at: Instant) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.phase != FusionControlPhase::Prepared {
+            return false;
+        }
+        if self.cancel.is_cancelled() {
+            state.phase = FusionControlPhase::Terminal;
+            state.cancel_claimed = true;
+            return false;
+        }
+        let Some(deadline) = activated_at.checked_add(self.duration) else {
+            state.phase = FusionControlPhase::Terminal;
+            return false;
+        };
+        state.phase = FusionControlPhase::Running;
+        state.activated_at = Some(activated_at);
+        state.deadline = Some(deadline);
+        true
+    }
+
+    /// Remaining duration from the single captured deadline.
+    #[must_use]
+    pub fn remaining(&self) -> Duration {
+        let deadline = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .deadline;
+        deadline.map_or(Duration::ZERO, |deadline| {
+            deadline.saturating_duration_since(Instant::now())
+        })
+    }
+
+    /// Absolute deadline captured at activation, if the run is active.
+    #[must_use]
+    pub fn deadline(&self) -> Option<Instant> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .deadline
+    }
+
+    /// Begin irreversible finalization. Exactly one owner wins.
+    pub fn begin_finalizing(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.phase != FusionControlPhase::Running {
+            return false;
+        }
+        state.phase = FusionControlPhase::Finalizing;
+        true
+    }
+
+    /// Atomically claim cancellation while the run is still cancellable.
+    ///
+    /// Once finalization has begun, the natural result owns settlement and
+    /// cancellation must not replace it. Callers should only tear down their
+    /// task projection when this method returns `true`.
+    pub fn request_cancel(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(
+            state.phase,
+            FusionControlPhase::Prepared | FusionControlPhase::Running
+        ) {
+            return false;
+        }
+        state.phase = FusionControlPhase::Terminal;
+        state.cancel_claimed = true;
+        // Cancel while the phase lock is still held. A concurrent finalizer
+        // can only observe Terminal after the token is already signalled.
+        self.cancel.cancel();
+        true
+    }
+
+    fn cancellation_claimed(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cancel_claimed
+    }
+
+    /// Claim an early terminal state while the run is still prepared/running.
+    ///
+    /// Finalization has a separate claim method so cancellation cannot steal a
+    /// natural result after the supervisor crossed its irreversible boundary.
+    pub fn claim_terminal(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(
+            state.phase,
+            FusionControlPhase::Prepared | FusionControlPhase::Running
+        ) {
+            return false;
+        }
+        state.phase = FusionControlPhase::Terminal;
+        true
+    }
+
+    /// Claim the terminal state after [`Self::begin_finalizing`] won.
+    pub fn claim_finalizing(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.phase != FusionControlPhase::Finalizing {
+            return false;
+        }
+        state.phase = FusionControlPhase::Terminal;
+        true
+    }
+
+    /// Whether a terminal owner already exists.
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .phase
+            == FusionControlPhase::Terminal
+    }
+
+    /// Whether the run crossed its irreversible finalization boundary.
+    #[must_use]
+    pub fn is_finalizing(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .phase
+            == FusionControlPhase::Finalizing
+    }
+
+    /// Return the sealed outcome once the owned supervisor has finished all
+    /// accounting and terminal callbacks. A terminal phase alone is not
+    /// sufficient: cancellation may claim it while settlement is still
+    /// draining.
+    #[must_use]
+    pub fn terminal_outcome(&self) -> Option<FusionRunOutcome> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .outcome
+            .as_deref()
+            .cloned()
+    }
+
+    /// Wait for the terminal envelope, not merely a terminal phase claim.
+    /// This is the synchronization point for quota and task projections that
+    /// must observe the final allocation/cost facts.
+    pub async fn wait_terminal(&self) -> FusionRunOutcome {
+        let mut terminal_rx = self.terminal_tx.subscribe();
+        loop {
+            if let Some(outcome) = self.terminal_outcome() {
+                return outcome;
+            }
+            // The sender is retained by `self`, so closure is unreachable.
+            let _ = terminal_rx.changed().await;
+        }
+    }
+
+    fn publish_terminal(&self, result: Result<FusionResult, FusionError>) -> FusionRunOutcome {
+        let candidate = Arc::new(FusionRunOutcome::from_control(self, result));
+        let outcome = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(outcome) = state.outcome.as_ref() {
+                return outcome.as_ref().clone();
+            }
+            state.phase = FusionControlPhase::Terminal;
+            state.outcome = Some(Arc::clone(&candidate));
+            candidate
+        };
+        self.terminal_tx.send_replace(Some(Arc::clone(&outcome)));
+        outcome.as_ref().clone()
+    }
+}
+
+/// One terminal Fusion envelope, including reliable identity and facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FusionRunOutcome {
+    /// Immutable identity.
+    pub identity: FusionRunIdentity,
+    /// Legacy computation result or failure.
+    pub result: Result<FusionResult, FusionError>,
+    /// Reliable facts snapshot.
+    pub facts: FusionRunFacts,
+}
+
+impl FusionRunOutcome {
+    /// Construct a terminal outcome from a control object.
+    #[must_use]
+    pub fn from_control(
+        control: &FusionRunControl,
+        result: Result<FusionResult, FusionError>,
+    ) -> Self {
+        Self {
+            identity: control.identity.clone(),
+            result,
+            facts: control.facts.snapshot(),
+        }
+    }
+
+    /// Consume the envelope for legacy callers.
+    #[must_use]
+    pub fn into_legacy_result(self) -> Result<FusionResult, FusionError> {
+        self.result
+    }
+}
+
+type PreparedRunner = Box<
+    dyn FnOnce(
+            FusionActivation,
+            Option<Sender<FusionProgress>>,
+        ) -> BoxFuture<'static, FusionRunOutcome>
+        + Send,
+>;
+
+/// Poll a prepared runner behind a panic boundary inside the owned supervisor.
+struct CatchPanicFuture<F> {
+    inner: F,
+}
+
+impl<F> std::future::Future for CatchPanicFuture<F>
+where
+    F: std::future::Future + Unpin,
+{
+    type Output = Result<F::Output, ()>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let poll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            std::pin::Pin::new(&mut self.inner).poll(cx)
+        }));
+        match poll {
+            Ok(std::task::Poll::Ready(output)) => std::task::Poll::Ready(Ok(output)),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(_) => std::task::Poll::Ready(Err(())),
+        }
+    }
+}
+
+/// Opaque one-shot prepared execution. It is deliberately non-Clone so a
+/// prepared route cannot be accidentally dispatched twice.
+pub struct PreparedFusionRun {
+    summary: FusionPreparedSummary,
+    control: FusionRunControl,
+    runner: Option<PreparedRunner>,
+    unactivated_error: FusionError,
+}
+
+impl PreparedFusionRun {
+    /// Build a prepared run around a private runner closure.
+    pub fn new<F, Fut>(summary: FusionPreparedSummary, control: FusionRunControl, runner: F) -> Self
+    where
+        F: FnOnce(FusionActivation, Option<Sender<FusionProgress>>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = FusionRunOutcome> + Send + 'static,
+    {
+        Self {
+            summary,
+            control,
+            runner: Some(Box::new(move |activation, progress| {
+                Box::pin(runner(activation, progress))
+            })),
+            unactivated_error: FusionError::Cancelled,
+        }
+    }
+
+    /// Build an inert terminal run for pre-activation preparation failures.
+    #[must_use]
+    pub fn failed(
+        summary: FusionPreparedSummary,
+        control: FusionRunControl,
+        error: FusionError,
+    ) -> Self {
+        control.facts().set_known_zero();
+        let mut prepared = Self::new(summary, control.clone(), {
+            let error = error.clone();
+            move |_activation, _progress| {
+                let outcome = FusionRunOutcome::from_control(&control, Err(error));
+                async move { outcome }
+            }
+        });
+        prepared.unactivated_error = error;
+        prepared
+    }
+
+    /// Summary safe to publish before activation.
+    #[must_use]
+    pub fn summary(&self) -> &FusionPreparedSummary {
+        &self.summary
+    }
+
+    /// Shared control used by the host supervisor.
+    #[must_use]
+    pub fn control(&self) -> FusionRunControl {
+        self.control.clone()
+    }
+
+    /// Activate exactly once with the host-captured timestamp.
+    pub async fn activate(
+        mut self,
+        activation: FusionActivation,
+        progress: Option<Sender<FusionProgress>>,
+    ) -> FusionRunOutcome {
+        if !self.control.activate_at(activation.activated_at) {
+            let error = if self.control.cancel().is_cancelled() {
+                FusionError::Cancelled
+            } else {
+                FusionError::Internal
+            };
+            self.control.facts().set_known_zero();
+            return self.control.publish_terminal(Err(error));
+        }
+        let Some(runner) = self.runner.take() else {
+            self.control.facts().set_known_zero();
+            return self.control.publish_terminal(Err(FusionError::Internal));
+        };
+        let supervisor_control = self.control.clone();
+        let spawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tokio::spawn(async move {
+                // Constructing the runner future happens inside this async
+                // block, so both a synchronous closure panic and a later poll
+                // panic are caught by the same boundary.
+                let guarded: BoxFuture<'static, FusionRunOutcome> =
+                    Box::pin(async move { runner(activation, progress).await });
+                let outcome = CatchPanicFuture { inner: guarded }.await;
+                let runner_result = match outcome {
+                    Ok(outcome)
+                        if &outcome.identity == supervisor_control.identity()
+                            && outcome.result.as_ref().map_or(true, |result| {
+                                result.run_id == supervisor_control.identity().run_id.as_str()
+                            }) =>
+                    {
+                        outcome.result
+                    }
+                    Ok(_) | Err(()) => Err(FusionError::Internal),
+                };
+                // A runner supplied by a legacy/fake executor may ignore the
+                // cooperative token. The atomic claim remains authoritative
+                // until finalization, so such a runner cannot publish success
+                // after the host has already won cancellation.
+                let result = if supervisor_control.cancellation_claimed() {
+                    Err(FusionError::Cancelled)
+                } else {
+                    runner_result
+                };
+                if !supervisor_control.is_terminal() && !supervisor_control.is_finalizing() {
+                    if result.is_ok() {
+                        let _ = supervisor_control.begin_finalizing();
+                    } else {
+                        let _ = supervisor_control.claim_terminal();
+                    }
+                }
+                supervisor_control.publish_terminal(result);
+            })
+        }));
+        if spawn.is_err() {
+            self.control.facts().set_known_zero();
+            return self.control.publish_terminal(Err(FusionError::Internal));
+        }
+        self.control.wait_terminal().await
+    }
+}
+
+impl Drop for PreparedFusionRun {
+    fn drop(&mut self) {
+        if self.runner.is_none() {
+            return;
+        }
+        // No activation poll can have crossed a provider boundary while the
+        // one-shot runner is still armed. Seal an exact-zero outcome so a
+        // host guard waiting to release quota cannot hang when the prepared
+        // value (or an entirely unpolled `activate` future) is abandoned.
+        self.control.facts().set_known_zero();
+        self.control
+            .publish_terminal(Err(self.unactivated_error.clone()));
     }
 }
 
@@ -969,6 +1870,31 @@ pub enum FusionError {
     Internal,
 }
 
+impl FusionError {
+    /// Whether this error's contract proves that no provider request could
+    /// have started. Callers must not infer zero from every error: timeout,
+    /// cancellation, and internal failures deliberately remain unknown.
+    #[must_use]
+    pub const fn guarantees_zero_provider_calls(&self) -> bool {
+        matches!(
+            self,
+            Self::Disabled
+                | Self::UnavailableOnPlatform
+                | Self::InvalidConfiguration(_)
+                | Self::InvalidRequest(_)
+                | Self::TooFewModels { .. }
+                | Self::InvalidCustomModels(_)
+                | Self::CrossProviderDenied
+                | Self::NoJudgeModel { .. }
+                | Self::StructuredOutputUnsupported
+                | Self::BudgetReservationUnavailable
+                | Self::BudgetExceeded
+                | Self::SpawnLimitExceeded
+                | Self::AllPanelsFailedPreflight
+        )
+    }
+}
+
 /// Checked-in quality / latency / cost hints for automatic panel selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -1100,7 +2026,7 @@ impl Default for FusionAgentSurface {
 
 /// Executor implemented by the `fusion` crate and injected at the composition root.
 #[async_trait]
-pub trait FusionExecutor: Send + Sync {
+pub trait FusionExecutor: Send + Sync + 'static {
     /// Run one Fusion pipeline to a terminal [`FusionResult`] or [`FusionError`].
     ///
     /// [`FusionStatus::NeedsParent`] is returned as `Ok`, not as an error.
@@ -1110,6 +2036,66 @@ pub trait FusionExecutor: Send + Sync {
         inherit: FusionInheritance,
         progress: Option<tokio::sync::mpsc::Sender<FusionProgress>>,
     ) -> Result<FusionResult, FusionError>;
+
+    /// Prepare one immutable route/config/identity handoff. Production
+    /// executors override this; the default keeps existing fake executors
+    /// source-compatible by deferring their legacy `run()` until activation.
+    fn prepare(
+        self: Arc<Self>,
+        submission: FusionSubmission,
+    ) -> Result<PreparedFusionRun, FusionError> {
+        let FusionSubmission {
+            request,
+            inherit,
+            identity,
+        } = FusionSubmission::new(submission.request, submission.inherit, submission.identity)?;
+        let duration_ms = inherit
+            .effective_timeout_ms
+            .or_else(|| self.effective_timeout_ms())
+            .unwrap_or_default();
+        let summary = FusionPreparedSummary {
+            identity: identity.clone(),
+            duration_ms,
+            planned_panels: None,
+        };
+        let control = FusionRunControl::new(
+            identity.clone(),
+            duration_ms,
+            inherit.cancel.clone(),
+            FusionRunFactsRecorder::default(),
+        );
+        let facts_control = control.clone();
+        Ok(PreparedFusionRun::new(
+            summary,
+            control,
+            move |_activation, progress| {
+                let executor = self;
+                let facts_control = facts_control.clone();
+                async move {
+                    let mut result = executor.run(request, inherit, progress).await;
+                    if let Ok(result) = &mut result {
+                        // Prepared identity is authoritative even for legacy fake
+                        // executors that mint their own result id in `run()`.
+                        result.run_id = identity.run_id.to_string();
+                        let facts = facts_control.facts();
+                        facts.replace_usage(result.usage.clone(), result.usage.estimated);
+                        facts.set_timing(result.timing.clone());
+                        facts.set_attempts(result.usage.provider_requests);
+                        for profile in &result.egress_profiles {
+                            facts.add_confirmed_egress(profile.clone());
+                        }
+                    } else if result
+                        .as_ref()
+                        .err()
+                        .is_some_and(FusionError::guarantees_zero_provider_calls)
+                    {
+                        facts_control.facts().set_known_zero();
+                    }
+                    FusionRunOutcome::from_control(&facts_control, result)
+                }
+            },
+        ))
+    }
 
     /// Return the effective end-to-end timeout for a newly spawned run, in
     /// milliseconds, when the host can expose one without starting work.
@@ -1409,7 +2395,10 @@ mod tests {
             assert_eq!(json["status"], serde_json::json!(wire_status));
             let back: FusionPublicationReceipt = serde_json::from_value(json).unwrap();
             assert_eq!(back, receipt);
-            assert_eq!(back.is_published(), back.status == FusionPublicationStatus::Published);
+            assert_eq!(
+                back.is_published(),
+                back.status == FusionPublicationStatus::Published
+            );
         }
 
         let legacy: FusionPublicationReceipt =
@@ -1426,7 +2415,9 @@ mod tests {
             "final_text": "answer"
         }))
         .unwrap();
-        let receipt = NoopFusionCompletionSink.publish("conversation", &result).await;
+        let receipt = NoopFusionCompletionSink
+            .publish("conversation", &result)
+            .await;
         assert_eq!(receipt.status, FusionPublicationStatus::NotRequired);
         assert!(!receipt.is_published());
     }
@@ -1634,6 +2625,214 @@ mod tests {
     #[test]
     fn trait_is_object_safe() {
         let _: Option<Arc<dyn FusionExecutor>> = None;
+    }
+
+    #[test]
+    fn run_id_deserialization_keeps_the_constructor_validation() {
+        let valid = serde_json::json!("fu_0123456789abcdef0123456789abcdef");
+        let parsed: FusionRunId = serde_json::from_value(valid).unwrap();
+        assert_eq!(parsed.as_str(), "fu_0123456789abcdef0123456789abcdef");
+        let invalid = serde_json::from_value::<FusionRunId>(serde_json::json!("fu_not-a-run"));
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn finalizing_claim_cannot_be_stolen_by_cancellation_claim() {
+        let control = FusionRunControl::new(
+            FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Agent, None),
+            1_000,
+            CancellationToken::new(),
+            FusionRunFactsRecorder::default(),
+        );
+        assert!(control.activate_at(Instant::now()));
+        assert!(control.begin_finalizing());
+        assert!(!control.request_cancel());
+        assert!(!control.cancel().is_cancelled());
+        assert!(!control.claim_terminal());
+        assert!(control.claim_finalizing());
+        assert!(control.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn cancellation_claim_is_atomic_and_overrides_an_ignoring_runner() {
+        let control = FusionRunControl::new(
+            FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Agent, None),
+            1_000,
+            CancellationToken::new(),
+            FusionRunFactsRecorder::default(),
+        );
+        let summary = FusionPreparedSummary {
+            identity: control.identity().clone(),
+            duration_ms: 1_000,
+            planned_panels: None,
+        };
+        let runner_control = control.clone();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let runner_release = Arc::clone(&release);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let prepared = PreparedFusionRun::new(summary, control.clone(), move |_, _| async move {
+            let _ = started_tx.send(());
+            runner_release.notified().await;
+            FusionRunOutcome::from_control(&runner_control, Err(FusionError::Internal))
+        });
+        let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+        started_rx.await.expect("owned runner must start");
+
+        assert!(control.request_cancel());
+        assert!(control.cancel().is_cancelled());
+        release.notify_one();
+
+        let outcome = waiter.await.expect("activation waiter must join");
+        assert_eq!(outcome.result, Err(FusionError::Cancelled));
+        assert!(!control.request_cancel());
+    }
+
+    #[test]
+    fn activation_overflow_fails_closed_without_dispatch() {
+        let control = FusionRunControl::new(
+            FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Slash, None),
+            u64::MAX,
+            CancellationToken::new(),
+            FusionRunFactsRecorder::default(),
+        );
+        // A very large duration can still be representable on hosts whose
+        // monotonic clock has a correspondingly wide range; checked arithmetic
+        // must preserve that valid legacy configuration rather than rejecting
+        // it merely because it is large.
+        assert!(control.activate_at(Instant::now()));
+
+        // Exercise the actual overflow boundary when this platform exposes a
+        // representable instant that close to its upper limit. Some platforms
+        // cannot construct that instant, in which case the checked-add API has
+        // already demonstrated the only available failure path.
+        let near_limit = Instant::now().checked_add(Duration::MAX);
+        if let Some(near_limit) = near_limit {
+            let bounded = FusionRunControl::new(
+                FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Slash, None),
+                1,
+                CancellationToken::new(),
+                FusionRunFactsRecorder::default(),
+            );
+            assert!(!bounded.activate_at(near_limit));
+            assert!(bounded.is_terminal());
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_activation_is_one_shot_and_legacy_facts_stay_unknown_on_error() {
+        let control = FusionRunControl::new(
+            FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Agent, None),
+            1_000,
+            CancellationToken::new(),
+            FusionRunFactsRecorder::default(),
+        );
+        let identity = control.identity().clone();
+        let summary = FusionPreparedSummary {
+            identity,
+            duration_ms: 1_000,
+            planned_panels: None,
+        };
+        let runner_control = control.clone();
+        let prepared = PreparedFusionRun::new(summary, control.clone(), move |_activation, _| {
+            let runner_control = runner_control.clone();
+            async move { FusionRunOutcome::from_control(&runner_control, Err(FusionError::Internal)) }
+        });
+        let outcome = prepared.activate(FusionActivation::now(), None).await;
+        assert!(matches!(outcome.result, Err(FusionError::Internal)));
+        assert_eq!(outcome.facts.resolved_panels, None);
+        assert_eq!(outcome.facts.allocated_panels, None);
+        assert_eq!(outcome.facts.usage, None);
+    }
+
+    #[tokio::test]
+    async fn unpolled_activation_seals_zero_dispatch_for_waiters() {
+        let control = FusionRunControl::new(
+            FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Agent, None),
+            1_000,
+            CancellationToken::new(),
+            FusionRunFactsRecorder::default(),
+        );
+        let summary = FusionPreparedSummary {
+            identity: control.identity().clone(),
+            duration_ms: 1_000,
+            planned_panels: None,
+        };
+        let runner_control = control.clone();
+        let prepared = PreparedFusionRun::new(summary, control.clone(), move |_, _| async move {
+            FusionRunOutcome::from_control(&runner_control, Err(FusionError::Internal))
+        });
+        let never_polled = prepared.activate(FusionActivation::now(), None);
+        drop(never_polled);
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), control.wait_terminal())
+            .await
+            .expect("dropping an unpolled activation must wake terminal waiters");
+        assert!(matches!(outcome.result, Err(FusionError::Cancelled)));
+        assert_eq!(outcome.facts.allocated_panels, Some(0));
+        assert_eq!(outcome.facts.dispatched_panels, Some(0));
+        assert_eq!(outcome.facts.attempts, Some(0));
+        assert_eq!(outcome.facts.usage, Some(FusionUsage::default()));
+    }
+
+    #[tokio::test]
+    async fn owned_supervisor_finishes_after_activation_waiter_is_dropped() {
+        let control = FusionRunControl::new(
+            FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Agent, None),
+            1_000,
+            CancellationToken::new(),
+            FusionRunFactsRecorder::default(),
+        );
+        let summary = FusionPreparedSummary {
+            identity: control.identity().clone(),
+            duration_ms: 1_000,
+            planned_panels: Some(2),
+        };
+        let runner_control = control.clone();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let runner_release = Arc::clone(&release);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let prepared = PreparedFusionRun::new(summary, control.clone(), move |_, _| async move {
+            let _ = started_tx.send(());
+            runner_release.notified().await;
+            runner_control.facts().set_allocated_panels(2);
+            FusionRunOutcome::from_control(&runner_control, Err(FusionError::Internal))
+        });
+        let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+        started_rx.await.expect("owned runner must start");
+        waiter.abort();
+        let _ = waiter.await;
+        release.notify_one();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), control.wait_terminal())
+            .await
+            .expect("owned supervisor must outlive its activation waiter");
+        assert!(matches!(outcome.result, Err(FusionError::Internal)));
+        assert_eq!(outcome.facts.allocated_panels, Some(2));
+    }
+
+    #[tokio::test]
+    async fn synchronous_runner_panic_is_sealed_as_internal() {
+        let control = FusionRunControl::new(
+            FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Slash, None),
+            1_000,
+            CancellationToken::new(),
+            FusionRunFactsRecorder::default(),
+        );
+        let summary = FusionPreparedSummary {
+            identity: control.identity().clone(),
+            duration_ms: 1_000,
+            planned_panels: None,
+        };
+        let prepared = PreparedFusionRun::new(summary, control.clone(), move |_, _| {
+            panic!("runner construction panic");
+            #[allow(unreachable_code)]
+            async {
+                unreachable!()
+            }
+        });
+        let outcome = prepared.activate(FusionActivation::now(), None).await;
+        assert!(matches!(outcome.result, Err(FusionError::Internal)));
+        assert!(control.terminal_outcome().is_some());
     }
 
     /// F005: every progress surface renders `FusionStage` through this ONE

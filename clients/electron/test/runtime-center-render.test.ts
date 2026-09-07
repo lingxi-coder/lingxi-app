@@ -60,3 +60,118 @@ test('TaskDetail renders nothing extra when a task has no stage', () => {
   const html = render(React.createElement(TaskDetail, { task: noStage, bridge: EMPTY_BRIDGE }));
   assert.ok(!html.includes('Running panels'), `expected no stage text, got: ${html}`);
 });
+
+import { RuntimeCenterOverview, RuntimeCenterInspector } from '../src/renderer/components/RuntimeCenter';
+import { emptyRuntimeCenterState } from '../src/renderer/bridge/runtimeCenterState';
+import { emptyDesktopState } from '../src/renderer/bridge/desktopState';
+
+function runtimeBridge(): UseBridge {
+  return {
+    runtimeCenter: { ...emptyRuntimeCenterState(), overviewOpen: true },
+    desktop: { ...emptyDesktopState(), tasks: { [FUSION_TASK.task_id]: FUSION_TASK } },
+    conversation: { plan: [] },
+  } as unknown as UseBridge;
+}
+
+test('overview exposes background task data and detail preserves the task stage', () => {
+  const bridge = runtimeBridge();
+  const html = render(React.createElement(RuntimeCenterOverview, { bridge }));
+  assert.ok(html.includes('local_fusion') || html.includes('background task'));
+  const active = { kind: 'task', id: FUSION_TASK.task_id } as const;
+  bridge.runtimeCenter = { ...bridge.runtimeCenter, inspectorOpen: true, activeItem: active, tabs: [active] };
+  assert.ok(render(React.createElement(RuntimeCenterInspector, { bridge })).includes('Running panels 2/3'));
+});
+
+test('closed overview and inspector do not render stale session content', () => {
+  const bridge = runtimeBridge();
+  bridge.runtimeCenter = { ...bridge.runtimeCenter, overviewOpen: false, inspectorOpen: false };
+  assert.equal(render(React.createElement(RuntimeCenterOverview, { bridge })), '');
+  assert.equal(render(React.createElement(RuntimeCenterInspector, { bridge })), '');
+});
+
+test('pinned summary is a nonmodal region with four ordered empty categories', () => {
+  const bridge = runtimeBridge();
+  bridge.desktop = emptyDesktopState();
+  const html = render(React.createElement(RuntimeCenterOverview, { bridge }));
+  assert.ok(html.includes('role="region"'));
+  assert.ok(html.includes('aria-label="Pinned summary"'));
+  assert.ok(!html.includes('role="dialog"'));
+  const headings = [...html.matchAll(/<h2>(.*?)<\/h2>/g)].map((match) => match[1]);
+  assert.deepEqual(headings, ['Subagents', 'Todos', 'Resources', 'Plan']);
+  for (const empty of ['No subagents or background tasks.', 'No todos yet.', 'No input resources in this session.', 'No submitted plan yet.']) assert.ok(html.includes(empty));
+});
+
+test('summary previews only three resources while the resources detail lists every resource', () => {
+  const bridge = runtimeBridge();
+  bridge.runtimeCenter = { ...bridge.runtimeCenter, resources: Array.from({ length: 5 }, (_, i) => ({ id: `resource-${i}`, kind: 'file', name: `example-${i}.ts` })) };
+  const summary = render(React.createElement(RuntimeCenterOverview, { bridge }));
+  assert.ok(summary.includes('example-2.ts'));
+  assert.ok(!summary.includes('example-3.ts'));
+  assert.ok(summary.includes('View all'));
+  const active = { kind: 'section', id: 'resources' } as const;
+  bridge.runtimeCenter = { ...bridge.runtimeCenter, inspectorOpen: true, activeItem: active, tabs: [active] };
+  const details = render(React.createElement(RuntimeCenterInspector, { bridge }));
+  assert.ok(details.includes('example-4.ts'));
+});
+
+test('Todos checklist and submitted Plan body render as distinct detail content', () => {
+  const bridge = runtimeBridge();
+  bridge.runtimeCenter = { ...bridge.runtimeCenter, plan: [{ subject: 'Implement integration', state: 'in_progress' }], submittedPlan: { id: 'exit-plan-1', content: '# Migration design\n\nPreserve **compatibility**.', status: 'approved' } };
+  const summary = render(React.createElement(RuntimeCenterOverview, { bridge }));
+  assert.ok(summary.includes('0 of 1 done'));
+  assert.ok(summary.includes('Implement integration'));
+  assert.ok(summary.includes('Migration design'));
+  const planTab = { kind: 'plan-document', id: 'exit-plan-1' } as const;
+  bridge.runtimeCenter = { ...bridge.runtimeCenter, inspectorOpen: true, activeItem: planTab, tabs: [planTab] };
+  const document = render(React.createElement(RuntimeCenterInspector, { bridge }));
+  assert.ok(document.includes('Approved'));
+  assert.ok(document.includes('compatibility</span>'));
+  assert.ok(!document.includes('**compatibility**'));
+  assert.ok(!document.includes('Implement integration'));
+  const todoTab = { kind: 'section', id: 'todos' } as const;
+  bridge.runtimeCenter = { ...bridge.runtimeCenter, activeItem: todoTab, tabs: [todoTab] };
+  const todos = render(React.createElement(RuntimeCenterInspector, { bridge }));
+  assert.ok(todos.includes('Implement integration'));
+  assert.ok(!todos.includes('Migration design'));
+});
+
+test('an open inspector with no tabs shows four content entry points', () => {
+  const bridge = runtimeBridge();
+  bridge.runtimeCenter = { ...bridge.runtimeCenter, inspectorOpen: true, activeItem: null, tabs: [] };
+  const html = render(React.createElement(RuntimeCenterInspector, { bridge }));
+  for (const label of ['Subagents', 'Todos', 'Resources', 'Plan']) assert.ok(html.includes(label));
+  assert.ok(html.includes('Hide right panel'));
+  assert.ok(html.includes('Open pinned summary'));
+});
+
+test('Subagents detail identifies background tasks and preserves their stage', () => {
+  const bridge = runtimeBridge();
+  const active = { kind: 'section', id: 'agents' } as const;
+  bridge.runtimeCenter = { ...bridge.runtimeCenter, inspectorOpen: true, activeItem: active, tabs: [active] };
+  const html = render(React.createElement(RuntimeCenterInspector, { bridge }));
+  assert.ok(html.includes('Background task'));
+  assert.ok(html.includes('local_fusion'));
+  assert.ok(html.includes('Running panels 2/3'));
+});
+
+test('each submitted plan tab keeps its own body when a newer plan arrives', () => {
+  const bridge = runtimeBridge();
+  const first = { id: 'first', content: '# First proposal\n\nOriginal scope.', status: 'rejected' as const };
+  const latest = { id: 'latest', content: '# Revised proposal\n\nNew scope.', status: 'approved' as const };
+  bridge.runtimeCenter = {
+    ...bridge.runtimeCenter,
+    submittedPlan: latest,
+    submittedPlanState: { calls: [first, latest], resolutions: {} },
+    inspectorOpen: true,
+    tabs: [{ kind: 'plan-document', id: 'first' }, { kind: 'plan-document', id: 'latest' }],
+    activeItem: { kind: 'plan-document', id: 'first' },
+  };
+  const html = render(React.createElement(RuntimeCenterInspector, { bridge }));
+  assert.ok(html.includes('Original scope.'));
+  assert.ok(html.includes('Rejected'));
+  assert.ok(!html.includes('New scope.'));
+  bridge.runtimeCenter = { ...bridge.runtimeCenter, activeItem: { kind: 'section', id: 'plan' } };
+  const current = render(React.createElement(RuntimeCenterInspector, { bridge }));
+  assert.ok(current.includes('New scope.'));
+  assert.ok(!current.includes('Original scope.'));
+});

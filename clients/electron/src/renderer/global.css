@@ -77,22 +77,20 @@ body {
   scale: .96;
 }
 .desktop-topbar {
-  z-index: 1;
-  box-shadow: 0 1px 0 color-mix(in oklab, currentColor 2%, transparent),
-    0 8px 24px color-mix(in oklab, #000 3%, transparent);
+  z-index: 45;
 }
 .desktop-topbar .mono {
   font-variant-numeric: tabular-nums;
 }
 .desktop-topbar-action {
-  width: 40px;
-  height: 40px;
+  width: 32px;
+  height: 32px;
   display: grid;
   place-items: center;
-  flex: 0 0 40px;
+  flex: 0 0 32px;
   padding: 0;
   border: 0;
-  border-radius: 10px;
+  border-radius: 11px;
   outline: none;
   background: transparent;
   box-shadow: none;
@@ -101,7 +99,7 @@ body {
 }
 .desktop-topbar-action:hover:not(:disabled) {
   color: var(--topbar-action-hover-color);
-  background: transparent;
+  background: var(--topbar-action-focus);
   box-shadow: none;
 }
 .desktop-topbar-action:focus-visible {
@@ -111,8 +109,36 @@ body {
 .desktop-topbar-action[data-active='true'] {
   color: var(--topbar-action-active-color);
   background: var(--topbar-action-active);
-  box-shadow: inset 0 0 0 .5px var(--topbar-action-ring);
+  box-shadow: none;
 }
+
+.desktop-topbar-usage { padding: 0 8px; white-space: nowrap; }
+.desktop-topbar-more {
+  position: absolute;
+  top: 50px;
+  right: 80px;
+  width: 210px;
+  padding: 5px;
+  border: .5px solid;
+  border-radius: 12px;
+  box-shadow: 0 6px 24px #00000014;
+}
+.desktop-topbar-more button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.desktop-topbar-more button:hover,
+.desktop-topbar-more button:focus-visible { background: color-mix(in oklab, currentColor 7%, transparent); }
 
 .context-summary-panel {
   position: absolute;
@@ -1458,4 +1484,9 @@ textarea, input { font-family: inherit; }
   .desktop-empty-state-wrap { min-height: 220px !important; }
   .desktop-empty-mark { margin-bottom: 13px; }
   .desktop-empty-steps { display: none; }
+}
+
+/* The expanded pane owns its toggle, as in the Codex split header. */
+@media (min-width: 1101px) {
+  .desktop-inspector-trigger[aria-expanded='true'] { display: none; }
 }

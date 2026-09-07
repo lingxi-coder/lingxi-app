@@ -148,6 +148,7 @@ test('desktop topbar keeps command and engine controls out of the chrome', () =>
     ...bridgeFixture(),
     usage: null,
     conversation: { sessionKey: 'session-a', summaries: [] },
+    runtimeCenter: { inspectorOpen: false },
   };
   const markup = renderToStaticMarkup(React.createElement(
     Theme.Provider,
@@ -156,16 +157,15 @@ test('desktop topbar keeps command and engine controls out of the chrome', () =>
       bridge: bridge as any,
       runtimeCenterOpen: false,
       onToggleRuntimeCenter: () => undefined,
-      theme: 'dark',
-      onTheme: () => undefined,
     }),
   ));
 
-  assert.match(markup, /aria-label="Toggle theme"/);
-  assert.match(markup, /aria-label="Open context summaries"/);
-  assert.match(markup, /aria-label="Toggle runtime center"/);
+  assert.match(markup, /aria-label="More chat actions"/);
+  assert.match(markup, /aria-label="Toggle pinned summary"/);
+  assert.match(markup, /aria-label="Toggle right panel"/);
+  assert.doesNotMatch(markup, /aria-label="Toggle theme"|aria-label="Open context summaries"/);
   assert.doesNotMatch(markup, /Open command palette|Open session status|Engine ready|>Commands</);
-  assert.doesNotMatch(openingTag(markup, 'aria-label="Open context summaries"'), /background:/);
+  assert.doesNotMatch(openingTag(markup, 'aria-label="Toggle pinned summary"'), /background:/);
 
   const css = readFileSync(join(import.meta.dirname, '../src/renderer/global.css'), 'utf8');
   assert.match(css, /\.desktop-topbar-action\s*\{[^}]*background:\s*transparent/s);

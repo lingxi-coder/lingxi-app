@@ -4,14 +4,19 @@ import type {
   ImageRefDto,
   MessageDto,
   PlanTaskDto,
+  PermissionRequest,
   SessionAgentSummaryDto,
   TaskRowDto,
 } from '@lingxi/bridge-client';
 import { fileMentionsFromPrompt } from './fileMentions';
+import { emptySubmittedPlanState, latestSubmittedPlan, reduceSubmittedPlanEvent, reduceSubmittedPlanPermission, type SubmittedPlan, type SubmittedPlanState } from './submittedPlan';
 
-export type RuntimeCenterSection = 'tasks' | 'agents' | 'resources' | 'plan';
+export type RuntimeCenterSection = 'tasks' | 'agents' | 'todos' | 'resources' | 'plan';
 
 export type RuntimeCenterItemRef =
+  | { kind: 'section'; id: 'agents' | 'todos' | 'resources' | 'plan' }
+  | { kind: 'todo'; id: string }
+  | { kind: 'plan-document'; id: string }
   | { kind: 'task'; id: string }
   | { kind: 'agent'; id: string }
   | { kind: 'resource'; id: string }
@@ -45,6 +50,8 @@ export interface RuntimeCenterState {
   readonly transcripts: Readonly<Record<string, AgentTranscriptState>>;
   readonly resources: readonly RuntimeResource[];
   readonly plan: readonly PlanTaskDto[];
+  readonly submittedPlan: SubmittedPlan | null;
+  readonly submittedPlanState: SubmittedPlanState;
   readonly sections: Readonly<Record<RuntimeCenterSection, boolean>>;
   readonly overviewOpen: boolean;
   readonly tabs: readonly RuntimeCenterItemRef[];
@@ -55,6 +62,7 @@ export interface RuntimeCenterState {
 export const RUNTIME_CENTER_SECTIONS: readonly RuntimeCenterSection[] = [
   'tasks',
   'agents',
+  'todos',
   'resources',
   'plan',
 ];
@@ -65,7 +73,9 @@ export function emptyRuntimeCenterState(): RuntimeCenterState {
     transcripts: {},
     resources: [],
     plan: [],
-    sections: { tasks: true, agents: true, resources: true, plan: true },
+    submittedPlan: null,
+    submittedPlanState: emptySubmittedPlanState(),
+    sections: { tasks: true, agents: true, todos: true, resources: true, plan: true },
     overviewOpen: false,
     tabs: [],
     activeItem: null,
@@ -130,7 +140,7 @@ export function closeRuntimeCenterItem(
     ...state,
     tabs,
     activeItem: fallback,
-    inspectorOpen: fallback !== null,
+    inspectorOpen: state.inspectorOpen,
   };
 }
 
@@ -392,6 +402,10 @@ export function reduceRuntimeCenterEvent(
   event: ClientEvent,
   sessionId: string,
 ): RuntimeCenterState {
+  const submittedPlanState = reduceSubmittedPlanEvent(state.submittedPlanState, event, sessionId);
+  if (submittedPlanState !== state.submittedPlanState) {
+    state = { ...state, submittedPlanState, submittedPlan: latestSubmittedPlan(submittedPlanState) };
+  }
   switch (event.type) {
     case 'session_agent_list':
       if (event.session_id !== sessionId) return state;
@@ -438,4 +452,32 @@ export function reduceRuntimeCenterEvent(
 
 export function tasksToRuntimeItems(tasks: readonly TaskRowDto[]): RuntimeCenterItemRef[] {
   return tasks.map((task) => ({ kind: 'task', id: task.task_id }));
+}
+
+export function reduceRuntimeCenterPermission(
+  state: RuntimeCenterState, request: PermissionRequest, sessionId: string,
+): RuntimeCenterState {
+  const submittedPlanState = reduceSubmittedPlanPermission(state.submittedPlanState, request, sessionId);
+  return submittedPlanState === state.submittedPlanState ? state : {
+    ...state, submittedPlanState, submittedPlan: latestSubmittedPlan(submittedPlanState),
+  };
+}
+
+/** A respawn creates a fresh permission gate whose request IDs restart. */
+export function resetRuntimeCenterConnection(state: RuntimeCenterState): RuntimeCenterState {
+  const submittedPlanState: SubmittedPlanState = {
+    ...emptySubmittedPlanState(),
+    calls: state.submittedPlanState.calls.map(({ requestId: _requestId, ...call }) => ({
+      ...call,
+      ...(!call.finished && (call.status === 'pending' || call.status === 'submitted')
+        ? { status: 'failed' as const, finished: true }
+        : {}),
+    })),
+  };
+  return {
+    ...state,
+    overviewOpen: false,
+    submittedPlanState,
+    submittedPlan: latestSubmittedPlan(submittedPlanState),
+  };
 }

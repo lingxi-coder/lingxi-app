@@ -15,10 +15,13 @@ import {
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
 import { Stage } from './Stage';
+import { MarkdownContent } from './MarkdownContent';
+import type { SubmittedPlan } from '../bridge/submittedPlan';
 
 const SECTION_LABELS: Record<RuntimeCenterSection, string> = {
   tasks: 'Tasks',
-  agents: 'Agents',
+  agents: 'Subagents',
+  todos: 'Todos',
   resources: 'Resources',
   plan: 'Plan',
 };
@@ -127,19 +130,21 @@ function shorten(value: string, max = 90): string {
 
 function EmptyRow({ children }: { children: ReactNode }) {
   const t = useT();
-  return <div style={{ padding: '7px 9px 9px', color: t.text4, fontSize: 11 }}>{children}</div>;
+  return <div style={{ padding: '7px 9px 9px', color: t.dark ? t.text2 : t.text3, fontSize: 12 }}>{children}</div>;
 }
 
 function OverviewRow({
   icon,
   title,
   subtitle,
+  thumbnail,
   status,
   onClick,
 }: {
   icon: string;
   title: string;
   subtitle?: string;
+  thumbnail?: string;
   status?: string;
   onClick(): void;
 }) {
@@ -156,47 +161,35 @@ function OverviewRow({
       onMouseEnter={(event) => { event.currentTarget.style.background = t.surfaceHover; }}
       onMouseLeave={(event) => { event.currentTarget.style.background = 'transparent'; }}
     >
-      <span style={{ width: 23, height: 23, display: 'grid', placeItems: 'center', flexShrink: 0, borderRadius: 7, background: t.surfaceActive, color: status ? statusColor(t, status) : t.accent }}>
-        <Icon name={icon} size={13} stroke={1.8} />
+      <span style={{ width: 23, height: 23, display: 'grid', placeItems: 'center', flexShrink: 0, color: icon === 'subagent' ? t.accent : t.text3 }}>
+        <>{thumbnail ? <img src={thumbnail} alt="" style={{ width: 23, height: 23, objectFit: 'cover', borderRadius: 4 }} /> : <Icon name={icon} size={16} stroke={1.8} />}</>
       </span>
       <span style={{ minWidth: 0, flex: 1 }}>
-        <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 560 }}>{title}</span>
-        {subtitle && <span style={{ display: 'block', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>{subtitle}</span>}
+        <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 14, fontWeight: 400 }}>{title}</span>
+        {subtitle && <span style={{ display: 'block', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.dark ? t.text2 : t.text3, fontSize: 12 }}>{subtitle}</span>}
       </span>
       {status && <span className={status === 'running' ? 'running-sweep' : undefined} style={{ flexShrink: 0, color: statusColor(t, status), fontSize: 10 }}>{status}</span>}
     </button>
   );
 }
 
-function OverviewSection({
-  section,
-  open,
-  onToggle,
-  count,
-  children,
-}: {
-  section: RuntimeCenterSection;
-  open: boolean;
-  onToggle(): void;
-  count: number;
-  children: ReactNode;
-}) {
-  const t = useT();
-  return (
-    <section style={{ borderBottom: `0.5px solid ${t.border}`, paddingBottom: 5, marginBottom: 5 }}>
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={onToggle}
-        style={{ width: '100%', minHeight: 31, display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px', border: 0, borderRadius: 7, background: 'transparent', color: t.text2, font: 'inherit', cursor: 'pointer', textAlign: 'left' }}
-      >
-        <Icon name={open ? 'chevron' : 'chevronR'} size={12} stroke={1.9} />
-        <span style={{ flex: 1, fontSize: 10.5, fontWeight: 680, letterSpacing: 0.8, textTransform: 'uppercase' }}>{SECTION_LABELS[section]}</span>
-        <span className="mono" style={{ color: t.text4, fontSize: 10 }}>{count}</span>
-      </button>
-      {open && <div>{children}</div>}
-    </section>
-  );
+function SummarySection({ section, children }: { section: RuntimeCenterSection; children: ReactNode }) {
+  return <section className="runtime-summary-section" aria-label={SECTION_LABELS[section]}>
+    <h2>{SECTION_LABELS[section]}</h2>{children}
+  </section>;
+}
+
+function agentStatusSummary(statuses: readonly string[]): string {
+  const running = statuses.filter((status) => ['running', 'pending', 'paused', 'in_progress'].includes(status)).length;
+  const done = statuses.filter((status) => status === 'completed').length;
+  const failed = statuses.filter((status) => ['failed', 'killed', 'cancelled'].includes(status)).length;
+  return [running > 0 ? `${running} running` : '', done > 0 ? `${done} done` : '', failed > 0 ? `${failed} failed` : ''].filter(Boolean).join(' · ') || `${statuses.length} idle`;
+}
+
+const PLAN_STATUS_LABELS = { submitted: 'Submitted', pending: 'Pending approval', approved: 'Approved', rejected: 'Rejected', failed: 'Failed' };
+
+function planHeading(content: string): string {
+  return shorten(content.split('\n').find((line) => line.trim())?.replace(/^#+\s*/, '') ?? 'Submitted plan', 70);
 }
 
 export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
@@ -233,48 +226,9 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
   }, [bridge.setRuntimeCenterOverviewOpen]);
 
   useEffect(() => {
-    if (!center.overviewOpen) return undefined;
-    openerRef.current = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : document.querySelector<HTMLElement>('[data-runtime-center-trigger="true"]');
-    const focusFrame = window.requestAnimationFrame(() => {
-      ref.current?.querySelector<HTMLElement>('[data-runtime-overview-initial="true"]')?.focus();
-    });
-    const onPointerDown = (event: PointerEvent) => {
-      if (event.target instanceof Node && !ref.current?.contains(event.target)) closeOverview(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        closeOverview(true);
-        return;
-      }
-      if (event.key === 'Tab' && ref.current) {
-        const focusable = [...ref.current.querySelectorAll<HTMLElement>('button:not([disabled])')];
-        if (focusable.length === 0) return;
-        const active = document.activeElement;
-        const index = active instanceof HTMLElement ? focusable.indexOf(active) : -1;
-        const target = index < 0
-          ? (event.shiftKey ? focusable.at(-1) : focusable[0])
-          : event.shiftKey && index === 0
-            ? focusable.at(-1)
-            : !event.shiftKey && index === focusable.length - 1
-              ? focusable[0]
-              : undefined;
-        if (target) {
-          event.preventDefault();
-          target.focus();
-        }
-      }
-    };
-    document.addEventListener('pointerdown', onPointerDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      window.cancelAnimationFrame(focusFrame);
-      document.removeEventListener('pointerdown', onPointerDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [center.overviewOpen, closeOverview]);
+    if (!center.overviewOpen) return;
+    openerRef.current = document.querySelector<HTMLElement>('[data-runtime-center-trigger="true"]');
+  }, [center.overviewOpen]);
 
   // [Finding 5] The desktop client has no server-pushed `TaskRow` update --
   // `bridge.desktop.tasks` (and therefore the `task.stage`/`status`
@@ -307,49 +261,38 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
       [...tabs].find((tab) => tab.dataset.runtimeInspectorTab === key)?.focus();
     });
   };
-  const section = (name: RuntimeCenterSection) => center.sections[name];
   return (
-    <div
-      ref={ref}
-      id="runtime-center-overview"
-      role="dialog"
-      aria-label="Runtime center"
-      style={{
-        position: 'absolute', top: 59, right: 14, zIndex: 40, width: 340, maxHeight: 'min(78vh, 680px)', overflowY: 'auto',
-        padding: '9px 8px 5px', border: `0.5px solid ${t.borderStrong}`, borderRadius: 15,
-        background: t.surface, boxShadow: '0 20px 55px rgba(0,0,0,.28)', animation: 'fade-in .14s ease',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 9px 9px' }}>
-        <span style={{ flex: 1, color: t.text, fontSize: 13, fontWeight: 700 }}>Runtime center</span>
-        <span className="mono" style={{ color: t.text4, fontSize: 10 }}>{tasks.length + agents.length + center.resources.length + plan.length} items</span>
-        <button type="button" data-runtime-overview-initial="true" aria-label="Close runtime center" onClick={() => closeOverview(true)} style={{ display: 'grid', placeItems: 'center', width: 24, height: 24, border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}><Icon name="x" size={13} /></button>
-      </div>
-      <OverviewSection section="tasks" open={section('tasks')} onToggle={() => bridge.toggleRuntimeCenterSection('tasks')} count={tasks.length}>
-        {tasks.length === 0 ? <EmptyRow>No background tasks.</EmptyRow> : tasks.map((task) => (
-          <OverviewRow key={task.task_id} icon="activity" title={task.task_type} subtitle={shorten(task.status.type === 'running' && task.stage ? task.stage : task.description)} status={task.status.type} onClick={() => open({ kind: 'task', id: task.task_id })} />
-        ))}
-      </OverviewSection>
-      <OverviewSection section="agents" open={section('agents')} onToggle={() => bridge.toggleRuntimeCenterSection('agents')} count={agents.length}>
-        {agents.length === 0 ? <EmptyRow>No subagents reported yet.</EmptyRow> : agents.map((agent) => (
-          <OverviewRow key={agent.agent_id} icon="sparkle" title={agent.name || agent.agent_type} subtitle={shorten(agent.latest_activity ?? agent.agent_type)} status={agent.status} onClick={() => open({ kind: 'agent', id: agent.agent_id })} />
-        ))}
-      </OverviewSection>
-      <OverviewSection section="resources" open={section('resources')} onToggle={() => bridge.toggleRuntimeCenterSection('resources')} count={center.resources.length}>
-        {center.resources.length === 0 ? <EmptyRow>No input resources in this session.</EmptyRow> : center.resources.map((resource) => (
-          <OverviewRow key={resource.id} icon={resource.kind === 'image' ? 'image' : resource.kind === 'file' ? 'file' : 'anchor'} title={resource.name} subtitle={resource.path ?? resource.detail} onClick={() => open({ kind: 'resource', id: resource.id })} />
-        ))}
-      </OverviewSection>
-      <OverviewSection section="plan" open={section('plan')} onToggle={() => bridge.toggleRuntimeCenterSection('plan')} count={plan.length}>
-        {plan.length === 0 ? <EmptyRow>No active plan.</EmptyRow> : plan.map((task, index) => (
-          <OverviewRow key={planRuntimeItemId(task, index, plan)} icon={task.state === 'completed' ? 'check' : 'goal'} title={task.subject} status={task.state} onClick={() => open({ kind: 'plan', id: planRuntimeItemId(task, index, plan) })} />
-        ))}
-      </OverviewSection>
+    <div ref={ref} id="runtime-center-overview" className="runtime-summary" role="region" aria-label="Pinned summary"
+      onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeOverview(true); } }}
+      style={{ '--runtime-border': t.border, '--runtime-muted': t.dark ? t.text2 : t.text3, background: t.surface, color: t.text } as CSSProperties}>
+      <SummarySection section="agents">
+        {agents.length === 0 && tasks.length === 0 ? <EmptyRow>No subagents or background tasks.</EmptyRow> : <>
+          {agents.length > 0 && <OverviewRow icon="subagent" title={agentStatusSummary(agents.map((agent) => agent.status))} onClick={() => open({ kind: 'section', id: 'agents' })} />}
+          {tasks.length > 0 && <OverviewRow icon="activity" title={`${tasks.length} background ${tasks.length === 1 ? 'task' : 'tasks'}`} subtitle={agentStatusSummary(tasks.map((task) => task.status.type))} onClick={() => open({ kind: 'section', id: 'agents' })} />}
+        </>}
+      </SummarySection>
+      <SummarySection section="todos">
+        {plan.length === 0 ? <EmptyRow>No todos yet.</EmptyRow> : <OverviewRow icon="check" title={`${plan.filter((task) => task.state === 'completed').length} of ${plan.length} done`} subtitle={plan.find((task) => task.state === 'in_progress')?.subject ?? 'View checklist'} onClick={() => open({ kind: 'section', id: 'todos' })} />}
+      </SummarySection>
+      <SummarySection section="resources">
+        {center.resources.length === 0 ? <EmptyRow>No input resources in this session.</EmptyRow> : <>
+          {center.resources.slice(0, 3).map((resource) => <OverviewRow key={resource.id} icon={resource.kind === 'image' ? 'image' : resource.kind === 'file' ? 'file' : 'resources'} title={resource.name} thumbnail={resource.kind === 'image' ? resource.url : undefined} onClick={() => open({ kind: 'resource', id: resource.id })} />)}
+          <OverviewRow icon="resources" title="View all" onClick={() => open({ kind: 'section', id: 'resources' })} />
+        </>}
+      </SummarySection>
+      <SummarySection section="plan">
+        {center.submittedPlan ? <OverviewRow icon="file" title={planHeading(center.submittedPlan.content)} subtitle={PLAN_STATUS_LABELS[center.submittedPlan.status]} onClick={() => open({ kind: 'plan-document', id: center.submittedPlan!.id })} /> : <EmptyRow>No submitted plan yet.</EmptyRow>}
+      </SummarySection>
     </div>
   );
 }
 
 function tabLabel(item: RuntimeCenterItemRef, bridge: UseBridge): string {
+  if (item.kind === 'section') return SECTION_LABELS[item.id];
+  if (item.kind === 'plan-document') {
+    const plan = bridge.runtimeCenter.submittedPlanState.calls.find((call) => call.id === item.id);
+    return plan ? planHeading(plan.content) : 'Plan';
+  }
   if (item.kind === 'task') return bridge.desktop.tasks[item.id]?.task_type ?? 'Task';
   if (item.kind === 'agent') return bridge.runtimeCenter.agents[item.id]?.name ?? item.id.slice(0, 13);
   if (item.kind === 'resource') return bridge.runtimeCenter.resources.find((resource) => resource.id === item.id)?.name ?? 'Resource';
@@ -358,17 +301,12 @@ function tabLabel(item: RuntimeCenterItemRef, bridge: UseBridge): string {
   return index >= 0 ? plan[index]?.subject ?? 'Plan item' : 'Plan';
 }
 
-function InspectorHeader({ title, subtitle, onClose }: { title: string; subtitle?: string; onClose(): void }) {
-  const t = useT();
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 50, padding: '0 12px', borderBottom: `0.5px solid ${t.border}` }}>
-      <span style={{ minWidth: 0, flex: 1 }}>
-        <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text, fontSize: 12.5, fontWeight: 680 }}>{title}</span>
-        {subtitle && <span style={{ display: 'block', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10 }}>{subtitle}</span>}
-      </span>
-      <button type="button" aria-label="Collapse runtime inspector" onClick={onClose} style={{ display: 'grid', placeItems: 'center', width: 26, height: 26, border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}><Icon name="sidebarR" size={14} /></button>
-    </div>
-  );
+function tabIcon(item: RuntimeCenterItemRef): string {
+  if (item.kind === 'agent' || (item.kind === 'section' && item.id === 'agents')) return 'subagent';
+  if (item.kind === 'task') return 'activity';
+  if (item.kind === 'resource' || (item.kind === 'section' && item.id === 'resources')) return 'resources';
+  if (item.kind === 'todo' || item.kind === 'plan' || (item.kind === 'section' && item.id === 'todos')) return 'check';
+  return 'file';
 }
 
 function InspectorTabs({ bridge }: { bridge: UseBridge }) {
@@ -394,18 +332,18 @@ function InspectorTabs({ bridge }: { bridge: UseBridge }) {
     focusTab(target);
   };
   return (
-    <div role="tablist" aria-label="Runtime inspector items" style={{ display: 'flex', gap: 5, overflowX: 'auto', padding: '8px 9px 7px', borderBottom: `0.5px solid ${t.border}`, scrollbarWidth: 'thin' }}>
+    <div className="runtime-inspector-tabs" role="tablist" aria-label="Runtime inspector items">
       {center.tabs.map((item, index) => {
         const active = sameRuntimeCenterItem(item, center.activeItem);
         const key = runtimeCenterItemKey(item);
         return (
-          <div key={`${item.kind}:${item.id}`} role="presentation" style={{ display: 'flex', alignItems: 'center', flexShrink: 0, borderRadius: 7, background: active ? t.accentBg : t.surfaceActive, color: active ? t.accent : t.text3 }}>
-            <button type="button" role="tab" id={`runtime-inspector-tab-${encodeURIComponent(key)}`} aria-controls="runtime-inspector-panel" aria-selected={active} tabIndex={active ? 0 : -1} data-runtime-inspector-tab={key} data-runtime-inspector-active={active ? 'true' : undefined} onClick={() => bridge.openRuntimeItem(item)} onKeyDown={(event) => selectFromKeyboard(event, index)} style={{ maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', padding: '5px 7px 5px 9px', border: 0, background: 'transparent', color: 'inherit', font: 'inherit', fontSize: 10.5, cursor: 'pointer' }}>{tabLabel(item, bridge)}</button>
-            <button type="button" aria-label={`Close ${tabLabel(item, bridge)}`} onClick={() => { bridge.closeRuntimeItem(item); window.requestAnimationFrame(() => (document.querySelector<HTMLElement>('[data-runtime-inspector-active="true"]') ?? document.querySelector<HTMLElement>('[data-runtime-center-trigger="true"]'))?.focus()); }} style={{ display: 'grid', placeItems: 'center', width: 22, height: 22, marginRight: 2, border: 0, borderRadius: 5, background: 'transparent', color: 'inherit', cursor: 'pointer' }}><Icon name="x" size={11} /></button>
+          <div key={`${item.kind}:${item.id}`} role="presentation" style={{ display: 'flex', alignItems: 'center', flexShrink: 0, height: 32, borderRadius: 12, background: active ? t.surfaceActive : 'transparent', color: active ? t.text : t.text3 }}>
+            <button type="button" role="tab" id={`runtime-inspector-tab-${encodeURIComponent(key)}`} aria-controls="runtime-inspector-panel" aria-selected={active} tabIndex={active ? 0 : -1} data-runtime-inspector-tab={key} data-runtime-inspector-active={active ? 'true' : undefined} onClick={() => bridge.openRuntimeItem(item)} onKeyDown={(event) => selectFromKeyboard(event, index)} style={{ maxWidth: 180, minWidth: 0, height: 32, display: 'flex', alignItems: 'center', gap: 8, padding: '0 7px 0 11px', border: 0, background: 'transparent', color: 'inherit', font: 'inherit', fontSize: 13, fontWeight: 400, cursor: 'pointer' }}><Icon name={tabIcon(item)} size={16} /><span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tabLabel(item, bridge)}</span></button>
+            <button type="button" aria-label={`Close ${tabLabel(item, bridge)}`} onClick={() => { bridge.closeRuntimeItem(item); window.requestAnimationFrame(() => (document.querySelector<HTMLElement>('[data-runtime-inspector-active="true"]') ?? document.querySelector<HTMLElement>('.runtime-inspector-landing button') ?? document.querySelector<HTMLElement>('[data-runtime-center-trigger="true"]'))?.focus()); }} style={{ display: 'grid', placeItems: 'center', width: 22, height: 22, marginRight: 2, border: 0, borderRadius: 5, background: 'transparent', color: 'inherit', cursor: 'pointer' }}><Icon name="x" size={11} /></button>
           </div>
         );
       })}
-      <button type="button" aria-label="Open runtime center" onClick={() => bridge.setRuntimeCenterOverviewOpen(true)} style={{ display: 'grid', placeItems: 'center', flexShrink: 0, width: 26, height: 26, border: `0.5px solid ${t.border}`, borderRadius: 7, background: 'transparent', color: t.text3, cursor: 'pointer' }}><Icon name="plus" size={13} /></button>
+      <button type="button" aria-label="Open pinned summary" onClick={() => bridge.setRuntimeCenterOverviewOpen(true)} style={{ display: 'grid', placeItems: 'center', flexShrink: 0, width: 32, height: 32, border: 0, borderRadius: 10, background: 'transparent', color: t.text3, cursor: 'pointer' }}><Icon name="plus" size={17} /></button>
     </div>
   );
 }
@@ -435,7 +373,7 @@ function AgentDetail({ agent, bridge }: { agent: SessionAgentSummaryDto | undefi
       <div style={{ padding: '10px 13px', borderBottom: `0.5px solid ${t.border}`, color: t.text3, fontSize: 10.5 }}>
         <span style={{ color: statusColor(t, agent.status), fontWeight: 650 }}>{agent.status}</span>
         {agent.model && <span> · {agent.model}</span>}
-        {agent.latest_activity && <span style={{ display: 'block', marginTop: 4, color: t.text4 }}>{shorten(agent.latest_activity, 150)}</span>}
+        {agent.latest_activity && <span style={{ display: 'block', marginTop: 4, color: t.dark ? t.text2 : t.text3 }}>{shorten(agent.latest_activity, 150)}</span>}
       </div>
       <Stage liveItems={conversation.items} running={agent.status === 'running'} sessionKey={`agent:${agent.agent_id}`} emptyMessage="Waiting for the agent to emit its first message." />
     </div>
@@ -476,8 +414,8 @@ function PlanDetail({ selected, plan }: { selected: PlanTaskDto | undefined; pla
   return (
     <div style={{ minHeight: 0, overflow: 'auto', padding: 15 }}>
       {selected && <div style={{ marginBottom: 16, padding: 12, borderRadius: 10, background: t.accentBg, color: t.text, fontSize: 13, lineHeight: 1.5 }}><div style={{ color: t.accent, fontSize: 10, fontWeight: 700, letterSpacing: .7, textTransform: 'uppercase', marginBottom: 5 }}>{selected.state.replace('_', ' ')}</div>{selected.subject}</div>}
-      <div style={{ color: t.text4, fontSize: 10, fontWeight: 700, letterSpacing: .7, textTransform: 'uppercase', marginBottom: 7 }}>Full plan</div>
-      {plan.length === 0 ? <EmptyRow>No active plan.</EmptyRow> : plan.map((task, index) => <div key={planRuntimeItemId(task, index, plan)} style={{ display: 'flex', gap: 8, padding: '6px 0', color: task.state === 'completed' ? t.text4 : t.text2, fontSize: 12, textDecoration: task.state === 'completed' ? 'line-through' : undefined }}><span style={{ color: task.state === 'completed' ? t.ok : task.state === 'in_progress' ? t.accent : t.text4 }}>●</span><span>{task.subject}</span></div>)}
+      <div style={{ color: t.dark ? t.text2 : t.text3, fontSize: 10, fontWeight: 700, letterSpacing: .7, textTransform: 'uppercase', marginBottom: 7 }}>Todos</div>
+      {plan.length === 0 ? <EmptyRow>No todos yet.</EmptyRow> : plan.map((task, index) => <div key={planRuntimeItemId(task, index, plan)} style={{ display: 'flex', gap: 8, padding: '6px 0', color: task.state === 'completed' ? t.text4 : t.text2, fontSize: 12, textDecoration: task.state === 'completed' ? 'line-through' : undefined }}><span style={{ color: task.state === 'completed' ? t.ok : task.state === 'in_progress' ? t.accent : t.text4 }}>●</span><span>{task.subject}</span></div>)}
     </div>
   );
 }
@@ -490,7 +428,7 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
   const resource = active?.kind === 'resource' ? center.resources.find((entry) => entry.id === active.id) : undefined;
   const task = active?.kind === 'task' ? bridge.desktop.tasks[active.id] : undefined;
   const agent = active?.kind === 'agent' ? center.agents[active.id] : undefined;
-  const selectedPlan = active?.kind === 'plan' ? plan.find((taskEntry, index) => planRuntimeItemId(taskEntry, index, plan) === active.id) : undefined;
+  const selectedPlan = (active?.kind === 'plan' || active?.kind === 'todo') ? plan.find((taskEntry, index) => planRuntimeItemId(taskEntry, index, plan) === active.id) : undefined;
   // [Finding 5, rework round 2] Same ref treatment as the overview panel's
   // `hasActiveTaskRef` -- `task?.status.type` must not sit in the
   // row-refresh effect's dependency array below, or a background poll
@@ -546,20 +484,56 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
     return startPollingWhileActive(() => taskInFlightRef.current, bridge.refreshTasks);
   }, [active?.kind, active?.id, !!task, bridge.refreshTasks]);
 
-  if (!center.inspectorOpen || !active) return null;
-  const subtitle = active.kind === 'agent' ? agent?.agent_type : active.kind === 'task' ? task?.status.type : active.kind === 'resource' ? resource?.path : undefined;
+  useEffect(() => {
+    // The pinned overview already owns discovery polling when both are open.
+    if (!center.inspectorOpen || center.overviewOpen || active?.kind !== 'section' || active.id !== 'agents') return undefined;
+    void bridge.refreshTasks({ preserve: true }).catch(() => undefined);
+    return startPollingWhileActive(() => true, bridge.refreshTasks);
+  }, [center.inspectorOpen, center.overviewOpen, active?.kind, active?.id, bridge.refreshTasks]);
+
+  if (!center.inspectorOpen) return null;
   return (
-    <aside aria-label="Runtime inspector" style={{ width: 390, minWidth: 300, maxWidth: '42vw', flexShrink: 0, minHeight: 0, display: 'flex', flexDirection: 'column', background: t.sidebarBg, borderLeft: `0.5px solid ${t.border}` }}>
-      <InspectorHeader title={tabLabel(active, bridge)} subtitle={subtitle} onClose={() => bridge.setRuntimeInspectorOpen(false)} />
-      <InspectorTabs bridge={bridge} />
-      <div id="runtime-inspector-panel" role="tabpanel" aria-labelledby={`runtime-inspector-tab-${encodeURIComponent(runtimeCenterItemKey(active))}`} style={{ minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column' }}>
-        {active.kind === 'task' && <TaskDetail task={task} bridge={bridge} />}
-        {active.kind === 'agent' && <AgentDetail agent={agent} bridge={bridge} />}
-        {active.kind === 'resource' && <ResourceDetail resource={resource} bridge={bridge} />}
-        {active.kind === 'plan' && <PlanDetail selected={selectedPlan} plan={plan} />}
+    <aside id="runtime-inspector" className="runtime-inspector" aria-label="Runtime inspector" style={{ background: t.surface, borderLeft: `0.5px solid ${t.border}` }}>
+      <header className="runtime-inspector-header" style={{ borderBottom: `0.5px solid ${t.border}` }}>
+        <InspectorTabs bridge={bridge} />
+        <button type="button" aria-label="Hide right panel" className="runtime-panel-hide" onClick={() => { bridge.setRuntimeInspectorOpen(false); window.requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-runtime-inspector-trigger="true"]')?.focus()); }} style={runtimeCenterButtonStyle(t, true)}><Icon name="panel-right" size={18} /></button>
+      </header>
+      <div id="runtime-inspector-panel" role={active ? 'tabpanel' : 'region'} aria-label={active ? undefined : 'Details'} aria-labelledby={active ? `runtime-inspector-tab-${encodeURIComponent(runtimeCenterItemKey(active))}` : undefined} style={{ minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
+        {!active && <div className="runtime-inspector-landing">{(['agents', 'todos', 'resources', 'plan'] as const).map((section) => <OverviewRow key={section} icon={section === 'agents' ? 'subagent' : section === 'todos' ? 'check' : section === 'resources' ? 'resources' : 'file'} title={SECTION_LABELS[section]} onClick={() => bridge.openRuntimeItem({ kind: 'section', id: section })} />)}</div>}
+        {active?.kind === 'section' && <SectionDetail section={active.id} bridge={bridge} />}
+        {active?.kind === 'task' && <TaskDetail task={task} bridge={bridge} />}
+        {active?.kind === 'agent' && <AgentDetail agent={agent} bridge={bridge} />}
+        {active?.kind === 'resource' && <ResourceDetail resource={resource} bridge={bridge} />}
+        {(active?.kind === 'plan' || active?.kind === 'todo') && <PlanDetail selected={selectedPlan} plan={plan} />}
+        {active?.kind === 'plan-document' && <SubmittedPlanDetail plan={center.submittedPlanState.calls.find((call) => call.id === active.id) ?? (center.submittedPlan?.id === active.id ? center.submittedPlan : undefined)} />}
       </div>
     </aside>
   );
+}
+
+function SubmittedPlanDetail({ plan }: { plan: SubmittedPlan | null | undefined }) {
+  const t = useT();
+  return <div className="runtime-section-detail" style={{ color: t.text }}>
+    {plan ? <><div style={{ marginBottom: 16, color: t.text3, fontSize: 12 }}>{PLAN_STATUS_LABELS[plan.status]}</div><MarkdownContent text={plan.content} /></> : <EmptyRow>No submitted plan yet.</EmptyRow>}
+  </div>;
+}
+
+function SectionDetail({ section, bridge }: { section: RuntimeCenterSection; bridge: UseBridge }) {
+  const center = bridge.runtimeCenter;
+  const tasks = orderedTasks(bridge.desktop);
+  const agents = Object.values(center.agents).filter((agent) => agent.agent_id !== 'main');
+  const todos = center.plan.length > 0 ? center.plan : bridge.conversation.plan;
+  if (section === 'plan') return <SubmittedPlanDetail plan={center.submittedPlan} />;
+  return <div className="runtime-section-detail">
+    <h2>{SECTION_LABELS[section]}</h2>
+    {section === 'todos' && (todos.length === 0 ? <EmptyRow>No todos yet.</EmptyRow> : todos.map((todo, index) => <OverviewRow key={planRuntimeItemId(todo, index, todos)} icon={todo.state === 'completed' ? 'check' : 'goal'} title={todo.subject} status={todo.state} onClick={() => bridge.openRuntimeItem({ kind: 'todo', id: planRuntimeItemId(todo, index, todos) })} />))}
+    {section === 'agents' && <>
+      {agents.length === 0 && tasks.length === 0 && <EmptyRow>No subagents or background tasks.</EmptyRow>}
+      {agents.map((agent) => <OverviewRow key={agent.agent_id} icon="subagent" title={agent.name || agent.agent_type} subtitle={`Subagent · ${agent.latest_activity ?? agent.agent_type}`} status={agent.status} onClick={() => bridge.openRuntimeItem({ kind: 'agent', id: agent.agent_id })} />)}
+      {tasks.map((task) => <OverviewRow key={task.task_id} icon="activity" title={task.task_type} subtitle={`Background task · ${shorten(task.status.type === 'running' && task.stage ? task.stage : task.description)}`} status={task.status.type} onClick={() => bridge.openRuntimeItem({ kind: 'task', id: task.task_id })} />)}
+    </>}
+    {section === 'resources' && (center.resources.length === 0 ? <EmptyRow>No input resources in this session.</EmptyRow> : center.resources.map((resource) => <OverviewRow key={resource.id} icon={resource.kind === 'image' ? 'image' : 'file'} title={resource.name} subtitle={resource.path ?? resource.detail} onClick={() => bridge.openRuntimeItem({ kind: 'resource', id: resource.id })} />))}
+  </div>;
 }
 
 export function RuntimeCenter({ bridge }: { bridge: UseBridge }) {
@@ -567,5 +541,5 @@ export function RuntimeCenter({ bridge }: { bridge: UseBridge }) {
 }
 
 export function runtimeCenterButtonStyle(t: ReturnType<typeof useT>, active: boolean): CSSProperties {
-  return { width: 30, height: 30, display: 'grid', placeItems: 'center', borderRadius: 7, border: `0.5px solid ${active ? t.accentBorder : t.border}`, background: active ? t.accentBg : 'transparent', color: active ? t.accent : t.text3, cursor: 'pointer' };
+  return { width: 32, height: 32, flexShrink: 0, display: 'grid', placeItems: 'center', borderRadius: 10, border: 0, background: active ? t.surfaceActive : 'transparent', color: active ? t.text : t.text3, cursor: 'pointer' };
 }

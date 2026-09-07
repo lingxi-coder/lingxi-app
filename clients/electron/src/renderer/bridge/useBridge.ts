@@ -63,6 +63,8 @@ import {
   openRuntimeCenterItem,
   promptRuntimeResources,
   reduceRuntimeCenterEvent,
+  reduceRuntimeCenterPermission,
+  resetRuntimeCenterConnection,
   resourcesFromRestoredMessages,
   rollbackRuntimeResources,
   setRuntimeCenterOverviewOpen,
@@ -1382,7 +1384,7 @@ export function useBridge(): UseBridge {
           return {
             ...reset,
             connection: state,
-            runtimeCenter: { ...current.runtimeCenter, overviewOpen: false },
+            runtimeCenter: resetRuntimeCenterConnection(current.runtimeCenter),
           };
         }
         if (shouldClearPendingPermissions(state)) {
@@ -1421,6 +1423,7 @@ export function useBridge(): UseBridge {
         const alreadyQueued = state.permissionQueue.some((entry) => entry.request_id === envelope.event.request_id);
         return {
           ...state,
+          runtimeCenter: reduceRuntimeCenterPermission(state.runtimeCenter, envelope.event, envelope.sessionId),
           permissionQueue: [
             ...state.permissionQueue.filter((entry) => entry.request_id !== envelope.event.request_id),
             envelope.event,
@@ -2110,10 +2113,11 @@ export function useBridge(): UseBridge {
     if (!sessionId || sessionLoadingRef.current) return;
     updateRuntime(sessionId, (state) => ({
       ...state,
-      runtimeCenter: setRuntimeCenterOverviewOpen(openRuntimeCenterItem(state.runtimeCenter, item), false),
+      runtimeCenter: openRuntimeCenterItem(state.runtimeCenter, item),
     }));
     if (item.kind === 'agent') void loadSessionAgentTranscript(item.id).catch(() => undefined);
-  }, [loadSessionAgentTranscript, updateRuntime]);
+    if (item.kind === 'section' && item.id === 'agents') void refreshSessionAgents().catch(() => undefined);
+  }, [loadSessionAgentTranscript, refreshSessionAgents, updateRuntime]);
   const closeRuntimeItem = useCallback((item: RuntimeCenterItemRef): void => {
     const sessionId = activeSessionIdRef.current;
     if (!sessionId) return;

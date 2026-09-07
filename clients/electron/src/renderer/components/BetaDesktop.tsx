@@ -12,7 +12,6 @@ import type { NativeAudioApi } from '../bridge/lingxi';
 import { orderedTasks } from '../bridge/desktopState';
 import { classifyDesktopError } from '../bridge/errors';
 import { useT } from '../theme/ThemeContext';
-import type { ThemeMode } from '../theme/tokens';
 import {
   activeFileMention,
   promptWithFileMentions,
@@ -783,33 +782,36 @@ export function ContextSummaryPanel({ summaries, selectedId, onSelect, onClose }
   );
 }
 
-export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, theme, onTheme }: {
+export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter }: {
   bridge: UseBridge;
   runtimeCenterOpen: boolean;
   onToggleRuntimeCenter(): void;
-  theme: ThemeMode;
-  onTheme(value: ThemeMode): void;
 }) {
   const t = useT();
+  const [moreOpen, setMoreOpen] = useState(false);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [selectedSummaryId, setSelectedSummaryId] = useState<string | null>(null);
-  const summaryTriggerRef = useRef<HTMLButtonElement>(null);
+  const moreTriggerRef = useRef<HTMLButtonElement>(null);
+  const moreMenuRef = useRef<HTMLDivElement>(null);
   const summaryPanelRef = useRef<HTMLDivElement>(null);
   const summaries = bridge.conversation.summaries;
-  const currentSummaryId = summaries.at(-1)?.id ?? null;
+  const inspectorOpen = bridge.runtimeCenter.inspectorOpen;
 
   useEffect(() => {
-    if (!summaryOpen) return;
+    if (!moreOpen && !summaryOpen) return;
     const closeOnPointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node)) return;
-      if (summaryTriggerRef.current?.contains(target) || summaryPanelRef.current?.contains(target)) return;
+      if (moreTriggerRef.current?.contains(target) || moreMenuRef.current?.contains(target) || summaryPanelRef.current?.contains(target)) return;
+      setMoreOpen(false);
       setSummaryOpen(false);
     };
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      setMoreOpen(false);
       setSummaryOpen(false);
-      summaryTriggerRef.current?.focus();
+      moreTriggerRef.current?.focus();
     };
     document.addEventListener('pointerdown', closeOnPointerDown, true);
     document.addEventListener('keydown', closeOnEscape);
@@ -817,66 +819,105 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
       document.removeEventListener('pointerdown', closeOnPointerDown, true);
       document.removeEventListener('keydown', closeOnEscape);
     };
-  }, [summaryOpen]);
+  }, [moreOpen, summaryOpen]);
 
   useEffect(() => {
+    setMoreOpen(false);
     setSummaryOpen(false);
     setSelectedSummaryId(null);
   }, [bridge.conversation.sessionKey]);
 
+  useEffect(() => {
+    if (moreOpen) moreMenuRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
+  }, [moreOpen]);
+
+  useEffect(() => {
+    if (summaryOpen) summaryPanelRef.current?.querySelector<HTMLButtonElement>('.context-summary-close')?.focus();
+  }, [summaryOpen]);
+
   const topbarActionTokens = {
     '--topbar-action-focus': t.surfaceHover,
     '--topbar-action-active': t.surfaceHover,
-    '--topbar-action-ring': t.border,
+    '--topbar-action-ring': t.borderStrong,
     '--topbar-action-color': t.text3,
     '--topbar-action-hover-color': t.text,
     '--topbar-action-active-color': t.text,
   } as CSSProperties;
   return (
-    <header className="drag-region desktop-topbar" style={{ height: 56, position: 'relative', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, padding: '0 10px 0 18px', borderBottom: `0.5px solid ${t.border}`, background: t.windowBg }}>
+    <header className="drag-region desktop-topbar" style={{ height: 56, position: 'relative', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, padding: '0 12px 0 18px', borderBottom: `0.5px solid ${t.border}`, background: t.windowBg }}>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path)}</div>
         <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path ?? 'Add a project to begin'}</div>
       </div>
       {bridge.usage && (
-        <span className="mono" style={{ color: t.text4, fontSize: 9.5 }} title="Input + output tokens">
+        <span className="mono desktop-topbar-usage" style={{ color: t.text4, fontSize: 9.5 }} title="Input + output tokens">
           {(bridge.usage.inputTokens + bridge.usage.outputTokens).toLocaleString()} tok
         </span>
       )}
-      <button className="no-drag desktop-topbar-action" type="button" aria-label="Toggle theme" onClick={() => onTheme(theme === 'dark' ? 'light' : 'dark')} style={topbarActionTokens}>
-        <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} />
-      </button>
       <button
-        ref={summaryTriggerRef}
+        ref={moreTriggerRef}
         className="no-drag desktop-topbar-action"
         type="button"
-        aria-label="Open context summaries"
-        aria-controls="context-summary-panel"
-        aria-expanded={summaryOpen}
-        data-active={summaryOpen ? 'true' : undefined}
+        aria-label="More chat actions"
+        title="More chat actions"
+        aria-expanded={moreOpen}
+        aria-controls="desktop-topbar-more"
+        data-active={moreOpen || summaryOpen ? 'true' : undefined}
+        onClick={() => { setMoreOpen((open) => !open); setSummaryOpen(false); }}
+        style={topbarActionTokens}
+      ><Icon name="more" size={18} /></button>
+      <button
+        className="no-drag desktop-topbar-action"
+        type="button"
+        data-runtime-center-trigger="true"
+        aria-label="Toggle pinned summary"
+        title="Toggle pinned summary"
+        aria-controls="runtime-center-overview"
+        aria-expanded={runtimeCenterOpen}
+        aria-pressed={runtimeCenterOpen}
+        data-active={runtimeCenterOpen ? 'true' : undefined}
+        onClick={onToggleRuntimeCenter}
+        style={topbarActionTokens}
+      ><Icon name="summary-list" size={20} /></button>
+      <button
+        className="no-drag desktop-topbar-action desktop-inspector-trigger"
+        type="button"
+        data-runtime-inspector-trigger="true"
+        aria-label="Toggle right panel"
+        title="Toggle right panel"
+        aria-controls="runtime-inspector"
+        aria-expanded={inspectorOpen}
+        aria-pressed={inspectorOpen}
+        data-active={inspectorOpen ? 'true' : undefined}
         onClick={() => {
-          setSummaryOpen((open) => {
-            if (!open) setSelectedSummaryId((current) => summaries.some((summary) => summary.id === current) ? current : currentSummaryId);
-            return !open;
+          bridge.setRuntimeInspectorOpen(!inspectorOpen);
+          if (!inspectorOpen) window.requestAnimationFrame(() => {
+            (document.querySelector<HTMLElement>('[data-runtime-inspector-active="true"]')
+              ?? document.querySelector<HTMLElement>('.runtime-inspector-landing button')
+              ?? document.querySelector<HTMLElement>('.runtime-panel-hide'))?.focus();
           });
         }}
         style={topbarActionTokens}
-      >
-        <Icon name="summary" size={17} stroke={1.7} />
-      </button>
-      <button className="no-drag desktop-topbar-action" type="button" data-runtime-center-trigger="true" aria-label="Toggle runtime center" aria-controls="runtime-center-overview" aria-expanded={runtimeCenterOpen} data-active={runtimeCenterOpen ? 'true' : undefined} onClick={onToggleRuntimeCenter} style={topbarActionTokens}>
-        <Icon name="tasks" size={17} stroke={1.7} />
-      </button>
-      {summaryOpen ? (
+      ><Icon name={inspectorOpen ? 'panel-right' : 'panel-right-hidden'} size={20} /></button>
+      {moreOpen && (
+        <div ref={moreMenuRef} id="desktop-topbar-more" className="no-drag desktop-topbar-more" style={{ background: t.surface, color: t.text, borderColor: t.border }}>
+          <button type="button" aria-label="Open context summaries" onClick={() => {
+            setMoreOpen(false);
+            setSelectedSummaryId(summaries.at(-1)?.id ?? null);
+            setSummaryOpen(true);
+          }}><Icon name="summary" size={16} /><span>Context summaries</span></button>
+        </div>
+      )}
+      {summaryOpen && (
         <div ref={summaryPanelRef} style={{ display: 'contents' }}>
           <ContextSummaryPanel
             summaries={summaries}
             selectedId={selectedSummaryId}
             onSelect={setSelectedSummaryId}
-            onClose={() => { setSummaryOpen(false); summaryTriggerRef.current?.focus(); }}
+            onClose={() => { setSummaryOpen(false); moreTriggerRef.current?.focus(); }}
           />
         </div>
-      ) : null}
+      )}
     </header>
   );
 }

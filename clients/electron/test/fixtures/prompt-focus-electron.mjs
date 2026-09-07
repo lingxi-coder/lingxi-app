@@ -91,7 +91,8 @@ async function main() {
     await delay(50);
     webContents.sendInputEvent({ type: 'mouseDown', x: Math.round(resizeGeometry.handleX), y: Math.round(resizeGeometry.handleY), button: 'left', clickCount: 1 });
     await delay(50);
-    webContents.sendInputEvent({ type: 'mouseMove', x: 360, y: Math.round(resizeGeometry.handleY), button: 'left' });
+    // Electron 43 derives pointermove.buttons from modifiers, not button alone.
+    webContents.sendInputEvent({ type: 'mouseMove', x: 360, y: Math.round(resizeGeometry.handleY), button: 'left', modifiers: ['leftButtonDown'] });
     await waitFor(webContents, `Math.round(document.querySelector('[aria-label="Resize sidebar"]')?.closest('aside')?.getBoundingClientRect().width ?? 0) === 360`);
     webContents.sendInputEvent({ type: 'mouseUp', x: 360, y: Math.round(resizeGeometry.handleY), button: 'left', clickCount: 1 });
     await delay(50);

@@ -22,6 +22,57 @@ impl BoundAttemptBudget {
         self.account.binding_id
     }
 
+    pub(crate) fn tracker(&self) -> Arc<CostTracker> {
+        self.account.tracker.clone()
+    }
+
+    pub(crate) fn authorize_and_enqueue(
+        &self,
+        intent: &crate::AttemptIntent,
+        max_reserved_nano_usd: u64,
+        session_limit: Option<u64>,
+        state: &crate::CostState,
+        permit: crate::AttemptPersistPermit,
+        ack: tokio::sync::oneshot::Sender<
+            Result<crate::AttemptPersistAck, crate::CostPersistError>,
+        >,
+    ) -> Result<(), AttemptAdmissionError> {
+        if intent.session_id != self.account.session_id
+            || state.session_id != self.account.session_id
+        {
+            return Err(invalid("attempt admission session mismatch").into());
+        }
+        let gate = self.account.tracker.durability_gate();
+        let mut book = self.account.session.lock_reservations(&gate)?;
+        self.account
+            .tracker
+            .preflight_durable()
+            .map_err(|error| invalid_owned(error.to_string()))?;
+        let inserted = book.reserve_attempt(
+            &intent.attempt_id,
+            AttemptHold {
+                run_id: intent.run_id.clone(),
+                generation: self.account.generation_id,
+                nano_usd: intent.authorized_nano_usd,
+                output_tokens: intent.authorized_output_tokens,
+            },
+            max_reserved_nano_usd,
+            state.total_nano_usd,
+            session_limit,
+        )?;
+        if !inserted {
+            return Err(invalid("attempt already owns an admission").into());
+        }
+        permit
+            .enqueue(crate::AttemptPersistRequest {
+                session_id: intent.session_id,
+                mutation: crate::AttemptPersistMutation::Intent(intent.clone()),
+                ack,
+            })
+            .map_err(|error| invalid_owned(error.to_string()))?;
+        Ok(())
+    }
+
     pub(crate) fn validate_tracker(
         &self,
         tracker: &CostTracker,
@@ -78,6 +129,20 @@ pub(super) struct AttemptRunBudget {
     pub(super) max_reserved_nano_usd: u64,
 }
 
+/// Capacity denial is an ordinary outcome, not a persistence fault. Keep
+/// this classification typed; no caller should inspect diagnostic strings.
+#[derive(Debug)]
+pub(crate) enum AttemptAdmissionError {
+    Denied(BudgetError),
+    Fault(BudgetError),
+}
+
+impl From<BudgetError> for AttemptAdmissionError {
+    fn from(error: BudgetError) -> Self {
+        Self::Fault(error)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct OutputRevision {
     revision: u64,
@@ -92,6 +157,10 @@ pub(super) struct PublishedAttemptOutput {
 
 fn invalid(reason: &'static str) -> BudgetError {
     BudgetError::Internal(reason.into())
+}
+
+fn invalid_owned(reason: String) -> BudgetError {
+    BudgetError::Internal(reason)
 }
 
 fn sum(mut values: impl Iterator<Item = u64>) -> Result<u64, BudgetError> {
@@ -112,9 +181,9 @@ impl ReservationBook {
         max_reserved_nano_usd: u64,
         realized_nano_usd: u64,
         session_limit: Option<u64>,
-    ) -> Result<bool, BudgetError> {
+    ) -> Result<bool, AttemptAdmissionError> {
         if attempt_id.is_empty() || hold.run_id.is_empty() {
-            return Err(invalid("empty attempt budget identity"));
+            return Err(invalid("empty attempt budget identity").into());
         }
         let run = AttemptRunBudget {
             generation: hold.generation,
@@ -125,26 +194,26 @@ impl ReservationBook {
             .get(&hold.run_id)
             .is_some_and(|previous| previous != &run)
         {
-            return Err(invalid(
-                "attempt run changed its output scope or outstanding limit",
-            ));
+            return Err(
+                invalid("attempt run changed its output scope or outstanding limit").into(),
+            );
         }
         if let Some(previous) = self.attempt_holds.get(attempt_id) {
             return if previous == &hold {
                 Ok(false)
             } else {
-                Err(invalid("attempt hold identity conflict"))
+                Err(invalid("attempt hold identity conflict").into())
             };
         }
         if self.attempt_origins.contains_key(attempt_id) {
-            return Err(invalid("settled attempt cannot acquire another hold"));
+            return Err(invalid("settled attempt cannot acquire another hold").into());
         }
         let scope = self
             .output_scopes
             .get(&hold.generation)
             .ok_or_else(|| invalid("attempt has no captured output scope"))?;
         if scope.attempts.contains_key(attempt_id) {
-            return Err(invalid("settled attempt cannot acquire another hold"));
+            return Err(invalid("settled attempt cannot acquire another hold").into());
         }
         // Checked sums reject overflow even when a limit is u64::MAX. A
         // saturating sum would incorrectly authorize at that boundary.
@@ -158,9 +227,9 @@ impl ReservationBook {
             .checked_add(hold.nano_usd)
             .ok_or_else(|| invalid("money occupancy overflow"))?;
         if session_limit.is_some_and(|limit| next > limit) {
-            return Err(BudgetError::Exceeded {
+            return Err(AttemptAdmissionError::Denied(BudgetError::Exceeded {
                 current_nano_usd: current,
-            });
+            }));
         }
         let run_held = sum(self
             .attempt_holds
@@ -171,9 +240,9 @@ impl ReservationBook {
             .checked_add(hold.nano_usd)
             .is_none_or(|next| next > max_reserved_nano_usd)
         {
-            return Err(BudgetError::Exceeded {
+            return Err(AttemptAdmissionError::Denied(BudgetError::Exceeded {
                 current_nano_usd: run_held,
-            });
+            }));
         }
         let output_held = sum(self
             .attempt_holds
@@ -189,7 +258,9 @@ impl ReservationBook {
             .max_output_tokens
             .is_some_and(|limit| output_next > limit)
         {
-            return Err(invalid("workflow output budget exceeded"));
+            return Err(AttemptAdmissionError::Denied(invalid(
+                "workflow output budget exceeded",
+            )));
         }
         self.attempt_runs.insert(hold.run_id.clone(), run);
         self.attempt_origins

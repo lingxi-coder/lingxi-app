@@ -13,7 +13,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
+mod attempt_lifecycle;
 mod attempts;
+pub use attempt_lifecycle::CostBudgetAttempt;
+pub(crate) use attempts::AttemptAdmissionError;
 mod output;
 pub(crate) use attempts::BoundAttemptBudget;
 #[cfg(test)]

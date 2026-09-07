@@ -26,6 +26,7 @@ use telemetry::AnalyticsBus;
 use tokio::sync::{mpsc, Mutex, OwnedMutexGuard, RwLock};
 
 mod attempts;
+pub(crate) use attempts::AttemptLifecycle;
 pub use attempts::{CostAttemptReceipt, CostAttemptSettlement};
 
 /// Persisted snapshot of one session's cumulative cost and usage.
@@ -815,18 +816,39 @@ impl CostTracker {
                     }
                 }
             }
-            let attempts = entry
-                .attempt_settlements
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .values()
-                .cloned()
-                .collect::<Vec<_>>();
-            for slot in attempts {
-                if let Err(error) = slot.wait().await {
+            // Accepted begin owners can create receipt slots after the first
+            // fence. Wait their lease lifecycles, then fence those receipts.
+            // This map is append-only; retirement must replace the length
+            // check with a monotonic registration generation.
+            loop {
+                let attempts = entry
+                    .attempt_settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let count = attempts.len();
+                for slot in attempts {
+                    if let Err(error) = slot.drain().await {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+                if let Err(error) = entry.durability_gate.drain_registered().await {
                     if first_error.is_none() {
                         first_error = Some(error);
                     }
+                }
+                if entry
+                    .attempt_settlements
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .len()
+                    == count
+                {
+                    break;
                 }
             }
         }

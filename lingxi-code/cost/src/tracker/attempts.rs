@@ -5,6 +5,9 @@ use crate::{
     AttemptFoldAck, AttemptPersistAck, AttemptPersistMutation, AttemptPersistRequest,
     CostStateVector,
 };
+mod begin;
+#[cfg(test)]
+mod begin_tests;
 
 /// Compact stable result; no historical cumulative vector is retained.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,12 +23,71 @@ pub struct CostAttemptSettlement {
 pub(super) struct AttemptSlot {
     mutation: AttemptPersistMutation,
     publication_key: Option<protocol::MessageId>,
-    result: std::sync::Mutex<Option<Result<CostAttemptSettlement, CostPersistError>>>,
+    result: std::sync::Mutex<Option<AttemptSlotOutcome>>,
+    lifecycle: Option<Arc<AttemptLifecycle>>,
     notify: tokio::sync::Notify,
+}
+
+#[derive(Clone)]
+enum AttemptSlotOutcome {
+    Persisted(Result<CostAttemptSettlement, CostPersistError>),
+    NotAdmitted(platform_api::BudgetError),
+}
+
+/// No account/lease backedge. Intent acknowledgement ends its durability
+/// turn, while shutdown waits until the unique lease registers its receipt.
+pub(crate) struct AttemptLifecycle {
+    closed: std::sync::atomic::AtomicBool,
+    changed: tokio::sync::Notify,
+}
+
+impl AttemptLifecycle {
+    pub(crate) fn new() -> Self {
+        Self {
+            closed: std::sync::atomic::AtomicBool::new(false),
+            changed: tokio::sync::Notify::new(),
+        }
+    }
+
+    pub(crate) fn close(&self) {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.changed.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        loop {
+            let notified = self.changed.notified();
+            if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 impl AttemptSlot {
     pub(super) async fn wait(&self) -> Result<CostAttemptSettlement, CostPersistError> {
+        match self.wait_outcome().await {
+            AttemptSlotOutcome::Persisted(result) => result,
+            AttemptSlotOutcome::NotAdmitted(error) => {
+                Err(CostPersistError::Rejected(error.to_string()))
+            }
+        }
+    }
+
+    pub(super) async fn drain(&self) -> Result<(), CostPersistError> {
+        let outcome = self.wait_outcome().await;
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.wait().await;
+        }
+        match outcome {
+            AttemptSlotOutcome::Persisted(result) => result.map(|_| ()),
+            AttemptSlotOutcome::NotAdmitted(_) => Ok(()),
+        }
+    }
+
+    async fn wait_outcome(&self) -> AttemptSlotOutcome {
         loop {
             let notified = self.notify.notified();
             if let Some(result) = self
@@ -44,7 +106,8 @@ impl AttemptSlot {
         *self
             .result
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(AttemptSlotOutcome::Persisted(result));
         self.notify.notify_waiters();
     }
 }
@@ -85,7 +148,7 @@ impl CostTracker {
         &self,
         mutation: AttemptPersistMutation,
     ) -> Result<CostAttemptReceipt, CostPersistError> {
-        self.submit_attempt_inner(mutation, None)
+        self.submit_attempt_inner(mutation, None, None)
     }
 
     pub(crate) fn submit_budgeted_attempt_receipt(
@@ -93,14 +156,28 @@ impl CostTracker {
         receipt: crate::AttemptReceipt,
         publication: crate::budget::BoundAttemptBudget,
     ) -> Result<CostAttemptReceipt, CostPersistError> {
+        self.submit_budgeted_attempt_with_permit(receipt, publication, None)
+    }
+
+    pub(crate) fn submit_budgeted_attempt_with_permit(
+        &self,
+        receipt: crate::AttemptReceipt,
+        publication: crate::budget::BoundAttemptBudget,
+        profile_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<CostAttemptReceipt, CostPersistError> {
         publication.validate_tracker(self)?;
-        self.submit_attempt_inner(AttemptPersistMutation::Receipt(receipt), Some(publication))
+        self.submit_attempt_inner(
+            AttemptPersistMutation::Receipt(receipt),
+            Some(publication),
+            profile_permit,
+        )
     }
 
     fn submit_attempt_inner(
         &self,
         mutation: AttemptPersistMutation,
         publication: Option<crate::budget::BoundAttemptBudget>,
+        profile_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<CostAttemptReceipt, CostPersistError> {
         let authority = self.selected_entry();
         let publication_key = publication
@@ -134,6 +211,7 @@ impl CostTracker {
         let slot = Arc::new(AttemptSlot {
             mutation,
             publication_key,
+            lifecycle: None,
             result: std::sync::Mutex::new(None),
             notify: tokio::sync::Notify::new(),
         });
@@ -168,6 +246,7 @@ impl CostTracker {
             turn.wait().await;
             let mutation = worker_slot.mutation.clone();
             let result = tokio::spawn(async move {
+                let _profile_permit = profile_permit;
                 tracker
                     .persist_attempt_owned(id, mutation, publication)
                     .await
@@ -325,7 +404,7 @@ mod tests {
         }
     }
 
-    fn tracker() -> (CostTracker, mpsc::Receiver<AttemptPersistRequest>) {
+    pub(super) fn tracker() -> (CostTracker, mpsc::Receiver<AttemptPersistRequest>) {
         let session = SessionId::new();
         let (legacy, _) = mpsc::channel(1);
         let (requests, receiver) = mpsc::channel(4);

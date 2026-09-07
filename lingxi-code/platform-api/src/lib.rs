@@ -85,6 +85,7 @@ pub mod runtime;
 pub mod sandbox;
 pub mod secure_storage;
 pub mod session_flags;
+pub mod session_retention;
 pub mod share;
 pub mod skill_loader;
 pub mod stt;
@@ -102,6 +103,9 @@ pub mod uds_inbox;
 pub mod voice;
 pub mod web_search;
 pub mod workflow_output;
+pub use session_retention::{
+    SessionRetentionError, SessionRetentionGate, SessionRetentionPin, SessionRetirement,
+};
 pub mod worktree;
 
 pub use android_ui::{
@@ -134,9 +138,10 @@ pub use deep_link::{DeepLinkError, DeepLinkOpener};
 pub use device_status::{DeviceStatus, DeviceStatusError, DeviceStatusProvider};
 pub use effect_handler::EffectHandler;
 pub use evidence::{
-    EvidenceBlockRef, EvidenceCapability, EvidenceContext, EvidenceReceipt, EvidenceReceiptRef,
-    EvidenceRun, EvidenceSource, MAX_EVIDENCE_BYTES_PER_PANEL, MAX_EVIDENCE_BYTES_PER_RECEIPT,
-    MAX_EVIDENCE_BYTES_PER_RUN,
+    CapturedToolEvidence, EvidenceAttestation, EvidenceBlockRef, EvidenceCapability,
+    EvidenceContext, EvidenceDelivery, EvidenceExcerptStatus, EvidenceHistoryBinding,
+    EvidenceReceipt, EvidenceReceiptRef, EvidenceRun, EvidenceSource, SelectedEvidence,
+    MAX_EVIDENCE_BYTES_PER_PANEL, MAX_EVIDENCE_BYTES_PER_RECEIPT, MAX_EVIDENCE_BYTES_PER_RUN,
 };
 pub use file_history_sink::FileHistorySink;
 pub use filesystem::{
@@ -166,8 +171,8 @@ pub use http::{
     WebSocketConnectionWithMeta, WebSocketMessageStream, WebSocketMessageStreamWithMeta,
 };
 pub use ide::{IdeEndpointInfo, IdeHandle, IdeStatus, IdeTransport};
-pub use location::{LocationError, LocationFix, LocationProvider};
 pub use live_sessions::{SessionIdClaim, SessionWriterLease, SharedSessionWriterLease};
+pub use location::{LocationError, LocationFix, LocationProvider};
 pub use lsp::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
     NewDiagnosticsSource,
@@ -227,7 +232,7 @@ pub use prompting_gate::{
 pub use repo_root_reload::{RepoRootReloadOutcome, RepoRootReloadRequest, RepoRootReloader};
 pub use rooted_fs::{
     atomic_write_pinned, lock_exclusive_pinned, open_read_file_pinned, sync_parent_pinned,
-    truncate_file_pinned, AtomicWriteOptions, RootedFileLock, RootIdentity,
+    truncate_file_pinned, AtomicWriteOptions, RootIdentity, RootedFileLock,
 };
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 pub use sandbox::{

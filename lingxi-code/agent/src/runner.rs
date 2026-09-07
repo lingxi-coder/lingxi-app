@@ -1226,6 +1226,10 @@ async fn run_subagent_loop(
     // would duplicate context the agent has seen and re-fire `SubagentStart`
     // for a run that began in another process.
     let mut history: Vec<ConversationMessage> = Vec::new();
+    let evidence_owner = (ctx.agent_definition.agent_type == platform_api::FUSION_PANEL_TYPE)
+        .then(|| ctx.evidence_context.clone())
+        .flatten();
+    let mut evidence_bindings: Vec<platform_api::EvidenceHistoryBinding> = Vec::new();
     if let Some(resumed) = &ctx.resumed_history {
         history.extend(resumed.iter().cloned());
     } else {
@@ -1505,6 +1509,14 @@ async fn run_subagent_loop(
                     let messages_for_api = cap_input_bytes(&history, ctx.max_input_bytes_per_turn)
                         .map_err(|message| (Vec::new(), LlmError::InvalidRequest { message }))?;
                     let call_opts = crate::api::SubagentApiCallOpts {
+                        evidence_delivery: evidence_owner.as_ref().map(|owner| {
+                            evidence_bindings.retain(|binding| binding.is_in_history(&history));
+                            platform_api::EvidenceDelivery::select(
+                                owner,
+                                &evidence_bindings,
+                                &messages_for_api,
+                            )
+                        }),
                         model_attempt: model_attempt.clone(),
                         max_output_tokens: ctx.max_output_tokens_per_turn,
                         query_source_label: ctx.query_source_label.clone(),
@@ -1899,6 +1911,7 @@ async fn run_subagent_loop(
                 };
 
                 let mut tool_results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
+                let mut tool_evidence = Vec::new();
                 for (tool_use_id, name, input, provider_id) in &tool_uses {
                     // Structured output: the synthetic `StructuredOutput` tool is not
                     // dispatched — its input IS the run's result, but ONLY when it
@@ -1966,6 +1979,7 @@ async fn run_subagent_loop(
                         continue;
                     }
                     let inv_ctx = platform_api::tool_invoker::SubagentInvocationContext {
+                        evidence_context: evidence_owner.clone(),
                         parent_agent_id: ctx.parent_agent_id,
                         origin_session_id: ctx.origin_session_id,
                         // This is selected from the host-resolved definition,
@@ -2044,8 +2058,17 @@ async fn run_subagent_loop(
                         // dispatches (claude `freezeCommandDenies`).
                         frozen_command_denies: ctx.frozen_command_denies.clone(),
                     };
-                    match invoker.invoke(name, input.clone(), inv_ctx).await {
-                        Ok(value) => {
+                    let invocation = if evidence_owner.is_some() {
+                        invoker.invoke_observed(name, input.clone(), inv_ctx).await
+                    } else {
+                        invoker
+                            .invoke(name, input.clone(), inv_ctx)
+                            .await
+                            .map(Into::into)
+                    };
+                    match invocation {
+                        Ok(observed) => {
+                            let value = observed.value;
                             // A subagent reads tool results through the same
                             // eyes the main loop does. Deriving the media blocks
                             // here — from the SHARED rule, not a copy of it — is
@@ -2071,6 +2094,9 @@ async fn run_subagent_loop(
                                 (None, serde_json::Value::String(s)) => s.clone(),
                                 (None, other) => other.to_string(),
                             };
+                            if let Some(capture) = observed.evidence {
+                                tool_evidence.push((tool_results.len(), capture));
+                            }
                             tool_results.push(ContentBlock::ToolResult {
                                 tool_use_id: tool_use_id.clone(),
                                 content,
@@ -2109,13 +2135,20 @@ async fn run_subagent_loop(
                     }
                 }
 
-                let tool_results_msg = ConversationMessage::User {
+                let mut tool_results_msg = ConversationMessage::User {
                     id: MessageId::new(),
                     content: tool_results,
                     is_meta: false,
                     is_compact_summary: false,
                     is_visible_in_transcript_only: false,
                 };
+                for (block_index, capture) in tool_evidence {
+                    if let Some(binding) =
+                        capture.decorate_and_bind(&mut tool_results_msg, block_index)
+                    {
+                        evidence_bindings.push(binding);
+                    }
+                }
                 history.push(tool_results_msg.clone());
                 emit_message(&out_tx, agent_id, &tool_results_msg).await;
                 if file_write_requested {

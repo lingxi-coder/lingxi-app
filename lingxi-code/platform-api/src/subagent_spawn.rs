@@ -85,6 +85,9 @@ pub enum StructuredOutputMode {
 /// so the trait surface stays insulated from `lingxi-tools`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SubagentSpawnRequest {
+    /// Host-owned panel evidence scope. Persisted/model-authored input cannot mint it.
+    #[serde(skip)]
+    pub evidence_context: Option<crate::EvidenceContext>,
     /// Host-only registered model-call capability for this child. Neither
     /// model-authored input nor serialized task replay may mint this authority.
     #[serde(skip)]
@@ -852,7 +855,9 @@ pub trait SubagentSpawner: Send + Sync {
         _deadline: tokio::time::Instant,
         _cancel: tokio_util::sync::CancellationToken,
     ) -> Result<crate::PanelPoolLease, SubagentSpawnError> {
-        Err(SubagentSpawnError::Runtime("atomic panel admission is unavailable".into()))
+        Err(SubagentSpawnError::Runtime(
+            "atomic panel admission is unavailable".into(),
+        ))
     }
 
     /// Consume a previously reserved slot from this same pool. Implementations
@@ -866,7 +871,9 @@ pub trait SubagentSpawner: Send + Sync {
         _watchdog: WorkflowQueryWatchdog,
         _permit: crate::PanelPoolPermit,
     ) -> Result<SubagentResult, SubagentSpawnError> {
-        Err(SubagentSpawnError::Runtime("admitted panel spawning is unavailable".into()))
+        Err(SubagentSpawnError::Runtime(
+            "admitted panel spawning is unavailable".into(),
+        ))
     }
 
     /// Allocate a subagent slot, pump its state machine to completion, and
@@ -1072,6 +1079,18 @@ pub trait SubagentSpawner: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn evidence_scope_is_not_restored_from_serialized_spawn() {
+        let request = super::SubagentSpawnRequest {
+            evidence_context: Some(crate::EvidenceRun::new().new_panel()),
+            ..super::SubagentSpawnRequest::default()
+        };
+        let mut value = serde_json::to_value(&request).unwrap();
+        assert!(value.get("evidence_context").is_none());
+        value["evidence_context"] = serde_json::json!({"forged": true});
+        let restored: super::SubagentSpawnRequest = serde_json::from_value(value).unwrap();
+        assert!(restored.evidence_context.is_none());
+    }
     use super::*;
     use std::sync::Arc;
 

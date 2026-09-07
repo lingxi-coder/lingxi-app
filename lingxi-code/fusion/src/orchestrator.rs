@@ -684,7 +684,10 @@ impl FusionOrchestrator {
         // Wrapper cancellation can detach runtime cancellation. Do not start
         // the analyst until the actual producers and their durable receipts
         // have drained; these tickets do not retain physical pool permits.
-        if let Some(drain) = producer_drain { drain.wait().await; }
+        if let Some(drain) = producer_drain {
+            drain.wait().await;
+        }
+        panel_tasks.freeze_evidence();
         if let Some(fence) = &self.panel_fence {
             if let Err(error) = fence.wait().await {
                 facts.set_attempt_settlement(platform_api::FusionAttemptSettlementStatus::Failed {
@@ -701,6 +704,7 @@ impl FusionOrchestrator {
             Err(error) => return Err(error),
         };
         panel::anonymize(&mut panels, run_id);
+        panel_tasks.attach_evidence(&mut panels);
         let panels_ms = millis_since(panel_started);
         for panel in &panels {
             let mut md = fusion_event_metadata(request);
@@ -2125,7 +2129,10 @@ impl FusionOrchestrator {
             }
             Err((error, lost_usage)) => {
                 let mut lost_usage = lost_usage;
-                if lost_usage.total_tokens() == 0 && self.side_query.has_canonical_estimator() {
+                if error != SynthError::InvalidCitations
+                    && lost_usage.total_tokens() == 0
+                    && self.side_query.has_canonical_estimator()
+                {
                     if let Ok(input_tokens) = crate::synthesizer::estimate_input_tokens(
                         self.side_query.as_ref(),
                         config,
@@ -2146,6 +2153,11 @@ impl FusionOrchestrator {
                     analyst_usage_incomplete,
                 );
                 let (reason, error_label, message) = match error {
+                    SynthError::InvalidCitations => (
+                        FusionNeedsParentReason::SynthesisFailed,
+                        "citation_integrity",
+                        "synthesizer cited evidence not authorized by the final request",
+                    ),
                     SynthError::TimedOut => (
                         FusionNeedsParentReason::SynthesisTimedOut,
                         "synthesis_timed_out",
@@ -4045,6 +4057,7 @@ mod check_panel_bar_preflight_tests {
 
     fn panel_with_category(category: Option<&str>) -> PanelInternal {
         PanelInternal {
+            host_evidence: Vec::new(),
             index: 0,
             profile: "profile".into(),
             model: "model".into(),
@@ -4329,6 +4342,7 @@ mod outer_err_arm_realized_tokens_tests {
                     confidence: 80,
                 }],
                 evidence: vec![PanelEvidence {
+                    receipt_ref: None,
                     id: "e1".into(),
                     kind: EvidenceKind::File,
                     locator: "src/lib.rs".into(),
@@ -4562,6 +4576,7 @@ were genuinely dispatched before cancellation, not None or a subset — got \
                     confidence: 80,
                 }],
                 evidence: vec![PanelEvidence {
+                    receipt_ref: None,
                     id: "e1".into(),
                     kind: EvidenceKind::File,
                     locator: "src/lib.rs".into(),

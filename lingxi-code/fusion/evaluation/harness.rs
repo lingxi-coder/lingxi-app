@@ -32,8 +32,11 @@ const MAX_LABEL_BYTES: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComparisonMode {
+    /// One independent model candidate, without a Fusion analyst or synthesizer.
     Single,
+    /// Independent candidates followed by the explicit panel-selection policy.
     PanelPick,
+    /// Independent candidates followed by the explicit synthesis policy, subject to host safety refusal.
     PanelMerge,
 }
 
@@ -58,31 +61,47 @@ impl ComparisonMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompletionPolicy {
+    /// Collect every panel before analysis, subject to the run's cancellation/deadline.
     WaitAll,
+    /// Permit completion after the fixed grace period once enough panels succeed.
     QuorumAfterGrace,
 }
 
 /// One planned comparison. It has no provider inputs or network side effects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedComparison {
+    /// Stable fixture identifier from the pinned local corpus.
     pub fixture_id: String,
+    /// Fixture family label: research, plan, review, or code proposal.
     pub fixture_kind: String,
+    /// Comparison policy to exercise, not an observed quality ranking.
     pub mode: ComparisonMode,
+    /// Explicit panel completion policy for this comparison.
     pub completion_policy: CompletionPolicy,
+    /// Planned number of independent model candidates.
     pub panel_count: u8,
+    /// Ordered logical stages; these are not physical retry counts.
     pub stages: Vec<String>,
+    /// Planned network calls; deterministic dry-run always reports zero.
     pub network_calls: u32,
 }
 
 /// Stable dry-run report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DryRunReport {
+    /// Version of the evaluation report schema.
     pub schema_version: u16,
+    /// Exact local corpus revision used to enumerate comparisons.
     pub fixture_corpus_revision: String,
+    /// Number of validated synthetic fixtures in the corpus.
     pub fixture_count: usize,
+    /// Number of fixture, mode, and completion-policy combinations.
     pub comparison_count: usize,
+    /// Network calls made by planning; always zero.
     pub network_calls: u32,
+    /// Explicit rating status; planning produces no semantic scores.
     pub semantic_ratings: String,
+    /// Deterministically ordered, side-effect-free comparison plan.
     pub comparisons: Vec<PlannedComparison>,
 }
 
@@ -92,14 +111,19 @@ pub struct DryRunReport {
 #[serde(deny_unknown_fields)]
 pub struct TimingSummary {
     #[serde(default)]
+    /// Producer-reported preparation duration in milliseconds.
     pub preparation_ms: u64,
     #[serde(default)]
+    /// Producer-reported panel-stage wall time, not the sum of child times.
     pub panel_ms: u64,
     #[serde(default)]
+    /// Producer-reported analyst-stage duration in milliseconds.
     pub analyst_ms: u64,
     #[serde(default)]
+    /// Producer-reported synthesis duration, or zero when absent.
     pub synthesis_ms: u64,
     #[serde(default)]
+    /// Producer-reported end-to-end duration; not independently timed by replay.
     pub total_ms: u64,
 }
 
@@ -109,10 +133,13 @@ pub struct TimingSummary {
 #[serde(deny_unknown_fields)]
 pub struct CostSummary {
     #[serde(default)]
+    /// Amount labeled actual by the producer; replay does not authenticate its receipt.
     pub reported_actual_nano_usd: Option<u64>,
     #[serde(default)]
+    /// Amount labeled estimated by the producer, mutually exclusive with reported actual.
     pub reported_estimated_nano_usd: Option<u64>,
     #[serde(default)]
+    /// Producer-reported count of dispatched calls with unresolved usage.
     pub reported_unknown_dispatched_calls: u32,
 }
 
@@ -122,7 +149,9 @@ pub struct CostSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SanitizedCitation {
+    /// Producer-supplied fixture source ID; not a host-minted evidence receipt.
     pub source_id: String,
+    /// Producer-supplied source revision compared against the local fixture.
     pub source_version: String,
 }
 
@@ -132,16 +161,22 @@ pub struct SanitizedCitation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SanitizedOutput {
+    /// Bounded identifier unique within the saved run.
     pub output_id: String,
     #[serde(default)]
+    /// Producer's format-validity assertion, not replay's authentication of that assertion.
     pub reported_format_valid: bool,
     #[serde(default)]
+    /// Explicit producer-reported fact IDs; never inferred by keyword matching.
     pub fact_ids: Vec<String>,
     #[serde(default)]
+    /// Producer-reported source references checked against the fixture corpus.
     pub citations: Vec<SanitizedCitation>,
     #[serde(default)]
+    /// Explicit producer-reported action IDs checked against prohibited fixture actions.
     pub proposed_actions: Vec<String>,
     #[serde(default)]
+    /// Producer's truncation flag, required to agree with accompanying truncation events.
     pub reported_truncated: bool,
 }
 
@@ -149,11 +184,17 @@ pub struct SanitizedOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TruncationEvent {
+    /// Identifier of the output whose content was truncated.
     pub output_id: String,
+    /// Producer-reported stage associated with the truncation.
     pub stage: String,
+    /// Bounded label identifying the truncated field.
     pub field: String,
+    /// Producer-reported UTF-8 size before truncation.
     pub original_bytes: u64,
+    /// Producer-reported size retained, strictly smaller than the original size.
     pub retained_bytes: u64,
+    /// Whether the producer claims the omission was disclosed to the consumer.
     pub reported_disclosed: bool,
 }
 
@@ -162,9 +203,13 @@ pub struct TruncationEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticRating {
+    /// Imported provenance label; it does not authenticate a rating source.
     pub source_label: String,
+    /// Imported reviewer label, not verified reviewer identity.
     pub reviewer_label: String,
+    /// Fixture rubric dimension rated by the imported record.
     pub dimension: String,
+    /// Imported rubric score in 0..=4, never generated by replay.
     pub score: u8,
 }
 
@@ -174,19 +219,29 @@ pub struct SemanticRating {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SavedRun {
+    /// Saved-run schema version checked before replay.
     pub schema_version: u16,
+    /// Exact corpus revision required for interpreting imported references.
     pub fixture_corpus_revision: String,
+    /// Identifier of the synthetic fixture this producer claims to have run.
     pub fixture_id: String,
+    /// Producer-reported comparison mode.
     pub mode: ComparisonMode,
+    /// Producer-reported completion policy.
     pub completion_policy: CompletionPolicy,
+    /// Bounded structured outputs; their claims remain imported and unverified.
     pub outputs: Vec<SanitizedOutput>,
     #[serde(default)]
+    /// Unverified producer-reported timing measurements.
     pub timings: TimingSummary,
     #[serde(default)]
+    /// Unverified producer-reported cost and completeness fields.
     pub cost: CostSummary,
     #[serde(default)]
+    /// Bounded producer-reported omissions checked for internal consistency.
     pub truncations: Vec<TruncationEvent>,
     #[serde(default)]
+    /// Optional imported ratings; replay never upgrades their trust.
     pub semantic_ratings: Vec<SemanticRating>,
 }
 
@@ -195,30 +250,45 @@ pub struct SavedRun {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CostCompleteness {
+    /// The producer supplied an actual amount and reported no unresolved calls.
     ReportedActual,
+    /// The producer supplied an estimated amount and reported no unresolved calls.
     ReportedEstimated,
+    /// The producer explicitly reported at least one call with unresolved usage.
     ReportedIncomplete,
+    /// Neither an actual nor estimated amount was reported.
     Unknown,
 }
 
 /// Objective metrics based on structured fact/action references only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectiveMetrics {
+    /// Number of expected facts defined by the fixture.
     pub expected_fact_count: usize,
+    /// Distinct expected fact IDs explicitly present in imported outputs.
     pub reported_expected_fact_count: usize,
+    /// Expected fact IDs with all required valid source refs in the same output; not semantic proof.
     pub supported_expected_fact_count: usize,
+    /// Expected fact IDs absent from every imported output.
     pub missing_fact_ids: Vec<String>,
+    /// Reported fact IDs absent from the fixture definition.
     pub unsupported_fact_ids: Vec<String>,
+    /// Distinct reported action IDs listed as prohibited by the fixture.
     pub prohibited_action_ids: Vec<String>,
 }
 
 /// Provenance metrics from host source ids and versions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvenanceMetrics {
+    /// Total imported citation entries examined.
     pub citation_count: usize,
+    /// Entries matching an available fixture source and version; not authenticated tool receipts.
     pub valid_citation_count: usize,
+    /// Entries with unknown sources, stale versions, or unavailable sources.
     pub invalid_citation_count: usize,
+    /// Invalid entries whose known source has a different version.
     pub stale_citation_count: usize,
+    /// Invalid entries matching the version of a source marked unavailable.
     pub unavailable_citation_count: usize,
 }
 
@@ -226,10 +296,15 @@ pub struct ProvenanceMetrics {
 /// semantic quality and are not independently authenticated by replay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FormatMetrics {
+    /// Number of imported structured outputs.
     pub output_count: usize,
+    /// Outputs whose producer asserted valid format.
     pub reported_format_valid_count: usize,
+    /// Outputs whose producer asserted truncation.
     pub reported_truncated_output_count: usize,
+    /// Truncation events the producer labeled disclosed.
     pub reported_disclosed_truncation_count: usize,
+    /// Truncation events the producer did not label disclosed.
     pub reported_undisclosed_truncation_count: usize,
 }
 
@@ -238,6 +313,7 @@ pub struct FormatMetrics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplayInputTrust {
+    /// Imported JSON was checked for shape/consistency, not authenticated as host evidence.
     ImportedUnverified,
 }
 
@@ -245,34 +321,53 @@ pub enum ReplayInputTrust {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticRatingTrust {
+    /// No semantic rating records were supplied.
     Unrated,
+    /// Supplied reviewer labels and scores remain unverified imports.
     ImportedUnverified,
 }
 
 /// Replay report with semantic ratings explicitly marked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayReport {
+    /// Version of this replay report.
     pub schema_version: u16,
+    /// Local corpus revision against which replay validated the input.
     pub fixture_corpus_revision: String,
+    /// Explicit imported-input trust classification; replay cannot authenticate JSON.
     pub input_trust: ReplayInputTrust,
+    /// Validated fixture identifier associated with the imported run.
     pub fixture_id: String,
+    /// Imported comparison mode, not independently observed execution.
     pub mode: ComparisonMode,
+    /// Imported completion policy.
     pub completion_policy: CompletionPolicy,
+    /// Structured fact/action-reference comparisons, not a semantic quality grade.
     pub objective: ObjectiveMetrics,
+    /// Fixture source/version matching statistics, not real-world provenance proof.
     pub provenance: ProvenanceMetrics,
+    /// Producer format/truncation assertions and their internal consistency statistics.
     pub format: FormatMetrics,
+    /// Unverified timing values retained from the saved run.
     pub timings: TimingSummary,
+    /// Unverified cost values retained from the saved run.
     pub cost: CostSummary,
+    /// Internal completeness classification of the reported cost fields.
     pub cost_completeness: CostCompleteness,
+    /// Whether ratings are absent or imported without authentication.
     pub semantic_rating_trust: SemanticRatingTrust,
+    /// Original bounded ratings retained without upgrading reviewer/source trust.
     pub imported_semantic_ratings: Vec<SemanticRating>,
 }
 
 /// Explicit controls required before a live run could ever be admitted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LiveOptions {
+    /// Explicit operator authorization for paid execution; never inferred from other flags.
     pub paid_opt_in: bool,
+    /// Required operator-selected number of comparisons, bounded by MAX_LIVE_RUNS.
     pub run_count: Option<usize>,
+    /// Required operator monetary ceiling, in nano-USD and bounded by the live harness limit.
     pub budget_nano_usd: Option<u64>,
 }
 
@@ -280,17 +375,39 @@ pub struct LiveOptions {
 /// bodies or credentials.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalError {
+    /// The checked-in synthetic corpus failed its consistency checks.
     InvalidFixtures(String),
+    /// An operator option, adapter contract or comparison selection was invalid.
     InvalidInput(String),
+    /// Paid execution was requested without explicit operator authorization.
     MissingPaidOptIn,
+    /// The operator did not supply the required comparison-count ceiling.
     MissingRunCount,
+    /// The operator did not supply the required monetary ceiling.
     MissingBudget,
-    RunCountExceeded { requested: usize, maximum: usize },
-    BudgetExceeded { requested: u64, maximum: u64 },
+    /// The requested number of comparisons exceeds the harness ceiling.
+    RunCountExceeded {
+        /// Operator-requested comparisons.
+        requested: usize,
+        /// Harness maximum comparisons.
+        maximum: usize,
+    },
+    /// The requested monetary ceiling exceeds the harness maximum.
+    BudgetExceeded {
+        /// Operator-requested nano-USD ceiling.
+        requested: u64,
+        /// Harness maximum nano-USD ceiling.
+        maximum: u64,
+    },
+    /// This entrypoint has no real application host capable of executing the plan.
     LiveAdapterUnavailable,
+    /// The imported saved-run schema version is unsupported.
     ReplaySchema(u16),
+    /// The supplied fixture ID does not exist in the pinned corpus.
     UnknownFixture(String),
+    /// Saved-run JSON, bounded fields or cross-field consistency failed validation.
     InvalidSavedRun(String),
+    /// Local replay-file or report IO failed.
     Io(String),
 }
 

@@ -597,6 +597,7 @@ fn report(answer: &str) -> PanelReport {
             confidence: 80,
         }],
         evidence: vec![PanelEvidence {
+            receipt_ref: None,
             id: "e1".into(),
             kind: EvidenceKind::File,
             locator: "src/lib.rs".into(),
@@ -3495,6 +3496,7 @@ fn three_ok_completed_panels() -> Vec<crate::panel::PanelInternal> {
         .into_iter()
         .enumerate()
         .map(|(index, answer)| crate::panel::PanelInternal {
+            host_evidence: Vec::new(),
             index,
             profile: String::new(),
             model: String::new(),
@@ -4546,6 +4548,7 @@ fn needs_parent_text_bounds_a_panel_authored_summary() {
     let mut oversized = report("short-candidate");
     oversized.summary = "S".repeat(100_000);
     let panels = vec![crate::panel::PanelInternal {
+        host_evidence: Vec::new(),
         index: 0,
         profile: String::new(),
         model: String::new(),
@@ -4581,6 +4584,7 @@ fn needs_parent_text_bounds_a_panel_authored_summary() {
 #[test]
 fn needs_parent_text_bounds_an_analyst_authored_consensus_section() {
     let panels = vec![crate::panel::PanelInternal {
+        host_evidence: Vec::new(),
         index: 0,
         profile: String::new(),
         model: String::new(),
@@ -4635,6 +4639,7 @@ fn needs_parent_text_keeps_every_panel_row_and_the_closing_line_at_max_panels() 
             oversized.summary = "S".repeat(20_000);
             oversized.candidate_answer = "A".repeat(20_000);
             crate::panel::PanelInternal {
+                host_evidence: Vec::new(),
                 index: i,
                 profile: String::new(),
                 model: String::new(),
@@ -4690,6 +4695,7 @@ fn needs_parent_text_keeps_every_panel_row_and_the_closing_line_at_max_panels() 
 #[test]
 fn needs_parent_text_keeps_panel_rows_and_the_closing_line_under_a_huge_analyst_section() {
     let panels = vec![crate::panel::PanelInternal {
+        host_evidence: Vec::new(),
         index: 0,
         profile: String::new(),
         model: String::new(),
@@ -4750,6 +4756,7 @@ fn needs_parent_text_keeps_panel_rows_and_the_closing_line_under_a_huge_analyst_
 #[test]
 fn needs_parent_text_keeps_panel_material_under_an_uncapped_analyst_authored_reason() {
     let panels = vec![crate::panel::PanelInternal {
+        host_evidence: Vec::new(),
         index: 0,
         profile: String::new(),
         model: String::new(),
@@ -4808,6 +4815,7 @@ fn needs_parent_text_keeps_panel_material_under_an_uncapped_analyst_authored_rea
 fn needs_parent_text_appends_the_closing_line_after_the_whole_body_backstop() {
     let panels: Vec<crate::panel::PanelInternal> = (0..3_000)
         .map(|i| crate::panel::PanelInternal {
+            host_evidence: Vec::new(),
             index: i,
             profile: String::new(),
             model: String::new(),
@@ -7244,6 +7252,7 @@ fn make_panel_internal(
     error_category: &str,
 ) -> crate::panel::PanelInternal {
     crate::panel::PanelInternal {
+        host_evidence: Vec::new(),
         index: 0,
         profile: "anthropic".into(),
         model: "m".into(),
@@ -7708,6 +7717,7 @@ fn ttl_catalog() -> Vec<CatalogModel> {
 
 fn panel_with_cache_write(cache_write_tokens: u64) -> Vec<crate::panel::PanelInternal> {
     vec![crate::panel::PanelInternal {
+        host_evidence: Vec::new(),
         index: 0,
         profile: "anthropic".into(),
         model: "claude-sonnet-5".into(),

@@ -23,6 +23,8 @@ use tool_api::content_replacement::ContentReplacementState;
 /// re-allocating.
 #[derive(Clone)]
 pub struct SubagentContext {
+    /// Host-owned evidence scope; never serialized or inherited by ordinary agents.
+    pub evidence_context: Option<platform_api::EvidenceContext>,
     /// Typed registered run context, retained across rounds and never serialized.
     pub model_attempt: Option<platform_api::ModelAttemptContext>,
     /// Stable identifier for this spawn — every event carries this id.

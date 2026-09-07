@@ -97,13 +97,24 @@ fn intent(session: SessionId, id: &str) -> AttemptIntent {
 }
 
 fn acknowledge(request: AttemptPersistRequest, cost: u64, output: u64) {
-    let (_, id) = identity(&request.mutation);
     let is_receipt = matches!(&request.mutation, AttemptPersistMutation::Receipt(_));
     let revision = u64::from(is_receipt);
+    acknowledge_at_revision(request, cost, output, revision, 1 + revision);
+}
+
+fn acknowledge_at_revision(
+    request: AttemptPersistRequest,
+    cost: u64,
+    output: u64,
+    revision: u64,
+    journal_revision: u64,
+) {
+    let (_, id) = identity(&request.mutation);
+    let is_receipt = matches!(&request.mutation, AttemptPersistMutation::Receipt(_));
     let ack = AttemptPersistAck {
         persistence: CostPersistAck {
             mutation_id: CostMutationId::new(id),
-            journal_revision: 1 + revision,
+            journal_revision,
             cost_revision: revision,
         },
         state: CostStateVector::from(&CostState {
@@ -206,8 +217,12 @@ async fn owned_begin_buffered_success_keeps_drain_pending_until_receiver_drop_an
     let (tracker, enforcer, scope, mut requests, permits) = setup(100).await;
     let receiver = start(&tracker, &enforcer, &scope, &permits, "buffered", 100).await;
     acknowledge(requests.recv().await.unwrap(), 0, 0);
-    let slot = tracker.selected_entry().attempt_settlements.lock().unwrap()
-        ["attempt-intent:buffered"]
+    let slot = tracker
+        .selected_entry()
+        .attempt_settlements
+        .lock()
+        .unwrap()
+        .slots["attempt-intent:buffered"]
         .clone();
     slot.wait().await.unwrap(); // begin has sent the lease, but receiver was never polled
     let drain = tracker.drain_owned_settlements();
@@ -220,6 +235,70 @@ async fn owned_begin_buffered_success_keeps_drain_pending_until_receiver_drop_an
     drain.await.unwrap();
     assert_eq!(permits.available_permits(), 1);
     assert_eq!(enforcer.active_reservation_nano_usd().await, 0);
+}
+
+#[tokio::test]
+async fn owned_begin_drain_detects_registration_after_same_length_retirement() {
+    use std::future::Future;
+    let (tracker, enforcer, scope, mut requests, permits) = setup(100).await;
+    permits.add_permits(1);
+    let first = start(&tracker, &enforcer, &scope, &permits, "first", 100).await;
+    acknowledge_at_revision(requests.recv().await.unwrap(), 0, 0, 0, 1);
+    let authority = tracker.selected_entry();
+    let first_slot =
+        authority.attempt_settlements.lock().unwrap().slots["attempt-intent:first"].clone();
+    first_slot.wait().await.unwrap();
+    let drain = tracker.drain_owned_settlements();
+    tokio::pin!(drain);
+    let waiting =
+        std::future::poll_fn(|cx| std::task::Poll::Ready(drain.as_mut().poll(cx).is_pending()))
+            .await;
+    assert!(waiting, "drain must capture the first live lease");
+    let second = start(&tracker, &enforcer, &scope, &permits, "second", 100).await;
+    acknowledge_at_revision(requests.recv().await.unwrap(), 0, 0, 0, 2);
+    let second_slot =
+        authority.attempt_settlements.lock().unwrap().slots["attempt-intent:second"].clone();
+    second_slot.wait().await.unwrap();
+    drop(first);
+    let receipt = requests.recv().await.unwrap();
+    let (_, receipt_id) = identity(&receipt.mutation);
+    acknowledge_at_revision(receipt, 0, 0, 1, 3);
+    let receipt_slot = authority.attempt_settlements.lock().unwrap().slots[&receipt_id].clone();
+    receipt_slot.wait().await.unwrap();
+    first_slot.drain().await.unwrap();
+    // Retire only completely settled old slots. The second intent has a live
+    // buffered lease, so it remains and restores the original map length.
+    {
+        let mut slots = authority.attempt_settlements.lock().unwrap();
+        let generation = slots.generation();
+        slots.slots.remove("attempt-intent:first").unwrap();
+        slots.slots.remove(&receipt_id).unwrap();
+        assert_eq!(slots.slots.len(), 1);
+        assert_eq!(
+            slots.generation(),
+            generation,
+            "retirement cannot rewind generation"
+        );
+    }
+    let completed_early =
+        std::future::poll_fn(|cx| std::task::Poll::Ready(drain.as_mut().poll(cx).is_ready())).await;
+    // Always release/ack the new lease before asserting, including on RED.
+    drop(second);
+    let receipt = requests.recv().await.unwrap();
+    // Both receipts belong to one session projection. Retiring registry slots
+    // does not reset its cost revision; the second applied receipt advances 1
+    // to 2 even though both ProvenNotSent contributions cost zero.
+    acknowledge_at_revision(receipt, 0, 0, 2, 4);
+    if !completed_early {
+        drain.await.unwrap();
+    }
+    tracker.drain_owned_settlements().await.unwrap();
+    assert!(
+        !completed_early,
+        "same map length cannot hide a new registered lease from drain"
+    );
+    assert_eq!(enforcer.active_reservation_nano_usd().await, 0);
+    assert_eq!(permits.available_permits(), 2);
 }
 
 #[tokio::test]
@@ -252,6 +331,35 @@ async fn owned_begin_capacity_denial_leaves_session_healthy_and_next_attempt_usa
         assert_eq!(permits.available_permits(), 1);
         assert!(tracker.preflight_durable().is_ok());
     }
+}
+
+#[tokio::test]
+async fn owned_begin_generation_overflow_releases_permit_without_hold_or_intent() {
+    let (tracker, enforcer, scope, mut requests, permits) = setup(100).await;
+    let authority = tracker.selected_entry();
+    authority
+        .attempt_settlements
+        .lock()
+        .unwrap()
+        .registration_generation = u64::MAX;
+    let result = tracker.begin_budgeted_attempt(
+        intent(scope.session_id(), "overflow-begin"),
+        enforcer.bind_attempt_budget(&scope).await.unwrap(),
+        100,
+        Some(100),
+        permits.clone().acquire_owned().await.unwrap(),
+    );
+    let error = result.err().expect("new begin generation must fail closed");
+    assert!(error
+        .to_string()
+        .contains("registration generation exhausted"));
+    assert!(authority.durability_gate.frozen_reason().is_some());
+    assert_eq!(permits.available_permits(), 1);
+    assert_eq!(enforcer.active_reservation_nano_usd().await, 0);
+    assert!(requests.try_recv().is_err());
+    let slots = authority.attempt_settlements.lock().unwrap();
+    assert_eq!(slots.generation(), u64::MAX);
+    assert!(slots.slots.is_empty());
 }
 
 #[tokio::test]

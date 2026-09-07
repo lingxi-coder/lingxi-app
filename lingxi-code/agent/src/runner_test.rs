@@ -15,6 +15,192 @@ use tokio::sync::mpsc;
 
 // ---- Scripted loop-mode fixtures -------------------------------------
 
+struct EvidenceOptsApi {
+    inner: Arc<MockSubagentApiClient>,
+    selections: Mutex<Vec<Option<usize>>>,
+}
+
+#[async_trait]
+impl crate::api::SubagentApiClient for EvidenceOptsApi {
+    async fn messages_create(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        crate::api::SubagentApiClient::messages_create(
+            self.inner.as_ref(),
+            model,
+            system,
+            messages,
+            tools,
+        )
+        .await
+    }
+
+    async fn messages_create_stream_in_opts(
+        &self,
+        model: &str,
+        _profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        effort: Option<serde_json::Value>,
+        opts: crate::api::SubagentApiCallOpts,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+        llm_client::LlmError,
+    > {
+        self.selections.lock().unwrap().push(
+            opts.evidence_delivery
+                .as_ref()
+                .map(|delivery| delivery.selected().len()),
+        );
+        crate::api::SubagentApiClient::messages_create_stream(
+            self.inner.as_ref(),
+            model,
+            system,
+            messages,
+            tools,
+            effort,
+        )
+        .await
+    }
+}
+
+struct EvidenceObservedInvoker;
+
+#[async_trait]
+impl platform_api::tool_invoker::ToolInvoker for EvidenceObservedInvoker {
+    async fn invoke(
+        &self,
+        _name: &str,
+        _input: serde_json::Value,
+        _ctx: platform_api::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        Ok(serde_json::json!({"type":"text", "file": {
+            "filePath":"src/lib.rs", "content":"read evidence", "numLines":1,
+            "startLine":1, "totalLines":1
+        }}))
+    }
+    async fn invoke_observed(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        ctx: platform_api::tool_invoker::SubagentInvocationContext,
+    ) -> Result<
+        platform_api::tool_invoker::ToolInvocationResult,
+        platform_api::tool_invoker::ToolInvokerError,
+    > {
+        let value = self.invoke(name, input, ctx.clone()).await?;
+        let evidence = ctx.evidence_context.as_ref().and_then(|owner| {
+            owner.capture_observed(
+                platform_api::EvidenceCapability::Read,
+                ctx.tool_use_id.as_deref(),
+                &value,
+            )
+        });
+        Ok(platform_api::tool_invoker::ToolInvocationResult { value, evidence })
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+async fn evidence_runner_case(fusion: bool) {
+    let owner = platform_api::EvidenceRun::new().new_panel();
+    let api = Arc::new(EvidenceOptsApi {
+        inner: MockSubagentApiClient::new(vec![
+            Ok(tool_use_response("Read", Some("tool_use"))),
+            Ok(text_response("done", Some("end_turn"))),
+        ]),
+        selections: Mutex::new(Vec::new()),
+    });
+    let mut ctx = loop_ctx(api.clone(), Some(Arc::new(EvidenceObservedInvoker)), 3);
+    if fusion {
+        ctx.agent_definition.agent_type = platform_api::FUSION_PANEL_TYPE.into();
+    }
+    ctx.evidence_context = Some(owner.clone());
+    let (tx, rx) = mpsc::channel(1);
+    drop(tx);
+    let (out_tx, out_rx) = mpsc::channel(64);
+    run_subagent(ctx, rx, out_tx).await;
+    let events = drain(out_rx).await;
+    assert!(!events.is_empty());
+    assert_eq!(
+        *api.selections.lock().unwrap(),
+        if fusion {
+            vec![Some(0), Some(1)]
+        } else {
+            vec![None, None]
+        }
+    );
+    assert_eq!(owner.receipts().len(), usize::from(fusion));
+    assert!(owner
+        .receipts()
+        .iter()
+        .all(|receipt| !receipt.included_in_request));
+}
+
+#[tokio::test]
+async fn actual_runner_binds_observed_result_for_next_selected_call_only() {
+    evidence_runner_case(true).await;
+}
+
+#[tokio::test]
+async fn ordinary_runner_drops_injected_evidence_owner() {
+    evidence_runner_case(false).await;
+}
+
+#[test]
+fn actual_input_cap_removes_receipt_delivery_with_its_old_tool_pair() {
+    let owner = platform_api::EvidenceRun::new().new_panel();
+    let data = serde_json::json!({"type":"text", "file": {"filePath":"a.rs", "content":"x".repeat(2048), "numLines":1, "startLine":1, "totalLines":1}});
+    let id = ToolUseId::new();
+    let seed = ConversationMessage::user(MessageId::new(), "task".into());
+    let assistant = ConversationMessage::Assistant {
+        id: MessageId::new(),
+        content: vec![ContentBlock::ToolUse {
+            id: id.clone(),
+            name: "Read".into(),
+            input: serde_json::json!({}),
+            provider_id: None,
+        }],
+        stop_reason: None,
+    };
+    let mut result = ConversationMessage::User {
+        id: MessageId::new(),
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: id,
+            content: data.to_string(),
+            is_error: false,
+            provider_tool_use_id: None,
+            content_blocks: None,
+        }],
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+    };
+    let capture = owner
+        .capture_observed(platform_api::EvidenceCapability::Read, None, &data)
+        .unwrap();
+    let binding = capture.decorate_and_bind(&mut result, 0).unwrap();
+    let latest = ConversationMessage::user(MessageId::new(), "continue".into());
+    let cap = serde_json::to_vec(&vec![seed.clone(), latest.clone()])
+        .unwrap()
+        .len() as u64;
+    let history = vec![seed, assistant, result, latest];
+    let selected = cap_input_bytes(&history, Some(cap)).unwrap();
+    assert_eq!(selected.len(), 2);
+    assert!(
+        platform_api::EvidenceDelivery::select(&owner, &[binding], &selected)
+            .selected()
+            .is_empty()
+    );
+    assert!(!owner.receipts()[0].included_in_request);
+}
+
 /// `SubagentApiClient` that hands back a pre-scripted queue of responses,
 /// one per `messages_create` call. Counts calls so tests can assert the
 /// number of model round-trips (`max_turns` bound, multi-turn loop).
@@ -492,6 +678,7 @@ fn loop_ctx(
 fn fresh_subagent_ctx() -> SubagentContext {
     SubagentContext {
         model_attempt: None,
+        evidence_context: None,
         agent_id: AgentId::new(),
         parent_agent_id: None,
         agent_name: None,

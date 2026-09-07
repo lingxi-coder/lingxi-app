@@ -28,6 +28,45 @@ pub(super) struct AttemptSlot {
     notify: tokio::sync::Notify,
 }
 
+/// Slot membership and registration history share one lock. Retiring settled
+/// slots may reduce membership, but must never rewind registration history.
+#[derive(Default)]
+pub(super) struct AttemptRegistry {
+    slots: HashMap<String, Arc<AttemptSlot>>,
+    registration_generation: u64,
+}
+
+impl AttemptRegistry {
+    fn next_generation(&self, gate: &CostDurabilityGate) -> Result<u64, CostPersistError> {
+        self.registration_generation.checked_add(1).ok_or_else(|| {
+            let error =
+                CostPersistError::Storage("attempt registration generation exhausted".into());
+            gate.freeze(error.to_string());
+            error
+        })
+    }
+
+    pub(super) fn snapshot(&self) -> (u64, Vec<Arc<AttemptSlot>>) {
+        (
+            self.registration_generation,
+            self.slots.values().cloned().collect(),
+        )
+    }
+
+    pub(super) fn generation(&self) -> u64 {
+        self.registration_generation
+    }
+
+    pub(super) fn is_idle(&self) -> bool {
+        self.slots.values().all(|slot| {
+            slot.result.lock().is_ok_and(|result| result.is_some())
+                && slot.lifecycle.as_ref().is_none_or(|lifecycle| {
+                    lifecycle.closed.load(std::sync::atomic::Ordering::Acquire)
+                })
+        })
+    }
+}
+
 #[derive(Clone)]
 enum AttemptSlotOutcome {
     Persisted(Result<CostAttemptSettlement, CostPersistError>),
@@ -183,6 +222,11 @@ impl CostTracker {
         let publication_key = publication
             .as_ref()
             .map(crate::budget::BoundAttemptBudget::key);
+        let _accepting = authority
+            .durability_gate
+            .retention_gate()
+            .try_pin()
+            .map_err(|error| CostPersistError::Rejected(error.to_string()))?;
         let (session_id, id) = identity(&mutation);
         if session_id != authority.session_id {
             return Err(CostPersistError::Rejected(
@@ -199,7 +243,7 @@ impl CostTracker {
             .attempt_settlements
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(slot) = slots.get(&id) {
+        if let Some(slot) = slots.slots.get(&id) {
             if slot.mutation != mutation || slot.publication_key != publication_key {
                 let error =
                     CostPersistError::Rejected("attempt submission identity conflict".into());
@@ -208,6 +252,7 @@ impl CostTracker {
             }
             return Ok(CostAttemptReceipt { slot: slot.clone() });
         }
+        let generation = slots.next_generation(&authority.durability_gate)?;
         let slot = Arc::new(AttemptSlot {
             mutation,
             publication_key,
@@ -215,7 +260,8 @@ impl CostTracker {
             result: std::sync::Mutex::new(None),
             notify: tokio::sync::Notify::new(),
         });
-        slots.insert(id.clone(), slot.clone());
+        slots.slots.insert(id.clone(), slot.clone());
+        slots.registration_generation = generation;
         // No await between retaining the observation and registering its turn.
         let turn = self.register_durable_mutation_for(&authority);
         drop(slots);
@@ -472,6 +518,16 @@ mod tests {
         let mutation = observation(session);
         let first = tracker.submit_attempt_mutation(mutation.clone()).unwrap();
         let duplicate = tracker.submit_attempt_mutation(mutation.clone()).unwrap();
+        assert_eq!(
+            tracker
+                .selected_entry()
+                .attempt_settlements
+                .lock()
+                .unwrap()
+                .generation(),
+            1,
+            "duplicate pending submission must not register another generation"
+        );
         drop(first);
         let request = requests.recv().await.unwrap();
         let ack = acknowledgment(&request);
@@ -493,6 +549,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repeated.persistence, ack.persistence);
+        assert!(requests.try_recv().is_err());
+        assert_eq!(
+            tracker
+                .selected_entry()
+                .attempt_settlements
+                .lock()
+                .unwrap()
+                .generation(),
+            1,
+            "settled replay must not advance registration generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn owned_attempt_generation_overflow_freezes_without_inserting_or_enqueuing() {
+        let (tracker, mut requests) = tracker();
+        let authority = tracker.selected_entry();
+        let mutation = observation(authority.session_id);
+        let receipt = tracker.submit_attempt_mutation(mutation.clone()).unwrap();
+        let request = requests.recv().await.unwrap();
+        let ack = acknowledgment(&request);
+        request.ack.send(Ok(ack)).unwrap();
+        receipt.settle().await.unwrap();
+        authority
+            .attempt_settlements
+            .lock()
+            .unwrap()
+            .registration_generation = u64::MAX;
+        // Idempotency does not require a new sequence value, even at the cap.
+        tracker
+            .submit_attempt_mutation(mutation.clone())
+            .unwrap()
+            .settle()
+            .await
+            .unwrap();
+        assert!(authority.durability_gate.frozen_reason().is_none());
+        let mut fresh = mutation;
+        if let AttemptPersistMutation::Receipt(receipt) = &mut fresh {
+            receipt.attempt_id = "overflow-new-receipt".into();
+        }
+        let error = tracker
+            .submit_attempt_mutation(fresh)
+            .err()
+            .expect("new generation must fail closed");
+        assert!(error
+            .to_string()
+            .contains("registration generation exhausted"));
+        assert!(authority.durability_gate.frozen_reason().is_some());
+        let slots = authority.attempt_settlements.lock().unwrap();
+        assert_eq!(slots.generation(), u64::MAX);
+        assert_eq!(slots.slots.len(), 1);
         assert!(requests.try_recv().is_err());
     }
 

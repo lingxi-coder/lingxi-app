@@ -81,11 +81,15 @@ struct BudgetSessionLedger {
         std::sync::Mutex<HashMap<protocol::SessionId, Arc<output::BudgetOutputAccount>>>,
 }
 
+mod retirement;
+pub(crate) use retirement::BudgetCacheRetirement;
+
 /// Shared state for an owned settlement.  A receipt can be dropped while its
 /// finalizer is waiting for a persistence permit; a later retry must wait for
 /// that same owned operation instead of treating the consumed token as an
 /// unrelated no-op.
 struct SettlementSlot {
+    session_id: protocol::SessionId,
     started: AtomicBool,
     actual_nano_usd: u64,
     result: std::sync::Mutex<Option<Result<(), platform_api::BudgetError>>>,
@@ -100,8 +104,9 @@ struct ReservationOwner {
 }
 
 impl SettlementSlot {
-    fn new(actual_nano_usd: u64) -> Self {
+    fn new(session_id: protocol::SessionId, actual_nano_usd: u64) -> Self {
         Self {
+            session_id,
             started: AtomicBool::new(false),
             actual_nano_usd,
             result: std::sync::Mutex::new(None),
@@ -703,7 +708,7 @@ impl BudgetEnforcer {
                 })));
             }
             let durability_turn = owner.tracker.register_durable_mutation();
-            let slot = Arc::new(SettlementSlot::new(actual_nano_usd));
+            let slot = Arc::new(SettlementSlot::new(owner.session_id, actual_nano_usd));
             slot.started.store(true, Ordering::Release);
             settlements.insert(id.raw(), slot.clone());
             (slot, durability_turn)

@@ -7,6 +7,13 @@
 
 #![forbid(unsafe_code)]
 
+// The shared evaluation module is also included by the standalone example,
+// where `fusion::` names the library dependency instead of this self alias.
+extern crate self as fusion;
+
+#[path = "../evaluation/mod.rs"]
+pub mod evaluation;
+
 mod analyst;
 mod attempts;
 mod budget;

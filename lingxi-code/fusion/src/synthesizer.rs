@@ -24,6 +24,8 @@ use tokio::time::timeout;
 /// was already in hand at the moment it was thrown away.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SynthError {
+    /// Successful billed output cited a reference absent from the final payload.
+    InvalidCitations,
     /// Provider / protocol failure.
     Failed,
     /// Idle / total timeout.
@@ -53,7 +55,7 @@ pub(crate) async fn synthesize_registered(
     attempt_run: Option<&platform_api::ModelAttemptRun>,
 ) -> Result<(String, cost::Usage), (SynthError, cost::Usage)> {
     let output_tokens = limits.output_cap(config.synthesizer_max_output_tokens);
-    let mut req = match packing::prepare_synth_request(
+    let prepared = match packing::prepare_synth_request(
         client.as_ref(),
         request,
         analysis,
@@ -64,6 +66,8 @@ pub(crate) async fn synthesize_registered(
         Ok(req) => req,
         Err(_) => return Err((SynthError::Failed, cost::Usage::default())),
     };
+    let allowed_citations = prepared.allowed_citations;
+    let mut req = prepared.request;
     if let Some(run) = attempt_run {
         req.model_attempt = match run.context(platform_api::ModelAttemptStage::Synthesis, None) {
             Ok(context) => Some(context),
@@ -100,6 +104,11 @@ pub(crate) async fn synthesize_registered(
                 return Err((SynthError::Failed, usage));
             }
             let sanitized = sanitize_blocks(&[raw.replace('\0', "")]).content.join("");
+            if crate::evidence::citations::validate_merged_citations(&sanitized, &allowed_citations)
+                .is_err()
+            {
+                return Err((SynthError::InvalidCitations, usage));
+            }
             Ok((sanitized, usage))
         }
     }
@@ -228,6 +237,93 @@ mod tests {
     /// `provider_side_query::decode_response` renders as `text: None`
     /// (it accumulates only `Text` blocks and ignores `Reasoning` ones).
     struct BilledButTextlessClient;
+
+    struct BilledCitationClient {
+        answer: String,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SideQueryClient for BilledCitationClient {
+        async fn query(&self, _: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(SideQueryResponse {
+                text: Some(self.answer.clone()),
+                structured: None,
+                tool_calls: vec![],
+                usage: cost::Usage {
+                    tokens: cost::TokenUsage {
+                        input: 4_000,
+                        output: 3,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                stop_reason: Some("end_turn".into()),
+                retry_count: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn citation_integrity_preserves_billed_usage_without_an_extra_query() {
+        let host = crate::evidence::tests::included_host_evidence();
+        let reference = host.attestation.receipt_ref().to_owned();
+        let panel = PanelInternal {
+            index: 0,
+            profile: "p".into(),
+            model: "m".into(),
+            anonymous_id: "P1".into(),
+            status: platform_api::PanelRunStatus::Completed,
+            report: Some(platform_api::PanelReport {
+                schema_version: 1,
+                summary: "summary".into(),
+                candidate_answer: "candidate".into(),
+                claims: vec![],
+                evidence: vec![],
+                assumptions: vec![],
+                risks: vec![],
+                unresolved_questions: vec![],
+            }),
+            duration_ms: 0,
+            error_category: None,
+            error_detail: None,
+            usage: None,
+            spawn_prompt: String::new(),
+            host_evidence: vec![host],
+        };
+        for (answer, valid) in [
+            (format!("answer [evidence:{reference}]"), true),
+            ("legacy answer".into(), true),
+            (
+                "answer [evidence:evr_00000000000000000000000000000000]".into(),
+                false,
+            ),
+        ] {
+            let client = Arc::new(BilledCitationClient {
+                answer,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let outcome = synthesize_with_test_limits(
+                client.clone(),
+                &FusionRuntimeConfig::defaults(),
+                &stub_request(),
+                &stub_analysis(),
+                std::slice::from_ref(&panel),
+            )
+            .await;
+            let usage = if valid {
+                outcome.unwrap().1
+            } else {
+                let (error, usage) = outcome.unwrap_err();
+                assert_eq!(error, SynthError::InvalidCitations);
+                usage
+            };
+            assert_eq!(usage.tokens.input, 4_000);
+            assert_eq!(usage.tokens.output, 3);
+            assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
 
     #[async_trait]
     impl SideQueryClient for BilledButTextlessClient {

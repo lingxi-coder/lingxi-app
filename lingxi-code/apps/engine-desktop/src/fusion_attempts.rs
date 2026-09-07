@@ -139,6 +139,28 @@ impl fusion::FusionAttemptRegistrar for DesktopFusionAttempts {
         &self,
         captured: fusion::FusionAttemptRegistration,
     ) -> Result<fusion::RegisteredFusionAttempts, platform_api::FusionError> {
+        self.register_routes(captured, true)
+    }
+}
+
+impl DesktopFusionAttempts {
+    /// Evaluation-only ordinary single-agent registration. Reuses the exact
+    /// durable route/receipt owner but grants no analyst/synthesis authority.
+    pub(crate) fn register_single(
+        &self,
+        captured: fusion::FusionAttemptRegistration,
+    ) -> Result<fusion::RegisteredFusionAttempts, platform_api::FusionError> {
+        if captured.resolved.panels.len() != 1 {
+            return Err(fusion_error("single evaluation requires exactly one route"));
+        }
+        self.register_routes(captured, false)
+    }
+
+    fn register_routes(
+        &self,
+        captured: fusion::FusionAttemptRegistration,
+        include_judges: bool,
+    ) -> Result<fusion::RegisteredFusionAttempts, platform_api::FusionError> {
         let session = captured
             .control
             .identity()
@@ -188,19 +210,21 @@ impl fusion::FusionAttemptRegistrar for DesktopFusionAttempts {
                 ))
             })
             .collect::<Result<Vec<_>, platform_api::FusionError>>()?;
-        selected.push((
-            (ModelAttemptStage::Analyst, None),
-            captured.resolved.analyst.clone(),
-            config.analyst_max_output_tokens,
-        ));
-        selected.push((
-            (ModelAttemptStage::Synthesis, None),
-            fusion::ResolvedPanel {
-                profile: captured.request.parent_profile.clone(),
-                model: captured.request.parent_model.clone(),
-            },
-            config.synthesizer_max_output_tokens,
-        ));
+        if include_judges {
+            selected.push((
+                (ModelAttemptStage::Analyst, None),
+                captured.resolved.analyst.clone(),
+                config.analyst_max_output_tokens,
+            ));
+            selected.push((
+                (ModelAttemptStage::Synthesis, None),
+                fusion::ResolvedPanel {
+                    profile: captured.request.parent_profile.clone(),
+                    model: captured.request.parent_model.clone(),
+                },
+                config.synthesizer_max_output_tokens,
+            ));
+        }
         let mut routes = HashMap::new();
         for (key, panel, configured_output) in selected {
             let pinned = (|| -> Result<PinnedRoute, platform_api::FusionError> {

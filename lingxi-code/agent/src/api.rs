@@ -319,6 +319,8 @@ pub trait SubagentApiClient: Send + Sync {
 /// Optional per-round-trip Fusion / COGS knobs.
 #[derive(Debug, Clone, Default)]
 pub struct SubagentApiCallOpts {
+    /// Immutable selected result provenance; preparation is not wire inclusion.
+    pub evidence_delivery: Option<platform_api::EvidenceDelivery>,
     /// Trusted per-logical-call capability; retries retain this exact context.
     pub model_attempt: Option<platform_api::ModelAttemptContext>,
     /// Output token cap for this turn.

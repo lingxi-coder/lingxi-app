@@ -89,7 +89,7 @@ pub struct DesktopFusionRecorder {
     delivery_locks: DeliveryLocks,
 }
 
-type DeliveryLocks = Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>;
+type DeliveryLocks = Arc<Mutex<HashMap<(protocol::SessionId, String), Arc<Mutex<()>>>>>;
 
 fn retry_delay_seconds(attempt: u64, cycle_start: u64) -> Option<u64> {
     let power = attempt.checked_sub(cycle_start)?;
@@ -135,7 +135,7 @@ impl DesktopFusionRecorderFactory {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
-            .cloned()
+            .filter_map(|recorder| recorder.pinned_view())
             .collect();
         let mut receipts = Vec::new();
         for recorder in recorders {
@@ -186,25 +186,62 @@ impl DesktopFusionRecorderFactory {
         &self,
         session_id: protocol::SessionId,
     ) -> Option<Arc<DesktopFusionRecorder>> {
-        let coordinator = self.manager.coordinator(session_id)?;
+        let coordinator = self.manager.coordinator_core(session_id)?;
+        // Acquire the external capability before publishing a cache core.
+        // Otherwise retirement could remove the manager entry between lookup
+        // and insertion, leaving a stale closed recorder for the next mount.
+        let pinned = coordinator.pinned_view().ok()?;
         let mut recorders = self
             .recorders
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Some(
-            recorders
-                .entry(session_id)
-                .or_insert_with(|| {
-                    Arc::new(
-                        DesktopFusionRecorder::new(
-                            coordinator,
-                            Some(self.transcript.clone().for_session(session_id)),
-                        )
-                        .with_delivery_locks(self.delivery_locks.clone()),
-                    )
-                })
-                .clone(),
-        )
+
+        let core = recorders.entry(session_id).or_insert_with(|| {
+            Arc::new(
+                DesktopFusionRecorder::new(
+                    coordinator,
+                    Some(self.transcript.clone().for_session(session_id)),
+                )
+                .with_delivery_locks(self.delivery_locks.clone()),
+            )
+        });
+        if !core.coordinator.shares_authority(&pinned) {
+            return None;
+        }
+        Some(Arc::new(DesktopFusionRecorder {
+            coordinator: pinned,
+            transcript: core.transcript.clone(),
+            delivery_locks: core.delivery_locks.clone(),
+        }))
+    }
+
+    pub(crate) async fn retire_cache(
+        &self,
+        session_id: protocol::SessionId,
+        coordinator: &SessionStateCoordinator,
+    ) -> Result<(), cost::CostPersistError> {
+        {
+            let mut recorders = self
+                .recorders
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if recorders
+                .get(&session_id)
+                .is_some_and(|recorder| !recorder.coordinator.shares_authority(coordinator))
+            {
+                return Err(cost::CostPersistError::Rejected(
+                    "recorder retirement authority changed".into(),
+                ));
+            }
+            recorders.remove(&session_id);
+        }
+        // Every delivery task owns a pinned recorder view. Reaching retirement
+        // therefore proves these session-specific lock entries are idle.
+        self.delivery_locks
+            .lock()
+            .await
+            .retain(|(owner, _), _| *owner != session_id);
+        Ok(())
     }
 
     /// Explicit local retry for one stable run in the current hydrated
@@ -267,6 +304,13 @@ impl FusionRunRecorder for UnavailableFusionRecorder {
 }
 
 impl DesktopFusionRecorder {
+    fn pinned_view(&self) -> Option<Arc<Self>> {
+        Some(Arc::new(Self {
+            coordinator: self.coordinator.pinned_view().ok()?,
+            transcript: self.transcript.clone(),
+            delivery_locks: self.delivery_locks.clone(),
+        }))
+    }
     /// Construct a recorder for a specific coordinator/lease. None transcript
     /// means Slash publication is unsupported and therefore fails closed;
     /// Agent/Workflow still record their terminal computation.
@@ -290,7 +334,7 @@ impl DesktopFusionRecorder {
     async fn lock_for_delivery(&self, delivery_id: &str) -> Arc<Mutex<()>> {
         let mut locks = self.delivery_locks.lock().await;
         locks
-            .entry(delivery_id.to_string())
+            .entry((self.coordinator.session_id(), delivery_id.to_string()))
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }

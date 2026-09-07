@@ -63,11 +63,12 @@ impl CostTracker {
                 .attempt_settlements
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if slots.contains_key(&id) {
+            if slots.slots.contains_key(&id) {
                 return Err(CostPersistError::Rejected(
                     "attempt admission identity already consumed".into(),
                 ));
             }
+            let generation = slots.next_generation(&authority.durability_gate)?;
             let turn = self
                 .register_durable_mutation_for(&authority)?
                 .expect("durable authority validated above");
@@ -78,7 +79,8 @@ impl CostTracker {
                 result: std::sync::Mutex::new(None),
                 notify: tokio::sync::Notify::new(),
             });
-            slots.insert(id.clone(), slot.clone());
+            slots.slots.insert(id.clone(), slot.clone());
+            slots.registration_generation = generation;
             (slot, turn)
         };
         let tracker = Self {

@@ -289,6 +289,7 @@ pub struct CostSessionScope {
 /// accidentally resolve a replacement authority.
 #[must_use = "a prepared cost session has no effect until it is activated"]
 pub struct PreparedCostSession {
+    retention_pin: platform_api::SessionRetentionPin,
     ledger: Arc<SessionLedger>,
     entry: Arc<SessionEntry>,
     catalog: Arc<PricingCatalog>,
@@ -310,6 +311,7 @@ impl PreparedCostSession {
     #[must_use]
     pub fn activate(self) -> CostSessionScope {
         let Self {
+            retention_pin,
             ledger,
             entry,
             catalog,
@@ -337,6 +339,7 @@ impl PreparedCostSession {
 
         CostSessionScope {
             tracker: Arc::new(CostTracker {
+                _retention_pin: Some(retention_pin),
                 ledger,
                 scope: Some(entry),
                 catalog,
@@ -361,12 +364,7 @@ impl CostSessionScope {
     pub fn new(tracker: Arc<CostTracker>) -> Self {
         let authority = tracker.selected_entry();
         Self {
-            tracker: Arc::new(CostTracker {
-                ledger: tracker.ledger.clone(),
-                scope: Some(authority),
-                catalog: tracker.catalog.clone(),
-                persist_tx: tracker.persist_tx.clone(),
-            }),
+            tracker: tracker.scoped(authority.session_id),
         }
     }
 
@@ -539,7 +537,7 @@ struct SessionEntry {
     durability_gate: CostDurabilityGate,
     missing_durable_authority: bool,
     response_settlements: std::sync::Mutex<HashMap<CostMutationId, Arc<CostResponseSlot>>>,
-    attempt_settlements: std::sync::Mutex<HashMap<String, Arc<attempts::AttemptSlot>>>,
+    attempt_settlements: std::sync::Mutex<attempts::AttemptRegistry>,
     attempt_outputs: Arc<Vec<crate::AttemptOutputRecovery>>,
 }
 
@@ -556,7 +554,7 @@ impl SessionEntry {
             durability_gate: CostDurabilityGate::default(),
             missing_durable_authority: false,
             response_settlements: std::sync::Mutex::new(HashMap::new()),
-            attempt_settlements: std::sync::Mutex::new(HashMap::new()),
+            attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
             attempt_outputs: Arc::new(Vec::new()),
         })
     }
@@ -573,7 +571,7 @@ impl SessionEntry {
             durability_gate: CostDurabilityGate::default(),
             missing_durable_authority: true,
             response_settlements: std::sync::Mutex::new(HashMap::new()),
-            attempt_settlements: std::sync::Mutex::new(HashMap::new()),
+            attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
             attempt_outputs: Arc::new(Vec::new()),
         })
     }
@@ -592,7 +590,7 @@ impl SessionLedger {
                 durability_gate: CostDurabilityGate::default(),
                 missing_durable_authority: false,
                 response_settlements: std::sync::Mutex::new(HashMap::new()),
-                attempt_settlements: std::sync::Mutex::new(HashMap::new()),
+                attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
                 attempt_outputs: Arc::new(Vec::new()),
             }),
         );
@@ -655,13 +653,20 @@ impl SessionLedger {
 /// session projection switched by the orchestrator at clear/resume boundaries.
 #[derive(Clone)]
 pub struct CostTracker {
+    _retention_pin: Option<platform_api::SessionRetentionPin>,
     ledger: Arc<SessionLedger>,
     scope: Option<Arc<SessionEntry>>,
     catalog: Arc<PricingCatalog>,
     persist_tx: mpsc::Sender<CostState>,
 }
 
+mod retirement;
+pub use retirement::CostSessionRetirement;
+
 impl CostTracker {
+    pub(crate) fn shares_ledger(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.ledger, &other.ledger)
+    }
     /// Construct a fresh tracker for `session_id`.
     ///
     /// `persist_tx` is a single-writer channel that drains to disk in a
@@ -679,6 +684,7 @@ impl CostTracker {
         };
         Self {
             ledger: Arc::new(SessionLedger::new(session_id, state)),
+            _retention_pin: None,
             scope: None,
             catalog,
             persist_tx,
@@ -736,7 +742,7 @@ impl CostTracker {
             durability_gate,
             missing_durable_authority: false,
             response_settlements: std::sync::Mutex::new(HashMap::new()),
-            attempt_settlements: std::sync::Mutex::new(HashMap::new()),
+            attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
             attempt_outputs: Arc::new(hydration.attempt_outputs),
         }));
         self.ledger
@@ -754,6 +760,23 @@ impl CostTracker {
     /// to the originating session.
     #[must_use]
     pub fn scoped(&self, session_id: SessionId) -> Arc<Self> {
+        let mut view = self.scoped_unpinned(session_id);
+        let inner = Arc::get_mut(&mut view).expect("fresh private tracker view");
+        match inner
+            .selected_entry()
+            .durability_gate
+            .retention_gate()
+            .try_pin()
+        {
+            Ok(pin) => inner._retention_pin = Some(pin),
+            Err(_) => inner.scope = Some(SessionEntry::missing(session_id)),
+        }
+        view
+    }
+
+    /// Cache-owned account core only. External users must receive a pinned
+    /// tracker/scope view, never this private construction shortcut.
+    pub(crate) fn scoped_unpinned(&self, session_id: SessionId) -> Arc<Self> {
         let entry = self.selected_entry_for(session_id).unwrap_or_else(|_| {
             if self
                 .ledger
@@ -767,6 +790,7 @@ impl CostTracker {
         });
         Arc::new(Self {
             ledger: self.ledger.clone(),
+            _retention_pin: None,
             scope: Some(entry),
             catalog: self.catalog.clone(),
             persist_tx: self.persist_tx.clone(),
@@ -823,17 +847,14 @@ impl CostTracker {
             }
             // Accepted begin owners can create receipt slots after the first
             // fence. Wait their lease lifecycles, then fence those receipts.
-            // This map is append-only; retirement must replace the length
-            // check with a monotonic registration generation.
+            // Sample membership and monotonic registration history atomically:
+            // settled-slot retirement cannot hide an equally sized new cohort.
             loop {
-                let attempts = entry
+                let (generation, attempts) = entry
                     .attempt_settlements
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .values()
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let count = attempts.len();
+                    .snapshot();
                 for slot in attempts {
                     if let Err(error) = slot.drain().await {
                         if first_error.is_none() {
@@ -850,8 +871,8 @@ impl CostTracker {
                     .attempt_settlements
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .len()
-                    == count
+                    .generation()
+                    == generation
                 {
                     break;
                 }
@@ -864,7 +885,13 @@ impl CostTracker {
     /// writable. The concrete lease deliberately exposes no filesystem API.
     #[must_use]
     pub fn writer_lease(&self) -> Option<platform_api::live_sessions::SharedSessionWriterLease> {
-        self.selected_entry().writer_lease.clone()
+        let entry = self.selected_entry();
+        let lease = entry.writer_lease.clone()?;
+        let pin = self
+            ._retention_pin
+            .clone()
+            .or_else(|| entry.durability_gate.retention_gate().try_pin().ok())?;
+        Some(platform_api::live_sessions::pin_writer_lease(lease, pin))
     }
 
     fn scope_or_active(&self) -> SessionId {
@@ -910,6 +937,11 @@ impl CostTracker {
 
     fn preflight_authority(&self, authority: &SessionEntry) -> Result<(), CostPersistError> {
         self.validate_authority_shape(authority)?;
+        if !authority.durability_gate.retention_gate().is_live() {
+            return Err(CostPersistError::Rejected(
+                "session authority is retiring or retired".into(),
+            ));
+        }
         if let Some(reason) = authority.durability_gate.frozen_reason() {
             return Err(CostPersistError::Frozen(reason));
         }
@@ -1040,15 +1072,21 @@ impl CostTracker {
         entry: Arc<SessionEntry>,
         hydration_bookkeeping: OwnedMutexGuard<HashMap<SessionId, u64>>,
         activates_durable_mode: bool,
-    ) -> PreparedCostSession {
-        PreparedCostSession {
+    ) -> Result<PreparedCostSession, CostPersistError> {
+        let retention_pin = entry
+            .durability_gate
+            .retention_gate()
+            .try_pin()
+            .map_err(|error| CostPersistError::Rejected(error.to_string()))?;
+        Ok(PreparedCostSession {
+            retention_pin,
             ledger: self.ledger.clone(),
             entry,
             catalog: self.catalog.clone(),
             persist_tx: self.persist_tx.clone(),
             hydration_bookkeeping,
             activates_durable_mode,
-        }
+        })
     }
 
     async fn prepare_existing_session(
@@ -1085,7 +1123,7 @@ impl CostTracker {
         };
         self.validate_authority_shape(&entry)?;
         let activates_durable_mode = entry.persistence.is_some();
-        Ok(self.prepared_session(entry, bookkeeping, activates_durable_mode))
+        self.prepared_session(entry, bookkeeping, activates_durable_mode)
     }
 
     /// Validate an already-known destination without changing the active
@@ -1159,7 +1197,7 @@ impl CostTracker {
                     }),
                 missing_durable_authority: false,
                 response_settlements: std::sync::Mutex::new(HashMap::new()),
-                attempt_settlements: std::sync::Mutex::new(HashMap::new()),
+                attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
                 attempt_outputs: Arc::new(hydration.attempt_outputs),
             });
             entries.insert(session_id, replacement.clone());
@@ -1168,7 +1206,7 @@ impl CostTracker {
         bookkeeping.insert(session_id, 0);
         let activates_durable_mode = replacement.persistence.is_some();
         let _scope = self
-            .prepared_session(replacement, bookkeeping, activates_durable_mode)
+            .prepared_session(replacement, bookkeeping, activates_durable_mode)?
             .activate();
         Ok(())
     }
@@ -1189,7 +1227,12 @@ impl CostTracker {
             let same_lease = existing
                 .writer_lease
                 .as_ref()
-                .is_some_and(|existing_lease| Arc::ptr_eq(existing_lease, writer_lease));
+                .is_some_and(|existing_lease| {
+                    platform_api::live_sessions::same_writer_lease_authority(
+                        existing_lease,
+                        writer_lease,
+                    )
+                });
             let same_gate = existing.durability_gate.shares_authority(durability_gate);
             if !same_persistence || !same_lease || !same_gate {
                 return Err(CostPersistError::Rejected(
@@ -1256,7 +1299,7 @@ impl CostTracker {
             &durability_gate,
         )? {
             bookkeeping.entry(session_id).or_insert(0);
-            return Ok(self.prepared_session(entry, bookkeeping, true));
+            return self.prepared_session(entry, bookkeeping, true);
         }
         drop(bookkeeping);
 
@@ -1292,7 +1335,7 @@ impl CostTracker {
                     durability_gate,
                     missing_durable_authority: false,
                     response_settlements: std::sync::Mutex::new(HashMap::new()),
-                    attempt_settlements: std::sync::Mutex::new(HashMap::new()),
+                    attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
                     attempt_outputs: Arc::new(hydration.attempt_outputs),
                 });
                 entries.insert(session_id, entry.clone());
@@ -1300,7 +1343,7 @@ impl CostTracker {
             }
         };
         bookkeeping.entry(session_id).or_insert(0);
-        Ok(self.prepared_session(entry, bookkeeping, true))
+        self.prepared_session(entry, bookkeeping, true)
     }
 
     /// Hydrate and validate a destination's exact durable authority without
@@ -1414,7 +1457,7 @@ impl CostTracker {
             durability_gate: source.durability_gate.clone(),
             missing_durable_authority: source.missing_durable_authority,
             response_settlements: std::sync::Mutex::new(HashMap::new()),
-            attempt_settlements: std::sync::Mutex::new(HashMap::new()),
+            attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
             attempt_outputs: source.attempt_outputs.clone(),
         });
         assert!(entries.insert(session_id, replacement).is_none());
@@ -2388,19 +2431,39 @@ mod tests {
     fn attempt_host_binding_requires_fixed_durable_unfrozen_origin() {
         let (persist_tx, _) = mpsc::channel(8);
         let session = SessionId::new();
-        let ephemeral = CostTracker::new(session, Arc::new(PricingCatalog::empty()), persist_tx.clone());
-        assert!(ephemeral.scoped(session).validate_attempt_host_binding(session).is_err());
+        let ephemeral = CostTracker::new(
+            session,
+            Arc::new(PricingCatalog::empty()),
+            persist_tx.clone(),
+        );
+        assert!(ephemeral
+            .scoped(session)
+            .validate_attempt_host_binding(session)
+            .is_err());
         let (requests, _) = tokio::sync::mpsc::unbounded_channel();
         let tracker = CostTracker::new(session, Arc::new(PricingCatalog::empty()), persist_tx)
-            .try_with_durable_persistence(hydration(session), Arc::new(TestPersistence { requests }),
-                Arc::new(TestLease(session.to_string())), CostDurabilityGate::default()).unwrap();
+            .try_with_durable_persistence(
+                hydration(session),
+                Arc::new(TestPersistence { requests }),
+                Arc::new(TestLease(session.to_string())),
+                CostDurabilityGate::default(),
+            )
+            .unwrap();
         assert!(tracker.validate_attempt_host_binding(session).is_err());
         let captured = tracker.scoped(session);
         assert!(captured.validate_attempt_host_binding(session).is_ok());
-        assert!(captured.validate_attempt_host_binding(SessionId::new()).is_err());
-        assert!(tracker.scoped(SessionId::new()).validate_attempt_host_binding(session).is_err());
+        assert!(captured
+            .validate_attempt_host_binding(SessionId::new())
+            .is_err());
+        assert!(tracker
+            .scoped(SessionId::new())
+            .validate_attempt_host_binding(session)
+            .is_err());
         captured.durability_gate().freeze("host unavailable");
-        assert!(matches!(captured.validate_attempt_host_binding(session), Err(CostPersistError::Frozen(_))));
+        assert!(matches!(
+            captured.validate_attempt_host_binding(session),
+            Err(CostPersistError::Frozen(_))
+        ));
     }
 
     #[tokio::test]
@@ -2919,7 +2982,7 @@ mod tests {
         let scope = prepared.activate();
         assert_eq!(tracker.session_id().await, session_b);
         assert_eq!(scope.tracker.snapshot().await.total_nano_usd, 41);
-        assert!(Arc::ptr_eq(
+        assert!(platform_api::live_sessions::same_writer_lease_authority(
             &scope.tracker.writer_lease().unwrap(),
             &lease_b
         ));
@@ -3142,8 +3205,14 @@ mod tests {
             }))
             .unwrap();
         assert!(current.settle().await.persistence_result().is_ok());
-        assert!(Arc::ptr_eq(&a1_tracker.writer_lease().unwrap(), &lease_a));
-        assert!(Arc::ptr_eq(&tracker.writer_lease().unwrap(), &lease_a));
+        assert!(platform_api::live_sessions::same_writer_lease_authority(
+            &a1_tracker.writer_lease().unwrap(),
+            &lease_a
+        ));
+        assert!(platform_api::live_sessions::same_writer_lease_authority(
+            &tracker.writer_lease().unwrap(),
+            &lease_a
+        ));
         assert!(tracker.durability_gate().shares_authority(&gate_a));
     }
 

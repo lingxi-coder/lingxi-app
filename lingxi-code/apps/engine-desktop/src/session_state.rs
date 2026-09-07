@@ -29,6 +29,7 @@ use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, Notify};
 const COST_QUEUE_CAPACITY: usize = 64;
 
 mod attempts;
+mod retention;
 use attempts::AttemptProjection;
 
 #[derive(Debug, Clone, Default)]
@@ -160,6 +161,13 @@ enum SessionMutation {
     Barrier {
         ack: tokio::sync::oneshot::Sender<()>,
     },
+}
+
+struct QueuedMutation {
+    mutation: SessionMutation,
+    // Accepted work, not its possibly cancelled caller, owns this pin until
+    // the writer has completed the blocking mutation and sent its ACK.
+    _pin: Option<platform_api::SessionRetentionPin>,
 }
 
 fn publication_rank(status: FusionPublicationStatus) -> u8 {
@@ -362,13 +370,14 @@ fn validate_outbox_transition(
 /// One canonical session's durable ledger owner.
 pub struct SessionStateCoordinator {
     state: Arc<CoordinatorState>,
-    queue_tx: mpsc::Sender<SessionMutation>,
-    queue_rx: AsyncMutex<Option<mpsc::Receiver<SessionMutation>>>,
-    admission_closed: AtomicBool,
+    queue_tx: mpsc::Sender<QueuedMutation>,
+    queue_rx: Arc<AsyncMutex<Option<mpsc::Receiver<QueuedMutation>>>>,
+    admission_closed: Arc<AtomicBool>,
     close_tx: watch::Sender<bool>,
     worker_completion: Arc<WorkerCompletion>,
+    _retention_pin: Option<platform_api::SessionRetentionPin>,
     #[cfg(test)]
-    start_hydration_block: Mutex<Option<Arc<TestHydrationBlock>>>,
+    start_hydration_block: Arc<Mutex<Option<Arc<TestHydrationBlock>>>>,
 }
 
 #[cfg(test)]
@@ -510,6 +519,10 @@ pub struct SessionStateManager {
     closing: AtomicBool,
     legacy_shadow: Option<Arc<dyn Fn(SessionId) -> Option<u64> + Send + Sync + 'static>>,
     transcript_writer: std::sync::RwLock<Option<Arc<session::jsonl::writer::JsonlWriter>>>,
+    last_used: Mutex<std::collections::HashMap<SessionId, std::time::Instant>>,
+    maintenance: std::sync::OnceLock<retention::Maintenance>,
+    maintenance_requested: AtomicBool,
+    maintenance_running: AtomicBool,
     #[cfg(test)]
     next_start_hydration_block: Mutex<Option<Arc<TestHydrationBlock>>>,
 }
@@ -537,6 +550,10 @@ impl SessionStateManager {
             closing: AtomicBool::new(false),
             legacy_shadow,
             transcript_writer: std::sync::RwLock::new(None),
+            last_used: Mutex::new(std::collections::HashMap::new()),
+            maintenance: std::sync::OnceLock::new(),
+            maintenance_requested: AtomicBool::new(false),
+            maintenance_running: AtomicBool::new(false),
             #[cfg(test)]
             next_start_hydration_block: Mutex::new(None),
         })
@@ -573,14 +590,16 @@ impl SessionStateManager {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(existing) = entries.get(&session_id) {
-            if !Arc::ptr_eq(existing, &coordinator) {
+            if !existing.shares_authority(&coordinator) {
                 return Err(CostPersistError::Rejected(
                     "session coordinator identity is already owned".into(),
                 ));
             }
             return Ok(());
         }
-        entries.insert(session_id, coordinator);
+        self.attach_retention_callback(&coordinator);
+        self.touch(session_id);
+        entries.insert(session_id, coordinator.view(None));
         Ok(())
     }
 
@@ -588,6 +607,13 @@ impl SessionStateManager {
     /// this process. This is a pure lookup used by host capability factories;
     /// it performs no I/O or claim acquisition.
     pub fn coordinator(&self, session_id: SessionId) -> Option<Arc<SessionStateCoordinator>> {
+        self.coordinator_core(session_id)?.pinned_view().ok()
+    }
+
+    pub(crate) fn coordinator_core(
+        &self,
+        session_id: SessionId,
+    ) -> Option<Arc<SessionStateCoordinator>> {
         self.entries
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -613,6 +639,7 @@ impl SessionStateManager {
     /// Composition must stop/join producers before calling this method when it
     /// needs a final shutdown drain; the queues deliberately remain open.
     pub async fn flush_all(&self) -> Result<(), CostPersistError> {
+        let _creation = self.creation_gate.clone().lock_owned().await;
         let coordinators = self
             .entries
             .read()
@@ -678,17 +705,15 @@ impl SessionStateManager {
                 "session state manager is closing".into(),
             ));
         }
-        if let Some(existing) = self.coordinator(session_id) {
-            return Ok(existing);
-        }
         let creation = self.creation_gate.clone().lock_owned().await;
         if self.closing.load(AtomicOrdering::Acquire) {
             return Err(CostPersistError::Rejected(
                 "session state manager is closing".into(),
             ));
         }
-        if let Some(existing) = self.coordinator(session_id) {
-            return Ok(existing);
+        if let Some(existing) = self.coordinator_core(session_id) {
+            self.touch(session_id);
+            return existing.pinned_view();
         }
         let lease =
             platform_api::live_sessions::LiveSessionDir::at_live(self.lingxi_home.join("sessions"))
@@ -697,7 +722,7 @@ impl SessionStateManager {
                     CostPersistError::Rejected(format!("session writer claim failed: {error}"))
                 })?
                 .into_shared();
-        let coordinator = SessionStateCoordinator::open(&self.lingxi_home, session_id, lease)?;
+        let coordinator = SessionStateCoordinator::open_core(&self.lingxi_home, session_id, lease)?;
         #[cfg(test)]
         if let Some(block) = self
             .next_start_hydration_block
@@ -761,12 +786,15 @@ impl SessionStateManager {
                 "session state manager closed during coordinator initialization".into(),
             ));
         }
+        self.attach_retention_callback(&coordinator);
+        self.touch(session_id);
         self.entries
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session_id, coordinator.clone());
+        let view = coordinator.pinned_view()?;
         let _ = publish_tx.send(());
-        Ok(coordinator)
+        Ok(view)
     }
 }
 
@@ -778,12 +806,15 @@ impl orchestrator::conversation::CostSessionSwitcher for SessionStateManager {
         session_id: SessionId,
     ) -> Result<orchestrator::conversation::PreparedSessionSwitch, CostPersistError> {
         let coordinator = self.ensure_coordinator(session_id).await?;
+        let core = self
+            .coordinator_core(session_id)
+            .ok_or_else(|| CostPersistError::Rejected("prepared coordinator disappeared".into()))?;
         let cost = tracker
             .prepare_session_hydrated_with_durable(
                 session_id,
                 coordinator.as_ref(),
-                coordinator.clone() as Arc<dyn CostPersistence>,
-                coordinator.writer_lease(),
+                core.clone() as Arc<dyn CostPersistence>,
+                core.writer_lease_core(),
                 coordinator.durability_gate(),
             )
             .await?;
@@ -791,10 +822,14 @@ impl orchestrator::conversation::CostSessionSwitcher for SessionStateManager {
             coordinator.journal().root().to_path_buf(),
             coordinator.journal().root_identity(),
         ));
-        Ok(orchestrator::conversation::PreparedSessionSwitch::new(
-            cost,
-            Some(transcript_lock),
-        ))
+        let prepared =
+            orchestrator::conversation::PreparedSessionSwitch::new(cost, Some(transcript_lock));
+        Ok(if let Some(maintenance) = self.maintenance.get() {
+            let wake = maintenance.wake.clone();
+            prepared.with_on_activated(move || wake())
+        } else {
+            prepared
+        })
     }
 }
 
@@ -809,8 +844,19 @@ impl std::fmt::Debug for SessionStateCoordinator {
 }
 
 impl SessionStateCoordinator {
+    pub(crate) fn session_id(&self) -> SessionId {
+        self.state.session_id
+    }
     /// Open the stable `<lingxi_home>/session-state/<uuid>` directory.
     pub fn open(
+        lingxi_home: impl AsRef<Path>,
+        session_id: SessionId,
+        writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
+    ) -> Result<Arc<Self>, CostPersistError> {
+        Self::open_core(lingxi_home, session_id, writer_lease)?.pinned_view()
+    }
+
+    fn open_core(
         lingxi_home: impl AsRef<Path>,
         session_id: SessionId,
         writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
@@ -837,19 +883,60 @@ impl SessionStateCoordinator {
                 durability_gate: CostDurabilityGate::default(),
             }),
             queue_tx,
-            queue_rx: AsyncMutex::new(Some(queue_rx)),
-            admission_closed: AtomicBool::new(false),
+            queue_rx: Arc::new(AsyncMutex::new(Some(queue_rx))),
+            admission_closed: Arc::new(AtomicBool::new(false)),
             close_tx,
             worker_completion: Arc::new(WorkerCompletion::default()),
+            _retention_pin: None,
             #[cfg(test)]
-            start_hydration_block: Mutex::new(None),
+            start_hydration_block: Arc::new(Mutex::new(None)),
         }))
+    }
+
+    fn view(&self, pin: Option<platform_api::SessionRetentionPin>) -> Arc<Self> {
+        Arc::new(Self {
+            state: self.state.clone(),
+            queue_tx: self.queue_tx.clone(),
+            queue_rx: self.queue_rx.clone(),
+            admission_closed: self.admission_closed.clone(),
+            close_tx: self.close_tx.clone(),
+            worker_completion: self.worker_completion.clone(),
+            _retention_pin: pin,
+            #[cfg(test)]
+            start_hydration_block: self.start_hydration_block.clone(),
+        })
+    }
+
+    fn retention_pin(&self) -> Result<platform_api::SessionRetentionPin, CostPersistError> {
+        self.state
+            .durability_gate
+            .retention_gate()
+            .try_pin()
+            .map_err(|error| CostPersistError::Rejected(error.to_string()))
+    }
+
+    pub(crate) fn pinned_view(&self) -> Result<Arc<Self>, CostPersistError> {
+        Ok(self.view(Some(self.retention_pin()?)))
+    }
+
+    pub(crate) fn shares_authority(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
+    pub(crate) fn writer_lease_core(
+        &self,
+    ) -> platform_api::live_sessions::SharedSessionWriterLease {
+        self.state.writer_lease.clone()
     }
 
     /// Keep the writer claim alive while returning a scoped clone.
     #[must_use]
     pub fn writer_lease(&self) -> platform_api::live_sessions::SharedSessionWriterLease {
-        self.state.writer_lease.clone()
+        let pin = self._retention_pin.clone().unwrap_or_else(|| {
+            self.retention_pin()
+                .expect("external writer lease requires a live authority")
+        });
+        platform_api::live_sessions::pin_writer_lease(self.writer_lease_core(), pin)
     }
 
     /// Per-session latch shared by ordinary and Fusion paid prechecks.
@@ -885,7 +972,10 @@ impl SessionStateCoordinator {
             .map_err(|_| CostPersistError::Rejected("session state queue is closed".into()))?;
         self.ensure_admission_open()?;
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        permit.send(SessionMutation::Barrier { ack: ack_tx });
+        permit.send(QueuedMutation {
+            mutation: SessionMutation::Barrier { ack: ack_tx },
+            _pin: None,
+        });
         ack_rx.await.map_err(|_| {
             CostPersistError::Storage("session state flush acknowledgment dropped".into())
         })
@@ -995,6 +1085,7 @@ impl SessionStateCoordinator {
                 let Some(mutation) = mutation else {
                     break;
                 };
+                let QueuedMutation { mutation, _pin } = mutation;
                 match mutation {
                     SessionMutation::Attempt(request) => {
                         let worker = state.clone();
@@ -1206,12 +1297,15 @@ impl SessionStateCoordinator {
         record: DurableFusionTerminalRecord,
     ) -> Result<CostPersistAck, CostPersistError> {
         let event_id = record.event_id.clone();
-        let permit = self.acquire_session_mutation_permit().await?;
+        let (permit, pin) = self.acquire_session_mutation_permit().await?;
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        permit.send(SessionMutation::FusionTerminal {
-            event_id,
-            record,
-            ack: ack_tx,
+        permit.send(QueuedMutation {
+            mutation: SessionMutation::FusionTerminal {
+                event_id,
+                record,
+                ack: ack_tx,
+            },
+            _pin: Some(pin),
         });
         ack_rx.await.map_err(|_| {
             CostPersistError::Storage("fusion terminal acknowledgment dropped".into())
@@ -1224,12 +1318,15 @@ impl SessionStateCoordinator {
         record: DurableFusionOutboxRecord,
     ) -> Result<CostPersistAck, CostPersistError> {
         let event_id = outbox_event_id(&record);
-        let permit = self.acquire_session_mutation_permit().await?;
+        let (permit, pin) = self.acquire_session_mutation_permit().await?;
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        permit.send(SessionMutation::FusionOutbox {
-            event_id,
-            record,
-            ack: ack_tx,
+        permit.send(QueuedMutation {
+            mutation: SessionMutation::FusionOutbox {
+                event_id,
+                record,
+                ack: ack_tx,
+            },
+            _pin: Some(pin),
         });
         ack_rx
             .await
@@ -1238,7 +1335,14 @@ impl SessionStateCoordinator {
 
     async fn acquire_session_mutation_permit(
         &self,
-    ) -> Result<mpsc::OwnedPermit<SessionMutation>, CostPersistError> {
+    ) -> Result<
+        (
+            mpsc::OwnedPermit<QueuedMutation>,
+            platform_api::SessionRetentionPin,
+        ),
+        CostPersistError,
+    > {
+        let pin = self.retention_pin()?;
         self.ensure_admission_open()?;
         if let Some(reason) = self.state.durability_gate.frozen_reason() {
             return Err(CostPersistError::Frozen(reason));
@@ -1250,7 +1354,7 @@ impl SessionStateCoordinator {
             .await
             .map_err(|_| CostPersistError::Rejected("session state queue is closed".into()))?;
         self.ensure_admission_open()?;
-        Ok(permit)
+        Ok((permit, pin))
     }
 
     /// Fold the legacy `lastCost` import decision and opening balance into one
@@ -1859,8 +1963,11 @@ impl CoordinatorState {
         if recover {
             self.recover_attempts()?;
         }
-        let attempt_outputs = self.attempts.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner).output_recovery();
+        let attempt_outputs = self
+            .attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .output_recovery();
         let projection = self
             .projection
             .lock()
@@ -2192,6 +2299,7 @@ impl CostPersistence for SessionStateCoordinator {
         &self,
         session_id: SessionId,
     ) -> Result<AttemptPersistPermit, CostPersistError> {
+        let pin = self.retention_pin()?;
         if session_id != self.state.session_id {
             return Err(CostPersistError::Rejected(
                 "attempt permit belongs to a different session".into(),
@@ -2216,7 +2324,10 @@ impl CostPersistence for SessionStateCoordinator {
             if let Some(reason) = gate.frozen_reason() {
                 return Err(CostPersistError::Frozen(reason));
             }
-            permit.send(SessionMutation::Attempt(request));
+            permit.send(QueuedMutation {
+                mutation: SessionMutation::Attempt(request),
+                _pin: Some(pin),
+            });
             Ok(())
         }))
     }
@@ -2225,6 +2336,7 @@ impl CostPersistence for SessionStateCoordinator {
         &self,
         session_id: SessionId,
     ) -> Result<CostPersistPermit, CostPersistError> {
+        let pin = self.retention_pin()?;
         if session_id != self.state.session_id {
             return Err(CostPersistError::Rejected(
                 "cost permit belongs to a different session".into(),
@@ -2249,7 +2361,10 @@ impl CostPersistence for SessionStateCoordinator {
             if let Some(reason) = gate.frozen_reason() {
                 return Err(CostPersistError::Frozen(reason));
             }
-            permit.send(SessionMutation::Cost(request));
+            permit.send(QueuedMutation {
+                mutation: SessionMutation::Cost(request),
+                _pin: Some(pin),
+            });
             Ok(())
         }))
     }
@@ -3031,7 +3146,7 @@ mod tests {
         assert_eq!(manager.session_ids(), vec![session_id]);
 
         let reused = manager.ensure_coordinator(session_id).await.unwrap();
-        assert!(Arc::ptr_eq(&first, &reused));
+        assert!(first.shares_authority(&reused));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(first.journal().replay().unwrap().entries.len(), 1);
         manager.flush_all().await.unwrap();
@@ -3320,16 +3435,14 @@ mod tests {
             .expect("retirement should unblock a fresh B mount")
             .unwrap()
             .unwrap();
-        assert!(Arc::ptr_eq(
-            &coordinator_b,
+        assert!(coordinator_b.shares_authority(
             &manager
                 .coordinator(session_b)
                 .expect("only retry publishes B")
         ));
-        assert!(Arc::ptr_eq(
-            &coordinator_a,
-            &manager.ensure_coordinator(session_a).await.unwrap()
-        ));
+        assert!(
+            coordinator_a.shares_authority(&manager.ensure_coordinator(session_a).await.unwrap())
+        );
         manager.close_and_drain().await.unwrap();
     }
 
@@ -3357,10 +3470,9 @@ mod tests {
         let coordinator_a = manager.ensure_coordinator(session_a).await.unwrap();
         assert!(manager.ensure_coordinator(session_b).await.is_err());
         assert_eq!(manager.session_ids(), vec![session_a]);
-        assert!(Arc::ptr_eq(
-            &coordinator_a,
-            &manager.ensure_coordinator(session_a).await.unwrap()
-        ));
+        assert!(
+            coordinator_a.shares_authority(&manager.ensure_coordinator(session_a).await.unwrap())
+        );
 
         let live = platform_api::live_sessions::LiveSessionDir::at_live(home.join("sessions"));
         live.claim_session_id(&session_b.to_string(), std::process::id())

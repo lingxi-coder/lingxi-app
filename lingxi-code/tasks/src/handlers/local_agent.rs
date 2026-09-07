@@ -434,6 +434,7 @@ impl Task for LocalAgentHandler {
             .and_then(|r| r.forked_skill_name.clone());
         let request = spawn_request.unwrap_or_else(|| SubagentSpawnRequest {
             model_attempt: None,
+            evidence_context: None,
             subagent_type,
             prompt,
             observer: None,
@@ -1331,6 +1332,7 @@ mod tests {
     fn request_with_worktree(prompt: &str) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
             model_attempt: None,
+            evidence_context: None,
             subagent_type: "general-purpose".into(),
             prompt: prompt.into(),
             observer: None,
@@ -2824,6 +2826,7 @@ mod tests {
         let creator_agent_id = protocol::AgentId::new();
         let expected = SubagentSpawnRequest {
             model_attempt: None,
+            evidence_context: None,
             subagent_type: "code-reviewer".into(),
             prompt: "inspect the background request".into(),
             observer: None,

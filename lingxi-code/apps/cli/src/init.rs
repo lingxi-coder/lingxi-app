@@ -338,7 +338,7 @@ impl From<engine_desktop::BuildError> for InitError {
 /// NEVER constructs an `AdapterPermissionGate` — the sink is therefore never
 /// invoked. It exists only to satisfy `build`'s signature (the bridge-server
 /// passes a real WS-backed sink instead).
-struct NoopPermissionRequestSink;
+pub(crate) struct NoopPermissionRequestSink;
 
 #[async_trait]
 impl client_adapter::PermissionRequestSink for NoopPermissionRequestSink {

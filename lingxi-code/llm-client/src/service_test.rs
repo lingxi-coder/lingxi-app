@@ -110,6 +110,72 @@ mod tests {
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
+    #[tokio::test]
+    async fn registration_required_is_one_way_and_missing_context_never_reaches_http() {
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 200,
+            headers: BTreeMap::new(),
+            body_json: ok_response_json(),
+            request_id: None,
+        });
+        let service = make_adapter(transport.clone());
+        let mut ordinary = registered_request();
+        ordinary.model_attempt = None;
+        // The opt-in flag does not change default service behavior.
+        service
+            .execute_side_query_request(ordinary.clone())
+            .await
+            .unwrap();
+        assert_eq!(transport.seen_count(), 1);
+        service.require_registered_model_attempts();
+        service.require_registered_model_attempts();
+        service.clear_model_attempt_hooks();
+        assert!(matches!(
+            service.execute_side_query_request(ordinary).await,
+            Err(LlmError::CostUnavailable { .. })
+        ));
+        assert_eq!(transport.seen_count(), 1);
+        let probe = Arc::new(AttemptProbe::default());
+        service.set_model_attempt_hooks(Arc::new(probe.clone()));
+        service
+            .execute_side_query_request(registered_request())
+            .await
+            .unwrap();
+        assert_eq!(transport.seen_count(), 2);
+        assert!(probe.events.lock().unwrap().contains(&"begin"));
+        assert!(probe.events.lock().unwrap().contains(&"settled"));
+    }
+
+    #[tokio::test]
+    async fn registration_required_blocks_sse_and_websocket_prewarm_before_transport() {
+        let transport = FakeStreamTransport::sequence(vec![FakeStreamResp::Status {
+            status: 200,
+            headers: BTreeMap::new(),
+            body_json: None,
+        }]);
+        let service = make_adapter(transport.clone());
+        service.require_registered_model_attempts();
+        let mut ordinary = registered_request();
+        ordinary.model_attempt = None;
+        assert!(matches!(
+            service.stream_request(ordinary).await,
+            Err(LlmError::CostUnavailable { .. })
+        ));
+        assert!(matches!(
+            service
+                .prewarm_responses_websocket("unused", None, None, vec![], vec![])
+                .await,
+            Err(LlmError::CostUnavailable { .. })
+        ));
+        assert_eq!(transport.stream_call_count(), 0);
+        let probe = Arc::new(AttemptProbe::default());
+        service.set_model_attempt_hooks(Arc::new(probe.clone()));
+        let stream = service.stream_request(registered_request()).await.unwrap();
+        drop(stream);
+        assert_eq!(transport.stream_call_count(), 1);
+        assert!(probe.events.lock().unwrap().contains(&"begin"));
+    }
+
     #[derive(Default)]
     struct AttemptProbe {
         events: Mutex<Vec<&'static str>>,
@@ -201,6 +267,107 @@ mod tests {
                 .unwrap(),
         );
         request
+    }
+
+    struct EvidenceWireProbe {
+        owner: platform_api::EvidenceContext,
+        inner: Arc<dyn Transport>,
+    }
+
+    impl Transport for EvidenceWireProbe {
+        fn execute<'a>(
+            &'a self,
+            request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+            assert!(
+                self.owner.receipts()[0].included_in_request,
+                "upgrade must precede submission"
+            );
+            assert!(!request
+                .body_json
+                .to_string()
+                .contains("lingxi-private-evidence-"));
+            self.inner.execute(request)
+        }
+        fn open_stream<'a>(
+            &'a self,
+            request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            assert!(
+                self.owner.receipts()[0].included_in_request,
+                "upgrade must precede submission"
+            );
+            assert!(!request
+                .body_json
+                .to_string()
+                .contains("lingxi-private-evidence-"));
+            self.inner.open_stream(request)
+        }
+    }
+
+    #[tokio::test]
+    async fn evidence_real_service_normalization_prepare_and_transport_marking() {
+        for (streaming, registered) in [(false, true), (true, true), (true, false)] {
+            let (owner, messages, delivery) = crate::evidence::tests::fixture();
+            let inner: Arc<dyn Transport> = if streaming {
+                ScriptedStreamTransport::anthropic_success()
+            } else {
+                FakeTransport::always(ProviderResponse::json(200, ok_response_json()))
+            };
+            let adapter = make_adapter(Arc::new(EvidenceWireProbe {
+                owner: owner.clone(),
+                inner,
+            }));
+            adapter.set_model_attempt_hooks(Arc::new(Arc::new(AttemptProbe::default())));
+            let mut request = adapter
+                .build_request_observed(
+                    "claude-sonnet-4-20250514",
+                    None,
+                    None,
+                    messages,
+                    vec![],
+                    streaming,
+                    Some(100),
+                    Some(&delivery),
+                )
+                .unwrap();
+            if registered {
+                request.model_attempt = registered_request().model_attempt;
+            }
+            assert!(request.evidence.is_some());
+            assert!(!owner.receipts()[0].included_in_request);
+            if streaming {
+                use futures::StreamExt;
+                let mut stream = adapter.stream_request(request).await.unwrap();
+                assert!(stream.next().await.unwrap().is_ok());
+            } else {
+                adapter.execute_side_query_request(request).await.unwrap();
+            }
+            assert!(owner.receipts()[0].included_in_request);
+        }
+    }
+
+    #[tokio::test]
+    async fn evidence_without_registered_authorization_stays_fetched() {
+        let (owner, messages, delivery) = crate::evidence::tests::fixture();
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport.clone());
+        let mut request = adapter
+            .build_request_observed(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                messages,
+                vec![],
+                false,
+                Some(100),
+                Some(&delivery),
+            )
+            .unwrap();
+        request.model_attempt = registered_request().model_attempt;
+        assert!(adapter.execute_side_query_request(request).await.is_err());
+        assert_eq!(transport.seen_count(), 0);
+        assert!(!owner.receipts()[0].included_in_request);
     }
 
     struct HttpOnlyProbeTransport {
@@ -446,9 +613,12 @@ mod tests {
 
     impl Drop for HookRetirementProbe {
         fn drop(&mut self) {
-            let unlocked = self.service.upgrade()
+            let unlocked = self
+                .service
+                .upgrade()
                 .is_some_and(|service| service.model_attempt_hooks.try_write().is_ok());
-            self.unlocked_drop.store(unlocked, std::sync::atomic::Ordering::SeqCst);
+            self.unlocked_drop
+                .store(unlocked, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -456,30 +626,46 @@ mod tests {
     async fn registered_hook_retirement_drops_outside_lock_and_rejects_late_wire() {
         use std::sync::atomic::{AtomicBool, Ordering};
         let transport = FakeTransport::always(ProviderResponse {
-            status: 200, headers: BTreeMap::new(), body_json: ok_response_json(), request_id: None,
+            status: 200,
+            headers: BTreeMap::new(),
+            body_json: ok_response_json(),
+            request_id: None,
         });
         let service = Arc::new(make_adapter(transport.clone()));
         for replacement in [true, false] {
             let unlocked = Arc::new(AtomicBool::new(false));
             service.set_model_attempt_hooks(Arc::new(HookRetirementProbe {
-                service: Arc::downgrade(&service), unlocked_drop: unlocked.clone(),
+                service: Arc::downgrade(&service),
+                unlocked_drop: unlocked.clone(),
             }));
             if replacement {
                 service.set_model_attempt_hooks(Arc::new(Arc::new(AttemptProbe::default())));
             } else {
                 service.clear_model_attempt_hooks();
             }
-            assert!(unlocked.load(Ordering::SeqCst), "hook destruction must run outside the write lock");
+            assert!(
+                unlocked.load(Ordering::SeqCst),
+                "hook destruction must run outside the write lock"
+            );
         }
         service.clear_model_attempt_hooks(); // idempotent
-        let error = service.execute_side_query_request(registered_request()).await.unwrap_err();
-        assert!(matches!(error, LlmError::InvalidRequest { message } if message.contains("requires host accounting hooks")));
+        let error = service
+            .execute_side_query_request(registered_request())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, LlmError::InvalidRequest { message } if message.contains("requires host accounting hooks"))
+        );
         assert!(service.stream_request(registered_request()).await.is_err());
         assert_eq!(transport.seen_count(), 0);
         let mut ordinary = registered_request();
         ordinary.model_attempt = None;
         service.execute_side_query_request(ordinary).await.unwrap();
-        assert_eq!(transport.seen_count(), 1, "ordinary calls remain unaffected");
+        assert_eq!(
+            transport.seen_count(),
+            1,
+            "ordinary calls remain unaffected"
+        );
     }
 
     #[tokio::test(start_paused = true)]

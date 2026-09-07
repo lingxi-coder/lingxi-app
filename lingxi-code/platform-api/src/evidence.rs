@@ -20,12 +20,86 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
 use uuid::Uuid;
 
+mod delivery;
+pub use delivery::{
+    CapturedToolEvidence, EvidenceDelivery, EvidenceHistoryBinding, SelectedEvidence,
+};
+
 /// Maximum material retained for one successful evidence receipt.
 pub const MAX_EVIDENCE_BYTES_PER_RECEIPT: usize = 512 * 1024;
 /// Maximum material retained by one Fusion panel.
 pub const MAX_EVIDENCE_BYTES_PER_PANEL: usize = 2 * 1024 * 1024;
 /// Maximum material retained by one Fusion run across all panels.
 pub const MAX_EVIDENCE_BYTES_PER_RUN: usize = 16 * 1024 * 1024;
+
+/// What the retained material establishes about a panel-authored excerpt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceExcerptStatus {
+    /// No excerpt was claimed.
+    NotRequested,
+    /// Exact text occurs in complete retained material.
+    Present,
+    /// Exact text occurs in the retained prefix; the rest was not retained.
+    PresentInPrefix,
+    /// Complete material does not contain the requested excerpt.
+    NotFound,
+    /// A truncated tail may contain the excerpt; the host cannot decide.
+    UnknownTruncated,
+}
+
+/// Frozen, host-produced provenance projection, never constructible from JSON.
+/// It attests retrieval/delivery, not correctness of the model's interpretation.
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EvidenceAttestation {
+    receipt_ref: String,
+    kind: EvidenceKind,
+    source: &'static str,
+    fetched_at_ms: Option<u64>,
+    status_code: Option<u16>,
+    digest_hex: String,
+    body_bytes: usize,
+    stored_bytes: usize,
+    truncated: bool,
+    fetched: bool,
+    included_in_request: bool,
+    excerpt_status: EvidenceExcerptStatus,
+}
+
+impl fmt::Debug for EvidenceAttestation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EvidenceAttestation")
+            .field("included_in_request", &self.included_in_request)
+            .field("excerpt_status", &self.excerpt_status)
+            .finish_non_exhaustive()
+    }
+}
+
+impl EvidenceAttestation {
+    /// Opaque report-local citation reference.
+    #[must_use]
+    pub fn receipt_ref(&self) -> &str {
+        &self.receipt_ref
+    }
+    /// Whether this reference may support a synthesis citation. Unknown quotes
+    /// remain visible as metadata, but cannot become positively verified quotes.
+    #[must_use]
+    pub fn allows_citation(&self) -> bool {
+        self.fetched
+            && self.included_in_request
+            && matches!(
+                self.excerpt_status,
+                EvidenceExcerptStatus::NotRequested
+                    | EvidenceExcerptStatus::Present
+                    | EvidenceExcerptStatus::PresentInPrefix
+            )
+    }
+    /// Exact excerpt support status, without interpreting the model's claim.
+    #[must_use]
+    pub fn excerpt_status(&self) -> EvidenceExcerptStatus {
+        self.excerpt_status
+    }
+}
 
 /// Where a successful URL result came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,6 +396,69 @@ impl PartialEq for EvidenceContext {
 impl Eq for EvidenceContext {}
 
 impl EvidenceContext {
+    /// Resolve a report-authored reference only in this frozen panel scope.
+    /// Kind and locator must match the captured native source. Forged, sibling,
+    /// or modified references never manufacture an attestation.
+    #[must_use]
+    pub fn attest_reference(
+        &self,
+        reference: &str,
+        kind: EvidenceKind,
+        locator: &str,
+        excerpt: Option<&str>,
+    ) -> Option<EvidenceAttestation> {
+        let panel = lock(&self.panel.state);
+        if !panel.frozen {
+            return None;
+        }
+        let record = panel
+            .records
+            .get(&EvidenceReceiptRef(reference.to_owned()))?;
+        let receipt = &record.receipt;
+        if receipt.scope != self.panel.scope
+            || receipt.kind != kind
+            || receipt.locator_digest_hex.as_deref()
+                != Some(digest_hex(locator.as_bytes()).as_str())
+        {
+            return None;
+        }
+        let excerpt_status = match excerpt.filter(|text| !text.is_empty()) {
+            None => EvidenceExcerptStatus::NotRequested,
+            Some(excerpt) => {
+                let raw_match =
+                    std::str::from_utf8(&record.body).is_ok_and(|body| body.contains(excerpt));
+                let parsed_match = !receipt.truncated
+                    && serde_json::from_slice::<Value>(&record.body)
+                        .ok()
+                        .is_some_and(|value| material_contains(&value, excerpt));
+                match (raw_match || parsed_match, receipt.truncated) {
+                    (true, false) => EvidenceExcerptStatus::Present,
+                    (true, true) => EvidenceExcerptStatus::PresentInPrefix,
+                    (false, false) => EvidenceExcerptStatus::NotFound,
+                    (false, true) => EvidenceExcerptStatus::UnknownTruncated,
+                }
+            }
+        };
+        Some(EvidenceAttestation {
+            receipt_ref: reference.to_owned(),
+            kind,
+            source: match receipt.source {
+                EvidenceSource::NativeTool => "native_tool",
+                EvidenceSource::WebFetchCache => "web_fetch_cache",
+                EvidenceSource::WebFetchNetwork => "web_fetch_network",
+            },
+            fetched_at_ms: receipt.fetched_at_ms,
+            status_code: receipt.status_code,
+            digest_hex: receipt.digest_hex.clone(),
+            body_bytes: receipt.body_bytes,
+            stored_bytes: receipt.stored_bytes,
+            truncated: receipt.truncated,
+            fetched: receipt.fetched,
+            included_in_request: receipt.included_in_request,
+            excerpt_status,
+        })
+    }
+
     /// Capture one already-authorized, successful tool result.
     ///
     /// The registry calls this only for a trusted Fusion policy after
@@ -427,7 +564,7 @@ impl EvidenceContext {
     pub fn body(&self, receipt: &EvidenceReceipt) -> Option<Vec<u8>> {
         let panel = lock(&self.panel.state);
         let record = panel.records.get(receipt.receipt_ref())?;
-        (record.receipt == *receipt).then(|| record.body.clone())
+        same_capture(&record.receipt, receipt, self.panel.scope).then(|| record.body.clone())
     }
 
     /// Freeze this panel after its drain.  Future capture attempts are ignored.
@@ -452,7 +589,7 @@ impl EvidenceContext {
     #[must_use]
     pub fn owns(&self, receipt: &EvidenceReceipt) -> bool {
         self.resolve(receipt.receipt_ref())
-            .is_some_and(|stored| stored == *receipt && receipt_scope(receipt, self.panel.scope))
+            .is_some_and(|stored| same_capture(&stored, receipt, self.panel.scope))
     }
 
     /// Return whether the host capture correlated a particular tool-use id.
@@ -475,6 +612,117 @@ impl EvidenceContext {
 // comparison without exposing run/panel ids in DTOs.
 fn receipt_scope(receipt: &EvidenceReceipt, scope: EvidenceScope) -> bool {
     receipt.scope == scope
+}
+
+fn material_contains(value: &Value, excerpt: &str) -> bool {
+    match value {
+        Value::String(text) => text.contains(excerpt),
+        Value::Array(values) => values.iter().any(|value| material_contains(value, excerpt)),
+        Value::Object(values) => values
+            .values()
+            .any(|value| material_contains(value, excerpt)),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod attestation_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn frozen_scope_checks_reference_kind_locator_and_exact_excerpt() {
+        let run = EvidenceRun::new();
+        let panel = run.new_panel();
+        let sibling = run.new_panel();
+        let value = json!({"type":"text","file":{"filePath":"a.rs","content":"first\nsecond","numLines":2,"startLine":1,"totalLines":2}});
+        let receipt = panel
+            .capture_success(EvidenceCapability::Read, None, &value)
+            .unwrap();
+        let reference = receipt.receipt_ref().as_str();
+        assert!(panel
+            .attest_reference(reference, EvidenceKind::File, "a.rs", None)
+            .is_none());
+        panel.freeze();
+        sibling.freeze();
+        assert!(sibling
+            .attest_reference(reference, EvidenceKind::File, "a.rs", None)
+            .is_none());
+        assert!(panel
+            .attest_reference(reference, EvidenceKind::Url, "a.rs", None)
+            .is_none());
+        assert!(panel
+            .attest_reference(reference, EvidenceKind::File, "b.rs", None)
+            .is_none());
+        assert!(panel
+            .attest_reference(&format!(" {reference}"), EvidenceKind::File, "a.rs", None)
+            .is_none());
+        let valid = panel
+            .attest_reference(reference, EvidenceKind::File, "a.rs", Some("first\nsecond"))
+            .unwrap();
+        assert_eq!(valid.excerpt_status(), EvidenceExcerptStatus::Present);
+        assert!(!valid.allows_citation(), "Fetched is not Included");
+        assert_eq!(
+            panel
+                .attest_reference(reference, EvidenceKind::File, "a.rs", Some("third"))
+                .unwrap()
+                .excerpt_status(),
+            EvidenceExcerptStatus::NotFound
+        );
+    }
+
+    #[test]
+    fn truncated_material_retains_metadata_without_claiming_tail_support() {
+        let panel = EvidenceRun::new().new_panel();
+        let value = json!({"type":"text","file":{"filePath":"a.rs","content":format!("prefix {} tail", "x".repeat(MAX_EVIDENCE_BYTES_PER_RECEIPT)),"numLines":1,"startLine":1,"totalLines":1}});
+        let receipt = panel
+            .capture_success(EvidenceCapability::Read, None, &value)
+            .unwrap();
+        panel.freeze();
+        let prefix = panel
+            .attest_reference(
+                receipt.receipt_ref().as_str(),
+                EvidenceKind::File,
+                "a.rs",
+                Some("prefix"),
+            )
+            .unwrap();
+        assert_eq!(
+            prefix.excerpt_status(),
+            EvidenceExcerptStatus::PresentInPrefix
+        );
+        let tail = panel
+            .attest_reference(
+                receipt.receipt_ref().as_str(),
+                EvidenceKind::File,
+                "a.rs",
+                Some("tail"),
+            )
+            .unwrap();
+        assert_eq!(
+            tail.excerpt_status(),
+            EvidenceExcerptStatus::UnknownTruncated
+        );
+        assert!(!tail.allows_citation());
+        assert!(serde_json::to_value(tail).unwrap()["truncated"]
+            .as_bool()
+            .unwrap());
+    }
+}
+
+fn same_capture(
+    stored: &EvidenceReceipt,
+    supplied: &EvidenceReceipt,
+    scope: EvidenceScope,
+) -> bool {
+    if !receipt_scope(supplied, scope) || stored.block_ref != supplied.block_ref {
+        return false;
+    }
+    // Delivery is monotonic state, not capture identity. All remaining immutable
+    // metadata must still match; forged public digest/length fields stay rejected.
+    let mut normalized = supplied.clone();
+    normalized.included_in_request = stored.included_in_request;
+    stored == &normalized
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

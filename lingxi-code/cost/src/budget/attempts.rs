@@ -11,11 +11,23 @@ use protocol::MessageId;
 /// key, never this account/tracker owner (which would form a reference cycle).
 pub(crate) struct BoundAttemptBudget {
     account: Arc<super::output::BudgetOutputAccount>,
+    _retention_pin: platform_api::SessionRetentionPin,
 }
 
 impl BoundAttemptBudget {
-    pub(super) fn new(account: Arc<super::output::BudgetOutputAccount>) -> Self {
-        Self { account }
+    pub(super) fn new(
+        account: Arc<super::output::BudgetOutputAccount>,
+    ) -> Result<Self, BudgetError> {
+        let pin = account
+            .tracker
+            .durability_gate()
+            .retention_gate()
+            .try_pin()
+            .map_err(|error| BudgetError::Internal(error.to_string()))?;
+        Ok(Self {
+            account,
+            _retention_pin: pin,
+        })
     }
 
     pub(crate) fn key(&self) -> MessageId {

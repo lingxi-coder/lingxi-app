@@ -292,6 +292,7 @@ pub trait RetryReporter: Send + Sync {
 /// Production service: drives `DefaultLlmClient` with full retry/rate-limit/betas.
 pub struct ApiService {
     model_attempt_hooks: RwLock<Option<Arc<dyn crate::ModelAttemptHooks>>>,
+    require_registered_model_attempts: std::sync::atomic::AtomicBool,
     client: Arc<DefaultLlmClient>,
     transport: Arc<dyn Transport>,
     /// Subscriber state for the 429 gate (Task 8 wires real value).
@@ -683,8 +684,49 @@ impl ApiService {
         query_source: Option<&str>,
         model_attempt: Option<platform_api::ModelAttemptContext>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        let mut request =
-            self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        self.stream_with_evidence_opts(
+            model,
+            profile,
+            system,
+            messages,
+            tools,
+            forced_tool,
+            effort,
+            max_tokens,
+            query_source,
+            model_attempt,
+            None,
+        )
+        .await
+    }
+
+    /// Panel stream with immutable host evidence selection. No inclusion is
+    /// recorded until the real physical request passes dispatch authorization.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stream_with_evidence_opts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        forced_tool: Option<&str>,
+        effort: Option<serde_json::Value>,
+        max_tokens: Option<u32>,
+        query_source: Option<&str>,
+        model_attempt: Option<platform_api::ModelAttemptContext>,
+        evidence: Option<platform_api::EvidenceDelivery>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let mut request = self.build_request_observed(
+            model,
+            profile,
+            system,
+            messages,
+            tools,
+            true,
+            max_tokens,
+            evidence.as_ref(),
+        )?;
         request.effort = effort;
         request.query_source = query_source.map(str::to_string);
         request.model_attempt = model_attempt;
@@ -702,6 +744,15 @@ impl ApiService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .replace(hooks);
         drop(retired);
+    }
+
+    /// Permanently narrow this service to host-registered model attempts.
+    /// Evaluation hosts enable this before exposing the service to producers.
+    /// There is intentionally no disable method; ordinary services default off.
+    /// OAuth refresh and token-count endpoints are not model dispatches.
+    pub fn require_registered_model_attempts(&self) {
+        self.require_registered_model_attempts
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Retire host authority after the host has drained all producers and
@@ -724,6 +775,16 @@ impl ApiService {
         prepared: &crate::PreparedLlmCall,
     ) -> Result<crate::model_attempt::WireAttempt, LlmError> {
         let Some(context) = request.model_attempt.as_ref() else {
+            if self
+                .require_registered_model_attempts
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(LlmError::CostUnavailable {
+                    message:
+                        "this service requires a registered model-attempt context before dispatch"
+                            .into(),
+                });
+            }
             return Ok(crate::model_attempt::WireAttempt::new(None));
         };
         let hooks = self
@@ -891,6 +952,7 @@ impl ApiService {
         Self {
             client,
             model_attempt_hooks: RwLock::new(None),
+            require_registered_model_attempts: std::sync::atomic::AtomicBool::new(false),
             transport,
             subscriber,
             subscription: None,
@@ -1223,6 +1285,23 @@ impl ApiService {
         stream: bool,
         max_tokens: Option<u32>,
     ) -> Result<LlmRequest, LlmError> {
+        self.build_request_observed(
+            model, profile, system, msgs, tools, stream, max_tokens, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_request_observed(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        stream: bool,
+        max_tokens: Option<u32>,
+        evidence: Option<&platform_api::EvidenceDelivery>,
+    ) -> Result<LlmRequest, LlmError> {
         // Pre-wire pipeline (claude-code order): strip_excess_media →
         // normalizeMessagesForAPI (consecutive-role merge) → ensureToolResultPairing
         // (SEND-time repair of orphaned/missing/duplicate tool_use↔tool_result on
@@ -1243,16 +1322,26 @@ impl ApiService {
             .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
             .map(str::to_string)
             .collect();
-        let messages = to_llm_messages(ensure_tool_result_pairing(
-            normalize_messages_for_api_with_tool_search(
-                strip_excess_media(msgs, MAX_MEDIA_PER_REQUEST),
-                tool_search_enabled,
-                Some(&available_tool_names),
-            ),
-        ))?;
+        let tagged =
+            evidence.and_then(|delivery| crate::evidence::tag_conversation(delivery, &msgs));
+        let normalize = |messages| {
+            to_llm_messages(ensure_tool_result_pairing(
+                normalize_messages_for_api_with_tool_search(
+                    strip_excess_media(messages, MAX_MEDIA_PER_REQUEST),
+                    tool_search_enabled,
+                    Some(&available_tool_names),
+                ),
+            ))
+        };
+        let messages = normalize(msgs)?;
+        let mapped_evidence = tagged.and_then(|tagged| {
+            let canonical_twin = normalize(tagged.messages.clone()).ok()?;
+            crate::evidence::map_canonical(&messages, &canonical_twin, tagged)
+        });
         let tool_decls = to_tool_declarations(tools)?;
 
         let mut req = LlmRequest::new(model);
+        req.evidence = mapped_evidence;
         if let Some(p) = profile {
             req = req.with_profile(p);
         }
@@ -2688,8 +2777,18 @@ impl ApiService {
             };
             Self::log_deepseek_prepared_request(&req.model, &prepared, false);
             self.inject_headers(&mut prepared, &request_id, dispatch);
+            if prepared
+                .evidence_proof
+                .as_mut()
+                .is_some_and(|proof| !proof.seal_final_request(&prepared.provider_request))
+            {
+                prepared.evidence_proof = None;
+            }
             let mut attempt = self.begin_model_attempt(&req, &prepared).await?;
             attempt.mark_dispatched()?;
+            if let Some(proof) = &prepared.evidence_proof {
+                proof.mark_request_submitted(&prepared.provider_request);
+            }
             let resp_result = self.transport.execute(&prepared.provider_request).await;
 
             match resp_result {
@@ -3569,6 +3668,14 @@ impl ApiService {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<(), LlmError> {
+        if self
+            .require_registered_model_attempts
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(LlmError::CostUnavailable {
+                message: "unregistered websocket prewarm is disabled for this service".into(),
+            });
+        }
         let req = self.build_request(model, profile, system, messages, tools, true, None)?;
         let mut prepared = self.client.prepare(&req).await?;
         let request_id = new_request_id();
@@ -3675,8 +3782,16 @@ impl ApiService {
             });
 
             let registered = req.model_attempt.is_some();
-            if registered {
+            let observed = registered || req.evidence.is_some();
+            if observed {
                 prepared.provider_request.stream_transport = crate::ProviderStreamTransport::Http;
+            }
+            if prepared
+                .evidence_proof
+                .as_mut()
+                .is_some_and(|proof| !proof.seal_final_request(&prepared.provider_request))
+            {
+                prepared.evidence_proof = None;
             }
             let mut attempt = self.begin_model_attempt(&req, &prepared).await?;
 
@@ -3684,8 +3799,11 @@ impl ApiService {
             // preserved while OpenAI Responses providers can reuse a WebSocket
             // session and apply previous_response_id deltas.
             let open = async {
-                if registered {
+                if observed {
                     attempt.mark_dispatched()?;
+                    if let Some(proof) = &prepared.evidence_proof {
+                        proof.mark_request_submitted(&prepared.provider_request);
+                    }
                     let streaming = self
                         .transport
                         .open_stream(&prepared.provider_request)

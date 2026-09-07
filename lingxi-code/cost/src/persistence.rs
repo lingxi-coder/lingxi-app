@@ -391,6 +391,7 @@ pub struct CostDurabilityGate {
 }
 
 struct CostDurabilityGateInner {
+    retention: platform_api::SessionRetentionGate,
     state: std::sync::Mutex<CostDurabilityGateState>,
     changed: tokio::sync::Notify,
 }
@@ -406,6 +407,7 @@ struct CostDurabilityGateState {
 /// One FIFO position in a session's durability authority. Mutation turns
 /// freeze on unexpected drop; preflight turns simply yield their position.
 pub(crate) struct CostDurabilityTurn {
+    _retention_pin: Option<platform_api::SessionRetentionPin>,
     inner: Arc<CostDurabilityGateInner>,
     ticket: u64,
     freeze_on_drop: bool,
@@ -416,6 +418,7 @@ impl Default for CostDurabilityGate {
     fn default() -> Self {
         Self {
             inner: Arc::new(CostDurabilityGateInner {
+                retention: platform_api::SessionRetentionGate::default(),
                 state: std::sync::Mutex::new(CostDurabilityGateState::default()),
                 changed: tokio::sync::Notify::new(),
             }),
@@ -424,6 +427,22 @@ impl Default for CostDurabilityGate {
 }
 
 impl CostDurabilityGate {
+    /// Shared lifetime authority, identical for tracker, output and Desktop
+    /// coordinator views. This is not a separate accounting ledger.
+    pub fn retention_gate(&self) -> platform_api::SessionRetentionGate {
+        self.inner.retention.clone()
+    }
+
+    pub(crate) fn is_idle(&self) -> bool {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.frozen_reason.is_none()
+            && state.next_ticket == state.serving_ticket
+            && state.abandoned_tickets.is_empty()
+    }
     /// Return the current freeze reason, if any.
     pub fn frozen_reason(&self) -> Option<String> {
         self.inner
@@ -486,6 +505,11 @@ impl CostDurabilityGate {
     }
 
     fn reserve_turn(&self, freeze_on_drop: bool) -> Result<CostDurabilityTurn, CostPersistError> {
+        let retention_pin = self
+            .inner
+            .retention
+            .try_pin()
+            .map_err(|error| CostPersistError::Rejected(error.to_string()))?;
         let mut state = self
             .inner
             .state
@@ -508,6 +532,7 @@ impl CostDurabilityGate {
             ticket,
             freeze_on_drop,
             released: false,
+            _retention_pin: Some(retention_pin),
         })
     }
 
@@ -533,6 +558,7 @@ impl CostDurabilityGate {
             ticket,
             freeze_on_drop: false,
             released: false,
+            _retention_pin: None,
         })
     }
 }

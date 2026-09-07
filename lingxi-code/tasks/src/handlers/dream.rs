@@ -298,6 +298,7 @@ impl Task for DreamHandler {
         //    passed.
         let request = SubagentSpawnRequest {
             model_attempt: None,
+            evidence_context: None,
             subagent_type: DREAM_SUBAGENT_TYPE.to_string(),
             prompt: build_consolidation_prompt(&prompt),
             observer: None,

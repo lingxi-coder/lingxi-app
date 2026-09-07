@@ -81,6 +81,16 @@ struct BudgetOutputScopes {
     enforcer: BudgetEnforcer,
 }
 
+fn pinned_scope(account: Arc<BudgetOutputAccount>) -> Result<WorkflowOutputScope, BudgetError> {
+    let pin = account
+        .tracker
+        .durability_gate()
+        .retention_gate()
+        .try_pin()
+        .map_err(|error| BudgetError::Internal(error.to_string()))?;
+    Ok(WorkflowOutputScope::new(account).with_retention_pin(pin))
+}
+
 impl ReservationBook {
     fn restore_attempt_outputs(
         &mut self,
@@ -200,7 +210,7 @@ impl BudgetEnforcer {
             .tracker
             .preflight_durable()
             .map_err(|error| BudgetError::Internal(error.to_string()))?;
-        Ok(super::BoundAttemptBudget::new(account))
+        super::BoundAttemptBudget::new(account)
     }
 
     /// Build a neutral factory over this exact money/output reservation book.
@@ -236,7 +246,14 @@ impl BudgetOutputScopes {
                 "output factory belongs to another session".into(),
             ));
         }
-        let tracker = self.enforcer.cost_tracker.scoped(session_id);
+        let tracker = self.enforcer.cost_tracker.scoped_unpinned(session_id);
+        // Protect asynchronous publication, but never retain this external pin
+        // inside the cached account core itself.
+        let _preparing = tracker
+            .durability_gate()
+            .retention_gate()
+            .try_pin()
+            .map_err(|error| BudgetError::Internal(error.to_string()))?;
         tracker
             .preflight_durable()
             .map_err(|error| BudgetError::Internal(error.to_string()))?;
@@ -262,7 +279,7 @@ impl BudgetOutputScopes {
                     .tracker
                     .preflight_durable()
                     .map_err(|error| BudgetError::Internal(error.to_string()))?;
-                return Ok(WorkflowOutputScope::new(account));
+                return pinned_scope(account);
             }
         }
         let session = self.enforcer.session_state_for(session_id).await;
@@ -335,7 +352,7 @@ impl BudgetOutputScopes {
         // do that while holding the book or current-scope registry lock.
         drop(_publication);
         drop(retired);
-        Ok(WorkflowOutputScope::new(account))
+        pinned_scope(account)
     }
 }
 
@@ -378,8 +395,8 @@ impl WorkflowOutputScopes for BudgetOutputScopes {
             .map_err(|_| BudgetError::Internal("output scope registry poisoned".into()))?
             .get(&session_id)
             .cloned()
-            .map(|account| WorkflowOutputScope::new(account))
             .ok_or_else(|| BudgetError::Internal("session has no published output turn".into()))
+            .and_then(pinned_scope)
     }
 }
 

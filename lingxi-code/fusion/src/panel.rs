@@ -248,6 +248,7 @@ fn in_flight_panels(
                 && !collected.iter().any(|(collected, _)| collected == index)
         })
         .map(|index| PanelInternal {
+            host_evidence: Vec::new(),
             index,
             profile: panels[index].profile.clone(),
             model: panels[index].model.clone(),
@@ -466,6 +467,8 @@ impl SubagentSpawnObserver for PanelAllocationObserver {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct PanelInternal {
+    /// Host-only provenance projections, attached after real producer drain.
+    pub host_evidence: Vec<crate::evidence::HostPanelEvidence>,
     /// Spawn index (stable before shuffle).
     pub index: usize,
     /// Provider profile (stripped before the analyst).
@@ -536,6 +539,7 @@ pub fn panel_report_json_schema() -> Value {
                         "kind": { "type": "string", "enum": ["file", "url", "command"] },
                         "locator": { "type": "string" },
                         "excerpt": { "type": "string" }
+                        ,"receipt_ref": { "type": "string", "pattern": "^evr_[0-9a-f]{32}$" }
                     }
                 }
             },
@@ -586,6 +590,8 @@ pub(crate) struct PanelTaskBarrier {
 
 #[derive(Default)]
 struct PanelTaskBarrierInner {
+    evidence_run: crate::evidence::FusionEvidenceRun,
+    evidence_panels: Mutex<std::collections::BTreeMap<usize, platform_api::EvidenceContext>>,
     abort_handles: Mutex<Vec<AbortHandle>>,
     producer_drain: Mutex<Option<Arc<dyn platform_api::panel_pool::PanelPoolDrain>>>,
     active: AtomicUsize,
@@ -603,11 +609,73 @@ impl Drop for PanelTaskDone {
 }
 
 impl PanelTaskBarrier {
-    pub(crate) fn set_producer_drain(&self, drain: Arc<dyn platform_api::panel_pool::PanelPoolDrain>) {
-        *self.inner.producer_drain.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(drain);
+    fn panel_evidence(&self, index: usize) -> Option<platform_api::EvidenceContext> {
+        // A custom spawner's wrapper completion cannot prove physical drain.
+        // Only a retained real producer ticket enables verified panel evidence.
+        if self
+            .inner
+            .producer_drain
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+        {
+            return None;
+        }
+        let mut scopes = self
+            .inner
+            .evidence_panels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Some(
+            scopes
+                .entry(index)
+                .or_insert_with(|| self.inner.evidence_run.panel().context())
+                .clone(),
+        )
+    }
+
+    pub(crate) fn freeze_evidence(&self) {
+        let scopes = self
+            .inner
+            .evidence_panels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for scope in scopes {
+            scope.freeze();
+        }
+    }
+
+    pub(crate) fn attach_evidence(&self, panels: &mut [PanelInternal]) {
+        let scopes = self
+            .inner
+            .evidence_panels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for panel in panels {
+            panel.host_evidence = match (scopes.get(&panel.index), panel.report.as_ref()) {
+                (Some(scope), Some(report)) => crate::evidence::attest_report(scope, report),
+                _ => Vec::new(),
+            };
+        }
+    }
+
+    pub(crate) fn set_producer_drain(
+        &self,
+        drain: Arc<dyn platform_api::panel_pool::PanelPoolDrain>,
+    ) {
+        *self
+            .inner
+            .producer_drain
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(drain);
     }
     fn close_panel_admission(&self) {
-        if let Some(fence) = &self.panel_fence { fence.close(); }
+        if let Some(fence) = &self.panel_fence {
+            fence.close();
+        }
     }
     fn begin(&self) -> PanelTaskDone {
         self.inner.active.fetch_add(1, Ordering::SeqCst);
@@ -625,7 +693,9 @@ impl PanelTaskBarrier {
     pub(crate) async fn abort_and_wait(&self) {
         // A faulty host close callback must not skip physical producer drain
         // while the supervisor is already recovering an inner panic.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.close_panel_admission()));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.close_panel_admission()
+        }));
         let handles = {
             let mut handles = self
                 .inner
@@ -644,9 +714,16 @@ impl PanelTaskBarrier {
             }
             drained.await;
         }
-        let producer = self.inner.producer_drain.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-        if let Some(producer) = producer { producer.wait().await; }
+        let producer = self
+            .inner
+            .producer_drain
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(producer) = producer {
+            producer.wait().await;
+        }
+        self.freeze_evidence();
     }
 }
 
@@ -681,6 +758,30 @@ mod producer_drain_test {
         assert!(std::future::poll_fn(|cx| std::task::Poll::Ready(wait.as_mut().poll(cx))).await.is_pending());
         gate.0.add_permits(1);
         wait.await;
+    }
+
+    #[tokio::test]
+    async fn evidence_freezes_only_after_real_producer_gate_and_scopes_are_stable() {
+        let barrier = PanelTaskBarrier::default();
+        assert!(
+            barrier.panel_evidence(0).is_none(),
+            "wrapper-only spawners cannot prove drain"
+        );
+        let gate = Arc::new(Gate(tokio::sync::Semaphore::new(0)));
+        barrier.set_producer_drain(gate.clone());
+        let first = barrier.panel_evidence(0).unwrap();
+        assert_eq!(first, barrier.panel_evidence(0).unwrap());
+        assert_ne!(first, barrier.panel_evidence(1).unwrap());
+        let mut drain = Box::pin(barrier.abort_and_wait());
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(drain.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(!first.is_frozen());
+        gate.0.add_permits(1);
+        drain.await;
+        assert!(first.is_frozen());
     }
 }
 
@@ -814,11 +915,17 @@ fn spawn_panel_tasks(
         // Captured before the task's first poll so aborting an unpolled panel
         // returns capacity without falsely reporting an allocation.
         let permit = permits.next();
-        let attempt_context = task_barrier.attempt_run.as_ref().map(|run| {
-            u32::try_from(index).map_err(|_| ()).and_then(|slot| {
-                run.context(platform_api::ModelAttemptStage::Panel, Some(slot)).map_err(|_| ())
+        let evidence_context = task_barrier.panel_evidence(index);
+        let attempt_context = task_barrier
+            .attempt_run
+            .as_ref()
+            .map(|run| {
+                u32::try_from(index).map_err(|_| ()).and_then(|slot| {
+                    run.context(platform_api::ModelAttemptStage::Panel, Some(slot))
+                        .map_err(|_| ())
+                })
             })
-        }).transpose();
+            .transpose();
         let abort_handle = join_set.spawn(async move {
             let _task_done = task_done;
             let started = Instant::now();
@@ -837,6 +944,7 @@ fn spawn_panel_tasks(
                 tool_invoker: subagent.tool_invoker,
                 budget: subagent.budget,
             };
+            request.evidence_context = evidence_context;
             let context_failed = match attempt_context {
                 Ok(context) => { request.model_attempt = context; false },
                 Err(()) => true,
@@ -1485,6 +1593,9 @@ pub(crate) fn panel_prompt(task: &str) -> String {
     format!(
         "You are one independent Fusion panel. You cannot see other panels and \
 must not mention providers, model names, or that you are part of an ensemble.\n\n\
+When a tool result supplies a host-evidence-receipt, copy its receipt_ref exactly into \
+the corresponding evidence item. Never invent a receipt_ref. Legacy evidence without \
+a host receipt remains unverified. A receipt proves provenance, not interpretation.\n\n\
 Task:\n{task}"
     )
 }
@@ -1498,6 +1609,7 @@ fn finish_panel(
 ) -> PanelInternal {
     let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     let mut internal = PanelInternal {
+        host_evidence: Vec::new(),
         index,
         profile: panel.profile,
         model: panel.model,

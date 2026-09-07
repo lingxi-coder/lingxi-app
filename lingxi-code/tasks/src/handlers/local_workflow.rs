@@ -1920,6 +1920,7 @@ fn make_request(
 
     SubagentSpawnRequest {
         model_attempt: None,
+        evidence_context: None,
         subagent_type,
         prompt: prompt.to_string(),
         observer: None,

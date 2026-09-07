@@ -61,13 +61,24 @@ pub trait WorkflowOutputAccount: Send + Sync {
 /// requires_deserialize::<platform_api::WorkflowOutputScope>();
 /// ```
 #[derive(Clone)]
-pub struct WorkflowOutputScope(Arc<dyn WorkflowOutputAccount>);
+pub struct WorkflowOutputScope(
+    Arc<dyn WorkflowOutputAccount>,
+    Option<crate::SessionRetentionPin>,
+);
 
 impl WorkflowOutputScope {
     /// Bind a trusted host account. JSON and metadata cannot mint this scope.
     #[must_use]
     pub fn new(account: Arc<dyn WorkflowOutputAccount>) -> Self {
-        Self(account)
+        Self(account, None)
+    }
+
+    /// Attach the real account authority's external-view pin. Cache-owned
+    /// account cores must not retain this view; clones keep the pin alive.
+    #[must_use]
+    pub fn with_retention_pin(mut self, pin: crate::SessionRetentionPin) -> Self {
+        self.1 = Some(pin);
+        self
     }
 
     /// Whether both scopes retain the exact same account allocation.

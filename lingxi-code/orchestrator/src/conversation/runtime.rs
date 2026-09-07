@@ -782,8 +782,7 @@ pub(crate) struct LifecycleRuntime {
     /// Weak self-link installed after a production builder wraps the
     /// orchestrator in `Arc`. It lets clear/resume transfer their commit to an
     /// owned task without creating a reference cycle.
-    pub(crate) session_switch_owner:
-        std::sync::OnceLock<std::sync::Weak<ConversationOrchestrator>>,
+    pub(crate) session_switch_owner: std::sync::OnceLock<std::sync::Weak<ConversationOrchestrator>>,
     /// Counts session-switch work from pre-I/O admission through post-commit
     /// host presence binding so shutdown can close admission and drain it.
     pub(crate) session_switch_supervisor: Arc<SessionSwitchSupervisor>,
@@ -819,6 +818,7 @@ impl LifecycleRuntime {
 pub struct PreparedSessionSwitch {
     cost: cost::PreparedCostSession,
     transcript_lock: Option<Arc<session::jsonl::DurableTranscriptWriter>>,
+    on_activated: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl PreparedSessionSwitch {
@@ -832,7 +832,16 @@ impl PreparedSessionSwitch {
         Self {
             cost,
             transcript_lock,
+            on_activated: None,
         }
+    }
+
+    /// Schedule host maintenance only after the old cost/output views have
+    /// been released and the new conversation identity has been committed.
+    #[must_use]
+    pub fn with_on_activated(mut self, callback: impl FnOnce() + Send + 'static) -> Self {
+        self.on_activated = Some(Box::new(callback));
+        self
     }
 
     pub(crate) fn into_parts(
@@ -840,8 +849,9 @@ impl PreparedSessionSwitch {
     ) -> (
         cost::PreparedCostSession,
         Option<Arc<session::jsonl::DurableTranscriptWriter>>,
+        Option<Box<dyn FnOnce() + Send>>,
     ) {
-        (self.cost, self.transcript_lock)
+        (self.cost, self.transcript_lock, self.on_activated)
     }
 }
 
@@ -1186,7 +1196,9 @@ impl ModelRuntime {
     ) -> Result<Option<PreparedSessionSwitch>, cost::CostPersistError> {
         if let Some(tracker) = self.cost_tracker.as_ref() {
             let prepared = if let Some(switcher) = self.cost_session_switcher.as_ref() {
-                switcher.prepare_session(tracker.clone(), session_id).await?
+                switcher
+                    .prepare_session(tracker.clone(), session_id)
+                    .await?
             } else {
                 PreparedSessionSwitch::new(tracker.prepare_session(session_id).await?, None)
             };

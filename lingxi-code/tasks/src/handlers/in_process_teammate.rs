@@ -847,6 +847,7 @@ impl InProcessTeammateHandler {
         let icon = definition.icon.clone();
         Ok(SubagentContext {
             model_attempt: None,
+            evidence_context: None,
             agent_id,
             parent_agent_id: None,
             // Swarm identity (claude-code `TeammateContext.agentName` /

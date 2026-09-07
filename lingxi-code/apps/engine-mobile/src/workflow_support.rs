@@ -5557,6 +5557,7 @@ mod workspace_lease_forwarding_tests {
 
     fn bare_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            evidence_context: None,
             parent_agent_id: None,
             origin_session_id: None,
             tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,

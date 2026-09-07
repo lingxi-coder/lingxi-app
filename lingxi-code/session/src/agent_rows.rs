@@ -171,6 +171,7 @@ mod tests {
     fn request(subagent_type: &str) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
             model_attempt: None,
+            evidence_context: None,
             subagent_type: subagent_type.into(),
             prompt: "do the thing".into(),
             observer: None,

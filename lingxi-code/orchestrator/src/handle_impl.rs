@@ -209,12 +209,7 @@ impl PreparedTranscriptSwitch {
             durable_lock,
         } = self
         {
-            writer.activate_session_target_with_durable_lock(
-                session_id,
-                path,
-                cwd,
-                durable_lock,
-            );
+            writer.activate_session_target_with_durable_lock(session_id, path, cwd, durable_lock);
         }
     }
 }
@@ -350,12 +345,15 @@ impl ConversationOrchestrator {
             .map_err(|error| {
                 HandleError::ActionFailed(format!("Cost session preparation failed: {error}"))
             })?;
-        let prepared_output = self.prepare_output_session(new_session_id_value).await
+        let prepared_output = self
+            .prepare_output_session(new_session_id_value)
+            .await
             .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
-        let (prepared_cost, durable_lock) = prepared.map_or((None, None), |prepared| {
-            let (cost, durable_lock) = prepared.into_parts();
-            (Some(cost), durable_lock)
-        });
+        let (prepared_cost, durable_lock, on_activated) =
+            prepared.map_or((None, None, None), |prepared| {
+                let (cost, durable_lock, on_activated) = prepared.into_parts();
+                (Some(cost), durable_lock, on_activated)
+            });
         let prepared_transcript =
             self.prepare_transcript_switch(new_session_id_value, durable_lock)?;
         prepared_transcript.prepare_legacy().await;
@@ -381,6 +379,9 @@ impl ConversationOrchestrator {
             .store(0, std::sync::atomic::Ordering::Relaxed);
         *self.transcript.last_jsonl_uuid.lock().await = None;
         drop(s);
+        if let Some(on_activated) = on_activated {
+            on_activated();
+        }
         self.notify_session_activated(old_session_id, new_session_id_value)
             .await;
         self.invoked_skill_session_guard.replace(new_session_id);
@@ -420,12 +421,15 @@ impl ConversationOrchestrator {
             .map_err(|error| {
                 HandleError::ActionFailed(format!("Cost session preparation failed: {error}"))
             })?;
-        let prepared_output = self.prepare_output_session(session_id).await
+        let prepared_output = self
+            .prepare_output_session(session_id)
+            .await
             .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
-        let (prepared_cost, durable_lock) = prepared.map_or((None, None), |prepared| {
-            let (cost, durable_lock) = prepared.into_parts();
-            (Some(cost), durable_lock)
-        });
+        let (prepared_cost, durable_lock, on_activated) =
+            prepared.map_or((None, None, None), |prepared| {
+                let (cost, durable_lock, on_activated) = prepared.into_parts();
+                (Some(cost), durable_lock, on_activated)
+            });
         let prepared_transcript = self.prepare_transcript_switch(session_id, durable_lock)?;
         prepared_transcript.prepare_legacy().await;
         self.reset_session_scoped_runtime().await;
@@ -473,6 +477,9 @@ impl ConversationOrchestrator {
         let resumed_profile = s.model_profile.clone();
         s.session_id = session_id;
         drop(s);
+        if let Some(on_activated) = on_activated {
+            on_activated();
+        }
         self.notify_session_activated(old_session_id, session_id)
             .await;
         self.invoked_skill_session_guard
@@ -547,16 +554,13 @@ impl ConversationOrchestrator {
         previous: protocol::SessionId,
         current: protocol::SessionId,
     ) {
-        let Some(observer) = self
-            .lifecycle_runtime
-            .session_activation_observer
-            .as_ref()
-        else {
+        let Some(observer) = self.lifecycle_runtime.session_activation_observer.as_ref() else {
             return;
         };
         if let Err(error) = observer.session_activated(previous, current).await {
             tracing::warn!(%error, "session committed but host presence did not follow it");
-            let notice = format!("Session switched, but host presence could not be updated: {error}");
+            let notice =
+                format!("Session switched, but host presence could not be updated: {error}");
             let _ = tokio::time::timeout(
                 std::time::Duration::from_millis(250),
                 self.output.emit_system_notice(&notice, false),
@@ -746,6 +750,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
         let request = platform_api::subagent_spawn::SubagentSpawnRequest {
             model_attempt: None,
+            evidence_context: None,
             subagent_type: platform_api::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
             origin_session_id: Some(origin_session_id),
             // NOTE (deliberate deviation from the plan's `String::new()`): the
@@ -3238,8 +3243,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingSessionActivationObserver {
-        activations:
-            std::sync::Mutex<Vec<(protocol::SessionId, protocol::SessionId)>>,
+        activations: std::sync::Mutex<Vec<(protocol::SessionId, protocol::SessionId)>>,
         changed: tokio::sync::Notify,
     }
 

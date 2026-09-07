@@ -250,6 +250,12 @@ pub trait SessionWriterLease: Send + Sync {
     /// Canonical session id protected by this lease.
     fn session_id(&self) -> &str;
 
+    /// Process-local identity of the underlying claim. Pinned views preserve
+    /// this address without exposing an unpinned Arc that could escape them.
+    fn authority_identity(&self) -> *const () {
+        std::ptr::from_ref(self).cast::<()>()
+    }
+
     /// Parse the claim's stable UUID without relying on a display prefix.
     fn canonical_session_id(&self) -> Option<SessionId> {
         SessionId::parse_prefixed(self.session_id())
@@ -259,6 +265,41 @@ pub trait SessionWriterLease: Send + Sync {
 /// Ref-counted writer claim shared by Bridge, cost views, and durable outbox
 /// work. The final clone drop releases the underlying OS lock.
 pub type SharedSessionWriterLease = Arc<dyn SessionWriterLease>;
+
+/// Compare the original writer claim, not a transient external-view wrapper.
+pub fn same_writer_lease_authority(
+    a: &SharedSessionWriterLease,
+    b: &SharedSessionWriterLease,
+) -> bool {
+    a.authority_identity() == b.authority_identity()
+        && a.canonical_session_id() == b.canonical_session_id()
+}
+
+struct PinnedWriterLease {
+    inner: SharedSessionWriterLease,
+    _pin: crate::SessionRetentionPin,
+}
+
+impl SessionWriterLease for PinnedWriterLease {
+    fn session_id(&self) -> &str {
+        self.inner.session_id()
+    }
+    fn authority_identity(&self) -> *const () {
+        self.inner.authority_identity()
+    }
+}
+
+/// External lease views keep the originating session pinned. Cache cores must
+/// retain the original claim, never this view; Weak views cannot revive it.
+pub fn pin_writer_lease(
+    lease: SharedSessionWriterLease,
+    pin: crate::SessionRetentionPin,
+) -> SharedSessionWriterLease {
+    Arc::new(PinnedWriterLease {
+        inner: lease,
+        _pin: pin,
+    })
+}
 
 impl SessionWriterLease for SessionIdClaim {
     fn session_id(&self) -> &str {

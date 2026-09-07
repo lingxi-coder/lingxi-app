@@ -9,7 +9,9 @@
 use crate::registry::ToolRegistry;
 use async_trait::async_trait;
 use platform_api::permission_gate::PermissionGate;
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use platform_api::tool_invoker::{
+    SubagentInvocationContext, ToolInvocationResult, ToolInvoker, ToolInvokerError,
+};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -214,10 +216,32 @@ impl ToolInvoker for RegistryToolInvoker {
     async fn invoke_with_workspace_lease(
         &self,
         name: &str,
-        mut input: Value,
+        input: Value,
         ctx: SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
     ) -> Result<Value, ToolInvokerError> {
+        self.invoke_observed_with_workspace_lease(name, input, ctx, workspace_lease_token)
+            .await
+            .map(|result| result.value)
+    }
+
+    async fn invoke_observed(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: SubagentInvocationContext,
+    ) -> Result<ToolInvocationResult, ToolInvokerError> {
+        self.invoke_observed_with_workspace_lease(name, input, ctx, None)
+            .await
+    }
+
+    async fn invoke_observed_with_workspace_lease(
+        &self,
+        name: &str,
+        mut input: Value,
+        ctx: SubagentInvocationContext,
+        workspace_lease_token: Option<u64>,
+    ) -> Result<ToolInvocationResult, ToolInvokerError> {
         let tool = self
             .registry
             .find_by_name(name)
@@ -427,20 +451,27 @@ impl ToolInvoker for RegistryToolInvoker {
         // result's `is_error` bit is still available here; once this function
         // returns only the JSON value remains. The concrete Tool's capability
         // is the trust anchor — `name`/display labels and model JSON are not.
+        let mut capture = None;
         if matches!(
             ctx.tool_execution_policy,
             platform_api::tool_invoker::ToolExecutionPolicy::FusionPanel
         ) && !result.is_error
         {
-            if let (Some(evidence), Some(capability)) =
-                (self.evidence_context.as_ref(), tool.evidence_capability())
-            {
-                let _ =
-                    evidence.capture_success(capability, ctx.tool_use_id.as_deref(), &result.data);
+            if let (Some(evidence), Some(capability)) = (
+                ctx.evidence_context
+                    .as_ref()
+                    .or(self.evidence_context.as_ref()),
+                tool.evidence_capability(),
+            ) {
+                capture =
+                    evidence.capture_observed(capability, ctx.tool_use_id.as_deref(), &result.data);
             }
         }
 
-        Ok(result.data)
+        Ok(ToolInvocationResult {
+            value: result.data,
+            evidence: capture,
+        })
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -894,6 +925,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn observed_registry_returns_one_capture_and_unchanged_value() {
+        let panel = platform_api::EvidenceRun::new().new_panel();
+        let invoker = RegistryToolInvoker::new(evidence_registry(EvidenceTool {
+            name: "Read",
+            capability: Some(platform_api::EvidenceCapability::Read),
+            behavior: EvidenceBehavior::Success,
+            deny: false,
+        }))
+        .with_evidence_context(panel.clone());
+        let ordinary = invoker
+            .invoke_observed("Read", json!({}), no_ctx())
+            .await
+            .unwrap();
+        assert!(ordinary.evidence.is_none());
+        let mut ctx = no_ctx();
+        ctx.tool_execution_policy = platform_api::tool_invoker::ToolExecutionPolicy::FusionPanel;
+        let first = invoker
+            .invoke_observed("Read", json!({}), ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!(first.value, ordinary.value);
+        assert!(first.evidence.is_some());
+        assert_eq!(panel.receipts().len(), 1, "one capture per execution");
+        let leased = invoker
+            .invoke_observed_with_workspace_lease("Read", json!({}), ctx, Some(17))
+            .await
+            .unwrap();
+        assert_eq!(leased.value, ordinary.value);
+        assert!(leased.evidence.is_some());
+        assert_eq!(panel.receipts().len(), 2);
+        assert!(panel
+            .receipts()
+            .iter()
+            .all(|receipt| !receipt.included_in_request));
+    }
+
+    struct LegacyObservedFixture {
+        ordinary: AtomicUsize,
+        leased: AtomicUsize,
+    }
+
+    #[tokio::test]
+    async fn invocation_owner_overrides_builder_and_ordinary_policy_ignores_it() {
+        let run = platform_api::EvidenceRun::new();
+        let fallback = run.new_panel();
+        let explicit = run.new_panel();
+        let invoker = RegistryToolInvoker::new(evidence_registry(EvidenceTool {
+            name: "Read",
+            capability: Some(platform_api::EvidenceCapability::Read),
+            behavior: EvidenceBehavior::Success,
+            deny: false,
+        }))
+        .with_evidence_context(fallback.clone());
+        let mut ctx = no_ctx();
+        ctx.evidence_context = Some(explicit.clone());
+        assert!(invoker
+            .invoke_observed("Read", json!({}), ctx.clone())
+            .await
+            .unwrap()
+            .evidence
+            .is_none());
+        assert!(explicit.receipts().is_empty());
+        ctx.tool_execution_policy = platform_api::tool_invoker::ToolExecutionPolicy::FusionPanel;
+        assert!(invoker
+            .invoke_observed("Read", json!({}), ctx)
+            .await
+            .unwrap()
+            .evidence
+            .is_some());
+        assert_eq!(explicit.receipts().len(), 1);
+        assert!(fallback.receipts().is_empty());
+    }
+
+    #[async_trait]
+    impl ToolInvoker for LegacyObservedFixture {
+        async fn invoke(
+            &self,
+            _name: &str,
+            input: Value,
+            _ctx: SubagentInvocationContext,
+        ) -> Result<Value, ToolInvokerError> {
+            self.ordinary.fetch_add(1, Ordering::SeqCst);
+            Ok(input)
+        }
+        async fn invoke_with_workspace_lease(
+            &self,
+            _name: &str,
+            input: Value,
+            _ctx: SubagentInvocationContext,
+            token: Option<u64>,
+        ) -> Result<Value, ToolInvokerError> {
+            self.leased.fetch_add(1, Ordering::SeqCst);
+            if token != Some(17) {
+                return Err(ToolInvokerError::Abort("wrong lease".into()));
+            }
+            Ok(input)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn observed_defaults_preserve_legacy_lease_override_and_errors() {
+        let invoker = LegacyObservedFixture {
+            ordinary: AtomicUsize::new(0),
+            leased: AtomicUsize::new(0),
+        };
+        let value = json!({"unchanged": true});
+        let ordinary = invoker
+            .invoke_observed("Read", value.clone(), no_ctx())
+            .await
+            .unwrap();
+        assert_eq!(ordinary.value, value);
+        assert!(ordinary.evidence.is_none());
+        let leased = invoker
+            .invoke_observed_with_workspace_lease("Read", value.clone(), no_ctx(), Some(17))
+            .await
+            .unwrap();
+        assert_eq!(leased.value, value);
+        assert!(leased.evidence.is_none());
+        assert!(matches!(
+            invoker
+                .invoke_observed_with_workspace_lease("Read", value, no_ctx(), None)
+                .await,
+            Err(ToolInvokerError::Abort(_))
+        ));
+        assert_eq!(invoker.ordinary.load(Ordering::SeqCst), 1);
+        assert_eq!(invoker.leased.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn fusion_capture_is_post_call_exact_and_ordinary_is_unchanged() {
         let panel = platform_api::EvidenceRun::new().new_panel();
         let invoker = RegistryToolInvoker::new(evidence_registry(EvidenceTool {
@@ -975,11 +1138,13 @@ mod tests {
             }))
             .with_evidence_context(panel.clone());
             ctx.tool_use_id = Some("toolu_reused".into());
-            let result = invoker.invoke("Read", json!({}), ctx.clone()).await;
+            let result = invoker
+                .invoke_observed("Read", json!({}), ctx.clone())
+                .await;
             if matches!(behavior, EvidenceBehavior::ToolError) {
                 assert!(result.is_err());
             } else {
-                assert!(result.is_ok());
+                assert!(result.unwrap().evidence.is_none());
             }
         }
 
@@ -990,7 +1155,10 @@ mod tests {
             deny: true,
         }))
         .with_evidence_context(panel.clone());
-        assert!(denied.invoke("Read", json!({}), ctx).await.is_err());
+        assert!(denied
+            .invoke_observed("Read", json!({}), ctx)
+            .await
+            .is_err());
         assert!(panel.receipts().is_empty());
     }
 
@@ -1008,10 +1176,11 @@ mod tests {
             }))
             .with_evidence_context(panel.clone());
             let value = invoker
-                .invoke("WebFetch", json!({}), ctx.clone())
+                .invoke_observed("WebFetch", json!({}), ctx.clone())
                 .await
                 .expect("WebFetch reports recoverable HTTP/redirect data");
-            assert_eq!(value["code"], status);
+            assert_eq!(value.value["code"], status);
+            assert!(value.evidence.is_none());
         }
         assert!(panel.receipts().is_empty());
     }
@@ -1175,6 +1344,7 @@ mod tests {
                 "NameRecordingTool",
                 json!({}),
                 SubagentInvocationContext {
+                    evidence_context: None,
                     parent_agent_id: None,
                     origin_session_id: Some(origin_session_id),
                     tool_execution_policy:
@@ -1247,6 +1417,7 @@ mod tests {
                 "NameRecordingTool",
                 json!({}),
                 SubagentInvocationContext {
+                    evidence_context: None,
                     parent_agent_id: None,
                     origin_session_id: None,
                     tool_execution_policy:
@@ -1412,6 +1583,7 @@ mod tests {
 
     fn no_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            evidence_context: None,
             parent_agent_id: None,
             origin_session_id: None,
             tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
@@ -1598,6 +1770,7 @@ mod tests {
 
     fn named_ctx(can_show: bool) -> SubagentInvocationContext {
         SubagentInvocationContext {
+            evidence_context: None,
             parent_agent_id: None,
             origin_session_id: None,
             tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
@@ -1740,6 +1913,7 @@ mod tests {
 
     fn ctx_with_tool_use_id(id: &str) -> SubagentInvocationContext {
         SubagentInvocationContext {
+            evidence_context: None,
             parent_agent_id: None,
             origin_session_id: None,
             tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,

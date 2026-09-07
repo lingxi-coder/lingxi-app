@@ -612,6 +612,7 @@ mod tests {
 
     fn stub_panel(id: &str) -> PanelInternal {
         PanelInternal {
+            host_evidence: Vec::new(),
             index: 0,
             profile: "anthropic".into(),
             model: "claude-sonnet-5".into(),

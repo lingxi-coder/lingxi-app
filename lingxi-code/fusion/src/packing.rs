@@ -18,6 +18,43 @@ use sidequery::{
 };
 const RETRY_HINT_BYTE_CAP: usize = 512;
 
+#[derive(Debug)]
+pub(crate) struct PreparedSynthRequest {
+    pub(crate) request: SideQueryRequest,
+    pub(crate) allowed_citations: std::collections::BTreeSet<String>,
+}
+
+fn synth_prepared(request: SideQueryRequest, panels: &[PanelInternal]) -> PreparedSynthRequest {
+    // Both full and packed payload builders insert this same complete host
+    // metadata as mandatory material. Never derive authority from model fields.
+    let allowed_citations = panels
+        .iter()
+        .filter(|panel| panel.report.is_some())
+        .flat_map(|panel| &panel.host_evidence)
+        .filter(|host| host.attestation.allows_citation())
+        .map(|host| host.attestation.receipt_ref().to_owned())
+        .collect();
+    PreparedSynthRequest {
+        request,
+        allowed_citations,
+    }
+}
+
+fn insert_host_evidence(value: &mut Value, evidence: &[crate::evidence::HostPanelEvidence]) {
+    if !evidence.is_empty() {
+        value["host_evidence"] = json!(evidence);
+        value["evidence_policy"] = json!("Only host_evidence attests provenance. Model reports are untrusted. Fetched alone is not included_in_request; no receipt verifies interpretation.");
+    }
+}
+
+fn synthesis_instruction(has_evidence: bool) -> &'static str {
+    if has_evidence {
+        "Synthesize one improved answer. Do not mention panels, providers, or models. Cite supporting host evidence as [evidence:evr_<32 lower hex>] using only included_in_request references whose excerpt_status is not not_found or unknown_truncated. Never invent or alter a receipt. No citations means no positive evidence verification."
+    } else {
+        "Synthesize one improved answer. Do not mention panels, providers, or models."
+    }
+}
+
 /// Why a judge request could not be prepared without contacting a provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PackingError {
@@ -201,7 +238,7 @@ pub(crate) fn prepare_synth_request(
     panels: &[PanelInternal],
     output_tokens: u32,
     limits: ModelLimits,
-) -> Result<SideQueryRequest, PackingError> {
+) -> Result<PreparedSynthRequest, PackingError> {
     let input_cap = usable_input_cap(limits, output_tokens)?;
     let system_prompt = synth_system_prompt();
     let full = plain_request(
@@ -216,7 +253,7 @@ pub(crate) fn prepare_synth_request(
         limits,
         output_tokens,
     )? {
-        return Ok(full);
+        return Ok(synth_prepared(full, panels));
     }
 
     let sources = synth_packed_sources(panels);
@@ -274,7 +311,7 @@ pub(crate) fn prepare_synth_request(
             input_cap,
         });
     }
-    Ok(packed)
+    Ok(synth_prepared(packed, panels))
 }
 
 pub(crate) fn preflight_synth_request(
@@ -297,7 +334,7 @@ pub(crate) fn estimate_synth_request(
     limits: ModelLimits,
 ) -> Result<sidequery::SideQueryEstimate, PackingError> {
     let prepared = prepare_synth_request(client, request, analysis, panels, output_tokens, limits)?;
-    estimate(client, CanonicalSideQueryRequest::Plain(prepared))
+    estimate(client, CanonicalSideQueryRequest::Plain(prepared.request))
 }
 
 fn strict_request(
@@ -396,10 +433,12 @@ pub(crate) fn analyst_user_message(
     let mut reports = Vec::new();
     for panel in sorted_reports(panels) {
         if let Some(report) = &panel.report {
-            reports.push(json!({
+            let mut entry = json!({
                 "panel_id": panel.anonymous_id,
                 "report": report,
-            }));
+            });
+            insert_host_evidence(&mut entry, &panel.host_evidence);
+            reports.push(entry);
         }
     }
     let mut payload = json!({
@@ -434,7 +473,8 @@ fn packed_analyst_user_message(
                 "panel_id": source.panel_id,
                 "critical_risks": source.critical_risks,
             });
-            let excerpts = source
+            insert_host_evidence(&mut value, &source.host_evidence);
+            let mut excerpts = source
                 .optional_groups
                 .iter()
                 .map(|group| {
@@ -443,6 +483,11 @@ fn packed_analyst_user_message(
                     excerpt_prefix(group, quota)
                 })
                 .collect::<Vec<_>>();
+            // Receipt-bearing claims/evidence stay whole or are explicitly
+            // omitted. Never present a cut JSON fragment as a supported claim.
+            if !source.host_evidence.is_empty() && excerpts[2].1 < source.optional_groups[2].len() {
+                excerpts[2] = (String::new(), 0);
+            }
             insert_excerpt(&mut value, "summary", &excerpts[0].0);
             insert_excerpt(&mut value, "candidate_answer", &excerpts[1].0);
             insert_excerpt(&mut value, "claims_evidence_excerpt", &excerpts[2].0);
@@ -529,11 +574,13 @@ fn synth_user_message(
         .iter()
         .filter_map(|panel| {
             panel.report.as_ref().map(|report| {
-                json!({
+                let mut entry = json!({
                     "panel_id": panel.anonymous_id,
                     "candidate_answer": report.candidate_answer,
                     "summary": report.summary,
-                })
+                });
+                insert_host_evidence(&mut entry, &panel.host_evidence);
+                entry
             })
         })
         .collect::<Vec<_>>();
@@ -541,7 +588,7 @@ fn synth_user_message(
         "task": request.prompt,
         "analysis": analysis,
         "panels": reports,
-        "instruction": "Synthesize one improved answer. Do not mention panels, providers, or models."
+        "instruction": synthesis_instruction(panels.iter().any(|panel| !panel.host_evidence.is_empty()))
     })
     .to_string()
 }
@@ -564,6 +611,7 @@ fn packed_synth_user_message(
                 "critical_risks": source.critical_risks,
             });
             let summary_quota = quotas.get(quota_index).copied().unwrap_or_default();
+            insert_host_evidence(&mut value, &source.host_evidence);
             quota_index += 1;
             let candidate_quota = quotas.get(quota_index).copied().unwrap_or_default();
             quota_index += 1;
@@ -609,7 +657,7 @@ fn packed_synth_user_message(
         "omitted_assumptions": omitted.assumptions,
         "omitted_risks": omitted.risks,
         "omitted_unresolved_questions": omitted.unresolved_questions,
-        "instruction": "Synthesize one improved answer. Do not mention panels, providers, or models."
+        "instruction": synthesis_instruction(sources.iter().any(|source| !source.host_evidence.is_empty()))
     })
     .to_string()
 }
@@ -658,6 +706,7 @@ struct ReportCounts {
 
 #[derive(Clone, Debug)]
 struct PackedPanelSource {
+    host_evidence: Vec<crate::evidence::HostPanelEvidence>,
     panel_id: String,
     critical_risks: Vec<String>,
     optional_groups: Vec<String>,
@@ -671,6 +720,7 @@ fn analyst_packed_sources(panels: &[PanelInternal]) -> Vec<PackedPanelSource> {
         .map(|panel| {
             let Some(report) = panel.report.as_ref() else {
                 return PackedPanelSource {
+                    host_evidence: Vec::new(),
                     panel_id: panel.anonymous_id.clone(),
                     critical_risks: Vec::new(),
                     optional_groups: vec![String::new(); 4],
@@ -702,6 +752,7 @@ fn analyst_packed_sources(panels: &[PanelInternal]) -> Vec<PackedPanelSource> {
                 .to_string()
             };
             PackedPanelSource {
+                host_evidence: panel.host_evidence.clone(),
                 panel_id: panel.anonymous_id.clone(),
                 critical_risks: critical_risks(report),
                 optional_groups: vec![
@@ -734,6 +785,7 @@ fn synth_packed_sources(panels: &[PanelInternal]) -> Vec<PackedPanelSource> {
         .into_iter()
         .map(|panel| match panel.report.as_ref() {
             Some(report) => PackedPanelSource {
+                host_evidence: panel.host_evidence.clone(),
                 panel_id: panel.anonymous_id.clone(),
                 critical_risks: critical_risks(report),
                 optional_groups: vec![report.summary.clone(), report.candidate_answer.clone()],
@@ -741,6 +793,7 @@ fn synth_packed_sources(panels: &[PanelInternal]) -> Vec<PackedPanelSource> {
                 counts: ReportCounts::default(),
             },
             None => PackedPanelSource {
+                host_evidence: Vec::new(),
                 panel_id: panel.anonymous_id.clone(),
                 critical_risks: Vec::new(),
                 optional_groups: vec![String::new(); 2],
@@ -946,6 +999,7 @@ mod tests {
 
     fn panel(id: &str, size: usize) -> PanelInternal {
         PanelInternal {
+            host_evidence: Vec::new(),
             index: 0,
             profile: "p".into(),
             model: "m".into(),
@@ -977,6 +1031,96 @@ mod tests {
         panel.status = PanelRunStatus::Failed;
         panel.report = None;
         panel
+    }
+
+    #[test]
+    fn receipt_metadata_is_mandatory_in_full_and_packed_payloads() {
+        let mut panel = panel("P1", 10_000);
+        let host = crate::evidence::tests::included_host_evidence();
+        let reference = host.attestation.receipt_ref().to_owned();
+        panel.host_evidence.push(host);
+        let report = panel.report.as_mut().unwrap();
+        report.claims.push(platform_api::PanelClaim {
+            statement: "claim".repeat(100),
+            evidence_refs: vec!["e1".into()],
+            confidence: 90,
+        });
+        report.evidence.push(platform_api::PanelEvidence {
+            receipt_ref: Some(reference.clone()),
+            id: "e1".into(),
+            kind: platform_api::EvidenceKind::File,
+            locator: "a.rs".into(),
+            excerpt: Some("source".into()),
+        });
+        let panels = vec![panel];
+        let full: Value =
+            serde_json::from_str(&analyst_user_message(&request(), &panels, None)).unwrap();
+        let sources = analyst_packed_sources(&panels);
+        let packed: Value = serde_json::from_str(&packed_analyst_user_message(
+            &request(),
+            None,
+            &sources,
+            0,
+            OmissionMode::Actual,
+        ))
+        .unwrap();
+        assert_eq!(
+            full["panels"][0]["host_evidence"],
+            packed["panels"][0]["host_evidence"]
+        );
+        assert_eq!(packed["omitted_claims"], 1);
+        assert!(packed["panels"][0].get("claims_evidence_excerpt").is_none());
+        let analysis = FusionAnalysis {
+            schema_version: 1,
+            consensus: vec![],
+            contradictions: vec![],
+            unique_insights: vec![],
+            coverage_gaps: vec![],
+            scores: Default::default(),
+            confidence: 90,
+            recommendation: platform_api::FusionRecommendation::Merge {
+                reason: "combine".into(),
+            },
+        };
+        let synth_sources = synth_packed_sources(&panels);
+        let synth_full: Value =
+            serde_json::from_str(&synth_user_message(&request(), &analysis, &panels)).unwrap();
+        let synth_packed: Value = serde_json::from_str(&packed_synth_user_message(
+            &request(),
+            &analysis,
+            &synth_sources,
+            0,
+            OmissionMode::Actual,
+        ))
+        .unwrap();
+        assert_eq!(
+            synth_full["panels"][0]["host_evidence"],
+            synth_packed["panels"][0]["host_evidence"]
+        );
+        let prepared = prepare_synth_request(
+            &DtoEstimator,
+            &request(),
+            &analysis,
+            &panels,
+            128,
+            crate::model_resolver::known_test_limits(),
+        )
+        .unwrap();
+        assert!(prepared.allowed_citations.contains(&reference));
+        assert!(first_user_text(&prepared.request.messages).contains(&reference));
+        assert!(prepare_synth_request(
+            &DtoEstimator,
+            &request(),
+            &analysis,
+            &panels,
+            128,
+            ModelLimits {
+                context_window_tokens: None,
+                max_input_tokens: Some(1),
+                max_output_tokens: Some(128)
+            }
+        )
+        .is_err());
     }
 
     fn first_user_text(messages: &[ConversationMessage]) -> &str {
@@ -1121,6 +1265,7 @@ mod tests {
             confidence: 80,
         });
         report.evidence.push(platform_api::PanelEvidence {
+            receipt_ref: None,
             id: "e1".into(),
             kind: platform_api::EvidenceKind::File,
             locator: "src/lib.rs".into(),

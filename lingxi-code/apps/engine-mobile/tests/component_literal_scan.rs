@@ -181,7 +181,18 @@ const PLUGIN_NAMESPACE: &str = "lingxi-local-app";
 /// steps 4-5 of the guided workspace contract no longer send it to a
 /// "runtime confirmation tool" that does not exist. See the allowlist file's
 /// own comments on both entries for why this does not reopen P-1.4.
-const ALLOWLIST_BASELINE_COUNT: usize = 6;
+///
+/// 6 → 11 (2026-09-06): three in `host.rs`, where the session-mode command
+/// filter keeps exactly the three plugin entry routers visible outside an app
+/// workspace — a membership test on `c.name`, so the names ARE the datum — and
+/// two in `tools/workflow/src/workflow_description_divergences.json`, the
+/// register that composes the Workflow tool's shipped description. The latter
+/// is the arrival this file's scan-surface note predicted when it put `.txt`
+/// and `.json` under `tools/workflow/src` into the scan: prose selecting a
+/// workflow moved out of an allowlisted `.js` script and into the description
+/// text, and it showed up here as a LEAK. See the allowlist file's comments on
+/// all five for why none of them can be reworded away.
+const ALLOWLIST_BASELINE_COUNT: usize = 11;
 
 /// Scan roots, relative to the workspace root. Deny-by-default directory
 /// enumeration: every source file under each of these is scanned unless it is

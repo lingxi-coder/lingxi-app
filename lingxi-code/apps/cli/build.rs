@@ -8,26 +8,11 @@
 //! The captured value is read by `lingxi-commands/src/builtin/version.rs`
 //! via `option_env!("LINGXI_GIT_SHA_SHORT")`.
 
-use std::process::Command;
+#[path = "../../build-support/git_metadata.rs"]
+mod git_metadata;
 
 fn main() {
-    let sha = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    println!("cargo:rustc-env=LINGXI_GIT_SHA_SHORT={sha}");
-    // Re-run if HEAD moves. M8-P6: package moved to apps/cli (one level
-    // deeper), so the repo-root `.git` is now three `..` up.
-    println!("cargo:rerun-if-changed=../../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../../.git/refs/heads");
+    git_metadata::emit();
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../../build-support/git_metadata.rs");
 }

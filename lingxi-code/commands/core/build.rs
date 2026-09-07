@@ -13,24 +13,11 @@
 //! - the `git` command isn't on `$PATH`
 //! - any other failure
 
-use std::process::Command;
+#[path = "../../build-support/git_metadata.rs"]
+mod git_metadata;
 
 fn main() {
-    let sha = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    println!("cargo:rustc-env=LINGXI_GIT_SHA_SHORT={sha}");
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/refs/heads");
+    git_metadata::emit();
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../../build-support/git_metadata.rs");
 }

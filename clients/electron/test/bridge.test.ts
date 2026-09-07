@@ -240,6 +240,7 @@ test('owned resume loads the restored model provider credential before becoming 
   client.sendCommand = (command) => {
     commands.push(command);
     const record = command as Record<string, unknown>;
+    if (record['type'] === 'refresh_listings') queueMicrotask(() => client.emit('event', { type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}' }));
     if (record['type'] === 'set_provider_credential') {
       queueMicrotask(() => client.emit('event', {
         type: 'provider_credential_status',
@@ -281,9 +282,65 @@ test('owned resume loads the restored model provider credential before becoming 
   assert.equal(settled, true);
   assert.deepEqual(commands.map((command) => (command as { type: string }).type), [
     'resume_session',
+    'refresh_listings',
     'set_provider_credential',
   ]);
-  assert.equal((commands[1] as { credential: string }).credential, 'or-resumed-secret');
+  assert.equal((commands[2] as { credential: string }).credential, 'or-resumed-secret');
+});
+
+test('owned resume resolves a cold custom routing alias before becoming ready', async () => {
+  const sessionId = '11111111-2222-4333-8444-555555555555';
+  const commands: unknown[] = [];
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void };
+  client.sendCommand = (command) => {
+    commands.push(command);
+    const record = command as Record<string, unknown>;
+    if (record['type'] === 'refresh_listings') queueMicrotask(() => client.emit('event', { type: 'settings_snapshot', effective_json: JSON.stringify({ providers: { custom: { models: ['model'] } }, routing: { aliases: { boss: 'custom/model' } } }), provenance_json: '{}' }));
+    if (record['type'] === 'set_provider_credential') {
+      queueMicrotask(() => client.emit('event', {
+        type: 'provider_credential_status',
+        operation_id: record['operation_id'],
+        configured_provider_ids: ['custom'],
+        storage_encrypted: false,
+        credential_previews: {},
+      }));
+    }
+  };
+  const runtime = new SessionRuntime({
+    sessionId,
+    projectPath: '/workspace',
+    sessionResumeTimeoutMs: 100,
+    launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }),
+    resolveProviderCredential: async (providerId) => {
+      assert.equal(providerId, 'custom');
+      return 'or-resumed-secret';
+    },
+  });
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).activeWorkspaceTrusted = true;
+  (runtime as any).state = { status: 'connected' };
+  (runtime as any).generation = 1;
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 1);
+
+  let settled = false;
+  const resume = runtime.resumeOwnedSession().then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  assert.deepEqual(commands, [{ type: 'resume_session', session_id: sessionId, cwd: '/workspace' }]);
+
+  client.emit('event', { type: 'session_resumed', session_id: sessionId, messages: [] });
+  await Promise.resolve();
+  assert.equal(settled, false, 'session_resumed precedes the authoritative restored model');
+  client.emit('event', { type: 'model_changed', model: 'boss' });
+  await resume;
+  assert.equal(settled, true);
+  assert.deepEqual(commands.map((command) => (command as { type: string }).type), [
+    'resume_session',
+    'refresh_listings',
+    'set_provider_credential',
+  ]);
+  assert.equal((commands[2] as { credential: string }).credential, 'or-resumed-secret');
 });
 
 test('session runtime manager launches a restored session with its catalog model hint', async () => {
@@ -1345,12 +1402,14 @@ test('provider switching hot-loads the destination credential once before set_mo
       return 'or-session-secret';
     },
   });
+  (manager as any).credentialRoutingSettings = {};
   (manager as any).activeWorkspace = '/workspace';
   (manager as any).activeWorkspaceTrusted = true;
   (manager as any).runtimeCredentialProviders.add('deepseek');
-  (manager as any).client = {
+  (manager as any).client = Object.assign(new EventEmitter(), {
     sendCommand: (command: Record<string, unknown>) => {
       commands.push(command);
+      if (command['type'] === 'set_model') queueMicrotask(() => (manager as any).client.emit('event', { type: 'model_changed', model: command['model'] }));
       if (command['type'] === 'set_provider_credential') {
         queueMicrotask(() => (manager as any).handleProviderCredentialStatus({
           type: 'provider_credential_status',
@@ -1361,7 +1420,8 @@ test('provider switching hot-loads the destination credential once before set_mo
         }));
       }
     },
-  };
+  });
+  (manager as any).wireClient((manager as any).client, 0);
 
   await manager.dispatchCommand({ type: 'set_model', model: 'openrouter/minimax/minimax-m3:free' });
   await manager.dispatchCommand({ type: 'set_model', model: 'openrouter/openrouter/free' });
@@ -1376,7 +1436,7 @@ test('provider switching hot-loads the destination credential once before set_mo
   assert.deepEqual(manager.activeCredentialProviderIds, ['deepseek', 'openrouter']);
 });
 
-test('concurrent model switches share one broker credential load per session', async () => {
+test('concurrent model switches are rejected while the first awaits credentials and confirmation', async () => {
   const commands: Array<Record<string, unknown>> = [];
   const credential = deferred<string>();
   let resolves = 0;
@@ -1387,11 +1447,13 @@ test('concurrent model switches share one broker credential load per session', a
       return credential.promise;
     },
   });
+  (manager as any).credentialRoutingSettings = {};
   (manager as any).activeWorkspace = '/workspace';
   (manager as any).activeWorkspaceTrusted = true;
-  (manager as any).client = {
+  (manager as any).client = Object.assign(new EventEmitter(), {
     sendCommand: (command: Record<string, unknown>) => {
       commands.push(command);
+      if (command['type'] === 'set_model') queueMicrotask(() => (manager as any).client.emit('event', { type: 'model_changed', model: command['model'] }));
       if (command['type'] === 'set_provider_credential') {
         queueMicrotask(() => (manager as any).handleProviderCredentialStatus({
           type: 'provider_credential_status',
@@ -1402,16 +1464,18 @@ test('concurrent model switches share one broker credential load per session', a
         }));
       }
     },
-  };
+  });
+  (manager as any).wireClient((manager as any).client, 0);
 
   const first = manager.dispatchCommand({ type: 'set_model', model: 'openrouter/minimax/minimax-m3:free' });
   const second = manager.dispatchCommand({ type: 'set_model', model: 'openrouter/openrouter/free' });
   assert.equal(resolves, 1);
+  await assert.rejects(second, /already in progress/);
   credential.resolve('or-session-secret');
-  await Promise.all([first, second]);
+  await first;
 
   assert.equal(commands.filter((command) => command['type'] === 'set_provider_credential').length, 1);
-  assert.equal(commands.filter((command) => command['type'] === 'set_model').length, 2);
+  assert.equal(commands.filter((command) => command['type'] === 'set_model').length, 1);
 });
 
 test('credential refresh skips disconnected cached runtimes that will reload on their next start', async () => {
@@ -2108,3 +2172,198 @@ test('successful scheduled creation commits the draft owner, while rejection kee
     await manager.dispose();
   }
 });
+
+test('custom provider IDs follow the latest engine settings snapshot', () => {
+  const manager = new BridgeManager({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  const client = new EventEmitter();
+  (manager as any).wireClient(client, 0);
+  client.emit('event', { type: 'settings_snapshot', effective_json: JSON.stringify({ providers: {
+    'my-provider': { type: 'openai' }, 'Invalid ID': {}, null_profile: null,
+  } }), provenance_json: '{}' });
+  assert.deepEqual(manager.customProviderIds, ['my-provider']);
+  client.emit('event', { type: 'settings_snapshot', effective_json: 'invalid json', provenance_json: '{}' });
+  assert.deepEqual(manager.customProviderIds, []);
+  client.emit('event', { type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}' });
+  assert.deepEqual(manager.customProviderIds, []);
+});
+
+test('custom credential authorization waits for the newly saved settings snapshot', async () => {
+  const manager = new BridgeManager({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void };
+  let requested = false;
+  client.sendCommand = () => { requested = true; };
+  (manager as any).requireClient = () => client;
+  (manager as any).wireClient(client, 0);
+  let ready = false;
+  const pending = manager.ensureCustomProviderConfigured('new-profile').then(() => { ready = true; });
+  assert.equal(requested, true);
+  client.emit('event', { type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}' });
+  await Promise.resolve();
+  assert.equal(ready, false);
+  client.emit('event', { type: 'settings_snapshot', effective_json: JSON.stringify({providers: {'new-profile': {type: 'openai'}}}), provenance_json: '{}' });
+  await pending;
+  assert.equal(ready, true);
+});
+
+test('cold alias model selection hydrates primary and fallback before sending a prompt', async () => {
+  const calls: string[] = [];
+  const secret = deferred<string>();
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void; sendPrompt(text: string): void };
+  const runtime = new SessionRuntime({
+    projectPath: '/workspace', launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    resolveProviderCredential: async (id) => { calls.push(`load:${id}`); return secret.promise; },
+  });
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).activeWorkspaceTrusted = true;
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 0);
+  client.sendCommand = (command) => {
+    calls.push(command.type);
+    if (command.type === 'set_model') queueMicrotask(() => client.emit('event', { type: 'model_changed', model: command.model }));
+    if (command.type === 'refresh_listings') queueMicrotask(() => client.emit('event', {
+      type: 'settings_snapshot', provenance_json: '{}', effective_json: JSON.stringify({
+        providers: { primary: { models: [{ id: 'model', aliases: ['fast'] }] }, backup: { models: ['other'] }, unrelated: { models: ['unused'] } },
+        routing: { aliases: { boss: 'primary/model' }, fallback: { model: ['backup/other'] } },
+      }),
+    }));
+    if (command.type === 'set_provider_credential') queueMicrotask(() => client.emit('event', {
+      type: 'provider_credential_status', operation_id: command.operation_id,
+      configured_provider_ids: [command.provider_id], storage_encrypted: false, credential_previews: {},
+    }));
+  };
+  client.sendPrompt = () => { calls.push('prompt'); };
+  client.emit('event', { type: 'model_changed', model: 'boss' });
+  const pending = runtime.sendPrompt('hello');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(calls.includes('prompt'), false, 'prompt waits for Broker credentials');
+  secret.resolve('test-key');
+  await pending;
+  assert.deepEqual(calls.filter((entry) => entry.startsWith('load:')).sort(), ['load:backup', 'load:primary']);
+  assert.equal(calls.at(-1), 'prompt');
+  client.emit('event', { type: 'turn_ended' });
+  await runtime.dispatchCommand({ type: 'set_model', model: 'fast' });
+  assert.equal(calls.filter((entry) => entry === 'refresh_listings').length, 1);
+  assert.equal(calls.at(-1), 'set_model');
+});
+
+test('cancel during alias credential hydration never sends the delayed prompt', async () => {
+  const key = deferred<string>();
+  let sent = false;
+  const runtime = new SessionRuntime({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    resolveProviderCredential: () => key.promise,
+  });
+  const client = new EventEmitter() as EventEmitter & { cancel(): void; sendPrompt(): void };
+  client.cancel = () => undefined;
+  client.sendPrompt = () => { sent = true; };
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).activeWorkspaceTrusted = true;
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 0);
+  runtime.cacheProviderCredential = async (id) => { (runtime as any).runtimeCredentialProviders.add(id); };
+  client.emit('event', { type: 'settings_snapshot', effective_json: JSON.stringify({ providers: { custom: { models: [{ id: 'model', aliases: ['fast'] }] } } }), provenance_json: '{}' });
+  client.emit('event', { type: 'model_changed', model: 'fast' });
+  const pending = runtime.sendPrompt('hello');
+  assert.equal(runtime.turnActive, true);
+  runtime.cancelTurn(undefined);
+  key.resolve('secret');
+  await assert.rejects(Promise.resolve(pending), /interrupted/);
+  assert.equal(sent, false);
+  assert.equal(runtime.turnActive, false);
+});
+
+test('cold set_model resolves a declared model alias before dispatch', async () => {
+  const calls: string[] = [];
+  const runtime = new SessionRuntime({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    resolveProviderCredential: async (id) => { calls.push(`key:${id}`); return 'secret'; },
+  });
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void };
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).activeWorkspaceTrusted = true;
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 0);
+  runtime.cacheProviderCredential = async (id) => { (runtime as any).runtimeCredentialProviders.add(id); };
+  client.sendCommand = (command) => {
+    calls.push(command.type);
+    if (command.type === 'set_model') queueMicrotask(() => client.emit('event', { type: 'model_changed', model: command.model }));
+    if (command.type === 'refresh_listings') queueMicrotask(() => client.emit('event', {
+      type: 'settings_snapshot', provenance_json: '{}', effective_json: JSON.stringify({ providers: { custom: { models: [{ id: 'model', aliases: ['fast'] }] } } }),
+    }));
+  };
+  await runtime.dispatchCommand({ type: 'set_model', model: 'fast' });
+  assert.deepEqual(calls, ['refresh_listings', 'key:custom', 'set_model']);
+});
+
+test('a prompt submitted during a cold model switch waits for the new model acknowledgement', async () => {
+  const nextKey = deferred<string>();
+  const calls: string[] = [];
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void; sendPrompt(): void; cancel(): void };
+  const runtime = new SessionRuntime({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    resolveProviderCredential: async (id) => { calls.push(`key:${id}`); return id === 'next' ? nextKey.promise : 'old-key'; },
+  });
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).activeWorkspaceTrusted = true;
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 0);
+  (runtime as any).selectedModelReference = 'old/model';
+  runtime.cacheProviderCredential = async (id) => { (runtime as any).runtimeCredentialProviders.add(id); };
+  client.cancel = () => undefined;
+  client.sendPrompt = () => { calls.push('prompt'); };
+  client.sendCommand = (command) => {
+    calls.push(command.type);
+    if (command.type === 'refresh_listings') queueMicrotask(() => client.emit('event', {
+      type: 'settings_snapshot', provenance_json: '{}', effective_json: JSON.stringify({ providers: { old: { models: ['model'] }, next: { models: ['model'] } } }),
+    }));
+  };
+  const switching = runtime.dispatchCommand({ type: 'set_model', model: 'next/model' });
+  const prompt = runtime.sendPrompt('hello');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(calls, ['refresh_listings', 'key:next']);
+  nextKey.resolve('next-key');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(calls.includes('prompt'), false);
+  client.emit('event', { type: 'model_changed', model: 'next/model' });
+  await switching;
+  await prompt;
+  assert.equal(calls.at(-1), 'prompt');
+  assert.equal(calls.includes('key:old'), false);
+});
+
+for (const interruption of ['cancel', 'restart', 'active-turn'] as const) {
+  test(`${interruption} interrupts a model switch and its waiting prompt`, async () => {
+    const key = deferred<string>();
+    const calls: string[] = [];
+    const runtime = new SessionRuntime({
+      registerIpc: false,
+      launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+      resolveProviderCredential: () => key.promise,
+    });
+    const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void; sendPrompt(): void; cancel(): void };
+    (runtime as any).activeWorkspace = '/workspace';
+    (runtime as any).activeWorkspaceTrusted = true;
+    (runtime as any).client = client;
+    (runtime as any).wireClient(client, 0);
+    client.sendCommand = (command) => { calls.push(command.type); };
+    client.sendPrompt = () => { calls.push('prompt'); };
+    client.cancel = () => undefined;
+    runtime.cacheProviderCredential = async (id) => { (runtime as any).runtimeCredentialProviders.add(id); };
+    client.emit('event', { type: 'settings_snapshot', effective_json: JSON.stringify({ providers: { next: { models: ['model'] } } }), provenance_json: '{}' });
+    const switching = runtime.dispatchCommand({ type: 'set_model', model: 'next/model' });
+    const prompt = runtime.sendPrompt('hello');
+    const settled = Promise.allSettled([switching, prompt]);
+    assert.equal(runtime.turnActive, true);
+    if (interruption === 'cancel') runtime.cancelTurn(undefined);
+    else if (interruption === 'restart') {
+      (runtime as any).startInternal = async () => undefined;
+      await runtime.restart();
+    } else (runtime as any).activeTurn = true;
+    key.resolve('new-key');
+    const results = await settled;
+    assert.deepEqual(results.map((result) => result.status), ['rejected', 'rejected']);
+    assert.equal(calls.includes('set_model'), false);
+    assert.equal(calls.includes('prompt'), false);
+    assert.equal(runtime.turnActive, interruption === 'active-turn');
+  });
+}

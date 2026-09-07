@@ -193,6 +193,7 @@ export interface PageContentProps {
   bridge: UseBridge;
   snapshot: SettingsSnapshot | null;
   editingLayer: EditableLayer;
+  onLayerLockChange?(locked: boolean): void;
   theme: ThemeMode;
   onTheme(value: ThemeMode): void;
   /** Jumps the shell to another nav page by id — how `General`'s cross-page entries actually navigate, rather than just naming a destination they can't reach. */
@@ -260,7 +261,8 @@ function EngineRequiredEmptyState({ page }: { page: NavPage }) {
   );
 }
 
-function LayerSwitcher({ value, onChange, hasProject }: {
+function LayerSwitcher({ value, onChange, hasProject, locked = false }: {
+  locked?: boolean;
   value: EditableLayer;
   onChange(layer: EditableLayer): void;
   hasProject: boolean;
@@ -274,7 +276,7 @@ function LayerSwitcher({ value, onChange, hasProject }: {
       >
         {EDITABLE_LAYERS.map((layer) => {
           const active = value === layer;
-          const disabled = layerDisabled(layer, hasProject);
+          const disabled = locked || layerDisabled(layer, hasProject);
           return (
             <button
               key={layer}
@@ -320,6 +322,8 @@ export function SettingsScreen({
   const [page, setPage] = useState<string>(() => resolveInitialPage(initialPageId, initialProviderId));
   const [query, setQuery] = useState('');
   const [editingLayer, setEditingLayer] = useState<EditableLayer>('user');
+  const [layerLockCount, setLayerLockCount] = useState(0);
+  const layerLocked = layerLockCount > 0;
 
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -441,7 +445,7 @@ export function SettingsScreen({
         // correct even if a future edit removes this `key` without
         // understanding why it's here.
         <Component
-          key={editingLayer}
+          key={activePage.id === 'custom-providers' ? `${activeSessionId}:${editingLayer}` : editingLayer}
           bridge={bridge}
           snapshot={snapshot}
           editingLayer={editingLayer}
@@ -451,7 +455,8 @@ export function SettingsScreen({
           initialProviderId={initialProviderId}
           pendingModelReference={pendingModelReference}
           onClose={onClose}
-          onJumpToLayer={setEditingLayer}
+          onJumpToLayer={(layer) => { if (!layerLocked) setEditingLayer(layer); }}
+          onLayerLockChange={(locked) => setLayerLockCount((count) => Math.max(0, count + (locked ? 1 : -1)))}
         />
       )
       : <PagePlaceholder page={activePage} kind="not-wired" />;
@@ -544,7 +549,7 @@ export function SettingsScreen({
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
             <div style={{ fontSize: 18, fontWeight: 600 }}>{activePage.label}</div>
             {showLayerSwitcher && (
-              <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} />
+              <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} locked={layerLocked} />
             )}
           </div>
           {body}

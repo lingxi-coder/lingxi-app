@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { createServer } from 'node:http';
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
@@ -581,11 +582,13 @@ async function assertSecurityBehavior(page) {
   assert.equal(navigation.after, navigation.before, 'cross-origin navigation must be blocked');
 }
 
-async function setupSmokeCollectors(page) {
+async function setupSmokeCollectors(page, sessionId = null) {
   await evaluate(page, `(() => {
     window.__lingxiSmoke?.unsubs?.forEach((unsubscribe) => unsubscribe());
     const state = { events: [], states: [], permissions: [], unsubs: [] };
-    state.unsubs.push(window.lingxi.onEvent((envelope) => { state.events.push(envelope.event); }));
+    state.unsubs.push(window.lingxi.onEvent((envelope) => {
+      if (${JSON.stringify(sessionId)} === null || envelope.sessionId === ${JSON.stringify(sessionId)}) state.events.push(envelope.event);
+    }));
     state.unsubs.push(window.lingxi.onConnectionStateChanged((connection) => { state.states.push(connection); }));
     state.unsubs.push(window.lingxi.onPermission((permission) => { state.permissions.push(permission); }));
     window.__lingxiSmoke = state;
@@ -697,6 +700,89 @@ async function assertRuntimeCleanup(tempRoot, bridgeRuntimeDir) {
   assert.deepEqual(leftoverBridgeEntries, [], 'bridge runtime launch artifacts must be cleaned up');
 }
 
+// A unique, disposable profile exercises the signed Broker rather than mocking
+// Keychain. The server accepts only a synthetic test key and never leaves localhost.
+async function customProviderProbe() {
+  const providerId = `smoke-custom-${process.pid}-${Date.now()}`;
+  const key = `test-only-${providerId}`;
+  const requests = [];
+  const server = createServer(async (request, response) => {
+    let body = '';
+    for await (const chunk of request) body += chunk;
+    requests.push({ authenticated: request.headers.authorization === `Bearer ${key}`, body });
+    if (request.headers.authorization !== `Bearer ${key}`) {
+      response.writeHead(401).end();
+      return;
+    }
+    response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    for (const chunk of [
+      { choices: [{ index: 0, delta: { role: 'assistant', content: 'Custom provider verified.' } }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+    ]) response.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    response.end('data: [DONE]\n\n');
+  });
+  await new Promise((resolvePromise, rejectPromise) => {
+    server.once('error', rejectPromise);
+    server.listen(0, '127.0.0.1', resolvePromise);
+  });
+  return {
+    providerId, key, requests,
+    baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+    close: () => new Promise((resolvePromise) => {
+      server.close(resolvePromise);
+      server.closeAllConnections();
+    }),
+  };
+}
+
+async function prepareCustomProvider(page, probe, restore = false) {
+  const sessionId = await evaluate(page, `(async () => {
+    const current = await window.lingxi.bootstrap();
+    return (await window.lingxi.newSession(current.workspace.path)).activeSession.sessionId;
+  })()`);
+  await setupSmokeCollectors(page, sessionId);
+  if (!restore) {
+    const patch = { providers: { [probe.providerId]: {
+      type: 'openai', baseUrl: probe.baseUrl, models: [{ id: 'smoke-model' }],
+    } } };
+    await evaluate(page, `window.lingxi.command(${JSON.stringify(sessionId)}, ${JSON.stringify({
+      type: 'update_settings', destination: 'user', patch_json: JSON.stringify(patch),
+    })})`);
+  }
+  await evaluate(page, `window.lingxi.command(${JSON.stringify(sessionId)}, {type:'refresh_listings',which:[{type:'settings'}]})`);
+  await waitFor(() => evaluate(page, `window.__lingxiSmoke.events.some(e => e.type === 'settings_snapshot' && JSON.parse(e.effective_json).providers?.[${JSON.stringify(probe.providerId)}])`), { label: 'custom provider settings snapshot' });
+  if (!restore) {
+    const saved = await evaluate(page, `window.lingxi.setProviderCredential(${JSON.stringify(probe.providerId)}, ${JSON.stringify(probe.key)})`);
+    assert.equal(saved.credential.configured, true);
+    assert.equal(saved.credential.encryptionAvailable, true);
+  }
+  const metadata = await evaluate(page, `window.lingxi.providerCredentials(${JSON.stringify(probe.providerId)})`);
+  const credential = metadata.find((entry) => entry.providerId === probe.providerId);
+  assert.equal(credential?.configured, true, 'custom key must survive a full packaged app restart');
+  assert.equal(credential?.encryptionAvailable, true);
+  assert.equal(JSON.stringify(metadata).includes(probe.key), false, 'credential status must contain metadata only');
+  return sessionId;
+}
+
+export function assertCustomProviderTurn(events) {
+  assert.equal(events.some((event) => event.type === 'error' || (event.type === 'system_notice' && event.is_error)), false, 'custom provider turn must not report an error');
+  assert.equal(events.find((event) => event.type === 'turn_ended')?.outcome?.type, 'end_turn', 'custom provider turn must finish successfully');
+  const answer = events.filter((event) => event.type === 'text_delta').map((event) => event.text).join('');
+  assert.equal(answer.includes('Custom provider verified.'), true, 'custom provider response must reach the client');
+}
+
+async function assertCustomProviderRequest(page, probe, sessionId) {
+  await evaluate(page, `window.lingxi.command(${JSON.stringify(sessionId)}, ${JSON.stringify({ type: 'set_model', model: `${probe.providerId}/smoke-model` })})`);
+  await evaluate(page, `window.lingxi.sendPrompt(${JSON.stringify(sessionId)}, 'Reply briefly, without calling tools.')`);
+  await waitFor(() => probe.requests.length > 0, { label: 'custom provider authenticated request' });
+  assert.ok(probe.requests.every((request) => request.authenticated), 'custom model must resolve its own stored key');
+  assert.equal(JSON.parse(probe.requests[0].body).model, 'smoke-model');
+  await waitFor(() => evaluate(page, `window.__lingxiSmoke.events.some(e => e.type === 'turn_ended')`), { label: 'custom provider turn completion' });
+  assertCustomProviderTurn(await evaluate(page, 'window.__lingxiSmoke.events'));
+  const diagnostics = await evaluate(page, 'window.lingxi.diagnostics()');
+  assert.equal(JSON.stringify(diagnostics).includes(probe.key), false);
+}
+
 export async function runPackagedAppSmoke(root = packageRoot) {
   if (process.platform !== 'darwin') {
     throw new Error(`packaged smoke verification requires macOS; received ${process.platform}`);
@@ -738,6 +824,7 @@ export async function runPackagedAppSmoke(root = packageRoot) {
   let page;
   let child;
   let output = { stdout: '', stderr: '' };
+  let customProbe;
   try {
     const launch = spawnPackagedApp(copiedAppPath, env, cdpPort, runtimePaths.userDataDir);
     child = launch.child;
@@ -764,6 +851,9 @@ export async function runPackagedAppSmoke(root = packageRoot) {
     await assertSecurityBehavior(page);
     await assertBundledSidecar(page, copiedAppPath, tempRoot);
 
+    customProbe = await customProviderProbe();
+    await prepareCustomProvider(page, customProbe);
+
     assert.equal(consoleErrors.length, 0, `renderer console errors detected: ${JSON.stringify(consoleErrors)}`);
     assert.equal(runtimeExceptions.length, 0, `renderer exceptions detected: ${JSON.stringify(runtimeExceptions)}`);
     assert.equal(logErrors.length, 0, `renderer log errors detected: ${JSON.stringify(logErrors)}`);
@@ -777,16 +867,40 @@ export async function runPackagedAppSmoke(root = packageRoot) {
 
     await assertRuntimeCleanup(tempRoot, runtimePaths.bridgeRuntimeDir);
 
+    // Relaunch the same signed app and isolated settings home, then prove both
+    // encrypted persistence and real request credential resolution end to end.
+    const relaunch = spawnPackagedApp(copiedAppPath, env, cdpPort, runtimePaths.userDataDir);
+    child = relaunch.child;
+    output = relaunch.output;
+    ({ browser, page } = await connectToDebugger(cdpPort));
+    await waitFor(() => evaluate(page, 'window.lingxi?.bootstrap().then(b => b.connection?.status === "connected")'), { label: 'restarted custom provider app' });
+    const customSession = await prepareCustomProvider(page, customProbe, true);
+    await assertCustomProviderRequest(page, customProbe, customSession);
+    await evaluate(page, `window.lingxi.clearProviderCredential(${JSON.stringify(customProbe.providerId)})`);
+    const cleared = await evaluate(page, `window.lingxi.providerCredentials(${JSON.stringify(customProbe.providerId)})`);
+    assert.equal(cleared.find((entry) => entry.providerId === customProbe.providerId)?.configured, false);
+    await closePackagedApp(browser, child, copiedAppBundleId);
+    child = null;
+    await browser.close();
+    await page.close();
+    browser = null;
+    page = null;
+    await assertRuntimeCleanup(tempRoot, runtimePaths.bridgeRuntimeDir);
+
     return {
       appPath: copiedAppPath,
       cdpPort,
       runtimePaths,
       notes: [
-        'Automated: bundled file:// renderer, preload contract, bounded @file workspace search, encrypted credential metadata, bundled sidecar session/listing flow, live permission-mode switching, renderer security checks, and exact temp cleanup.',
+        'Automated: bundled renderer and sidecar, custom Provider Keychain persistence across app restart, authenticated localhost model request, credential deletion, live permission modes, security checks, and exact temp cleanup.',
         'Manual-only: Gatekeeper transfer prompts, ad-hoc signature approval on a different Mac, full Developer ID notarization/stapling, and native workspace-trust dialog text on physical user interaction.',
       ],
     };
   } finally {
+    if (page && customProbe) {
+      try { await evaluate(page, `window.lingxi.clearProviderCredential(${JSON.stringify(customProbe.providerId)})`); } catch {}
+    }
+    if (customProbe) await customProbe.close();
     if (browser) {
       try { await browser.close(); } catch {}
     }

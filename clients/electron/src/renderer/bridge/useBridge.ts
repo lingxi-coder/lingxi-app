@@ -1,3 +1,4 @@
+import { saveProviderSettings } from './providerSettingsSave';
 import { requestCronManagement } from './cronManagement';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
@@ -242,6 +243,8 @@ export interface UseBridge {
    * prop reflects the write without a separate caller-side refresh call.
    */
   updateEngineSettings(destination: 'user' | 'project' | 'local', patch: Record<string, unknown>): Promise<void>;
+  /** Save provider settings and wait for confirmation from the persisted file layer. */
+  updateProviderSettings(destination: 'user' | 'project' | 'local', patch: Record<string, unknown>): Promise<void>;
   /**
    * `update_permission_rules` — the ONLY write path for `permissions.{allow,deny,ask}`.
    * `apply_patch` refuses the `permissions` key outright, so there is no
@@ -875,6 +878,11 @@ export function useBridge(): UseBridge {
   const activeSession = displayedSession(persistedActiveSession, pendingSession);
   const sessionLoading = pendingSession !== null;
   const activeSessionId = activeSession?.sessionId ?? null;
+  const providerSettingsSaves = useRef(new Set<AbortController>());
+  useEffect(() => () => {
+    for (const controller of providerSettingsSaves.current) controller.abort();
+    providerSettingsSaves.current.clear();
+  }, [activeSessionId]);
   const activeSessionIdRef = useRef<string | null>(null);
   activeSessionIdRef.current = activeSessionId;
   sessionLoadingRef.current = sessionLoading;
@@ -1845,19 +1853,24 @@ export function useBridge(): UseBridge {
     if (!host) throw new Error('Desktop host unavailable.');
     try {
       const update = await host.setProviderCredential(providerId, credential);
-      patchBootstrap({ settings: update.settings, providerCredentials: (bootstrap?.providerCredentials ?? []).map((entry) => entry.providerId === providerId ? update.credential : entry) });
+      setBootstrap((previous) => previous ? {
+        ...previous, settings: update.settings,
+        providerCredentials: [...(previous.providerCredentials ?? []).filter((entry) => entry.providerId !== providerId), update.credential],
+      } : previous);
       return update;
     } catch (cause) { return capture(cause); }
-  }, [bootstrap?.providerCredentials, capture, host, patchBootstrap]);
+  }, [capture, host]);
 
   const clearProviderCredential = useCallback(async (providerId: string) => {
     if (!host) throw new Error('Desktop host unavailable.');
     try {
       const metadata = await host.clearProviderCredential(providerId);
-      patchBootstrap({ providerCredentials: (bootstrap?.providerCredentials ?? []).map((entry) => entry.providerId === providerId ? metadata : entry) });
+      setBootstrap((previous) => previous ? {
+        ...previous, providerCredentials: [...(previous.providerCredentials ?? []).filter((entry) => entry.providerId !== providerId), metadata],
+      } : previous);
       return metadata;
     } catch (cause) { return capture(cause); }
-  }, [bootstrap?.providerCredentials, capture, host, patchBootstrap]);
+  }, [capture, host]);
 
   const testProviderConnection = useCallback(async (providerId: string, credentialOverride?: string) => {
     if (!host) throw new Error('Desktop host unavailable.');
@@ -2150,6 +2163,21 @@ export function useBridge(): UseBridge {
     () => command({ type: 'refresh_listings', which: [{ type: 'settings' }] }),
     [command],
   );
+  const updateProviderSettings = useCallback(
+    async (destination: 'user' | 'project' | 'local', patch: Record<string, unknown>) => {
+      const sessionId = activeSessionIdRef.current;
+      if (sessionLoadingRef.current || !host || !sessionId) throw new Error('Open a connected session before saving provider settings.');
+      if (providerSettingsSaves.current.size > 0) throw new Error('A provider settings save is already in progress.');
+      const controller = new AbortController();
+      providerSettingsSaves.current.add(controller);
+      try {
+        await saveProviderSettings(host, sessionId, destination, patch, controller.signal);
+        if (activeSessionIdRef.current !== sessionId) throw new Error('Provider settings session changed.');
+      } finally {
+        providerSettingsSaves.current.delete(controller);
+      }
+    }, [host],
+  );
   const updateEngineSettings = useCallback(
     async (destination: 'user' | 'project' | 'local', patch: Record<string, unknown>) => {
       await command({ type: 'update_settings', destination, patch_json: JSON.stringify(patch) });
@@ -2334,6 +2362,7 @@ export function useBridge(): UseBridge {
     setApiBaseUrl,
     setVoicePreferences,
     setModelPickerVisibility,
+    updateProviderSettings,
     updateEngineSettings,
     updatePermissionRules,
     setDefaultPermissionMode,

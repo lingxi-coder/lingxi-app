@@ -30,7 +30,7 @@ import {
   validatePrompt,
   validateRequestId,
 } from './validation.js';
-import { resolveProviderIdForModel } from './credential-broker.js';
+import { resolveModelCredentialProviderIds } from './credential-broker.js';
 
 export const CH_SEND_PROMPT = 'lingxi:sendPrompt';
 export const CH_APPROVE = 'lingxi:approve';
@@ -686,6 +686,101 @@ export class SessionRuntime {
   private sessionHasHistory = false;
   private sessionIdentityCommitted = false;
   private eventSequence = 0;
+  private credentialRoutingSettings: unknown = undefined;
+  private pendingModelSwitch: { model: string; sent: boolean; promise: Promise<void>; complete(): void; fail(error: Error): void } | undefined;
+
+  private switchModel(model: string): Promise<void> {
+    if (this.pendingModelSwitch) return Promise.reject(new Error('A model switch is already in progress.'));
+    const generation = this.generation;
+    const client = this.requireClient();
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+    const finish = (error?: Error): void => {
+      if (this.pendingModelSwitch !== pending) return;
+      clearTimeout(timer);
+      this.pendingModelSwitch = undefined;
+      if (error) reject(error); else resolve();
+      this.notifyActivityChanged();
+    };
+    const pending = { model, sent: false, promise, complete: () => finish(), fail: (error: Error) => finish(error) };
+    const timer = setTimeout(() => finish(new Error('Model switch confirmation timed out.')), 10_000);
+    this.pendingModelSwitch = pending;
+    this.notifyActivityChanged();
+    void (async () => {
+      try {
+        await this.ensureModelProviderCredential(model);
+        if (this.pendingModelSwitch !== pending) return;
+        if (generation !== this.generation || client !== this.client || this.archiving || this.activeTurn) {
+          throw new Error('Model switch was interrupted.');
+        }
+        pending.sent = true;
+        client.sendCommand({ type: 'set_model', model });
+      } catch (error) {
+        pending.fail(error instanceof Error ? error : new Error(String(error)));
+      }
+    })();
+    return promise;
+  }
+
+  private readonly pendingPromptHydrations = new Set<symbol>();
+  private selectedModelReference: string | undefined;
+  private pendingCredentialSettings: { promise: Promise<void>; resolve(): void; reject(error: Error): void } | undefined;
+
+  private ensureCredentialSettings(): Promise<void> {
+    if (this.credentialRoutingSettings !== undefined) return Promise.resolve();
+    if (this.pendingCredentialSettings) return this.pendingCredentialSettings.promise;
+    const client = this.requireClient();
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+    const timer = setTimeout(() => reject(new Error('Provider settings loading timed out.')), 5_000);
+    this.pendingCredentialSettings = { promise, resolve, reject };
+    void promise.then(() => clearTimeout(timer), () => clearTimeout(timer)).finally(() => {
+      if (this.pendingCredentialSettings?.promise === promise) this.pendingCredentialSettings = undefined;
+    });
+    try { client.sendCommand({ type: 'refresh_listings', which: [{ type: 'settings' }] }); }
+    catch (error) { reject(error instanceof Error ? error : new Error(String(error))); }
+    return promise;
+  }
+
+  private configuredCustomProviderIds: string[] = [];
+  private readonly customProviderWaiters = new Map<string, Set<() => void>>();
+
+  async ensureCustomProviderConfigured(providerId: string): Promise<void> {
+    if (this.configuredCustomProviderIds.includes(providerId)) return;
+    const client = this.requireClient();
+    await new Promise<void>((resolve, reject) => {
+      const waiters = this.customProviderWaiters.get(providerId) ?? new Set<() => void>();
+      const finish = (): void => {
+        clearTimeout(timer);
+        waiters.delete(finish);
+        if (waiters.size === 0) this.customProviderWaiters.delete(providerId);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        waiters.delete(finish);
+        if (waiters.size === 0) this.customProviderWaiters.delete(providerId);
+        reject(new Error('unsupported provider: settings did not confirm this profile'));
+      }, 5_000);
+      waiters.add(finish);
+      this.customProviderWaiters.set(providerId, waiters);
+      try {
+        client.sendCommand({ type: 'refresh_listings', which: [{ type: 'settings' }] });
+      } catch (error) {
+        clearTimeout(timer);
+        waiters.delete(finish);
+        if (waiters.size === 0) this.customProviderWaiters.delete(providerId);
+        reject(error);
+      }
+    });
+  }
+
+
+  get customProviderIds(): readonly string[] {
+    return [...this.configuredCustomProviderIds];
+  }
+
   private replayEvents: SequencedRuntimeEventEnvelope<ClientEvent>[] = [];
   private readonly targets = new Map<WebContents, Set<string>>();
   /**
@@ -712,7 +807,7 @@ export class SessionRuntime {
   }
 
   beginArchive(): () => void {
-    if (this.archiving || this.activeTurn || this.pendingInteractions > 0 || this.pendingCron.size > 0) throw new Error('Wait for active work and pending interactions before archiving this chat.');
+    if (this.archiving || this.turnActive || this.pendingInteractions > 0 || this.pendingCron.size > 0) throw new Error('Wait for active work and pending interactions before archiving this chat.');
     this.archiving = true;
     return () => { this.archiving = false; };
   }
@@ -751,7 +846,7 @@ export class SessionRuntime {
   }
 
   get turnActive(): boolean {
-    return this.activeTurn;
+    return this.activeTurn || this.pendingPromptHydrations.size > 0 || this.pendingModelSwitch !== undefined;
   }
 
   get activeCredentialProviderIds(): readonly string[] {
@@ -789,7 +884,7 @@ export class SessionRuntime {
       projectPath: this.projectPath || this.activeWorkspace || '',
       sessionId: this.sessionId,
       connection: this.connectionState,
-      turnActive: this.activeTurn,
+      turnActive: this.turnActive,
       pendingInteractions: this.pendingInteractions,
       pendingAskUserQuestions: this.pendingAskUserQuestionIds.size,
       ...(this.runtimeVersions ? { runtimeVersions: this.runtimeVersions } : {}),
@@ -1028,6 +1123,11 @@ export class SessionRuntime {
   }
 
   private async startInternal(): Promise<void> {
+    this.configuredCustomProviderIds = [];
+    this.credentialRoutingSettings = undefined;
+    this.selectedModelReference = undefined;
+    this.pendingCredentialSettings?.reject(new Error('Provider settings loading was interrupted.'));
+    this.pendingCredentialSettings = undefined;
     let generation = ++this.generation;
     const bridgeRoot = this.opts.bridgeRoot;
     if (bridgeRoot && this.projectPath) {
@@ -1068,6 +1168,7 @@ export class SessionRuntime {
 
     const launch = await this.opts.launchConfig();
     if (this.disposed) throw new Error('SessionRuntime is disposed');
+    this.selectedModelReference = launch.model;
     this.activeWorkspace = launch.workspace;
     if (launch.sessionId && launch.sessionId !== this.sessionId) {
       throw new Error('bridge launch session id does not match the runtime');
@@ -1400,6 +1501,29 @@ export class SessionRuntime {
           this.notifyActivityChanged();
         }
       }
+      if (event.type === 'settings_snapshot') {
+        this.configuredCustomProviderIds = [];
+        try {
+          const effective: unknown = JSON.parse(event.effective_json);
+          this.credentialRoutingSettings = effective;
+          this.pendingCredentialSettings?.resolve();
+          const providers = effective && typeof effective === 'object' && !Array.isArray(effective)
+            ? (effective as Record<string, unknown>).providers : undefined;
+          if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
+            this.configuredCustomProviderIds = Object.entries(providers).filter(([id, profile]) =>
+              /^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)
+              && profile !== null && typeof profile === 'object' && !Array.isArray(profile),
+            ).map(([id]) => id);
+          }
+        } catch {
+          this.credentialRoutingSettings = undefined;
+          this.pendingCredentialSettings?.reject(new Error('Invalid provider settings snapshot.'));
+          // An invalid snapshot must not keep stale credential authorization.
+        }
+        for (const providerId of this.configuredCustomProviderIds) {
+          for (const resolve of this.customProviderWaiters.get(providerId) ?? []) resolve();
+        }
+      }
       if (event.type === 'provider_credential_status') {
         this.handleProviderCredentialStatus(event);
       }
@@ -1419,6 +1543,10 @@ export class SessionRuntime {
           this.completePendingSessionResumeIfReady();
         }
       }
+      if (event.type === 'error') {
+        this.pendingCredentialSettings?.reject(new Error('Provider settings loading failed.'));
+        this.pendingModelSwitch?.fail(new Error('Model switch failed.'));
+      }
       if (event.type === 'error' && this.pendingSessionResume) {
         this.rejectPendingSessionResume(new Error(sanitizeDiagnostic(event.message)));
       }
@@ -1434,6 +1562,8 @@ export class SessionRuntime {
         this.clearTurnInteractions();
       }
       if (event.type === 'model_changed') {
+        this.selectedModelReference = event.model;
+        if (this.pendingModelSwitch?.sent && this.pendingModelSwitch.model === event.model) this.pendingModelSwitch.complete();
         try { this.opts.onModelChanged?.(event.model); }
         catch (error) { this.diagnostics.add('warn', 'host', error); }
         const pending = this.pendingSessionResume;
@@ -1575,10 +1705,33 @@ export class SessionRuntime {
     if (!origin || !origins.has(origin)) throw new Error('unauthorized IPC origin');
   }
 
-  sendPrompt(text: unknown, images: unknown = []): void {
+  sendPrompt(text: unknown, images: unknown = []): void | Promise<void> {
     if (this.archiving) throw new Error('This chat is being archived.');
     const prompt = validatePrompt(text);
     const validatedImages = validateImageRefs(images);
+    if (this.opts.resolveProviderCredential) {
+      const generation = this.generation;
+      const client = this.requireClient();
+      const token = Symbol('prompt hydration');
+      this.pendingPromptHydrations.add(token);
+      this.notifyActivityChanged();
+      return (async () => {
+        try {
+          if (this.pendingModelSwitch) await this.pendingModelSwitch.promise;
+          if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
+          if (this.selectedModelReference) await this.ensureModelProviderCredential(this.selectedModelReference);
+          if (this.archiving || !this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) throw new Error('Prompt credential loading was interrupted.');
+          this.sendPreparedPrompt(prompt, validatedImages);
+        } finally {
+          this.pendingPromptHydrations.delete(token);
+          this.notifyActivityChanged();
+        }
+      })();
+    }
+    this.sendPreparedPrompt(prompt, validatedImages);
+  }
+
+  private sendPreparedPrompt(prompt: string, validatedImages: ReturnType<typeof validateImageRefs>): void {
     const needsIdentityCommit = !this.sessionIdentityCommitted;
     this.requireClient().sendPrompt(prompt, { images: validatedImages });
     this.sessionHasHistory = true;
@@ -1600,6 +1753,11 @@ export class SessionRuntime {
   cancelTurn(turnId: unknown): void {
     const id = validateOptionalTurnId(turnId);
     this.requireClient().cancel(id);
+    this.pendingModelSwitch?.fail(new Error('Model switch was cancelled.'));
+    if (this.pendingPromptHydrations.size > 0) {
+      this.pendingPromptHydrations.clear();
+      this.notifyActivityChanged();
+    }
     if (this.activeTurn && (id === undefined || id === this.activeTurnId)) {
       this.cancellingTurn = true;
       this.clearTurnInteractions();
@@ -1666,7 +1824,7 @@ export class SessionRuntime {
       // The engine owns provider credential resolution. The Electron host must
       // not reject a prompt merely because no secret crossed its stdin boundary;
       // CLI/TUI may already have populated the shared secure store.
-      this.sendPrompt(text, images);
+      return this.sendPrompt(text, images);
     });
     ipcMain.handle(CH_APPROVE, (event: IpcMainInvokeEvent, requestId: unknown, response: unknown) => {
       this.assertSender(event);
@@ -1754,7 +1912,8 @@ export class SessionRuntime {
       await this.sendCronCommand(validated);
       return;
     }
-    assertCommandAllowedDuringTurn(validated, this.activeTurn);
+    if (validated.type === 'set_model' && this.pendingModelSwitch) throw new Error('A model switch is already in progress.');
+    assertCommandAllowedDuringTurn(validated, this.turnActive);
     if (validated.type === 'set_permission_mode' && validated.mode === 'bypassPermissions') {
       const accepted = (await this.opts.confirmBypassPermissions?.()) ?? false;
       if (!accepted) {
@@ -1767,8 +1926,8 @@ export class SessionRuntime {
       // would race a real reply the engine has already accepted.
       this.outstandingResponderRequests.delete(validated.request_id);
     }
-    if (validated.type === 'set_model') {
-      await this.ensureModelProviderCredential(validated.model);
+    if (validated.type === 'set_model' && this.opts.resolveProviderCredential) {
+      return this.switchModel(validated.model);
     }
     this.requireClient().sendCommand(validated);
   }
@@ -1796,8 +1955,13 @@ export class SessionRuntime {
   }
 
   private async ensureModelProviderCredential(model: string): Promise<void> {
-    const providerId = resolveProviderIdForModel(model);
-    if (providerId) await this.ensureProviderCredentialCached(providerId);
+    if (!this.opts.resolveProviderCredential) return;
+    const generation = this.generation;
+    const client = this.requireClient();
+    if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
+    if (generation !== this.generation || client !== this.client) throw new Error('Provider credential loading was interrupted.');
+    await Promise.all(resolveModelCredentialProviderIds(model, this.credentialRoutingSettings)
+      .map((providerId) => this.ensureProviderCredentialCached(providerId)));
   }
 
   hasCachedProviderCredential(providerId: string): boolean {
@@ -1931,6 +2095,9 @@ export class SessionRuntime {
 
   private setState(next: ConnectionState): void {
     this.state = next;
+    if (next.status === 'disconnected' || next.status === 'error' || next.status === 'idle') {
+      this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
+    }
     if (
       this.pendingSessionResume
       && (next.status === 'disconnected' || next.status === 'error' || next.status === 'idle')
@@ -1955,6 +2122,11 @@ export class SessionRuntime {
     this.pendingCron.clear();
     ++this.generation;
     this.rejectPendingSessionResume(new Error('session resume was interrupted'));
+    this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
+    this.pendingCredentialSettings?.reject(new Error('Provider settings loading was interrupted.'));
+    this.pendingCredentialSettings = undefined;
+    this.credentialRoutingSettings = undefined;
+    this.pendingPromptHydrations.clear();
     this.clearTurnInteractions();
     // Losing the connection IS the engine's own drain: `close_connection`
     // drops every parked audio sender, so each in-flight call has already
@@ -2448,7 +2620,7 @@ export class SessionRuntimeManager {
     });
     ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, sessionId: unknown, text: unknown, images: unknown) => {
       this.assertSender(event);
-      this.requireById(sessionId).sendPrompt(text, images);
+      return this.requireById(sessionId).sendPrompt(text, images);
     });
     ipcMain.handle(CH_APPROVE, (event: IpcMainInvokeEvent, sessionId: unknown, requestId: unknown, response: unknown) => {
       this.assertSender(event);

@@ -82,7 +82,14 @@ test('a model entry with a blank id is refused even though the list is non-empty
 
 test('every one of the nine engine-supported provider types passes validation with a model', () => {
   for (const type of ['openai', 'openai-responses', 'anthropic', 'gemini', 'azure-openai', 'bedrock-claude', 'vertex-claude', 'vertex-gemini', 'foundry-claude']) {
-    assert.equal(validateCustomProvider({ type, models: [{ id: 'm' }] }), null, `${type} should be accepted`);
+    assert.equal(validateCustomProvider({
+      type,
+      baseUrl: 'https://example.com/v1',
+      apiKeyEnv: 'TEST_PROVIDER_KEY',
+      ...(type === 'azure-openai' ? { apiVersion: '2024-10-21' } : {}),
+      ...(type === 'bedrock-claude' ? { region: 'us-east-1' } : {}),
+      models: [{ id: 'm' }],
+    }), null, `${type} should be accepted`);
   }
 });
 

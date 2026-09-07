@@ -495,10 +495,10 @@ export class HostController {
       this.assertSender(event);
       if (this.credentialBroker) {
         await this.refreshCredentialBrokerStatus(
-          providerId !== undefined ? this.requireProvider(providerId).id : undefined,
+          providerId !== undefined ? (await this.requireCredentialProvider(providerId)).id : undefined,
         );
       } else if (providerId !== undefined) {
-        const provider = this.requireProvider(providerId);
+        const provider = await this.requireCredentialProvider(providerId);
         const runtime = this.currentRuntime();
         if (runtime?.connectionState.status === 'connected') {
           await runtime.listProviderCredentials([provider.id], [provider.id]);
@@ -508,7 +508,7 @@ export class HostController {
     });
     this.ipc.handle(CH_PROVIDER_CREDENTIAL_SET, async (event: IpcMainInvokeEvent, providerId: unknown, credential: unknown) => {
       this.assertSender(event);
-      const provider = this.requireProvider(providerId);
+      const provider = await this.requireCredentialProvider(providerId);
       if (typeof credential !== 'string') throw new Error('invalid credential');
       this.assertNoActiveTurn();
       const credentialMetadata = this.credentialBroker
@@ -518,7 +518,7 @@ export class HostController {
     });
     this.ipc.handle(CH_PROVIDER_CREDENTIAL_CLEAR, async (event: IpcMainInvokeEvent, providerId: unknown) => {
       this.assertSender(event);
-      const provider = this.requireProvider(providerId);
+      const provider = await this.requireCredentialProvider(providerId);
       this.assertNoActiveTurn();
       if (this.credentialBroker) await this.clearCredentialThroughBroker(provider.id);
       else {
@@ -845,7 +845,7 @@ export class HostController {
     const credentialPreviews = this.credentialBroker
       ? Object.fromEntries(this.brokerCredentialPreviews)
       : runtime?.providerCredentialPreviews ?? legacy.providerCredentialPreviews ?? {};
-    return PROVIDER_IDS.map((providerId) => {
+    return this.credentialProviderIds().map((providerId) => {
       if (persistedProviders.has(providerId)) {
         return {
           providerId,
@@ -884,14 +884,14 @@ export class HostController {
   private async refreshCredentialBrokerStatus(previewProviderId?: string): Promise<void> {
     if (!this.credentialBroker) return;
     const nextConfigured = new Set(
-      (await this.credentialBroker.listStatus(PROVIDER_IDS))
+      (await this.credentialBroker.listStatus(this.credentialProviderIds()))
         .filter((entry: CredentialBrokerStatus) => entry.configured)
         .map((entry: CredentialBrokerStatus) => entry.providerId),
     );
     this.brokerStorageError = undefined;
     this.brokerConfiguredProviders.clear();
     for (const providerId of nextConfigured) this.brokerConfiguredProviders.add(providerId);
-    for (const providerId of PROVIDER_IDS) {
+    for (const providerId of this.credentialProviderIds()) {
       if (!nextConfigured.has(providerId)) this.brokerCredentialPreviews.delete(providerId);
     }
     if (!previewProviderId) return;
@@ -944,6 +944,24 @@ export class HostController {
     this.brokerConfiguredProviders.delete(providerId);
     this.brokerCredentialPreviews.delete(providerId);
     this.brokerStorageError = undefined;
+  }
+
+  private credentialProviderIds(): string[] {
+    return [...new Set([...PROVIDER_IDS, ...(this.currentRuntime()?.customProviderIds ?? [])])];
+  }
+
+  private async requireCredentialProvider(providerId: unknown): Promise<{ id: string }> {
+    if (typeof providerId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(providerId)) {
+      throw new Error('invalid provider id');
+    }
+    if (providerById(providerId)) return this.requireProvider(providerId);
+    const runtime = this.currentRuntime();
+    if (!runtime?.customProviderIds?.includes(providerId)) {
+      if (!runtime?.ensureCustomProviderConfigured) throw new Error('unsupported provider');
+      await runtime.ensureCustomProviderConfigured(providerId);
+      if (runtime !== this.currentRuntime() || !runtime.customProviderIds.includes(providerId)) throw new Error('unsupported provider');
+    }
+    return { id: providerId };
   }
 
   private requireProvider(providerId: unknown) {

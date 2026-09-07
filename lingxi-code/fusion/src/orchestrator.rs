@@ -690,7 +690,10 @@ impl FusionOrchestrator {
                 facts.set_attempt_settlement(platform_api::FusionAttemptSettlementStatus::Failed {
                     reason: error.to_string(),
                 });
-                return Err(error);
+                // Panels have already executed. A host diagnostic such as
+                // InvalidConfiguration must not regain a preflight/zero-call
+                // meaning and refund their lifetime spawn quota.
+                return Err(FusionError::Internal);
             }
         }
         let mut panels = match panel_result {

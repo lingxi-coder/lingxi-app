@@ -46,14 +46,12 @@ async fn waiter_id_overflow_and_poison_fail_closed() {
     let mut waiting = Box::pin(core.reserve_group(1, deadline(), CancellationToken::new()));
     assert!(poll!(&mut waiting).is_pending());
     let poisoned = core.clone();
-    assert!(
-        std::thread::spawn(move || {
-            let _guard = poisoned.state.lock().unwrap();
-            panic!("poison capacity book");
-        })
-        .join()
-        .is_err()
-    );
+    assert!(std::thread::spawn(move || {
+        let _guard = poisoned.state.lock().unwrap();
+        panic!("poison capacity book");
+    })
+    .join()
+    .is_err());
     drop(held);
     assert!(matches!(waiting.await, Err(AdmissionError::Closed)));
     assert!(matches!(
@@ -99,9 +97,14 @@ fn deadline() -> Instant {
 async fn producer_ticket_waits_for_every_physical_owner_without_holding_capacity() {
     use platform_api::panel_pool::PanelPoolDrain;
     let core = CapacityCore::new(2).unwrap();
-    let mut permits = core.reserve_group(2, deadline(), CancellationToken::new()).await.unwrap();
+    let mut permits = core
+        .reserve_group(2, deadline(), CancellationToken::new())
+        .await
+        .unwrap();
     let ticket = PoolGroupDrain::new(2);
-    for permit in &mut permits { permit.track_group(ticket.clone()); }
+    for permit in &mut permits {
+        permit.track_group(ticket.clone());
+    }
     let first = Arc::new(permits.pop().unwrap());
     let runner = first.clone();
     let second = permits.pop().unwrap();

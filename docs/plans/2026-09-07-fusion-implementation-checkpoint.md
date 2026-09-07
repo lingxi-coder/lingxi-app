@@ -24,13 +24,20 @@ PR05 was completed previously. The approved full optimization plan remains
 - Independent source reviews found and drove fixes for premature capacity
   release and analyst dispatch before producer/receipt drain. Source approval
   is not a substitute for compilation or executed integration tests.
-- The last full nine-package Cargo attempt failed on Desktop's private ledger
-  access and a move from borrowed `ProtocolFamily`. This checkpoint corrects
-  those two errors; the complete test suite has not been rerun afterward.
+- The resumed nine-package library suite passed: agent 430, cost 185,
+  engine-desktop 399, fusion 247, llm-client 857, orchestrator 1066,
+  platform-api 336, tasks 379 and tool-agent 159 (4058 total; exit 0).
+  This validates the checkpoint plus the subsequent verification fixes.
+- Desktop boot tests now isolate native watch delivery with a test-only
+  counted stream while retaining real supervisors and shutdown/drain. Native
+  macOS FSEvents RPC blocked the earlier run; production watcher behavior is
+  unchanged and its native lifecycle is not validated by this test fixture.
+- A new regression first reproduced post-panel settlement errors being
+  classified as zero-provider preflight failures. The runtime error boundary
+  now preserves settlement details without incorrectly refunding spawn quota.
 - Production Desktop registration of the attempt host and explicit activation
-  of atomic panel admission remain pending. The new Desktop
-  `fusion_pool_admission_test.rs` is preserved but is not yet declared as a
-  test module. Wire it before claiming its three tests have been executed.
+  of atomic panel admission remain pending. The three Desktop pool admission
+  integration tests are now declared and passed in the 399-test suite.
 - Finish full affected-package tests, Clippy, app checks and formatting before
   enabling production paths or merging. No paid provider testing was run.
 - Workflow batch admission, evidence integration, cache retirement and the

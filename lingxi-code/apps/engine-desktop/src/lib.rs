@@ -42,6 +42,10 @@ pub mod session_agents;
 pub mod session_state;
 pub mod settings_watch;
 mod skill_loader;
+#[cfg(test)]
+mod watcher_test_support;
+#[cfg(test)]
+mod fusion_pool_admission_test;
 
 use crate::ide::DesktopIdeHandle;
 use async_trait::async_trait;
@@ -15569,8 +15573,14 @@ pub async fn build(
     //       thread) would be pure overhead in the common no-hook case — gating
     //       keeps boot cheap and avoids holding an OS watch handle nobody
     //       consumes.
+    #[cfg(not(test))]
     let watch_fs: Arc<dyn platform_api::FileSystem> =
         Arc::new(PosixFileSystem::new(watch_cwd.clone()));
+    // Unit tests exercise the real watcher lifecycle with cancellable streams,
+    // without depending on the host FSEvents daemon's blocking startup/stop RPCs.
+    #[cfg(test)]
+    let watch_fs: Arc<dyn platform_api::FileSystem> =
+        Arc::new(watcher_test_support::WatchFs::new(watch_cwd.clone()));
     let firer: Arc<dyn settings_watch::ConfigChangeFirer> = orch.clone();
     let settings_watcher =
         settings_watch::SettingsWatcher::new(&cfg.lingxi_home, &watch_cwd, firer)
@@ -15601,8 +15611,12 @@ pub async fn build(
     let matcher_refs: Vec<&str> = file_changed_matchers.iter().map(String::as_str).collect();
     let watcher =
         file_changed_watch::FileChangedWatcher::new(&matcher_refs, &watch_cwd, file_changed_firer);
+    #[cfg(not(test))]
     let watch_fs: Arc<dyn platform_api::FileSystem> =
         Arc::new(PosixFileSystem::new(watch_cwd.clone()));
+    #[cfg(test)]
+    let watch_fs: Arc<dyn platform_api::FileSystem> =
+        Arc::new(watcher_test_support::WatchFs::new(watch_cwd.clone()));
     let file_changed_watcher = watcher.spawn(watch_fs).await;
     // Fill the `CwdChanged` firer's deferred rebinder cell now that the watcher
     // exists (it spawns AFTER the firer is built). On a mid-session `cd` the

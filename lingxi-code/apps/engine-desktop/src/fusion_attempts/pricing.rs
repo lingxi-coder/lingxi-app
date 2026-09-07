@@ -157,7 +157,11 @@ pub(super) fn quote(
     ),
     String,
 > {
-    quote_body(route, prepared.route.protocol.clone(), &prepared.provider_request)
+    quote_body(
+        route,
+        prepared.route.protocol.clone(),
+        &prepared.provider_request,
+    )
 }
 
 pub(super) fn quote_body(

@@ -1,5 +1,48 @@
 //! Fake-spawner / fake-side-query tests for the Fusion orchestrator.
 
+#[tokio::test]
+async fn panel_settlement_failure_after_execution_is_not_a_preflight_refund() {
+    struct FailedFence;
+    #[async_trait]
+    impl crate::FusionPanelAttemptFence for FailedFence {
+        fn close(&self) {}
+        async fn wait(&self) -> Result<(), FusionError> {
+            Err(FusionError::InvalidConfiguration("panel receipt rejected".into()))
+        }
+    }
+    struct Registrar;
+    impl crate::FusionAttemptRegistrar for Registrar {
+        fn register(&self, _: crate::FusionAttemptRegistration) -> Result<crate::RegisteredFusionAttempts, FusionError> {
+            Ok(crate::RegisteredFusionAttempts {
+                panel_fence: Some(Arc::new(FailedFence)),
+                run: Arc::new(platform_api::ModelAttemptRun::new(Arc::new(()))),
+                finalizer: Box::new(AttemptFinalizerProbe {
+                    fail: false, settled: Arc::new(AtomicUsize::new(0)), barrier: None,
+                }),
+            })
+        }
+    }
+    let spawner = FakeSpawner::new(three_ok());
+    let query = Arc::new(AttemptQueryProbe {
+        inner: ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        contexts: Mutex::new(vec![]),
+    });
+    let orchestrator = Arc::new(FusionOrchestrator::new(
+        spawner.clone(), query.clone(), Arc::new(test_config()), Arc::new(catalog()),
+    ).with_attempt_registrar(Arc::new(Registrar)));
+    let identity = FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Slash, None);
+    let prepared = orchestrator.prepare(FusionSubmission::new(request("task"), inherit(), identity).unwrap()).unwrap();
+    let outcome = prepared.activate(FusionActivation::now(), None).await;
+    let error = outcome.result.unwrap_err();
+    assert_eq!(spawner.requests.lock().unwrap().len(), 3);
+    assert_eq!(outcome.facts.allocated_panels, Some(3));
+    assert!(!error.guarantees_zero_provider_calls(), "paid panels cannot be refunded as preflight: {error}");
+    assert_eq!(error, FusionError::Internal);
+    assert!(query.contexts.lock().unwrap().is_empty(), "failed settlement must block the analyst");
+    assert!(matches!(outcome.facts.attempt_settlement, Some(platform_api::FusionAttemptSettlementStatus::Failed { .. })));
+    assert_eq!(outcome.facts.usage.unwrap().provider_requests, 8);
+}
+
 #[test]
 fn completion_policy_request_no_partial_rejects_before_attempt_registration() {
     let mut config = test_config();

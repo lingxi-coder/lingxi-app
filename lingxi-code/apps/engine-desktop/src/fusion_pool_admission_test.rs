@@ -1,3 +1,4 @@
+use ::fusion as fusion_engine;
 use async_trait::async_trait;
 use platform_api::panel_pool::PanelPoolDrain;
 use platform_api::subagent_spawn::SubagentInheritance;
@@ -45,9 +46,9 @@ impl BudgetEnforcerHandle for Budget {
     }
 }
 struct Prices;
-impl fusion::FusionPriceBook for Prices {
-    fn rates_for(&self, _: &str, _: &str) -> Option<fusion::ModelRates> {
-        Some(fusion::ModelRates {
+impl fusion_engine::FusionPriceBook for Prices {
+    fn rates_for(&self, _: &str, _: &str) -> Option<fusion_engine::ModelRates> {
+        Some(fusion_engine::ModelRates {
             input_nano_usd_per_token: 1,
             output_nano_usd_per_token: 1,
             per_request_nano_usd: 1,
@@ -202,7 +203,7 @@ struct ReceiptFence {
     gate: Gate,
 }
 #[async_trait]
-impl fusion::FusionPanelAttemptFence for ReceiptFence {
+impl fusion_engine::FusionPanelAttemptFence for ReceiptFence {
     fn close(&self) {
         self.closed.store(true, Ordering::Release);
     }
@@ -213,12 +214,12 @@ impl fusion::FusionPanelAttemptFence for ReceiptFence {
     }
 }
 struct Registrar(Arc<ReceiptFence>);
-impl fusion::FusionAttemptRegistrar for Registrar {
+impl fusion_engine::FusionAttemptRegistrar for Registrar {
     fn register(
         &self,
-        _: fusion::FusionAttemptRegistration,
-    ) -> Result<fusion::RegisteredFusionAttempts, FusionError> {
-        Ok(fusion::RegisteredFusionAttempts {
+        _: fusion_engine::FusionAttemptRegistration,
+    ) -> Result<fusion_engine::RegisteredFusionAttempts, FusionError> {
+        Ok(fusion_engine::RegisteredFusionAttempts {
             run: Arc::new(ModelAttemptRun::new(self.0.clone())),
             panel_fence: Some(self.0.clone()),
             finalizer: Box::new(Finalizer),
@@ -226,18 +227,19 @@ impl fusion::FusionAttemptRegistrar for Registrar {
     }
 }
 struct Finalizer;
-impl fusion::FusionAttemptFinalizer for Finalizer {
-    fn finish(self: Box<Self>) -> Box<dyn fusion::FusionAttemptSettlement> {
+impl fusion_engine::FusionAttemptFinalizer for Finalizer {
+    fn finish(self: Box<Self>) -> Box<dyn fusion_engine::FusionAttemptSettlement> {
         self
     }
 }
 #[async_trait]
-impl fusion::FusionAttemptSettlement for Finalizer {
+impl fusion_engine::FusionAttemptSettlement for Finalizer {
     async fn wait(
         self: Box<Self>,
-    ) -> Result<fusion::FusionAttemptSummary, fusion::FusionAttemptSettlementError> {
+    ) -> Result<fusion_engine::FusionAttemptSummary, fusion_engine::FusionAttemptSettlementError>
+    {
         // Scheduling-only mock: these fakes do not incur provider charges.
-        Ok(fusion::FusionAttemptSummary {
+        Ok(fusion_engine::FusionAttemptSummary {
             usage: Default::default(),
             confirmed_egress: vec![],
             possible_egress: vec![],
@@ -309,7 +311,7 @@ impl SubagentSpawner for AdmissionProbe {
 
 struct Fixture {
     spawner: Arc<agent::PoolSubagentSpawner>,
-    orchestrator: Arc<fusion::FusionOrchestrator>,
+    orchestrator: Arc<fusion_engine::FusionOrchestrator>,
     api: Arc<Api>,
     judge: Arc<Judge>,
     budget: Arc<Budget>,
@@ -333,7 +335,7 @@ impl Fixture {
         let judge = Arc::new(Judge::default());
         let catalog: Vec<_> = ["claude-sonnet-5", "claude-opus-4-7"]
             .into_iter()
-            .map(|model| fusion::CatalogModel {
+            .map(|model| fusion_engine::CatalogModel {
                 profile: "anthropic".into(),
                 model: model.into(),
                 hints: FusionModelHints {
@@ -343,7 +345,7 @@ impl Fixture {
                     ..Default::default()
                 },
                 structured_output: true,
-                limits: fusion::ModelLimits {
+                limits: fusion_engine::ModelLimits {
                     context_window_tokens: Some(200_000),
                     max_input_tokens: Some(180_000),
                     max_output_tokens: Some(32_000),
@@ -356,12 +358,12 @@ impl Fixture {
             queued: queued.clone(),
             producer_gate: gates.as_ref().map(|(producer, _)| producer.clone()),
         });
-        let mut orchestrator = fusion::FusionOrchestrator::new(
+        let mut orchestrator = fusion_engine::FusionOrchestrator::new(
             probe,
             judge.clone(),
-            Arc::new(fusion::FusionRuntimeConfig {
+            Arc::new(fusion_engine::FusionRuntimeConfig {
                 analysis_protocol_retries: 0,
-                ..fusion::FusionRuntimeConfig::defaults()
+                ..fusion_engine::FusionRuntimeConfig::defaults()
             }),
             Arc::new(catalog),
         )

@@ -11,7 +11,7 @@ use platform_api::{
 };
 
 /// Usage line for empty / invalid invocations.
-pub const FUSION_SLASH_USAGE: &str = "Usage: /fusion [--quality|--fast] [--same-provider|--cross-provider] [--models profile:model,...] [--dimensions dim,...] [--partial-ok|--no-partial] [--max-panel N] PROMPT";
+pub const FUSION_SLASH_USAGE: &str = "Usage: /fusion [--quality|--fast] [--same-provider|--cross-provider] [--models profile:model,...] [--dimensions dim,...] [--partial-ok|--no-partial] [--max-panel N] PROMPT\n   or: /fusion --retry-publication fu_RUN_ID";
 
 /// Parsed `/fusion` flags plus the remaining prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]

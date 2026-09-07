@@ -35,15 +35,18 @@ mod cron_command;
 pub mod file_changed_watch;
 pub mod fork_resume;
 mod fusion_command;
+pub mod fusion_recorder;
 pub mod ide;
 pub mod session_agents;
-mod session_state;
+pub mod session_state;
 pub mod settings_watch;
 mod skill_loader;
 
 use crate::ide::DesktopIdeHandle;
+use async_trait::async_trait;
 use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
 use command_api::model::BuiltinCommandHandler;
+use cost::CostHydrator;
 use command_api::{
     parse_slash_command, CommandRegistry, CommandResult, ParsedSlashCommand,
     RegistrySlashDispatcher,
@@ -5296,6 +5299,46 @@ pub fn register_desktop_tools(
     worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
     fusion: Option<Arc<dyn platform_api::FusionExecutor>>,
 ) -> tool_cron::WakeupSchedulerCell {
+    register_desktop_tools_with_fusion_recorder(
+        reg,
+        ctx,
+        coordinator,
+        ask_user_question_resolver,
+        advertise_ask_user_question,
+        computer_access_resolver,
+        cron_auth,
+        skill_loader,
+        cwd_changed_firer,
+        web_side_query,
+        live_cwd,
+        worktree_state_persister,
+        fusion,
+        None,
+        None,
+    )
+}
+
+/// Assemble the desktop tools with the optional host-owned Fusion recorder.
+#[allow(clippy::too_many_arguments)]
+pub fn register_desktop_tools_with_fusion_recorder(
+    reg: &mut ToolRegistry,
+    ctx: BuiltinToolContext,
+    coordinator: Option<CoordinatorWiring>,
+    ask_user_question_resolver: Option<
+        Arc<dyn tool_ui::ask_user_question::AskUserQuestionResolver>,
+    >,
+    advertise_ask_user_question: bool,
+    computer_access_resolver: Option<Arc<dyn tool_computer_use::ComputerAccessResolver>>,
+    cron_auth: Option<Arc<dyn tool_cron::ClaudeAiAuthProvider>>,
+    skill_loader: Option<Arc<dyn tool_skill::skill::SkillLoader>>,
+    cwd_changed_firer: hooks::OptionalCwdChangedFirer,
+    web_side_query: Option<Arc<dyn sidequery::SideQueryClient>>,
+    live_cwd: Option<tool_api::LiveCwdCell>,
+    worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
+    fusion: Option<Arc<dyn platform_api::FusionExecutor>>,
+    fusion_recorder: Option<Arc<dyn platform_api::FusionRunRecorder>>,
+    fusion_recorder_factory: Option<Arc<dyn platform_api::FusionRunRecorderFactory>>,
+) -> tool_cron::WakeupSchedulerCell {
     // ----- cross-platform tool crates (also linked by engine-mobile, P11) ---
     // (P2-08) The shared live-cwd cell (`getCwd()`/`Ct()`): the desktop `BashTool`
     // writes it on a `cd`, and Read/Glob/Grep + the LSP tool read it as their live
@@ -5405,7 +5448,13 @@ pub fn register_desktop_tools(
     // ----- desktop-only tool crates ----------------------------------------
     // Fusion is injected here (not inside `tool_agent::register_all`) so mobile
     // and snapshot tests keep an inert Agent tool.
-    tool_agent::register_with_fusion(reg, ctx.clone(), fusion);
+    tool_agent::register_with_fusion_and_recorder_factory(
+        reg,
+        ctx.clone(),
+        fusion,
+        fusion_recorder.clone(),
+        fusion_recorder_factory,
+    );
     match coordinator {
         // Coordinator-capable session: register the coordinator `TeamCreate` /
         // `TeamDelete` IN PLACE OF `tool_team`'s pair. `tool_team::register_all`
@@ -5842,6 +5891,10 @@ pub struct DesktopConfig {
     /// claude-code `--session-id`. The host (`apps/cli` / `apps/bridge-server`)
     /// validates UUID-ness + the cross-flag rules before setting this.
     pub session_id_override: Option<String>,
+    /// Construction-only writer claim acquired by the host. When present the
+    /// engine consumes this exact Arc instead of opening a second OS lock;
+    /// None keeps standalone desktop/test hosts on the local claim path.
+    pub session_writer_lease: Option<platform_api::live_sessions::SharedSessionWriterLease>,
     /// Source session id for a forked transcript. When present it is appended
     /// to Anthropic's JSON-string `metadata.user_id` as `parent_session_id`.
     /// Ordinary fresh/resumed sessions leave this unset.
@@ -6282,6 +6335,10 @@ impl std::fmt::Debug for DesktopConfig {
                 &self.append_system_prompt.is_some(),
             )
             .field("session_id_override", &self.session_id_override)
+            .field(
+                "session_writer_lease",
+                &self.session_writer_lease.as_ref().map(|_| "claimed"),
+            )
             .field("parent_session_id", &self.parent_session_id)
             .field("disable_slash_commands", &self.disable_slash_commands)
             .field(
@@ -6376,6 +6433,7 @@ impl Default for DesktopConfig {
             system_prompt_override: None,
             append_system_prompt: None,
             session_id_override: None,
+            session_writer_lease: None,
             parent_session_id: None,
             disable_slash_commands: false,
             add_dir: Vec::new(),
@@ -6924,11 +6982,274 @@ impl BuiltinCommandHandler for DesktopWorktreeCommandHandler {
     }
 }
 
+/// Ordered owner of host-shutdown persistence barriers. Clones keep the exact
+/// task registry, cost ledger, per-session coordinators, and outbox delivery
+/// locks alive until accepted work is settled.
+struct ProcessSessionActivationObserver;
+
+#[async_trait]
+impl orchestrator::conversation::SessionActivationObserver for ProcessSessionActivationObserver {
+    async fn session_activated(
+        &self,
+        previous: protocol::SessionId,
+        current: protocol::SessionId,
+    ) -> Result<(), String> {
+        refresh_process_session_presence(previous, current).await
+    }
+}
+
+/// Rebind this host process's UDS generation and live discovery record after
+/// the owned orchestrator commit. The conversation switch is already durable;
+/// failures are returned as post-commit warnings and stale socket fields are
+/// removed rather than advertising an endpoint under the wrong session.
+pub async fn refresh_process_session_presence(
+    previous: protocol::SessionId,
+    current: protocol::SessionId,
+) -> Result<(), String> {
+    if previous == current {
+        return Ok(());
+    }
+    let Some(dir) = platform_api::live_sessions::process_dir() else {
+        return Ok(());
+    };
+    let pid = std::process::id();
+    let current_text = current.as_uuid().to_string();
+    let observed = platform_api::live_sessions::process_session_id()
+        .as_deref()
+        .and_then(protocol::SessionId::parse_prefixed)
+        .ok_or_else(|| "live process has no valid scoped session identity".to_string())?;
+    if observed != previous && observed != current {
+        return Err(format!(
+            "stale session activation {previous} -> {current} cannot replace live session {observed}"
+        ));
+    }
+    let already_current = observed == current;
+    let socket = if already_current {
+        platform_api::uds_inbox::process_socket_path()
+    } else {
+        let inbox_session = current_text.clone();
+        match tokio::task::spawn_blocking(move || {
+            platform_api::uds_inbox::retarget_process_inbox(&inbox_session)
+        })
+        .await
+        {
+            Ok(Ok(path)) => Some(path),
+            Ok(Err(error)) => {
+                platform_api::live_sessions::set_process_session_id(&current_text);
+                let _ = dir.upsert_identity(
+                    pid,
+                    &current_text,
+                    platform_api::live_sessions::process_name().as_deref(),
+                    None,
+                    None,
+                    platform_api::live_sessions::process_permission_class().as_deref(),
+                );
+                let _ = dir.clear_messaging_socket_if_session(pid, &current_text);
+                let _ = dir.clear_messaging_socket_if_session(pid, &previous.to_string());
+                return Err(format!("cross-session inbox is unavailable: {error}"));
+            }
+            Err(error) => {
+                platform_api::live_sessions::set_process_session_id(&current_text);
+                let _ = dir.upsert_identity(
+                    pid,
+                    &current_text,
+                    platform_api::live_sessions::process_name().as_deref(),
+                    None,
+                    None,
+                    platform_api::live_sessions::process_permission_class().as_deref(),
+                );
+                let _ = dir.clear_messaging_socket_if_session(pid, &current_text);
+                let _ = dir.clear_messaging_socket_if_session(pid, &previous.to_string());
+                return Err(format!("cross-session inbox task failed: {error}"));
+            }
+        }
+    };
+    platform_api::live_sessions::set_process_session_id(&current_text);
+    if let Err(error) = dir.upsert_identity(
+        pid,
+        &current_text,
+        platform_api::live_sessions::process_name().as_deref(),
+        None,
+        socket.as_deref(),
+        platform_api::live_sessions::process_permission_class().as_deref(),
+    ) {
+        let _ = dir.clear_messaging_socket_if_session(pid, &previous.to_string());
+        return Err(format!("live-session identity could not be updated: {error}"));
+    }
+    if socket.is_none() {
+        dir.clear_messaging_socket_if_session(pid, &current_text)
+            .map_err(|error| format!("stale messaging presence could not be cleared: {error}"))?;
+    }
+    Ok(())
+}
+
+pub struct DesktopSessionLifecycle {
+    settings_watcher: settings_watch::SettingsWatcherHandle,
+    file_changed_watcher: file_changed_watch::FileChangedWatcherHandle,
+    cron_scheduler: Option<Arc<cron::CronScheduler>>,
+    orchestrator: Arc<ConversationOrchestrator>,
+    mcp_reconnect_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    mcp_catalog_refresh_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task_registry: Arc<tasks::registry::TaskRegistry>,
+    command_registry: Arc<RwLock<CommandRegistry>>,
+    subagent_spawner: Arc<agent::handle::PoolSubagentSpawner>,
+    cost_tracker: Arc<cost::CostTracker>,
+    session_state_manager: Option<Arc<session_state::SessionStateManager>>,
+    fusion_recorder_factory: Option<Arc<fusion_recorder::DesktopFusionRecorderFactory>>,
+    fusion_recovery_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+/// Truthful result of a host shutdown drain. Independent producer barriers are
+/// attempted on failure, but live-worker dependencies remain owned for retry.
+#[derive(Debug, Default)]
+pub struct DesktopSessionShutdownReport {
+    /// True only after every barrier succeeded. An incomplete shutdown must
+    /// not be followed by a whole-runtime session remount.
+    pub complete: bool,
+    /// Persistence/producer failures observed after all possible drains ran.
+    pub errors: Vec<String>,
+    /// Final durable publication states for every known Slash outbox.
+    pub publications: Vec<platform_api::FusionPublicationReceipt>,
+}
+
+impl DesktopSessionLifecycle {
+    /// Stop producers, settle known provider usage, fence session queues, drain
+    /// retained outbox I/O, then fence late acknowledgements. Filesystem work
+    /// already in progress is never cancelled merely because a UI waiter left.
+    /// The host must await this barrier to completion without racing another
+    /// shutdown call; an incomplete report may then be retried sequentially.
+    pub async fn shutdown_and_drain(&self) -> DesktopSessionShutdownReport {
+        let mut report = DesktopSessionShutdownReport::default();
+        let mut producers_drained = true;
+        // Both watcher families can fire hooks that retain the orchestrator or
+        // create children. Join their actual jobs before draining consumers.
+        tokio::join!(
+            self.settings_watcher.shutdown_and_drain(),
+            self.file_changed_watcher.shutdown_and_drain(),
+        );
+        if let Some(scheduler) = self.cron_scheduler.as_ref() {
+            if let Err(error) = scheduler.stop().await {
+                producers_drained = false;
+                report
+                    .errors
+                    .push(format!("cron scheduler shutdown failed: {error}"));
+            }
+        }
+        if let Some(reconnect) = self.mcp_reconnect_task.lock().await.take() {
+            reconnect.abort();
+            let _ = reconnect.await;
+        }
+        if let Some(refresh) = self.mcp_catalog_refresh_task.lock().await.take() {
+            refresh.abort();
+            let _ = refresh.await;
+        }
+        if let Err(error) = self.task_registry.shutdown_background_tasks().await {
+            producers_drained = false;
+            report.errors.push(format!("task shutdown failed: {error}"));
+        }
+        report.errors.extend(
+            self.orchestrator
+                .close_and_drain_session_switches()
+                .await
+                .into_iter()
+                .map(|error| format!("session switch failed: {error}")),
+        );
+        if !producers_drained {
+            // A failed handler drain cannot prove its worker stopped. Preserve
+            // commands, pool backedges and open coordinators so it can finish
+            // and this lifecycle can be retried. Already-observed charges may
+            // still be settled safely; no queue or writer claim is closed here.
+            if let Err(error) = self.cost_tracker.drain_owned_settlements().await {
+                report.errors.push(format!("cost settlement failed: {error}"));
+            }
+            return report;
+        }
+        let retired_command_handlers = {
+            self.command_registry
+                .write()
+                .await
+                .take_builtin_handlers()
+        };
+        // Handler destructors can release the orchestrator, whose skill-listing
+        // provider owns this same registry. Run that graph teardown only after
+        // the write guard above has been released.
+        drop(retired_command_handlers);
+        // The task registry has drained every handler-owned child and the
+        // session-switch supervisor has joined every accepted mount. Nothing
+        // can legitimately start another child now, so sever the pool's four
+        // construction-time backedges (tools/hooks/skills/MCP builder). The
+        // set-once latches remain closed and cannot be resurrected by a late
+        // producer.
+        self.subagent_spawner.release_runtime_links();
+        if let Err(error) = self.cost_tracker.drain_owned_settlements().await {
+            report.errors.push(format!("cost settlement failed: {error}"));
+        }
+        if let Some(manager) = self.session_state_manager.as_ref() {
+            if let Err(error) = manager.flush_all().await {
+                report
+                    .errors
+                    .push(format!("session queue flush failed: {error}"));
+            }
+        }
+        if let Some(recovery) = self.fusion_recovery_task.lock().await.take() {
+            if let Err(error) = recovery.await {
+                report
+                    .errors
+                    .push(format!("Fusion startup recovery task failed: {error}"));
+            }
+        }
+        if let Some(factory) = self.fusion_recorder_factory.as_ref() {
+            report.publications = factory.drain_pending_all().await;
+            for receipt in &report.publications {
+                if !matches!(
+                    receipt.status,
+                    platform_api::FusionPublicationStatus::Published
+                        | platform_api::FusionPublicationStatus::Queued
+                ) {
+                    report.errors.push(
+                        receipt
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "Fusion publication remains queued".into()),
+                    );
+                }
+            }
+        }
+        if let Some(manager) = self.session_state_manager.as_ref() {
+            if let Err(error) = manager.flush_all().await {
+                report
+                    .errors
+                    .push(format!("late session queue flush failed: {error}"));
+            }
+            if let Err(error) = manager.close_and_drain().await {
+                report
+                    .errors
+                    .push(format!("session state shutdown failed: {error}"));
+            }
+        }
+        report.complete = report.errors.is_empty();
+        report
+    }
+}
+
 pub struct DesktopRuntime {
     /// The fully-constructed orchestrator (cost tracker + MCP/hook/agent
     /// registries + compaction wired), bound to the supplied output stream and
     /// permission gate.
     pub orchestrator: Arc<ConversationOrchestrator>,
+    /// Hydrated per-session durable coordinator retained for Fusion terminal
+    /// receipts and ordinary cost mutations. None when persistence is
+    /// explicitly disabled.
+    pub session_state: Option<Arc<session_state::SessionStateCoordinator>>,
+    /// Common Fusion recorder pinned to the boot session's coordinator.
+    pub fusion_recorder: Option<Arc<dyn platform_api::FusionRunRecorder>>,
+    /// Per-session Fusion recorder factory retained for host shutdown/remount
+    /// draining. It owns recorders for every mounted session, not just boot A.
+    pub fusion_recorder_factory:
+        Option<Arc<fusion_recorder::DesktopFusionRecorderFactory>>,
+    /// Shared ordered shutdown owner used by CLI remounts and bridge process
+    /// teardown. It is always present, including explicit ephemeral mode.
+    pub session_lifecycle: Arc<DesktopSessionLifecycle>,
     /// The runtime analytics bus shared with the orchestrator and host-side
     /// producers. `mcp serve` uses this to emit process-scope startup
     /// telemetry after boot succeeds and before the request loop starts.
@@ -7292,6 +7613,9 @@ pub enum BuildError {
     /// Orchestrator construction failed.
     #[error("orchestrator construction failed: {0}")]
     Orchestrator(String),
+    /// Durable session claim/hydration/composition failed before activation.
+    #[error("durable session state failed: {0}")]
+    DurableSession(String),
     /// Secure-storage backend initialization failed.
     #[error("secure storage init failed: {0}")]
     SecureStorage(String),
@@ -10555,11 +10879,45 @@ fn aws_auth_refresher(
     )))
 }
 
+/// Read the pre-V1 project `lastCost` only when its session tag matches the
+/// boot identity.  Durable coordinators persist the evaluation marker even
+/// when this returns `None`, so a later mutable shadow-config edit cannot be
+/// imported into an already-authoritative ledger.  This small composition
+/// helper intentionally lives above `migrations`: the migration crate owns
+/// the JSON substrate, while the app owns the deterministic nano-USD mapping.
+/// Capture the single pre-V1 project shadow once at composition time. The
+/// returned tuple is immutable and can safely back hot-session matching; the
+/// manager never rereads mutable ambient config while opening later sessions.
+fn capture_legacy_opening_balance(
+    config_path: Option<&Path>,
+    cwd: &Path,
+) -> Option<(protocol::SessionId, u64)> {
+    let config_path = config_path?;
+    let project_key = migrations::global_config::project_path_for_config(cwd);
+    let project = migrations::global_config::get_project_config(&config_path, &project_key).ok()?;
+    let session = project.get("lastSessionId").and_then(serde_json::Value::as_str)?;
+    let session_id = protocol::SessionId::parse_prefixed(session)?;
+    let dollars = project.get("lastCost").and_then(serde_json::Value::as_f64)?;
+    if !dollars.is_finite() || dollars <= 0.0 {
+        return None;
+    }
+    let nanos = (dollars * 1_000_000_000.0).round();
+    if nanos >= u64::MAX as f64 {
+        Some((session_id, u64::MAX))
+    } else {
+        Some((session_id, nanos as u64))
+    }
+}
+
 pub async fn build(
-    cfg: DesktopConfig,
+    mut cfg: DesktopConfig,
     output: Arc<dyn OutputStream>,
     permission_sink: Arc<dyn PermissionRequestSink>,
 ) -> Result<DesktopRuntime, BuildError> {
+    // Consume the construction-only writer claim before any config-derived
+    // stack is cloned. Long-lived settings/catalog clones must not retain an
+    // obsolete session authority across a hot clear/resume.
+    let construction_writer_lease = cfg.session_writer_lease.take();
     let cwd = cfg.cwd.clone();
     let managed_settings_for_strict = crate::settings_watch::managed_settings_raw_tiers().await;
     let effective_settings = load_effective_settings_for_config(&cfg, &managed_settings_for_strict);
@@ -10617,6 +10975,13 @@ pub async fn build(
         &cfg.lingxi_home,
         &cwd.to_string_lossy(),
         &main_session_uuid,
+    );
+    // Create the one ordinary transcript writer before durable session setup.
+    // Production later decorates this same writer with the coordinator's
+    // durable transaction; legacy/no-persistence hosts keep compatibility.
+    let main_jsonl_writer = session::jsonl::writer::JsonlWriter::new(
+        main_transcript_path.clone(),
+        Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>,
     );
     // Resume the live file-history index before the first restored turn. The
     // `/rewind` command can parse snapshots directly from disk, but the edit
@@ -10964,11 +11329,186 @@ pub async fn build(
         base.push_str(&append);
     }
 
-    // (4.5) One CostTracker per process. The persist channel drains into a
-    //       fire-and-forget task that discards snapshots (on-disk persistence is
-    //       later work). Depth 64 absorbs bursts without blocking.
-    let (cost_persist_tx, mut cost_persist_rx) = tokio::sync::mpsc::channel(64);
-    tokio::spawn(async move { while cost_persist_rx.recv().await.is_some() {} });
+    // Phase 2a T7: one pricing catalog backs both ordinary cost and Fusion.
+    let pricing = Arc::new(pricing);
+
+    // (4.5) Acquire the one process-wide writer claim and hydrate the mixed
+    // session coordinator before constructing any paid tracker or Fusion
+    // handler. When persistence is disabled this remains fully ephemeral and
+    // no durable directories/locks are touched.
+    // The migration path is resolved once from the same configured home that
+    // owns the session ledger.  A TempDir/custom `lingxi_home` must not read
+    // the developer's ambient global config; such hosts pass `None` until an
+    // explicit legacy path is provided by their composition fixture.
+    let legacy_config_path = if cfg.session_persistence {
+        migrations::global_config::global_config_path().filter(|_| {
+            migrations::global_config::lingxi_config_home()
+                .is_some_and(|ambient_home| ambient_home == cfg.lingxi_home)
+        })
+    } else {
+        None
+    };
+    let legacy_opening_balance = capture_legacy_opening_balance(
+        legacy_config_path.as_deref(),
+        &cfg.cwd,
+    );
+    let session_state_manager = cfg.session_persistence.then(|| {
+        let legacy_shadow = legacy_opening_balance.map(|(legacy_session_id, amount)| {
+            Arc::new(move |session_id| (session_id == legacy_session_id).then_some(amount))
+                as Arc<
+                    dyn Fn(protocol::SessionId) -> Option<u64> + Send + Sync + 'static,
+                >
+        });
+        session_state::SessionStateManager::new_with_legacy_shadow(
+            cfg.lingxi_home.clone(),
+            legacy_shadow,
+        )
+    });
+    let (session_state, durable_hydration) = if cfg.session_persistence {
+        let lease = if let Some(lease) = construction_writer_lease {
+            lease
+        } else {
+            platform_api::live_sessions::LiveSessionDir::at_live(
+                cfg.lingxi_home.join("sessions"),
+            )
+            .claim_session_id(&main_session_id.to_string(), std::process::id())
+            .map_err(|error| BuildError::DurableSession(error.to_string()))?
+            .into_shared()
+        };
+        let coordinator = session_state::SessionStateCoordinator::open(
+            &cfg.lingxi_home,
+            main_session_id,
+            lease.clone(),
+        )
+        .map_err(|error| BuildError::DurableSession(error.to_string()))?;
+        let initialization: Result<_, cost::CostPersistError> = async {
+            coordinator.start().await?;
+            let _initial_hydration = coordinator.hydrate(main_session_id).await?;
+            coordinator
+                .import_legacy_opening_balance(
+                    legacy_opening_balance
+                        .filter(|(session_id, _)| *session_id == main_session_id)
+                        .map(|(_, amount)| amount),
+                )
+                .await?;
+            // The import marker/opening balance is itself a durable mutation,
+            // so seed the tracker only from the post-import authoritative
+            // projection.
+            let hydration = coordinator.hydrate(main_session_id).await?;
+            if let Some(manager) = session_state_manager.as_ref() {
+                manager
+                    .register(main_session_id, coordinator.clone())
+                    .await?;
+            }
+            Ok(hydration)
+        }
+        .await;
+        let hydration = match initialization {
+            Ok(hydration) => hydration,
+            Err(error) => {
+                let cleanup = coordinator.close_and_drain().await.err();
+                let message = cleanup.map_or_else(
+                    || error.to_string(),
+                    |cleanup| format!("{error}; coordinator cleanup failed: {cleanup}"),
+                );
+                return Err(BuildError::DurableSession(message));
+            }
+        };
+        (Some(coordinator), Some(hydration))
+    } else {
+        (None, None)
+    };
+
+    // Decorate the same writer that the orchestrator receives. Fusion delivery
+    // resolves its active path under this writer's lock and the coordinator's
+    // durable transaction, so ordinary append, outbox delivery, and `/cd`
+    // retargeting share one authority.
+    let main_jsonl_writer = if let Some(coordinator) = session_state.as_ref() {
+        let durable_writer = Arc::new(session::jsonl::DurableTranscriptWriter::from_pinned(
+            coordinator.journal().root().to_path_buf(),
+            coordinator.journal().root_identity(),
+        ));
+        let writer = Arc::new(main_jsonl_writer.with_durable_lock(durable_writer));
+        writer
+            .activate_session_target(
+                main_session_id,
+                main_transcript_path.clone(),
+                cfg.cwd.clone(),
+            )
+            .map_err(|error| BuildError::DurableSession(error.to_string()))?;
+        writer
+    } else {
+        Arc::new(main_jsonl_writer)
+    };
+    if let Some(manager) = session_state_manager.as_ref() {
+        manager.set_transcript_writer(main_jsonl_writer.clone());
+    }
+    let fusion_transcript_target = session_state.as_ref().map(|_| {
+        fusion_recorder::FusionTranscriptTarget::new(main_jsonl_writer.clone())
+            .for_session(main_session_id)
+    });
+    let fusion_recorder_factory_impl = session_state_manager.as_ref().map(|manager| {
+        Arc::new(fusion_recorder::DesktopFusionRecorderFactory::new(
+                manager.clone(),
+                fusion_transcript_target
+                    .as_ref()
+                    .expect("durable session has a transcript target")
+                    .clone(),
+            ))
+    });
+    // Resolve the boot recorder through the same factory retained for hot
+    // sessions and shutdown recovery. This both shares its per-delivery lock
+    // and ensures a boot outbox is included in `retry_pending_all()`.
+    let (fusion_recorder, fusion_recovery_recorder): (
+        Option<Arc<dyn platform_api::FusionRunRecorder>>,
+        Option<Arc<fusion_recorder::DesktopFusionRecorder>>,
+    ) = if let Some(factory) = fusion_recorder_factory_impl.as_ref() {
+        let recorder = factory
+            .recorder_for_session(main_session_id)
+            .expect("boot durable session is registered before recorder wiring");
+        (
+            Some(recorder.clone() as Arc<dyn platform_api::FusionRunRecorder>),
+            Some(recorder),
+        )
+    } else {
+        (Some(Arc::new(fusion_recorder::UnavailableFusionRecorder)), None)
+    };
+    let fusion_recorder_factory: Arc<dyn platform_api::FusionRunRecorderFactory> =
+        fusion_recorder_factory_impl.clone().map_or_else(
+            || Arc::new(fusion_recorder::UnavailableFusionRecorderFactory)
+                as Arc<dyn platform_api::FusionRunRecorderFactory>,
+            |factory| factory as Arc<dyn platform_api::FusionRunRecorderFactory>,
+        );
+
+    // One CostTracker per process. The ephemeral path retains compatibility
+    // with hosts that explicitly disabled session persistence; production
+    // persistence uses the hydrated app-owned coordinator and its exact lease.
+    let cost_tracker = if let (Some(coordinator), Some(hydration)) =
+        (session_state.clone(), durable_hydration)
+    {
+        Arc::new(
+            cost::CostTracker::new(
+                main_session_id,
+                pricing.clone(),
+                tokio::sync::mpsc::channel(1).0,
+            )
+            .try_with_durable_persistence(
+                hydration,
+                coordinator.clone() as Arc<dyn cost::CostPersistence>,
+                coordinator.writer_lease(),
+                coordinator.durability_gate(),
+            )
+            .map_err(|error| BuildError::DurableSession(error.to_string()))?,
+        )
+    } else {
+        let (cost_persist_tx, mut cost_persist_rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move { while cost_persist_rx.recv().await.is_some() {} });
+        Arc::new(cost::CostTracker::new(
+            main_session_id,
+            pricing.clone(),
+            cost_persist_tx,
+        ))
+    };
     // Phase 2a T7: the CostTracker uses the SAME assembled pricing catalog the
     // estimator was built from (built-in reference tiers + non-Anthropic preset
     // rows + settings overrides), not a fresh `builtin_reference()`, so session
@@ -10976,13 +11516,6 @@ pub async fn build(
     // the SAME `Arc` also backs `desktop_fusion_executor`'s `FusionPriceBook`
     // adapter below, so Fusion's hard-budget quote/settlement prices against
     // the identical catalog the rest of the session bills from.
-    let pricing = Arc::new(pricing);
-    let cost_tracker = Arc::new(cost::CostTracker::new(
-        main_session_id,
-        pricing.clone(),
-        cost_persist_tx,
-    ));
-
     // (4.6) Subagent spawner pool + budget enforcer for the `AgentTool` seam.
     //       `AgentTool::call` requires BOTH `subagent_spawner` and
     //       `budget_enforcer` to be `Some` — wiring the spawner alone is inert.
@@ -11147,6 +11680,7 @@ pub async fn build(
     // `StreamingSubagentSpawner` (Phase-1 seam) — the LocalAgent handler needs
     // the streaming half to make a backgrounded agent "come to rest" + resume.
     let subagent_spawner_arc = Arc::new(subagent_spawner_concrete);
+    let lifecycle_subagent_spawner = subagent_spawner_arc.clone();
     let subagent_spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner> =
         subagent_spawner_arc.clone();
     let subagent_streaming_spawner: Arc<dyn agent::StreamingSubagentSpawner> = subagent_spawner_arc;
@@ -12127,7 +12661,6 @@ pub async fn build(
     // refresh driver below is installed.
     let mut mcp_catalog_changes = mcp_registry.subscribe_catalog_changes();
     mcp_registry.connect_all(mcp_configs).await;
-    tokio::spawn(Arc::clone(&mcp_registry).run_reconnect_loop());
     // Clone handles the runtime `/add-dir` live effect needs (the same registry
     // Arc is moved into the orchestrator builder below via `with_mcp_registry`).
     let runtime_mcp_registry = mcp_registry.clone();
@@ -12597,6 +13130,8 @@ pub async fn build(
             .with_workspace_permission_leases(workspace_leases.clone(), cwd.clone())
             .with_worktree_manager(worktree_manager.clone())
             .with_fusion(fusion_executor.clone())
+            .with_terminal_recorder_opt(fusion_recorder.clone())
+            .with_terminal_recorder_factory(fusion_recorder_factory.clone())
             .with_status_sink(
                 local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
             )
@@ -12616,13 +13151,15 @@ pub async fn build(
     let fusion_completion_sink = Arc::new(fusion_command::DeferredFusionCompletionSink::new());
     let fusion_invoker = Arc::new(DeferredToolInvoker::new());
     let fusion_status_sink = Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
-    tasks::registry::register_fusion_handler(
+    tasks::registry::register_fusion_handler_with_recorder_factory(
         &mut task_registry_inner,
         fusion_executor.clone(),
         fusion_completion_sink.clone() as Arc<dyn platform_api::FusionCompletionSink>,
         fusion_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
         budget_enforcer.clone(),
         fusion_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>,
+        fusion_recorder.clone(),
+        Some(fusion_recorder_factory.clone()),
     );
 
     let task_registry = Arc::new(task_registry_inner);
@@ -12654,13 +13191,15 @@ pub async fn build(
     //        which is `cwd`). `load_persisted` reads `createdAt`/`lastFiredAt` in
     //        epoch ms; next-fire is COMPUTED at runtime from the cron string +
     //        `lastFiredAt ?? createdAt` (never persisted). Ticks every 60s on a
-    //        posix RuntimeSpawner (D17). The detached tick task holds a self-clone
-    //        of the scheduler, so it runs for the process lifetime without being
-    //        stored on `DesktopRuntime`.
+    //        posix RuntimeSpawner (D17). The tick task holds a self-clone; the
+    //        session lifecycle therefore retains the scheduler and explicitly
+    //        stops it before draining task producers on shutdown/remount.
     //        Gated by the `LINGXI_DISABLE_CRON` local kill-switch
     //        (claude-code `prompt.ts:34/38` — the env override that wins over the
     //        GrowthBook fleet flag, which itself defaults on).
-    if cron_scheduler_enabled(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref()) {
+    let cron_scheduler = if cron_scheduler_enabled(
+        std::env::var("LINGXI_DISABLE_CRON").ok().as_deref(),
+    ) {
         let tasks_file = cron::tasks_file::scheduled_tasks_path(&cwd);
         let scheduler = Arc::new(cron::CronScheduler::new(
             task_registry.clone(),
@@ -12676,7 +13215,10 @@ pub async fn build(
         if let Err(e) = scheduler.clone().start().await {
             tracing::error!("cron: failed to start scheduler: {e}");
         }
-    }
+        Some(scheduler)
+    } else {
+        None
+    };
 
     // (5.47) M10 (T13): the typed spawn/kill seam the coordinator's `TeamCreate` /
     //        `TeamDelete` use to start / stop the real backing `InProcessTeammate`
@@ -13409,7 +13951,7 @@ pub async fn build(
         Arc::new(tool_computer_use::TuiBridgeResolver::new(tx))
             as Arc<dyn tool_computer_use::ComputerAccessResolver>
     });
-    let wakeup_scheduler_cell = register_desktop_tools(
+    let wakeup_scheduler_cell = register_desktop_tools_with_fusion_recorder(
         &mut tools_inner,
         tool_ctx,
         coordinator_wiring,
@@ -13426,6 +13968,8 @@ pub async fn build(
         Some(current_cwd_cell.clone()),
         worktree_state_persister,
         Some(fusion_executor.clone()),
+        fusion_recorder.clone(),
+        Some(fusion_recorder_factory.clone()),
     );
     // Workflow tool (desktop-only — it fans out subagents). Registered here,
     // after `register_desktop_tools`, because its launcher needs `task_registry`
@@ -13568,6 +14112,12 @@ pub async fn build(
     // `DesktopRuntime::tools` (the orchestrator takes ownership below).
     let runtime_tools = tools.clone();
 
+    // Start the perpetual reconnect owner only after every fallible build step
+    // has completed. A detached reconnect loop spawned before a later `?` /
+    // policy rejection would otherwise retain the half-built MCP/hooks/pool
+    // graph with no `DesktopSessionLifecycle` available to stop it.
+    let mcp_reconnect_task = tokio::spawn(Arc::clone(&mcp_registry).run_reconnect_loop());
+
     // MCP servers can mutate their tool/prompt/resource catalogs while the
     // session is running. Refresh the registry snapshot on every generation-
     // checked notification; only a successful tools/list replaces the live
@@ -13577,7 +14127,7 @@ pub async fn build(
     // Capture the MCP registry weakly. A strong Arc here would keep its own
     // broadcast sender alive forever and prevent this task from terminating
     // when the desktop runtime is dropped.
-    {
+    let mcp_catalog_refresh_task = {
         let mcp_registry_weak = Arc::downgrade(&mcp_registry);
         let live_tools = tools.clone();
         let live_mcp_tool_ctx = mcp_tool_ctx.clone();
@@ -13650,8 +14200,8 @@ pub async fn build(
                     }
                 }
             }
-        });
-    }
+        })
+    };
 
     // (5.5a) M10 (T13): bind the teammate handler's `DeferredToolInvoker` to the
     //        real `RegistryToolInvoker` now that `tools` exists. The invoker
@@ -13875,10 +14425,8 @@ pub async fn build(
     // user message). `PosixFileSystem` does not confine `append_file_with_mode`
     // to its workspace root, so rooting it at `watch_cwd` is fine for a path
     // under `claude_home`.
-    let main_jsonl_writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
-        main_transcript_path.clone(),
-        Arc::new(PosixFileSystem::new(watch_cwd.clone())) as Arc<dyn platform_api::FileSystem>,
-    ));
+    // `main_jsonl_writer` was created before durable session setup so Fusion
+    // delivery and ordinary persistence can share its lock/active path.
     // (P2-02 cc2.1.207) `main_jsonl_writer` MOVES into the orchestrator builder
     // below (when `session_persistence`); capture a clone so the `--agent` block
     // can persist the applied `agentType` as an `agent-setting` transcript record
@@ -13963,7 +14511,9 @@ pub async fn build(
         // session matches the id baked into the leaf firers' `transcript_path` and the
         // subagent spawner's subagents dir — one consistent session id end-to-end.
         .with_session_id(main_session_id)
-        .with_cost_tracker(cost_tracker)
+        .with_cost_tracker(cost_tracker.clone())
+        .with_cost_session_switcher_opt(session_state_manager.clone())
+        .with_session_activation_observer(Arc::new(ProcessSessionActivationObserver))
         // (review #12) Wire the /goal trust + hooks-restricted gates (resolved
         // above) into the orchestrator, replacing the hardcoded trusted=true /
         // restricted=false defaults.
@@ -14125,6 +14675,7 @@ pub async fn build(
         _ => orch_builder,
     };
     let orch = Arc::new(orch_builder);
+    orch.attach_owned_session_switches();
     async_hook_response_buffer.attach_rewake_target(&orch);
 
     // The task registry had to be completed before the orchestrator existed.
@@ -14150,12 +14701,20 @@ pub async fn build(
 
     // (6) Command registry through the desktop composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();
-    fusion_completion_sink
-        .bind(Arc::new(
-            fusion_command::DesktopFusionCompletionSink::new(handle.clone())
-                .with_durable_storage_enabled(cfg.session_persistence),
-        ))
-        .await;
+    if let Some(transcript) = fusion_transcript_target.as_ref() {
+        transcript.attach_orchestrator(&orch);
+    }
+    let fusion_recovery_task = fusion_recovery_recorder.map(|recovery_recorder| {
+        tokio::spawn(async move {
+            let _ = recovery_recorder.retry_pending().await;
+        })
+    });
+    // Production terminal publication is owned by the durable Fusion recorder.
+    // Keep the compatibility sink deliberately unbound here: binding it to an
+    // orchestrator that owns this task registry would create
+    // registry -> handler -> sink -> orchestrator -> registry, pinning the old
+    // session after a drained remount. Standalone/legacy constructors may still
+    // bind the deferred sink explicitly in their own compatibility tests.
     // FIX (B-agent-model-inheritance): now that the orchestrator exists, wire the
     // subagent spawner's LIVE default-model source to read the orchestrator's LIVE
     // `session.model` (the SAME source `build_prompt_context` / `get_status_snapshot`
@@ -14375,7 +14934,8 @@ pub async fn build(
                 .map(|(model, (profile, _))| (model.clone(), profile.clone()))
                 .collect(),
         )
-        .with_durable_publication_available(cfg.session_persistence),
+        .with_durable_publication_available(cfg.session_persistence)
+        .with_publication_retrier(fusion_recorder_factory_impl.clone()),
     ));
 
     // WIZARD-06: re-register `/auto-mode-setup` WITH its runners attached.
@@ -15050,8 +15610,28 @@ pub async fn build(
         .entry("anthropic".to_string())
         .or_insert_with(|| "api_key".to_string());
 
+    let session_lifecycle = Arc::new(DesktopSessionLifecycle {
+        settings_watcher: settings_watcher.clone(),
+        file_changed_watcher: file_changed_watcher.clone(),
+        cron_scheduler,
+        orchestrator: orch.clone(),
+        mcp_reconnect_task: tokio::sync::Mutex::new(Some(mcp_reconnect_task)),
+        mcp_catalog_refresh_task: tokio::sync::Mutex::new(Some(mcp_catalog_refresh_task)),
+        task_registry: task_registry.clone(),
+        command_registry: shared_command_registry.clone(),
+        subagent_spawner: lifecycle_subagent_spawner,
+        cost_tracker,
+        session_state_manager,
+        fusion_recorder_factory: fusion_recorder_factory_impl.clone(),
+        fusion_recovery_task: tokio::sync::Mutex::new(fusion_recovery_task),
+    });
+
     Ok(DesktopRuntime {
         orchestrator: orch,
+        session_state,
+        fusion_recorder,
+        fusion_recorder_factory: fusion_recorder_factory_impl,
+        session_lifecycle,
         analytics_bus,
         shared_command_registry,
         dispatcher,
@@ -18190,6 +18770,7 @@ still flip to available"
             system_prompt_override: None,
             append_system_prompt: None,
             session_id_override: None,
+            session_writer_lease: None,
             parent_session_id: None,
             disable_slash_commands: false,
             add_dir: Vec::new(),
@@ -18780,6 +19361,239 @@ still flip to available"
         assert!(
             rt.orchestrator.has_compaction(),
             "no CompactionOrchestrator"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_task_drain_preserves_desktop_runtime_authorities_for_retry() {
+        use platform_posix::{PosixFileSystem, PosixRuntime};
+        use tasks::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
+        struct FailingDrain(std::sync::atomic::AtomicBool);
+        #[async_trait::async_trait]
+        impl Task for FailingDrain {
+            fn name(&self) -> &str { "failing-drain" }
+            fn task_type(&self) -> tasks::id::TaskType { tasks::id::TaskType::LocalBash }
+            async fn spawn(&self, _: TaskSpawnInput, _: TaskContext) -> Result<TaskHandle, TaskError> {
+                Err(TaskError::Unsupported)
+            }
+            async fn kill(&self, _: &str, _: TaskContext) -> Result<(), TaskError> { Ok(()) }
+            async fn drain_shutdown(&self) -> Result<(), TaskError> {
+                if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                    Err(TaskError::Internal("worker has not exited".into()))
+                } else { Ok(()) }
+            }
+        }
+        let (tmp, cfg) = test_config(true);
+        let mut rt = build(
+            cfg,
+            Arc::new(orchestrator::test_support::MockOutputStream::new()),
+            Arc::new(RecordingPermissionSink::default()),
+        ).await.unwrap();
+        let fs = Arc::new(PosixFileSystem::new(tmp.path().to_path_buf()));
+        let mut registry = tasks::registry::TaskRegistry::new(
+            Arc::new(PosixRuntime::new()), fs.clone(),
+            Arc::new(tasks::output_manager::TaskOutputManager::new(tmp.path().join("drain-test"), fs)),
+        );
+        let handler = Arc::new(FailingDrain(std::sync::atomic::AtomicBool::new(true)));
+        registry.register_handler(tasks::id::TaskType::LocalBash, handler.clone());
+        // Keep the real registry to drain its production graph on the retry.
+        let lifecycle = Arc::get_mut(&mut rt.session_lifecycle).expect("single lifecycle owner");
+        let original = std::mem::replace(&mut lifecycle.task_registry, Arc::new(registry));
+        let report = lifecycle.shutdown_and_drain().await;
+        assert!(!report.complete);
+        assert!(!report.errors.is_empty());
+        assert!(lifecycle.subagent_spawner.tool_registry_handle().get().is_some(),
+            "a failed task drain must not retire dependencies used by live workers");
+        handler.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        lifecycle.task_registry.shutdown_background_tasks().await.unwrap();
+        lifecycle.task_registry = original;
+        let report = lifecycle.shutdown_and_drain().await;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.complete);
+        assert!(lifecycle.subagent_spawner.tool_registry_handle().get().is_none());
+    }
+
+    #[tokio::test]
+    async fn drained_desktop_composition_releases_registry_and_session_claim() {
+        let (_tmp, cfg) = test_config(true);
+        let output: Arc<dyn platform_api::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+        let registry = Arc::downgrade(&rt.task_registry);
+        let orchestrator = Arc::downgrade(&rt.orchestrator);
+        let pool = Arc::downgrade(&rt.session_lifecycle.subagent_spawner);
+        let tool_registry = Arc::downgrade(
+            &rt.session_lifecycle
+                .subagent_spawner
+                .tool_registry_handle()
+                .get()
+                .expect("production pool tool registry is bound"),
+        );
+        let hook_executor = Arc::downgrade(
+            &rt.session_lifecycle
+                .subagent_spawner
+                .hook_executor_handle()
+                .get()
+                .expect("production pool hook executor is bound"),
+        );
+        let mcp_registry = Arc::downgrade(&rt.mcp_registry);
+        let command_registry = Arc::downgrade(&rt.shared_command_registry);
+        let lease = rt
+            .session_state
+            .as_ref()
+            .expect("persistent test runtime")
+            .writer_lease();
+        let weak_lease = Arc::downgrade(&lease);
+        drop(lease);
+
+        let report = rt.session_lifecycle.shutdown_and_drain().await;
+        assert!(report.errors.is_empty(), "shutdown errors: {:?}", report.errors);
+        drop(rt);
+
+        let immediate_registry_zero = registry.strong_count() == 0;
+        let immediate_lease_zero = weak_lease.strong_count() == 0;
+
+        eprintln!(
+            "desktop owner counts immediately after drain/drop: registry={} orchestrator={} \
+             pool={} tools={} hooks={} mcp={} commands={} lease={}",
+            registry.strong_count(),
+            orchestrator.strong_count(),
+            pool.strong_count(),
+            tool_registry.strong_count(),
+            hook_executor.strong_count(),
+            mcp_registry.strong_count(),
+            command_registry.strong_count(),
+            weak_lease.strong_count(),
+        );
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        eprintln!(
+            "desktop owner counts after bounded yields: registry={} orchestrator={} pool={} \
+             tools={} hooks={} mcp={} commands={} lease={}",
+            registry.strong_count(),
+            orchestrator.strong_count(),
+            pool.strong_count(),
+            tool_registry.strong_count(),
+            hook_executor.strong_count(),
+            mcp_registry.strong_count(),
+            command_registry.strong_count(),
+            weak_lease.strong_count(),
+        );
+
+        assert!(
+            immediate_registry_zero,
+            "task handler/tool/completion composition must not retain the old registry"
+        );
+        assert!(
+            immediate_lease_zero,
+            "the last drained runtime must release its session writer claim"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn desktop_shutdown_waits_for_blocked_known_cost_wal_ack() {
+        let (_tmp, cfg) = test_config(true);
+        let output: Arc<dyn platform_api::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+        let coordinator = rt
+            .session_state
+            .as_ref()
+            .expect("persistent test runtime")
+            .clone();
+        let writer_lease = coordinator.writer_lease();
+        let weak_lease = Arc::downgrade(&writer_lease);
+        drop(writer_lease);
+        let journal = coordinator.journal();
+        let journal_lock = platform_api::rooted_fs::lock_exclusive_pinned(
+            journal.root(),
+            std::path::Path::new(session::jsonl::JOURNAL_LOCK_FILE_NAME),
+            session::jsonl::journal::SESSION_STATE_DIR_MODE,
+            session::jsonl::journal::SESSION_STATE_FILE_MODE,
+            Some(&journal.root_identity()),
+        )
+        .expect("hold the real session WAL lock");
+
+        let tracker = rt.session_lifecycle.cost_tracker.clone();
+        let initial = tracker.snapshot().await;
+        let expected_revision = initial.cost_revision.checked_add(1).unwrap();
+        let session_id = initial.session_id;
+        let scope = tracker.session_scope(session_id);
+        let usage = cost::Usage {
+            tokens: cost::TokenUsage {
+                input: 41,
+                output: 17,
+                cache_read: 3,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let receipt = scope.submit_model_response(cost::CostModelResponse {
+            model_ref: cost::ModelRef {
+                provider: cost::ProviderId::Anthropic,
+                model: "claude-opus-4-6".into(),
+            },
+            usage,
+            duration: std::time::Duration::from_millis(9),
+            retries: 0,
+            cache_read_input_tokens: 3,
+            cache_creation_input_tokens: 0,
+            is_batch_request: false,
+            bus: None,
+        });
+        let mutation_id = receipt.mutation_id().clone();
+        drop(receipt);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if tracker.snapshot().await.cost_revision == expected_revision {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("known usage is synchronously retained before WAL acknowledgement");
+
+        let lifecycle = rt.session_lifecycle.clone();
+        let mut shutdown = Box::pin(lifecycle.shutdown_and_drain());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut shutdown)
+                .await
+                .is_err(),
+            "shutdown must not release the session while a registered WAL append is blocked"
+        );
+
+        drop(journal_lock);
+        let report = tokio::time::timeout(std::time::Duration::from_secs(2), &mut shutdown)
+            .await
+            .expect("shutdown completes after the WAL lock is released");
+        assert!(report.errors.is_empty(), "shutdown errors: {:?}", report.errors);
+        let hydration = coordinator.hydrate_blocking().expect("replay durable cost");
+        assert_eq!(hydration.state.cost_revision, expected_revision);
+        assert_eq!(hydration.state.last_usage, Some(usage));
+        assert!(hydration.state.total_nano_usd > 0);
+        let retained = scope
+            .retained_response(&mutation_id)
+            .expect("originating session retains the response");
+        assert_eq!(retained.observation.usage, usage);
+        assert!(matches!(retained.settlement, Some(Ok(Some(_)))));
+
+        drop(shutdown);
+        drop(lifecycle);
+        drop(scope);
+        drop(tracker);
+        drop(journal);
+        drop(coordinator);
+        drop(rt);
+        assert!(
+            weak_lease.upgrade().is_none(),
+            "the acknowledged response must not pin its session writer claim after shutdown"
         );
     }
 
@@ -21207,9 +22021,11 @@ must be filtered out: got {after:?}"
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm1: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
-        let _rt1 = build(cfg, output1, perm1)
+        let rt1 = build(cfg, output1, perm1)
             .await
             .expect("first boot with --agent must succeed");
+        assert!(rt1.session_lifecycle.shutdown_and_drain().await.complete);
+        drop(rt1);
 
         // Resume boot: no `--agent`; `rVe` reads the persisted record and re-adopts.
         let output2: Arc<dyn platform_api::OutputStream> =
@@ -21254,9 +22070,11 @@ must be filtered out: got {after:?}"
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm1: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
-        let _rt1 = build(cfg, output1, perm1)
+        let rt1 = build(cfg, output1, perm1)
             .await
             .expect("first boot with --agent must succeed");
+        assert!(rt1.session_lifecycle.shutdown_and_drain().await.complete);
+        drop(rt1);
 
         let output2: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
@@ -21301,9 +22119,11 @@ must be filtered out: got {after:?}"
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm1: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
-        let _rt1 = build(cfg, output1, perm1)
+        let rt1 = build(cfg, output1, perm1)
             .await
             .expect("first boot with --agent must succeed");
+        assert!(rt1.session_lifecycle.shutdown_and_drain().await.complete);
+        drop(rt1);
 
         let output2: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());

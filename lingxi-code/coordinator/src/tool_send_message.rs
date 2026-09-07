@@ -294,24 +294,11 @@ impl SendMessageTool {
         let message = platform_api::live_sessions::outbound_peer_message(
             &from_name, &from_sid, content, summary,
         );
-        let socket = peer
-            .messaging_socket_path
-            .as_deref()
-            .filter(|path| !path.is_empty())
-            .map(std::path::PathBuf::from)
-            .filter(|path| platform_api::uds_inbox::is_canonical_inbox_sock(path));
-        let uds_error = socket
-            .as_deref()
-            .map(|path| platform_api::uds_inbox::send_peer_message(path, &message))
-            .and_then(Result::err);
-        if socket.is_none() || uds_error.is_some() {
-            dir.send_inbox(peer.sid(), &message).map_err(|error| {
-                let transport = uds_error
-                    .as_ref()
-                    .map_or_else(String::new, |uds| format!(" (UDS failed first: {uds})"));
-                ToolError::Internal(format!("SendMessage: {error}{transport}"))
-            })?;
-        }
+        // Discovery pins the destination even if its process remounts while
+        // sender_name awaits. Use the session inbox alone: its polling latency
+        // buys reliable routing without unacknowledged UDS loss or dual-send duplicates.
+        dir.send_inbox(peer.sid(), &message)
+            .map_err(|error| ToolError::Internal(format!("SendMessage: {error}")))?;
         Ok(())
     }
 

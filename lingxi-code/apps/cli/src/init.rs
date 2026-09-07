@@ -37,6 +37,19 @@ use std::sync::Arc;
 pub struct Runtime {
     /// The fully-constructed orchestrator.
     pub orchestrator: Arc<ConversationOrchestrator>,
+    /// Durable session coordinator retained across CLI runtime projection and
+    /// remounts; None is the explicit no-session-persistence mode.
+    pub session_state: Option<Arc<engine_desktop::session_state::SessionStateCoordinator>>,
+    /// Common Fusion terminal recorder retained by the projected runtime.
+    pub fusion_recorder: Option<Arc<dyn platform_api::FusionRunRecorder>>,
+    /// Per-session recorder factory used to drain mounted outboxes during CLI
+    /// shutdown or an in-process session remount.
+    pub fusion_recorder_factory: Option<
+        Arc<engine_desktop::fusion_recorder::DesktopFusionRecorderFactory>,
+    >,
+    /// Ordered producer/cost/session/outbox drain retained across the desktop
+    /// runtime projection.
+    pub session_lifecycle: Arc<engine_desktop::DesktopSessionLifecycle>,
     /// Slash-command dispatcher seeded with the 94 builtins + 18 wired core
     /// handlers (M5-09/M5-10/M5-11).
     pub dispatcher: RegistrySlashDispatcher,
@@ -265,6 +278,9 @@ pub enum InitError {
     /// Orchestrator construction failed (currently infallible).
     #[error("orchestrator construction failed: {0}")]
     Orchestrator(String),
+    /// Durable session claim, hydration, or migration failed before startup.
+    #[error("durable session state failed: {0}")]
+    DurableSession(String),
     /// Secure-storage backend initialization failed.
     #[error("secure storage init failed: {0}")]
     SecureStorage(String),
@@ -301,6 +317,7 @@ impl From<engine_desktop::BuildError> for InitError {
         match e {
             engine_desktop::BuildError::ApiBase(m) => Self::ApiBase(m),
             engine_desktop::BuildError::Orchestrator(m) => Self::Orchestrator(m),
+            engine_desktop::BuildError::DurableSession(m) => Self::DurableSession(m),
             engine_desktop::BuildError::SecureStorage(m) => Self::SecureStorage(m),
             engine_desktop::BuildError::SandboxUnavailable(m) => Self::SandboxUnavailable(m),
             engine_desktop::BuildError::WorktreeLaunch(m) => Self::WorktreeLaunch(m),
@@ -972,6 +989,7 @@ pub(crate) fn resolve_desktop_config(
         // either `None` or a valid UUID string. `build()` parses it into the
         // boot-canonical MAIN session id (else mints a fresh one).
         session_id_override: argv.session_id.clone(),
+        session_writer_lease: None,
         // Populated by the resume/fork TUI constructor after it has inspected
         // the transcript's versioned `forkedFrom` metadata.
         parent_session_id: None,
@@ -1159,10 +1177,31 @@ pub async fn build_runtime(
 /// [`DesktopConfig`] + output sink. Lets the TUI path inject a permission gate
 /// derived from the SAME `cfg` without resolving config twice.
 pub async fn build_runtime_from_config(
-    cfg: DesktopConfig,
+    mut cfg: DesktopConfig,
     output: Arc<dyn OutputStream>,
 ) -> Result<Runtime, InitError> {
     crate::startup_trace::mark("runtime_build_start");
+    // The CLI owns the process live-session registration, so consume one
+    // construction-only writer claim before the engine opens its coordinator.
+    // This keeps the claim shared by cost, ordinary transcript, and Fusion
+    // publication instead of letting each layer reacquire the OS lock.
+    if cfg.session_persistence && cfg.session_writer_lease.is_none() {
+        let session_id = cfg
+            .session_id_override
+            .as_deref()
+            .and_then(protocol::SessionId::parse_prefixed)
+            .unwrap_or_else(protocol::SessionId::new);
+        cfg.session_id_override = Some(session_id.as_uuid().to_string());
+        let lease = platform_api::live_sessions::LiveSessionDir::at_live(
+            cfg.lingxi_home.join("sessions"),
+        )
+            .claim_session_id(&session_id.to_string(), std::process::id())
+            .map_err(|error| InitError::Orchestrator(format!(
+                "session writer claim failed: {error}"
+            )))?
+            .into_shared();
+        cfg.session_writer_lease = Some(lease);
+    }
     let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
         Arc::new(NoopPermissionRequestSink);
     let rt = build(cfg, output, permission_sink).await?;
@@ -1180,6 +1219,10 @@ pub async fn build_runtime_from_config(
     }
     Ok(Runtime {
         orchestrator: rt.orchestrator,
+        session_state: rt.session_state,
+        fusion_recorder: rt.fusion_recorder,
+        fusion_recorder_factory: rt.fusion_recorder_factory,
+        session_lifecycle: rt.session_lifecycle,
         dispatcher: rt.dispatcher,
         auth: rt.auth,
         enforcing_permission_gate: rt.enforcing_permission_gate,

@@ -26,7 +26,7 @@ use async_trait::async_trait;
 /// it once the registry `Arc` exists.
 #[derive(Default)]
 pub struct RegistryStatusSink {
-    registry: OnceLock<Arc<TaskRegistry>>,
+    registry: OnceLock<std::sync::Weak<TaskRegistry>>,
 }
 
 impl RegistryStatusSink {
@@ -40,7 +40,11 @@ impl RegistryStatusSink {
 
     /// Bind the registry handle. Idempotent — a second bind is ignored.
     pub fn bind(&self, registry: Arc<TaskRegistry>) {
-        let _ = self.registry.set(registry);
+        let _ = self.registry.set(Arc::downgrade(&registry));
+    }
+
+    fn registry(&self) -> Option<Arc<TaskRegistry>> {
+        self.registry.get().and_then(std::sync::Weak::upgrade)
     }
 }
 
@@ -51,7 +55,7 @@ impl TaskStatusSink for RegistryStatusSink {
     }
 
     async fn set_status(&self, task_id: &str, status: TaskStatus) {
-        if let Some(reg) = self.registry.get() {
+        if let Some(reg) = self.registry() {
             // Best-effort: a status write for a since-evicted task is a benign
             // `NotFound` we deliberately swallow (mirrors the bash sink's
             // tolerance for a racing teardown).
@@ -65,7 +69,7 @@ impl TaskStatusSink for RegistryStatusSink {
         // this the stored state kept `exit_code: None` and the panel/output
         // projection could never show the real completion. Best-effort like
         // `set_status`.
-        if let Some(reg) = self.registry.get() {
+        if let Some(reg) = self.registry() {
             let _ = reg.set_bash_exit_code(task_id, exit_code).await;
         }
     }
@@ -79,7 +83,7 @@ impl TaskStatusSink for RegistryStatusSink {
         agent_name: Option<String>,
         team_name: Option<String>,
     ) {
-        if let Some(reg) = self.registry.get() {
+        if let Some(reg) = self.registry() {
             reg.mark_task_rested(task_id, result, usage, agent_id, agent_name, team_name)
                 .await;
         }
@@ -90,7 +94,7 @@ impl TaskStatusSink for RegistryStatusSink {
         task_id: &str,
         outcome: platform_api::task_registry::AgentTerminalOutcome,
     ) {
-        if let Some(reg) = self.registry.get() {
+        if let Some(reg) = self.registry() {
             reg.set_agent_outcome(task_id, outcome).await;
         }
     }
@@ -100,19 +104,19 @@ impl TaskStatusSink for RegistryStatusSink {
         task_id: &str,
         outcome: platform_api::task_registry::WorkflowTerminalOutcome,
     ) {
-        if let Some(reg) = self.registry.get() {
+        if let Some(reg) = self.registry() {
             reg.set_workflow_outcome(task_id, outcome).await;
         }
     }
 
     async fn set_fusion_outcome(&self, task_id: &str, run_id: String, final_text: String) {
-        if let Some(reg) = self.registry.get() {
+        if let Some(reg) = self.registry() {
             reg.set_fusion_outcome(task_id, run_id, final_text).await;
         }
     }
 
     async fn set_fusion_error(&self, task_id: &str, error: String) {
-        if let Some(reg) = self.registry.get() {
+        if let Some(reg) = self.registry() {
             reg.set_fusion_error(task_id, error).await;
         }
     }
@@ -123,14 +127,14 @@ impl TaskStatusSink for RegistryStatusSink {
         egress_profiles: Vec<String>,
         usage: Option<platform_api::task_registry::AgentRunUsage>,
     ) {
-        if let Some(reg) = self.registry.get() {
+        if let Some(reg) = self.registry() {
             reg.set_fusion_egress_and_usage(task_id, egress_profiles, usage)
                 .await;
         }
     }
 
     async fn set_fusion_stage(&self, task_id: &str, stage: String) {
-        if let Some(reg) = self.registry.get() {
+        if let Some(reg) = self.registry() {
             reg.set_fusion_stage(task_id, stage).await;
         }
     }
@@ -140,13 +144,13 @@ impl TaskStatusSink for RegistryStatusSink {
         task_id: &str,
         receipt: platform_api::FusionPublicationReceipt,
     ) {
-        if let Some(reg) = self.registry.get() {
+        if let Some(reg) = self.registry() {
             reg.set_fusion_publication(task_id, receipt).await;
         }
     }
 
     async fn mark_fusion_result_published(&self, task_id: &str) {
-        if let Some(reg) = self.registry.get() {
+        if let Some(reg) = self.registry() {
             reg.mark_fusion_result_published(task_id).await;
         }
     }
@@ -158,7 +162,7 @@ impl TaskStatusSink for RegistryStatusSink {
         final_text: String,
         status: TaskStatus,
     ) {
-        if let Some(reg) = self.registry.get() {
+        if let Some(reg) = self.registry() {
             let _ = reg
                 .finish_fusion_terminal(task_id, run_id, final_text, status)
                 .await;
@@ -174,7 +178,7 @@ impl TaskStatusSink for RegistryStatusSink {
         outcome: platform_api::task_registry::WorkflowTerminalOutcome,
         status: TaskStatus,
     ) {
-        if let Some(reg) = self.registry.get() {
+        if let Some(reg) = self.registry() {
             let _ = reg.finish_workflow_terminal(task_id, outcome, status).await;
         } else {
             self.set_workflow_outcome(task_id, outcome).await;
@@ -183,13 +187,13 @@ impl TaskStatusSink for RegistryStatusSink {
     }
 
     async fn notify_monitor_event(&self, task_id: &str, event: &str) {
-        if let Some(reg) = self.registry.get() {
+        if let Some(reg) = self.registry() {
             let _ = reg.enqueue_monitor_event(task_id, event).await;
         }
     }
 
     async fn is_registered(&self, task_id: &str) -> bool {
-        match self.registry.get() {
+        match self.registry() {
             Some(reg) => reg.get(task_id).await.is_some(),
             // An unbound sink is inert and should not stall a standalone
             // handler forever.
@@ -203,7 +207,7 @@ impl TaskStatusSink for RegistryStatusSink {
     /// since-evicted terminal task's `set_status` is already a benign `NotFound`
     /// no-op, so nothing is clobbered either way.
     async fn is_terminal(&self, task_id: &str) -> bool {
-        if let Some(reg) = self.registry.get() {
+        if let Some(reg) = self.registry() {
             if let Some(rec) = reg.get(task_id).await {
                 return rec.base().status.is_terminal();
             }

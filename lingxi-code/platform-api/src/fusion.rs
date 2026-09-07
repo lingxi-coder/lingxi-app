@@ -833,11 +833,42 @@ impl FusionRunControl {
         true
     }
 
-    fn cancellation_claimed(&self) -> bool {
-        self.state
+    /// Atomically choose the terminal result owned by the common supervisor.
+    ///
+    /// A successful natural result crosses the irreversible `Finalizing`
+    /// boundary; an error owns `Terminal` directly. If cancellation already
+    /// won either claim, its result is authoritative. Keeping the phase read,
+    /// winner selection, and transition under one lock prevents a cancellation
+    /// claim from landing between a stale read and a failed natural claim.
+    fn claim_supervisor_result(
+        &self,
+        natural: Result<FusionResult, FusionError>,
+    ) -> Result<FusionResult, FusionError> {
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .cancel_claimed
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.cancel_claimed {
+            return Err(FusionError::Cancelled);
+        }
+        match state.phase {
+            FusionControlPhase::Prepared => {
+                // An unpolled activation/failed preparation owns a no-dispatch
+                // terminal before its asynchronous recorder is scheduled.
+                state.phase = FusionControlPhase::Terminal;
+            }
+            FusionControlPhase::Running => {
+                state.phase = if natural.is_ok() {
+                    FusionControlPhase::Finalizing
+                } else {
+                    FusionControlPhase::Terminal
+                };
+            }
+            // The Fusion orchestrator may cross Finalizing before it returns
+            // while it commits settlement. Preserve that natural winner.
+            FusionControlPhase::Finalizing | FusionControlPhase::Terminal => {}
+        }
+        natural
     }
 
     /// Claim an early terminal state while the run is still prepared/running.
@@ -921,7 +952,25 @@ impl FusionRunControl {
     }
 
     fn publish_terminal(&self, result: Result<FusionResult, FusionError>) -> FusionRunOutcome {
-        let candidate = Arc::new(FusionRunOutcome::from_control(self, result));
+        self.publish_terminal_with_receipt(result, FusionPublicationReceipt::not_required())
+    }
+
+    fn publish_terminal_with_receipt(
+        &self,
+        result: Result<FusionResult, FusionError>,
+        publication: FusionPublicationReceipt,
+    ) -> FusionRunOutcome {
+        let candidate = FusionRunOutcome::from_control(self, result);
+        self.publish_terminal_candidate(candidate, publication)
+    }
+
+    fn publish_terminal_candidate(
+        &self,
+        mut candidate: FusionRunOutcome,
+        publication: FusionPublicationReceipt,
+    ) -> FusionRunOutcome {
+        candidate.publication = publication;
+        let candidate = Arc::new(candidate);
         let outcome = {
             let mut state = self
                 .state
@@ -948,6 +997,9 @@ pub struct FusionRunOutcome {
     pub result: Result<FusionResult, FusionError>,
     /// Reliable facts snapshot.
     pub facts: FusionRunFacts,
+    /// Durable terminal/publication receipt. The computation result remains
+    /// authoritative even when this receipt reports a storage failure.
+    pub publication: FusionPublicationReceipt,
 }
 
 impl FusionRunOutcome {
@@ -961,6 +1013,7 @@ impl FusionRunOutcome {
             identity: control.identity.clone(),
             result,
             facts: control.facts.snapshot(),
+            publication: FusionPublicationReceipt::not_required(),
         }
     }
 
@@ -978,6 +1031,72 @@ type PreparedRunner = Box<
         ) -> BoxFuture<'static, FusionRunOutcome>
         + Send,
 >;
+
+/// Host-trusted target that permits a terminal run to enqueue a parent-session
+/// Slash publication. Agent and Workflow entrypoints deliberately do not
+/// receive this capability, even when they carry a session identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FusionSlashPublicationTarget {
+    /// Canonical parent session selected by the trusted task/bridge input.
+    pub session_id: protocol::SessionId,
+}
+
+/// Common durable terminal recorder. The recorder is invoked by the owned
+/// [`PreparedFusionRun`] supervisor before its control watch is sealed, so all
+/// origins and terminal paths share one persistence boundary.
+#[async_trait]
+pub trait FusionRunRecorder: Send + Sync {
+    /// Record one immutable terminal outcome and, when `slash_target` is
+    /// present, atomically retain its trusted parent-session outbox item.
+    async fn record_terminal(
+        &self,
+        outcome: FusionRunOutcome,
+        slash_target: Option<FusionSlashPublicationTarget>,
+    ) -> FusionPublicationReceipt;
+}
+
+/// Pure host factory for a recorder pinned to one already-hydrated session
+/// authority. Entrypoints call this during preparation, so a hot A→B switch
+/// cannot leave a future run holding A's recorder. Returning `None` means the
+/// trusted session is not currently mounted and the caller must fail closed or
+/// use its explicitly configured legacy adapter.
+pub trait FusionRunRecorderFactory: Send + Sync {
+    /// Resolve a recorder without I/O or permit acquisition.
+    fn recorder_for(&self, session_id: protocol::SessionId) -> Option<Arc<dyn FusionRunRecorder>>;
+}
+
+/// Capability attached by a host after preparation. Attaching it performs no
+/// I/O and reserves no permits; the owned supervisor consumes it only when the
+/// run reaches a terminal boundary.
+#[derive(Clone)]
+pub struct FusionTerminalCapability {
+    recorder: Arc<dyn FusionRunRecorder>,
+    slash_target: Option<FusionSlashPublicationTarget>,
+}
+
+impl FusionTerminalCapability {
+    /// Attach an all-origin recorder without granting parent publication.
+    #[must_use]
+    pub fn new(recorder: Arc<dyn FusionRunRecorder>) -> Self {
+        Self {
+            recorder,
+            slash_target: None,
+        }
+    }
+
+    /// Grant the host-trusted Slash parent publication capability.
+    #[must_use]
+    pub fn with_slash_target(mut self, target: FusionSlashPublicationTarget) -> Self {
+        self.slash_target = Some(target);
+        self
+    }
+
+    async fn record(&self, outcome: FusionRunOutcome) -> FusionPublicationReceipt {
+        self.recorder
+            .record_terminal(outcome, self.slash_target)
+            .await
+    }
+}
 
 /// Poll a prepared runner behind a panic boundary inside the owned supervisor.
 struct CatchPanicFuture<F> {
@@ -1012,6 +1131,7 @@ pub struct PreparedFusionRun {
     control: FusionRunControl,
     runner: Option<PreparedRunner>,
     unactivated_error: FusionError,
+    terminal_capability: Option<FusionTerminalCapability>,
 }
 
 impl PreparedFusionRun {
@@ -1028,7 +1148,15 @@ impl PreparedFusionRun {
                 Box::pin(runner(activation, progress))
             })),
             unactivated_error: FusionError::Cancelled,
+            terminal_capability: None,
         }
+    }
+
+    /// Attach the host-owned terminal recorder after pure preparation.
+    #[must_use]
+    pub fn with_terminal_capability(mut self, capability: FusionTerminalCapability) -> Self {
+        self.terminal_capability = Some(capability);
+        self
     }
 
     /// Build an inert terminal run for pre-activation preparation failures.
@@ -1075,13 +1203,17 @@ impl PreparedFusionRun {
                 FusionError::Internal
             };
             self.control.facts().set_known_zero();
-            return self.control.publish_terminal(Err(error));
+            self.runner.take();
+            return self.spawn_detached_terminal(Err(error)).await;
         }
         let Some(runner) = self.runner.take() else {
             self.control.facts().set_known_zero();
-            return self.control.publish_terminal(Err(FusionError::Internal));
+            return self
+                .spawn_detached_terminal(Err(FusionError::Internal))
+                .await;
         };
         let supervisor_control = self.control.clone();
+        let terminal_capability = self.terminal_capability.clone();
         let spawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tokio::spawn(async move {
                 // Constructing the runner future happens inside this async
@@ -1102,29 +1234,74 @@ impl PreparedFusionRun {
                     Ok(_) | Err(()) => Err(FusionError::Internal),
                 };
                 // A runner supplied by a legacy/fake executor may ignore the
-                // cooperative token. The atomic claim remains authoritative
-                // until finalization, so such a runner cannot publish success
-                // after the host has already won cancellation.
-                let result = if supervisor_control.cancellation_claimed() {
-                    Err(FusionError::Cancelled)
-                } else {
-                    runner_result
-                };
-                if !supervisor_control.is_terminal() && !supervisor_control.is_finalizing() {
-                    if result.is_ok() {
-                        let _ = supervisor_control.begin_finalizing();
-                    } else {
-                        let _ = supervisor_control.claim_terminal();
-                    }
-                }
-                supervisor_control.publish_terminal(result);
+                // cooperative token. Resolve the natural/cancel winner and
+                // cross the finalization boundary in one atomic transition.
+                let result = supervisor_control.claim_supervisor_result(runner_result);
+                let candidate = FusionRunOutcome::from_control(&supervisor_control, result.clone());
+                let publication =
+                    Self::record_terminal_candidate(candidate.clone(), terminal_capability).await;
+                supervisor_control.publish_terminal_candidate(candidate, publication);
             })
         }));
         if spawn.is_err() {
             self.control.facts().set_known_zero();
-            return self.control.publish_terminal(Err(FusionError::Internal));
+            return self
+                .spawn_detached_terminal(Err(FusionError::Internal))
+                .await;
         }
         self.control.wait_terminal().await
+    }
+
+    async fn spawn_detached_terminal(
+        self,
+        result: Result<FusionResult, FusionError>,
+    ) -> FusionRunOutcome {
+        let control = self.control.clone();
+        let result = control.claim_supervisor_result(result);
+        let capability = self.terminal_capability.clone();
+        let fallback_control = control.clone();
+        let fallback_result = result.clone();
+        let spawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tokio::spawn(async move {
+                Self::seal_terminal(control, result, capability).await;
+            })
+        }));
+        if spawn.is_err() {
+            return fallback_control.publish_terminal_with_receipt(
+                fallback_result,
+                FusionPublicationReceipt::storage_failure(
+                    "terminal supervisor could not be scheduled",
+                ),
+            );
+        }
+        fallback_control.wait_terminal().await
+    }
+
+    async fn record_terminal_candidate(
+        candidate: FusionRunOutcome,
+        capability: Option<FusionTerminalCapability>,
+    ) -> FusionPublicationReceipt {
+        let Some(capability) = capability else {
+            return FusionPublicationReceipt::not_required();
+        };
+        let recorder = capability.clone();
+        let future: BoxFuture<'static, FusionPublicationReceipt> =
+            Box::pin(async move { recorder.record(candidate).await });
+        CatchPanicFuture { inner: future }
+            .await
+            .unwrap_or_else(|_| {
+                FusionPublicationReceipt::storage_failure("terminal recorder panicked")
+            })
+    }
+
+    async fn seal_terminal(
+        control: FusionRunControl,
+        result: Result<FusionResult, FusionError>,
+        capability: Option<FusionTerminalCapability>,
+    ) -> FusionRunOutcome {
+        let candidate = FusionRunOutcome::from_control(&control, result.clone());
+        let publication = Self::record_terminal_candidate(candidate.clone(), capability).await;
+        control.publish_terminal_candidate(candidate, publication)
     }
 }
 
@@ -1138,8 +1315,24 @@ impl Drop for PreparedFusionRun {
         // host guard waiting to release quota cannot hang when the prepared
         // value (or an entirely unpolled `activate` future) is abandoned.
         self.control.facts().set_known_zero();
-        self.control
-            .publish_terminal(Err(self.unactivated_error.clone()));
+        let control = self.control.clone();
+        let result = control.claim_supervisor_result(Err(self.unactivated_error.clone()));
+        let Some(capability) = self.terminal_capability.clone() else {
+            control.publish_terminal_with_receipt(result, FusionPublicationReceipt::not_required());
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            self.control.publish_terminal_with_receipt(
+                result,
+                FusionPublicationReceipt::storage_failure(
+                    "terminal recorder requires an async runtime",
+                ),
+            );
+            return;
+        };
+        handle.spawn(async move {
+            PreparedFusionRun::seal_terminal(control, result, Some(capability)).await;
+        });
     }
 }
 
@@ -1627,6 +1820,64 @@ impl FusionPublicationReceipt {
     pub const fn is_published(&self) -> bool {
         matches!(self.status, FusionPublicationStatus::Published)
     }
+}
+
+/// Durable parent-session delivery item shared by the platform terminal
+/// contract and app-tier session coordinator. The payload is already
+/// sanitized and carries a deterministic message identity, so replay never
+/// reruns Fusion or mints a new parent-dependent message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DurableFusionOutboxRecord {
+    /// Stable delivery identity, normally derived from `(session, run)`.
+    pub delivery_id: String,
+    /// Destination session.
+    pub session_id: protocol::SessionId,
+    /// Deterministic transcript message UUID.
+    pub message_uuid: String,
+    /// Sanitized transcript payload.
+    pub payload: serde_json::Value,
+    /// Monotonic retry generation. Existing `u8` JSON values remain valid,
+    /// while a long-lived dead letter never wraps back onto an earlier event.
+    #[serde(default)]
+    pub attempt: u64,
+    /// Inclusive last attempt in this durable local retry cycle. Legacy
+    /// records predate this field and belong to the original `0..=4` cycle.
+    #[serde(default = "default_outbox_retry_cycle_end")]
+    pub retry_cycle_end: u64,
+    /// Last durable delivery receipt.
+    pub receipt: FusionPublicationReceipt,
+}
+
+const fn default_outbox_retry_cycle_end() -> u64 {
+    4
+}
+
+impl DurableFusionOutboxRecord {
+    /// Return the next retry generation without wrapping its durable identity.
+    #[must_use]
+    pub const fn checked_next_attempt(&self) -> Option<u64> {
+        self.attempt.checked_add(1)
+    }
+}
+
+/// Durable terminal projection shared by Slash, Agent, and Workflow. The
+/// optional outbox item is part of this same event, so terminal computation
+/// and trusted Slash publication are acknowledged together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DurableFusionTerminalRecord {
+    /// Stable event/run identity.
+    pub event_id: String,
+    /// Immutable run identity.
+    pub identity: FusionRunIdentity,
+    /// Computation result or terminal error.
+    pub result: Result<FusionResult, FusionError>,
+    /// Reliable accounting facts.
+    pub facts: FusionRunFacts,
+    /// Publication projection at terminal-record time.
+    pub publication: FusionPublicationReceipt,
+    /// Optional trusted Slash outbox item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outbox: Option<DurableFusionOutboxRecord>,
 }
 
 /// Compatibility alias used by callers that describe the field as a state
@@ -2308,6 +2559,131 @@ impl PanelReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ProbeTerminalRecorder {
+        calls: AtomicUsize,
+        seen: std::sync::Mutex<
+            Option<
+                tokio::sync::oneshot::Sender<(
+                    FusionRunOutcome,
+                    Option<FusionSlashPublicationTarget>,
+                )>,
+            >,
+        >,
+        release: Option<Arc<tokio::sync::Semaphore>>,
+        panic_after_observation: bool,
+        receipt: FusionPublicationReceipt,
+    }
+
+    impl ProbeTerminalRecorder {
+        fn new(
+            blocked: bool,
+            panic_after_observation: bool,
+            receipt: FusionPublicationReceipt,
+        ) -> (
+            Arc<Self>,
+            tokio::sync::oneshot::Receiver<(
+                FusionRunOutcome,
+                Option<FusionSlashPublicationTarget>,
+            )>,
+            Option<Arc<tokio::sync::Semaphore>>,
+        ) {
+            let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+            let release = blocked.then(|| Arc::new(tokio::sync::Semaphore::new(0)));
+            (
+                Arc::new(Self {
+                    calls: AtomicUsize::new(0),
+                    seen: std::sync::Mutex::new(Some(seen_tx)),
+                    release: release.clone(),
+                    panic_after_observation,
+                    receipt,
+                }),
+                seen_rx,
+                release,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl FusionRunRecorder for ProbeTerminalRecorder {
+        async fn record_terminal(
+            &self,
+            outcome: FusionRunOutcome,
+            slash_target: Option<FusionSlashPublicationTarget>,
+        ) -> FusionPublicationReceipt {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(seen) = self
+                .seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                let _ = seen.send((outcome, slash_target));
+            }
+            assert!(!self.panic_after_observation, "terminal recorder panic");
+            if let Some(release) = self.release.as_ref() {
+                release
+                    .acquire()
+                    .await
+                    .expect("test terminal recorder semaphore remains open")
+                    .forget();
+            }
+            self.receipt.clone()
+        }
+    }
+
+    fn terminal_test_control(
+        origin: FusionOrigin,
+    ) -> (protocol::SessionId, FusionRunControl, FusionPreparedSummary) {
+        let session_id = protocol::SessionId::new();
+        let identity = FusionRunIdentity::new(
+            FusionRunId::generated(),
+            Some(session_id),
+            origin,
+            (origin == FusionOrigin::Workflow).then(|| "workflow-test".to_string()),
+        );
+        let control = FusionRunControl::new(
+            identity.clone(),
+            1_000,
+            CancellationToken::new(),
+            FusionRunFactsRecorder::default(),
+        );
+        let summary = FusionPreparedSummary {
+            identity,
+            duration_ms: 1_000,
+            planned_panels: Some(1),
+        };
+        (session_id, control, summary)
+    }
+
+    fn terminal_test_result(run_id: &FusionRunId) -> FusionResult {
+        FusionResult {
+            schema_version: FUSION_SCHEMA_VERSION,
+            run_id: run_id.to_string(),
+            status: FusionStatus::Completed,
+            decision: FusionDecision::Merged,
+            final_text: "sealed".into(),
+            analysis: None,
+            panels: Vec::new(),
+            usage: FusionUsage::default(),
+            timing: FusionTiming::default(),
+            egress_profiles: Vec::new(),
+        }
+    }
+
+    fn terminal_test_capability(
+        recorder: Arc<ProbeTerminalRecorder>,
+        origin: FusionOrigin,
+        session_id: protocol::SessionId,
+    ) -> FusionTerminalCapability {
+        let capability = FusionTerminalCapability::new(recorder);
+        if origin == FusionOrigin::Slash {
+            capability.with_slash_target(FusionSlashPublicationTarget { session_id })
+        } else {
+            capability
+        }
+    }
 
     /// F011: `Subscription` (a $0-marginal route) must rank cheapest,
     /// contradicting the OLD derived-`Ord` declaration order
@@ -2404,6 +2780,27 @@ mod tests {
         let legacy: FusionPublicationReceipt =
             serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(legacy, FusionPublicationReceipt::pending());
+    }
+
+    #[test]
+    fn legacy_outbox_records_default_to_the_original_wide_retry_cycle() {
+        let session_id = protocol::SessionId::new();
+        let legacy = serde_json::json!({
+            "delivery_id": "fusion-delivery:fu_test",
+            "session_id": session_id,
+            "message_uuid": "00000000-0000-0000-0000-000000000001",
+            "payload": {"body": "answer"},
+            "attempt": 0,
+            "receipt": {"status": "queued"},
+        });
+        let record: DurableFusionOutboxRecord = serde_json::from_value(legacy).unwrap();
+        assert_eq!(record.retry_cycle_end, 4);
+
+        let mut roundtrip = serde_json::to_value(record).unwrap();
+        assert_eq!(roundtrip["retry_cycle_end"], 4);
+        roundtrip["retry_cycle_end"] = serde_json::json!(u64::from(u8::MAX) + 5);
+        let wide: DurableFusionOutboxRecord = serde_json::from_value(roundtrip).unwrap();
+        assert_eq!(wide.retry_cycle_end, 260);
     }
 
     #[tokio::test]
@@ -2634,6 +3031,191 @@ mod tests {
         assert_eq!(parsed.as_str(), "fu_0123456789abcdef0123456789abcdef");
         let invalid = serde_json::from_value::<FusionRunId>(serde_json::json!("fu_not-a-run"));
         assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn supervisor_result_claim_atomically_preserves_the_winning_owner() {
+        for origin in [
+            FusionOrigin::Agent,
+            FusionOrigin::Slash,
+            FusionOrigin::Workflow,
+        ] {
+            let (_session_id, cancelled, _) = terminal_test_control(origin);
+            assert!(cancelled.activate_at(Instant::now()));
+            assert!(cancelled.request_cancel());
+            let ignored_success = terminal_test_result(&cancelled.identity().run_id);
+            assert_eq!(
+                cancelled.claim_supervisor_result(Ok(ignored_success)),
+                Err(FusionError::Cancelled),
+                "a cancellation claim that wins the phase lock is authoritative for {origin:?}"
+            );
+
+            let (_session_id, natural, _) = terminal_test_control(origin);
+            assert!(natural.activate_at(Instant::now()));
+            let success = terminal_test_result(&natural.identity().run_id);
+            assert_eq!(
+                natural.claim_supervisor_result(Ok(success.clone())),
+                Ok(success)
+            );
+            assert!(natural.is_finalizing());
+            assert!(
+                !natural.request_cancel(),
+                "cancellation cannot steal the natural claim for {origin:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn every_origin_records_one_immutable_candidate_before_terminal_visibility() {
+        for origin in [
+            FusionOrigin::Agent,
+            FusionOrigin::Slash,
+            FusionOrigin::Workflow,
+        ] {
+            let (session_id, control, summary) = terminal_test_control(origin);
+            let (recorder, seen_rx, release) =
+                ProbeTerminalRecorder::new(true, false, FusionPublicationReceipt::queued());
+            let capability = terminal_test_capability(recorder.clone(), origin, session_id);
+            let runner_control = control.clone();
+            let prepared =
+                PreparedFusionRun::new(summary, control.clone(), move |_, _| async move {
+                    runner_control.facts().set_allocated_panels(1);
+                    FusionRunOutcome::from_control(
+                        &runner_control,
+                        Ok(terminal_test_result(&runner_control.identity().run_id)),
+                    )
+                })
+                .with_terminal_capability(capability);
+            let waiter = tokio::spawn(prepared.activate(FusionActivation::now(), None));
+
+            let (recorded, slash_target) = tokio::time::timeout(Duration::from_secs(1), seen_rx)
+                .await
+                .expect("common recorder must be reached")
+                .expect("common recorder observation must be retained");
+            assert_eq!(control.terminal_outcome(), None);
+            assert!(control.is_finalizing());
+            assert!(!control.request_cancel());
+            assert_eq!(recorded.facts.allocated_panels, Some(1));
+            assert_eq!(
+                slash_target.map(|target| target.session_id),
+                (origin == FusionOrigin::Slash).then_some(session_id)
+            );
+
+            // A late mutation cannot alter the exact candidate already handed
+            // to durable recording.
+            control.facts().set_allocated_panels(9);
+            release.expect("this recorder is blocked").add_permits(1);
+            let visible = waiter.await.expect("activation waiter must join");
+            assert_eq!(visible.identity, recorded.identity);
+            assert_eq!(visible.result, recorded.result);
+            assert_eq!(visible.facts, recorded.facts);
+            assert_eq!(visible.facts.allocated_panels, Some(1));
+            assert_eq!(visible.publication, FusionPublicationReceipt::queued());
+            assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn dropping_without_a_recorder_seals_exact_zero_synchronously_without_a_runtime() {
+        let (_session_id, control, summary) = terminal_test_control(FusionOrigin::Agent);
+        let runner_control = control.clone();
+        let prepared = PreparedFusionRun::new(summary, control.clone(), move |_, _| async move {
+            FusionRunOutcome::from_control(&runner_control, Err(FusionError::Internal))
+        });
+
+        drop(prepared);
+
+        let outcome = control
+            .terminal_outcome()
+            .expect("legacy/no-recorder Drop seals before returning");
+        assert_eq!(outcome.result, Err(FusionError::Cancelled));
+        assert_eq!(outcome.facts.allocated_panels, Some(0));
+        assert_eq!(outcome.facts.dispatched_panels, Some(0));
+        assert_eq!(outcome.facts.attempts, Some(0));
+        assert_eq!(outcome.facts.usage, Some(FusionUsage::default()));
+        assert_eq!(
+            outcome.publication,
+            FusionPublicationReceipt::not_required()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_any_origin_claims_sealing_before_the_recorder_can_run() {
+        for origin in [
+            FusionOrigin::Agent,
+            FusionOrigin::Slash,
+            FusionOrigin::Workflow,
+        ] {
+            let (session_id, control, summary) = terminal_test_control(origin);
+            let (recorder, seen_rx, release) =
+                ProbeTerminalRecorder::new(true, false, FusionPublicationReceipt::queued());
+            let capability = terminal_test_capability(recorder.clone(), origin, session_id);
+            let runner_control = control.clone();
+            let prepared =
+                PreparedFusionRun::new(summary, control.clone(), move |_, _| async move {
+                    FusionRunOutcome::from_control(&runner_control, Err(FusionError::Internal))
+                })
+                .with_terminal_capability(capability);
+
+            drop(prepared);
+            // A current-thread runtime cannot poll the detached recorder until
+            // this task yields. The claim therefore has to happen in Drop,
+            // synchronously, rather than at the start of the spawned future.
+            assert!(
+                !control.request_cancel(),
+                "Drop must own sealing before scheduling for {origin:?}"
+            );
+            let (recorded, _) = tokio::time::timeout(Duration::from_secs(1), seen_rx)
+                .await
+                .expect("Drop-owned recorder must run")
+                .expect("Drop-owned candidate must be observable");
+            assert_eq!(control.terminal_outcome(), None);
+            assert_eq!(recorded.result, Err(FusionError::Cancelled));
+            assert_eq!(recorded.facts.attempts, Some(0));
+
+            release.expect("this recorder is blocked").add_permits(1);
+            let visible = tokio::time::timeout(Duration::from_secs(1), control.wait_terminal())
+                .await
+                .expect("Drop-owned sealing must wake waiters");
+            assert_eq!(visible.result, recorded.result);
+            assert_eq!(visible.facts, recorded.facts);
+            assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn runner_and_recorder_panics_are_sealed_once_for_every_origin() {
+        for origin in [
+            FusionOrigin::Agent,
+            FusionOrigin::Slash,
+            FusionOrigin::Workflow,
+        ] {
+            let (session_id, control, summary) = terminal_test_control(origin);
+            let (recorder, seen_rx, _) =
+                ProbeTerminalRecorder::new(false, true, FusionPublicationReceipt::queued());
+            let capability = terminal_test_capability(recorder.clone(), origin, session_id);
+            let prepared = PreparedFusionRun::new(summary, control.clone(), move |_, _| {
+                panic!("runner construction panic");
+                #[allow(unreachable_code)]
+                async {
+                    unreachable!()
+                }
+            })
+            .with_terminal_capability(capability);
+
+            let visible = prepared.activate(FusionActivation::now(), None).await;
+            let (recorded, _) = seen_rx
+                .await
+                .expect("recorder observes the runner panic candidate before panicking");
+            assert_eq!(recorded.result, Err(FusionError::Internal));
+            assert_eq!(visible.result, recorded.result);
+            assert_eq!(visible.facts, recorded.facts);
+            assert_eq!(
+                visible.publication,
+                FusionPublicationReceipt::storage_failure("terminal recorder panicked")
+            );
+            assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[test]

@@ -779,6 +779,16 @@ pub(crate) struct LifecycleRuntime {
     /// a stale prewarm cannot later seed `previous_response_id`.
     pub(crate) startup_responses_websocket_prewarm:
         std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Weak self-link installed after a production builder wraps the
+    /// orchestrator in `Arc`. It lets clear/resume transfer their commit to an
+    /// owned task without creating a reference cycle.
+    pub(crate) session_switch_owner:
+        std::sync::OnceLock<std::sync::Weak<ConversationOrchestrator>>,
+    /// Counts session-switch work from pre-I/O admission through post-commit
+    /// host presence binding so shutdown can close admission and drain it.
+    pub(crate) session_switch_supervisor: Arc<SessionSwitchSupervisor>,
+    /// Optional process-host binding invoked from the owned commit itself.
+    pub(crate) session_activation_observer: Option<Arc<dyn SessionActivationObserver>>,
 }
 
 impl LifecycleRuntime {
@@ -796,7 +806,224 @@ impl LifecycleRuntime {
             goal_checkin_idle_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             stop_hook_snapshot: None,
             startup_responses_websocket_prewarm: std::sync::Mutex::new(None),
+            session_switch_owner: std::sync::OnceLock::new(),
+            session_switch_supervisor: SessionSwitchSupervisor::new(),
+            session_activation_observer: None,
         }
+    }
+}
+
+/// Prepared host authority for a hot session switch. Construction may hydrate,
+/// import, and claim storage, but neither cost nor transcript state becomes
+/// active until the owned orchestrator commit consumes this token.
+pub struct PreparedSessionSwitch {
+    cost: cost::PreparedCostSession,
+    transcript_lock: Option<Arc<session::jsonl::DurableTranscriptWriter>>,
+}
+
+impl PreparedSessionSwitch {
+    /// Join a validated cost entry with the transcript transaction rooted at
+    /// the same canonical session-state directory.
+    #[must_use]
+    pub fn new(
+        cost: cost::PreparedCostSession,
+        transcript_lock: Option<Arc<session::jsonl::DurableTranscriptWriter>>,
+    ) -> Self {
+        Self {
+            cost,
+            transcript_lock,
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        cost::PreparedCostSession,
+        Option<Arc<session::jsonl::DurableTranscriptWriter>>,
+    ) {
+        (self.cost, self.transcript_lock)
+    }
+}
+
+/// Host-owned durable session preparer used by clear/resume before the
+/// orchestrator publishes a replacement conversation identity. The host keeps
+/// the exact coordinator/lease for every live session; this seam returns a
+/// non-active token so caller cancellation leaves the old session coherent.
+#[async_trait::async_trait]
+pub trait CostSessionSwitcher: Send + Sync {
+    /// Hydrate/claim `session_id` without changing the active tracker/writer.
+    async fn prepare_session(
+        &self,
+        tracker: Arc<cost::CostTracker>,
+        session_id: protocol::SessionId,
+    ) -> Result<PreparedSessionSwitch, cost::CostPersistError>;
+}
+
+/// Host callback run by the owned session-switch commit after conversation,
+/// cost, and transcript identities have moved together. Failure is post-commit:
+/// it is surfaced as a warning and must never roll the session back.
+#[async_trait::async_trait]
+pub trait SessionActivationObserver: Send + Sync {
+    /// Rebind process-scoped discovery/inbox state to the committed identity.
+    async fn session_activated(
+        &self,
+        previous: protocol::SessionId,
+        current: protocol::SessionId,
+    ) -> Result<(), String>;
+}
+
+#[derive(Default)]
+struct SessionSwitchSupervisorState {
+    closing: bool,
+    active: usize,
+    errors: Vec<String>,
+}
+
+/// Admission and completion fence for owned clear/resume commits. A claim is
+/// registered synchronously before the first switch await and moves into the
+/// detached owner, closing the caller-drop gap without retaining task handles.
+pub(crate) struct SessionSwitchSupervisor {
+    state: std::sync::Mutex<SessionSwitchSupervisorState>,
+    changed: tokio::sync::Notify,
+    #[cfg(test)]
+    wait_hook: std::sync::Mutex<Option<Arc<SessionSwitchWaitHook>>>,
+}
+
+#[cfg(test)]
+pub(crate) struct SessionSwitchWaitHook {
+    pub(crate) checked_active: tokio::sync::Notify,
+    pub(crate) resume_wait: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl SessionSwitchWaitHook {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            checked_active: tokio::sync::Notify::new(),
+            resume_wait: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+impl SessionSwitchSupervisor {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: std::sync::Mutex::new(SessionSwitchSupervisorState::default()),
+            changed: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            wait_hook: std::sync::Mutex::new(None),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_wait_hook(&self, hook: Arc<SessionSwitchWaitHook>) {
+        *self
+            .wait_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    pub(crate) fn claim(self: &Arc<Self>) -> Result<SessionSwitchClaim, String> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closing {
+            return Err("session lifecycle is shutting down".into());
+        }
+        state.active = state
+            .active
+            .checked_add(1)
+            .ok_or_else(|| "too many concurrent session-switch ownership claims".to_string())?;
+        Ok(SessionSwitchClaim {
+            supervisor: self.clone(),
+            completed: false,
+        })
+    }
+
+    pub(crate) async fn close_and_drain(&self) -> Vec<String> {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.closing = true;
+        }
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let active = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .active;
+            if active == 0 {
+                break;
+            }
+            #[cfg(test)]
+            let wait_hook = self
+                .wait_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            #[cfg(test)]
+            if let Some(hook) = wait_hook {
+                hook.checked_active.notify_one();
+                hook.resume_wait.notified().await;
+            }
+            changed.await;
+        }
+        std::mem::take(
+            &mut self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .errors,
+        )
+    }
+}
+
+pub(crate) struct SessionSwitchClaim {
+    supervisor: Arc<SessionSwitchSupervisor>,
+    completed: bool,
+}
+
+impl SessionSwitchClaim {
+    pub(crate) fn complete(mut self, error: Option<String>) {
+        if let Some(error) = error {
+            self.supervisor
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .errors
+                .push(error);
+        }
+        self.release();
+    }
+
+    fn release(&mut self) {
+        if self.completed {
+            return;
+        }
+        self.completed = true;
+        let mut state = self
+            .supervisor
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active = state
+            .active
+            .checked_sub(1)
+            .expect("session switch claim count underflow");
+        drop(state);
+        self.supervisor.changed.notify_waiters();
+    }
+}
+
+impl Drop for SessionSwitchClaim {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -842,6 +1069,9 @@ pub(crate) struct ModelRuntime {
     /// It remains fixed across hot-session switches until the switch
     /// publishes a hydrated destination.
     pub(crate) cost_scope: std::sync::Mutex<Option<cost::CostSessionScope>>,
+    /// Optional app-owned durable session authority. Library/legacy hosts leave
+    /// this unset and retain the historical tracker-only switch behavior.
+    pub(crate) cost_session_switcher: Option<Arc<dyn CostSessionSwitcher>>,
     /// Optional analytics bus wired by [`Self::with_analytics_bus`] (M7). When
     /// present (desktop composition root), the live turn loop fires
     /// `tengu_api_success` per completed API response — 1:1 with claude-code
@@ -917,6 +1147,7 @@ impl ModelRuntime {
             refusal_notice_queue: Mutex::new(crate::refusal_notice::NoticeQueue::new()),
             cost_tracker: None,
             cost_scope: std::sync::Mutex::new(None),
+            cost_session_switcher: None,
             analytics_bus: None,
             session_started_at: std::sync::Mutex::new(std::time::Instant::now()),
             api_calls_recorded: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -940,20 +1171,33 @@ impl ModelRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = std::time::Instant::now();
     }
 
-    /// Move the active cost projection to the session that has just been
-    /// mounted. Existing session cells remain available to scoped background
-    /// work and are never reset here.
-    pub(crate) async fn switch_cost_session(
+    /// Hydrate and validate the destination without changing the active cost or
+    /// transcript projection. The owned session-switch task consumes the token
+    /// only after every fallible/awaiting reset step has completed.
+    pub(crate) async fn prepare_cost_session(
         &self,
         session_id: protocol::SessionId,
-    ) -> Result<(), cost::CostPersistError> {
+    ) -> Result<Option<PreparedSessionSwitch>, cost::CostPersistError> {
         if let Some(tracker) = self.cost_tracker.as_ref() {
-            tracker.switch_session(session_id).await?;
+            let prepared = if let Some(switcher) = self.cost_session_switcher.as_ref() {
+                switcher.prepare_session(tracker.clone(), session_id).await?
+            } else {
+                PreparedSessionSwitch::new(tracker.prepare_session(session_id).await?, None)
+            };
+            return Ok(Some(prepared));
+        }
+        Ok(None)
+    }
+
+    /// Synchronously publish a prepared cost entry after all asynchronous work
+    /// has succeeded. This function performs no I/O and cannot be cancelled
+    /// between active-session publication and the caller's conversation commit.
+    pub(crate) fn activate_cost_session(&self, prepared: Option<cost::PreparedCostSession>) {
+        if let Some(prepared) = prepared {
             *self
                 .cost_scope
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                Some(tracker.session_scope(session_id));
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(prepared.activate());
         }
         self.api_calls_recorded
             .store(0, std::sync::atomic::Ordering::SeqCst);
@@ -963,7 +1207,6 @@ impl ModelRuntime {
             .session_started_at
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = std::time::Instant::now();
-        Ok(())
     }
 
     /// Reset refusal routing after compaction token accounting is cleared.
@@ -1161,5 +1404,31 @@ pub(super) fn camelize_json_keys(value: serde_json::Value) -> serde_json::Value 
             serde_json::Value::Array(values.into_iter().map(camelize_json_keys).collect())
         }
         scalar => scalar,
+    }
+}
+
+#[cfg(test)]
+mod session_switch_supervisor_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn release_between_active_check_and_wait_cannot_be_lost() {
+        let supervisor = SessionSwitchSupervisor::new();
+        let claim = supervisor.claim().expect("admit switch");
+        let hook = SessionSwitchWaitHook::new();
+        supervisor.set_wait_hook(hook.clone());
+
+        let closing = supervisor.clone();
+        let drain = tokio::spawn(async move { closing.close_and_drain().await });
+        hook.checked_active.notified().await;
+        drop(claim);
+        hook.resume_wait.notify_one();
+
+        let errors = tokio::time::timeout(std::time::Duration::from_secs(1), drain)
+            .await
+            .expect("registered notification survives the check/wait gap")
+            .expect("drain task");
+        assert!(errors.is_empty());
+        assert!(supervisor.claim().is_err(), "shutdown closes admission");
     }
 }

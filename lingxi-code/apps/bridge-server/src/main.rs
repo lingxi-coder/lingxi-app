@@ -104,10 +104,23 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("failed to assemble bridge runtime: {e}"))?;
 
+    // Capture the ordered runtime lifecycle before moving the connection into
+    // the endpoint. It outlives the pump and drains all accepted work before
+    // the session claim and discovery record are released.
+    let session_lifecycle = bound.session_lifecycle();
+
     // (3) Start the loopback WebSocket endpoint on an ephemeral port.
-    let endpoint = McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(bound.connection))
+    let endpoint = match McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(bound.connection))
         .await
-        .map_err(|e| anyhow::anyhow!("failed to bind loopback endpoint: {e}"))?;
+    {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            drain_session_lifecycle(&session_lifecycle).await;
+            return Err(anyhow::anyhow!(
+                "failed to bind loopback endpoint: {error}"
+            ));
+        }
+    };
     let port = endpoint.port();
 
     // (4) Write the F2-04 discovery lockfile and enforce its token on the
@@ -118,12 +131,23 @@ async fn main() -> anyhow::Result<()> {
     let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let bridge_dir = match &args.bridge_dir {
         Some(path) => path.clone(),
-        None => boot::lingxi_config_home()
-            .ok_or_else(|| anyhow::anyhow!("no home directory to root the bridge lockfile"))?
-            .join("bridge"),
+        None => match boot::lingxi_config_home() {
+            Some(home) => home.join("bridge"),
+            None => {
+                endpoint.shutdown().await;
+                drain_session_lifecycle(&session_lifecycle).await;
+                return Err(anyhow::anyhow!(
+                    "no home directory to root the bridge lockfile"
+                ));
+            }
+        },
     };
     if !bridge_dir.is_absolute() {
-        anyhow::bail!("bridge lockfile directory must be absolute");
+        endpoint.shutdown().await;
+        drain_session_lifecycle(&session_lifecycle).await;
+        return Err(anyhow::anyhow!(
+            "bridge lockfile directory must be absolute"
+        ));
     }
     let boot::ServedEndpoint {
         endpoint,
@@ -131,8 +155,17 @@ async fn main() -> anyhow::Result<()> {
         // `lock_guard` reaps the lockfile on shutdown OR panic (Drop-guard); it
         // is held to end-of-scope rather than dropped early.
         lock_guard,
-    } = boot::publish_lockfile(endpoint, bridge_dir, vec![workspace])
-        .map_err(|e| anyhow::anyhow!("failed to publish bridge lockfile: {e}"))?;
+    } = match boot::publish_lockfile_recoverable(endpoint, bridge_dir, vec![workspace]) {
+        Ok(served) => served,
+        Err(error) => {
+            let (error, endpoint) = error.into_parts();
+            endpoint.shutdown().await;
+            drain_session_lifecycle(&session_lifecycle).await;
+            return Err(anyhow::anyhow!(
+                "failed to publish bridge lockfile: {error}"
+            ));
+        }
+    };
 
     // (5) Log the chosen port + lockfile path (NEVER the token), then block.
     tracing::info!(
@@ -145,14 +178,30 @@ async fn main() -> anyhow::Result<()> {
     // Desktop hosts terminate sidecars with SIGTERM on Unix. Listen for both
     // interactive Ctrl-C and host termination so the lockfile guard and socket
     // endpoint always receive a graceful teardown opportunity.
-    let shutdown_signal = wait_for_shutdown_signal().await?;
+    let shutdown_signal = match wait_for_shutdown_signal().await {
+        Ok(signal) => signal,
+        Err(error) => {
+            endpoint.shutdown().await;
+            drain_session_lifecycle(&session_lifecycle).await;
+            drop(lock_guard);
+            return Err(error);
+        }
+    };
     tracing::info!(shutdown_signal, "bridge-server: shutdown signal received");
 
     // Explicit teardown: stop accepting, then `lock_guard` drops at end of scope
     // (removing the discovery file).
     endpoint.shutdown().await;
+    drain_session_lifecycle(&session_lifecycle).await;
     drop(lock_guard);
     Ok(())
+}
+
+async fn drain_session_lifecycle(lifecycle: &engine_desktop::DesktopSessionLifecycle) {
+    let report = lifecycle.shutdown_and_drain().await;
+    for error in report.errors {
+        tracing::warn!(%error, "bridge-server session shutdown was not fully durable");
+    }
 }
 
 async fn wait_for_shutdown_signal() -> anyhow::Result<&'static str> {

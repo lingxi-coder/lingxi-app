@@ -12,7 +12,12 @@ use crate::jsonl::transcript_compact::{
     local_gc_enabled, next_backstop, perform_compact_transcript, CompactOutcome, CompactStats,
     COMPACT_BACKSTOP_BYTES,
 };
+use crate::jsonl::durable_writer::{
+    DurableTranscriptWriter, TranscriptAppendOutcome, TranscriptWriterError,
+};
 use platform_api::{FileSystem, FsError};
+use protocol::SessionId;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -28,6 +33,9 @@ pub enum WriterError {
     /// `serde_json::to_string` failed (e.g. malformed `Value`).
     #[error("serialize failure: {0}")]
     Serialize(#[from] serde_json::Error),
+    /// The production composition root's durable transcript transaction.
+    #[error(transparent)]
+    Durable(#[from] TranscriptWriterError),
 }
 
 /// SC-07 — stamp `sessionKind` on a chain entry that does not carry one.
@@ -57,6 +65,13 @@ fn stamp_session_kind(msg: &JsonlMessage) -> Option<JsonlMessage> {
     Some(stamped)
 }
 
+#[derive(Clone)]
+struct DurableTranscriptTarget {
+    path: PathBuf,
+    writer: Arc<DurableTranscriptWriter>,
+    cwd: PathBuf,
+}
+
 /// Append-only writer for one session's `<uuid>.jsonl`.
 ///
 /// Holds an exclusive in-process lock so concurrent `append` calls serialize
@@ -64,8 +79,26 @@ fn stamp_session_kind(msg: &JsonlMessage) -> Option<JsonlMessage> {
 /// the orchestrator wants it; the spec only mandates in-process for M5-07).
 pub struct JsonlWriter {
     path: PathBuf,
-    active_path: std::sync::RwLock<PathBuf>,
+    active_path: Arc<std::sync::RwLock<PathBuf>>,
     fs: Arc<dyn FileSystem>,
+    /// Optional session-state transaction used by production composition.
+    /// Legacy/test writers leave this unset and retain their historical
+    /// FileSystem-only behavior.
+    durable_lock: Arc<std::sync::RwLock<Option<Arc<DurableTranscriptWriter>>>>,
+    /// One coherent `(path, writer, cwd)` snapshot for ordinary appends. A hot
+    /// session switch publishes this tuple synchronously after the destination
+    /// cost authority is active, so no append can combine A's path with B's
+    /// session-state lock.
+    active_durable_target: Arc<std::sync::RwLock<Option<DurableTranscriptTarget>>>,
+    /// Session-pinned transcript targets used by late background recorders.
+    /// The ordinary writer follows the active target; a Fusion recorder keeps
+    /// its originating session id and resolves this map under the same writer
+    /// mutex, so A→B cannot redirect a late A append into B's transcript.
+    session_targets: Arc<
+        std::sync::RwLock<
+            HashMap<SessionId, DurableTranscriptTarget>,
+        >,
+    >,
     lock: Mutex<()>,
     /// Bytes appended to the active transcript since the last metadata
     /// re-append — the oracle's `bytesSinceMetadataReAppend` (increment site
@@ -265,15 +298,141 @@ impl JsonlWriter {
     #[must_use]
     pub fn new(path: PathBuf, fs: Arc<dyn FileSystem>) -> Self {
         Self {
-            active_path: std::sync::RwLock::new(path.clone()),
+            active_path: Arc::new(std::sync::RwLock::new(path.clone())),
             path,
             fs,
+            durable_lock: Arc::new(std::sync::RwLock::new(None)),
+            active_durable_target: Arc::new(std::sync::RwLock::new(None)),
+            session_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             lock: Mutex::new(()),
             bytes_since_metadata_re_append: AtomicUsize::new(0),
             metadata_state: Mutex::new(SessionMetadataState::default()),
             bytes_since_compact: AtomicU64::new(0),
             compact_backstop_bytes: AtomicU64::new(COMPACT_BACKSTOP_BYTES),
         }
+    }
+
+    /// Share the coordinator's durable transcript transaction with ordinary
+    /// appends and Fusion outbox delivery. This is additive: embedders that do
+    /// not opt in continue using the compatibility writer above.
+    #[must_use]
+    pub fn with_durable_lock(self, durable_lock: Arc<DurableTranscriptWriter>) -> Self {
+        *self
+            .durable_lock
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(durable_lock);
+        self
+    }
+
+    /// Replace the active session's durable lock after a validated hot
+    /// session switch. The writer remains the same shared in-process object;
+    /// only the pinned session-state root changes.
+    pub fn set_durable_lock(&self, durable_lock: Arc<DurableTranscriptWriter>) {
+        *self
+            .durable_lock
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(durable_lock);
+    }
+
+    /// Pin the current transcript path and durable authority for one session.
+    /// Composition roots call this after boot/hot-switch hydration and after
+    /// a cwd relocation. No I/O occurs; the next append resolves this target
+    /// while holding the writer mutex.
+    pub fn bind_session_target(&self, session_id: SessionId, path: PathBuf) {
+        let _ = self.activate_session_target(session_id, path, PathBuf::new());
+    }
+
+    /// Publish a hot-session transcript target without an await point. The
+    /// caller invokes this immediately after the durable cost authority has
+    /// switched; cancellation can therefore occur only before both changes or
+    /// after both are visible.
+    pub fn activate_session_target(
+        &self,
+        session_id: SessionId,
+        path: PathBuf,
+        cwd: PathBuf,
+    ) -> Result<(), WriterError> {
+        let durable_lock = self.durable_lock().ok_or_else(|| {
+            WriterError::Fs(FsError::Io(
+                "durable transcript lock is not configured".into(),
+            ))
+        })?;
+        self.activate_session_target_with_durable_lock(session_id, path, cwd, durable_lock);
+        Ok(())
+    }
+
+    /// Atomically publish an explicitly prepared session target and its exact
+    /// durable authority. Hot-switch preparation captures this lock without
+    /// mutating the active writer; the owned commit consumes it with no await
+    /// or fallible lookup between transcript, cost, and conversation identity.
+    pub fn activate_session_target_with_durable_lock(
+        &self,
+        session_id: SessionId,
+        path: PathBuf,
+        cwd: PathBuf,
+        durable_lock: Arc<DurableTranscriptWriter>,
+    ) {
+        *self
+            .durable_lock
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(durable_lock.clone());
+        let target = DurableTranscriptTarget {
+            path: path.clone(),
+            writer: durable_lock,
+            cwd,
+        };
+        self.session_targets
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id, target.clone());
+        *self
+            .active_durable_target
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(target);
+        *self
+            .active_path
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = path;
+    }
+
+    /// Cwd metadata captured alongside one session's durable transcript target.
+    #[must_use]
+    pub fn session_target_cwd(&self, session_id: SessionId) -> Option<PathBuf> {
+        self.session_targets
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .map(|target| target.cwd.clone())
+    }
+
+    /// Transcript path captured with one session's durable authority.
+    #[must_use]
+    pub fn session_target_path(&self, session_id: SessionId) -> Option<PathBuf> {
+        self.session_targets
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .map(|target| target.path.clone())
+    }
+
+    fn durable_lock(&self) -> Option<Arc<DurableTranscriptWriter>> {
+        self.durable_lock
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Whether production attached a session-state transcript authority.
+    #[must_use]
+    pub fn durable_transcript_enabled(&self) -> bool {
+        self.durable_lock().is_some()
+    }
+
+    fn active_durable_target(&self) -> Option<DurableTranscriptTarget> {
+        self.active_durable_target
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Returns the on-disk path this writer targets.
@@ -330,6 +489,243 @@ impl JsonlWriter {
     /// When the project path changes, byte backstop counters are reset because
     /// they belong to the old transcript rather than the newly targeted file.
     pub async fn retarget_with_relocation(
+        &self,
+        path: PathBuf,
+        session_id: &str,
+        relocated_cwd: &str,
+    ) -> Result<(), WriterError> {
+        if let Some(durable_target) = self.active_durable_target() {
+            return self
+                .retarget_with_relocation_durable(
+                    path,
+                    session_id.to_string(),
+                    relocated_cwd.to_string(),
+                    durable_target.writer,
+                )
+                .await;
+        }
+        self.retarget_with_relocation_legacy(path, session_id, relocated_cwd)
+            .await
+    }
+
+    /// Relocate through the same rooted session transaction used by durable
+    /// ordinary/outbox appends.  The blocking closure owns the transaction
+    /// lock across source inspection, destination quarantine, move, target
+    /// resolution and marker fsync; a concurrent outbox therefore cannot
+    /// capture the old path between relocation's metadata and append locks.
+    async fn retarget_with_relocation_durable(
+        &self,
+        path: PathBuf,
+        session_id: String,
+        relocated_cwd: String,
+        durable_lock: Arc<DurableTranscriptWriter>,
+    ) -> Result<(), WriterError> {
+        let target_session_id = SessionId::parse_prefixed(&session_id);
+        let line = serde_json::to_string(&serde_json::json!({
+            "type": "relocated",
+            "relocatedCwd": relocated_cwd,
+            "sessionId": session_id,
+        }))?;
+        let mut payload = String::with_capacity(line.len() + 1);
+        payload.push_str(&line);
+        payload.push('\n');
+
+        let mut metadata_state = self.metadata_state.lock().await;
+        let _writer_guard = self.lock.lock().await;
+        let old_path = self.active_path();
+        let same_path = old_path == path;
+        let shared_root = if same_path {
+            None
+        } else {
+            Some(relocation_root(&old_path, &path).map_err(|error| {
+                WriterError::Fs(FsError::Io(format!("unsafe transcript relocation path: {error}")))
+            })?)
+        };
+
+        let operation_path = path.clone();
+        let operation_old_path = old_path.clone();
+        let operation_payload = payload;
+        let operation_root = shared_root.clone();
+        let operation_durable_lock = durable_lock.clone();
+        let operation = tokio::task::spawn_blocking(move || {
+            operation_durable_lock.with_transaction(|transaction| {
+                let old_exists = match std::fs::symlink_metadata(&operation_old_path) {
+                    Ok(metadata) if metadata.file_type().is_file() => true,
+                    Ok(_) => {
+                        return Err(TranscriptWriterError::Fs(FsError::Io(format!(
+                            "transcript source is not a regular file: {}",
+                            operation_old_path.display()
+                        ))));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(error) => {
+                        return Err(TranscriptWriterError::Fs(FsError::Io(format!(
+                            "could not inspect transcript source: {error}"
+                        ))));
+                    }
+                };
+                let mut moved_existing = false;
+
+                if !same_path {
+                    if let Some(parent) = operation_path.parent() {
+                        if !parent.as_os_str().is_empty() && !parent.exists() {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::DirBuilderExt;
+                                std::fs::DirBuilder::new()
+                                    .recursive(true)
+                                    .mode(0o700)
+                                    .create(parent)
+                                    .map_err(|error| {
+                                        TranscriptWriterError::Fs(FsError::Io(error.to_string()))
+                                    })?;
+                            }
+                            #[cfg(not(unix))]
+                            std::fs::create_dir_all(parent).map_err(|error| {
+                                TranscriptWriterError::Fs(FsError::Io(error.to_string()))
+                            })?;
+                        }
+                    }
+
+                    let root = operation_root
+                        .as_deref()
+                        .expect("different transcript paths have a shared root");
+                    validate_relocation_parents(root, &operation_old_path, &operation_path, old_exists)
+                        .map_err(|error| {
+                            TranscriptWriterError::Fs(FsError::Io(format!(
+                                "unsafe transcript relocation parent: {error}"
+                            )))
+                        })?;
+                    let target_exists = match std::fs::symlink_metadata(&operation_path) {
+                        Ok(_) => true,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                        Err(error) => {
+                            return Err(TranscriptWriterError::Fs(FsError::Io(format!(
+                                "could not inspect transcript destination: {error}"
+                            ))));
+                        }
+                    };
+                    let superseded = if target_exists {
+                        Some(move_to_superseded_path(&operation_path).map_err(|error| {
+                            TranscriptWriterError::Fs(FsError::Io(format!(
+                                "transcript destination quarantine failed: {error}"
+                            )))
+                        })?)
+                    } else {
+                        None
+                    };
+
+                    if !old_exists {
+                        if let Some(superseded) = superseded {
+                            if let Err(error) = std::fs::rename(&superseded, &operation_path) {
+                                tracing::warn!(
+                                    path = %operation_path.display(),
+                                    %error,
+                                    "failed to restore occupied transcript destination"
+                                );
+                            }
+                            return Err(TranscriptWriterError::Fs(FsError::Io(format!(
+                                "transcript source missing and destination occupied: {}",
+                                operation_path.display()
+                            ))));
+                        }
+                    } else if let Err(error) = move_file_with_cross_device_fallback(
+                        &operation_old_path,
+                        &operation_path,
+                    ) {
+                        if let Some(superseded) = superseded.as_ref() {
+                            let _ = std::fs::rename(superseded, &operation_path);
+                        }
+                        return Err(TranscriptWriterError::Fs(FsError::Io(format!(
+                            "transcript move failed: {error}"
+                        ))));
+                    } else {
+                        moved_existing = true;
+                    }
+
+                    if !old_exists {
+                        validate_real_parent_chain(
+                            root,
+                            operation_path
+                                .parent()
+                                .expect("transcript destination has a parent"),
+                        )
+                        .map_err(|error| {
+                            TranscriptWriterError::Fs(FsError::Io(format!(
+                                "unsafe transcript relocation parent: {error}"
+                            )))
+                        })?;
+                    }
+                }
+
+                let should_append_marker = (same_path && old_exists) || moved_existing;
+                if should_append_marker {
+                    let parent = operation_path.parent().ok_or_else(|| {
+                        TranscriptWriterError::Fs(FsError::Io(
+                            "transcript destination has no parent".into(),
+                        ))
+                    })?;
+                    let identity = platform_api::rooted_fs::root_identity(parent)?;
+                    let relative = operation_path.file_name().map(PathBuf::from).ok_or_else(|| {
+                        TranscriptWriterError::Fs(FsError::Io(
+                            "transcript destination has no file name".into(),
+                        ))
+                    })?;
+                    if let Err(error) = transaction.append_raw_json_at(
+                        parent,
+                        &identity,
+                        &relative,
+                        serde_json::from_str(&operation_payload).map_err(|error| {
+                            TranscriptWriterError::Fs(FsError::Io(error.to_string()))
+                        })?,
+                    ) {
+                        tracing::warn!(
+                            path = %operation_path.display(),
+                            %error,
+                            "transcript relocation marker append failed"
+                        );
+                    }
+                }
+                Ok((old_exists, moved_existing))
+            })
+        })
+        .await
+        .map_err(|error| WriterError::Fs(FsError::Io(error.to_string())))??;
+
+        let (_, moved_existing) = operation;
+        if let Some(session_id) = target_session_id {
+            let target = DurableTranscriptTarget {
+                path: path.clone(),
+                writer: durable_lock.clone(),
+                cwd: PathBuf::from(&relocated_cwd),
+            };
+            self.session_targets
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(session_id, target.clone());
+            *self
+                .active_durable_target
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(target);
+        }
+        *self
+            .active_path
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = path.clone();
+        metadata_state.relocated_cwd = Some(relocated_cwd);
+        if !same_path {
+            self.bytes_since_metadata_re_append.store(0, Ordering::Relaxed);
+            self.bytes_since_compact.store(0, Ordering::Relaxed);
+        }
+        drop(_writer_guard);
+        drop(metadata_state);
+        if same_path || moved_existing {
+            self.maybe_re_append_metadata().await;
+        }
+        Ok(())
+    }
+
+    async fn retarget_with_relocation_legacy(
         &self,
         path: PathBuf,
         session_id: &str,
@@ -546,7 +942,16 @@ impl JsonlWriter {
     /// virtualize for tests (each `FileSystem` impl that hosts real files
     /// would do the same syscall internally). M5-08 may extend the trait.
     pub async fn append(&self, msg: &JsonlMessage) -> Result<(), WriterError> {
-        {
+        if self.active_durable_target().is_some() {
+            let stamped = stamp_session_kind(msg);
+            let payload = serde_json::to_value(stamped.as_ref().unwrap_or(msg))?;
+            let payload_bytes = serde_json::to_vec(&payload)?.len() + 1;
+            self.append_json_durable(payload).await?;
+            self.bytes_since_metadata_re_append
+                .fetch_add(payload_bytes, Ordering::Relaxed);
+            self.bytes_since_compact
+                .fetch_add(payload_bytes as u64, Ordering::Relaxed);
+        } else {
             let _g = self.lock.lock().await;
             let stamped = stamp_session_kind(msg);
             let line = serde_json::to_string(stamped.as_ref().unwrap_or(msg))?;
@@ -569,12 +974,185 @@ impl JsonlWriter {
         Ok(())
     }
 
+    /// Append one JSON object through the active transcript path while holding
+    /// the coordinator's durable session-state transaction. The active path
+    /// is resolved *inside* that transaction, so a concurrent `/cd` retarget
+    /// cannot split an ordinary append and a Fusion outbox delivery.
+    pub async fn append_json_once_durable(
+        &self,
+        delivery_id: &str,
+        payload: serde_json::Value,
+    ) -> Result<TranscriptAppendOutcome, TranscriptWriterError> {
+        let _guard = self.lock.lock().await;
+        let Some(target) = self.active_durable_target() else {
+            return Err(TranscriptWriterError::Fs(FsError::Io(
+                "durable transcript target is not configured".into(),
+            )));
+        };
+        self.append_json_once_durable_locked(
+            target.path,
+            target.writer,
+            delivery_id,
+            payload,
+        )
+        .await
+    }
+
+    /// Append once for a run pinned to its originating session. The target is
+    /// looked up only after acquiring the ordinary writer mutex, while the
+    /// durable transaction then serializes it with `/cd` relocation and other
+    /// cross-process writers.
+    pub async fn append_json_once_durable_for_session(
+        &self,
+        session_id: SessionId,
+        delivery_id: &str,
+        payload: serde_json::Value,
+    ) -> Result<TranscriptAppendOutcome, TranscriptWriterError> {
+        let _guard = self.lock.lock().await;
+        let target = self
+            .session_targets
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .cloned();
+        let target = target.ok_or_else(|| {
+            TranscriptWriterError::Fs(FsError::Io(format!(
+                "durable transcript target is not bound for session {session_id}"
+            )))
+        })?;
+        self.append_json_once_durable_locked(
+            target.path,
+            target.writer,
+            delivery_id,
+            payload,
+        )
+        .await
+    }
+
+    /// Append an ordinary transcript record under the active durable
+    /// transaction. Unlike Fusion delivery this deliberately performs no UUID
+    /// scan: ordinary history is append-only and its loader preserves the
+    /// established last-write-wins semantics for repeated UUID updates.
+    async fn append_json_durable(
+        &self,
+        payload: serde_json::Value,
+    ) -> Result<(), TranscriptWriterError> {
+        let _guard = self.lock.lock().await;
+        let Some(target) = self.active_durable_target() else {
+            return Err(TranscriptWriterError::Fs(FsError::Io(
+                "durable transcript target is not configured".into(),
+            )));
+        };
+        self.append_json_durable_locked(target.path, target.writer, payload)
+            .await
+    }
+
+    async fn append_json_durable_for_session(
+        &self,
+        session_id: SessionId,
+        payload: serde_json::Value,
+    ) -> Result<(), TranscriptWriterError> {
+        let _guard = self.lock.lock().await;
+        let target = self
+            .session_targets
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| {
+                TranscriptWriterError::Fs(FsError::Io(format!(
+                    "durable transcript target is not bound for session {session_id}"
+                )))
+            })?;
+        self.append_json_durable_locked(target.path, target.writer, payload)
+            .await
+    }
+
+    async fn append_json_durable_locked(
+        &self,
+        active_path: PathBuf,
+        durable_lock: Arc<DurableTranscriptWriter>,
+        payload: serde_json::Value,
+    ) -> Result<(), TranscriptWriterError> {
+        tokio::task::spawn_blocking(move || {
+            durable_lock.with_transaction(|transaction| {
+                let parent = active_path.parent().ok_or_else(|| {
+                    TranscriptWriterError::Fs(FsError::Io(
+                        "active transcript path has no parent".into(),
+                    ))
+                })?;
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    TranscriptWriterError::Fs(FsError::Io(error.to_string()))
+                })?;
+                let identity = platform_api::rooted_fs::root_identity(parent)?;
+                let relative = active_path.file_name().map(PathBuf::from).ok_or_else(|| {
+                    TranscriptWriterError::Fs(FsError::Io(
+                        "active transcript path has no file name".into(),
+                    ))
+                })?;
+                transaction.append_raw_json_at(parent, &identity, &relative, payload)
+            })
+        })
+        .await
+        .map_err(|error| TranscriptWriterError::Fs(FsError::Io(error.to_string())))?
+    }
+
+    async fn append_json_once_durable_locked(
+        &self,
+        active_path: PathBuf,
+        durable_lock: Arc<DurableTranscriptWriter>,
+        delivery_id: &str,
+        payload: serde_json::Value,
+    ) -> Result<TranscriptAppendOutcome, TranscriptWriterError> {
+        let delivery_id = delivery_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            durable_lock.with_transaction(|transaction| {
+                let parent = active_path.parent().ok_or_else(|| {
+                    TranscriptWriterError::Fs(FsError::Io(
+                        "active transcript path has no parent".into(),
+                    ))
+                })?;
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    TranscriptWriterError::Fs(FsError::Io(error.to_string()))
+                })?;
+                let identity = platform_api::rooted_fs::root_identity(parent)?;
+                let relative = active_path.file_name().map(PathBuf::from).ok_or_else(|| {
+                    TranscriptWriterError::Fs(FsError::Io(
+                        "active transcript path has no file name".into(),
+                    ))
+                })?;
+                transaction.append_json_once_at(
+                    parent,
+                    &identity,
+                    &relative,
+                    &delivery_id,
+                    payload,
+                )
+            })
+        })
+        .await
+        .map_err(|error| TranscriptWriterError::Fs(FsError::Io(error.to_string())))?
+    }
+
     /// Append one line to an explicit session transcript without retargeting
     /// the writer's active session. The shared append lock prevents an
     /// in-process current-session write from interleaving with this line.
     pub async fn append_to_path(&self, path: &Path, msg: &JsonlMessage) -> Result<(), WriterError> {
         if self.active_path() == path {
             return self.append(msg).await;
+        }
+
+        if self.durable_transcript_enabled() {
+            let session_id = SessionId::parse_prefixed(&msg.session_id).ok_or_else(|| {
+                WriterError::Fs(FsError::Io(format!(
+                    "durable transcript message has invalid session id {:?}",
+                    msg.session_id
+                )))
+            })?;
+            let stamped = stamp_session_kind(msg);
+            let payload = serde_json::to_value(stamped.as_ref().unwrap_or(msg))?;
+            self.append_json_durable_for_session(session_id, payload).await?;
+            return Ok(());
         }
 
         let _g = self.lock.lock().await;
@@ -1163,6 +1741,155 @@ mod tests {
         let fs: Arc<dyn FileSystem> =
             Arc::new(platform_posix::fs::PosixFileSystem::new(dir.clone()));
         (dir, path.clone(), JsonlWriter::new(path, fs))
+    }
+
+    #[tokio::test]
+    async fn durable_ordinary_append_stays_constant_work_and_last_write_wins() {
+        let (dir, path, _) = temp_writer("durable-ordinary-last-write");
+        let state_root = dir.join("session-state");
+        std::fs::create_dir_all(&state_root).expect("create state root");
+        let durable = Arc::new(
+            DurableTranscriptWriter::open(&state_root).expect("open durable transaction"),
+        );
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(dir.clone()));
+        let writer = JsonlWriter::new(path.clone(), fs).with_durable_lock(durable.clone());
+        let session_id = SessionId::parse_prefixed("11111111-2222-3333-4444-555555555555")
+            .expect("session id");
+        writer
+            .activate_session_target(session_id, path.clone(), dir.clone())
+            .expect("activate target");
+
+        let message = |content: &str| {
+            serde_json::from_value::<JsonlMessage>(serde_json::json!({
+                "parentUuid": null,
+                "isSidechain": false,
+                "type": "user",
+                "message": {"role": "user", "content": content},
+                "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "timestamp": "2026-09-06T00:00:00.000Z",
+                "cwd": dir.to_string_lossy(),
+                "sessionId": session_id.as_uuid().to_string(),
+                "version": "test"
+            }))
+            .expect("message")
+        };
+        writer.append(&message("first")).await.expect("first append");
+        writer
+            .append(&message("updated"))
+            .await
+            .expect("updated append");
+
+        let raw = std::fs::read_to_string(&path).expect("read transcript");
+        assert_eq!(raw.lines().count(), 2, "ordinary updates remain append-only");
+        assert!(!raw.contains("deliveryId"));
+        assert_eq!(
+            durable.duplicate_scan_count_for_test(),
+            0,
+            "ordinary durable appends must not rescan transcript history"
+        );
+        let loaded = crate::jsonl::reader::route_lines(&raw);
+        assert_eq!(
+            loaded
+                .by_uuid
+                .get("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                .and_then(|message| message.message.get("content"))
+                .and_then(serde_json::Value::as_str),
+            Some("updated"),
+            "the existing loader's duplicate-uuid last-write rule is preserved"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn late_origin_appends_stay_pinned_after_active_session_switch() {
+        let (dir, path_a, _) = temp_writer("durable-origin-pinning");
+        let path_b = dir.join("22222222-3333-4444-8555-666666666666.jsonl");
+        let state_a = dir.join("state-a");
+        let state_b = dir.join("state-b");
+        std::fs::create_dir_all(&state_a).unwrap();
+        std::fs::create_dir_all(&state_b).unwrap();
+        let durable_a = Arc::new(DurableTranscriptWriter::open(&state_a).unwrap());
+        let durable_b = Arc::new(DurableTranscriptWriter::open(&state_b).unwrap());
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(dir.clone()));
+        let writer = JsonlWriter::new(path_a.clone(), fs).with_durable_lock(durable_a);
+        let session_a = SessionId::parse_prefixed("11111111-2222-3333-4444-555555555555")
+            .unwrap();
+        let session_b = SessionId::parse_prefixed("22222222-3333-4444-8555-666666666666")
+            .unwrap();
+        writer
+            .activate_session_target(session_a, path_a.clone(), dir.join("project-a"))
+            .unwrap();
+        writer.set_durable_lock(durable_b);
+        writer
+            .activate_session_target(session_b, path_b.clone(), dir.join("project-b"))
+            .unwrap();
+
+        let message = |session_id: SessionId, uuid: &str, content: &str| {
+            serde_json::from_value::<JsonlMessage>(serde_json::json!({
+                "parentUuid": null,
+                "isSidechain": false,
+                "type": "user",
+                "message": {"role": "user", "content": content},
+                "uuid": uuid,
+                "timestamp": "2026-09-06T00:00:00.000Z",
+                "cwd": dir.to_string_lossy(),
+                "sessionId": session_id.as_uuid().to_string(),
+                "version": "test"
+            }))
+            .unwrap()
+        };
+        writer
+            .append(&message(
+                session_b,
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "active B",
+            ))
+            .await
+            .unwrap();
+        writer
+            .append_to_path(
+                &path_a,
+                &message(
+                    session_a,
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    "late ordinary A",
+                ),
+            )
+            .await
+            .unwrap();
+        writer
+            .append_json_once_durable_for_session(
+                session_a,
+                "fusion-delivery:fu_0123456789abcdef0123456789abcdef",
+                serde_json::json!({
+                    "uuid": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                    "parentUuid": null,
+                    "type": "user",
+                    "sessionId": session_a.as_uuid().to_string(),
+                    "message": {"role": "user", "content": "late Fusion A"}
+                }),
+            )
+            .await
+            .unwrap();
+
+        let a = std::fs::read_to_string(&path_a).unwrap();
+        let b = std::fs::read_to_string(&path_b).unwrap();
+        assert!(a.contains("late ordinary A"));
+        assert!(a.contains("late Fusion A"));
+        assert!(!a.contains("active B"));
+        let fusion_row: serde_json::Value = serde_json::from_str(a.lines().last().unwrap()).unwrap();
+        assert_eq!(
+            fusion_row.get("parentUuid").and_then(serde_json::Value::as_str),
+            Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            "origin-session parent resolution happens under A's transaction"
+        );
+        assert!(b.contains("active B"));
+        assert!(!b.contains("late ordinary A"));
+        assert!(!b.contains("late Fusion A"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

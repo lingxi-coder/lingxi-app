@@ -384,7 +384,31 @@ pub struct CronScheduler {
     /// Auto-expiry age for RECURRING jobs; `None` disables expiry (unlimited).
     /// Defaults to [`DEFAULT_RECURRING_MAX_AGE`].
     recurring_max_age: Option<Duration>,
-    tick_handle: Mutex<Option<platform_api::BackgroundTaskHandle>>,
+    tick_handle: Mutex<Option<TickHandle>>,
+}
+
+struct TickHandle {
+    runtime_handle: platform_api::BackgroundTaskHandle,
+    completed: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// Field order is intentional: drop the entire producer future (including its
+/// scheduler/registry owners) before closing the completion channel. This also
+/// works when the runtime cancels the task before its first poll.
+struct TickFuture {
+    future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    _completed: tokio::sync::oneshot::Sender<()>,
+}
+
+impl std::future::Future for TickFuture {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        self.get_mut().future.as_mut().poll(cx)
+    }
 }
 
 struct ClaimedCronJob {
@@ -615,23 +639,31 @@ impl CronScheduler {
     }
 
     /// Spawn the tick loop on the configured [`RuntimeSpawner`]. Safe to call
-    /// once; calling again replaces the handle without stopping the prior loop.
+    /// repeatedly; an already-owned loop is never replaced or orphaned.
     pub async fn start(self: Arc<Self>) -> Result<(), platform_api::RuntimeError> {
+        let mut tick_handle = self.tick_handle.lock().await;
+        if tick_handle.is_some() {
+            return Ok(());
+        }
         let registry_key = task_registry_identity(&self.task_registry);
         LIVE_SCHEDULERS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(registry_key, Arc::downgrade(&self));
         let me = self.clone();
+        let (completed_tx, completed) = tokio::sync::oneshot::channel();
         let handle = match self
             .runtime
             .spawn(
                 "cron-tick",
-                Box::pin(async move {
-                    loop {
-                        me.tick().await;
-                        me.runtime.sleep(SCHEDULER_TICK_INTERVAL).await;
-                    }
+                Box::pin(TickFuture {
+                    future: Box::pin(async move {
+                        loop {
+                            me.tick().await;
+                            me.runtime.sleep(SCHEDULER_TICK_INTERVAL).await;
+                        }
+                    }),
+                    _completed: completed_tx,
                 }),
             )
             .await
@@ -645,7 +677,10 @@ impl CronScheduler {
                 return Err(error);
             }
         };
-        *self.tick_handle.lock().await = Some(handle);
+        *tick_handle = Some(TickHandle {
+            runtime_handle: handle,
+            completed,
+        });
         Ok(())
     }
 
@@ -724,13 +759,18 @@ impl CronScheduler {
         self.process_due_ids(now, due_ids).await;
     }
 
-    /// Cancel the tick loop, if running. Idempotent.
+    /// Cancel and join the tick future, if running. The owned completion
+    /// barrier remains available if this waiter is cancelled or cancellation
+    /// fails; concurrent start/stop calls cannot bypass it.
     pub async fn stop(&self) -> Result<(), platform_api::RuntimeError> {
-        let cancel_result = if let Some(h) = self.tick_handle.lock().await.take() {
-            self.runtime.cancel(&h).await
-        } else {
-            Ok(())
-        };
+        let mut tick_handle = self.tick_handle.lock().await;
+        if let Some(tick) = tick_handle.as_mut() {
+            self.runtime.cancel(&tick.runtime_handle).await?;
+            // Channel closure, not a sent value, proves TickFuture and all its
+            // captured owners were destroyed. Retain the receiver across await.
+            let _ = (&mut tick.completed).await;
+        }
+        *tick_handle = None;
         let key = task_registry_identity(&self.task_registry);
         LIVE_SCHEDULERS
             .lock()
@@ -738,7 +778,7 @@ impl CronScheduler {
             .remove(&key);
         self.session_tasks.write().await.clear();
         self.tasks.write().await.clear();
-        cancel_result
+        Ok(())
     }
 
     async fn claim_due_job_if_still_due(
@@ -1586,6 +1626,81 @@ mod scheduler_tick_tests {
     }
 
     struct UnusedRuntime;
+
+    #[derive(Default)]
+    struct DeferredCancelRuntime {
+        future: std::sync::Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send>>>>,
+        cancelled: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl RuntimeSpawner for DeferredCancelRuntime {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: Pin<Box<dyn Future<Output = ()> + Send>>,
+        ) -> Result<BackgroundTaskHandle, RuntimeError> {
+            *self.future.lock().unwrap() = Some(task);
+            Ok(BackgroundTaskHandle {
+                task_name: name.into(),
+                task_id: 1,
+            })
+        }
+        async fn sleep(&self, _: Duration) {
+            std::future::pending::<()>().await;
+        }
+        async fn cancel(&self, _: &BackgroundTaskHandle) -> Result<(), RuntimeError> {
+            self.cancelled.notify_one();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_waits_for_tick_future_drop_even_after_waiter_cancellation() {
+        let fs = MemFs::with(TASKS_PATH, r#"{"tasks":[]}"#);
+        let runtime = Arc::new(DeferredCancelRuntime::default());
+        let scheduler = Arc::new(CronScheduler::new(
+            registry(fs.clone()),
+            fs,
+            FixedClock::at_secs(NOW),
+            runtime.clone(),
+            PathBuf::from(TASKS_PATH),
+        ));
+        scheduler.clone().start().await.unwrap();
+        let first_scheduler = scheduler.clone();
+        let mut first = tokio::spawn(async move { first_scheduler.stop().await });
+        runtime.cancelled.notified().await;
+        let returned_early = tokio::time::timeout(Duration::from_millis(30), &mut first)
+            .await
+            .is_ok();
+        if !returned_early {
+            first.abort();
+            let _ = first.await;
+        }
+        let second_scheduler = scheduler.clone();
+        let mut second = tokio::spawn(async move { second_scheduler.stop().await });
+        let retry_returned_early = tokio::time::timeout(Duration::from_millis(30), &mut second)
+            .await
+            .is_ok();
+        let future = runtime.future.lock().unwrap().take();
+        drop(future);
+        if !retry_returned_early {
+            tokio::time::timeout(Duration::from_secs(1), second)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+        assert!(
+            !returned_early,
+            "cancel acknowledgement does not prove producer exit"
+        );
+        assert!(
+            !retry_returned_early,
+            "cancelled waiter must retain the producer barrier"
+        );
+        scheduler.stop().await.unwrap();
+    }
 
     #[async_trait]
     impl RuntimeSpawner for UnusedRuntime {

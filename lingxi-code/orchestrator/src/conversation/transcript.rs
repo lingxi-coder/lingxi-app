@@ -1220,11 +1220,18 @@ impl ConversationOrchestrator {
             return Ok(None);
         };
 
-        let fs = writer.filesystem_handle();
         let target_uuid = target_session.as_uuid();
         let target_bare = target_uuid.to_string();
         let cwd = self.cwd.to_string_lossy().into_owned();
-        let target_path = match self.config_home.as_ref() {
+        let durable = writer.durable_transcript_enabled();
+        let target_path = if durable {
+            writer.session_target_path(target_session).ok_or_else(|| {
+                platform_api::HandleError::ActionFailed(format!(
+                    "durable transcript target is not bound for session {target_bare}"
+                ))
+            })?
+        } else {
+            match self.config_home.as_ref() {
             Some(home) => {
                 match session::jsonl::resolve_session_path_across_worktrees(home, &cwd, target_uuid)
                     .await
@@ -1250,9 +1257,17 @@ impl ConversationOrchestrator {
                 }
                 writer.active_path()
             }
+            }
         };
 
-        let parent_uuid = match self.config_home.as_ref() {
+        // Production resolves parentage inside the pinned transcript
+        // transaction. Compatibility writers retain the historical loader
+        // lookup because they have no durable target map/lock.
+        let parent_uuid = if durable {
+            None
+        } else {
+            let fs = writer.filesystem_handle();
+            match self.config_home.as_ref() {
             Some(home) => {
                 match session::jsonl::load_session_across_worktrees(home, &cwd, target_uuid, fs)
                     .await
@@ -1270,11 +1285,17 @@ impl ConversationOrchestrator {
                 }
             }
             None => self.transcript.last_jsonl_uuid.lock().await.clone(),
+            }
         };
 
+        let persisted_session_id = if durable {
+            target_bare.clone()
+        } else {
+            target_session.to_string()
+        };
         let mut persisted = self.to_jsonl_message_with_inner_id(
             msg,
-            &target_session.to_string(),
+            &persisted_session_id,
             parent_uuid,
             self.resolve_git_branch().await,
             Some(entrypoint_value()),
@@ -1289,6 +1310,13 @@ impl ConversationOrchestrator {
             "isModelContextExcluded".to_string(),
             serde_json::Value::Bool(true),
         );
+        if durable {
+            persisted.cwd = writer
+                .session_target_cwd(target_session)
+                .unwrap_or_else(|| self.current_cwd())
+                .to_string_lossy()
+                .into_owned();
+        }
         if matches!(msg, ConversationMessage::User { .. }) {
             persisted.extra.insert(
                 "permissionMode".to_string(),

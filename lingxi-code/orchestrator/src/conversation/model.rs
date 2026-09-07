@@ -441,6 +441,77 @@ impl ConversationOrchestrator {
             .map_or_else(|_| self.cwd.clone(), |g| g.clone())
     }
 
+    /// Retarget the shared transcript writer for a newly mounted session id
+    /// without relocating the previous session's file. Hot clear/resume uses
+    /// this after destination cost hydration succeeds and before publishing
+    /// the replacement conversation identity; ordinary `/cd` continues to use
+    /// [`Self::retarget_transcript_for_cwd`], which performs a relocation.
+    pub async fn retarget_transcript_for_session(
+        &self,
+        session_id: protocol::SessionId,
+    ) -> Result<Option<std::path::PathBuf>, String> {
+        let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
+            return Ok(None);
+        };
+        let Some(config_home) = self.config_home.as_ref() else {
+            return Ok(Some(writer.active_path()));
+        };
+        let target = session::jsonl::path::session_path(
+            config_home,
+            &self.current_cwd().to_string_lossy(),
+            &session_id.as_uuid().to_string(),
+        );
+        // Compatibility helper for direct/legacy callers. Production hot
+        // clear/resume captures the destination authority first and uses
+        // `activate_session_target_with_durable_lock` inside its owned commit,
+        // alongside the prepared cost token and conversation identity.
+        if writer.durable_transcript_enabled() {
+            writer
+                .activate_session_target(session_id, target.clone(), self.current_cwd())
+                .map_err(|error| format!("activate transcript for session {session_id}: {error}"))?;
+        } else {
+            // Compatibility writers have no cross-process/session authority;
+            // retain their historical in-process retarget behavior.
+            writer.retarget(target.clone()).await;
+        }
+        Ok(Some(target))
+    }
+
+    /// Reflect a Fusion terminal that was already persisted by the host-owned
+    /// durable recorder into the live history, without appending a second
+    /// transcript row.  The recorder writes the immutable JSONL envelope first
+    /// under the shared session transaction; this method only updates the
+    /// in-memory model context when the originating session is still active.
+    /// A hot clear/resume therefore leaves the durable result in its original
+    /// session while the newly active session does not accidentally inherit it.
+    pub async fn record_persisted_fusion_meta(
+        &self,
+        session_id: protocol::SessionId,
+        message_uuid: &str,
+        text: String,
+    ) -> Result<(), String> {
+        let message_id = protocol::MessageId::parse_prefixed(message_uuid)
+            .ok_or_else(|| format!("invalid persisted Fusion message uuid {message_uuid:?}"))?;
+        let _turn_guard = self.turn_gate.lock().await;
+        let mut session = self.session.lock().await;
+        if session.session_id != session_id {
+            return Ok(());
+        }
+        if session
+            .history
+            .iter()
+            .any(|message| message.id() == message_id)
+        {
+            return Ok(());
+        }
+        let message = protocol::ConversationMessage::user_meta(message_id, text);
+        session.model_context_excluded_messages.insert(message_id);
+        session.history.push(message);
+        drop(session);
+        *self.transcript.last_jsonl_uuid.lock().await = Some(message_uuid.to_string());
+        Ok(())
+    }
+
     /// Persist a session-cwd move before directing future transcript appends
     /// into the cwd's project directory. The writer rehomes an existing
     /// transcript before appending the relocation marker; the complete
@@ -460,15 +531,15 @@ impl ConversationOrchestrator {
         let Some(config_home) = self.config_home.as_ref() else {
             return Ok(None);
         };
-        let session_id = self.session.lock().await.session_id.as_uuid().to_string();
+        let session_id = self.session.lock().await.session_id;
+        let session_uuid = session_id.as_uuid().to_string();
         let cwd = cwd.to_string_lossy().into_owned();
-        let target = session::jsonl::path::session_path(config_home, &cwd, &session_id);
+        let target = session::jsonl::path::session_path(config_home, &cwd, &session_uuid);
         let previous = writer.active_path();
         writer
-            .retarget_with_relocation(target.clone(), &session_id, &cwd)
+            .retarget_with_relocation(target.clone(), &session_uuid, &cwd)
             .await
             .map_err(|error| format!("retarget transcript for cwd {cwd}: {error}"))?;
-
         // Hook/MCP output files and other session-scoped artifacts live beside
         // the transcript under `<session-id>/`. Keep the whole sidecar
         // directory with the rehomed transcript when the project directory
@@ -479,11 +550,11 @@ impl ConversationOrchestrator {
             let old_sidecar = previous
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."))
-                .join(&session_id);
+                .join(&session_uuid);
             let new_sidecar = target
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."))
-                .join(&session_id);
+                .join(&session_uuid);
             move_session_sidecar_best_effort(&old_sidecar, &new_sidecar);
         }
         Ok(Some(writer.active_path()))

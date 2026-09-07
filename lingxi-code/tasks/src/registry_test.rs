@@ -191,6 +191,226 @@ impl Task for RecordingHandler {
     }
 }
 
+struct ShutdownBarrierHandler {
+    task_type: TaskType,
+    drain_calls: Arc<AtomicUsize>,
+    fail_first_drain: bool,
+    entered: tokio::sync::Notify,
+    release: Option<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Task for ShutdownBarrierHandler {
+    fn name(&self) -> &str {
+        "shutdown-barrier"
+    }
+
+    fn task_type(&self) -> TaskType {
+        self.task_type
+    }
+
+    async fn spawn(&self, _: TaskSpawnInput, _: TaskContext) -> Result<TaskHandle, TaskError> {
+        Err(TaskError::Unsupported)
+    }
+
+    async fn kill(&self, _: &str, _: TaskContext) -> Result<(), TaskError> {
+        Ok(())
+    }
+
+    async fn drain_shutdown(&self) -> Result<(), TaskError> {
+        let call = self.drain_calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_one();
+        if let Some(release) = &self.release {
+            release.notified().await;
+        }
+        if self.fail_first_drain && call == 0 {
+            return Err(TaskError::Internal("first drain failed".into()));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn shutdown_kill_error_still_waits_for_finalizing_handler_drain() {
+    let (_dir, mut registry) = make_registry();
+    let failing_kill = RecordingHandler::new(TaskType::LocalBash, "shutdown-worker");
+    failing_kill.fail_next_kill();
+    registry.register_handler(TaskType::LocalBash, failing_kill);
+    let handler = Arc::new(ShutdownBarrierHandler {
+        task_type: TaskType::LocalFusion,
+        drain_calls: Arc::new(AtomicUsize::new(0)),
+        fail_first_drain: true,
+        entered: tokio::sync::Notify::new(),
+        release: Some(tokio::sync::Notify::new()),
+    });
+    registry.register_handler(TaskType::LocalFusion, handler.clone());
+    registry
+        .spawned
+        .write()
+        .await
+        .insert("shutdown-worker".into(), TaskType::LocalBash);
+    let registry = Arc::new(registry);
+    let owner = registry.clone();
+    let shutdown = tokio::spawn(async move { owner.shutdown_background_tasks().await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), handler.entered.notified())
+        .await
+        .expect("kill failure must not skip the finalization barrier");
+    assert!(!shutdown.is_finished(), "shutdown must retain the blocked worker");
+    handler.release.as_ref().unwrap().notify_one();
+    let error = shutdown.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("transient kill failure"));
+    assert_eq!(handler.drain_calls.load(Ordering::SeqCst), 1);
+    assert!(registry.handlers.read().await.contains_key(&TaskType::LocalFusion));
+    assert!(registry.spawned.read().await.contains_key("shutdown-worker"));
+}
+
+#[tokio::test]
+async fn shutdown_drain_error_still_attempts_later_handlers_and_retains_graph() {
+    let (_dir, mut registry) = make_registry();
+    let calls = Arc::new(AtomicUsize::new(0));
+    // Whichever HashMap entry runs first fails. The other must still drain,
+    // making the assertion independent of randomized handler iteration order.
+    for task_type in [TaskType::LocalFusion, TaskType::LocalWorkflow] {
+        registry.register_handler(task_type, Arc::new(ShutdownBarrierHandler {
+            task_type,
+            drain_calls: calls.clone(),
+            fail_first_drain: true,
+            entered: tokio::sync::Notify::new(),
+            release: None,
+        }));
+    }
+    let error = registry.shutdown_background_tasks().await.unwrap_err();
+    assert!(error.to_string().contains("first drain failed"));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(registry.handlers.read().await.len(), 2);
+}
+
+/// Models the composition-root back edge carried by deferred tool registries:
+/// the registry owns the handler and the handler can reach the registry.
+struct RegistryBackReferenceHandler {
+    registry: std::sync::OnceLock<Arc<TaskRegistry>>,
+}
+
+#[async_trait]
+impl Task for RegistryBackReferenceHandler {
+    fn name(&self) -> &str {
+        "registry-back-reference"
+    }
+
+    fn task_type(&self) -> TaskType {
+        TaskType::LocalAgent
+    }
+
+    async fn spawn(
+        &self,
+        _input: TaskSpawnInput,
+        _ctx: TaskContext,
+    ) -> Result<TaskHandle, TaskError> {
+        Err(TaskError::Unsupported)
+    }
+
+    async fn kill(&self, _task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn successful_shutdown_severs_handler_back_references() {
+    let dir = tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let output = Arc::new(TaskOutputManager::new(
+        dir.path().to_path_buf(),
+        fs.clone(),
+    ));
+    let handler = Arc::new(RegistryBackReferenceHandler {
+        registry: std::sync::OnceLock::new(),
+    });
+    let mut inner = TaskRegistry::new(runtime, fs, output);
+    inner.register_handler(TaskType::LocalAgent, handler.clone());
+    let registry = Arc::new(inner);
+    handler.registry.set(registry.clone()).ok().unwrap();
+    let weak = Arc::downgrade(&registry);
+    drop(handler);
+
+    registry
+        .shutdown_background_tasks()
+        .await
+        .expect("empty registry drains");
+    drop(registry);
+
+    assert!(
+        weak.upgrade().is_none(),
+        "a drained registry must not retain itself through handler composition"
+    );
+}
+
+/// Models the production lifecycle-hook owner graph: both firers share a hook
+/// executor which can reach the late-bound agent tool registry and therefore
+/// this registry again.
+struct RegistryBackReferenceFirer {
+    registry: std::sync::OnceLock<Arc<TaskRegistry>>,
+}
+
+impl Drop for RegistryBackReferenceFirer {
+    fn drop(&mut self) {
+        let Some(registry) = self.registry.get() else {
+            return;
+        };
+        assert!(
+            registry.task_created_firer.try_lock().is_ok(),
+            "created-firer destructor must run outside its registry mutex"
+        );
+        assert!(
+            registry.task_completed_firer.try_lock().is_ok(),
+            "completed-firer destructor must run outside its registry mutex"
+        );
+    }
+}
+
+#[async_trait]
+impl hooks::TaskCreatedFirer for RegistryBackReferenceFirer {
+    async fn fire(&self, _fire: hooks::TaskCreatedFire) {}
+}
+
+#[async_trait]
+impl hooks::TaskCompletedFirer for RegistryBackReferenceFirer {
+    async fn fire(&self, _fire: hooks::TaskCompletedFire) {}
+}
+
+#[tokio::test]
+async fn successful_shutdown_severs_lifecycle_firer_back_references() {
+    let dir = tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let output = Arc::new(TaskOutputManager::new(
+        dir.path().to_path_buf(),
+        fs.clone(),
+    ));
+    let firer = Arc::new(RegistryBackReferenceFirer {
+        registry: std::sync::OnceLock::new(),
+    });
+    let registry = Arc::new(
+        TaskRegistry::new(runtime, fs, output)
+            .with_task_created_firer(firer.clone())
+            .with_task_completed_firer(firer.clone()),
+    );
+    firer.registry.set(registry.clone()).ok().unwrap();
+    let weak = Arc::downgrade(&registry);
+    drop(firer);
+
+    registry
+        .shutdown_background_tasks()
+        .await
+        .expect("empty registry drains");
+    drop(registry);
+
+    assert!(
+        weak.upgrade().is_none(),
+        "a drained registry must not retain itself through lifecycle hook firers"
+    );
+}
+
 fn make_registry() -> (tempfile::TempDir, TaskRegistry) {
     let dir = tempdir().unwrap();
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());

@@ -596,6 +596,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // The Desktop host owns the session UUID so multiple bridge processes can
         // address one another without relying on generated display names.
         session_id_override: args.session_id.clone(),
+        session_writer_lease: None,
         parent_session_id: None,
         // The Electron bridge has no --disable-slash-commands flag.
         disable_slash_commands: false,
@@ -728,6 +729,14 @@ impl BoundServer {
     pub fn audio(&self) -> &Arc<AudioBridge> {
         &self.audio
     }
+
+    /// Capture the ordered session lifecycle owner before the connection is
+    /// moved into the endpoint. It retains task, cost, coordinator, and outbox
+    /// authorities until host teardown has drained accepted work.
+    #[must_use]
+    pub fn session_lifecycle(&self) -> Arc<engine_desktop::DesktopSessionLifecycle> {
+        self.runtime.session_lifecycle.clone()
+    }
 }
 
 /// Process-local live-session registration owned by a bridge runtime.
@@ -738,17 +747,88 @@ impl BoundServer {
 /// engine wire protocol.
 struct LiveSessionGuard {
     dir: platform_api::live_sessions::LiveSessionDir,
+    pid: u32,
     session_id: String,
+    generation: u64,
     inbox_started: bool,
-    _writer_claim: platform_api::live_sessions::SessionIdClaim,
+    _writer_claim: Option<platform_api::live_sessions::SharedSessionWriterLease>,
+}
+
+#[derive(Debug)]
+struct LiveSessionGenerationState {
+    next: u64,
+    active: Option<u64>,
+}
+
+static LIVE_SESSION_GENERATIONS: std::sync::Mutex<LiveSessionGenerationState> =
+    std::sync::Mutex::new(LiveSessionGenerationState {
+        next: 0,
+        active: None,
+    });
+
+fn install_live_session_generation() -> Result<u64, String> {
+    let mut state = LIVE_SESSION_GENERATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let generation = state
+        .next
+        .checked_add(1)
+        .ok_or_else(|| "bridge live-session generation exhausted".to_string())?;
+    state.next = generation;
+    state.active = Some(generation);
+    Ok(generation)
+}
+
+fn retire_live_session_generation(generation: u64) -> bool {
+    let mut state = LIVE_SESSION_GENERATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if state.active != Some(generation) {
+        return false;
+    }
+    state.active = None;
+    true
+}
+
+impl LiveSessionGuard {
+    /// Drop the bootstrap's claim clone after engine composition has consumed
+    /// the same construction-only Arc. The hydrated coordinator/manager now
+    /// owns the authority and can release it when its live scopes drain.
+    fn release_writer_claim(&mut self) {
+        self._writer_claim.take();
+    }
 }
 
 impl Drop for LiveSessionGuard {
     fn drop(&mut self) {
-        if self.inbox_started {
-            platform_api::uds_inbox::stop_process_inbox();
+        // Process session/presence and the UDS runtime are global. A newer
+        // bridge assembled in this process supersedes the old guard; only that
+        // newest generation may tear the globals down. Otherwise dropping an
+        // old A/B server could stop and unregister an unrelated live C server.
+        if !retire_live_session_generation(self.generation) {
+            return;
         }
-        let _ = self.dir.unregister(&self.session_id);
+        if self.inbox_started {
+            if let Err(error) = platform_api::uds_inbox::stop_process_inbox_checked() {
+                tracing::warn!(%error, "bridge inbox shutdown could not preserve accepted work");
+            }
+        }
+        // Clear/resume may have moved this process's presence record to a
+        // successfully hydrated destination.  Drop must unregister that
+        // current record, not the construction-time A target, while old A
+        // durable scopes continue to own their independent writer lease.
+        let current = platform_api::live_sessions::process_session_id()
+            .unwrap_or_else(|| self.session_id.clone());
+        // `stop_process_inbox_checked` has just spilled accepted/held work into
+        // `<session>.inbox`. Remove only this PID's matching presence metadata;
+        // the inbox is durable work, and writer-claim ownership belongs to the
+        // coordinator/last scoped owner rather than this registration guard.
+        if let Err(error) = self
+            .dir
+            .unregister_record_if_session(self.pid, &current)
+        {
+            tracing::warn!(%error, "bridge live-session metadata cleanup failed");
+        }
     }
 }
 
@@ -778,16 +858,23 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
                     "bridge session id is already active".to_string()
                 }
                 _ => "bridge live-session registry is unavailable".to_string(),
-            })?;
+            })?
+            .into_shared();
+    // Consume this construction-only claim into the desktop config. The
+    // coordinator, Fusion recorder, and ordinary transcript writer all clone
+    // this exact lease; build must not reacquire a second OS lock.
+    cfg.session_writer_lease = Some(writer_claim.clone());
 
     // Keep the claim in a guard from this point onward. If any later live
     // registration step fails, Drop releases the claim and does not strand a
     // writer lock for the next historical resume.
     let mut live_session = LiveSessionGuard {
         dir: dir.clone(),
+        pid,
         session_id: session_id.clone(),
+        generation: install_live_session_generation()?,
         inbox_started: false,
-        _writer_claim: writer_claim,
+        _writer_claim: Some(writer_claim),
     };
 
     let display_name = cfg
@@ -818,7 +905,10 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
     );
 
     let socket = platform_api::uds_inbox::default_socket_path(pid);
-    let inbox_started = match platform_api::uds_inbox::start_process_inbox(socket) {
+    let inbox_started = match platform_api::uds_inbox::start_process_inbox_for_session(
+        socket,
+        &session_id,
+    ) {
         Ok(path) => {
             live_session.inbox_started = true;
             dir.upsert_identity(
@@ -1041,7 +1131,7 @@ pub async fn assemble_with_provider_keys(
         cfg.credential_storage_policy,
         platform_api::CredentialStoragePolicy::NativeOrMemory
     );
-    let live_session = initialize_live_session(&mut cfg)?;
+    let mut live_session = initialize_live_session(&mut cfg)?;
     let connection = BridgeConnection::new();
 
     // Preserve only the non-secret parent-source fact before `cfg` moves. The
@@ -1180,6 +1270,10 @@ pub async fn assemble_with_provider_keys(
     let runtime = build(cfg, output, permission_sink)
         .await
         .map_err(|e| e.to_string())?;
+    // The runtime cloned the exact construction-only lease into its hydrated
+    // coordinator. Do not let the bridge's process-registration guard pin the
+    // old session through later hot clear/resume operations.
+    live_session.release_writer_claim();
 
     // Seeds the parent-supplied keys and refreshes Fusion's catalog filter for
     // them under ONE bounded budget -- see `seed_parent_supplied_provider_keys`
@@ -1365,6 +1459,44 @@ pub struct ServedEndpoint {
     pub lock_guard: LockfileGuard,
 }
 
+/// Lockfile publication failure that returns ownership of the already-bound
+/// endpoint to the host.  The bridge must stop and join that endpoint before
+/// draining durable session state; dropping it here would only signal the
+/// accept loop and would not prove that accepted connections have finished.
+pub struct PublishLockfileError {
+    source: std::io::Error,
+    endpoint: McpEndpoint,
+}
+
+impl PublishLockfileError {
+    /// Recover the error and endpoint for ordered host teardown.
+    #[must_use]
+    pub fn into_parts(self) -> (std::io::Error, McpEndpoint) {
+        (self.source, self.endpoint)
+    }
+}
+
+impl std::fmt::Debug for PublishLockfileError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PublishLockfileError")
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for PublishLockfileError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for PublishLockfileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 /// Write the F2-04 discovery lockfile for `endpoint`'s port and enforce its
 /// `authToken` on the endpoint — the env-free half of the binary's step (4),
 /// factored into the library so the headless serve-path test drives the SAME
@@ -1384,10 +1516,24 @@ pub fn publish_lockfile(
     lockfile_dir: PathBuf,
     workspace_folders: Vec<PathBuf>,
 ) -> std::io::Result<ServedEndpoint> {
+    publish_lockfile_recoverable(endpoint, lockfile_dir, workspace_folders)
+        .map_err(|error| error.into_parts().0)
+}
+
+/// [`publish_lockfile`] variant for a production host that must retain the
+/// bound endpoint when the filesystem write fails so teardown can join every
+/// already-accepted connection before releasing session authority.
+pub fn publish_lockfile_recoverable(
+    endpoint: McpEndpoint,
+    lockfile_dir: PathBuf,
+    workspace_folders: Vec<PathBuf>,
+) -> Result<ServedEndpoint, PublishLockfileError> {
     let port = endpoint.port();
     let lockfile = IdeLockfile::new_for_bridge_dir(lockfile_dir, port, workspace_folders);
     let lockfile_path = lockfile.path();
-    lockfile.write()?;
+    if let Err(source) = lockfile.write() {
+        return Err(PublishLockfileError { source, endpoint });
+    }
     // The endpoint MUST enforce the SAME token the lockfile published.
     endpoint.set_auth_token(lockfile.auth_token().to_string());
     let lock_guard = LockfileGuard::new(lockfile_path.clone());
@@ -1608,11 +1754,109 @@ mod tests {
             .unwrap()
             .iter()
             .any(|record| record.sid() == session_id));
+        let mut accepted = platform_api::live_sessions::outbound_peer_message(
+            "sender",
+            "source-session",
+            "survive bridge shutdown",
+            None,
+        );
+        accepted.msg_id = Some("bridge-shutdown-accepted".into());
+        platform_api::uds_inbox::enqueue_accepted(accepted);
+        std::env::set_var("LINGXI_CROSS_SESSION_INBOUND", "hold");
+        let mut held = platform_api::live_sessions::outbound_peer_message(
+            "sender",
+            "source-session",
+            "held across bridge shutdown",
+            None,
+        );
+        held.msg_id = Some("bridge-shutdown-held".into());
+        platform_api::uds_inbox::enqueue_inbound(held);
+        std::env::remove_var("LINGXI_CROSS_SESSION_INBOUND");
         drop(guard);
-        assert!(LiveSessionDir::at_live(home.path().join("sessions"))
+        let dir = LiveSessionDir::at_live(home.path().join("sessions"));
+        assert!(dir.list_live().unwrap().is_empty());
+        let spilled = dir.drain_inbox(session_id).expect("preserved inbox");
+        let mut spilled_ids = spilled
+            .iter()
+            .filter_map(|message| message.msg_id.as_deref())
+            .collect::<Vec<_>>();
+        spilled_ids.sort_unstable();
+        assert_eq!(
+            spilled_ids,
+            vec!["bridge-shutdown-accepted", "bridge-shutdown-held"]
+        );
+    }
+
+    #[test]
+    fn stale_live_session_guard_cannot_stop_or_unregister_new_generation() {
+        let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let home = tempfile::tempdir().expect("config tempdir");
+        let session_a = "aaaaaaaa-2222-4333-8444-555555555555";
+        let session_c = "cccccccc-2222-4333-8444-555555555555";
+
+        let mut cfg_a = resolve_desktop_config(&BridgeArgs::default());
+        cfg_a.cwd = cwd.path().to_path_buf();
+        cfg_a.lingxi_home = home.path().to_path_buf();
+        cfg_a.session_id_override = Some(session_a.to_string());
+        let guard_a = initialize_live_session(&mut cfg_a).expect("start generation A");
+        let mut accepted_a = platform_api::live_sessions::outbound_peer_message(
+            "sender",
+            "source-session",
+            "owned by A",
+            None,
+        );
+        accepted_a.msg_id = Some("accepted-a".into());
+        platform_api::uds_inbox::enqueue_accepted(accepted_a);
+
+        let mut cfg_c = resolve_desktop_config(&BridgeArgs::default());
+        cfg_c.cwd = cwd.path().to_path_buf();
+        cfg_c.lingxi_home = home.path().to_path_buf();
+        cfg_c.session_id_override = Some(session_c.to_string());
+        let guard_c = initialize_live_session(&mut cfg_c).expect("start generation C");
+        let dir = guard_c.dir.clone();
+        let a_inbox_path = dir.root().join(format!("{session_a}.inbox.jsonl"));
+        let a_inbox_before = std::fs::read(&a_inbox_path)
+            .expect("starting C spills accepted A work");
+
+        drop(guard_a);
+
+        assert_eq!(
+            platform_api::live_sessions::process_session_id().as_deref(),
+            Some(session_c)
+        );
+        assert!(platform_api::uds_inbox::process_socket_path().is_some());
+        assert!(dir
             .list_live()
             .unwrap()
-            .is_empty());
+            .iter()
+            .any(|record| record.pid == std::process::id() && record.sid() == session_c));
+        assert_eq!(
+            std::fs::read(&a_inbox_path).expect("stale guard preserves A inbox"),
+            a_inbox_before
+        );
+
+        let mut accepted_c = platform_api::live_sessions::outbound_peer_message(
+            "sender",
+            "source-session",
+            "owned by C",
+            None,
+        );
+        accepted_c.msg_id = Some("accepted-c".into());
+        platform_api::uds_inbox::enqueue_accepted(accepted_c);
+        drop(guard_c);
+
+        assert!(dir.list_live().unwrap().is_empty());
+        assert_eq!(
+            dir.drain_inbox(session_a).unwrap()[0].msg_id.as_deref(),
+            Some("accepted-a")
+        );
+        assert_eq!(
+            dir.drain_inbox(session_c).unwrap()[0].msg_id.as_deref(),
+            Some("accepted-c")
+        );
     }
 
     #[test]
@@ -1897,6 +2141,7 @@ mod tests {
             system_prompt_override: None,
             append_system_prompt: None,
             session_id_override: None,
+            session_writer_lease: None,
             parent_session_id: None,
             disable_slash_commands: false,
             add_dir: Vec::new(),

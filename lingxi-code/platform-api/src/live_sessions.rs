@@ -340,18 +340,19 @@ impl LiveSessionDir {
     /// short-lived writer claim file. A persisted transcript is not an owner:
     /// historical resume intentionally reuses the UUID from that transcript.
     pub fn claim_session_id(&self, session_id: &str, pid: u32) -> io::Result<SessionIdClaim> {
-        if !safe_session_id(session_id) {
+        let Some(canonical_id) = SessionId::parse_prefixed(session_id) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "invalid session id",
+                "session writer claims require a valid UUID session id",
             ));
-        }
+        };
+        let canonical_session_id = canonical_id.as_uuid().to_string();
         self.ensure_root()?;
         if self.check_liveness {
             self.sweep_dead()?;
         }
 
-        let claim_relative = PathBuf::from(format!("{session_id}{SESSION_CLAIM_SUFFIX}"));
+        let claim_relative = PathBuf::from(format!("{canonical_session_id}{SESSION_CLAIM_SUFFIX}"));
         let mut rooted_claim =
             crate::rooted_fs::try_lock_exclusive(&self.root, &claim_relative, 0o700, 0o600)
                 .map_err(|error| match error {
@@ -369,10 +370,9 @@ impl LiveSessionDir {
         // The lock closes the check-then-create race between two processes.
         // Re-read centrally filtered live records after taking it so a legacy
         // writer that has no claim file still prevents a second writer.
-        let occupied = self
-            .list_live()?
-            .into_iter()
-            .any(|record| record.pid != pid && record.sid() == session_id);
+        let occupied = self.list_live()?.into_iter().any(|record| {
+            record.pid != pid && SessionId::parse_prefixed(record.sid()) == Some(canonical_id)
+        });
         if occupied {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -381,7 +381,7 @@ impl LiveSessionDir {
         }
         Ok(SessionIdClaim {
             file: claim,
-            session_id: session_id.to_string(),
+            session_id: canonical_session_id,
         })
     }
 
@@ -471,6 +471,44 @@ impl LiveSessionDir {
         }
         let _ = fs::remove_file(self.inbox_path(session_id));
         Ok(())
+    }
+
+    /// Remove only `sessions/<pid>.json` when its locked canonical identity
+    /// still matches `expected_session`.
+    ///
+    /// This is the generation-safe metadata cleanup used by a process that is
+    /// retargeting between sessions. It deliberately does not remove the
+    /// session inbox and does not touch the independently owned writer claim;
+    /// only dropping [`SessionIdClaim`] releases that OS lock.
+    pub fn unregister_record_if_session(
+        &self,
+        pid: u32,
+        expected_session: &str,
+    ) -> io::Result<bool> {
+        let expected = SessionId::parse_prefixed(expected_session).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "live record cleanup requires a valid UUID session id",
+            )
+        })?;
+        self.ensure_root()?;
+        let _record_lock = self.lock_record(pid)?;
+        let path = self.record_path(pid);
+        let body = match fs::read_to_string(&path) {
+            Ok(body) => body,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let record: LiveSessionRecord = serde_json::from_str(&body)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if SessionId::parse_prefixed(record.sid()) != Some(expected) {
+            return Ok(false);
+        }
+        match fs::remove_file(path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     fn remove_record_if_session_matches(&self, pid: u32, session_id: &str) -> io::Result<bool> {
@@ -880,6 +918,54 @@ impl LiveSessionDir {
         self.upsert_identity(pid, session_id, None, None, Some(sock), None)
     }
 
+    /// Remove only `messagingSocketPath` when the locked PID record still
+    /// belongs to `expected_session`.
+    ///
+    /// A PID record may be retargeted from session A to B while endpoint
+    /// startup is in flight. Canonical identity is therefore rechecked under
+    /// the same record lock as every merge writer; a stale A cleanup cannot
+    /// erase B's endpoint, and clearing B does not delete A's preserved inbox.
+    pub fn clear_messaging_socket_if_session(
+        &self,
+        pid: u32,
+        expected_session: &str,
+    ) -> io::Result<bool> {
+        let expected = SessionId::parse_prefixed(expected_session).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "messaging socket cleanup requires a valid UUID session id",
+            )
+        })?;
+        self.ensure_root()?;
+        let _record_lock = self.lock_record(pid)?;
+        let path = self.record_path(pid);
+        let body = match fs::read_to_string(&path) {
+            Ok(body) => body,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let mut value: Value = serde_json::from_str(&body)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let object = value.as_object_mut().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "live session record is not an object",
+            )
+        })?;
+        let matches = object
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .and_then(SessionId::parse_prefixed)
+            == Some(expected);
+        if !matches || object.remove("messagingSocketPath").is_none() {
+            return Ok(false);
+        }
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, serde_json::to_vec(&value).map_err(io::Error::other)?)?;
+        fs::rename(tmp, path)?;
+        Ok(true)
+    }
+
     /// Merge-write identity fields onto `sessions/<pid>.json` without dropping
     /// unknown keys (status forwarders, `procStart`, former names, …).
     pub fn upsert_identity(
@@ -1001,13 +1087,6 @@ impl LiveSessionDir {
     fn ensure_root(&self) -> io::Result<()> {
         fs::create_dir_all(&self.root)
     }
-}
-
-fn safe_session_id(session_id: &str) -> bool {
-    !session_id.trim().is_empty()
-        && !session_id.contains('/')
-        && !session_id.contains('\\')
-        && !session_id.contains("..")
 }
 
 /// Decide whether `desired` must yield. Pure: no IO.
@@ -2234,6 +2313,47 @@ mod tests {
     }
 
     #[test]
+    fn canonical_session_claim_aliases_share_one_lock_and_release_together() {
+        let (_tmp, d) = dir();
+        let bare = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+        let prefixed_upper = format!("sess:{}", bare.to_ascii_uppercase());
+        let first = d
+            .claim_session_id(&prefixed_upper, 101)
+            .expect("valid prefixed UUID claim");
+        assert_eq!(first.session_id(), bare);
+        assert!(d
+            .root()
+            .join(format!("{bare}{SESSION_CLAIM_SUFFIX}"))
+            .exists());
+        assert_eq!(
+            d.claim_session_id(bare, 202)
+                .expect_err("bare alias must see the held canonical lock")
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        drop(first);
+        let second = d
+            .claim_session_id(bare, 202)
+            .expect("dropping the only canonical claim releases aliases");
+        drop(second);
+    }
+
+    #[test]
+    fn malformed_writer_claims_fail_before_creating_a_lock_file() {
+        let (_tmp, d) = dir();
+        let error = d
+            .claim_session_id("sess:not-a-uuid", 101)
+            .expect_err("durable writer claims require UUID session identities");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(d
+            .root()
+            .read_dir()
+            .unwrap()
+            .flatten()
+            .all(|entry| { entry.file_name().to_string_lossy() != "sess:not-a-uuid.writer.lock" }));
+    }
+
+    #[test]
     fn stale_reused_pid_record_does_not_block_claim() {
         let tmp = TempDir::new().unwrap();
         let d = LiveSessionDir::at_live(tmp.path());
@@ -2550,6 +2670,110 @@ mod tests {
         assert_eq!(hit.sid(), "deadbeef-2222");
         assert_eq!(hit.permission_class.as_deref(), Some("bypass"));
         assert_eq!(hit.display_name(), "alpha");
+    }
+
+    #[test]
+    fn messaging_socket_clear_is_canonical_session_conditional_and_field_only() {
+        let (_tmp, d) = dir();
+        let pid = 7;
+        let session = SessionId::new();
+        let other = SessionId::new();
+        d.upsert_identity(
+            pid,
+            &session.to_string(),
+            Some("alpha"),
+            Some("user"),
+            Some(std::path::Path::new("/tmp/session-a.sock")),
+            Some("bypass"),
+        )
+        .unwrap();
+        d.set_status(pid, "waiting", Some("permission prompt"))
+            .unwrap();
+        let path = d.record_path(pid);
+        let mut original: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        original["futureField"] = json!({"preserved": true});
+        std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+        let inbox = d.inbox_path(&session.to_string());
+        std::fs::write(&inbox, b"preserve me").unwrap();
+
+        let before_wrong_session = std::fs::read(&path).unwrap();
+        assert!(!d
+            .clear_messaging_socket_if_session(pid, &other.to_string())
+            .unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), before_wrong_session);
+
+        let bare = session.as_uuid().to_string();
+        assert!(d.clear_messaging_socket_if_session(pid, &bare).unwrap());
+        let cleared: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut expected = original;
+        expected
+            .as_object_mut()
+            .unwrap()
+            .remove("messagingSocketPath");
+        assert_eq!(cleared, expected, "only the socket field may change");
+        assert_eq!(std::fs::read(&inbox).unwrap(), b"preserve me");
+        assert!(!d
+            .clear_messaging_socket_if_session(pid, &session.to_string())
+            .unwrap());
+        assert!(!d
+            .clear_messaging_socket_if_session(pid + 1, &session.to_string())
+            .unwrap());
+    }
+
+    #[test]
+    fn conditional_record_unregister_preserves_inbox_and_writer_claim() {
+        let (_tmp, d) = dir();
+        let pid = 7;
+        let session = SessionId::new();
+        let other = SessionId::new();
+        let bare = session.as_uuid().to_string();
+        let record_alias = format!("sess:{}", bare.to_ascii_uppercase());
+        let claim = d.claim_session_id(&bare, pid).unwrap();
+        d.upsert_identity(
+            pid,
+            &record_alias,
+            Some("alpha"),
+            Some("user"),
+            Some(Path::new("/tmp/session.sock")),
+            Some("bypass"),
+        )
+        .unwrap();
+        let message = PeerMessage {
+            from: "peer".into(),
+            from_session_id: other.to_string(),
+            content: "accepted before unregister".into(),
+            ..Default::default()
+        };
+        d.send_inbox(&session.to_string(), &message).unwrap();
+        let record_path = d.record_path(pid);
+        let before_wrong_session = fs::read(&record_path).unwrap();
+
+        assert!(!d
+            .unregister_record_if_session(pid, &other.to_string())
+            .unwrap());
+        assert_eq!(fs::read(&record_path).unwrap(), before_wrong_session);
+        assert!(matches!(
+            d.unregister_record_if_session(pid, "not-a-session"),
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput
+        ));
+        assert_eq!(fs::read(&record_path).unwrap(), before_wrong_session);
+
+        assert!(d.unregister_record_if_session(pid, &bare).unwrap());
+        assert!(!record_path.exists());
+        assert_eq!(d.drain_inbox(&session.to_string()).unwrap(), vec![message]);
+        assert_eq!(
+            d.claim_session_id(&session.to_string(), pid + 1)
+                .expect_err("metadata removal must not release the writer claim")
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert!(!d.unregister_record_if_session(pid, &bare).unwrap());
+
+        drop(claim);
+        let next = d
+            .claim_session_id(&session.to_string(), pid + 1)
+            .expect("only dropping the lease releases writer ownership");
+        drop(next);
     }
 
     #[test]

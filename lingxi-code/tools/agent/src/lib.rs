@@ -35,10 +35,38 @@ pub fn register_with_fusion(
     ctx: tool_api::BuiltinToolContext,
     fusion: Option<std::sync::Arc<dyn platform_api::FusionExecutor>>,
 ) {
+    register_with_fusion_and_recorder(reg, ctx, fusion, None);
+}
+
+/// Register `AgentTool` with an optional common Fusion terminal recorder.
+pub fn register_with_fusion_and_recorder(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+    fusion: Option<std::sync::Arc<dyn platform_api::FusionExecutor>>,
+    recorder: Option<std::sync::Arc<dyn platform_api::FusionRunRecorder>>,
+) {
+    register_with_fusion_and_recorder_factory(reg, ctx, fusion, recorder, None);
+}
+
+/// Register `AgentTool` with both a compatibility recorder and a pure
+/// per-session recorder factory.
+pub fn register_with_fusion_and_recorder_factory(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+    fusion: Option<std::sync::Arc<dyn platform_api::FusionExecutor>>,
+    recorder: Option<std::sync::Arc<dyn platform_api::FusionRunRecorder>>,
+    factory: Option<std::sync::Arc<dyn platform_api::FusionRunRecorderFactory>>,
+) {
     use std::sync::Arc;
     let mut tool = AgentTool::new(ctx);
     if let Some(executor) = fusion {
         tool = tool.with_fusion(executor);
+    }
+    if let Some(recorder) = recorder {
+        tool = tool.with_terminal_recorder(recorder);
+    }
+    if let Some(factory) = factory {
+        tool = tool.with_terminal_recorder_factory(factory);
     }
     reg.register_builtin(Arc::new(tool));
 }

@@ -423,6 +423,7 @@ pub(crate) fn ensure_live_messaging(
     let dir = platform_api::live_sessions::LiveSessionDir::at_live(
         crate::agents_registry::sessions_dir(&home),
     );
+    let previous_session_id = platform_api::live_sessions::process_session_id();
     if platform_api::live_sessions::process_dir().is_none() {
         let claim =
             platform_api::live_sessions::install_process(dir.clone(), session_id, user_name);
@@ -439,7 +440,6 @@ pub(crate) fn ensure_live_messaging(
             }
         }
     } else {
-        platform_api::live_sessions::set_process_session_id(session_id);
         if let Some(name) = user_name.filter(|s| !s.is_empty()) {
             platform_api::live_sessions::set_process_name(name);
         }
@@ -466,7 +466,19 @@ pub(crate) fn ensure_live_messaging(
         }
     }
     let path = match platform_api::uds_inbox::process_socket_path() {
-        Some(existing) => existing,
+        Some(_) if previous_session_id.as_deref() != Some(session_id) => {
+            match platform_api::uds_inbox::retarget_process_inbox(session_id) {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    tracing::warn!(%error, "cross-session inbox could not follow session switch");
+                    eprintln!(
+                        "lingxi-cli: session switched, but cross-session inbox is unavailable: {error}"
+                    );
+                    None
+                }
+            }
+        }
+        Some(existing) => Some(existing),
         None => {
             // (CLI-12, cc2.1.238) `--messaging-socket-path <path>` overrides the
             // auto-generated `mum()` path; absent, the oracle's own default
@@ -474,19 +486,22 @@ pub(crate) fn ensure_live_messaging(
             let sock = messaging_socket_override().unwrap_or_else(|| {
                 platform_api::uds_inbox::default_socket_path(std::process::id())
             });
-            match platform_api::uds_inbox::start_process_inbox(sock) {
-                Ok(path) => path,
+            match platform_api::uds_inbox::start_process_inbox_for_session(sock, session_id) {
+                Ok(path) => Some(path),
                 Err(error) => {
                     tracing::warn!(%error, "cross-session inbox unavailable");
                     eprintln!("lingxi-cli: cross-session inbox unavailable: {error}");
-                    return;
+                    None
                 }
             }
         }
     };
+    platform_api::live_sessions::set_process_session_id(session_id);
     let name_source = derived_name.as_deref().map(|_| "derived");
     if let Some(reg) = registration {
-        reg.set_messaging_socket(&path);
+        if let Some(path) = path.as_deref() {
+            reg.set_messaging_socket(path);
+        }
         reg.set_session_id(session_id);
         if let Some(name) = derived_name.as_deref().filter(|s| !s.trim().is_empty()) {
             reg.set_name(name, "derived");
@@ -495,14 +510,27 @@ pub(crate) fn ensure_live_messaging(
             reg.set_permission_class(&class);
         }
     }
-    let _ = dir.upsert_identity(
+    let identity_result = dir.upsert_identity(
         std::process::id(),
         session_id,
         platform_api::live_sessions::process_name().as_deref(),
         name_source,
-        Some(&path),
+        path.as_deref(),
         platform_api::live_sessions::process_permission_class().as_deref(),
     );
+    if path.is_none() {
+        if let Err(error) = dir.clear_messaging_socket_if_session(std::process::id(), session_id) {
+            tracing::warn!(%error, "stale live-session messaging socket could not be cleared");
+            eprintln!(
+                "lingxi-cli: session switched, but stale messaging presence could not be cleared: {error}"
+            );
+        }
+        if identity_result.is_err() {
+            if let Some(previous) = previous_session_id.as_deref() {
+                let _ = dir.clear_messaging_socket_if_session(std::process::id(), previous);
+            }
+        }
+    }
 }
 
 /// (iocraft → ratatui migration) Launch the `tui-rata` interactive chat wired
@@ -626,6 +654,12 @@ pub(crate) async fn run_ratatui_with_initial_state(
     initial_prompt: Option<String>,
     handoff: Option<platform_api::BackgroundingSnapshot>,
 ) -> RunOutcome {
+    // Durable session state owns the authoritative cost ledger and terminal
+    // publication path.  Keep this bit before the runtime is projected into
+    // the TUI so the legacy config shadow write below cannot run alongside a
+    // hydrated coordinator (or in explicit no-persistence mode).
+    let session_persistence_enabled = tui_build.runtime.session_state.is_some();
+    let session_lifecycle = tui_build.runtime.session_lifecycle.clone();
     let prompt_queue = Arc::new(msgqueue::MessageQueueManager::new());
     tui_build
         .runtime
@@ -1797,13 +1831,22 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // on a normal `/exit`/Ctrl-C quit. The pure `session.lock()` reads below
     // (cost/session id) are unaffected by the closed websocket.
     summary_orch.request_exit().await;
+    let shutdown = session_lifecycle.shutdown_and_drain().await;
+    for error in shutdown.errors {
+        eprintln!("lingxi-cli: session shutdown warning: {error}");
+    }
+    if !shutdown.complete {
+        // Do not reacquire a session writer claim or replace dependencies while
+        // the outgoing runtime still owns incomplete shutdown work.
+        return RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
+    }
     // Resume parity (claude-code `saveCurrentSessionCosts`, fired on process
     // exit): persist this session's accumulated cost to the project config,
     // keyed by (project, session id), so a later `--resume` of THIS session
     // restores it into the footer. Best-effort — a config-write failure must
     // never change the exit code. Runs for every exit arm (clean quit or TUI
     // failure), matching the reference's unconditional exit hook.
-    {
+    if !session_persistence_enabled {
         let total_usd = summary_orch.snapshot_cost().await.total_usd;
         let session_uuid = summary_orch.current_session_id().await.as_uuid();
         if let Some(cfg_path) = migrations::global_config::global_config_path() {

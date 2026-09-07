@@ -54,11 +54,16 @@ struct InboxState {
     path: Mutex<Option<PathBuf>>,
     peer_token: Mutex<Option<String>>,
     child_token: Mutex<Option<String>>,
+    /// Canonical destination this listener generation belongs to.
+    bound_session_id: Option<String>,
+    /// Set after a hot remount. Legacy unscoped UDS payloads are then refused
+    /// so a sender paused after resolving A cannot enter newly mounted B.
+    require_session_fence: bool,
     stop: AtomicBool,
 }
 
 impl InboxState {
-    fn new() -> Self {
+    fn new(bound_session_id: Option<String>, require_session_fence: bool) -> Self {
         Self {
             accepted: Mutex::new(VecDeque::new()),
             held: Mutex::new(Vec::new()),
@@ -67,6 +72,8 @@ impl InboxState {
             path: Mutex::new(None),
             peer_token: Mutex::new(None),
             child_token: Mutex::new(None),
+            bound_session_id,
+            require_session_fence,
             stop: AtomicBool::new(false),
         }
     }
@@ -86,13 +93,17 @@ struct InboxRuntime {
 }
 
 static RUNTIME: Mutex<Option<InboxRuntime>> = Mutex::new(None);
+/// Stopped generations whose file-inbox spill failed. They are intentionally
+/// kept out of `RUNTIME`, so a newly mounted session can never drain their
+/// accepted/held messages as its own; a later lifecycle drain retries them.
+static RETIRED_GENERATIONS: Mutex<Vec<Arc<InboxState>>> = Mutex::new(Vec::new());
 
 fn inbox() -> Arc<InboxState> {
     let mut g = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(rt) = g.as_ref() {
         return rt.state.clone();
     }
-    let state = Arc::new(InboxState::new());
+    let state = Arc::new(InboxState::new(process_session_id(), false));
     *g = Some(InboxRuntime {
         state: state.clone(),
         join: None,
@@ -297,6 +308,14 @@ pub struct UdsUserPayload {
     pub priority: String,
     /// `uds:<socket>` of the sender.
     pub from: String,
+    /// Destination session captured from the peer's socket key. Optional only
+    /// for wire compatibility with pre-fence senders on an initial mount.
+    #[serde(
+        rename = "toSessionId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub to_session_id: Option<String>,
 }
 
 /// Nested user message.
@@ -333,6 +352,7 @@ pub fn user_payload(
         },
         priority: "next".into(),
         from: from_addr.to_string(),
+        to_session_id: None,
     }
 }
 
@@ -344,7 +364,12 @@ pub fn send_uds(path: &Path, payload: &UdsUserPayload) -> io::Result<()> {
             "refusing to send on a non-inbox socket path",
         ));
     }
-    let token = lookup_peer_token(path);
+    let peer = lookup_peer_key(path);
+    let token = peer.as_ref().and_then(|peer| peer.peer_token.clone());
+    let mut payload = payload.clone();
+    if payload.to_session_id.is_none() {
+        payload.to_session_id = peer.and_then(|peer| peer.session_id);
+    }
     send_uds_raw(
         path,
         token.as_deref(),
@@ -391,7 +416,7 @@ fn send_uds_unix(path: &Path, auth_token: Option<&str>, payload: &Value) -> io::
 pub fn start_process_inbox(path: impl Into<PathBuf>) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
-        start_process_inbox_unix(path.into())
+        start_process_inbox_unix(path.into(), process_session_id(), false)
     }
     #[cfg(not(unix))]
     {
@@ -403,11 +428,56 @@ pub fn start_process_inbox(path: impl Into<PathBuf>) -> io::Result<PathBuf> {
     }
 }
 
+/// Bind the initial listener to an explicit session identity. The first
+/// generation still accepts legacy unscoped payloads; its key advertises the
+/// destination so current senders always stamp a generation fence.
+pub fn start_process_inbox_for_session(
+    path: impl Into<PathBuf>,
+    session_id: &str,
+) -> io::Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        start_process_inbox_unix(path.into(), Some(session_id.to_string()), false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, session_id);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "UDS inbox is not available on this platform",
+        ))
+    }
+}
+
+/// Stop the current listener, preserve its accepted work for the old session,
+/// and reuse the same socket path for a new session generation. After a hot
+/// switch unscoped legacy payloads are refused: only a sender that read the new
+/// key can enter the new session.
+pub fn retarget_process_inbox(session_id: &str) -> io::Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        let path = process_socket_path().unwrap_or_else(|| default_socket_path(std::process::id()));
+        start_process_inbox_unix(path, Some(session_id.to_string()), true)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = session_id;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "UDS inbox is not available on this platform",
+        ))
+    }
+}
+
 #[cfg(unix)]
-fn start_process_inbox_unix(path: PathBuf) -> io::Result<PathBuf> {
+fn start_process_inbox_unix(
+    path: PathBuf,
+    bound_session_id: Option<String>,
+    require_session_fence: bool,
+) -> io::Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
-    stop_process_inbox();
+    stop_process_inbox_inner()?;
     if let Some(parent) = path.parent() {
         ensure_private_dir(parent)?;
     }
@@ -423,13 +493,18 @@ fn start_process_inbox_unix(path: PathBuf) -> io::Result<PathBuf> {
             ));
         }
     }
-    let state = Arc::new(InboxState::new());
+    let state = Arc::new(InboxState::new(
+        bound_session_id.clone(),
+        require_session_fence,
+    ));
     *state.path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.clone());
     if let Some(p) = path.to_str() {
         std::env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", p);
         std::env::set_var("LINGXI_MESSAGING_SOCKET", p);
     }
-    if let Ok((peer, child)) = publish_inbox_key(&sessions_root(), &path) {
+    if let Ok((peer, child)) =
+        publish_inbox_key_for_session(&sessions_root(), &path, bound_session_id.as_deref())
+    {
         *state.peer_token.lock().unwrap_or_else(|e| e.into_inner()) = Some(peer);
         *state.child_token.lock().unwrap_or_else(|e| e.into_inner()) = Some(child.clone());
         std::env::set_var("CLAUDE_CODE_MESSAGING_TOKEN", &child);
@@ -481,6 +556,7 @@ fn ensure_private_dir(dir: &Path) -> io::Result<()> {
 #[cfg(unix)]
 fn accept_loop(listener: std::os::unix::net::UnixListener, state: Arc<InboxState>, path: PathBuf) {
     let _ = listener.set_nonblocking(true);
+    let mut clients = Vec::new();
     while !state.stop.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -488,7 +564,16 @@ fn accept_loop(listener: std::os::unix::net::UnixListener, state: Arc<InboxState
                     break;
                 }
                 let st = state.clone();
-                std::thread::spawn(move || handle_client(stream, &st));
+                clients.push(std::thread::spawn(move || handle_client(stream, &st)));
+                let mut index = 0;
+                while index < clients.len() {
+                    if clients[index].is_finished() {
+                        let handle = clients.swap_remove(index);
+                        let _ = handle.join();
+                    } else {
+                        index += 1;
+                    }
+                }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(20));
@@ -500,6 +585,12 @@ fn accept_loop(listener: std::os::unix::net::UnixListener, state: Arc<InboxState
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
+    }
+    // A socket accepted under generation A continues to write only into A's
+    // state. Join every such client before A is spilled and generation B is
+    // published, closing the accepted-before-switch race.
+    for client in clients {
+        let _ = client.join();
     }
     let _ = std::fs::remove_file(path);
 }
@@ -628,6 +719,12 @@ fn dispatch_line(v: Value, state: &InboxState, peer_pid: Option<u32>) {
             let Some(peer_pid) = peer_pid else {
                 return;
             };
+            let destination = v.get("toSessionId").and_then(Value::as_str);
+            if destination.is_some_and(|value| Some(value) != state.bound_session_id.as_deref())
+                || (state.require_session_fence && destination.is_none())
+            {
+                return;
+            }
             let content = v
                 .pointer("/message/content")
                 .and_then(Value::as_str)
@@ -832,16 +929,27 @@ fn random_peer_token() -> String {
 /// Publish the inbox auth key next to `sessions/<pid>.json`.
 /// Returns `(peerToken, childToken)`.
 pub fn publish_inbox_key(sessions_dir: &Path, sock: &Path) -> io::Result<(String, String)> {
+    publish_inbox_key_for_session(sessions_dir, sock, None)
+}
+
+fn publish_inbox_key_for_session(
+    sessions_dir: &Path,
+    sock: &Path,
+    session_id: Option<&str>,
+) -> io::Result<(String, String)> {
     std::fs::create_dir_all(sessions_dir)?;
     let peer = random_peer_token();
     let child = random_peer_token();
     let path = inbox_key_path(sessions_dir, sock);
-    let body = serde_json::to_vec(&json!({
+    let mut body = json!({
         "peerToken": peer,
         "childToken": child,
         "procStart": now_ms_string(),
-    }))
-    .map_err(io::Error::other)?;
+    });
+    if let (Some(session_id), Value::Object(object)) = (session_id, &mut body) {
+        object.insert("sessionId".into(), Value::String(session_id.to_string()));
+    }
+    let body = serde_json::to_vec(&body).map_err(io::Error::other)?;
     std::fs::write(&path, body)?;
     #[cfg(unix)]
     {
@@ -884,6 +992,16 @@ fn token_role(state: &InboxState, token: &str) -> Option<&'static str> {
 /// Look up a peer's `peerToken` for `sock` (any `{pid}.{hash}.key`).
 #[must_use]
 pub fn lookup_peer_token(sock: &Path) -> Option<String> {
+    lookup_peer_key(sock).and_then(|key| key.peer_token)
+}
+
+#[derive(Debug)]
+struct InboxPeerKey {
+    peer_token: Option<String>,
+    session_id: Option<String>,
+}
+
+fn lookup_peer_key(sock: &Path) -> Option<InboxPeerKey> {
     let hash = socket_key_hash(sock);
     let suffix = format!(".{hash}.key");
     let dir = sessions_root();
@@ -896,9 +1014,16 @@ pub fn lookup_peer_token(sock: &Path) -> Option<String> {
         }
         let body = std::fs::read_to_string(ent.path()).ok()?;
         let v: Value = serde_json::from_str(&body).ok()?;
-        if let Some(t) = v.get("peerToken").and_then(Value::as_str) {
-            return Some(t.to_string());
-        }
+        return Some(InboxPeerKey {
+            peer_token: v
+                .get("peerToken")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            session_id: v
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        });
     }
     None
 }
@@ -1027,22 +1152,35 @@ pub fn take_accepted_peer_reminders(mid_turn: bool) -> Vec<String> {
 
 /// Stop the accept loop, join it, and unlink the socket + key.
 pub fn stop_process_inbox() {
+    let _ = stop_process_inbox_inner();
+}
+
+/// Stop the inbox and report whether all accepted work was preserved to the
+/// bound session's file inbox. Lifecycle owners use this checked form so a
+/// shutdown persistence failure is visible rather than mistaken for a clean
+/// drain.
+pub fn stop_process_inbox_checked() -> io::Result<()> {
+    stop_process_inbox_inner()
+}
+
+fn stop_process_inbox_inner() -> io::Result<()> {
     let (state, join, path) = {
         let mut g = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
-        match g.as_mut() {
+        match g.take() {
             Some(rt) => {
-                let join = rt.join.take();
+                let join = rt.join;
                 let path = rt
                     .state
                     .path
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
-                (Some(rt.state.clone()), join, path)
+                (Some(rt.state), join, path)
             }
             None => (None, None, None),
         }
     };
+    let mut preservation_error = retry_retired_generations().err();
     if let Some(state) = state {
         state.stop.store(true, Ordering::SeqCst);
         if let Some(path) = path.as_ref() {
@@ -1059,12 +1197,15 @@ pub fn stop_process_inbox() {
             let _ = std::fs::remove_file(key);
             let _ = std::fs::remove_file(&path);
         }
-        state
-            .accepted
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
-        state.held.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        if let Err(error) = spill_generation(&state) {
+            RETIRED_GENERATIONS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(state.clone());
+            if preservation_error.is_none() {
+                preservation_error = Some(error);
+            }
+        }
         state
             .receipts
             .lock()
@@ -1083,6 +1224,60 @@ pub fn stop_process_inbox() {
     std::env::remove_var("LINGXI_MESSAGING_SOCKET");
     std::env::remove_var("CLAUDE_CODE_MESSAGING_TOKEN");
     std::env::remove_var("LINGXI_MESSAGING_TOKEN");
+    preservation_error.map_or(Ok(()), Err)
+}
+
+fn spill_generation(state: &InboxState) -> io::Result<()> {
+    let Some(session_id) = state.bound_session_id.as_deref() else {
+        state
+            .accepted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        state.held.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        return Ok(());
+    };
+    let live_dir = process_live_dir();
+    let mut accepted = state.accepted.lock().unwrap_or_else(|e| e.into_inner());
+    while let Some(message) = accepted.pop_front() {
+        if let Err(error) = live_dir.send_inbox(session_id, &message) {
+            accepted.push_front(message);
+            return Err(error);
+        }
+    }
+    drop(accepted);
+    let mut held = state.held.lock().unwrap_or_else(|e| e.into_inner());
+    while !held.is_empty() {
+        let entry = held.remove(0);
+        if let Err(error) = live_dir.send_inbox(session_id, &entry.msg) {
+            held.insert(0, entry);
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn retry_retired_generations() -> io::Result<()> {
+    let retired = std::mem::take(
+        &mut *RETIRED_GENERATIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    let mut failed = Vec::new();
+    let mut first_error = None;
+    for state in retired {
+        if let Err(error) = spill_generation(&state) {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+            failed.push(state);
+        }
+    }
+    RETIRED_GENERATIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .extend(failed);
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Deliver to a live peer: UDS when `messagingSocketPath` is set.
@@ -1128,6 +1323,7 @@ pub fn send_peer_message(sock: &Path, message: &PeerMessage) -> io::Result<()> {
             .clone()
             .or_else(process_uds_address)
             .unwrap_or_else(|| uds_address(Path::new("/"))),
+        to_session_id: lookup_peer_key(sock).and_then(|key| key.session_id),
     };
     send_uds(sock, &payload)
 }
@@ -1391,6 +1587,175 @@ mod tests {
         assert_eq!(p.message.role, "user");
         assert_eq!(p.priority, "next");
         assert!(p.message.content.contains("from=\"alpha\""));
+    }
+
+    #[test]
+    fn hot_generation_refuses_missing_or_stale_destination() {
+        let _g = test_guard();
+        clean_env();
+        std::env::set_var("LINGXI_CROSS_SESSION_INBOUND", "accept");
+        crate::live_sessions::set_process_name("receiver");
+        crate::live_sessions::set_process_session_id("session-b");
+        let state = InboxState::new(Some("session-b".into()), true);
+        let payload = |destination: Option<&str>, id: &str| {
+            let mut value = serde_json::json!({
+                "type": "user",
+                "msg_id": id,
+                "message": {"role": "user", "content": "hello"},
+                "from": "uds:/tmp/source.sock"
+            });
+            if let (Some(destination), Value::Object(object)) = (destination, &mut value) {
+                object.insert("toSessionId".into(), Value::String(destination.into()));
+            }
+            value
+        };
+
+        dispatch_line(payload(None, "missing"), &state, Some(std::process::id()));
+        dispatch_line(
+            payload(Some("session-a"), "stale"),
+            &state,
+            Some(std::process::id()),
+        );
+        dispatch_line(
+            payload(Some("session-b"), "current"),
+            &state,
+            Some(std::process::id()),
+        );
+
+        let accepted = state.accepted.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(
+            accepted
+                .front()
+                .and_then(|message| message.msg_id.as_deref()),
+            Some("current")
+        );
+        std::env::remove_var("LINGXI_CROSS_SESSION_INBOUND");
+    }
+
+    #[test]
+    fn retarget_spills_old_generation_work_to_old_session() {
+        let _g = test_guard();
+        stop_process_inbox();
+        clean_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = crate::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        crate::live_sessions::set_process_dir(dir.clone());
+        crate::live_sessions::set_process_session_id("session-a");
+        let socket = temp.path().join("inbox.sock");
+        start_process_inbox_for_session(&socket, "session-a").unwrap();
+        let mut message = crate::live_sessions::outbound_peer_message(
+            "sender",
+            "source-session",
+            "owned by A",
+            None,
+        );
+        message.msg_id = Some("generation-a".into());
+        enqueue_accepted(message);
+
+        retarget_process_inbox("session-b").expect("retarget");
+
+        let spilled = dir.drain_inbox("session-a").expect("old inbox");
+        assert_eq!(spilled.len(), 1);
+        assert_eq!(spilled[0].msg_id.as_deref(), Some("generation-a"));
+        assert!(dir.drain_inbox("session-b").unwrap().is_empty());
+        stop_process_inbox();
+    }
+
+    #[test]
+    fn paused_peer_lookup_keeps_delivery_in_original_session_after_remount() {
+        let _g = test_guard();
+        stop_process_inbox();
+        clean_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = crate::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        crate::live_sessions::set_process_dir(dir.clone());
+        crate::live_sessions::set_process_session_id("session-a");
+        let socket = temp.path().join("inbox.sock");
+        start_process_inbox_for_session(&socket, "session-a").unwrap();
+        dir.upsert_identity(
+            std::process::id(),
+            "session-a",
+            Some("receiver"),
+            None,
+            Some(&socket),
+            None,
+        )
+        .unwrap();
+        let peer = dir.find_by_pid(std::process::id()).unwrap();
+        let message =
+            crate::live_sessions::outbound_peer_message("sender", "source", "for A", None);
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let sender_dir = dir.clone();
+        let sender = std::thread::spawn(move || {
+            // The real discovery result is retained across this scheduling gap.
+            resume_rx.recv().unwrap();
+            // Both discovered-recipient production routes use this sole
+            // transport, retaining the destination from their discovery result.
+            sender_dir.send_inbox(peer.sid(), &message).unwrap();
+        });
+        retarget_process_inbox("session-b").unwrap();
+        crate::live_sessions::set_process_session_id("session-b");
+        dir.upsert_identity(
+            std::process::id(),
+            "session-b",
+            Some("receiver"),
+            None,
+            Some(&socket),
+            None,
+        )
+        .unwrap();
+        resume_tx.send(()).unwrap();
+        sender.join().unwrap();
+        assert!(take_accepted_peer_reminders(false).is_empty());
+        assert!(dir.drain_inbox("session-b").unwrap().is_empty());
+        let original = dir.drain_inbox("session-a").unwrap();
+        assert_eq!(original.len(), 1);
+        assert!(original[0].content.contains("for A"));
+        stop_process_inbox();
+    }
+
+    #[test]
+    fn failed_old_generation_spill_is_retained_but_never_exposed_to_new_session() {
+        let _g = test_guard();
+        stop_process_inbox();
+        clean_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let sessions = temp.path().join("sessions");
+        std::fs::write(&sessions, "temporarily unavailable").unwrap();
+        let dir = crate::live_sessions::LiveSessionDir::at(sessions.clone());
+        crate::live_sessions::set_process_dir(dir.clone());
+        let old = Arc::new(InboxState::new(Some("session-a".into()), true));
+        let mut message = crate::live_sessions::outbound_peer_message(
+            "sender",
+            "source-session",
+            "retained A",
+            None,
+        );
+        message.msg_id = Some("retained-a".into());
+        old.accepted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(message);
+        *RUNTIME.lock().unwrap_or_else(|e| e.into_inner()) = Some(InboxRuntime {
+            state: old,
+            join: None,
+        });
+
+        assert!(stop_process_inbox_checked().is_err());
+        crate::live_sessions::set_process_session_id("session-b");
+        assert!(
+            take_accepted_peer_reminders(false).is_empty(),
+            "retired A work must not be readable through B's active inbox state"
+        );
+
+        std::fs::remove_file(&sessions).unwrap();
+        std::fs::create_dir_all(&sessions).unwrap();
+        stop_process_inbox_checked().expect("retry retained generation");
+        let spilled = dir.drain_inbox("session-a").unwrap();
+        assert_eq!(spilled.len(), 1);
+        assert_eq!(spilled[0].msg_id.as_deref(), Some("retained-a"));
+        assert!(dir.drain_inbox("session-b").unwrap().is_empty());
     }
 
     #[test]

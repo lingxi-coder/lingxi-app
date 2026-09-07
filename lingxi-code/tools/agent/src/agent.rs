@@ -28,7 +28,8 @@ use platform_api::fusion::{
     FusionActivation, FusionAgentSurface, FusionExecutor, FusionInheritance, FusionModelRef,
     FusionOrigin, FusionPreset, FusionProgress, FusionRequest, FusionRunControl, FusionRunId,
     FusionRunIdentity, FusionStage, FusionStatus, FusionSubmission, FUSION_MAX_PANEL,
-    FUSION_MIN_PANEL,
+    FUSION_MIN_PANEL, FusionRunRecorder, FusionTerminalCapability, FusionPreparedSummary,
+    FusionRunFactsRecorder, FusionRunRecorderFactory, PreparedFusionRun,
 };
 use platform_api::subagent_spawn::{
     StructuredOutputMode, SubagentInheritance, SubagentListingEntry, SubagentResult,
@@ -622,6 +623,10 @@ pub struct AgentTool {
     advertise_run_in_background: bool,
     /// Injected Fusion orchestrator. `None` on mobile and in `register_all`.
     fusion: Option<Arc<dyn FusionExecutor>>,
+    /// Host-owned common terminal recorder for Agent-origin Fusion runs.
+    terminal_recorder: Option<Arc<dyn FusionRunRecorder>>,
+    /// Pure per-session recorder factory for long-lived hot-switch hosts.
+    terminal_recorder_factory: Option<Arc<dyn FusionRunRecorderFactory>>,
 }
 
 /// Normalize a subagent `description` the way the binary does — `replace(/\s+/g,
@@ -1243,6 +1248,8 @@ impl AgentTool {
             ctx,
             advertise_run_in_background,
             fusion: None,
+            terminal_recorder: None,
+            terminal_recorder_factory: None,
         }
     }
 
@@ -1252,6 +1259,44 @@ impl AgentTool {
     pub fn with_fusion(mut self, executor: Arc<dyn FusionExecutor>) -> Self {
         self.fusion = Some(executor);
         self
+    }
+
+    /// Attach the host-owned common terminal recorder. Agent receives no
+    /// Slash publication target, even when its trusted session is known.
+    #[must_use]
+    pub fn with_terminal_recorder(mut self, recorder: Arc<dyn FusionRunRecorder>) -> Self {
+        self.terminal_recorder = Some(recorder);
+        self
+    }
+
+    /// Attach a pure per-session recorder factory. Agent receives no Slash
+    /// publication target, but its terminal receipt remains pinned to the
+    /// trusted session authority selected before preparation.
+    #[must_use]
+    pub fn with_terminal_recorder_factory(
+        mut self,
+        factory: Arc<dyn FusionRunRecorderFactory>,
+    ) -> Self {
+        self.terminal_recorder_factory = Some(factory);
+        self
+    }
+
+    fn terminal_recorder_for(
+        &self,
+        session_id: Option<protocol::SessionId>,
+    ) -> Option<Arc<dyn FusionRunRecorder>> {
+        if let Some(factory) = self.terminal_recorder_factory.as_ref() {
+            // A production task normally carries the trusted origin session.
+            // If a legacy standalone host has no session binding, retain its
+            // explicitly supplied compatibility recorder (the desktop no-
+            // persistence path supplies an explicit StorageFailure recorder)
+            // instead of inventing an id for a pure factory lookup.
+            return session_id.map_or_else(
+                || self.terminal_recorder.clone(),
+                |session_id| factory.recorder_for(session_id),
+            );
+        }
+        self.terminal_recorder.clone()
     }
 
     fn fresh_invocation_id() -> String {
@@ -1536,12 +1581,13 @@ impl AgentTool {
         if let Some(gate) = self.ctx.permission_gate.clone() {
             invoker_impl = invoker_impl.with_gate(gate);
         }
+        let fusion_cancel = ctx.cancel.clone().unwrap_or_default();
         let inherit = FusionInheritance::new(
             SubagentInheritance {
                 tool_invoker: Arc::new(invoker_impl),
                 budget: budget.clone(),
             },
-            ctx.cancel.clone().unwrap_or_default(),
+            fusion_cancel.clone(),
         );
         let identity = FusionRunIdentity::new(
             FusionRunId::generated(),
@@ -1549,13 +1595,34 @@ impl AgentTool {
             FusionOrigin::Agent,
             Some(invocation_id.to_string()),
         );
+        let terminal_recorder = self.terminal_recorder_for(origin_session_id);
         let prepared = match executor.clone().prepare(FusionSubmission {
             request,
             inherit,
-            identity,
+            identity: identity.clone(),
         }) {
             Ok(prepared) => prepared,
             Err(error) => {
+                let control = FusionRunControl::new(
+                    identity.clone(),
+                    0,
+                    fusion_cancel,
+                    FusionRunFactsRecorder::default(),
+                );
+                let summary = FusionPreparedSummary {
+                    identity,
+                    duration_ms: 0,
+                    planned_panels: None,
+                };
+                let prepared = PreparedFusionRun::failed(summary, control, error.clone());
+                let prepared = if let Some(recorder) = terminal_recorder.as_ref() {
+                    prepared.with_terminal_capability(
+                        FusionTerminalCapability::new(recorder.clone()),
+                    )
+                } else {
+                    prepared
+                };
+                let _ = prepared.activate(FusionActivation::now(), None).await;
                 Self::emit_failed(
                     bus,
                     invocation_id,
@@ -1565,6 +1632,11 @@ impl AgentTool {
                 .await;
                 return Err(fusion_tool_error(error));
             }
+        };
+        let prepared = if let Some(recorder) = terminal_recorder.as_ref() {
+            prepared.with_terminal_capability(FusionTerminalCapability::new(recorder.clone()))
+        } else {
+            prepared
         };
         let prepared_summary = prepared.summary().clone();
         let prepared_control = prepared.control();

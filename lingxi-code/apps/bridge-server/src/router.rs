@@ -413,6 +413,21 @@ async fn read_session_agent_summary(
 }
 
 impl EngineCommandRouter {
+    /// Move this process's live-session presence only after the engine has
+    /// successfully activated the destination session.  The bridge process
+    /// owns one mutable presence record, while durable coordinators retain
+    /// old-session leases independently for late background work; updating
+    /// this record must therefore never unregister/release the old writer.
+    async fn refresh_process_session_presence(
+        previous: protocol::SessionId,
+        current: protocol::SessionId,
+    ) -> Option<String> {
+        engine_desktop::refresh_process_session_presence(previous, current)
+            .await
+            .err()
+            .map(|error| format!("session switched, but {error}"))
+    }
+
     async fn dispatch_desktop_slash(&self, raw: &str) -> Option<platform_api::SlashDispatchResult> {
         let parsed = parse_slash_command(raw)?;
         match parsed.name.as_str() {
@@ -3512,8 +3527,24 @@ impl CommandRouter for EngineCommandRouter {
                     .await;
                     return;
                 }
+                let previous_session_id = self.handle.current_session_id().await;
                 match self.handle.clear_session().await {
-                    Ok(()) => sink.emit(ClientEvent::SessionEnded).await,
+                    Ok(()) => {
+                        let current_session_id = self.handle.current_session_id().await;
+                        let presence_warning = Self::refresh_process_session_presence(
+                            previous_session_id,
+                            current_session_id,
+                        )
+                        .await;
+                        sink.emit(ClientEvent::SessionEnded).await;
+                        if let Some(message) = presence_warning {
+                            sink.emit(ClientEvent::SystemNotice {
+                                message,
+                                is_error: false,
+                            })
+                            .await;
+                        }
+                    }
                     Err(e) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
@@ -3537,6 +3568,7 @@ impl CommandRouter for EngineCommandRouter {
                     return;
                 }
 
+                let previous_session_id = self.handle.current_session_id().await;
                 if let Err(error) = self.handle.clear_session().await {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
@@ -3545,6 +3577,10 @@ impl CommandRouter for EngineCommandRouter {
                     .await;
                     return;
                 }
+                let current_session_id = self.handle.current_session_id().await;
+                let presence_warning =
+                    Self::refresh_process_session_presence(previous_session_id, current_session_id)
+                        .await;
 
                 if let Some(model) = model {
                     let listings = self.handle.list_model_listings().await;
@@ -3569,6 +3605,13 @@ impl CommandRouter for EngineCommandRouter {
                     mode: SessionModeDto::Code,
                 })
                 .await;
+                if let Some(message) = presence_warning {
+                    sink.emit(ClientEvent::SystemNotice {
+                        message,
+                        is_error: false,
+                    })
+                    .await;
+                }
             }
             ClientCommand::ResumeSession { session_id, cwd } => {
                 if self.is_turn_active() {
@@ -3624,6 +3667,7 @@ impl CommandRouter for EngineCommandRouter {
 
                 let messages = client_adapter::lowering::lower_transcript(&replayed.state.history);
                 let resume_plan_mode = replayed.state.plan_mode;
+                let previous_session_id = self.handle.current_session_id().await;
                 let previous_permission_mode = self
                     .handle
                     .permission_mode()
@@ -3687,12 +3731,25 @@ impl CommandRouter for EngineCommandRouter {
                     return;
                 }
 
+                let presence_warning = Self::refresh_process_session_presence(
+                    previous_session_id,
+                    protocol::SessionId::from_uuid(uuid),
+                )
+                .await;
+
                 sink.emit(ClientEvent::SessionResumed {
                     session_id: uuid.to_string(),
                     mode: SessionModeDto::Code,
                     messages,
                 })
                 .await;
+                if let Some(message) = presence_warning {
+                    sink.emit(ClientEvent::SystemNotice {
+                        message,
+                        is_error: false,
+                    })
+                    .await;
+                }
                 // resume_session restores the model/effort held by this exact
                 // transcript. Publish that authoritative session state after
                 // activation so clients do not keep showing the model selected

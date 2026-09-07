@@ -162,6 +162,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         system_prompt_override: None,
         append_system_prompt: None,
         session_id_override: None,
+        session_writer_lease: None,
         disable_slash_commands: false,
         add_dir: Vec::new(),
         cli_mcp_servers: Vec::new(),

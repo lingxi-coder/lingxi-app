@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use telemetry::AnalyticsBus;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, OwnedMutexGuard, RwLock};
 
 /// Persisted snapshot of one session's cumulative cost and usage.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,6 +273,80 @@ pub struct CostSessionScope {
     tracker: Arc<CostTracker>,
 }
 
+/// Fully validated session authority awaiting one synchronous activation.
+///
+/// Preparation may perform storage I/O, but it never changes the tracker's
+/// active projection. The token pins the exact hydrated entry and owns the
+/// session-switch bookkeeping lock, so consuming it cannot await, reread, or
+/// accidentally resolve a replacement authority.
+#[must_use = "a prepared cost session has no effect until it is activated"]
+pub struct PreparedCostSession {
+    ledger: Arc<SessionLedger>,
+    entry: Arc<SessionEntry>,
+    catalog: Arc<PricingCatalog>,
+    persist_tx: mpsc::Sender<CostState>,
+    hydration_bookkeeping: OwnedMutexGuard<HashMap<SessionId, u64>>,
+    activates_durable_mode: bool,
+}
+
+impl PreparedCostSession {
+    /// Canonical destination captured by this preparation.
+    #[must_use]
+    pub fn session_id(&self) -> SessionId {
+        self.entry.session_id
+    }
+
+    /// Atomically publish the prepared entry and return its pinned provider
+    /// accounting scope. All fallible hydration and authority validation has
+    /// already completed, so activation is deliberately synchronous.
+    #[must_use]
+    pub fn activate(self) -> CostSessionScope {
+        let Self {
+            ledger,
+            entry,
+            catalog,
+            persist_tx,
+            mut hydration_bookkeeping,
+            activates_durable_mode,
+        } = self;
+        let previous = *ledger
+            .active_session
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if previous != entry.session_id {
+            hydration_bookkeeping.entry(previous).or_insert(0);
+        }
+        if activates_durable_mode {
+            ledger
+                .requires_durable
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        *ledger
+            .active_session
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = entry.session_id;
+        drop(hydration_bookkeeping);
+
+        CostSessionScope {
+            tracker: Arc::new(CostTracker {
+                ledger,
+                scope: Some(entry),
+                catalog,
+                persist_tx,
+            }),
+        }
+    }
+}
+
+impl std::fmt::Debug for PreparedCostSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedCostSession")
+            .field("session_id", &self.entry.session_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl CostSessionScope {
     /// Pin one tracker view to its canonical originating session.
     #[must_use]
@@ -446,7 +520,7 @@ struct SessionLedger {
     /// marker is separate from the state cell because a cell can receive
     /// late in-memory settlement before the resume loader supplies its saved
     /// baseline; that baseline must be added exactly once to the delta.
-    hydrated_sessions: Mutex<HashMap<SessionId, u64>>,
+    hydrated_sessions: Arc<Mutex<HashMap<SessionId, u64>>>,
 }
 
 struct SessionEntry {
@@ -510,7 +584,7 @@ impl SessionLedger {
             active_session: std::sync::RwLock::new(session_id),
             entries: std::sync::Mutex::new(states),
             requires_durable: std::sync::atomic::AtomicBool::new(false),
-            hydrated_sessions: Mutex::new(HashMap::new()),
+            hydrated_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -555,31 +629,6 @@ impl SessionLedger {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.entry_for(session_id)
-    }
-
-    async fn switch_active(&self, session_id: SessionId) {
-        // Create the destination before publishing it as active. A live turn
-        // that starts after the switch always sees a real state cell.
-        self.entry_for(session_id);
-        let previous = *self
-            .active_session
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if previous != session_id {
-            // Leaving a live session establishes its zero persisted baseline:
-            // any later resume of that in-process ledger must not add the same
-            // on-disk spend a second time. The initial active session remains
-            // unmarked until it is either hydrated or left.
-            self.hydrated_sessions
-                .lock()
-                .await
-                .entry(previous)
-                .or_insert(0);
-        }
-        *self
-            .active_session
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = session_id;
     }
 }
 
@@ -717,6 +766,45 @@ impl CostTracker {
     #[must_use]
     pub fn durability_gate(&self) -> CostDurabilityGate {
         self.selected_entry().durability_gate.clone()
+    }
+
+    /// Drain every response settlement and durability ticket registered before
+    /// this call across all live session entries. Composition must stop/join
+    /// response producers first. The drain never authorizes paid work and does
+    /// not short-circuit on a frozen session: it waits all known owners, then
+    /// returns the first retained storage failure.
+    pub async fn drain_owned_settlements(&self) -> Result<(), CostPersistError> {
+        let entries = self
+            .ledger
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut first_error = None;
+        for entry in entries {
+            let slots = entry
+                .response_settlements
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            if let Err(error) = entry.durability_gate.drain_registered().await {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+            for slot in slots {
+                if let Err(error) = slot.wait().await {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Keep the claim alive for callers that need to prove the scope remains
@@ -871,30 +959,73 @@ impl CostTracker {
         self.selected_state().await
     }
 
-    /// Switch the active projection while preserving every session cell.
-    pub async fn switch_session(&self, session_id: SessionId) -> Result<(), CostPersistError> {
+    fn prepared_session(
+        &self,
+        entry: Arc<SessionEntry>,
+        hydration_bookkeeping: OwnedMutexGuard<HashMap<SessionId, u64>>,
+        activates_durable_mode: bool,
+    ) -> PreparedCostSession {
+        PreparedCostSession {
+            ledger: self.ledger.clone(),
+            entry,
+            catalog: self.catalog.clone(),
+            persist_tx: self.persist_tx.clone(),
+            hydration_bookkeeping,
+            activates_durable_mode,
+        }
+    }
+
+    async fn prepare_existing_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<PreparedCostSession, CostPersistError> {
         if self.scope.is_some() {
             return Err(CostPersistError::Rejected(
-                "a scoped cost view cannot switch sessions".into(),
+                "a scoped cost view cannot prepare a session switch".into(),
             ));
         }
-        if self
-            .ledger
-            .requires_durable
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            let Some(entry) = self.ledger.existing_entry(session_id) else {
+        let bookkeeping = self.ledger.hydrated_sessions.clone().lock_owned().await;
+        let entry = {
+            let mut entries = self
+                .ledger
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(entry) = entries.get(&session_id).cloned() {
+                entry
+            } else if self
+                .ledger
+                .requires_durable
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
                 return Err(CostPersistError::Rejected(
                     "durable destination has not been hydrated".into(),
                 ));
-            };
-            if entry.missing_durable_authority || entry.persistence.is_none() {
-                return Err(CostPersistError::Rejected(
-                    "durable destination has no persistence authority".into(),
-                ));
+            } else {
+                let entry = SessionEntry::ephemeral(session_id);
+                entries.insert(session_id, entry.clone());
+                entry
             }
-        }
-        self.ledger.switch_active(session_id).await;
+        };
+        self.validate_authority_shape(&entry)?;
+        let activates_durable_mode = entry.persistence.is_some();
+        Ok(self.prepared_session(entry, bookkeeping, activates_durable_mode))
+    }
+
+    /// Validate an already-known destination without changing the active
+    /// projection. The returned token serializes the later synchronous commit
+    /// against every other session activation.
+    pub async fn prepare_session(
+        self: &Arc<Self>,
+        session_id: SessionId,
+    ) -> Result<PreparedCostSession, CostPersistError> {
+        self.prepare_existing_session(session_id).await
+    }
+
+    /// Switch the active projection while preserving every session cell.
+    pub async fn switch_session(&self, session_id: SessionId) -> Result<(), CostPersistError> {
+        let prepared = self.prepare_existing_session(session_id).await?;
+        let _scope = prepared.activate();
         Ok(())
     }
 
@@ -916,34 +1047,201 @@ impl CostTracker {
                 "hydrated cost state belongs to a different session".into(),
             ));
         }
-        let entry = self.ledger.entry_for(session_id);
+        let mut bookkeeping = self.ledger.hydrated_sessions.clone().lock_owned().await;
+        let replacement = {
+            let mut entries = self
+                .ledger
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let existing = entries.get(&session_id).cloned();
+            if self
+                .ledger
+                .requires_durable
+                .load(std::sync::atomic::Ordering::Acquire)
+                && existing
+                    .as_ref()
+                    .is_none_or(|entry| entry.persistence.is_none())
+            {
+                return Err(crate::persistence::CostPersistError::Rejected(
+                    "durable session switch has no hydrated persistence authority".into(),
+                ));
+            }
+            let replacement = Arc::new(SessionEntry {
+                session_id,
+                state: Arc::new(RwLock::new(hydration.state)),
+                persistence: existing
+                    .as_ref()
+                    .and_then(|entry| entry.persistence.clone()),
+                writer_lease: existing
+                    .as_ref()
+                    .and_then(|entry| entry.writer_lease.clone()),
+                durability_gate: existing
+                    .as_ref()
+                    .map_or_else(CostDurabilityGate::default, |entry| {
+                        entry.durability_gate.clone()
+                    }),
+                missing_durable_authority: false,
+                response_settlements: std::sync::Mutex::new(HashMap::new()),
+            });
+            entries.insert(session_id, replacement.clone());
+            replacement
+        };
+        bookkeeping.insert(session_id, 0);
+        let activates_durable_mode = replacement.persistence.is_some();
+        let _scope = self
+            .prepared_session(replacement, bookkeeping, activates_durable_mode)
+            .activate();
+        Ok(())
+    }
+
+    fn reusable_durable_destination(
+        &self,
+        session_id: SessionId,
+        existing: Option<&Arc<SessionEntry>>,
+        persistence: &Arc<dyn CostPersistence>,
+        writer_lease: &platform_api::live_sessions::SharedSessionWriterLease,
+        durability_gate: &CostDurabilityGate,
+    ) -> Result<Option<Arc<SessionEntry>>, CostPersistError> {
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+        if let Some(existing_persistence) = &existing.persistence {
+            let same_persistence = Arc::ptr_eq(existing_persistence, persistence);
+            let same_lease = existing
+                .writer_lease
+                .as_ref()
+                .is_some_and(|existing_lease| Arc::ptr_eq(existing_lease, writer_lease));
+            let same_gate = existing.durability_gate.shares_authority(durability_gate);
+            if !same_persistence || !same_lease || !same_gate {
+                return Err(CostPersistError::Rejected(
+                    "live cost session must reuse its exact durable authority".into(),
+                ));
+            }
+            if existing.missing_durable_authority {
+                return Err(CostPersistError::Rejected(
+                    "live cost session has an inconsistent durable authority".into(),
+                ));
+            }
+            return Ok(Some(existing.clone()));
+        }
+        let active = *self
+            .ledger
+            .active_session
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active == session_id {
+            return Err(CostPersistError::Rejected(
+                "active cost session cannot replace its live durable authority during preparation"
+                    .into(),
+            ));
+        }
         if self
             .ledger
             .requires_durable
             .load(std::sync::atomic::Ordering::Acquire)
-            && entry.persistence.is_none()
+            && !existing.missing_durable_authority
         {
-            return Err(crate::persistence::CostPersistError::Rejected(
-                "durable session switch has no hydrated persistence authority".into(),
+            return Err(CostPersistError::Rejected(
+                "live cost session is missing its durable persistence authority".into(),
             ));
         }
-        let replacement = Arc::new(SessionEntry {
+        Ok(None)
+    }
+
+    async fn prepare_hydrated_durable_session(
+        &self,
+        session_id: SessionId,
+        hydrator: &dyn CostHydrator,
+        persistence: Arc<dyn CostPersistence>,
+        writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
+        durability_gate: CostDurabilityGate,
+    ) -> Result<PreparedCostSession, CostPersistError> {
+        if self.scope.is_some() {
+            return Err(CostPersistError::Rejected(
+                "a scoped cost view cannot prepare a session switch".into(),
+            ));
+        }
+        if writer_lease.canonical_session_id() != Some(session_id) {
+            return Err(CostPersistError::Rejected(
+                "durable hot-switch claim does not match canonical session".into(),
+            ));
+        }
+
+        let mut bookkeeping = self.ledger.hydrated_sessions.clone().lock_owned().await;
+        let existing = self.ledger.existing_entry(session_id);
+        if let Some(entry) = self.reusable_durable_destination(
             session_id,
-            state: Arc::new(RwLock::new(hydration.state)),
-            persistence: entry.persistence.clone(),
-            writer_lease: entry.writer_lease.clone(),
-            durability_gate: entry.durability_gate.clone(),
-            missing_durable_authority: false,
-            response_settlements: std::sync::Mutex::new(HashMap::new()),
-        });
-        self.ledger.install_entry(replacement);
-        self.ledger
-            .hydrated_sessions
-            .lock()
-            .await
-            .insert(session_id, 0);
-        self.ledger.switch_active(session_id).await;
-        Ok(())
+            existing.as_ref(),
+            &persistence,
+            &writer_lease,
+            &durability_gate,
+        )? {
+            bookkeeping.entry(session_id).or_insert(0);
+            return Ok(self.prepared_session(entry, bookkeeping, true));
+        }
+        drop(bookkeeping);
+
+        let hydration = hydrator.hydrate(session_id).await?;
+        if hydration.state.session_id != session_id {
+            return Err(CostPersistError::Storage(
+                "hydrated cost state belongs to a different session".into(),
+            ));
+        }
+
+        let mut bookkeeping = self.ledger.hydrated_sessions.clone().lock_owned().await;
+        let entry = {
+            let mut entries = self
+                .ledger
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let existing = entries.get(&session_id).cloned();
+            if let Some(entry) = self.reusable_durable_destination(
+                session_id,
+                existing.as_ref(),
+                &persistence,
+                &writer_lease,
+                &durability_gate,
+            )? {
+                entry
+            } else {
+                let entry = Arc::new(SessionEntry {
+                    session_id,
+                    state: Arc::new(RwLock::new(hydration.state)),
+                    persistence: Some(persistence),
+                    writer_lease: Some(writer_lease),
+                    durability_gate,
+                    missing_durable_authority: false,
+                    response_settlements: std::sync::Mutex::new(HashMap::new()),
+                });
+                entries.insert(session_id, entry.clone());
+                entry
+            }
+        };
+        bookkeeping.entry(session_id).or_insert(0);
+        Ok(self.prepared_session(entry, bookkeeping, true))
+    }
+
+    /// Hydrate and validate a destination's exact durable authority without
+    /// changing the active cost projection. Repeated preparation reuses the
+    /// live entry byte-for-byte and never rereads a stale persisted snapshot.
+    pub async fn prepare_session_hydrated_with_durable(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        hydrator: &dyn CostHydrator,
+        persistence: Arc<dyn CostPersistence>,
+        writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
+        durability_gate: CostDurabilityGate,
+    ) -> Result<PreparedCostSession, CostPersistError> {
+        self.prepare_hydrated_durable_session(
+            session_id,
+            hydrator,
+            persistence,
+            writer_lease,
+            durability_gate,
+        )
+        .await
     }
 
     /// Hydrate a session and install its own queue/lease/freeze authority
@@ -958,72 +1256,16 @@ impl CostTracker {
         writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
         durability_gate: CostDurabilityGate,
     ) -> Result<(), crate::persistence::CostPersistError> {
-        if self.scope.is_some() {
-            return Err(crate::persistence::CostPersistError::Rejected(
-                "a scoped cost view cannot switch sessions".into(),
-            ));
-        }
-        if writer_lease.canonical_session_id() != Some(session_id) {
-            return Err(crate::persistence::CostPersistError::Rejected(
-                "durable hot-switch claim does not match canonical session".into(),
-            ));
-        }
-        if let Some(existing) = self.ledger.existing_entry(session_id) {
-            if let Some(existing_persistence) = &existing.persistence {
-                let same_persistence = Arc::ptr_eq(existing_persistence, &persistence);
-                let same_lease = existing
-                    .writer_lease
-                    .as_ref()
-                    .is_some_and(|existing_lease| Arc::ptr_eq(existing_lease, &writer_lease));
-                let same_gate = existing.durability_gate.shares_authority(&durability_gate);
-                if !same_persistence || !same_lease || !same_gate {
-                    return Err(crate::persistence::CostPersistError::Rejected(
-                        "live cost session must reuse its exact durable authority".into(),
-                    ));
-                }
-                if existing.missing_durable_authority {
-                    return Err(crate::persistence::CostPersistError::Rejected(
-                        "live cost session has an inconsistent durable authority".into(),
-                    ));
-                }
-                self.ledger.switch_active(session_id).await;
-                return Ok(());
-            }
-            if self
-                .ledger
-                .requires_durable
-                .load(std::sync::atomic::Ordering::Acquire)
-                && !existing.missing_durable_authority
-            {
-                return Err(crate::persistence::CostPersistError::Rejected(
-                    "live cost session is missing its durable persistence authority".into(),
-                ));
-            }
-        }
-        let hydration = hydrator.hydrate(session_id).await?;
-        if hydration.state.session_id != session_id {
-            return Err(crate::persistence::CostPersistError::Storage(
-                "hydrated cost state belongs to a different session".into(),
-            ));
-        }
-        self.ledger
-            .requires_durable
-            .store(true, std::sync::atomic::Ordering::Release);
-        self.ledger.install_entry(Arc::new(SessionEntry {
-            session_id,
-            state: Arc::new(RwLock::new(hydration.state)),
-            persistence: Some(persistence),
-            writer_lease: Some(writer_lease),
-            durability_gate,
-            missing_durable_authority: false,
-            response_settlements: std::sync::Mutex::new(HashMap::new()),
-        }));
-        self.ledger
-            .hydrated_sessions
-            .lock()
-            .await
-            .insert(session_id, 0);
-        self.ledger.switch_active(session_id).await;
+        let prepared = self
+            .prepare_hydrated_durable_session(
+                session_id,
+                hydrator,
+                persistence,
+                writer_lease,
+                durability_gate,
+            )
+            .await?;
+        let _scope = prepared.activate();
         Ok(())
     }
 
@@ -1925,6 +2167,28 @@ mod tests {
 
     struct StaticHydrator(CostHydration);
 
+    struct PanicHydrator;
+
+    struct BlockingHydrator {
+        hydration: CostHydration,
+        entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: tokio::sync::Notify,
+    }
+
+    impl BlockingHydrator {
+        fn new(hydration: CostHydration) -> (Arc<Self>, tokio::sync::oneshot::Receiver<()>) {
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            (
+                Arc::new(Self {
+                    hydration,
+                    entered: std::sync::Mutex::new(Some(entered_tx)),
+                    release: tokio::sync::Notify::new(),
+                }),
+                entered_rx,
+            )
+        }
+    }
+
     #[async_trait]
     impl CostHydrator for StaticHydrator {
         async fn hydrate(&self, session_id: SessionId) -> Result<CostHydration, CostPersistError> {
@@ -1934,6 +2198,34 @@ mod tests {
                 ));
             }
             Ok(self.0.clone())
+        }
+    }
+
+    #[async_trait]
+    impl CostHydrator for PanicHydrator {
+        async fn hydrate(&self, _session_id: SessionId) -> Result<CostHydration, CostPersistError> {
+            panic!("an exact prepared durable entry must not be hydrated again")
+        }
+    }
+
+    #[async_trait]
+    impl CostHydrator for BlockingHydrator {
+        async fn hydrate(&self, session_id: SessionId) -> Result<CostHydration, CostPersistError> {
+            if self.hydration.state.session_id != session_id {
+                return Err(CostPersistError::Rejected(
+                    "test hydration session mismatch".into(),
+                ));
+            }
+            if let Some(entered) = self
+                .entered
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                let _ = entered.send(());
+            }
+            self.release.notified().await;
+            Ok(self.hydration.clone())
         }
     }
 
@@ -2179,6 +2471,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_drain_waits_for_a_dropped_response_receipt_and_exact_ack() {
+        let (legacy_tx, _legacy_rx) = mpsc::channel(1);
+        let session_id = SessionId::new();
+        let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let lease: SharedSessionWriterLease = Arc::new(TestLease(session_id.to_string()));
+        let tracker = Arc::new(
+            CostTracker::new(
+                session_id,
+                Arc::new(PricingCatalog::builtin_reference()),
+                legacy_tx,
+            )
+            .try_with_durable_persistence(
+                hydration(session_id),
+                Arc::new(TestPersistence {
+                    requests: requests_tx,
+                }),
+                lease,
+                CostDurabilityGate::default(),
+            )
+            .unwrap(),
+        );
+        let receipt = tracker
+            .session_scope(session_id)
+            .submit_model_response(CostModelResponse {
+                model_ref: ModelRef {
+                    provider: ProviderId::Anthropic,
+                    model: "claude-opus-4-6".into(),
+                },
+                usage: Usage {
+                    tokens: TokenUsage {
+                        input: 7,
+                        output: 3,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                duration: Duration::from_millis(3),
+                retries: 0,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                is_batch_request: false,
+                bus: None,
+            });
+        drop(receipt);
+        let request = requests_rx.recv().await.expect("durable response request");
+
+        let mut drain = Box::pin(tracker.drain_owned_settlements());
+        tokio::select! {
+            biased;
+            result = &mut drain => panic!("shutdown drain returned before response ack: {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+        request
+            .ack
+            .send(Ok(CostPersistAck {
+                mutation_id: request.mutation_id,
+                journal_revision: 1,
+                cost_revision: request.cost_revision,
+            }))
+            .unwrap();
+
+        drain.await.unwrap();
+        let snapshot = tracker.snapshot().await;
+        assert!(snapshot.total_nano_usd > 0);
+        let usage = snapshot.last_usage.expect("response usage was retained");
+        assert_eq!(usage.tokens.input, 7);
+        assert_eq!(usage.tokens.output, 3);
+    }
+
+    #[tokio::test]
     async fn each_response_receipt_keeps_its_own_serialized_durable_result() {
         let (legacy_tx, _legacy_rx) = mpsc::channel(1);
         let session_id = SessionId::new();
@@ -2407,6 +2769,173 @@ mod tests {
             .unwrap();
         preflight.await.expect("ack releases paid preflight");
         assert!(receipt.settle().await.persistence_result().is_ok());
+    }
+
+    #[tokio::test]
+    async fn prepared_durable_session_is_inert_until_synchronous_activation() {
+        let (legacy_tx, _legacy_rx) = mpsc::channel(1);
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let (a_tx, _a_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (b_tx, _b_rx) = tokio::sync::mpsc::unbounded_channel();
+        let lease_a: SharedSessionWriterLease = Arc::new(TestLease(session_a.to_string()));
+        let lease_b: SharedSessionWriterLease = Arc::new(TestLease(session_b.to_string()));
+        let gate_b = CostDurabilityGate::default();
+        let tracker = Arc::new(
+            CostTracker::new(
+                session_a,
+                Arc::new(PricingCatalog::builtin_reference()),
+                legacy_tx,
+            )
+            .try_with_durable_persistence(
+                hydration(session_a),
+                Arc::new(TestPersistence { requests: a_tx }),
+                lease_a,
+                CostDurabilityGate::default(),
+            )
+            .unwrap(),
+        );
+        let mut hydrated_b = hydration(session_b);
+        hydrated_b.state.total_nano_usd = 41;
+
+        let prepared = tracker
+            .prepare_session_hydrated_with_durable(
+                session_b,
+                &StaticHydrator(hydrated_b),
+                Arc::new(TestPersistence { requests: b_tx }),
+                lease_b.clone(),
+                gate_b.clone(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(prepared.session_id(), session_b);
+        assert_eq!(tracker.session_id().await, session_a);
+        assert_eq!(tracker.snapshot().await.session_id, session_a);
+
+        let scope = prepared.activate();
+        assert_eq!(tracker.session_id().await, session_b);
+        assert_eq!(scope.tracker.snapshot().await.total_nano_usd, 41);
+        assert!(Arc::ptr_eq(
+            &scope.tracker.writer_lease().unwrap(),
+            &lease_b
+        ));
+        assert!(scope.tracker.durability_gate().shares_authority(&gate_b));
+    }
+
+    #[tokio::test]
+    async fn dropped_prepared_session_keeps_a_active_and_reuses_b_without_rereading() {
+        let (legacy_tx, _legacy_rx) = mpsc::channel(1);
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let (a_tx, _a_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (b_tx, _b_rx) = tokio::sync::mpsc::unbounded_channel();
+        let persistence_b: Arc<dyn CostPersistence> = Arc::new(TestPersistence { requests: b_tx });
+        let lease_b: SharedSessionWriterLease = Arc::new(TestLease(session_b.to_string()));
+        let gate_b = CostDurabilityGate::default();
+        let tracker = Arc::new(
+            CostTracker::new(
+                session_a,
+                Arc::new(PricingCatalog::builtin_reference()),
+                legacy_tx,
+            )
+            .try_with_durable_persistence(
+                hydration(session_a),
+                Arc::new(TestPersistence { requests: a_tx }),
+                Arc::new(TestLease(session_a.to_string())),
+                CostDurabilityGate::default(),
+            )
+            .unwrap(),
+        );
+        let mut hydrated_b = hydration(session_b);
+        hydrated_b.state.total_nano_usd = 73;
+
+        let prepared = tracker
+            .prepare_session_hydrated_with_durable(
+                session_b,
+                &StaticHydrator(hydrated_b),
+                persistence_b.clone(),
+                lease_b.clone(),
+                gate_b.clone(),
+            )
+            .await
+            .unwrap();
+        drop(prepared);
+        assert_eq!(tracker.session_id().await, session_a);
+
+        let reused = tracker
+            .prepare_session_hydrated_with_durable(
+                session_b,
+                &PanicHydrator,
+                persistence_b,
+                lease_b,
+                gate_b,
+            )
+            .await
+            .unwrap();
+        assert_eq!(tracker.session_id().await, session_a);
+        let scope = reused.activate();
+        assert_eq!(scope.tracker.snapshot().await.total_nano_usd, 73);
+    }
+
+    #[tokio::test]
+    async fn cancelled_or_failed_durable_prepare_never_moves_active_a() {
+        let (legacy_tx, _legacy_rx) = mpsc::channel(1);
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let (a_tx, _a_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (b_tx, _b_rx) = tokio::sync::mpsc::unbounded_channel();
+        let persistence_b: Arc<dyn CostPersistence> = Arc::new(TestPersistence { requests: b_tx });
+        let lease_b: SharedSessionWriterLease = Arc::new(TestLease(session_b.to_string()));
+        let gate_b = CostDurabilityGate::default();
+        let tracker = Arc::new(
+            CostTracker::new(
+                session_a,
+                Arc::new(PricingCatalog::builtin_reference()),
+                legacy_tx,
+            )
+            .try_with_durable_persistence(
+                hydration(session_a),
+                Arc::new(TestPersistence { requests: a_tx }),
+                Arc::new(TestLease(session_a.to_string())),
+                CostDurabilityGate::default(),
+            )
+            .unwrap(),
+        );
+        let (blocked, entered) = BlockingHydrator::new(hydration(session_b));
+        let preparing_tracker = tracker.clone();
+        let preparing_persistence = persistence_b.clone();
+        let preparing_lease = lease_b.clone();
+        let preparing_gate = gate_b.clone();
+        let prepare = tokio::spawn(async move {
+            preparing_tracker
+                .prepare_session_hydrated_with_durable(
+                    session_b,
+                    blocked.as_ref(),
+                    preparing_persistence,
+                    preparing_lease,
+                    preparing_gate,
+                )
+                .await
+        });
+        entered.await.unwrap();
+        prepare.abort();
+        assert!(prepare.await.is_err_and(|error| error.is_cancelled()));
+        assert_eq!(tracker.session_id().await, session_a);
+
+        let wrong_session = SessionId::new();
+        let error = tracker
+            .prepare_session_hydrated_with_durable(
+                session_b,
+                &StaticHydrator(hydration(wrong_session)),
+                persistence_b,
+                lease_b,
+                gate_b,
+            )
+            .await
+            .expect_err("failed B hydration must not publish an active switch");
+        assert!(matches!(error, CostPersistError::Rejected(_)));
+        assert_eq!(tracker.session_id().await, session_a);
     }
 
     #[tokio::test]

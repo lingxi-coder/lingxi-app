@@ -94,6 +94,19 @@ impl CommandRegistry {
         self.builtin_handlers.get(canon).cloned()
     }
 
+    /// Retire the executable builtin handler graph while preserving the command
+    /// catalog, aliases, and plugin metadata.
+    ///
+    /// Hosts call this only after request/task/session-switch admission has been
+    /// fenced. The returned handlers must be dropped after releasing any outer
+    /// lock protecting this registry: handler destruction can tear down an
+    /// orchestrator which itself owns a command-listing view of the registry.
+    pub fn take_builtin_handlers(&mut self) -> Vec<Arc<dyn BuiltinCommandHandler>> {
+        std::mem::take(&mut self.builtin_handlers)
+            .into_values()
+            .collect()
+    }
+
     /// Register a batch of commands owned by `plugin_id`.
     pub fn register_plugin_commands(&mut self, plugin_id: PluginId, cmds: Vec<SlashCommand>) {
         let names: Vec<String> = cmds.iter().map(|c| c.name.clone()).collect();
@@ -378,6 +391,35 @@ mod tests {
 
         // Canonicalization is a no-op for an unknown, non-alias name.
         assert!(reg.get_handler("nonexistent").is_none());
+    }
+
+    #[test]
+    fn taking_builtin_handlers_preserves_catalog_and_drops_outside_owner() {
+        let mut reg = CommandRegistry::new();
+        let handler = Arc::new(UnimplementedCommandHandler::new(
+            "resume",
+            "Resume a previous conversation",
+        ));
+        let weak = Arc::downgrade(&handler);
+        reg.register_builtin_handler(handler.clone());
+        reg.register_alias("continue".to_string(), "resume".to_string());
+        drop(handler);
+
+        let retired = reg.take_builtin_handlers();
+        assert!(reg.get_handler("resume").is_none());
+        assert!(reg.get_handler("continue").is_none());
+        assert_eq!(
+            reg.resolve("continue").map(|command| command.name.as_str()),
+            Some("resume"),
+            "shutdown must retain command and alias metadata"
+        );
+        assert!(weak.upgrade().is_some(), "the caller owns retired handlers");
+
+        drop(retired);
+        assert!(
+            weak.upgrade().is_none(),
+            "retired handler destruction is controlled by the caller"
+        );
     }
 
     #[test]

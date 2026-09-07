@@ -337,6 +337,61 @@ impl ConversationOrchestrator {
         self
     }
 
+    /// Attach an app-owned durable session switcher for hot clear/resume.
+    /// The switcher hydrates and claims a destination before the live
+    /// orchestrator session identity changes; legacy hosts leave it unset.
+    #[must_use]
+    pub fn with_cost_session_switcher(
+        mut self,
+        switcher: Arc<dyn crate::conversation::CostSessionSwitcher>,
+    ) -> Self {
+        self.model_runtime.cost_session_switcher = Some(switcher);
+        self
+    }
+
+    /// Optional form used by composition roots that preserve legacy
+    /// ephemeral construction when durable session persistence is disabled.
+    #[must_use]
+    pub fn with_cost_session_switcher_opt<T>(mut self, switcher: Option<Arc<T>>) -> Self
+    where
+        T: crate::conversation::CostSessionSwitcher + 'static,
+    {
+        self.model_runtime.cost_session_switcher = switcher
+            .map(|switcher| switcher as Arc<dyn crate::conversation::CostSessionSwitcher>);
+        self
+    }
+
+    /// Attach the host-side process presence/inbox binder that must follow an
+    /// owned hot-session commit even when the initiating client disappears.
+    #[must_use]
+    pub fn with_session_activation_observer(
+        mut self,
+        observer: Arc<dyn crate::conversation::SessionActivationObserver>,
+    ) -> Self {
+        self.lifecycle_runtime.session_activation_observer = Some(observer);
+        self
+    }
+
+    /// Publish the weak self-link used solely by owned clear/resume commits.
+    /// Production composition calls this immediately after `Arc::new`; direct
+    /// value-based library constructors retain their historical inline path.
+    pub fn attach_owned_session_switches(self: &Arc<Self>) {
+        let _ = self
+            .lifecycle_runtime
+            .session_switch_owner
+            .set(Arc::downgrade(self));
+    }
+
+    /// Close session-switch admission and wait for every registered prepare or
+    /// post-prepare owner to finish. Hosts call this after request producers
+    /// stop and before session-state coordinators close.
+    pub async fn close_and_drain_session_switches(&self) -> Vec<String> {
+        self.lifecycle_runtime
+            .session_switch_supervisor
+            .close_and_drain()
+            .await
+    }
+
     /// Share the API-call counter with other in-process model entry points,
     /// such as local-app vision delegation, so one `/cost` snapshot includes
     /// every billable request made on the session's behalf.

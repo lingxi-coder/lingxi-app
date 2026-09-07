@@ -452,7 +452,7 @@ pub struct BridgeConnection {
     /// Abort handle for the currently-owned spawned turn-drain loop. On close we
     /// abort it so stale turn work cannot survive into the next reconnect and
     /// emit onto a newly-claimed outbound sink.
-    active_turn_task: Arc<StdMutex<Option<tokio::task::AbortHandle>>>,
+    active_turn_task: Arc<StdMutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 #[derive(Clone, Default)]
@@ -1287,7 +1287,7 @@ impl BridgeConnection {
         *self
             .active_turn_task
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(task.abort_handle());
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(task);
     }
 
     async fn cancel_active_turn(&self, turn_id: Option<u64>) {
@@ -1478,14 +1478,16 @@ impl FramePump for BridgeConnection {
 }
 
 impl BridgeConnection {
-    fn abort_active_turn_task(&self) {
-        if let Some(handle) = self
-            .active_turn_task
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .take()
-        {
+    async fn abort_active_turn_task(&self) {
+        let active_turn_task = {
+            self.active_turn_task
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take()
+        };
+        if let Some(handle) = active_turn_task {
             handle.abort();
+            let _ = handle.await;
         }
     }
 
@@ -1502,7 +1504,7 @@ impl BridgeConnection {
         drop(active);
         self.handshaken.store(false, Ordering::SeqCst);
         self.handshake_refused.store(false, Ordering::SeqCst);
-        self.abort_active_turn_task();
+        self.abort_active_turn_task().await;
         self.turn_running.store(false, Ordering::SeqCst);
         self.active_turn.clear();
         self.queue.clear_active_turn().await;

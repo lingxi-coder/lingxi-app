@@ -5,7 +5,8 @@ use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, F
 use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use platform_api::{
     BudgetError, FusionDecision, FusionNeedsParentReason, FusionOrigin, FusionPreset,
-    FusionRequest, FusionTiming, FusionUsage,
+    FusionRequest, FusionRunOutcome, FusionRunRecorder, FusionSlashPublicationTarget,
+    FusionTiming, FusionUsage,
 };
 use serde_json::json;
 use std::any::Any;
@@ -424,6 +425,26 @@ impl FusionCompletionSink for CountingCompletionSink {
     ) -> platform_api::FusionPublicationReceipt {
         self.0.fetch_add(1, Ordering::SeqCst);
         platform_api::FusionPublicationReceipt::published()
+    }
+}
+
+/// Production-shaped terminal capability used to prove that the prepared
+/// supervisor records before the handler exposes a completed task and never
+/// invokes the legacy completion sink as a second publication path.
+struct RecordingTerminalRecorder {
+    calls: AtomicUsize,
+    publication: platform_api::FusionPublicationReceipt,
+}
+
+#[async_trait]
+impl FusionRunRecorder for RecordingTerminalRecorder {
+    async fn record_terminal(
+        &self,
+        _outcome: FusionRunOutcome,
+        _slash_target: Option<FusionSlashPublicationTarget>,
+    ) -> platform_api::FusionPublicationReceipt {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.publication.clone()
     }
 }
 
@@ -1195,6 +1216,46 @@ async fn finalize_fusion_outcome_marks_result_published_after_the_completion_sin
          finish_fusion_terminal (\"outcome\"/\"status:Completed\") and the \
          completion sink's own publish — never before either"
     );
+}
+
+#[tokio::test]
+async fn prepared_terminal_recorder_precedes_task_completion_without_legacy_publish() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let status_sink = Arc::new(RecordingStatusSink::default());
+    let completion_sink = Arc::new(CountingCompletionSink::default());
+    let recorder = Arc::new(RecordingTerminalRecorder {
+        calls: AtomicUsize::new(0),
+        publication: platform_api::FusionPublicationReceipt::published(),
+    });
+    let handler = make_handler(
+        ImmediateExecutor::new(),
+        output_manager,
+        status_sink.clone(),
+        completion_sink.clone(),
+    )
+    .with_terminal_recorder(recorder.clone());
+
+    handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
+            },
+            make_ctx(fs),
+        )
+        .await
+        .expect("spawn succeeds");
+
+    for _ in 0..200 {
+        if status_sink.last_status() == Some(TaskStatus::Completed) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(completion_sink.0.load(Ordering::SeqCst), 0);
+    assert_eq!(status_sink.last_status(), Some(TaskStatus::Completed));
 }
 
 #[tokio::test]

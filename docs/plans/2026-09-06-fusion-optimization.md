@@ -60,7 +60,7 @@ PR-11 24 deterministic fixtures (6 each research/plan/review/code proposal), dry
 ## Dependencies and ownership
 PR00 -> independent PR01,PR02,PR03; PR03 -> PR04,PR05; PR05 -> PR06 -> PR07 -> PR08; PR01+03+04 -> PR09; PR05+08+09 -> PR10; all -> PR11, fixtures may start early.
 At most 2 independent code writers. Shared platform-api, llm-client, cost owned by one lane at a time; explicitly hand off fields before another edits them.
-Luna max implementation; Sol max independent review/fixes; architect verification and changed-only cleanup then full regression.
+Current Astra implementation and independent review/fixes (user override after resuming); architect verification and changed-only cleanup then full regression. Earlier verified Luna/Sol-authored changes remain preserved.
 Commit each verified batch using Lore trailers, no auto push/merge/delete of user branches/worktrees.
 
 ## Completion gate
@@ -74,3 +74,6 @@ Every PR package implemented (not just scaffold), fresh targeted/full affected t
 - Use the pinned session directory as root for journal/snapshot/locks. A stable transcript lock under session-state/<uuid> coordinates ordinary append, outbox append and cwd relocation across processes; resolve target and parent under that lock. Stream and bound UUID scans/records; perform filesystem blocking work off Tokio workers.
 - WAL fsync is the durable-ack boundary; derivative snapshot failure is rebuildable and must not undo an acknowledged mutation. Rebuild corrupt/ahead/prefix-mismatched snapshots from a valid WAL; missing authoritative WAL, interior corruption, newline-terminated invalid records, revision gaps and conflicting IDs fail closed without source deletion. Only a malformed final non-newline tail is recoverable under lock.
 - Persist LegacyImportEvaluated even when no matching lastCost exists. A matching opening balance is durable before application and stays separately attributed; later legacy shadow edits cannot trigger an import into an existing V1 ledger.
+- Desktop shutdown is a sequential, must-await host barrier. Explicit watcher and Cron drains wait for actual producer-future destruction, not only cancellation acknowledgement. Task shutdown attempts every handler drain even after a cancellation error. A failed producer drain retains command/pool/coordinator authorities for retry and prevents CLI whole-runtime remount; never close a ledger still needed by live work.
+- Live peer discovery pins its target session before any intervening await. Discovered-session sends use only the existing session-keyed file inbox, accepting its polling latency. A socket key can change after validation and UDS has no delivery acknowledgement, so optimistic socket delivery plus fallback cannot guarantee retention or avoid duplicates across remount. Raw explicit UDS addresses remain unchanged; restoring immediate discovered-session socket delivery requires an acknowledged generation-safe protocol.
+- Session restore tests close and drop the previous runtime before reacquiring its writer claim. Cost tests compare against the hydrated opening revision, since even a no-balance legacy-import evaluation is a durable mutation.

@@ -181,16 +181,10 @@ fn js_to_fixed_2(value: f64) -> String {
     format!("{}.{:02}", cents / 100, cents % 100)
 }
 
-/// Install the print/SDK-mode process-tree cleanup (parity 2.1.212 — "Fixed
-/// SIGTERM during Bash tool orphaning process trees in print/SDK mode").
-///
-/// Enables the posix runner to spawn foreground Bash children in their own
-/// process group (`setsid`) and track them, then spawns a task that — on
-/// `SIGTERM`/`SIGHUP`/`SIGINT` (claude-code's signal-exit `[SIGHUP, SIGINT,
-/// SIGTERM]`) — `killpg`s every live Bash subtree before the process exits. Tokio
-/// `kill_on_drop` only fires on a graceful future drop, so an abrupt signal to
-/// `-p`/SDK mode would otherwise orphan the subtree. Installed once per process
-/// (idempotent); a no-op in interactive TUI/REPL mode, which never calls it.
+/// Enable process-tree tracking for print/SDK mode. Catchable signal handling
+/// is awaited by the owning print future below; it must not call
+/// `std::process::exit` from a detached task because that bypasses durable
+/// response/outbox settlement.
 fn install_print_mode_process_cleanup() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -198,31 +192,117 @@ fn install_print_mode_process_cleanup() {
         return;
     }
     platform_posix::process::enable_print_mode_child_cleanup();
-    tokio::spawn(async move {
-        use tokio::signal::unix::{signal, SignalKind};
-        let (Ok(mut term), Ok(mut hup), Ok(mut intr)) = (
-            signal(SignalKind::terminate()),
-            signal(SignalKind::hangup()),
-            signal(SignalKind::interrupt()),
-        ) else {
-            return;
-        };
-        let signum = tokio::select! {
-            _ = term.recv() => nix::libc::SIGTERM,
-            _ = hup.recv() => nix::libc::SIGHUP,
-            _ = intr.recv() => nix::libc::SIGINT,
-        };
-        // Tree-kill every still-running foreground Bash child, then exit with the
-        // conventional 128+signal status so the subtree never outlives us.
-        platform_posix::process::kill_all_active_children();
-        std::process::exit(128 + signum);
-    });
+}
+
+#[cfg(unix)]
+async fn print_shutdown_signal() -> i32 {
+    use tokio::signal::unix::{signal, SignalKind};
+    let (Ok(mut term), Ok(mut hup), Ok(mut intr)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::hangup()),
+        signal(SignalKind::interrupt()),
+    ) else {
+        return futures::future::pending().await;
+    };
+    tokio::select! {
+        _ = term.recv() => nix::libc::SIGTERM,
+        _ = hup.recv() => nix::libc::SIGHUP,
+        _ = intr.recv() => nix::libc::SIGINT,
+    }
+}
+
+#[cfg(not(unix))]
+async fn print_shutdown_signal() -> i32 {
+    futures::future::pending().await
+}
+
+async fn run_print_owned<F>(runtime: &Runtime, operation: F) -> i32
+where
+    F: std::future::Future<Output = i32>,
+{
+    run_print_owned_with_cleanup(runtime, operation, futures::future::ready(())).await
+}
+
+async fn run_print_owned_with_cleanup<F, C>(
+    runtime: &Runtime,
+    operation: F,
+    cleanup: C,
+) -> i32
+where
+    F: std::future::Future<Output = i32>,
+    C: std::future::Future<Output = ()>,
+{
+    install_print_mode_process_cleanup();
+    let mut operation = Box::pin(operation);
+    let outcome = tokio::select! {
+        biased;
+        signal = print_shutdown_signal() => Err(signal),
+        code = &mut operation => Ok(code),
+    };
+    let code = match outcome {
+        Ok(code) => code,
+        Err(signal) => {
+            // Drop the foreground turn first. Its response receipt transfers
+            // any known usage to the retained settlement owner before the
+            // lifecycle drain takes its FIFO fence.
+            drop(operation);
+            platform_posix::process::kill_all_active_children();
+            runtime.orchestrator.request_exit().await;
+            128 + signal
+        }
+    };
+    cleanup.await;
+    finish_oneshot_lifecycle(runtime, code).await
+}
+
+#[derive(Default)]
+struct PrintAuxTaskGroup {
+    tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl PrintAuxTaskGroup {
+    fn push(&self, task: tokio::task::JoinHandle<()>) {
+        self.tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(task);
+    }
+
+    async fn abort_and_join(&self) {
+        let tasks = std::mem::take(
+            &mut *self
+                .tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+    }
+
+    async fn join(&self) {
+        let tasks = std::mem::take(
+            &mut *self
+                .tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for task in tasks {
+            let _ = task.await;
+        }
+    }
 }
 
 /// Drive a one-shot conversation: either a `/slash-command` or a normal
 /// prompt that runs through the orchestrator turn loop.
 pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
-    install_print_mode_process_cleanup();
+    run_print_owned(runtime, run_oneshot_inner(argv, runtime, sink)).await
+}
+
+async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
     let prompt = argv.prompt.clone().unwrap_or_default();
     if prompt.trim().is_empty() {
         // Byte-parity with claude-code print.ts: the empty-input error in print
@@ -277,6 +357,18 @@ pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) 
             sink.error("runtime", &e.to_string()).await;
             exit_codes::RUNTIME_ERROR
         }
+    }
+}
+
+async fn finish_oneshot_lifecycle(runtime: &Runtime, code: i32) -> i32 {
+    let report = runtime.session_lifecycle.shutdown_and_drain().await;
+    for error in &report.errors {
+        eprintln!("lingxi-cli: session shutdown persistence failed: {error}");
+    }
+    if code == exit_codes::SUCCESS && !report.errors.is_empty() {
+        exit_codes::RUNTIME_ERROR
+    } else {
+        code
     }
 }
 
@@ -350,7 +442,19 @@ pub async fn run_stream_json_print(
     stream: Arc<StreamJsonStream>,
     permission_mode: permission::PermissionMode,
 ) -> i32 {
-    install_print_mode_process_cleanup();
+    run_print_owned(
+        runtime,
+        run_stream_json_print_inner(argv, runtime, stream, permission_mode),
+    )
+    .await
+}
+
+async fn run_stream_json_print_inner(
+    argv: &Argv,
+    runtime: &Runtime,
+    stream: Arc<StreamJsonStream>,
+    permission_mode: permission::PermissionMode,
+) -> i32 {
     let prompt = argv.prompt.clone().unwrap_or_default();
     if prompt.trim().is_empty() {
         // Byte-parity with claude-code print.ts (see run_oneshot).
@@ -1766,7 +1870,30 @@ pub async fn run_stream_json_input_loop(
     permission_mode: permission::PermissionMode,
     control_plane: Arc<StdioControlPlane>,
 ) -> i32 {
-    install_print_mode_process_cleanup();
+    let auxiliary_tasks = Arc::new(PrintAuxTaskGroup::default());
+    run_print_owned_with_cleanup(
+        runtime,
+        run_stream_json_input_loop_inner(
+            argv,
+            runtime,
+            stream,
+            permission_mode,
+            control_plane,
+            auxiliary_tasks.clone(),
+        ),
+        auxiliary_tasks.abort_and_join(),
+    )
+    .await
+}
+
+async fn run_stream_json_input_loop_inner(
+    argv: &Argv,
+    runtime: &Runtime,
+    stream: Arc<StreamJsonStream>,
+    permission_mode: permission::PermissionMode,
+    control_plane: Arc<StdioControlPlane>,
+    auxiliary_tasks: Arc<PrintAuxTaskGroup>,
+) -> i32 {
     // Collect the real session_id and model from the orchestrator after build.
     let (session_id_str, model_str) = {
         let session_handle = runtime.orchestrator.session();
@@ -1914,7 +2041,7 @@ pub async fn run_stream_json_input_loop(
     // round-trip). It runs concurrently with the turn loop so a host's
     // permission answer can arrive mid-turn while the gate awaits.
     let resolver_plane = control_plane.clone();
-    let resolver_task = tokio::spawn(async move {
+    auxiliary_tasks.push(tokio::spawn(async move {
         while let Some(frame) = control_resp_rx.recv().await {
             resolver_plane.resolve_response(&frame).await;
         }
@@ -1924,7 +2051,7 @@ pub async fn run_stream_json_input_loop(
         resolver_plane
             .fail_all_pending("Tool permission stream closed before response received")
             .await;
-    });
+    }));
 
     // ③ Phase 1: pre-collect initialization data for the `initialize` handler.
     // These require async access to runtime — must be collected here before the
@@ -2040,7 +2167,7 @@ pub async fn run_stream_json_input_loop(
     let resolver_plane_for_cancel = control_plane.clone();
     let ctrl_lifecycle = queue_lifecycle.clone();
     let ctrl_file_suggestions = StreamFileSuggestionIndex::default();
-    let ctrl_req_task = tokio::spawn(async move {
+    auxiliary_tasks.push(tokio::spawn(async move {
         // §2.2: a second `initialize` is an error, not a re-handshake — the
         // binary's handleInitializeRequest replies {subtype:'error', error:
         // 'Already initialized'} when the `initialized` flag is already set.
@@ -2086,7 +2213,7 @@ pub async fn run_stream_json_input_loop(
                 }
             }
         }
-    });
+    }));
 
     // ④ Consume user turns sequentially through the orchestrator.
     let betas = argv.betas.clone().unwrap_or_default();
@@ -2375,8 +2502,7 @@ pub async fn run_stream_json_input_loop(
     // Wait for the control dispatcher + response resolver to finish (they exit
     // when their channels close, which happens when the stdin reader task
     // finishes or drops the senders).
-    let _ = ctrl_req_task.await;
-    let _ = resolver_task.await;
+    auxiliary_tasks.join().await;
 
     if let Some((cancel, mut handle)) = prompt_suggestion_task.take() {
         if tokio::time::timeout(std::time::Duration::from_secs(30), &mut handle)
@@ -2904,7 +3030,10 @@ fn local_fusion_task_id_to_await<'a>(input: &str, display: &'a str) -> Option<&'
 /// (`CommandResult::Done` carries no error channel), and special-casing
 /// `/fusion` alone there would be a new inconsistency, not a fix.
 fn fusion_spawn_failure_exit_code(input: &str, display: &str) -> i32 {
-    if dispatches_to_fusion_command(input) && display.starts_with("fusion failed to start: ") {
+    if dispatches_to_fusion_command(input)
+        && (display.starts_with("fusion failed to start: ")
+            || display.starts_with("fusion publication retry failed: "))
+    {
         exit_codes::RUNTIME_ERROR
     } else {
         exit_codes::SUCCESS
@@ -3883,16 +4012,20 @@ async fn mount_resumed_tui_inner(
     // would show `$0.0000` after resume until the first new turn. Restore the
     // prior accumulated cost from the project config IF it was saved for THIS
     // session id (the `run_ratatui` exit path writes it via `saveCurrentSessionCosts`).
-    if let Some(cfg_path) = migrations::global_config::global_config_path() {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        if let Some(usd) =
-            crate::session_cost::restore_session_cost_usd(&cfg_path, &cwd, &session_id.to_string())
-        {
-            tui_build
-                .runtime
-                .orchestrator
-                .restore_session_cost(crate::session_cost::usd_to_nano(usd))
-                .await;
+    if tui_build.runtime.session_state.is_none() {
+        if let Some(cfg_path) = migrations::global_config::global_config_path() {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            if let Some(usd) = crate::session_cost::restore_session_cost_usd(
+                &cfg_path,
+                &cwd,
+                &session_id.to_string(),
+            ) {
+                tui_build
+                    .runtime
+                    .orchestrator
+                    .restore_session_cost(crate::session_cost::usd_to_nano(usd))
+                    .await;
+            }
         }
     }
     // LIVE-STATE carry (parity with claude-code's in-place `/rewind`, a React
@@ -4070,7 +4203,9 @@ async fn drive_tui_switch_loop_inner(
     struct InboxShutdown;
     impl Drop for InboxShutdown {
         fn drop(&mut self) {
-            platform_api::uds_inbox::stop_process_inbox();
+            if let Err(error) = platform_api::uds_inbox::stop_process_inbox_checked() {
+                eprintln!("lingxi-cli: cross-session inbox drain failed: {error}");
+            }
         }
     }
     let _inbox = InboxShutdown;
@@ -7255,6 +7390,14 @@ mod tests {
             ),
             exit_codes::SUCCESS,
             "a usage/flag rejection is the pre-existing CLI-wide convention, not this fix's concern"
+        );
+        assert_eq!(
+            fusion_spawn_failure_exit_code(
+                "/fusion --retry-publication fu_0123456789abcdef0123456789abcdef",
+                "fusion publication retry failed: durable outbox write failed"
+            ),
+            exit_codes::RUNTIME_ERROR,
+            "a failed explicit durable retry must not exit 0"
         );
         // Non-fusion commands never take the RUNTIME_ERROR arm, even if
         // their display happens to start with the same text.

@@ -62,6 +62,94 @@ pub fn workflow_transcript_subdir_override() -> Option<std::path::PathBuf> {
         .flatten()
 }
 
+/// A host-owned runtime seam that is initialized once and can be released at
+/// shutdown. Unlike [`std::sync::OnceLock`], clearing the live value does not
+/// reopen the initialization latch, so a late producer can never resurrect a
+/// link after the host has drained its children.
+pub struct RuntimeLink<T> {
+    state: std::sync::RwLock<RuntimeLinkState<T>>,
+}
+
+struct RuntimeLinkState<T> {
+    initialized: bool,
+    value: Option<T>,
+}
+
+impl<T> RuntimeLink<T> {
+    /// Construct an empty, permanently set-once link.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            state: std::sync::RwLock::new(RuntimeLinkState {
+                initialized: false,
+                value: None,
+            }),
+        }
+    }
+
+    /// Fill the link once. A second fill is rejected even after [`Self::clear`].
+    pub fn set(&self, value: T) -> Result<(), T> {
+        let mut state = self
+            .state
+            .write()
+            .expect("runtime link lock poisoned while setting");
+        if state.initialized {
+            return Err(value);
+        }
+        state.initialized = true;
+        state.value = Some(value);
+        Ok(())
+    }
+
+    /// Release the live value and close the set-once latch. Clearing a link
+    /// that was never filled also seals it against a late initializer.
+    ///
+    /// Taking the value in one scope and dropping it in the next is deliberate:
+    /// a destructor may re-enter another runtime link, and must never run while
+    /// this link's write lock is held.
+    pub fn clear(&self) {
+        let value = {
+            let mut state = self
+                .state
+                .write()
+                .expect("runtime link lock poisoned while clearing");
+            // `clear` is also the shutdown seal for an optional link that was
+            // never filled. Linearizing this flag under the same write lock as
+            // `set` makes both race orders safe: either the value is installed
+            // and then removed, or the later install is rejected.
+            state.initialized = true;
+            state.value.take()
+        };
+        drop(value);
+    }
+
+    /// Whether this link currently retains a live value. This inspection does
+    /// not clone or invoke the stored value.
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        self.state
+            .read()
+            .expect("runtime link lock poisoned while reading")
+            .value
+            .is_some()
+    }
+}
+
+impl<T: ?Sized> RuntimeLink<Arc<T>> {
+    /// Clone the current live `Arc`, if the link has been filled and not yet
+    /// released. Runtime links intentionally accept only `Arc` reads: an
+    /// arbitrary `T::clone` could run user code while the read lock is held.
+    #[must_use]
+    pub fn get(&self) -> Option<Arc<T>> {
+        self.state
+            .read()
+            .expect("runtime link lock poisoned while reading")
+            .value
+            .as_ref()
+            .map(Arc::clone)
+    }
+}
+
 fn subagent_usage_from_llm_usage(usage: &llm_client::Usage) -> SubagentUsage {
     let bt = usage.billable_tokens;
     SubagentUsage {
@@ -143,7 +231,7 @@ pub struct PoolSubagentSpawner {
     /// 'ant'`) plus the definition's own `disallowed_tools`, so a
     /// general-purpose child no longer inherits `Agent`/`Task`; it narrows
     /// further once the spawn path loads real per-agent definitions.
-    tool_registry: Arc<std::sync::OnceLock<Arc<ToolRegistry>>>,
+    tool_registry: Arc<RuntimeLink<Arc<ToolRegistry>>>,
     /// Creates one independent passive-diagnostics cursor per spawn. The cwd
     /// lets a host scope the cursor to the child workspace (Local App builders
     /// must never observe another app's diagnostics).
@@ -253,7 +341,7 @@ pub struct PoolSubagentSpawner {
     /// [`Self::hook_executor_handle`] before boxing and fills it once the executor
     /// exists. Unfilled (the default / tests) ⇒ the child runner skips the
     /// SubagentStart fire + frontmatter-hook registration (byte-identical legacy).
-    hook_executor: Arc<std::sync::OnceLock<Arc<hooks::HookExecutorImpl>>>,
+    hook_executor: Arc<RuntimeLink<Arc<hooks::HookExecutorImpl>>>,
     /// Managed hook-slot lock, filled by the composition root after settings
     /// policy resolution. Unfilled means the legacy permissive default.
     strict_plugin_only_hooks: Arc<std::sync::OnceLock<bool>>,
@@ -264,7 +352,7 @@ pub struct PoolSubagentSpawner {
     /// cycle into the command/skill registry; the concrete impl is built at the
     /// composition root. SET-ONCE cell (same cycle-break as the others). Unfilled
     /// ⇒ no skill preloading (byte-identical legacy).
-    skill_loader: Arc<std::sync::OnceLock<Arc<dyn platform_api::skill_loader::SkillLoader>>>,
+    skill_loader: Arc<RuntimeLink<Arc<dyn platform_api::skill_loader::SkillLoader>>>,
     /// Session id stamped on the `HookContext` the child runner builds for the
     /// SubagentStart fire (claude `createBaseHookInput`). Set at boot via
     /// [`Self::with_hook_context`]; defaults to a nil session (only consulted when
@@ -339,7 +427,7 @@ pub struct PoolSubagentSpawner {
     /// subagent's frontmatter `mcpServers` contribute NO tools, byte-identical
     /// to legacy (this feature's whole prior history: named, computed, never
     /// wired).
-    mcp_tool_builder: Arc<std::sync::OnceLock<crate::agent_mcp_tools::AgentMcpToolBuilder>>,
+    mcp_tool_builder: Arc<RuntimeLink<crate::agent_mcp_tools::AgentMcpToolBuilder>>,
     /// Live coordinator-mode seam used by the spawn-time tool resolver. The
     /// composition root fills this after constructing the session's mode;
     /// unset means an ordinary session (`false`).
@@ -519,7 +607,7 @@ impl PoolSubagentSpawner {
         Self {
             pool,
             api_client: None,
-            tool_registry: Arc::new(std::sync::OnceLock::new()),
+            tool_registry: Arc::new(RuntimeLink::new()),
             new_diagnostics_source_factory: None,
             builtins: Arc::new(builtins),
             persistent_agent_mcp_cleanups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -532,9 +620,9 @@ impl PoolSubagentSpawner {
             model_setting: None,
             model_restriction: None,
             session_provider_first_party: true,
-            hook_executor: Arc::new(std::sync::OnceLock::new()),
+            hook_executor: Arc::new(RuntimeLink::new()),
             strict_plugin_only_hooks: Arc::new(std::sync::OnceLock::new()),
-            skill_loader: Arc::new(std::sync::OnceLock::new()),
+            skill_loader: Arc::new(RuntimeLink::new()),
             hook_session_id: protocol::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
             hook_subagents_dir: None,
@@ -543,7 +631,7 @@ impl PoolSubagentSpawner {
             name_registry: Arc::new(RwLock::new(HashMap::new())),
             tool_wide_deny_names: Arc::new(std::sync::OnceLock::new()),
             subagent_env_renderer: Arc::new(std::sync::OnceLock::new()),
-            mcp_tool_builder: Arc::new(std::sync::OnceLock::new()),
+            mcp_tool_builder: Arc::new(RuntimeLink::new()),
             coordinator_mode: Arc::new(std::sync::OnceLock::new()),
             mobile_runtime_environment: None,
             mobile_workspace_cwd_provider: None,
@@ -627,7 +715,7 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn mcp_tool_builder_handle(
         &self,
-    ) -> Arc<std::sync::OnceLock<crate::agent_mcp_tools::AgentMcpToolBuilder>> {
+    ) -> Arc<RuntimeLink<crate::agent_mcp_tools::AgentMcpToolBuilder>> {
         self.mcp_tool_builder.clone()
     }
 
@@ -985,7 +1073,7 @@ impl PoolSubagentSpawner {
     /// AFTER the executor is built (breaking the construction cycle, exactly like
     /// [`Self::tool_registry_handle`]). First fill wins; later fills are no-ops.
     #[must_use]
-    pub fn hook_executor_handle(&self) -> Arc<std::sync::OnceLock<Arc<hooks::HookExecutorImpl>>> {
+    pub fn hook_executor_handle(&self) -> Arc<RuntimeLink<Arc<hooks::HookExecutorImpl>>> {
         self.hook_executor.clone()
     }
 
@@ -1014,7 +1102,7 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn skill_loader_handle(
         &self,
-    ) -> Arc<std::sync::OnceLock<Arc<dyn platform_api::skill_loader::SkillLoader>>> {
+    ) -> Arc<RuntimeLink<Arc<dyn platform_api::skill_loader::SkillLoader>>> {
         self.skill_loader.clone()
     }
 
@@ -1087,8 +1175,20 @@ impl PoolSubagentSpawner {
     /// shared with the boxed spawner, so a later `cell.set(...)` is seen by every
     /// `spawn`. Filling more than once is a no-op (the first wins).
     #[must_use]
-    pub fn tool_registry_handle(&self) -> Arc<std::sync::OnceLock<Arc<ToolRegistry>>> {
+    pub fn tool_registry_handle(&self) -> Arc<RuntimeLink<Arc<ToolRegistry>>> {
         self.tool_registry.clone()
+    }
+
+    /// Release the four composition-root runtime links after the host has
+    /// drained producers and child runners. The links remain permanently
+    /// initialized, so a late completion cannot repopulate a released value.
+    /// Repeated calls are safe and intentionally do nothing after the first
+    /// clear.
+    pub fn release_runtime_links(&self) {
+        self.tool_registry.clear();
+        self.hook_executor.clear();
+        self.skill_loader.clear();
+        self.mcp_tool_builder.clear();
     }
 
     /// Builder: set the file-loaded user/project agent catalog the spawn path
@@ -1327,7 +1427,7 @@ impl PoolSubagentSpawner {
             .get()
             .is_some_and(|mode| mode.is_enabled());
         crate::tool_resolver::resolve_subagent_tools(
-            registry,
+            registry.as_ref(),
             agent_def,
             denied,
             default_model.as_deref(),
@@ -1740,13 +1840,13 @@ impl PoolSubagentSpawner {
         });
         // G4/G5: thread the runner's hook executor + skill loader + hook context
         // seed from the set-once cells (None ⇒ runner skips those steps).
-        ctx.hook_executor = self.hook_executor.get().cloned();
+        ctx.hook_executor = self.hook_executor.get();
         ctx.strict_plugin_only_hooks = self
             .strict_plugin_only_hooks
             .get()
             .copied()
             .unwrap_or(false);
-        ctx.skill_loader = self.skill_loader.get().cloned();
+        ctx.skill_loader = self.skill_loader.get();
         ctx.hook_session_id = self.hook_session_id;
         ctx.hook_cwd = self.hook_cwd.clone();
         // A RESTORE seeds the child from its recovered conversation, replacing
@@ -3180,7 +3280,7 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::sync::Mutex;
     use test_harness::mocks::MockRuntimeSpawner;
@@ -4827,6 +4927,151 @@ mod tests {
         assert!(spawner.tool_registry_handle().get().is_some());
         // Set-once: a second fill is rejected.
         assert!(cell.set(registry_with(&[])).is_err());
+    }
+
+    #[test]
+    fn runtime_link_preserves_set_get_and_first_wins_after_clear() {
+        let link = RuntimeLink::new();
+        let value = Arc::new(7_u32);
+
+        assert!(link.get().is_none(), "a new link is empty");
+        assert!(link.set(value.clone()).is_ok(), "the first fill wins");
+        assert_eq!(link.get().as_deref(), Some(&7));
+        assert!(link.set(Arc::new(8_u32)).is_err(), "repeated fills reject");
+
+        link.clear();
+        assert!(link.get().is_none(), "clear removes the live value");
+        assert!(
+            link.set(Arc::new(9_u32)).is_err(),
+            "clear must not reopen the set-once latch"
+        );
+
+        let never_filled = RuntimeLink::new();
+        never_filled.clear();
+        assert!(
+            never_filled.set(Arc::new(10_u32)).is_err(),
+            "shutdown must seal a link even when its optional value was never filled"
+        );
+    }
+
+    #[test]
+    fn runtime_link_clear_releases_the_stored_strong_reference() {
+        let link = RuntimeLink::new();
+        let value = Arc::new(());
+        let weak = Arc::downgrade(&value);
+
+        assert!(link.set(value.clone()).is_ok());
+        drop(value);
+        assert!(
+            weak.upgrade().is_some(),
+            "the link owns the last strong ref"
+        );
+
+        link.clear();
+        assert!(
+            weak.upgrade().is_none(),
+            "clear must drop the stored value, not just hide it"
+        );
+    }
+
+    #[derive(Clone)]
+    struct ReentrantDrop {
+        link: std::sync::Weak<RuntimeLink<ReentrantDrop>>,
+        dropped_after_clear: Arc<AtomicBool>,
+    }
+
+    impl Drop for ReentrantDrop {
+        fn drop(&mut self) {
+            if let Some(link) = self.link.upgrade() {
+                self.dropped_after_clear
+                    .store(!link.is_live(), Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_link_clear_drops_outside_the_lock() {
+        let link = Arc::new(RuntimeLink::new());
+        let dropped_after_clear = Arc::new(AtomicBool::new(false));
+
+        assert!(link
+            .set(ReentrantDrop {
+                link: Arc::downgrade(&link),
+                dropped_after_clear: dropped_after_clear.clone(),
+            })
+            .is_ok());
+        link.clear();
+
+        assert!(
+            dropped_after_clear.load(Ordering::SeqCst),
+            "the value destructor must be able to re-enter the link"
+        );
+    }
+
+    struct NoopSkillLoader;
+
+    #[async_trait]
+    impl platform_api::skill_loader::SkillLoader for NoopSkillLoader {
+        async fn resolve_and_load(
+            &self,
+            _skill_name: &str,
+            _agent_type: &str,
+        ) -> Option<platform_api::skill_loader::SkillLoad> {
+            None
+        }
+    }
+
+    #[test]
+    fn release_runtime_links_clears_all_four_links_idempotently() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime.clone(), 4));
+        let spawner = PoolSubagentSpawner::new(pool);
+        let tool_registry = spawner.tool_registry_handle();
+        let hook_executor = spawner.hook_executor_handle();
+        let skill_loader = spawner.skill_loader_handle();
+        let mcp_tool_builder = spawner.mcp_tool_builder_handle();
+
+        assert!(tool_registry.set(registry_with(&["Read"])).is_ok());
+        assert!(hook_executor
+            .set(Arc::new(hooks::HookExecutorImpl::new(
+                Arc::new(RwLock::new(hooks::HookRegistry::new())),
+                Arc::new(test_harness::mocks::MockHttpTransport::new()),
+                runtime as Arc<dyn RuntimeSpawner>,
+            )))
+            .is_ok());
+        assert!(skill_loader
+            .set(Arc::new(NoopSkillLoader) as Arc<dyn platform_api::skill_loader::SkillLoader>)
+            .is_ok());
+        let builder: crate::agent_mcp_tools::AgentMcpToolBuilder =
+            Arc::new(|_, _| Box::pin(async { crate::agent_mcp_tools::AgentMcpToolSet::default() }));
+        assert!(mcp_tool_builder.set(builder).is_ok());
+
+        assert!(tool_registry.get().is_some());
+        assert!(hook_executor.get().is_some());
+        assert!(skill_loader.get().is_some());
+        assert!(mcp_tool_builder.get().is_some());
+
+        spawner.release_runtime_links();
+        spawner.release_runtime_links();
+
+        assert!(tool_registry.get().is_none());
+        assert!(hook_executor.get().is_none());
+        assert!(skill_loader.get().is_none());
+        assert!(mcp_tool_builder.get().is_none());
+        assert!(tool_registry.set(registry_with(&[])).is_err());
+        assert!(hook_executor
+            .set(Arc::new(hooks::HookExecutorImpl::new(
+                Arc::new(RwLock::new(hooks::HookRegistry::new())),
+                Arc::new(test_harness::mocks::MockHttpTransport::new()),
+                Arc::new(MockRuntimeSpawner::default()) as Arc<dyn RuntimeSpawner>,
+            )))
+            .is_err());
+        assert!(skill_loader
+            .set(Arc::new(NoopSkillLoader) as Arc<dyn platform_api::skill_loader::SkillLoader>)
+            .is_err());
+        let replacement_builder: crate::agent_mcp_tools::AgentMcpToolBuilder =
+            Arc::new(|_, _| Box::pin(async { crate::agent_mcp_tools::AgentMcpToolSet::default() }));
+        assert!(mcp_tool_builder.set(replacement_builder).is_err());
     }
 
     #[tokio::test]

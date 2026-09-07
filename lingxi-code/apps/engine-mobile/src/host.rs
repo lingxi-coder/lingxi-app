@@ -499,7 +499,7 @@ pub struct MobileRuntime {
     /// preload silently warn-and-skip on mobile.
     #[cfg(test)]
     pub(crate) wired_subagent_skill_loader_cell:
-        Arc<std::sync::OnceLock<Arc<dyn platform_api::skill_loader::SkillLoader>>>,
+        Arc<agent::RuntimeLink<Arc<dyn platform_api::skill_loader::SkillLoader>>>,
     /// Auth handle for `/login` and `/logout`.
     pub auth: Arc<dyn AuthHandle>,
     /// Native mobile OAuth coordinator. It owns the provider-specific handles

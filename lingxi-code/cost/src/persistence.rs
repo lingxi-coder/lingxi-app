@@ -386,6 +386,19 @@ impl CostDurabilityGate {
         Ok(turn)
     }
 
+    /// Place a shutdown-only FIFO fence behind every mutation registered
+    /// before this call. Unlike a paid-work preflight this deliberately
+    /// reserves its position even after the gate is frozen: storage failure
+    /// must stop new dispatch, but it must not let teardown abandon earlier
+    /// response owners that still hold known usage.
+    pub(crate) async fn drain_registered(&self) -> Result<(), CostPersistError> {
+        let mut turn = self.reserve_drain_turn()?;
+        turn.wait().await;
+        let frozen = self.frozen_reason();
+        turn.finish();
+        frozen.map_or(Ok(()), |reason| Err(CostPersistError::Frozen(reason)))
+    }
+
     fn reserve_turn(&self, freeze_on_drop: bool) -> Result<CostDurabilityTurn, CostPersistError> {
         let mut state = self
             .inner
@@ -408,6 +421,31 @@ impl CostDurabilityGate {
             inner: self.inner.clone(),
             ticket,
             freeze_on_drop,
+            released: false,
+        })
+    }
+
+    fn reserve_drain_turn(&self) -> Result<CostDurabilityTurn, CostPersistError> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ticket = state.next_ticket;
+        let Some(next_ticket) = state.next_ticket.checked_add(1) else {
+            let message = "cost durability sequence overflow".to_string();
+            if state.frozen_reason.is_none() {
+                state.frozen_reason = Some(message.clone());
+            }
+            drop(state);
+            self.inner.changed.notify_waiters();
+            return Err(CostPersistError::Storage(message));
+        };
+        state.next_ticket = next_ticket;
+        Ok(CostDurabilityTurn {
+            inner: self.inner.clone(),
+            ticket,
+            freeze_on_drop: false,
             released: false,
         })
     }
@@ -600,5 +638,26 @@ mod tests {
         let next = gate.acquire_preflight().await.unwrap();
         next.finish();
         assert!(gate.frozen_reason().is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_waits_for_registered_mutation_even_after_freeze() {
+        let gate = CostDurabilityGate::default();
+        let mut mutation = gate.register_mutation().unwrap();
+        mutation.wait().await;
+        gate.freeze("first append failed");
+
+        let mut drain = Box::pin(gate.drain_registered());
+        tokio::select! {
+            biased;
+            _ = &mut drain => panic!("shutdown drain bypassed active mutation"),
+            () = tokio::task::yield_now() => {}
+        }
+        mutation.finish();
+
+        assert!(matches!(
+            drain.await,
+            Err(CostPersistError::Frozen(message)) if message == "first append failed"
+        ));
     }
 }

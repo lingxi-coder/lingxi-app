@@ -44,8 +44,10 @@ use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use platform_api::{
     BackgroundTaskHandle, BudgetEnforcerHandle, FusionActivation, FusionError, FusionExecutor,
     FusionInheritance, FusionModelRef, FusionOrigin, FusionPreset, FusionRunId,
-    FusionRunIdentity, FusionSubmission, RuntimeSpawner, SubagentInheritance, SubagentResult,
+    FusionRunIdentity, FusionSubmission, FusionPreparedSummary, FusionRunFactsRecorder,
+    PreparedFusionRun, RuntimeSpawner, SubagentInheritance, SubagentResult,
     SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
+    FusionRunRecorder, FusionRunRecorderFactory, FusionTerminalCapability,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -1304,12 +1306,12 @@ impl Drop for WorkerCompletionSignal {
 async fn cancel_workflow_worker(rec: WorkerCancel) -> Result<(), TaskError> {
     rec.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     rec.fusion_cancel.cancel();
-    let completion_rx = rec
+    let mut completion_rx = rec
         .completion_rx
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
-    let completed = if let Some(completion_rx) = completion_rx {
+    let completed = if let Some(completion_rx) = completion_rx.as_mut() {
         tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx)
             .await
             .is_ok()
@@ -1321,6 +1323,9 @@ async fn cancel_workflow_worker(rec: WorkerCancel) -> Result<(), TaskError> {
             .cancel(&rec.handle)
             .await
             .map_err(|error| TaskError::Io(error.to_string()))?;
+        if let Some(completion_rx) = completion_rx {
+            let _ = completion_rx.await;
+        }
     }
     Ok(())
 }
@@ -1398,6 +1403,10 @@ pub struct LocalWorkflowHandler {
     /// helper. Mobile leaves this unset and reports
     /// [`FusionError::UnavailableOnPlatform`] if a script calls `fusion()`.
     fusion: Option<Arc<dyn FusionExecutor>>,
+    /// Host-owned terminal recorder attached to each prepared Fusion run.
+    terminal_recorder: Option<Arc<dyn FusionRunRecorder>>,
+    /// Pure per-session recorder factory for hot session switches.
+    terminal_recorder_factory: Option<Arc<dyn FusionRunRecorderFactory>>,
 }
 
 impl LocalWorkflowHandler {
@@ -1430,6 +1439,8 @@ impl LocalWorkflowHandler {
             workspace_root: None,
             plugin_workflows: None,
             fusion: None,
+            terminal_recorder: None,
+            terminal_recorder_factory: None,
         }
     }
 
@@ -1534,6 +1545,35 @@ impl LocalWorkflowHandler {
     #[must_use]
     pub fn with_fusion(mut self, executor: Arc<dyn FusionExecutor>) -> Self {
         self.fusion = Some(executor);
+        self
+    }
+
+    /// Attach the host-owned common terminal recorder for workflow Fusion
+    /// calls. Workflow never receives a Slash publication target.
+    #[must_use]
+    pub fn with_terminal_recorder(mut self, recorder: Arc<dyn FusionRunRecorder>) -> Self {
+        self.terminal_recorder = Some(recorder);
+        self
+    }
+
+    /// Optional composition-root form used by mobile/ephemeral hosts.
+    #[must_use]
+    pub fn with_terminal_recorder_opt(
+        mut self,
+        recorder: Option<Arc<dyn FusionRunRecorder>>,
+    ) -> Self {
+        self.terminal_recorder = recorder;
+        self
+    }
+
+    /// Attach a pure per-session recorder factory. A workflow's prepared
+    /// Fusion runs then pin the coordinator that owned the workflow session.
+    #[must_use]
+    pub fn with_terminal_recorder_factory(
+        mut self,
+        factory: Arc<dyn FusionRunRecorderFactory>,
+    ) -> Self {
+        self.terminal_recorder_factory = Some(factory);
         self
     }
 
@@ -2666,6 +2706,65 @@ async fn run_workflow_script_with_live_updates_and_fusion(
     workflow_run_id: Option<String>,
     parent_model: Option<String>,
     parent_model_profile: Option<String>,
+    transcript_subdir: Option<PathBuf>,
+    bus: Arc<AnalyticsBus>,
+    agent_count_out: Option<Arc<AtomicU64>>,
+    phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
+    workflow_metrics_out: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
+) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
+    run_workflow_script_with_live_updates_and_fusion_recorded(
+        script,
+        subagent_type,
+        workflow_id,
+        spawner,
+        tool_invoker,
+        budget,
+        progress_tx,
+        live_progress_tx,
+        journal,
+        journal_writer,
+        token_budget_total,
+        shared_pool,
+        turn_start_baseline,
+        nested,
+        cancel,
+        fusion_cancel,
+        fusion,
+        workflow_run_id,
+        parent_model,
+        parent_model_profile,
+        transcript_subdir,
+        bus,
+        agent_count_out,
+        phase_telemetry_ctx,
+        workflow_metrics_out,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_workflow_script_with_live_updates_and_fusion_recorded(
+    script: &str,
+    subagent_type: &str,
+    workflow_id: &str,
+    spawner: Arc<dyn SubagentSpawner>,
+    tool_invoker: Arc<dyn ToolInvoker>,
+    budget: Arc<dyn BudgetEnforcerHandle>,
+    progress_tx: Option<mpsc::UnboundedSender<String>>,
+    live_progress_tx: Option<mpsc::UnboundedSender<WorkflowProgressUpdate>>,
+    journal: Option<Arc<std::sync::Mutex<HashMap<String, String>>>>,
+    journal_writer: Option<WorkflowJournalWriter>,
+    token_budget_total: Option<u64>,
+    shared_pool: Option<Arc<AtomicU64>>,
+    turn_start_baseline: u64,
+    nested: NestedConfig,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    fusion_cancel: CancellationToken,
+    fusion: Option<Arc<dyn FusionExecutor>>,
+    workflow_run_id: Option<String>,
+    parent_model: Option<String>,
+    parent_model_profile: Option<String>,
     // The same workflow-scoped child transcript directory the `agent()` batch
     // path applies via `WorkflowIsolationSpawner::spawn_inner` (`agent::
     // with_transcript_subdir_override`). NOT currently applied to the
@@ -2681,6 +2780,7 @@ async fn run_workflow_script_with_live_updates_and_fusion(
     agent_count_out: Option<Arc<AtomicU64>>,
     phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
     workflow_metrics_out: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
+    terminal_recorder: Option<Arc<dyn FusionRunRecorder>>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
     let NestedConfig {
         allow_nested,
@@ -2978,17 +3078,48 @@ async fn run_workflow_script_with_live_updates_and_fusion(
                             let prepared_result = executor.clone().prepare(FusionSubmission {
                                 request,
                                 inherit,
-                                identity,
+                                identity: identity.clone(),
                             });
                             let preparation_error = prepared_result
                                 .as_ref()
                                 .err()
                                 .map(ToString::to_string);
                             if let Some(error) = preparation_error {
+                                let control = platform_api::FusionRunControl::new(
+                                    identity.clone(),
+                                    0,
+                                    fusion_cancel.clone(),
+                                    FusionRunFactsRecorder::default(),
+                                );
+                                let summary = FusionPreparedSummary {
+                                    identity: identity.clone(),
+                                    duration_ms: 0,
+                                    planned_panels: None,
+                                };
+                                let prepared = PreparedFusionRun::failed(
+                                    summary,
+                                    control,
+                                    FusionError::InvalidRequest(error.clone()),
+                                );
+                                let prepared = if let Some(recorder) = terminal_recorder.as_ref() {
+                                    prepared.with_terminal_capability(
+                                        FusionTerminalCapability::new(recorder.clone()),
+                                    )
+                                } else {
+                                    prepared
+                                };
+                                let _ = prepared.activate(FusionActivation::now(), None).await;
                                 wf_throw(&error)
                             } else {
                             let prepared = prepared_result
                                 .expect("Fusion preparation error was checked above");
+                            let prepared = if let Some(recorder) = terminal_recorder.as_ref() {
+                                prepared.with_terminal_capability(
+                                    FusionTerminalCapability::new(recorder.clone()),
+                                )
+                            } else {
+                                prepared
+                            };
                             // KNOWN GAP (G012, tracked as a cross-lane
                             // residual — see local_workflow_test.rs's removed
                             // `workflow_fusion_run_inherits_the_workflow_
@@ -3772,6 +3903,17 @@ impl Task for LocalWorkflowHandler {
         let runtime = ctx.runtime.clone();
         let token_budget_total = self.token_budget_total;
         let fusion = self.fusion.clone();
+        let terminal_recorder = if let Some(factory) = self.terminal_recorder_factory.as_ref() {
+            session_uuid.as_deref().map_or_else(
+                || self.terminal_recorder.clone(),
+                |raw| {
+                    protocol::SessionId::parse_prefixed(raw)
+                        .and_then(|session_id| factory.recorder_for(session_id))
+                },
+            )
+        } else {
+            self.terminal_recorder.clone()
+        };
         // The shared `budget.spent()` pool (main loop + all workflows), published
         // by the root once the orchestrator exists. `None` in tests ⇒ the run
         // uses its own private pool (own-spend only).
@@ -4035,7 +4177,7 @@ impl Task for LocalWorkflowHandler {
                     workflow_name: meta_name.clone(),
                     invocation_mode: invocation_mode.clone(),
                 };
-                let run = run_workflow_script_with_live_updates_and_fusion(
+                let run = run_workflow_script_with_live_updates_and_fusion_recorded(
                     &script,
                     DEFAULT_WORKFLOW_SUBAGENT,
                     &workflow_id,
@@ -4070,6 +4212,7 @@ impl Task for LocalWorkflowHandler {
                     // workflow_source, workflow_name, and built-in-source gate.
                     Some(phase_telemetry_ctx.clone()),
                     Some(workflow_metrics.clone()),
+                    terminal_recorder.clone(),
                 );
                 let (outcome, (), ()) = tokio::join!(run, drain, live_drain);
                 // Natural completion and TaskStop race on the worker map. Once
@@ -4287,6 +4430,26 @@ impl Task for LocalWorkflowHandler {
             self.status_sink
                 .set_status(task_id, TaskStatus::Killed)
                 .await;
+        }
+        Ok(())
+    }
+
+    async fn drain_shutdown(&self) -> Result<(), TaskError> {
+        let completions = {
+            let workers = self.workers.lock().await;
+            workers
+                .values()
+                .filter_map(|worker| {
+                    worker
+                        .completion_rx
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                })
+                .collect::<Vec<_>>()
+        };
+        for completion in completions {
+            let _ = completion.await;
         }
         Ok(())
     }

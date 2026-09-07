@@ -482,26 +482,14 @@ impl SendMessageTool {
             let message = platform_api::live_sessions::outbound_peer_message(
                 &from_name, &from_sid, content, summary,
             );
-            let sock = peer
-                .messaging_socket_path
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(std::path::PathBuf::from)
-                .filter(|p| platform_api::uds_inbox::is_canonical_inbox_sock(p));
-            let uds_error = sock
-                .as_deref()
-                .map(|path| platform_api::uds_inbox::send_peer_message(path, &message))
-                .and_then(Result::err);
-            if sock.is_none() || uds_error.is_some() {
-                dir.send_inbox(peer.sid(), &message).map_err(|e| {
-                    let transport = uds_error
-                        .as_ref()
-                        .map_or_else(String::new, |uds| format!(" (UDS failed first: {uds})"));
-                    ToolError::Internal(format!(
-                        "SendMessage: failed to deliver to live session inbox: {e}{transport}"
-                    ))
-                })?;
-            }
+            // Keep the discovered session as the destination across remounts.
+            // The file inbox's polling latency avoids unacknowledged socket
+            // loss; sending through only this transport also prevents duplicates.
+            dir.send_inbox(peer.sid(), &message).map_err(|e| {
+                ToolError::Internal(format!(
+                    "SendMessage: failed to deliver to live session inbox: {e}"
+                ))
+            })?;
             let subscribed = if notify_when_idle {
                 dir.append_idle_subscription(
                     peer.sid(),

@@ -9,14 +9,14 @@ use command_api::parser::ParsedSlashCommand;
 use command_core::{fusion_request_from_slash, parse_fusion_slash};
 use platform_api::{
     FusionCompletionSink, FusionExecutor, FusionPublicationReceipt, FusionResult, FusionStatus,
-    OrchestratorHandle,
+    FusionRunId, OrchestratorHandle,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use tasks::{TaskSpawnInput, TaskType};
 use tokio::sync::Mutex;
 
-const FUSION_ARGUMENT_HINT: &str = "[--quality|--fast] [--same-provider|--cross-provider] PROMPT";
+const FUSION_ARGUMENT_HINT: &str = "[--quality|--fast] [--same-provider|--cross-provider] PROMPT | --retry-publication fu_RUN_ID";
 const FUSION_PERSISTENCE_REQUIRED: &str =
     "durable session storage is disabled; /fusion requires session persistence (remove --no-session-persistence)";
 
@@ -102,9 +102,9 @@ impl FusionCompletionSink for DesktopFusionCompletionSink {
         let appended_to_current =
             self.handle.current_session_id().await.to_string() == conversation_id;
         let body = if appended_to_current {
-            fusion_completion_notice(result)
+            fusion_completion_notice_for_status(result.status)
         } else {
-            fusion_completion_notice_other_session(result, conversation_id)
+            fusion_completion_notice_other_session_for_status(result.status, conversation_id)
         };
         self.handle.emit_background_system_notice(&body).await;
         seen.insert(key);
@@ -115,8 +115,8 @@ impl FusionCompletionSink for DesktopFusionCompletionSink {
 /// Short, content-free notice text for [`DesktopFusionCompletionSink::publish`]
 /// — no prompt, no final text, no model/provider names, just the status and a
 /// pointer at the durable record.
-fn fusion_completion_notice(result: &FusionResult) -> String {
-    match result.status {
+pub(crate) fn fusion_completion_notice_for_status(status: FusionStatus) -> String {
+    match status {
         FusionStatus::Completed => {
             "Fusion run finished — see the result appended to this conversation.".to_string()
         }
@@ -145,7 +145,10 @@ fn fusion_completion_notice(result: &FusionResult) -> String {
 /// the JSONL file stem, i.e. the BARE uuid (`session/src/jsonl/loader.rs`:
 /// `let sid = stem.as_str()`), so the prefix is stripped rather than shown.
 /// Eight uuid characters is short enough not to dominate a one-line notice.
-fn fusion_completion_notice_other_session(result: &FusionResult, conversation_id: &str) -> String {
+pub(crate) fn fusion_completion_notice_other_session_for_status(
+    status: FusionStatus,
+    conversation_id: &str,
+) -> String {
     // `parse_prefixed` accepts both the prefixed display form and a bare uuid,
     // so this stays correct if a caller ever hands over an unprefixed id; a
     // string that is neither falls back to being truncated as-is.
@@ -154,7 +157,7 @@ fn fusion_completion_notice_other_session(result: &FusionResult, conversation_id
         |id| id.as_uuid().to_string(),
     );
     let short: String = body.chars().take(8).collect();
-    let what = match result.status {
+    let what = match status {
         FusionStatus::Completed => "its result",
         FusionStatus::NeedsParent => "its summary (it needs your judgment)",
     };
@@ -162,6 +165,40 @@ fn fusion_completion_notice_other_session(result: &FusionResult, conversation_id
         "Fusion run finished — {what} was saved to the conversation it was started in \
 (session {short}…), not this one. Resume that session, or check the task list, to see it."
     )
+}
+
+pub(crate) fn fusion_persisted_notice(
+    status: &str,
+    conversation_id: &str,
+    current_session: bool,
+) -> String {
+    match (status, current_session) {
+        ("completed", true) => fusion_completion_notice_for_status(FusionStatus::Completed),
+        ("needs_parent", true) => fusion_completion_notice_for_status(FusionStatus::NeedsParent),
+        ("completed", false) => fusion_completion_notice_other_session_for_status(
+            FusionStatus::Completed,
+            conversation_id,
+        ),
+        ("needs_parent", false) => fusion_completion_notice_other_session_for_status(
+            FusionStatus::NeedsParent,
+            conversation_id,
+        ),
+        ("error", true) => {
+            "Fusion run failed — see the recorded error in this conversation.".to_string()
+        }
+        ("error", false) => {
+            let body = protocol::SessionId::parse_prefixed(conversation_id).map_or_else(
+                || conversation_id.to_string(),
+                |id| id.as_uuid().to_string(),
+            );
+            let short: String = body.chars().take(8).collect();
+            format!(
+                "Fusion run failed — its error was saved to the conversation it was started in \
+(session {short}…), not this one."
+            )
+        }
+        _ => "Fusion run finished — see its durable task record.".to_string(),
+    }
 }
 
 /// [Finding 13] Notice text for the append-failure path: unlike
@@ -251,6 +288,7 @@ pub struct DesktopFusionCommandHandler {
     handle: Arc<dyn OrchestratorHandle>,
     parent_profiles: BTreeMap<String, String>,
     durable_publication_available: bool,
+    publication_retrier: Option<Arc<crate::fusion_recorder::DesktopFusionRecorderFactory>>,
 }
 
 impl DesktopFusionCommandHandler {
@@ -268,6 +306,7 @@ impl DesktopFusionCommandHandler {
             handle,
             parent_profiles,
             durable_publication_available: true,
+            publication_retrier: None,
         }
     }
 
@@ -279,11 +318,84 @@ impl DesktopFusionCommandHandler {
         self.durable_publication_available = available;
         self
     }
+
+    /// Attach the durable outbox owner used by the explicit local-only retry
+    /// form. This accepts only a run id; no executor or prompt reaches it.
+    #[must_use]
+    pub fn with_publication_retrier(
+        mut self,
+        retrier: Option<Arc<crate::fusion_recorder::DesktopFusionRecorderFactory>>,
+    ) -> Self {
+        self.publication_retrier = retrier;
+        self
+    }
+}
+
+fn publication_retry_run_id(args: &ParsedSlashCommand) -> Result<Option<FusionRunId>, String> {
+    let contains_retry = args
+        .positional_args
+        .iter()
+        .any(|token| token == "--retry-publication");
+    if !contains_retry {
+        return Ok(None);
+    }
+    if args.positional_args.len() != 2 || args.positional_args[0] != "--retry-publication" {
+        return Err(format!(
+            "--retry-publication cannot be combined with a prompt or Fusion flags\n{FUSION_ARGUMENT_HINT}"
+        ));
+    }
+    FusionRunId::parse(args.positional_args[1].clone())
+        .map(Some)
+        .map_err(|error| format!("{error}\n{FUSION_ARGUMENT_HINT}"))
 }
 
 #[async_trait]
 impl BuiltinCommandHandler for DesktopFusionCommandHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
+        let retry_run_id = match publication_retry_run_id(args) {
+            Ok(retry) => retry,
+            Err(message) => return CommandResult::Done { display: Some(message) },
+        };
+        if let Some(run_id) = retry_run_id {
+            if !self.durable_publication_available {
+                return CommandResult::Done {
+                    display: Some(format!(
+                        "fusion publication retry failed: {FUSION_PERSISTENCE_REQUIRED}"
+                    )),
+                };
+            }
+            let Some(retrier) = self.publication_retrier.as_ref() else {
+                return CommandResult::Done {
+                    display: Some(
+                        "fusion publication retry failed: durable publication is unavailable"
+                            .into(),
+                    ),
+                };
+            };
+            let session_id = self.handle.current_session_id().await;
+            let receipt = retrier
+                .retry_publication(session_id, run_id.as_str())
+                .await;
+            let display = match receipt.status {
+                platform_api::FusionPublicationStatus::Published => {
+                    format!("Fusion publication {} is published.", run_id.as_str())
+                }
+                platform_api::FusionPublicationStatus::Queued => format!(
+                    "Fusion publication {} is durably queued for retry.",
+                    run_id.as_str()
+                ),
+                _ => format!(
+                    "fusion publication retry failed: {}",
+                    receipt
+                        .error
+                        .as_deref()
+                        .unwrap_or("durable outbox did not accept the retry")
+                ),
+            };
+            return CommandResult::Done {
+                display: Some(display),
+            };
+        }
         let parsed = match parse_fusion_slash(args) {
             Ok(parsed) => parsed,
             Err(msg) => {
@@ -367,6 +479,7 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use command_api::parse_slash_command;
     use platform_api::{
         FusionDecision, FusionNeedsParentReason, FusionStatus, FusionTiming, FusionUsage,
     };
@@ -435,6 +548,32 @@ mod tests {
     fn description_does_not_truncate_a_short_prompt() {
         let desc = fusion_task_description("fast", "same-provider", "short");
         assert_eq!(desc, "Fusion fast same-provider: short");
+    }
+
+    #[test]
+    fn publication_retry_is_strictly_local_and_mutex_with_run_arguments() {
+        let run_id = "fu_0123456789abcdef0123456789abcdef";
+        let retry = parse_slash_command(&format!("/fusion --retry-publication {run_id}"))
+            .expect("slash");
+        assert_eq!(
+            publication_retry_run_id(&retry)
+                .expect("valid retry")
+                .expect("retry mode")
+                .as_str(),
+            run_id
+        );
+
+        for invocation in [
+            format!("/fusion --quality --retry-publication {run_id}"),
+            format!("/fusion --retry-publication {run_id} prompt"),
+            "/fusion --retry-publication not-a-run-id".to_string(),
+        ] {
+            let parsed = parse_slash_command(&invocation).expect("slash");
+            assert!(
+                publication_retry_run_id(&parsed).is_err(),
+                "retry must reject provider-bearing prompt/flag input: {invocation}"
+            );
+        }
     }
 
     #[tokio::test]

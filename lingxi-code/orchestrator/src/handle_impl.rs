@@ -167,35 +167,204 @@ impl ConversationOrchestrator {
     }
 }
 
-#[async_trait]
-impl OrchestratorHandle for ConversationOrchestrator {
-    async fn current_session_id(&self) -> protocol::SessionId {
-        self.session.lock().await.session_id
+enum OwnedSessionSwitch {
+    Clear,
+    Resume {
+        session_id: protocol::SessionId,
+        history: Vec<protocol::ConversationMessage>,
+        last_jsonl_uuid: Option<String>,
+        active_goal: Option<ActiveGoalSnapshot>,
+        runtime: platform_api::ResumeRuntimeSnapshot,
+    },
+}
+
+enum PreparedTranscriptSwitch {
+    None,
+    Legacy {
+        writer: Arc<session::jsonl::writer::JsonlWriter>,
+        path: std::path::PathBuf,
+    },
+    Durable {
+        writer: Arc<session::jsonl::writer::JsonlWriter>,
+        session_id: protocol::SessionId,
+        path: std::path::PathBuf,
+        cwd: std::path::PathBuf,
+        durable_lock: Arc<session::jsonl::DurableTranscriptWriter>,
+    },
+}
+
+impl PreparedTranscriptSwitch {
+    async fn prepare_legacy(&self) {
+        if let Self::Legacy { writer, path } = self {
+            writer.retarget(path.clone()).await;
+        }
     }
 
-    async fn clear_session(&self) -> Result<(), HandleError> {
-        // Session replacement must serialize with the turn loop. In
-        // particular, this keeps maybe_extract_session_memory's history +
-        // generation snapshot on the same side of the clear/resume boundary.
-        let _turn_guard = self.turn_gate.lock().await;
+    fn activate(self) {
+        if let Self::Durable {
+            writer,
+            session_id,
+            path,
+            cwd,
+            durable_lock,
+        } = self
+        {
+            writer.activate_session_target_with_durable_lock(
+                session_id,
+                path,
+                cwd,
+                durable_lock,
+            );
+        }
+    }
+}
+
+impl ConversationOrchestrator {
+    fn prepare_transcript_switch(
+        &self,
+        session_id: protocol::SessionId,
+        durable_lock: Option<Arc<session::jsonl::DurableTranscriptWriter>>,
+    ) -> Result<PreparedTranscriptSwitch, HandleError> {
+        let Some(writer) = self.transcript.jsonl_writer.as_ref().cloned() else {
+            return Ok(PreparedTranscriptSwitch::None);
+        };
+        let Some(config_home) = self.config_home.as_ref() else {
+            return Ok(PreparedTranscriptSwitch::None);
+        };
+        let cwd = self.current_cwd();
+        let path = session::jsonl::path::session_path(
+            config_home,
+            &cwd.to_string_lossy(),
+            &session_id.as_uuid().to_string(),
+        );
+        if writer.durable_transcript_enabled() {
+            let durable_lock = durable_lock.ok_or_else(|| {
+                HandleError::ActionFailed(
+                    "durable session switch did not prepare its transcript authority".into(),
+                )
+            })?;
+            Ok(PreparedTranscriptSwitch::Durable {
+                writer,
+                session_id,
+                path,
+                cwd,
+                durable_lock,
+            })
+        } else {
+            Ok(PreparedTranscriptSwitch::Legacy { writer, path })
+        }
+    }
+
+    async fn run_owned_session_switch(
+        &self,
+        request: OwnedSessionSwitch,
+    ) -> Result<(), HandleError> {
+        let claim = self
+            .lifecycle_runtime
+            .session_switch_supervisor
+            .claim()
+            .map_err(HandleError::ActionFailed)?;
+        let turn_guard = self.turn_gate.clone().lock_owned().await;
+        let owner = self
+            .lifecycle_runtime
+            .session_switch_owner
+            .get()
+            .and_then(std::sync::Weak::upgrade);
+        let Some(owner) = owner else {
+            let result = self.execute_owned_session_switch(turn_guard, request).await;
+            claim.complete(None);
+            return result;
+        };
+
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            // The nested task turns a panic into a retained error while the
+            // outer owner keeps the lifecycle claim until all borrowed state
+            // and the turn gate have been released.
+            let execution = tokio::spawn(async move {
+                owner
+                    .execute_owned_session_switch(turn_guard, request)
+                    .await
+            })
+            .await;
+            let result = match execution {
+                Ok(result) => result,
+                Err(error) => Err(HandleError::ActionFailed(format!(
+                    "owned session switch failed: {error}"
+                ))),
+            };
+            match result_tx.send(result) {
+                Ok(()) => claim.complete(None),
+                Err(result) => claim.complete(
+                    result
+                        .err()
+                        .map(|error| format!("detached session switch failed: {error}")),
+                ),
+            }
+        });
+        result_rx.await.map_err(|_| {
+            HandleError::ActionFailed("owned session switch result channel closed".into())
+        })?
+    }
+
+    async fn execute_owned_session_switch(
+        &self,
+        turn_guard: tokio::sync::OwnedMutexGuard<()>,
+        request: OwnedSessionSwitch,
+    ) -> Result<(), HandleError> {
+        match request {
+            OwnedSessionSwitch::Clear => self.execute_clear_session(turn_guard).await,
+            OwnedSessionSwitch::Resume {
+                session_id,
+                history,
+                last_jsonl_uuid,
+                active_goal,
+                runtime,
+            } => {
+                self.execute_resume_session(
+                    turn_guard,
+                    session_id,
+                    history,
+                    last_jsonl_uuid,
+                    active_goal,
+                    runtime,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn execute_clear_session(
+        &self,
+        _turn_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<(), HandleError> {
         self.abort_startup_responses_websocket_prewarm();
         if let Err(err) = self.api.close_responses_websocket_session().await {
             tracing::warn!(error = %err, "failed to close responses websocket session during clear_session");
         }
         let new_session_id_value = protocol::SessionId::new();
-        // Validate and activate the destination cost authority before any
-        // conversation identity/state is published. Durable composition must
-        // hydrate/install this destination first; otherwise clear fails closed
-        // with the old session still intact.
-        self.model_runtime
-            .switch_cost_session(new_session_id_value)
+        let prepared = self
+            .model_runtime
+            .prepare_cost_session(new_session_id_value)
             .await
             .map_err(|error| {
-                HandleError::ActionFailed(format!("Cost session activation failed: {error}"))
+                HandleError::ActionFailed(format!("Cost session preparation failed: {error}"))
             })?;
+        let (prepared_cost, durable_lock) = prepared.map_or((None, None), |prepared| {
+            let (cost, durable_lock) = prepared.into_parts();
+            (Some(cost), durable_lock)
+        });
+        let prepared_transcript =
+            self.prepare_transcript_switch(new_session_id_value, durable_lock)?;
+        prepared_transcript.prepare_legacy().await;
         self.reset_session_scoped_runtime().await;
         let mut s = self.session.lock().await;
         let old_session_id = s.session_id;
+        // All fallible and awaiting work is complete. Publish the captured
+        // transcript authority, cost scope, and conversation state in one
+        // synchronous critical section so caller cancellation cannot split it.
+        prepared_transcript.activate();
+        self.model_runtime.activate_cost_session(prepared_cost);
         s.history.clear();
         s.transcript_only_messages.clear();
         s.compact_summary_messages.clear();
@@ -207,56 +376,27 @@ impl OrchestratorHandle for ConversationOrchestrator {
         self.compaction_runtime
             .compaction_cumulative_dropped_tokens
             .store(0, std::sync::atomic::Ordering::Relaxed);
-        // Reset the JSONL parent-uuid chain (M5-07) since we minted a new
-        // session id; downstream appends should not chain to the prior
-        // session's last entry.
         *self.transcript.last_jsonl_uuid.lock().await = None;
         drop(s);
+        self.notify_session_activated(old_session_id, new_session_id_value)
+            .await;
         self.invoked_skill_session_guard.replace(new_session_id);
-        // (review #8) Reset the autocompact circuit-breaker / rapid-refill
-        // tracking. claude-code's clearConversation restarts the query loop with
-        // a fresh autoCompactTracking accumulator; LingXi's long-lived
-        // orchestrator field would otherwise leak a TRIPPED breaker (>=3
-        // consecutive summarizer failures) or a stale rapid-refill counter into
-        // the freshly-cleared session — permanently disabling autocompact there
-        // (a tripped breaker only clears on a successful compact, which can then
-        // never run). Zero it alongside the cumulative-dropped-tokens reset.
         *self.compaction_runtime.compaction_tracking.lock().await =
             compaction::AutoCompactTrackingState::default();
-        // (parity 2.1.212) claude-code's clearConversation calls resetCostState
-        // (yJe): a freshly-cleared session starts the cost footer/status line at
-        // zero instead of carrying the prior conversation's accumulated total
-        // ("Fixed /clear not resetting session cost counter"). Reset the wired
-        // tracker (no-op when unwired) and the orchestrator's api-call counter —
-        // claude-code zeroes `modelUsage`, from which the api-call count derives.
         self.hooks.clear_session_hooks(old_session_id).await;
         Ok(())
     }
 
-    /// Adopt a replayed session IN PLACE — the symmetric twin of
-    /// [`Self::clear_session`]. Where `clear_session` wipes the history and
-    /// MINTS a fresh `SessionId`, `resume_session` ADOPTS the named on-disk
-    /// session: it swaps in the replayed `history`, adopts the named
-    /// `session_id` (so the running orchestrator IS the resumed session), and
-    /// seeds the JSONL parent-uuid chain to `last_jsonl_uuid` so any future
-    /// append chains via `parent_uuid` off the resumed tail (the same field
-    /// `with_resume` overrides at construction time, here applied to a live
-    /// orchestrator).
-    ///
-    /// When the replay carries a resolved model, it replaces `s.model` and its
-    /// provider-profile hint. Legacy/default callers leave the live values
-    /// unchanged by passing an empty model.
-    async fn resume_session(
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_resume_session(
         &self,
+        _turn_guard: tokio::sync::OwnedMutexGuard<()>,
         session_id: protocol::SessionId,
         history: Vec<protocol::ConversationMessage>,
         last_jsonl_uuid: Option<String>,
         active_goal: Option<ActiveGoalSnapshot>,
         runtime: platform_api::ResumeRuntimeSnapshot,
     ) -> Result<(), HandleError> {
-        // See clear_session: a resumed history and its session-memory epoch
-        // must be published atomically with respect to an active turn.
-        let _turn_guard = self.turn_gate.lock().await;
         self.abort_startup_responses_websocket_prewarm();
         if let Err(err) = self.api.close_responses_websocket_session().await {
             tracing::warn!(error = %err, "failed to close responses websocket session during resume_session");
@@ -270,36 +410,29 @@ impl OrchestratorHandle for ConversationOrchestrator {
             )
         };
         let requested_model = (!runtime.model.is_empty()).then(|| runtime.model.clone());
-        // The destination ledger must already be hydrated with its own claim.
-        // Reject before resetting or publishing any live session state.
-        self.model_runtime
-            .switch_cost_session(session_id)
+        let prepared = self
+            .model_runtime
+            .prepare_cost_session(session_id)
             .await
             .map_err(|error| {
-                HandleError::ActionFailed(format!("Cost session activation failed: {error}"))
+                HandleError::ActionFailed(format!("Cost session preparation failed: {error}"))
             })?;
+        let (prepared_cost, durable_lock) = prepared.map_or((None, None), |prepared| {
+            let (cost, durable_lock) = prepared.into_parts();
+            (Some(cost), durable_lock)
+        });
+        let prepared_transcript = self.prepare_transcript_switch(session_id, durable_lock)?;
+        prepared_transcript.prepare_legacy().await;
         self.reset_session_scoped_runtime().await;
-        // A hot resume must adopt a persisted prompt snapshot when present,
-        // but never create one if the transcript did not carry it.
         self.prompt_runtime
             .prompt_snapshot_resume
             .store(true, std::sync::atomic::Ordering::Release);
         *self.prompt_runtime.prompt_snapshot.lock().await = runtime.prompt_snapshot.clone();
         let mut s = self.session.lock().await;
+        prepared_transcript.activate();
+        self.model_runtime.activate_cost_session(prepared_cost);
         s.history = history;
         if !runtime.model.is_empty() {
-            // `session.model` is the WIRE model id; the provider profile rides
-            // beside it. A transcript can hand back a provider-QUALIFIED
-            // reference either with no profile or with the matching profile
-            // persisted beside the still-qualified model (an older engine,
-            // another client, or a partially migrated session). Adopting that
-            // verbatim ships `"deepseek/deepseek-v4-flash"` as the wire id and
-            // the provider rejects every message of the resumed session.
-            // Re-split it exactly as `SetModel` does, so the resumed session
-            // lands on the same (model, profile) pair a fresh pick produces.
-            // `parse_model_ref` only splits a prefix a real listing claims, so
-            // an unknown ref and an id whose own name contains a slash
-            // (`openrouter/auto`) are both preserved.
             let listings = self.api.list_model_listings();
             let (model, profile) = normalize_session_model_ref(
                 &runtime.model,
@@ -332,9 +465,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let resumed_reasoning = runtime.reasoning_selection.clone();
         let resumed_model = s.model.clone();
         let resumed_profile = s.model_profile.clone();
-        // Adopt the NAMED id (clear_session mints a fresh one; resume does NOT).
         s.session_id = session_id;
         drop(s);
+        self.notify_session_activated(old_session_id, session_id)
+            .await;
         self.invoked_skill_session_guard
             .replace(session_id.to_string());
         if let Some(selection) = resumed_reasoning {
@@ -368,19 +502,15 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 turn_id: runtime.turn_id,
                 consecutive_failures: runtime.consecutive_failures,
                 consecutive_rapid_refills: runtime.consecutive_rapid_refills,
-                // Transient in-call state (SC-04); never restored from metadata.
                 ..Default::default()
             };
         self.tools
             .deferral()
             .replace_loaded(runtime.loaded_tool_names);
-        // Seed the parent-uuid chain so any future append chains off the
-        // resumed tail (matching the M5-07 writer's chain semantics).
         *self.transcript.last_jsonl_uuid.lock().await = last_jsonl_uuid;
         self.model_runtime
             .refusal_fallback_latched
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        // …and so does the cascade's tried-models list (see `clear_session`).
         self.model_runtime.refusal_tried_models.lock().await.clear();
         self.hooks.clear_session_hooks(old_session_id).await;
         let (to_model, to_profile) = {
@@ -404,6 +534,72 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 .map_err(|error| HandleError::ActionFailed(format!("deferred replay: {error}")))?;
         }
         Ok(())
+    }
+
+    async fn notify_session_activated(
+        &self,
+        previous: protocol::SessionId,
+        current: protocol::SessionId,
+    ) {
+        let Some(observer) = self
+            .lifecycle_runtime
+            .session_activation_observer
+            .as_ref()
+        else {
+            return;
+        };
+        if let Err(error) = observer.session_activated(previous, current).await {
+            tracing::warn!(%error, "session committed but host presence did not follow it");
+            let notice = format!("Session switched, but host presence could not be updated: {error}");
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                self.output.emit_system_notice(&notice, false),
+            )
+            .await;
+        }
+    }
+}
+
+#[async_trait]
+impl OrchestratorHandle for ConversationOrchestrator {
+    async fn current_session_id(&self) -> protocol::SessionId {
+        self.session.lock().await.session_id
+    }
+
+    async fn clear_session(&self) -> Result<(), HandleError> {
+        self.run_owned_session_switch(OwnedSessionSwitch::Clear)
+            .await
+    }
+
+    /// Adopt a replayed session IN PLACE — the symmetric twin of
+    /// [`Self::clear_session`]. Where `clear_session` wipes the history and
+    /// MINTS a fresh `SessionId`, `resume_session` ADOPTS the named on-disk
+    /// session: it swaps in the replayed `history`, adopts the named
+    /// `session_id` (so the running orchestrator IS the resumed session), and
+    /// seeds the JSONL parent-uuid chain to `last_jsonl_uuid` so any future
+    /// append chains via `parent_uuid` off the resumed tail (the same field
+    /// `with_resume` overrides at construction time, here applied to a live
+    /// orchestrator).
+    ///
+    /// When the replay carries a resolved model, it replaces `s.model` and its
+    /// provider-profile hint. Legacy/default callers leave the live values
+    /// unchanged by passing an empty model.
+    async fn resume_session(
+        &self,
+        session_id: protocol::SessionId,
+        history: Vec<protocol::ConversationMessage>,
+        last_jsonl_uuid: Option<String>,
+        active_goal: Option<ActiveGoalSnapshot>,
+        runtime: platform_api::ResumeRuntimeSnapshot,
+    ) -> Result<(), HandleError> {
+        self.run_owned_session_switch(OwnedSessionSwitch::Resume {
+            session_id,
+            history,
+            last_jsonl_uuid,
+            active_goal,
+            runtime,
+        })
+        .await
     }
 
     async fn force_compact(&self) -> Result<CompactionSummary, HandleError> {
@@ -3003,6 +3199,285 @@ mod tests {
             Some("xhigh")
         );
         std::fs::remove_dir_all(root).ok();
+    }
+
+    struct BlockingSessionPreparer {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        destination: std::sync::Mutex<Option<protocol::SessionId>>,
+        transcript_lock: Arc<session::jsonl::DurableTranscriptWriter>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::conversation::CostSessionSwitcher for BlockingSessionPreparer {
+        async fn prepare_session(
+            &self,
+            tracker: Arc<cost::CostTracker>,
+            session_id: protocol::SessionId,
+        ) -> Result<crate::conversation::PreparedSessionSwitch, cost::CostPersistError> {
+            let cost = tracker.prepare_session(session_id).await?;
+            *self
+                .destination
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session_id);
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(crate::conversation::PreparedSessionSwitch::new(
+                cost,
+                Some(self.transcript_lock.clone()),
+            ))
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSessionActivationObserver {
+        activations:
+            std::sync::Mutex<Vec<(protocol::SessionId, protocol::SessionId)>>,
+        changed: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::conversation::SessionActivationObserver for RecordingSessionActivationObserver {
+        async fn session_activated(
+            &self,
+            previous: protocol::SessionId,
+            current: protocol::SessionId,
+        ) -> Result<(), String> {
+            self.activations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((previous, current));
+            self.changed.notify_waiters();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn dropped_hot_clear_keeps_a_coherent_until_owned_b_commit_finishes() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_a = protocol::SessionId::new();
+        let (persist_tx, _persist_rx) = tokio::sync::mpsc::channel(8);
+        let tracker = Arc::new(cost::CostTracker::new(
+            session_a,
+            Arc::new(cost::PricingCatalog::empty()),
+            persist_tx,
+        ));
+        let root_a = temp.path().join("authority-a");
+        let root_b = temp.path().join("authority-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let lock_a = Arc::new(session::jsonl::DurableTranscriptWriter::open(&root_a).unwrap());
+        let lock_b = Arc::new(session::jsonl::DurableTranscriptWriter::open(&root_b).unwrap());
+        let cwd = temp.path().join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let path_a = session::jsonl::path::session_path(
+            temp.path(),
+            &cwd.to_string_lossy(),
+            &session_a.as_uuid().to_string(),
+        );
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(temp.path().to_path_buf()),
+        );
+        let writer = Arc::new(
+            session::jsonl::JsonlWriter::new(path_a.clone(), fs).with_durable_lock(lock_a),
+        );
+        writer
+            .activate_session_target(session_a, path_a.clone(), cwd.clone())
+            .unwrap();
+        let preparer = Arc::new(BlockingSessionPreparer {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            destination: std::sync::Mutex::new(None),
+            transcript_lock: lock_b,
+        });
+        let orchestrator = Arc::new(
+            crate::ConversationOrchestrator::new(
+                crate::OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                cwd.clone(),
+            )
+            .with_session_id(session_a)
+            .with_jsonl_writer(writer.clone())
+            .with_config_home(temp.path().to_path_buf())
+            .with_cost_tracker(tracker.clone())
+            .with_cost_session_switcher(preparer.clone()),
+        );
+        orchestrator.attach_owned_session_switches();
+
+        let clearing = {
+            let orchestrator = orchestrator.clone();
+            tokio::spawn(async move {
+                platform_api::OrchestratorHandle::clear_session(orchestrator.as_ref()).await
+            })
+        };
+        preparer.entered.notified().await;
+        let session_b = preparer
+            .destination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("prepared destination");
+        clearing.abort();
+        let _ = clearing.await;
+
+        assert_eq!(orchestrator.current_session_id().await, session_a);
+        assert_eq!(tracker.session_id().await, session_a);
+        assert_eq!(writer.session_target_path(session_a), Some(path_a));
+        assert!(writer.session_target_path(session_b).is_none());
+
+        preparer.release.notify_one();
+        let errors = orchestrator.close_and_drain_session_switches().await;
+        assert!(errors.is_empty(), "owned switch errors: {errors:?}");
+        assert_eq!(orchestrator.current_session_id().await, session_b);
+        assert_eq!(tracker.session_id().await, session_b);
+        assert_eq!(
+            writer.session_target_path(session_b),
+            Some(session::jsonl::path::session_path(
+                temp.path(),
+                &cwd.to_string_lossy(),
+                &session_b.as_uuid().to_string(),
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_prepared_resume_is_owned_through_host_activation_and_shutdown() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_a = protocol::SessionId::new();
+        let session_b = protocol::SessionId::new();
+        let (persist_tx, _persist_rx) = tokio::sync::mpsc::channel(8);
+        let tracker = Arc::new(cost::CostTracker::new(
+            session_a,
+            Arc::new(cost::PricingCatalog::empty()),
+            persist_tx,
+        ));
+        let root_a = temp.path().join("resume-authority-a");
+        let root_b = temp.path().join("resume-authority-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let lock_a = Arc::new(session::jsonl::DurableTranscriptWriter::open(&root_a).unwrap());
+        let lock_b = Arc::new(session::jsonl::DurableTranscriptWriter::open(&root_b).unwrap());
+        let cwd = temp.path().join("resume-workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let path_a = session::jsonl::path::session_path(
+            temp.path(),
+            &cwd.to_string_lossy(),
+            &session_a.as_uuid().to_string(),
+        );
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(temp.path().to_path_buf()),
+        );
+        let writer = Arc::new(
+            session::jsonl::JsonlWriter::new(path_a.clone(), fs).with_durable_lock(lock_a),
+        );
+        writer
+            .activate_session_target(session_a, path_a.clone(), cwd.clone())
+            .unwrap();
+        let preparer = Arc::new(BlockingSessionPreparer {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            destination: std::sync::Mutex::new(None),
+            transcript_lock: lock_b,
+        });
+        let observer = Arc::new(RecordingSessionActivationObserver::default());
+        let orchestrator = Arc::new(
+            crate::ConversationOrchestrator::new(
+                crate::OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                cwd.clone(),
+            )
+            .with_session_id(session_a)
+            .with_jsonl_writer(writer.clone())
+            .with_config_home(temp.path().to_path_buf())
+            .with_cost_tracker(tracker.clone())
+            .with_cost_session_switcher(preparer.clone())
+            .with_session_activation_observer(observer.clone()),
+        );
+        orchestrator.attach_owned_session_switches();
+
+        let resuming = {
+            let orchestrator = orchestrator.clone();
+            tokio::spawn(async move {
+                platform_api::OrchestratorHandle::resume_session(
+                    orchestrator.as_ref(),
+                    session_b,
+                    Vec::new(),
+                    None,
+                    None,
+                    platform_api::ResumeRuntimeSnapshot::default(),
+                )
+                .await
+            })
+        };
+        preparer.entered.notified().await;
+        assert_eq!(
+            *preparer
+                .destination
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            Some(session_b)
+        );
+        // The destination cost/transcript authorities are prepared. Hold the
+        // conversation lock that reset/publication must acquire, then let the
+        // owner cross out of preparation and cancel only its public waiter.
+        let mounted_a = orchestrator.session.clone().lock_owned().await;
+        preparer.release.notify_one();
+        tokio::task::yield_now().await;
+        resuming.abort();
+        let _ = resuming.await;
+
+        assert_eq!(mounted_a.session_id, session_a);
+        assert_eq!(tracker.session_id().await, session_a);
+        assert_eq!(writer.session_target_path(session_a), Some(path_a));
+        assert!(writer.session_target_path(session_b).is_none());
+
+        let draining = {
+            let orchestrator = orchestrator.clone();
+            tokio::spawn(async move { orchestrator.close_and_drain_session_switches().await })
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), async {
+                while !draining.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err(),
+            "shutdown must wait for the accepted resume owner"
+        );
+        drop(mounted_a);
+        let errors = tokio::time::timeout(std::time::Duration::from_secs(2), draining)
+            .await
+            .expect("owned resume drains")
+            .expect("drain task joins");
+        assert!(errors.is_empty(), "owned switch errors: {errors:?}");
+        assert_eq!(orchestrator.current_session_id().await, session_b);
+        assert_eq!(tracker.session_id().await, session_b);
+        assert_eq!(
+            writer.session_target_path(session_b),
+            Some(session::jsonl::path::session_path(
+                temp.path(),
+                &cwd.to_string_lossy(),
+                &session_b.as_uuid().to_string(),
+            ))
+        );
+        assert_eq!(
+            observer
+                .activations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            &[(session_a, session_b)]
+        );
     }
 
     #[test]

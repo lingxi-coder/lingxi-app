@@ -245,12 +245,101 @@ impl SettingsPaths {
     }
 }
 
-/// Handle owning the spawned watcher tasks. Dropping it aborts every task
-/// (RAII teardown); each aborted task drops its `FileSystem::watch` stream,
-/// releasing the underlying `notify` OS handle.
-#[derive(Debug)]
+/// Cloneable owner of the spawned watcher tasks. Hosts use
+/// [`Self::shutdown_and_drain`] for an immediate join; dropping the last clone
+/// retains the legacy abort-on-drop fallback.
+#[derive(Debug, Clone)]
 pub struct SettingsWatcherHandle {
-    tasks: Vec<JoinHandle<()>>,
+    owner: Arc<SettingsWatcherOwner>,
+}
+
+#[derive(Debug)]
+struct SettingsWatcherOwner {
+    state: std::sync::Mutex<SettingsWatcherState>,
+    drained: tokio::sync::Notify,
+}
+
+#[derive(Debug)]
+enum SettingsWatcherState {
+    Running(Vec<JoinHandle<()>>),
+    Draining,
+    Drained,
+}
+
+impl SettingsWatcherOwner {
+    fn begin_drain(self: &Arc<Self>) {
+        let tasks = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &mut *state {
+                SettingsWatcherState::Running(tasks) => {
+                    let tasks = std::mem::take(tasks);
+                    *state = SettingsWatcherState::Draining;
+                    Some(tasks)
+                }
+                SettingsWatcherState::Draining | SettingsWatcherState::Drained => None,
+            }
+        };
+        let Some(tasks) = tasks else {
+            return;
+        };
+        for task in &tasks {
+            task.abort();
+        }
+        if tasks.is_empty() {
+            *self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = SettingsWatcherState::Drained;
+            self.drained.notify_waiters();
+            return;
+        }
+        let owner = self.clone();
+        tokio::spawn(async move {
+            for task in tasks {
+                let _ = task.await;
+            }
+            *owner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = SettingsWatcherState::Drained;
+            owner.drained.notify_waiters();
+        });
+    }
+
+    async fn wait_drained(&self) {
+        loop {
+            let notified = self.drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if matches!(
+                &*self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                SettingsWatcherState::Drained
+            ) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Drop for SettingsWatcherOwner {
+    fn drop(&mut self) {
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let SettingsWatcherState::Running(tasks) = state {
+            for task in tasks.iter() {
+                task.abort();
+            }
+        }
+    }
 }
 
 impl SettingsWatcherHandle {
@@ -258,21 +347,38 @@ impl SettingsWatcherHandle {
     /// watched). Dropping it is a no-op.
     #[must_use]
     pub fn empty() -> Self {
-        Self { tasks: Vec::new() }
+        Self::from_tasks(Vec::new())
     }
 
     /// Number of live watch tasks (one per successfully-watched directory).
     #[must_use]
     pub fn task_count(&self) -> usize {
-        self.tasks.len()
-    }
-}
-
-impl Drop for SettingsWatcherHandle {
-    fn drop(&mut self) {
-        for t in &self.tasks {
-            t.abort();
+        match &*self
+            .owner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            SettingsWatcherState::Running(tasks) => tasks.len(),
+            SettingsWatcherState::Draining | SettingsWatcherState::Drained => 0,
         }
+    }
+
+    fn from_tasks(tasks: Vec<JoinHandle<()>>) -> Self {
+        Self {
+            owner: Arc::new(SettingsWatcherOwner {
+                state: std::sync::Mutex::new(SettingsWatcherState::Running(tasks)),
+                drained: tokio::sync::Notify::new(),
+            }),
+        }
+    }
+
+    /// Abort every watch job and wait for their futures to release the
+    /// orchestrator/filesystem owners. The join is owned after the first call,
+    /// so cancelling one waiter cannot make a concurrent shutdown return early.
+    pub async fn shutdown_and_drain(&self) {
+        self.owner.begin_drain();
+        self.owner.wait_drained().await;
     }
 }
 
@@ -322,7 +428,9 @@ impl SettingsWatcher {
             firer,
             permission_gate,
         } = self;
-        let mut tasks = Vec::new();
+        // Own each task before awaiting the next watch setup. Cancellation of
+        // construction must abort prior loops even before a handle is returned.
+        let handle = SettingsWatcherHandle::empty();
         for dir in paths.watch_dirs() {
             if !dir.is_dir() {
                 continue;
@@ -338,11 +446,19 @@ impl SettingsWatcher {
             let paths = paths.clone();
             let firer = firer.clone();
             let permission_gate = permission_gate.clone();
+            let mut state = handle
+                .owner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let SettingsWatcherState::Running(tasks) = &mut *state else {
+                unreachable!("construction has not published the watcher handle");
+            };
             tasks.push(tokio::spawn(async move {
                 run_watch_loop_with_permission_gate(stream, paths, firer, permission_gate).await;
             }));
         }
-        SettingsWatcherHandle { tasks }
+        handle
     }
 }
 
@@ -411,6 +527,185 @@ mod tests {
     use super::*;
     use platform_api::FileEventKind;
     use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct DropBarrier {
+        entered: tokio::sync::Notify,
+        released: Mutex<bool>,
+        release: std::sync::Condvar,
+    }
+
+    struct BarrierGuard(Arc<DropBarrier>);
+
+    impl Drop for BarrierGuard {
+        fn drop(&mut self) {
+            self.0.entered.notify_one();
+            let released = self.0.released.lock().unwrap();
+            let _ = self
+                .0
+                .release
+                .wait_timeout_while(released, std::time::Duration::from_secs(5), |ready| !*ready)
+                .unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn settings_drain_survives_cancelled_waiter_and_joins_before_concurrent_return() {
+        let barrier = Arc::new(DropBarrier::default());
+        let owner = Arc::new(());
+        let weak = Arc::downgrade(&owner);
+        let guard = BarrierGuard(barrier.clone());
+        let task = tokio::spawn(async move {
+            let _owner = owner;
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+        let handle = SettingsWatcherHandle::from_tasks(vec![task]);
+        let first_handle = handle.clone();
+        let first = tokio::spawn(async move { first_handle.shutdown_and_drain().await });
+        barrier.entered.notified().await;
+        first.abort();
+        let _ = first.await;
+        let second_handle = handle.clone();
+        let mut second = tokio::spawn(async move { second_handle.shutdown_and_drain().await });
+        let premature = tokio::time::timeout(std::time::Duration::from_millis(100), &mut second)
+            .await
+            .is_ok();
+        *barrier.released.lock().unwrap() = true;
+        barrier.release.notify_all();
+        if !premature {
+            tokio::time::timeout(std::time::Duration::from_secs(2), second)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert!(!premature);
+        assert!(weak.upgrade().is_none());
+        handle.shutdown_and_drain().await;
+    }
+
+    struct ConstructionFs {
+        calls: std::sync::atomic::AtomicUsize,
+        second_watch: tokio::sync::Notify,
+        first_stream_dropped: Arc<tokio::sync::Notify>,
+    }
+
+    struct PendingStream(Arc<tokio::sync::Notify>);
+
+    impl Stream for PendingStream {
+        type Item = FileEvent;
+        fn poll_next(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<FileEvent>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl Drop for PendingStream {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    #[async_trait]
+    impl FileSystem for ConstructionFs {
+        async fn read_file(
+            &self,
+            _: &str,
+            _: Option<u64>,
+            _: Option<u64>,
+        ) -> Result<platform_api::FileContent, platform_api::FsError> {
+            Err(platform_api::FsError::Io("unused".into()))
+        }
+        async fn write_file(&self, _: &str, _: &str) -> Result<(), platform_api::FsError> {
+            Ok(())
+        }
+        fn is_within_workspace(&self, _: &str) -> bool {
+            true
+        }
+        async fn watch(
+            &self,
+            _: &str,
+        ) -> Result<std::pin::Pin<Box<dyn Stream<Item = FileEvent> + Send>>, platform_api::FsError>
+        {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Ok(Box::pin(PendingStream(self.first_stream_dropped.clone())));
+            }
+            self.second_watch.notify_one();
+            std::future::pending().await
+        }
+        async fn append_file(&self, _: &str, _: &str) -> Result<(), platform_api::FsError> {
+            Ok(())
+        }
+        async fn truncate(&self, _: &str, _: u64) -> Result<(), platform_api::FsError> {
+            Ok(())
+        }
+        async fn file_mtime(
+            &self,
+            _: &str,
+        ) -> Result<std::time::SystemTime, platform_api::FsError> {
+            Ok(std::time::SystemTime::UNIX_EPOCH)
+        }
+        async fn file_size(&self, _: &str) -> Result<u64, platform_api::FsError> {
+            Ok(0)
+        }
+        async fn delete_file(&self, _: &str) -> Result<(), platform_api::FsError> {
+            Ok(())
+        }
+        async fn symlink(&self, _: &str, _: &str) -> Result<(), platform_api::FsError> {
+            Ok(())
+        }
+        async fn flock_exclusive(
+            &self,
+            _: &str,
+        ) -> Result<Box<dyn platform_api::FlockGuard>, platform_api::FsError> {
+            Err(platform_api::FsError::Io("unused".into()))
+        }
+        async fn fsync(&self, _: &str) -> Result<(), platform_api::FsError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_settings_construction_aborts_already_spawned_directory_loops() {
+        let root = tempfile::tempdir().unwrap();
+        let user = root.path().join("user");
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let firer = Arc::new(RecordingFirer::default());
+        let weak = Arc::downgrade(&firer);
+        let fs = Arc::new(ConstructionFs {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            second_watch: tokio::sync::Notify::new(),
+            first_stream_dropped: Arc::new(tokio::sync::Notify::new()),
+        });
+        let watcher = SettingsWatcher {
+            paths: SettingsPaths {
+                user_settings: user.join("settings.json"),
+                project_settings: project.join("settings.json"),
+                local_settings: project.join("settings.local.json"),
+                policy_settings: root.path().join("absent/policy.json"),
+                policy_drop_in_dir: root.path().join("absent/dropins"),
+            },
+            firer,
+            permission_gate: None,
+        };
+        let task_fs = fs.clone();
+        let construction = tokio::spawn(async move { watcher.spawn(task_fs).await });
+        fs.second_watch.notified().await;
+        construction.abort();
+        let _ = construction.await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            fs.first_stream_dropped.notified().await;
+            while weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled construction must release prior directory loops and firer");
+    }
 
     /// Recording fake firer — captures every `(source, file_path)` the watcher
     /// fires so tests can assert deterministically without a real orchestrator.

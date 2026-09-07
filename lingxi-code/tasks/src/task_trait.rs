@@ -20,6 +20,14 @@ pub trait Task: Send + Sync {
         -> Result<TaskHandle, TaskError>;
     /// Kill a running task instance.
     async fn kill(&self, task_id: &str, ctx: TaskContext) -> Result<(), TaskError>;
+    /// Wait for handler-owned workers that already won natural finalization.
+    ///
+    /// Ordinary [`Self::kill`] must return immediately when cancellation loses
+    /// to a finalizing worker. Host shutdown calls this separate barrier only
+    /// after task admission is closed and every cancellable task was stopped.
+    async fn drain_shutdown(&self) -> Result<(), TaskError> {
+        Ok(())
+    }
     /// Whether this task type supports inbound messages.
     fn supports_messages(&self) -> bool {
         false

@@ -19,7 +19,7 @@ use platform_api::{
     FusionExecutor, ProcessRunner, RuntimeSpawner, Sandbox, SubagentSpawner, ToolInvoker,
 };
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
@@ -34,7 +34,12 @@ pub struct TaskRegistry {
     /// still win on lookup; aliases only bridge claude-code's Agent return
     /// surface to the task registry's `a…`/`t…` ids.
     aliases: Arc<RwLock<HashMap<String, String>>>,
-    handlers: HashMap<TaskType, Arc<dyn Task>>,
+    /// Per-type owners are interior-mutable only so shutdown can sever the
+    /// registry -> handler side of the composition graph after every worker
+    /// has stopped. Some handlers legitimately point back toward the registry
+    /// through tool registries; retaining them forever would otherwise pin the
+    /// old session's cost and persistence authority across a remount.
+    handlers: RwLock<HashMap<TaskType, Arc<dyn Task>>>,
     handles: Arc<tokio::sync::Mutex<HashMap<String, BackgroundTaskHandle>>>,
     /// Handler-returned cleanup hooks keyed by task id. Handler-spawned tasks
     /// often own runtime work internally; preserving this hook lets the registry
@@ -58,12 +63,12 @@ pub struct TaskRegistry {
     /// injects a real firer via [`with_task_completed_firer`](Self::with_task_completed_firer).
     /// Mirrors the `TeamSpawnSeam` decoupling: the `tasks` leaf cannot reach a
     /// live hook executor, so it calls through this narrow trait instead.
-    task_completed_firer: hooks::OptionalTaskCompletedFirer,
+    task_completed_firer: std::sync::Mutex<hooks::OptionalTaskCompletedFirer>,
     /// Best-effort seam to fire the `TaskCreated` hook when a task is created.
     /// Counterpart to [`task_completed_firer`](Self::task_completed_firer):
     /// `None` (the default) => strict no-op; the orchestrator injects a real
     /// firer via [`with_task_created_firer`](Self::with_task_created_firer).
-    task_created_firer: hooks::OptionalTaskCreatedFirer,
+    task_created_firer: std::sync::Mutex<hooks::OptionalTaskCreatedFirer>,
     /// Task ids of PERSISTENT agents that came to rest since the last drain —
     /// armed by [`mark_task_rested`](Self::mark_task_rested) (via the status
     /// sink's `notify_rest`), surfaced ONCE per rest by
@@ -92,6 +97,11 @@ pub struct TaskRegistry {
     /// ONE budget per session. An `Arc<AtomicU32>` — cheap atomic reads/writes off
     /// the tool's hot path, no lock.
     web_search_calls: Arc<std::sync::atomic::AtomicU32>,
+    /// Admission fence for host teardown. Spawn/register paths hold a shared
+    /// guard through publication; shutdown takes the exclusive guard, closes
+    /// admission, then snapshots every published owner without a race window.
+    lifecycle_gate: Arc<RwLock<()>>,
+    accepting_tasks: AtomicBool,
 }
 
 /// The optional `<result>` / `<usage>` payload an agent carries when it comes to
@@ -260,21 +270,23 @@ impl TaskRegistry {
             workflow_launch_reservations: Arc::new(std::sync::Mutex::new(HashSet::new())),
             workflow_session_filter: Arc::new(std::sync::RwLock::new(None)),
             aliases: Arc::new(RwLock::new(HashMap::new())),
-            handlers: HashMap::new(),
+            handlers: RwLock::new(HashMap::new()),
             handles: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cleanups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             spawned: Arc::new(RwLock::new(HashMap::new())),
             runtime,
             fs,
             output_manager,
-            task_completed_firer: None,
-            task_created_firer: None,
+            task_completed_firer: std::sync::Mutex::new(None),
+            task_created_firer: std::sync::Mutex::new(None),
             pending_rest: Arc::new(RwLock::new(std::collections::HashMap::new())),
             pending_monitor_events: Arc::new(tokio::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
             total_agent_spawns: AtomicU64::new(0),
             web_search_calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            lifecycle_gate: Arc::new(RwLock::new(())),
+            accepting_tasks: AtomicBool::new(true),
         }
     }
 
@@ -356,7 +368,7 @@ impl TaskRegistry {
     /// here so a terminal status transition fires the `TaskCompleted` hook.
     #[must_use]
     pub fn with_task_completed_firer(mut self, firer: Arc<dyn hooks::TaskCompletedFirer>) -> Self {
-        self.task_completed_firer = Some(firer);
+        self.task_completed_firer = std::sync::Mutex::new(Some(firer));
         self
     }
 
@@ -367,13 +379,13 @@ impl TaskRegistry {
     /// hook.
     #[must_use]
     pub fn with_task_created_firer(mut self, firer: Arc<dyn hooks::TaskCreatedFirer>) -> Self {
-        self.task_created_firer = Some(firer);
+        self.task_created_firer = std::sync::Mutex::new(Some(firer));
         self
     }
 
     /// Register a per-type handler.
     pub fn register_handler(&mut self, task_type: TaskType, handler: Arc<dyn Task>) {
-        self.handlers.insert(task_type, handler);
+        self.handlers.get_mut().insert(task_type, handler);
     }
 
     /// Resolve `id_or_alias` to the canonical task id. A real task id wins over
@@ -428,6 +440,10 @@ impl TaskRegistry {
         _input: TaskSpawnInput,
         description: String,
     ) -> Result<String, TaskError> {
+        let _admission = self.lifecycle_gate.read().await;
+        if !self.accepting_tasks.load(Ordering::Acquire) {
+            return Err(TaskError::Internal("task registry is shutting down".into()));
+        }
         let id = generate_task_id(task_type);
         let path = self
             .output_manager
@@ -498,7 +514,12 @@ impl TaskRegistry {
     /// `teammate_name` / `team_name` are not stored on the task state, so they
     /// ride as `None` (the same documented gap as the `TaskCompleted` fire).
     async fn fire_task_created(&self, task_id: &str, task_type: TaskType, description: &str) {
-        if let Some(firer) = &self.task_created_firer {
+        let firer = self
+            .task_created_firer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(firer) = firer {
             let (teammate_name, team_name) = self
                 .get(task_id)
                 .await
@@ -558,6 +579,10 @@ impl TaskRegistry {
         creator_agent_id: Option<protocol::AgentId>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String, TaskError> {
+        let _admission = self.lifecycle_gate.read().await;
+        if !self.accepting_tasks.load(Ordering::Acquire) {
+            return Err(TaskError::Internal("task registry is shutting down".into()));
+        }
         let id = generate_task_id(TaskType::McpTask);
         let path = self
             .output_manager
@@ -690,7 +715,12 @@ impl TaskRegistry {
         // it either wins the guard (settle no-ops before here) or loses it (and
         // its `Killed` transition, which has no claude-code counterpart, never
         // fires). Only `Completed` / `Failed` fire; no-op without a firer.
-        if let Some(firer) = &self.task_completed_firer {
+        let firer = self
+            .task_completed_firer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(firer) = firer {
             let status_str = if failed { "failed" } else { "completed" };
             firer
                 .fire(hooks::TaskCompletedFire {
@@ -732,10 +762,16 @@ impl TaskRegistry {
         input: TaskSpawnInput,
         description: String,
     ) -> Result<String, TaskError> {
+        let _admission = self.lifecycle_gate.read().await;
+        if !self.accepting_tasks.load(Ordering::Acquire) {
+            return Err(TaskError::Internal("task registry is shutting down".into()));
+        }
         // 1. Look up the per-type handler first — a missing handler is a clean
         //    error before any side effects (spool allocation, state insert).
         let handler = self
             .handlers
+            .read()
+            .await
             .get(&task_type)
             .ok_or(TaskError::UnknownType)?
             .clone();
@@ -1332,7 +1368,12 @@ impl TaskRegistry {
         status: TaskStatus,
         updated: &TaskState,
     ) {
-        if let Some(firer) = &self.task_completed_firer {
+        let firer = self
+            .task_completed_firer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(firer) = firer {
             let status_str = match status {
                 TaskStatus::Completed => Some("completed"),
                 TaskStatus::Failed => Some("failed"),
@@ -1967,6 +2008,86 @@ impl TaskRegistry {
         }
     }
 
+    /// Stop task admission and ask every published background owner to finish
+    /// or cancel. The exclusive admission fence closes the spawn/snapshot gap:
+    /// after it is released, no task can appear outside this drain set.
+    /// Teardown attempts every task and returns the first error only afterward.
+    pub async fn shutdown_background_tasks(&self) -> Result<(), TaskError> {
+        let admission = self.lifecycle_gate.write().await;
+        self.accepting_tasks.store(false, Ordering::Release);
+        let mut task_ids = self
+            .spawned
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        task_ids.extend(self.handles.lock().await.keys().cloned());
+        task_ids.extend(self.cleanups.lock().await.keys().cloned());
+        task_ids.sort();
+        task_ids.dedup();
+        drop(admission);
+
+        let mut first_error = None;
+        for task_id in task_ids {
+            if let Err(error) = self.kill(&task_id).await {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        let handlers = self
+            .handlers
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for handler in &handlers {
+            if let Err(error) = handler.drain_shutdown().await {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+
+        // A failed cancellation must not skip another handler's natural
+        // finalization barrier. Attempt every drain before reporting failure,
+        // but retain the graph for retry when any owner could still be live:
+        // a handler's default no-op drain cannot prove a failed kill stopped it.
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+
+        // Every handler-owned worker has now acknowledged teardown. Release
+        // the handler graph before the registry itself is dropped so deferred
+        // tool invokers cannot retain a path back to this registry (and thus
+        // to the old session's budget/persistence authorities).
+        self.handlers.write().await.clear();
+        // Task lifecycle firers are allowed to share the production hook
+        // executor. That executor can reach the agent spawner's late-bound tool
+        // registry, whose builtin context points back to this registry. Keep the
+        // firers live through every handler drain above (terminal hook ordering),
+        // then sever both back edges before returning from shutdown.
+        let task_created_firer = {
+            self.task_created_firer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+        };
+        let task_completed_firer = {
+            self.task_completed_firer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+        };
+        // Trait-object destructors may tear down an entire composition graph
+        // and re-enter registry code. Never run them while either firer mutex
+        // is held.
+        drop((task_created_firer, task_completed_firer));
+        Ok(())
+    }
+
     /// Kill a task, cancelling its background handle if any.
     ///
     /// Two paths, decided by how the task was started:
@@ -1995,8 +2116,11 @@ impl TaskRegistry {
         if let Some(task_type) = spawned_type {
             let handler = self
                 .handlers
+                .read()
+                .await
                 .get(&task_type)
-                .ok_or(TaskError::UnknownType)?;
+                .ok_or(TaskError::UnknownType)?
+                .clone();
             let ctx = TaskContext {
                 fs: self.fs.clone(),
                 runtime: self.runtime.clone(),
@@ -2145,6 +2269,8 @@ impl TeamSpawnSeam for TaskRegistry {
             .ok_or(TeamSpawnError::Terminated)?;
         let handler = self
             .handlers
+            .read()
+            .await
             .get(&task_type)
             .ok_or_else(|| TeamSpawnError::Unsupported(format!("{task_type:?}")))?
             .clone();
@@ -2621,13 +2747,70 @@ pub fn register_fusion_handler(
     budget: Arc<dyn BudgetEnforcerHandle>,
     status_sink: Arc<dyn crate::handlers::TaskStatusSink>,
 ) {
+    register_fusion_handler_with_recorder(
+        reg,
+        executor,
+        sink,
+        tool_invoker,
+        budget,
+        status_sink,
+        None,
+    );
+}
+
+/// Register Fusion with the common host-owned terminal recorder. The legacy
+/// helper above remains for mobile/tests that intentionally have no durable
+/// session capability.
+pub fn register_fusion_handler_with_recorder(
+    reg: &mut TaskRegistry,
+    executor: Arc<dyn FusionExecutor>,
+    sink: Arc<dyn FusionCompletionSink>,
+    tool_invoker: Arc<dyn ToolInvoker>,
+    budget: Arc<dyn BudgetEnforcerHandle>,
+    status_sink: Arc<dyn crate::handlers::TaskStatusSink>,
+    terminal_recorder: Option<Arc<dyn platform_api::FusionRunRecorder>>,
+) {
+    register_fusion_handler_with_recorder_factory(
+        reg,
+        executor,
+        sink,
+        tool_invoker,
+        budget,
+        status_sink,
+        terminal_recorder,
+        None,
+    );
+}
+
+/// Register Fusion with both a compatibility recorder and a pure per-session
+/// factory. The factory wins for production preparation so hot session
+/// switches cannot bind a new run to the boot session's coordinator.
+pub fn register_fusion_handler_with_recorder_factory(
+    reg: &mut TaskRegistry,
+    executor: Arc<dyn FusionExecutor>,
+    sink: Arc<dyn FusionCompletionSink>,
+    tool_invoker: Arc<dyn ToolInvoker>,
+    budget: Arc<dyn BudgetEnforcerHandle>,
+    status_sink: Arc<dyn crate::handlers::TaskStatusSink>,
+    terminal_recorder: Option<Arc<dyn platform_api::FusionRunRecorder>>,
+    terminal_recorder_factory: Option<Arc<dyn platform_api::FusionRunRecorderFactory>>,
+) {
     let output_manager = reg.output_manager.clone();
+    let handler = LocalFusionHandler::new(executor, sink, tool_invoker, budget, output_manager)
+        .with_status_sink(status_sink);
+    let handler = if let Some(recorder) = terminal_recorder {
+        handler.with_terminal_recorder(recorder)
+    } else {
+        handler
+    };
+    let handler = if let Some(factory) = terminal_recorder_factory {
+        handler.with_terminal_recorder_factory(factory)
+    } else {
+        handler
+    };
     reg.register_handler(
         TaskType::LocalFusion,
-        Arc::new(
-            LocalFusionHandler::new(executor, sink, tool_invoker, budget, output_manager)
-                .with_status_sink(status_sink),
-        ),
+        Arc::new(handler),
     );
 }
 

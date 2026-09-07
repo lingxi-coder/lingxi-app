@@ -14,9 +14,10 @@ use async_trait::async_trait;
 use platform_api::{
     BackgroundTaskHandle, BudgetEnforcerHandle, FusionActivation, FusionCompletionSink,
     FusionError, FusionExecutor, FusionInheritance, FusionOrigin, FusionPreparedSummary,
-    FusionPublicationReceipt, FusionResult, FusionRunFacts, FusionRunId, FusionRunIdentity,
+    FusionResult, FusionRunFacts, FusionRunId, FusionRunIdentity,
     FusionRunOutcome, FusionStatus, FusionSubmission, PreparedFusionRun, RuntimeSpawner,
-    SubagentInheritance, ToolInvoker,
+    SubagentInheritance, ToolInvoker, FusionRunRecorder, FusionSlashPublicationTarget,
+    FusionRunRecorderFactory, FusionTerminalCapability,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -77,12 +78,12 @@ impl Drop for WorkerCompletionSignal {
 /// F012). Mirrors `local_workflow::cancel_workflow_worker`.
 async fn cancel_fusion_worker(rec: WorkerCancel) -> Result<(), TaskError> {
     rec.control.cancel().cancel();
-    let completion_rx = rec
+    let mut completion_rx = rec
         .completion_rx
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
-    let completed = if let Some(completion_rx) = completion_rx {
+    let completed = if let Some(completion_rx) = completion_rx.as_mut() {
         tokio::time::timeout(FUSION_KILL_COMPLETION_GRACE, completion_rx)
             .await
             .is_ok()
@@ -94,6 +95,9 @@ async fn cancel_fusion_worker(rec: WorkerCancel) -> Result<(), TaskError> {
             .cancel(&rec.handle)
             .await
             .map_err(|error| TaskError::Io(error.to_string()))?;
+        if let Some(completion_rx) = completion_rx {
+            let _ = completion_rx.await;
+        }
     }
     Ok(())
 }
@@ -166,9 +170,22 @@ async fn finalize_fusion_outcome(
                     Some(usage_summary),
                 )
                 .await;
-            status_sink
-                .set_fusion_publication(worker_task_id, FusionPublicationReceipt::pending())
-                .await;
+            // Production prepared runs have already recorded the sealed
+            // terminal outcome before `activate()` returned. Only legacy
+            // callers without a capability use the old completion sink. Keep
+            // that adapter's historical ordering (task outcome first, then
+            // sink publication) so old hosts can observe a completed answer
+            // even when their best-effort UI sink fails. Typed production
+            // receipts are projected before the terminal row becomes visible;
+            // they never call the legacy sink or get published twice.
+            let legacy_sink = outcome.publication.status
+                == platform_api::FusionPublicationStatus::NotRequired;
+            let mut receipt = outcome.publication.clone();
+            if !legacy_sink {
+                status_sink
+                    .set_fusion_publication(worker_task_id, receipt.clone())
+                    .await;
+            }
             status_sink
                 .finish_fusion_terminal(
                     worker_task_id,
@@ -177,14 +194,16 @@ async fn finalize_fusion_outcome(
                     TaskStatus::Completed,
                 )
                 .await;
+            if legacy_sink {
+                receipt = sink.publish(conversation_id, result).await;
+                status_sink
+                    .set_fusion_publication(worker_task_id, receipt.clone())
+                    .await;
+            }
             // Publication is independent from computation. The terminal
             // answer is retained even when the append fails; only the typed
             // receipt decides readiness and the legacy `result_published`
             // compatibility flag.
-            let receipt = sink.publish(conversation_id, result).await;
-            status_sink
-                .set_fusion_publication(worker_task_id, receipt.clone())
-                .await;
             if receipt.is_published() {
                 // Keep the old narrow hook for standalone sinks and older
                 // status adapters; its registry implementation now writes a
@@ -209,6 +228,9 @@ async fn finalize_fusion_outcome(
             )
             .await;
             status_sink
+                .set_fusion_publication(worker_task_id, outcome.publication.clone())
+                .await;
+            status_sink
                 .set_status(worker_task_id, TaskStatus::Killed)
                 .await;
         }
@@ -224,6 +246,9 @@ async fn finalize_fusion_outcome(
                 last_egress_profiles,
             )
             .await;
+            status_sink
+                .set_fusion_publication(worker_task_id, outcome.publication.clone())
+                .await;
             status_sink
                 .set_fusion_error(worker_task_id, err.to_string())
                 .await;
@@ -475,6 +500,8 @@ pub struct LocalFusionHandler {
     status_sink: Arc<dyn TaskStatusSink>,
     workers: Arc<Mutex<HashMap<String, WorkerCancel>>>,
     pending_kill: Arc<StdMutex<Vec<String>>>,
+    terminal_recorder: Option<Arc<dyn FusionRunRecorder>>,
+    terminal_recorder_factory: Option<Arc<dyn FusionRunRecorderFactory>>,
 }
 
 impl LocalFusionHandler {
@@ -496,6 +523,8 @@ impl LocalFusionHandler {
             status_sink: Arc::new(NoopStatusSink),
             workers: Arc::new(Mutex::new(HashMap::new())),
             pending_kill: Arc::new(StdMutex::new(Vec::new())),
+            terminal_recorder: None,
+            terminal_recorder_factory: None,
         }
     }
 
@@ -503,6 +532,24 @@ impl LocalFusionHandler {
     #[must_use]
     pub fn with_status_sink(mut self, sink: Arc<dyn TaskStatusSink>) -> Self {
         self.status_sink = sink;
+        self
+    }
+
+    /// Attach the host-owned common terminal recorder. Preparation remains
+    /// pure; the capability is attached only after trusted identity creation.
+    #[must_use]
+    pub fn with_terminal_recorder(mut self, recorder: Arc<dyn FusionRunRecorder>) -> Self {
+        self.terminal_recorder = Some(recorder);
+        self
+    }
+
+    /// Attach a pure per-session recorder factory for hot session switches.
+    #[must_use]
+    pub fn with_terminal_recorder_factory(
+        mut self,
+        factory: Arc<dyn FusionRunRecorderFactory>,
+    ) -> Self {
+        self.terminal_recorder_factory = Some(factory);
         self
     }
 
@@ -631,6 +678,20 @@ impl Task for LocalFusionHandler {
                 PreparedFusionRun::failed(fallback_summary.clone(), control, error)
             }
         };
+        let recorder = if let Some(factory) = self.terminal_recorder_factory.as_ref() {
+            factory.recorder_for(trusted_session.expect("validated session identity"))
+        } else {
+            self.terminal_recorder.clone()
+        };
+        let prepared = if let Some(recorder) = recorder.as_ref() {
+            let capability = FusionTerminalCapability::new(recorder.clone());
+            let capability = trusted_session.map_or(capability.clone(), |session_id| {
+                capability.with_slash_target(FusionSlashPublicationTarget { session_id })
+            });
+            prepared.with_terminal_capability(capability)
+        } else {
+            prepared
+        };
         let prepared_summary = prepared.summary().clone();
         let prepared_control = prepared.control();
         let sink = self.sink.clone();
@@ -724,6 +785,26 @@ impl Task for LocalFusionHandler {
             self.status_sink
                 .set_status(task_id, TaskStatus::Killed)
                 .await;
+        }
+        Ok(())
+    }
+
+    async fn drain_shutdown(&self) -> Result<(), TaskError> {
+        let completions = {
+            let workers = self.workers.lock().await;
+            workers
+                .values()
+                .filter_map(|worker| {
+                    worker
+                        .completion_rx
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                })
+                .collect::<Vec<_>>()
+        };
+        for completion in completions {
+            let _ = completion.await;
         }
         Ok(())
     }

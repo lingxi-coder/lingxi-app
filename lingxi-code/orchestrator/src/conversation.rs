@@ -1365,7 +1365,9 @@ mod wiring_impl;
 mod runtime_impl;
 
 use drivers_impl::parse_generated_session_name;
-pub use runtime_impl::SessionMemoryHandle;
+pub use runtime_impl::{
+    CostSessionSwitcher, PreparedSessionSwitch, SessionActivationObserver, SessionMemoryHandle,
+};
 use runtime_impl::{
     camelize_json_keys, compact_file_reference_body, extend_session_memory_fork_context,
     find_unresolved_tool_use_in_history, read_utf8_prefix, CompactionRuntime, LifecycleRuntime,

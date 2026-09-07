@@ -13,7 +13,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::Message;
@@ -139,12 +139,13 @@ pub trait FramePump: Send + Sync + 'static {
 ///
 /// The accept loop runs in a background task spawned by
 /// [`McpEndpoint::start_on_ephemeral_port`]; [`shutdown`](Self::shutdown)
-/// signals that task to stop. In-flight connections are NOT awaited — drop
-/// the handle (the runtime tears them down when the parent task ends).
+/// signals that task to stop and waits for every accepted connection to run
+/// its `FramePump::on_close_with_sink` teardown.
 pub struct McpEndpoint {
     port: u16,
     auth_token: Arc<RwLock<Option<String>>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    accept_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl McpEndpoint {
@@ -183,12 +184,24 @@ impl McpEndpoint {
         let port = listener.local_addr()?.port();
         let auth_token: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+        let (connection_shutdown_tx, _) = watch::channel(false);
 
         let auth_for_task = auth_token.clone();
-        tokio::spawn(async move {
+        let accept_task = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
             loop {
                 tokio::select! {
-                    _ = &mut shutdown_rx => break,
+                    biased;
+                    _ = &mut shutdown_rx => {
+                        let _ = connection_shutdown_tx.send(true);
+                        while connections.join_next().await.is_some() {}
+                        break;
+                    }
+                    completed = connections.join_next(), if !connections.is_empty() => {
+                        if let Some(Err(error)) = completed {
+                            tracing::warn!(%error, "bridge connection task failed");
+                        }
+                    }
                     accept = listener.accept() => {
                         let (stream, addr) = match accept {
                             Ok(v) => v,
@@ -199,7 +212,13 @@ impl McpEndpoint {
                         };
                         let auth_for_conn = auth_for_task.clone();
                         let pump_for_conn = pump.clone();
-                        tokio::spawn(handle_connection(stream, addr, auth_for_conn, pump_for_conn));
+                        connections.spawn(handle_connection(
+                            stream,
+                            addr,
+                            auth_for_conn,
+                            pump_for_conn,
+                            connection_shutdown_tx.subscribe(),
+                        ));
                     }
                 }
             }
@@ -209,6 +228,7 @@ impl McpEndpoint {
             port,
             auth_token,
             shutdown_tx: Some(shutdown_tx),
+            accept_task: Some(accept_task),
         })
     }
 
@@ -227,14 +247,15 @@ impl McpEndpoint {
         self.port
     }
 
-    /// Stop the accept loop. Does NOT wait for in-flight connections.
-    ///
-    /// Async for symmetry with future variants that may need to drain
-    /// connections — today the oneshot send is sync.
-    #[allow(clippy::unused_async)]
+    /// Stop accepting, signal every connection loop, and wait for their pump
+    /// close hooks. Once this returns no bridge request can create new model,
+    /// task, or persistence work.
     pub async fn shutdown(mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
+        }
+        if let Some(task) = self.accept_task.take() {
+            let _ = task.await;
         }
     }
 }
@@ -248,6 +269,7 @@ async fn handle_connection(
     addr: SocketAddr,
     auth: Arc<RwLock<Option<String>>>,
     pump: Option<Arc<dyn FramePump>>,
+    mut shutdown: watch::Receiver<bool>,
 ) {
     // Snapshot the expected token BEFORE upgrade so the synchronous callback
     // can compare without re-acquiring the lock.
@@ -294,14 +316,24 @@ async fn handle_connection(
         Ok(response)
     };
 
-    match tokio_tungstenite::accept_hdr_async_with_config(stream, cb, Some(websocket_config()))
-        .await
-    {
+    let upgraded = tokio::select! {
+        biased;
+        changed = shutdown.changed() => {
+            let _ = changed;
+            return;
+        }
+        upgraded = tokio_tungstenite::accept_hdr_async_with_config(
+            stream,
+            cb,
+            Some(websocket_config()),
+        ) => upgraded,
+    };
+    match upgraded {
         Ok(ws) => {
             tracing::debug!(?addr, "bridge: client connected");
             match pump {
                 // With a pump: drive the real read/write frame loop.
-                Some(pump) => run_frame_pump(ws, addr, pump).await,
+                Some(pump) => run_frame_pump(ws, addr, pump, shutdown).await,
                 // Without a pump: historical behavior — hold the socket open
                 // until the client disconnects so the upgrade succeeds. (This
                 // is the path `mcp_endpoint_test.rs`'s upgrade test exercises.)
@@ -324,7 +356,12 @@ async fn handle_connection(
 /// the read side. The loop ends when the client disconnects, sends a Close, or
 /// every [`FrameSink`] clone is dropped AND the socket has no more inbound
 /// frames.
-async fn run_frame_pump<S>(ws: S, addr: SocketAddr, pump: Arc<dyn FramePump>)
+async fn run_frame_pump<S>(
+    ws: S,
+    addr: SocketAddr,
+    pump: Arc<dyn FramePump>,
+    mut shutdown: watch::Receiver<bool>,
+)
 where
     S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
         + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
@@ -337,6 +374,12 @@ where
 
     loop {
         tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                let _ = changed;
+                tracing::debug!(?addr, "bridge: endpoint shutdown; ending pump");
+                break;
+            }
             // Outbound: a frame the pump queued → serialize + write. `recv`
             // only yields `None` once EVERY `FrameSink` clone is dropped; the
             // loop holds `sink` for its whole lifetime, so that arm is

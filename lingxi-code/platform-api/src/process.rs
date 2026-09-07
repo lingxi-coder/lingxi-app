@@ -11,6 +11,8 @@
 use crate::sandbox::SandboxedCommand;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Consumer for a command whose output must be observed while it is running.
@@ -267,6 +269,52 @@ pub struct ProcessOutput {
     /// True when the runner had to kill the process for exceeding its
     /// timeout.
     pub timed_out: bool,
+}
+
+/// A task identity a caller binds to a command it intends to background, so the
+/// engine's task registry and the process runner agree on ONE id and ONE output
+/// file for that command.
+///
+/// claude-code has a single shell spawn (`vV`, 2.1.263 `src_160988549.js`
+/// @1879742) that mints the task identity up front for every command:
+/// `Ur = Dh("local_bash"); Zr = new yI(Ur, ...)`. The id the model is handed as
+/// `backgroundTaskId`, the id the task registry records, and the file the child
+/// writes to are therefore the same identity. Without this binding the runner
+/// mints a private id in a second id space and the registry can never resolve
+/// the id the model was given.
+#[derive(Clone)]
+pub struct BackgroundTaskBinding {
+    /// Registry task id. The runner reports it back on [`ProcessHandle`] and
+    /// names the output file after it.
+    pub task_id: String,
+    /// Absolute path the child's captured output is appended to. The caller
+    /// (the task registry) has already created it, so the runner opens it for
+    /// append rather than creating it exclusively.
+    pub output_path: PathBuf,
+    /// Notified once, when the child is reaped, so the caller can settle the
+    /// task record (claude-code `Ger`, which sets the terminal status from
+    /// `Fpt(result)` and enqueues the completion `<task-notification>`).
+    pub on_exit: Option<Arc<dyn BackgroundExitSink>>,
+}
+
+impl std::fmt::Debug for BackgroundTaskBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackgroundTaskBinding")
+            .field("task_id", &self.task_id)
+            .field("output_path", &self.output_path)
+            .field("on_exit", &self.on_exit.is_some())
+            .finish()
+    }
+}
+
+/// Receives the one-shot exit report for a backgrounded child.
+#[async_trait]
+pub trait BackgroundExitSink: Send + Sync {
+    /// Called exactly once after the background child is reaped.
+    ///
+    /// `exit_code` is `None` when the platform could not report one (signalled
+    /// death, or a reaper that lost the child).
+    async fn on_exit(&self, task_id: &str, exit_code: Option<i32>);
 }
 
 /// Handle to a background process previously spawned by

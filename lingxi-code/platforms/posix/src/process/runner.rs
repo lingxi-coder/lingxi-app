@@ -351,12 +351,52 @@ impl PosixProcess {
         Self::default()
     }
 
-    #[cfg(test)]
-    fn with_task_output_dir(task_output_dir: PathBuf) -> Self {
+    /// Construct a runner whose task-output files land in `task_output_dir`.
+    ///
+    /// Composition roots point this at the SAME directory the task registry's
+    /// output manager owns, so a backgrounded command's file is readable
+    /// through the registry (claude-code has one task-output root per session:
+    /// `join(bR(), sessionId, "tasks")`, 2.1.263 `src_159581235.js` @10603).
+    #[must_use]
+    pub fn with_task_output_dir(task_output_dir: PathBuf) -> Self {
         Self {
             task_output_dir,
             task_output_root_identity: Mutex::new(None),
         }
+    }
+
+    /// Open the output file a caller bound to this command, for append.
+    ///
+    /// The bound file was created by the task registry's output manager, so it
+    /// already exists; the runner pins its parent directory's identity and
+    /// opens without following symlinks, exactly like the runner-owned path.
+    fn open_bound_output_file(
+        &self,
+        binding: &platform_api::BackgroundTaskBinding,
+    ) -> Result<std::fs::File, ProcessError> {
+        let path = &binding.output_path;
+        let parent = path
+            .parent()
+            .ok_or_else(|| self.task_output_pin_error("bound task output has no parent"))?;
+        let name = path
+            .file_name()
+            .map(Path::new)
+            .ok_or_else(|| self.task_output_pin_error("bound task output has no file name"))?;
+        let grandparent = parent
+            .parent()
+            .ok_or_else(|| self.task_output_pin_error("bound task output root has no parent"))?;
+        let dir_name = parent
+            .file_name()
+            .map(Path::new)
+            .ok_or_else(|| self.task_output_pin_error("bound task output root has no name"))?;
+        let identity = platform_api::rooted_fs::ensure_private_directory(
+            grandparent,
+            dir_name,
+            platform_api::rooted_fs::PRIVATE_DIR_MODE,
+        )
+        .map_err(|error| self.task_output_pin_error(error))?;
+        platform_api::rooted_fs::open_append_file_pinned(parent, name, Some(&identity))
+            .map_err(|error| self.task_output_pin_error(error))
     }
 
     fn task_output_pin_error(&self, error: impl std::fmt::Display) -> ProcessError {
@@ -976,7 +1016,14 @@ impl ProcessRunner for PosixProcess {
         // output captured before the deadline is flushed first so a `Read` on
         // the file shows everything from the start; the reaper then keeps
         // copying both pipes to the same confined file handles until EOF.
-        let (task_id, _out_path, std_file) = self.create_task_output_file()?;
+        let binding = cmd.background_task().cloned();
+        let (task_id, std_file) = match binding.as_ref() {
+            Some(bound) => (bound.task_id.clone(), self.open_bound_output_file(bound)?),
+            None => {
+                let (task_id, _out_path, std_file) = self.create_task_output_file()?;
+                (task_id, std_file)
+            }
+        };
         let initial_output = framed_output.map_or_else(
             || {
                 let mut output = out_buf;
@@ -989,6 +1036,7 @@ impl ProcessRunner for PosixProcess {
             FramedOutputCapture::force_spilled,
         );
         let pid = spawned_pid;
+        let exit_task_id = task_id.clone();
 
         tokio::spawn(async move {
             // Hold the print-mode registration for the child's remaining life so
@@ -997,7 +1045,13 @@ impl ProcessRunner for PosixProcess {
             let mut child = child;
             let mut file = tokio::fs::File::from_std(std_file);
             let _ = drain_framed_output(&mut sout, &mut serr, &mut file, &initial_output).await;
-            let _ = child.wait().await;
+            let status = child.wait().await;
+            // Same one-shot exit report as the explicit-background path, so an
+            // auto-backgrounded (timed-out) command settles its task record.
+            if let Some(sink) = binding.and_then(|bound| bound.on_exit) {
+                let code = status.ok().and_then(|status| status.code());
+                sink.on_exit(&exit_task_id, code).await;
+            }
         });
 
         Ok(platform_api::ForegroundRunResult {
@@ -1190,10 +1244,23 @@ impl ProcessRunner for PosixProcess {
         &self,
         cmd: &SandboxedCommand,
     ) -> Result<ProcessHandle, ProcessError> {
+        // When the caller bound a task identity (the Bash tool does, so the
+        // model-facing id, the registry record and this file are one identity —
+        // claude-code `vV`/`Xne`), write into the caller's already-created file
+        // and report the caller's id. Otherwise fall back to a runner-owned
+        // identity.
+        //
         // Root and leaf are both opened without following symlinks. The
         // runner pins the root identity on first use, so a later rename/swap
         // fails closed instead of redirecting command output.
-        let (task_id, _out_path, file) = self.create_task_output_file()?;
+        let binding = cmd.background_task().cloned();
+        let (task_id, file) = match binding.as_ref() {
+            Some(bound) => (bound.task_id.clone(), self.open_bound_output_file(bound)?),
+            None => {
+                let (task_id, _out_path, file) = self.create_task_output_file()?;
+                (task_id, file)
+            }
+        };
 
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::null())
@@ -1219,10 +1286,18 @@ impl ProcessRunner for PosixProcess {
         // Drain both pipes in one task so stderr chunks receive the oracle's
         // marker and the file reflects the order in which reads become ready.
         // The task also reaps the child to avoid zombies.
+        let exit_task_id = task_id.clone();
         tokio::spawn(async move {
             let mut file = tokio::fs::File::from_std(file);
             let _ = drain_framed_output(&mut stdout, &mut stderr, &mut file, &[]).await;
-            let _ = child.wait().await;
+            let status = child.wait().await;
+            // One-shot exit report so the caller can settle the task record
+            // (claude-code `Ger`: terminal status from the child's result, then
+            // the completion notification).
+            if let Some(sink) = binding.and_then(|bound| bound.on_exit) {
+                let code = status.ok().and_then(|status| status.code());
+                sink.on_exit(&exit_task_id, code).await;
+            }
         });
 
         Ok(ProcessHandle { task_id, pid })

@@ -621,6 +621,181 @@ impl TaskRegistry {
     /// (`if (O.notified) return O`). Callers use this to gate the
     /// `mcp_auto_background` outcome counter — a killed / already-settled task
     /// must never re-emit it.
+    /// Register a shell command the caller is about to background, minting the
+    /// id and creating the output file the process runner will append to.
+    ///
+    /// This is the port of claude-code `Xne` (2.1.263 `src_160988549.js`
+    /// @4281167): the shell's own task identity becomes a `local_bash` record
+    /// with `status: "running"`, so the `backgroundTaskId` handed to the model
+    /// resolves in `TaskOutput` / `TaskStop` / `TaskList`, and the terminal
+    /// transition produces the completion `<task-notification>`.
+    ///
+    /// The registry owns the id space and the output directory, so the caller
+    /// must take both from here rather than minting its own — a second id space
+    /// is exactly the defect this closes.
+    ///
+    /// # Errors
+    /// Returns [`TaskError::Io`] when the output file cannot be allocated.
+    pub async fn allocate_bash_output(&self) -> Result<(String, std::path::PathBuf), TaskError> {
+        let id = generate_task_id(TaskType::LocalBash);
+        let path = self
+            .output_manager
+            .allocate(&id)
+            .await
+            .map_err(|e| TaskError::Io(e.to_string()))?;
+        Ok((id, path))
+    }
+
+    /// Delete an allocated shell output file that was never needed, because the
+    /// command finished in the foreground and its output was returned inline
+    /// (claude-code `deleteOutputFile` under `outputFileRedundant`).
+    pub async fn discard_bash_output(&self, task_id: &str) {
+        let Ok(path) = self.output_manager.path_for(task_id) else {
+            return;
+        };
+        if self.tasks.read().await.contains_key(task_id) {
+            // A record was registered against this identity after all; its file
+            // is live output, not a redundant allocation.
+            return;
+        }
+        let _ = self.output_manager.discard(&path).await;
+    }
+
+    /// Register a `local_bash` record for an identity already minted by
+    /// [`Self::allocate_bash_output`].
+    ///
+    /// # Errors
+    /// Returns [`TaskError::Io`] when the output path cannot be derived.
+    pub async fn register_background_bash(
+        &self,
+        id: String,
+        command: String,
+        description: String,
+        tool_use_id: Option<String>,
+    ) -> Result<(String, std::path::PathBuf), TaskError> {
+        let path = self
+            .output_manager
+            .path_for(&id)
+            .map_err(|e| TaskError::Io(e.to_string()))?;
+        let description_for_hook = description.clone();
+        let base = TaskStateBase {
+            id: id.clone(),
+            task_type: TaskType::LocalBash,
+            status: TaskStatus::Running,
+            description,
+            tool_use_id,
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: path.clone(),
+            output_offset: 0,
+            notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
+        };
+        let state = TaskState::LocalBash(crate::state::LocalBashTaskState {
+            base,
+            command,
+            pid: None,
+            exit_code: None,
+        });
+        self.tasks.write().await.insert(id.clone(), state);
+        self.fire_task_created(&id, TaskType::LocalBash, &description_for_hook)
+            .await;
+        Ok((id, path))
+    }
+
+    /// Record the OS pid of an already-registered background shell and install
+    /// the cleanup that kills it, so `TaskStop` reaches a child this registry
+    /// did not spawn itself.
+    ///
+    /// # Errors
+    /// Returns [`TaskError::NotFound`] when the id is unknown.
+    pub async fn bind_background_bash_process(
+        &self,
+        task_id: &str,
+        pid: Option<u32>,
+        killer: Arc<dyn platform_api::task_registry::TaskKiller>,
+    ) -> Result<(), TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        {
+            let mut map = self.tasks.write().await;
+            let entry = map
+                .get_mut(&task_id)
+                .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
+            if let TaskState::LocalBash(bash) = entry {
+                bash.pid = pid;
+            }
+        }
+        // `TaskCleanup` is synchronous, so the kill is dispatched onto the
+        // runtime rather than awaited in place (the same shape the handler
+        // cleanups use for worker cancellation).
+        let cleanup: TaskCleanup = Arc::new(move || {
+            let killer = killer.clone();
+            tokio::spawn(async move { killer.kill().await });
+        });
+        self.cleanups.lock().await.insert(task_id, cleanup);
+        Ok(())
+    }
+
+    /// Settle a background shell task once its child has been reaped.
+    ///
+    /// Terminal status follows claude-code `Fpt`: an interrupted/killed child is
+    /// `killed`, exit code `0` is `completed`, anything else (including an
+    /// unknown code) is `failed`. The exit code is written first so the drained
+    /// `<task-notification>` can render `(exit code N)`.
+    ///
+    /// # Errors
+    /// Returns [`TaskError::NotFound`] when the id is unknown.
+    pub async fn settle_background_bash(
+        &self,
+        task_id: &str,
+        exit_code: Option<i32>,
+        killed: bool,
+    ) -> Result<(), TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        if let Some(code) = exit_code {
+            let _ = self.set_bash_exit_code(&task_id, code).await;
+        }
+        let status = if killed {
+            TaskStatus::Killed
+        } else if exit_code == Some(0) {
+            TaskStatus::Completed
+        } else {
+            TaskStatus::Failed
+        };
+        let output_file = {
+            let mut map = self.tasks.write().await;
+            match map.get_mut(&task_id) {
+                Some(entry) if entry.base().status.is_terminal() => return Ok(()),
+                Some(entry) => {
+                    entry.base_mut().end_time = Some(SystemTime::now());
+                    Some(entry.base().output_file.clone())
+                }
+                // No record: the identity was allocated for a command that was
+                // never backgrounded, so there is nothing to settle.
+                None => return Ok(()),
+            }
+        };
+        // claude-code closes a background shell's output file with a status
+        // trailer so a later `Read` shows how it ended (`Bpt`:
+        // `s1e(e, "\n[" + (killed ? "killed" : "exited with code " + (code ?? "unknown")) + "]\n")`,
+        // 2.1.263 `src_160988549.js` @4279785).
+        if let Some(output_file) = output_file {
+            let trailer = if killed {
+                "\n[killed]\n".to_string()
+            } else {
+                let code = exit_code.map_or_else(|| "unknown".to_string(), |c| c.to_string());
+                format!("\n[exited with code {code}]\n")
+            };
+            let _ = self.output_manager.append(&output_file, &trailer).await;
+        }
+        self.cleanups.lock().await.remove(&task_id);
+        self.set_status(&task_id, status).await?;
+        Ok(())
+    }
+
     pub async fn settle_mcp_task(
         &self,
         task_id: &str,

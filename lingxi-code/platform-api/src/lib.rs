@@ -195,8 +195,9 @@ pub use permission_gate::{
 };
 pub use platform::Platform;
 pub use process::{
-    ForegroundOutcome, ForegroundRunResult, HookOutputObserver, HookRunOutcome, ProcessError,
-    ProcessHandle, ProcessOutput, ProcessOutputFile, ProcessRunner, ProcessStreamSink,
+    BackgroundExitSink, BackgroundTaskBinding, ForegroundOutcome, ForegroundRunResult,
+    HookOutputObserver, HookRunOutcome, ProcessError, ProcessHandle, ProcessOutput,
+    ProcessOutputFile, ProcessRunner, ProcessStreamSink,
 };
 pub use prompting_gate::{
     PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,

@@ -653,6 +653,63 @@ impl TaskRegistryHandle for TaskRegistry {
         })
     }
 
+    async fn allocate_bash_output(
+        &self,
+    ) -> Result<platform_api::task_registry::BackgroundBashHandle, TaskRegistryError> {
+        let (task_id, path) = TaskRegistry::allocate_bash_output(self)
+            .await
+            .map_err(task_err_to_registry_err)?;
+        let output_path = path.to_str().map(str::to_string).ok_or_else(|| {
+            TaskRegistryError::Internal("task output path is not valid UTF-8".into())
+        })?;
+        Ok(platform_api::task_registry::BackgroundBashHandle {
+            task_id,
+            output_path,
+        })
+    }
+
+    async fn register_background_bash(
+        &self,
+        task_id: &str,
+        registration: platform_api::task_registry::BackgroundBashRegistration,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::register_background_bash(
+            self,
+            task_id.to_string(),
+            registration.command,
+            registration.description,
+            registration.tool_use_id,
+        )
+        .await
+        .map(|_| ())
+        .map_err(task_err_to_registry_err)
+    }
+
+    async fn discard_bash_output(&self, task_id: &str) {
+        TaskRegistry::discard_bash_output(self, task_id).await;
+    }
+
+    async fn bind_background_killer(
+        &self,
+        id: &str,
+        killer: std::sync::Arc<dyn platform_api::task_registry::TaskKiller>,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::bind_background_bash_process(self, id, None, killer)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+
+    async fn settle_background_bash(
+        &self,
+        id: &str,
+        exit_code: Option<i32>,
+        killed: bool,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::settle_background_bash(self, id, exit_code, killed)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+
     async fn mark_notified(&self, id: &str) -> Result<(), TaskRegistryError> {
         // Dispatch to the inherent `TaskRegistry::mark_notified`, which sets the
         // `notified` flag while keeping the task addressable.

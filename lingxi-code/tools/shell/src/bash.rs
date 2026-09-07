@@ -1606,6 +1606,39 @@ fn match_null_redirect(b: &[u8], p: usize) -> Option<usize> {
     Some(nul_start)
 }
 
+/// Settles a background shell's task record when its child is reaped.
+///
+/// Port of claude-code `Ger` (2.1.263 `src_160988549.js` @4284565): the shell's
+/// result promise drives the record to its terminal status, which is what makes
+/// the completion `<task-notification>` fire.
+struct BackgroundBashExitSink {
+    registry: std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+}
+
+#[async_trait::async_trait]
+impl platform_api::BackgroundExitSink for BackgroundBashExitSink {
+    async fn on_exit(&self, task_id: &str, exit_code: Option<i32>) {
+        // Best-effort: a settle for a since-evicted task is a benign NotFound.
+        let _ = self
+            .registry
+            .settle_background_bash(task_id, exit_code, false)
+            .await;
+    }
+}
+
+/// Terminates a backgrounded shell's OS process on `TaskStop` or teardown.
+struct BackgroundBashKiller {
+    process: std::sync::Arc<dyn platform_api::ProcessRunner>,
+    handle: platform_api::ProcessHandle,
+}
+
+#[async_trait::async_trait]
+impl platform_api::task_registry::TaskKiller for BackgroundBashKiller {
+    async fn kill(&self) {
+        let _ = self.process.kill(&self.handle).await;
+    }
+}
+
 /// Compute the per-task output file path used when `run_in_background=true`.
 ///
 /// Mirrors `platform_posix::process::task_output_path` (which we
@@ -1739,6 +1772,133 @@ pub struct BashTool {
 }
 
 impl BashTool {
+
+    /// Mint the task identity for this shell command: a registry task id and an
+    /// output file for the process runner to append to.
+    ///
+    /// Returns `None` when no registry is wired, in which case the runner keeps
+    /// minting its own identity and behaviour is unchanged.
+    async fn allocate_task_identity(&self) -> Option<(String, String)> {
+        let registry = self.ctx.task_registry.as_ref()?;
+        match registry.allocate_bash_output().await {
+            Ok(handle) => Some((handle.task_id, handle.output_path)),
+            Err(error) => {
+                // Fail open: a registry that cannot mint an identity must not
+                // stop the command from running, it only costs this command its
+                // registry record.
+                tracing::warn!(
+                    target: "tool_shell::bash",
+                    %error,
+                    "could not allocate a task identity for the shell command; falling back to a runner-owned id"
+                );
+                None
+            }
+        }
+    }
+
+    /// Bind the [`BackgroundTaskBinding`] for an allocated identity onto the
+    /// command, so the runner writes to that file and reports that id.
+    ///
+    /// [`BackgroundTaskBinding`]: platform_api::BackgroundTaskBinding
+    fn bind_identity(
+        &self,
+        sandboxed: platform_api::SandboxedCommand,
+        bound: Option<&(String, String)>,
+    ) -> platform_api::SandboxedCommand {
+        let Some((task_id, output_path)) = bound else {
+            return sandboxed;
+        };
+        sandboxed.with_background_task(platform_api::BackgroundTaskBinding {
+            task_id: task_id.clone(),
+            output_path: std::path::PathBuf::from(output_path),
+            on_exit: self.ctx.task_registry.clone().map(|registry| {
+                std::sync::Arc::new(BackgroundBashExitSink { registry })
+                    as std::sync::Arc<dyn platform_api::BackgroundExitSink>
+            }),
+        })
+    }
+
+    /// Create the `local_bash` record for an identity that is actually being
+    /// backgrounded (claude-code `Xne`). Foreground commands never get a record.
+    async fn register_background_task(
+        &self,
+        ctx: &ToolUseContext,
+        bound: Option<&(String, String)>,
+        command: &str,
+        description: Option<&str>,
+    ) {
+        let (Some((task_id, _)), Some(registry)) = (bound, self.ctx.task_registry.as_ref()) else {
+            return;
+        };
+        let registration = platform_api::task_registry::BackgroundBashRegistration {
+            command: command.to_string(),
+            // claude-code stores `description || command` on the record
+            // (`Xne`'s `description: Me || ve`); the completion summary renders
+            // it as `Background command "{description}" completed (exit code N)`.
+            description: description
+                .filter(|d| !d.is_empty())
+                .unwrap_or(command)
+                .to_string(),
+            tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
+            cwd: Some(self.shell_cwd.lock().unwrap().display().to_string()),
+        };
+        if let Err(error) = registry.register_background_bash(task_id, registration).await {
+            tracing::warn!(
+                target: "tool_shell::bash",
+                %error,
+                "could not register the backgrounded shell task"
+            );
+        }
+    }
+
+    /// Keep the minted identity only if the process runner actually used it.
+    ///
+    /// A runner that ignores the binding writes the child's output to a file of
+    /// its own and reports its own id; claiming the registry path in that case
+    /// would advertise a file nothing ever writes to. Drop the allocation
+    /// instead and fall back to the runner's identity.
+    async fn take_honoured_identity(
+        &self,
+        bound: Option<(String, String)>,
+        handle: &platform_api::ProcessHandle,
+    ) -> Option<(String, String)> {
+        let (task_id, output_path) = bound?;
+        if handle.task_id == task_id {
+            return Some((task_id, output_path));
+        }
+        if let Some(registry) = self.ctx.task_registry.as_ref() {
+            registry.discard_bash_output(&task_id).await;
+        }
+        tracing::debug!(
+            target: "tool_shell::bash",
+            minted = %task_id,
+            reported = %handle.task_id,
+            "process runner did not honour the bound task identity; keeping its own"
+        );
+        None
+    }
+
+    /// Attach the killer for a backgrounded shell so `TaskStop` and teardown can
+    /// terminate a child the registry did not spawn itself.
+    ///
+    /// `task_id` is the id the REGISTRY knows; `handle` is what the runner needs
+    /// to signal the process, and the two differ when the runner ignored the
+    /// binding.
+    async fn bind_background_task(
+        &self,
+        task_id: &str,
+        handle: &platform_api::ProcessHandle,
+    ) {
+        let Some(registry) = self.ctx.task_registry.as_ref() else {
+            return;
+        };
+        let killer = std::sync::Arc::new(BackgroundBashKiller {
+            process: self.ctx.process.clone(),
+            handle: handle.clone(),
+        }) as std::sync::Arc<dyn platform_api::task_registry::TaskKiller>;
+        let _ = registry.bind_background_killer(task_id, killer).await;
+    }
+
     /// Construct a fresh tool bound to the given builtin context.
     ///
     /// The `CwdChanged` firer defaults to `None` (no fire). Inject one via
@@ -2430,16 +2590,43 @@ impl Tool for BashTool {
                 stdin: None,
             };
             let sandboxed = self.ctx.sandbox.bypass_with_audit(pcmd, "bash_tool_call");
+            // Mint the task identity BEFORE spawning, so the id handed to the
+            // model, the record the registry keeps and the file the child
+            // writes to are one identity (claude-code `vV` mints it in the one
+            // shell spawn; `Xne` then registers that same id). Without a wired
+            // registry the runner keeps minting its own — the previous
+            // behaviour, retained for hosts that have no task registry.
+            let bound = self.allocate_task_identity().await;
+            let sandboxed = self.bind_identity(sandboxed, bound.as_ref());
             return match self.ctx.process.spawn_background(&sandboxed).await {
                 Ok(handle) => {
-                    let out_path = task_output_path(&handle.task_id).display().to_string();
+                    // Only claim the registry identity if the runner actually
+                    // honoured it; a runner that mints its own id is writing to
+                    // its own file, so the registry must not advertise a path
+                    // nothing writes to.
+                    let bound = self.take_honoured_identity(bound, &handle).await;
+                    self.register_background_task(
+                        &ctx,
+                        bound.as_ref(),
+                        &cmd_str,
+                        input.get("description").and_then(Value::as_str),
+                    )
+                    .await;
+                    let task_id = bound
+                        .as_ref()
+                        .map_or_else(|| handle.task_id.clone(), |(id, _)| id.clone());
+                    self.bind_background_task(&task_id, &handle).await;
+                    let out_path = match bound.as_ref() {
+                        Some((_, path)) => path.clone(),
+                        None => task_output_path(&handle.task_id).display().to_string(),
+                    };
                     // Model-facing background note (`y` in the binary's mapper,
                     // built by `L0i`): `Command running in background with ID: …
                     // Output is being written to: … use Read on that file path.`
                     // (offset 183106320), with the 2.1.238 lifetime sentence
                     // selected by `reapedAtFinalResponse`.
                     let reaped = background_ends_with_final_response(&ctx);
-                    let mut note = background_note(&handle.task_id, &out_path, None, reaped);
+                    let mut note = background_note(&task_id, &out_path, None, reaped);
                     // PARITY 2.1.210 (`backgroundCwdHint`): when the backgrounded
                     // command contains a statement-level `cd`/`pushd`/`popd`/`chdir`
                     // (`ror`), the binary appends this hint on a new line so the
@@ -2463,7 +2650,7 @@ impl Tool for BashTool {
                             false,
                             None,
                             crate::silent::is_silent_bash_command(&cmd_str),
-                            Some(&handle.task_id),
+                            Some(&task_id),
                             None,
                             None,
                             reaped,
@@ -2476,6 +2663,13 @@ impl Tool for BashTool {
                     })
                 }
                 Err(e) => {
+                    // The record was created before the spawn; settle it so a
+                    // failed launch cannot leave a task stuck at "running".
+                    if let (Some((task_id, _)), Some(registry)) =
+                        (bound.as_ref(), self.ctx.task_registry.as_ref())
+                    {
+                        let _ = registry.settle_background_bash(task_id, None, false).await;
+                    }
                     emit_failed(&self.ctx.bus, &request_id, "spawn_failed", started_at).await;
                     Err(ToolError::Io(format!("{e}")))
                 }
@@ -2543,6 +2737,15 @@ impl Tool for BashTool {
             stdin: None,
         };
         let sandboxed = self.ctx.sandbox.bypass_with_audit(pcmd, "bash_tool_call");
+        // A foreground command can still be moved to the background when it
+        // exceeds its timeout (claude-code 2.1.210 `timedOutAfterMs`), and the
+        // id it is then given must be a registry id for the same reason the
+        // explicit-background path needs one. Mint it up front — claude-code
+        // does the same, minting one identity per shell command in `vV`
+        // regardless of whether it is ever backgrounded — and settle it as
+        // completed when the command actually finishes in the foreground.
+        let fg_bound = self.allocate_task_identity().await;
+        let sandboxed = self.bind_identity(sandboxed, fg_bound.as_ref());
 
         // ===== Foreground spawn =====
         // PHASE-2: race the run against the sibling cancel token. On cancel the
@@ -2586,6 +2789,25 @@ impl Tool for BashTool {
         // timeout arms below build such a result via `build_interrupted_result`.
         // `format_timeout_error` / `BASH_TIMEOUT_ERROR_TEMPLATE` are retained
         // (still referenced by the locked-constant test) but no longer returned.
+        // The identity minted before the spawn is only used when the command is
+        // moved to the background; on every other outcome its file is redundant,
+        // so delete it rather than leaving one file per shell call behind
+        // (claude-code `deleteOutputFile` under `outputFileRedundant`).
+        let moved_to_background = matches!(
+            &run_result,
+            Ok(platform_api::ForegroundRunResult {
+                outcome: platform_api::ForegroundOutcome::MovedToBackground(_),
+                ..
+            })
+        );
+        if !moved_to_background {
+            if let (Some(registry), Some((task_id, _))) =
+                (self.ctx.task_registry.as_ref(), fg_bound.as_ref())
+            {
+                registry.discard_bash_output(task_id).await;
+            }
+        }
+
         match run_result {
             // PARITY 2.1.210: the command exceeded its timeout and the runner
             // moved it to the background instead of killing it. Surface the
@@ -2604,12 +2826,31 @@ impl Tool for BashTool {
                 );
                 meta.insert("timeout_ms".into(), AnalyticsValue::Int(timeout_ms as i64));
                 self.ctx.bus.log_event(BASH_TIMEOUT, meta).await;
-                let out_path = task_output_path(&handle.task_id).display().to_string();
+                // The command is now a background task: give the identity we
+                // minted up front an actual record, so its id resolves in
+                // TaskOutput / TaskStop / TaskList and its completion produces a
+                // `<task-notification>` (claude-code `wn` → `Xne` on the
+                // timeout path).
+                let fg_bound = self.take_honoured_identity(fg_bound, &handle).await;
+                self.register_background_task(
+                    &ctx,
+                    fg_bound.as_ref(),
+                    &cmd_str,
+                    input.get("description").and_then(Value::as_str),
+                )
+                .await;
+                let task_id = fg_bound
+                    .as_ref()
+                    .map_or_else(|| handle.task_id.clone(), |(id, _)| id.clone());
+                self.bind_background_task(&task_id, &handle).await;
+                let out_path = match fg_bound.as_ref() {
+                    Some((_, path)) => path.clone(),
+                    None => task_output_path(&handle.task_id).display().to_string(),
+                };
                 // `L0i`'s `timedOutAfterMs !== undefined` arm; the seconds shown
                 // are `Math.max(1, Math.round(timeoutMs / 1000))`.
                 let reaped = background_ends_with_final_response(&ctx);
-                let mut note =
-                    background_note(&handle.task_id, &out_path, Some(timeout_ms), reaped);
+                let mut note = background_note(&task_id, &out_path, Some(timeout_ms), reaped);
                 // PARITY 2.1.210 (`backgroundCwdHint`): same hint as an explicit
                 // background launch — a timed-out-and-backgrounded command whose
                 // text contains a statement-level `cd` never mutates the session
@@ -2632,7 +2873,7 @@ impl Tool for BashTool {
                         false,
                         None,
                         crate::silent::is_silent_bash_command(&cmd_str),
-                        Some(&handle.task_id),
+                        Some(&task_id),
                         None,
                         Some(timeout_ms),
                         reaped,
@@ -4943,6 +5184,236 @@ mod tests {
         assert!(
             !note.contains("Session cwd remains"),
             "non-cd bg command must not carry the cwd hint, got: {note}",
+        );
+    }
+
+    /// Records what the Bash tool asks of the task registry, so a test can
+    /// assert the background path mints ONE identity and registers it.
+    #[derive(Default)]
+    struct RecordingRegistry {
+        allocated: std::sync::Mutex<Vec<String>>,
+        registered: std::sync::Mutex<
+            Vec<(
+                String,
+                platform_api::task_registry::BackgroundBashRegistration,
+            )>,
+        >,
+        bound: std::sync::Mutex<Vec<String>>,
+        discarded: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::task_registry::TaskRegistryHandle for RecordingRegistry {
+        async fn create(
+            &self,
+            _i: platform_api::task_registry::TaskCreateInput,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn get(
+            &self,
+            _id: &str,
+        ) -> Result<
+            Option<platform_api::task_registry::TaskRecord>,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn list(
+            &self,
+            _f: platform_api::task_registry::TaskListFilter,
+        ) -> Result<
+            Vec<platform_api::task_registry::TaskRecord>,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn update(
+            &self,
+            _id: &str,
+            _p: platform_api::task_registry::TaskUpdatePatch,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn set_status(
+            &self,
+            _id: &str,
+            _s: &str,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn kill(
+            &self,
+            _id: &str,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn output(
+            &self,
+            _id: &str,
+            _o: Option<u64>,
+        ) -> Result<
+            platform_api::task_registry::TaskOutputChunk,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn allocate_bash_output(
+            &self,
+        ) -> Result<
+            platform_api::task_registry::BackgroundBashHandle,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            let id = "b1a2b3c4d".to_string();
+            self.allocated.lock().unwrap().push(id.clone());
+            Ok(platform_api::task_registry::BackgroundBashHandle {
+                task_id: id,
+                output_path: "/session/tasks/b1a2b3c4d.output".to_string(),
+            })
+        }
+        async fn register_background_bash(
+            &self,
+            task_id: &str,
+            registration: platform_api::task_registry::BackgroundBashRegistration,
+        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            self.registered
+                .lock()
+                .unwrap()
+                .push((task_id.to_string(), registration));
+            Ok(())
+        }
+        async fn discard_bash_output(&self, task_id: &str) {
+            self.discarded.lock().unwrap().push(task_id.to_string());
+        }
+        async fn bind_background_killer(
+            &self,
+            id: &str,
+            _killer: std::sync::Arc<dyn platform_api::task_registry::TaskKiller>,
+        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            self.bound.lock().unwrap().push(id.to_string());
+            Ok(())
+        }
+    }
+
+    /// A runner that honours a bound task identity, as the real posix runner
+    /// does: it reports back the id the caller bound rather than minting one.
+    struct BindingAwareBgStub;
+
+    #[async_trait::async_trait]
+    impl ProcessRunner for BindingAwareBgStub {
+        async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            unreachable!("background test never runs in the foreground")
+        }
+        async fn spawn_background(
+            &self,
+            cmd: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            let task_id = cmd
+                .background_task()
+                .map_or_else(|| "runner-minted".to_string(), |b| b.task_id.clone());
+            Ok(ProcessHandle { task_id, pid: 4242 })
+        }
+        async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn background_task_id_is_the_registry_id_and_the_task_is_registered() {
+        // The defect this pins: the model was handed the runner's private id
+        // (`local_bash_<pid>_<nonce>_<seq>`) while the registry knew nothing, so
+        // TaskOutput/TaskStop on that id answered "No task found with ID".
+        // claude-code mints ONE identity per shell command (`vV`) and registers
+        // that same id when the command is backgrounded (`Xne`).
+        let registry = Arc::new(RecordingRegistry::default());
+        let mut ctx = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        ctx.process = Arc::new(BindingAwareBgStub);
+        ctx.task_registry = Some(registry.clone());
+        let tool = BashTool::new(ctx);
+        let res = tool
+            .call(
+                json!({"command": "sleep 5", "description": "wait a bit", "run_in_background": true}),
+                use_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+
+        // The id the model sees is the registry's, NOT the runner stub's.
+        assert_eq!(res.data["backgroundTaskId"], "b1a2b3c4d");
+        assert_eq!(registry.allocated.lock().unwrap().len(), 1);
+
+        // …and a record exists for exactly that id, carrying the command and
+        // the description the completion summary renders.
+        let registered = registry.registered.lock().unwrap().clone();
+        assert_eq!(registered.len(), 1, "exactly one record for one command");
+        assert_eq!(registered[0].0, "b1a2b3c4d");
+        assert_eq!(registered[0].1.command, "sleep 5");
+        assert_eq!(registered[0].1.description, "wait a bit");
+
+        // The killer is bound so TaskStop can reach the child.
+        assert_eq!(registry.bound.lock().unwrap().as_slice(), ["b1a2b3c4d"]);
+        // Nothing was discarded: the identity was used, not redundant.
+        assert!(registry.discarded.lock().unwrap().is_empty());
+
+        // The note points at the registry's output file, which is the file the
+        // registry can actually read back through TaskOutput.
+        let note = res.model_content.as_deref().expect("background model note");
+        assert!(
+            note.contains("b1a2b3c4d") && note.contains("/session/tasks/b1a2b3c4d.output"),
+            "note must carry the registry id and its output path, got: {note}",
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_command_registers_no_task_and_discards_its_output_file() {
+        // claude-code mints the identity for every shell command but only
+        // creates a record when the command is actually backgrounded. Creating
+        // one per foreground command would put a completed row in TaskList and a
+        // `<task-notification>` in the transcript for every shell call.
+        let registry = Arc::new(RecordingRegistry::default());
+        let mut ctx = shell_test_ctx(ProcessOutput {
+            stdout: "done\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        ctx.task_registry = Some(registry.clone());
+        let tool = BashTool::new(ctx);
+        let res = tool
+            .call(json!({"command": "echo done"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+
+        assert!(res.data.get("backgroundTaskId").is_none());
+        assert!(
+            registry.registered.lock().unwrap().is_empty(),
+            "a foreground command must not become a task record",
+        );
+        assert_eq!(
+            registry.discarded.lock().unwrap().as_slice(),
+            ["b1a2b3c4d"],
+            "the unused output file must be discarded, not left behind",
         );
     }
 

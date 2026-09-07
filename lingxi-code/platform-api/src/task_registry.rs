@@ -61,6 +61,44 @@ pub struct MonitorRegistration {
 }
 
 /// Filter for [`TaskRegistryHandle::list`].
+/// A background shell command the caller is about to spawn.
+///
+/// claude-code registers a `local_bash` record for the SAME identity its shell
+/// spawn already minted (`Xne`, 2.1.263 `src_160988549.js` @4281167), so the
+/// `backgroundTaskId` handed to the model resolves in `TaskOutput`, `TaskStop`,
+/// `TaskList` and `/tasks`, and its completion produces a
+/// `<task-notification>`. The port mints the identity through the registry
+/// (which owns the id space and the output directory) and then hands it to the
+/// process runner.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackgroundBashRegistration {
+    /// The command as the model wrote it; stored verbatim on the record.
+    pub command: String,
+    /// Human-readable description used in the completion summary
+    /// (`Background command "{description}" completed (exit code N)`).
+    pub description: String,
+    /// Originating tool-use id, surfaced as the notification's `<tool-use-id>`.
+    pub tool_use_id: Option<String>,
+    /// Working directory the command was launched in.
+    pub cwd: Option<String>,
+}
+
+/// The identity the registry minted for a background shell command.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackgroundBashHandle {
+    /// Registry task id (`b` + 8 base-36 characters).
+    pub task_id: String,
+    /// Absolute path of the task's output file, already created.
+    pub output_path: String,
+}
+
+/// Terminates a task whose process the registry does not own.
+#[async_trait]
+pub trait TaskKiller: Send + Sync {
+    /// Kill the underlying OS process. Best-effort.
+    async fn kill(&self);
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskListFilter {
     /// Optional status filter — one of the 5 byte-locked status strings.
@@ -685,6 +723,89 @@ pub trait TaskRegistryHandle: Send + Sync {
     }
 
     /// Read the task's spool starting at `offset` (or from 0 if `None`).
+    /// Mint the task identity for a shell command: a task id and an
+    /// already-created output file for the process runner to append to.
+    ///
+    /// claude-code mints exactly one such identity per shell command, in its
+    /// single spawn (`vV`), so the id the model may later be handed, the id the
+    /// registry records and the file the child writes to are the same identity.
+    /// Defaults to an explicit error so a host without a registry keeps the
+    /// previous runner-owned behaviour instead of silently losing the task.
+    ///
+    /// # Errors
+    /// Returns [`TaskRegistryError`] when no registry is wired, or when the
+    /// output file cannot be allocated.
+    async fn allocate_bash_output(&self) -> Result<BackgroundBashHandle, TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "background bash allocation unwired".into(),
+        ))
+    }
+
+    /// Register a `local_bash` record for an identity already minted by
+    /// [`Self::allocate_bash_output`], because the command is being
+    /// backgrounded (explicitly, or after exceeding its timeout).
+    ///
+    /// Registration is deliberately separate from allocation: claude-code mints
+    /// the identity for every shell command but only creates a task record when
+    /// the command is actually backgrounded (`Xne`) or has been running long
+    /// enough to be armed for it (`U6t`). Registering every foreground command
+    /// would put a completed row in `TaskList` and a `<task-notification>` in
+    /// the transcript for every shell call.
+    ///
+    /// # Errors
+    /// Returns [`TaskRegistryError`] when no registry is wired.
+    async fn register_background_bash(
+        &self,
+        task_id: &str,
+        registration: BackgroundBashRegistration,
+    ) -> Result<(), TaskRegistryError> {
+        let _ = (task_id, registration);
+        Err(TaskRegistryError::Internal(
+            "background bash registration unwired".into(),
+        ))
+    }
+
+    /// Delete an allocated output file that was never needed, because the
+    /// command completed in the foreground and its output was returned inline
+    /// (claude-code `deleteOutputFile` under `outputFileRedundant`).
+    async fn discard_bash_output(&self, task_id: &str) {
+        let _ = task_id;
+    }
+
+    /// Attach the killer that terminates a background shell's OS process, so
+    /// `TaskStop` and session teardown can reach a child the registry did not
+    /// spawn itself.
+    ///
+    /// # Errors
+    /// Returns [`TaskRegistryError`] when the id is unknown.
+    async fn bind_background_killer(
+        &self,
+        id: &str,
+        killer: std::sync::Arc<dyn TaskKiller>,
+    ) -> Result<(), TaskRegistryError> {
+        let _ = (id, killer);
+        Ok(())
+    }
+
+    /// Settle a background shell task once its child has been reaped.
+    ///
+    /// `killed` wins over the exit code; otherwise exit code `0` completes the
+    /// task and anything else (including an unknown code) fails it — the port
+    /// of claude-code `Fpt` (`interrupted` → killed, `code === 0` → completed,
+    /// else failed).
+    ///
+    /// # Errors
+    /// Returns [`TaskRegistryError`] when the id is unknown.
+    async fn settle_background_bash(
+        &self,
+        id: &str,
+        exit_code: Option<i32>,
+        killed: bool,
+    ) -> Result<(), TaskRegistryError> {
+        let _ = (id, exit_code, killed);
+        Ok(())
+    }
+
     async fn output(
         &self,
         id: &str,

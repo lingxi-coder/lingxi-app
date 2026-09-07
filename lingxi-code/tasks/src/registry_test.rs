@@ -202,6 +202,118 @@ fn make_registry() -> (tempfile::TempDir, TaskRegistry) {
     (dir, registry)
 }
 
+#[tokio::test]
+async fn background_bash_identity_is_registered_settled_and_notified() {
+    // The defect: a backgrounded Bash command lived in the process runner's own
+    // id space, so TaskOutput/TaskStop could not resolve the id the model was
+    // given and no completion notification could ever fire. claude-code mints
+    // one identity per shell command and registers that same id (`Xne`), then
+    // settles it from the child's result (`Ger`/`Bpt`).
+    let (_dir, registry) = make_registry();
+
+    // 1. Allocation mints a registry id and creates its output file, with no
+    //    task record yet — a foreground command must not become a task.
+    let (task_id, path) = registry.allocate_bash_output().await.unwrap();
+    assert!(
+        task_id.starts_with('b') && task_id.len() == 9,
+        "background shell ids are the local_bash prefix plus 8 base-36 chars, got {task_id}",
+    );
+    assert_eq!(path, registry.output_manager.path_for(&task_id).unwrap());
+    assert!(registry.get(&task_id).await.is_none(), "allocation alone registers nothing");
+
+    // 2. Registering makes the SAME id resolvable, which is what TaskOutput and
+    //    TaskStop look up.
+    registry
+        .register_background_bash(
+            task_id.clone(),
+            "sleep 5".into(),
+            "wait a bit".into(),
+            Some("toolu_1".into()),
+        )
+        .await
+        .unwrap();
+    let state = registry.get(&task_id).await.expect("registered task resolves");
+    assert_eq!(state.base().status, TaskStatus::Running);
+    assert_eq!(state.base().tool_use_id.as_deref(), Some("toolu_1"));
+    assert_eq!(state.base().output_file, path);
+
+    // 3. Settling from the child's exit writes the status trailer claude-code
+    //    appends and drives the record terminal.
+    registry.settle_background_bash(&task_id, Some(0), false).await.unwrap();
+    let state = registry.get(&task_id).await.unwrap();
+    assert_eq!(state.base().status, TaskStatus::Completed);
+    assert!(state.base().end_time.is_some());
+    let written = registry
+        .output_manager
+        .read(&path, crate::output_manager::OutputOptions { offset: None, limit: None })
+        .await
+        .unwrap();
+    assert!(
+        written.content.contains("[exited with code 0]"),
+        "output file must carry the exit trailer, got: {:?}",
+        written.content,
+    );
+
+    // 4. …and exactly one completion notification is queued for the model.
+    let notifications = registry.take_pending_task_notifications().await;
+    let mine: Vec<_> = notifications.iter().filter(|n| n.task_id == task_id).collect();
+    assert_eq!(mine.len(), 1, "one completion notification for one command");
+    assert_eq!(mine[0].task_type, "local_bash");
+    assert_eq!(mine[0].status, "completed");
+    assert_eq!(mine[0].description, "wait a bit");
+}
+
+#[tokio::test]
+async fn settling_a_killed_background_bash_writes_the_killed_trailer() {
+    let (_dir, registry) = make_registry();
+    let (task_id, path) = registry.allocate_bash_output().await.unwrap();
+    registry
+        .register_background_bash(task_id.clone(), "sleep 5".into(), "wait".into(), None)
+        .await
+        .unwrap();
+    registry.settle_background_bash(&task_id, None, true).await.unwrap();
+    assert_eq!(
+        registry.get(&task_id).await.unwrap().base().status,
+        TaskStatus::Killed
+    );
+    let written = registry
+        .output_manager
+        .read(&path, crate::output_manager::OutputOptions { offset: None, limit: None })
+        .await
+        .unwrap();
+    assert!(written.content.contains("[killed]"), "got: {:?}", written.content);
+}
+
+#[tokio::test]
+async fn discarding_an_unused_bash_identity_removes_its_output_file() {
+    // A foreground command's allocated file is redundant once the command
+    // returns inline; leaving it would drop one file per shell call into the
+    // session's task directory (claude-code `deleteOutputFile`).
+    let (_dir, registry) = make_registry();
+    let (task_id, path) = registry.allocate_bash_output().await.unwrap();
+    registry.discard_bash_output(&task_id).await;
+    assert!(
+        registry
+            .output_manager
+            .read(&path, crate::output_manager::OutputOptions { offset: None, limit: None })
+            .await
+            .map(|out| out.content)
+            .unwrap_or_default()
+            .is_empty(),
+        "the discarded spool must not survive",
+    );
+    // Re-allocating the same identity must be possible after a discard.
+    registry
+        .register_background_bash(task_id.clone(), "cmd".into(), "d".into(), None)
+        .await
+        .unwrap();
+    registry.discard_bash_output(&task_id).await;
+    assert!(
+        registry.get(&task_id).await.is_some(),
+        "discard must not remove a registered task's live output",
+    );
+}
+
 fn teammate_input() -> TaskSpawnInput {
     TaskSpawnInput::InProcessTeammate {
         agent_id: protocol::AgentId::new(),

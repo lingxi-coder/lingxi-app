@@ -231,6 +231,7 @@ pub struct SandboxedCommand {
     inner: ProcessCommand,
     tag: SandboxedTag,
     plan: Option<BackendPlanHandle>,
+    background: Option<crate::process::BackgroundTaskBinding>,
 }
 
 /// Provenance of a [`SandboxedCommand`].
@@ -263,6 +264,7 @@ impl SandboxedCommand {
             inner,
             tag,
             plan: None,
+            background: None,
         }
     }
 
@@ -280,7 +282,30 @@ impl SandboxedCommand {
             inner,
             tag,
             plan: Some(plan),
+            background: None,
         }
+    }
+
+    /// Bind a caller-owned task identity to this command, so that backgrounding
+    /// it uses the caller's task id and output file instead of a runner-private
+    /// one.
+    ///
+    /// This is the seam that keeps the id the model is handed, the id the task
+    /// registry records, and the file the child writes to as ONE identity
+    /// (claude-code mints all three together in its single shell spawn).
+    #[must_use]
+    pub fn with_background_task(
+        mut self,
+        binding: crate::process::BackgroundTaskBinding,
+    ) -> Self {
+        self.background = Some(binding);
+        self
+    }
+
+    /// The caller-bound task identity, when one was attached.
+    #[must_use]
+    pub fn background_task(&self) -> Option<&crate::process::BackgroundTaskBinding> {
+        self.background.as_ref()
     }
 
     /// Access the underlying [`ProcessCommand`] (for the runner to actually

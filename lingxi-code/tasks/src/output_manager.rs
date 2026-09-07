@@ -240,6 +240,36 @@ impl TaskOutputManager {
         Ok(path)
     }
 
+    /// Delete a spool that turned out to be unused.
+    ///
+    /// claude-code deletes a shell's task-output file when it is redundant —
+    /// the command finished in the foreground and its output was returned
+    /// inline, so nothing will ever read the file (`deleteOutputFile`, guarded
+    /// by `outputFileRedundant`). Without this, minting one output file per
+    /// Bash call would leave a file behind for every command in the session.
+    ///
+    /// Best-effort and idempotent: a spool that is already gone is not an error.
+    ///
+    /// # Errors
+    /// Returns [`OutputError::PathEscape`] when the path is not inside this
+    /// manager's output directory.
+    pub async fn discard(&self, output_file: &Path) -> Result<(), OutputError> {
+        let relative = self.relative_path_for(output_file)?;
+        let write_lock = self.write_lock_for(output_file).await;
+        let _writes = write_lock.lock().await;
+        self.caps.lock().await.remove(output_file);
+        self.terminal.lock().await.remove(output_file);
+        self.terminal_overrides.lock().await.remove(output_file);
+        match self
+            .fs
+            .delete_file_rooted_no_follow(&self.output_dir, &relative)
+            .await
+        {
+            Ok(()) | Err(platform_api::FsError::NotFound(_)) => Ok(()),
+            Err(other) => Err(self.map_rooted_error(other)),
+        }
+    }
+
     /// Append a chunk to a task's spool, enforcing the per-file 5GB disk cap
     /// ([`MAX_TASK_OUTPUT_BYTES`]) on the WRITE side.
     ///

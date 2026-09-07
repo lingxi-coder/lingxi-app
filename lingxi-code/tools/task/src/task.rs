@@ -1597,16 +1597,26 @@ impl Tool for TaskUpdateTool {
                                 &[],
                             )
                             .await;
+                            // claude-code wraps a blocking hook's reason with
+                            // the hook's own name before it reaches the model
+                            // (`Fvt("TaskCompleted", …)` over
+                            // `S5t = " hook feedback:\n"`, 2.1.263
+                            // `src_158021603.js` @5706), and the SAME wrapped
+                            // text lands in both the `error` field and the
+                            // tool_result. The sibling hooks already spell it
+                            // this way (`TaskCreated` above, `Stop` and
+                            // `TeammateIdle` in the orchestrator).
+                            let feedback = format!("TaskCompleted hook feedback:\n{reason}");
                             return Ok(ToolCallResult {
                                 data: json!({
                                     "success": false,
                                     "taskId": task_id,
                                     "updatedFields": Vec::<String>::new(),
-                                    "error": reason,
+                                    "error": feedback,
                                 }),
                                 model_content: Some(render_task_update_fail(
                                     &task_id,
-                                    Some(&reason),
+                                    Some(&feedback),
                                 )),
                                 new_messages: vec![],
                                 context_modifier: None,
@@ -2233,7 +2243,8 @@ fn format_task_output(output: &str, task_id: &str, output_path: Option<&str>) ->
 
 /// 1:1 port of `TaskOutputTool.tsx`'s `mapToolResultToToolResultBlockParam`
 /// (lines 283-308): the XML render of a `retrieval_status` + optional `task`,
-/// joined by a single newline (`n.join("\n")`). Fed to the model verbatim via
+/// joined by a BLANK line (`n.join("\n\n")`, 2.1.263 `src_160988549.js`
+/// @3695691). Fed to the model verbatim via
 /// the `content` key.
 fn render_task_output(retrieval_status: &str, task: Option<&TaskOutputView>) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -2263,7 +2274,9 @@ fn render_task_output(retrieval_status: &str, task: Option<&TaskOutputView>) -> 
             parts.push(format!("<error>{error}</error>"));
         }
     }
-    parts.join("\n")
+    // claude-code joins the parts with a BLANK line, not a single newline
+    // (2.1.263 `src_160988549.js` @3695691: `content: r.join("\n\n")`).
+    parts.join("\n\n")
 }
 
 /// The `task` payload surfaced by `TaskOutputTool` — the subset of the TS

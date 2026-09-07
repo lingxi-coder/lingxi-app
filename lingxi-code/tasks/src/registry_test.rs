@@ -285,6 +285,51 @@ async fn settling_a_killed_background_bash_writes_the_killed_trailer() {
 }
 
 #[tokio::test]
+async fn stopping_a_background_bash_closes_its_output_file_with_the_killed_trailer() {
+    // claude-code's TaskStop path (`JF`) appends `\n[killed]\n` to the shell's
+    // output file before it notifies, so a later Read of the file shows how the
+    // command ended rather than just stopping mid-stream.
+    let (_dir, registry) = make_registry();
+    let (task_id, path) = registry.allocate_bash_output().await.unwrap();
+    registry
+        .register_background_bash(task_id.clone(), "sleep 60".into(), "long one".into(), None)
+        .await
+        .unwrap();
+    registry.output_manager.append(&path, "partial output\n").await.unwrap();
+
+    registry.kill(&task_id).await.unwrap();
+
+    assert_eq!(
+        registry.get(&task_id).await.unwrap().base().status,
+        TaskStatus::Killed
+    );
+    let written = registry
+        .output_manager
+        .read(&path, crate::output_manager::OutputOptions { offset: None, limit: None })
+        .await
+        .unwrap();
+    assert!(
+        written.content.contains("partial output") && written.content.contains("[killed]"),
+        "the killed trailer must follow the partial output, got: {:?}",
+        written.content,
+    );
+    // A second kill must not append a second trailer: only the call that
+    // performs the Running -> Killed transition writes one.
+    registry.kill(&task_id).await.unwrap();
+    let again = registry
+        .output_manager
+        .read(&path, crate::output_manager::OutputOptions { offset: None, limit: None })
+        .await
+        .unwrap();
+    assert_eq!(
+        again.content.matches("[killed]").count(),
+        1,
+        "exactly one trailer per task, got: {:?}",
+        again.content,
+    );
+}
+
+#[tokio::test]
 async fn discarding_an_unused_bash_identity_removes_its_output_file() {
     // A foreground command's allocated file is redundant once the command
     // returns inline; leaving it would drop one file per shell call into the

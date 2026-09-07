@@ -6016,6 +6016,13 @@ impl DesktopSessionComposition {
         matches!(self, Self::InteractiveCli)
     }
 
+    /// Whether the host can resolve permission prompts, including over the
+    /// bridge transport without adopting interactive CLI session semantics.
+    #[must_use]
+    pub fn supports_interactive_permissions(self) -> bool {
+        matches!(self, Self::InteractiveCli | Self::Transport)
+    }
+
     /// Claude Code 2.1.245 main-query identity: `(querySource, print)`.
     #[must_use]
     pub fn query_source_and_print(
@@ -10776,9 +10783,9 @@ pub async fn build(
     // (4) Orchestrator config from `cfg` (was `argv.model`).
     let mut orch_cfg = OrchestratorConfig::default();
     orch_cfg.interactive_session = interactive_session;
-    // Keep the legacy main-loop interactive bit aligned for CLI TUI / stdio
-    // REPL sessions until every remaining consumer reads `interactive_session`.
-    orch_cfg.interactive_permissions = interactive_session;
+    // Bridge hosts have a live permission surface even though their session
+    // identity remains SDK. Treating them as headless denies Plan-mode questions.
+    orch_cfg.interactive_permissions = session_composition.supports_interactive_permissions();
     // Resolve output style before query identity: Claude Code includes builtin
     // output-style names in `repl_main_thread:outputStyle:*`.
     let output_style = if cfg.restricted {
@@ -12140,8 +12147,11 @@ pub async fn build(
     //        out of the working tree / git status (T16). The spawner is the
     //        tokio-backed `PosixRuntime`. The same handle is returned for a
     //        transport/TUI poller to read live state.
-    let task_session_id = protocol::SessionId::new().to_string();
-    let task_output_dir = session_task_output_dir(&cwd, &task_session_id);
+    // Key the directory by THIS session's id, not a fresh one: claude-code's
+    // `o1e()` derives it from `K()` (the live session id), so the task spools
+    // sit beside the session's other per-session state instead of under a uuid
+    // that exists nowhere else in the process.
+    let task_output_dir = session_task_output_dir(&cwd, &main_session_uuid);
     // Eagerly create the dir (claude-code `ensureOutputDir`'s `mkdir(recursive)`)
     // so the very first spool `allocate` (exclusive create) finds its parent.
     if let Err(e) = std::fs::create_dir_all(&task_output_dir) {
@@ -17328,6 +17338,22 @@ still flip to available"
         };
         assert!(!custom.use_noop_permission_gate);
         let _ = format!("{custom:?}");
+    }
+
+    #[test]
+    fn desktop_permission_prompts_are_independent_of_cli_session_semantics() {
+        for (composition, interactive_session, interactive_permissions) in [
+            (DesktopSessionComposition::InteractiveCli, true, true),
+            (DesktopSessionComposition::HeadlessCli, false, false),
+            (DesktopSessionComposition::Transport, false, true),
+        ] {
+            assert_eq!(composition.is_interactive_session(), interactive_session);
+            assert_eq!(
+                composition.supports_interactive_permissions(),
+                interactive_permissions,
+                "permission prompt capability for {composition:?}"
+            );
+        }
     }
 
     #[test]

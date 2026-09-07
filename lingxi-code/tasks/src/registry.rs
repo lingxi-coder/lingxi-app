@@ -2300,22 +2300,8 @@ impl TaskRegistry {
             // must NOT be demoted to `Killed` — that would leave the task
             // `Killed` after `TaskCompleted` already fired. Skip the status
             // flip once terminal (mirrors `settle_mcp_task`'s re-check).
-            if let Some(s) = self.tasks.write().await.get_mut(task_id_ref) {
-                if !s.base().status.is_terminal() {
-                    match s {
-                        TaskState::LocalBash(b) => b.base.status = TaskStatus::Killed,
-                        TaskState::LocalAgent(a) => a.base.status = TaskStatus::Killed,
-                        TaskState::Monitor(m) => m.base.status = TaskStatus::Killed,
-                        // A backgrounded MCP call: mark killed + `mcpStatus:"cancelled"`
-                        // (the poll loop's `status==="killed"` → `cancelTask` branch).
-                        TaskState::McpTask(m) => {
-                            m.base.status = TaskStatus::Killed;
-                            m.mcp_status = "cancelled".to_string();
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            let killed_bash_output = self.mark_killed(task_id_ref).await;
+            self.append_killed_trailer(killed_bash_output).await;
             if let Some(cleanup) = cleanup {
                 cleanup();
             }
@@ -2330,30 +2316,58 @@ impl TaskRegistry {
                 .await
                 .map_err(|e| TaskError::Internal(e.to_string()))?;
         }
-        if let Some(s) = self.tasks.write().await.get_mut(task_id_ref) {
-            // Mark killed for the variants whose status is exposed here.
-            // Reverse-race guard: never demote an already-terminal task (e.g. a
-            // settle that won the race and fired `TaskCompleted`) to `Killed`.
-            if !s.base().status.is_terminal() {
-                match s {
-                    TaskState::LocalBash(b) => b.base.status = TaskStatus::Killed,
-                    TaskState::LocalAgent(a) => a.base.status = TaskStatus::Killed,
-                    TaskState::Monitor(m) => m.base.status = TaskStatus::Killed,
-                    // A backgrounded MCP call: the stored cancel cleanup aborts the
-                    // in-flight call; reflect the kill + `mcpStatus:"cancelled"`.
-                    TaskState::McpTask(m) => {
-                        m.base.status = TaskStatus::Killed;
-                        m.mcp_status = "cancelled".to_string();
-                    }
-                    // Other variants intentionally fall through in M1.
-                    _ => {}
-                }
-            }
-        }
+        let killed_bash_output = self.mark_killed(task_id_ref).await;
+        self.append_killed_trailer(killed_bash_output).await;
         if let Some(cleanup) = cleanup {
             cleanup();
         }
         Ok(())
+    }
+
+    /// Flip a task to `Killed`, but only when THIS call performs the
+    /// non-terminal transition. Returns the output file of a `local_bash` task
+    /// that was actually killed here, so the caller can close its file.
+    ///
+    /// Reverse-race guard: a task that already reached a terminal status (e.g.
+    /// an MCP settle that won the race and fired `TaskCompleted`) must NOT be
+    /// demoted to `Killed`.
+    async fn mark_killed(&self, task_id: &str) -> Option<std::path::PathBuf> {
+        let mut map = self.tasks.write().await;
+        let Some(state) = map.get_mut(task_id) else {
+            return None;
+        };
+        if state.base().status.is_terminal() {
+            return None;
+        }
+        let mut killed_bash_output = None;
+        match state {
+            TaskState::LocalBash(bash) => {
+                bash.base.status = TaskStatus::Killed;
+                killed_bash_output = Some(bash.base.output_file.clone());
+            }
+            TaskState::LocalAgent(agent) => agent.base.status = TaskStatus::Killed,
+            TaskState::Monitor(monitor) => monitor.base.status = TaskStatus::Killed,
+            // A backgrounded MCP call: mark killed + `mcpStatus:"cancelled"`
+            // (the poll loop's `status==="killed"` → `cancelTask` branch).
+            TaskState::McpTask(mcp) => {
+                mcp.base.status = TaskStatus::Killed;
+                mcp.mcp_status = "cancelled".to_string();
+            }
+            _ => {}
+        }
+        killed_bash_output
+    }
+
+    /// Close a killed shell's output file with the trailer claude-code appends
+    /// (`JF`: `s1e(e, "\n[killed]\n")`, 2.1.263 `src_160988549.js` @2039181),
+    /// so a later `Read` of that file shows how the command ended.
+    async fn append_killed_trailer(&self, output_file: Option<std::path::PathBuf>) {
+        if let Some(output_file) = output_file {
+            let _ = self
+                .output_manager
+                .append(&output_file, "\n[killed]\n")
+                .await;
+        }
     }
 }
 

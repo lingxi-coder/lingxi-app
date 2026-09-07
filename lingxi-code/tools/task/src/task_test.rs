@@ -1626,7 +1626,12 @@ mod tests {
                 .expect("a blocked completion is a benign success:false result, not an error");
             // TS shape: { success:false, taskId, updatedFields:[], error }.
             assert_eq!(res.data["success"], json!(false));
-            assert_eq!(res.data["error"], "not verified");
+            // The blocking reason reaches the model wrapped with the hook's
+            // name, as the sibling hooks already do (2.1.263 `Fvt`).
+            assert_eq!(
+                res.data["error"],
+                "TaskCompleted hook feedback:\nnot verified"
+            );
             assert_eq!(res.data["updatedFields"], json!(Vec::<String>::new()));
             assert!(
                 res.data.get("statusChange").is_none(),
@@ -2220,8 +2225,8 @@ mod tests {
             assert!(content.contains("<status>completed</status>"));
             assert!(content.contains("<exit_code>0</exit_code>"));
             assert!(content.contains("<output>\nall done\n</output>"));
-            // Tags joined by a single newline.
-            assert!(content.contains("</retrieval_status>\n<task_id>"));
+            // Tags joined by a BLANK line (2.1.263 `r.join("\n\n")`).
+            assert!(content.contains("</retrieval_status>\n\n<task_id>"));
         }
 
         #[tokio::test]

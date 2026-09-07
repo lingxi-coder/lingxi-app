@@ -397,6 +397,7 @@ impl DefaultLlmClient {
         }
 
         Ok(PreparedLlmCall {
+            registered_attempt: request.model_attempt.is_some(),
             route: Route {
                 resolved_route,
                 protocol: effective_protocol,
@@ -415,6 +416,9 @@ impl DefaultLlmClient {
         request: &LlmRequest,
         transport: &dyn Transport,
     ) -> Result<LlmResponse, LlmError> {
+        if request.model_attempt.is_some() {
+            return Err(crate::model_attempt::missing_hooks_error());
+        }
         let prepared = self.prepare(request).await?;
         let provider_response = transport.execute(&prepared.provider_request).await?;
         prepared.route.codec.decode_response(provider_response)
@@ -429,6 +433,9 @@ impl DefaultLlmClient {
         request: &LlmRequest,
         transport: &dyn Transport,
     ) -> Result<LlmEventStream, LlmError> {
+        if request.model_attempt.is_some() {
+            return Err(crate::model_attempt::missing_hooks_error());
+        }
         if !request.stream {
             return Err(LlmError::InvalidRequest {
                 message: "execute_stream requires LlmRequest.stream = true".to_string(),
@@ -453,6 +460,9 @@ impl DefaultLlmClient {
         transport: &dyn Transport,
         session: &mut ResponsesWebSocketSession,
     ) -> Result<(), LlmError> {
+        if request.model_attempt.is_some() {
+            return Err(crate::model_attempt::missing_hooks_error());
+        }
         if session.fallback_to_http() || session.connection.is_some() {
             return Ok(());
         }
@@ -489,6 +499,9 @@ impl DefaultLlmClient {
         transport: &dyn Transport,
         session: &mut ResponsesWebSocketSession,
     ) -> Result<(), LlmError> {
+        if request.model_attempt.is_some() {
+            return Err(crate::model_attempt::missing_hooks_error());
+        }
         if session.fallback_to_http() {
             return Ok(());
         }
@@ -529,6 +542,9 @@ impl DefaultLlmClient {
         transport: &dyn Transport,
         session: &mut ResponsesWebSocketSession,
     ) -> Result<(), LlmError> {
+        if prepared.registered_attempt {
+            return Err(crate::model_attempt::missing_hooks_error());
+        }
         if session.fallback_to_http() {
             return Ok(());
         }
@@ -568,6 +584,9 @@ impl DefaultLlmClient {
         transport: &dyn Transport,
         session: &mut ResponsesWebSocketSession,
     ) -> Result<LlmEventStream, LlmError> {
+        if request.model_attempt.is_some() {
+            return Err(crate::model_attempt::missing_hooks_error());
+        }
         if !request.stream {
             return Err(LlmError::InvalidRequest {
                 message: "execute_stream_with_session requires LlmRequest.stream = true"
@@ -606,6 +625,9 @@ impl DefaultLlmClient {
         transport: &dyn Transport,
         session: &mut ResponsesWebSocketSession,
     ) -> Result<(PreparedLlmCall, StreamingResponse), LlmError> {
+        if prepared.registered_attempt {
+            return Err(crate::model_attempt::missing_hooks_error());
+        }
         let logical_body = prepared.provider_request.body_json.clone();
         self.open_prepared_stream_with_session_internal(
             prepared,
@@ -1387,6 +1409,7 @@ fn validate_provider_profile(provider: &crate::ProviderProfile) -> Result<(), Ll
 
 #[derive(Debug)]
 pub struct PreparedLlmCall {
+    registered_attempt: bool,
     pub route: Route,
     pub provider_request: ProviderRequest,
 }

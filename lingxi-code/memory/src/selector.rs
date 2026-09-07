@@ -64,6 +64,7 @@ impl MemorySelector {
 
         let prompt = build_selector_prompt(query, &candidates, recent_tools);
         let req = SideQueryRequest {
+            model_attempt: None,
             model: self.selector_model.clone(),
             profile: None,
             system_prompt: Some("You select memory files relevant to the query.".into()),

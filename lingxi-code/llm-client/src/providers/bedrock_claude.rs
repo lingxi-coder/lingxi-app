@@ -93,6 +93,12 @@ impl BedrockClaudeCodec {
 }
 
 impl WireCodec for BedrockClaudeCodec {
+    fn response_usage(
+        &self,
+        response: &ProviderResponse,
+    ) -> Option<(crate::Usage, crate::ModelAttemptUsageCompleteness)> {
+        self.inner.response_usage(response)
+    }
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
         // Delegate to the inner Anthropic codec for body construction.
         let mut provider_request = self.inner.encode_request(request)?;

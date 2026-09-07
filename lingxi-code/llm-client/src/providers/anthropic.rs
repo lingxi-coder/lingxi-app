@@ -77,6 +77,22 @@ impl AnthropicMessagesCodec {
 }
 
 impl WireCodec for AnthropicMessagesCodec {
+    fn response_usage(
+        &self,
+        response: &ProviderResponse,
+    ) -> Option<(crate::Usage, crate::ModelAttemptUsageCompleteness)> {
+        let usage = response
+            .body_json
+            .get("usage")
+            .filter(|value| value.is_object())
+            .map(normalize_anthropic_usage)?;
+        Some(crate::model_attempt::response_usage_observation(
+            usage,
+            response.status,
+            "input_tokens",
+            "output_tokens",
+        ))
+    }
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
         let (mut body, json_string_overrides) = base_body(request)?;
 

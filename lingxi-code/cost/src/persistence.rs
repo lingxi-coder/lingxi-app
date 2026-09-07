@@ -77,6 +77,10 @@ pub struct CostStateVector {
     pub total_lines_removed: u64,
     /// Last usage, when present.
     pub last_usage: Option<crate::Usage>,
+    /// Original completion revision of last_usage, not a later correction's
+    /// revision. Absent in legacy snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_usage_revision: Option<u64>,
     /// Last request cache-read count.
     pub last_cache_read_input_tokens: u64,
     /// Last request cache-creation count.
@@ -138,6 +142,7 @@ impl From<&CostState> for CostStateVector {
             total_lines_added: state.total_lines_added,
             total_lines_removed: state.total_lines_removed,
             last_usage: state.last_usage.clone(),
+            last_usage_revision: state.last_usage_revision,
             last_cache_read_input_tokens: state.last_cache_read_input_tokens,
             last_cache_creation_input_tokens: state.last_cache_creation_input_tokens,
             external_nano_usd: state.external_nano_usd,
@@ -153,6 +158,13 @@ impl CostStateVector {
     /// overwrite duplicate structured keys, and each row must repeat the same
     /// model identity carried by its usage payload.
     pub fn try_into_state(self) -> Result<CostState, CostPersistError> {
+        if self.last_usage_revision.is_some_and(|revision| {
+            revision == 0 || revision > self.cost_revision || self.last_usage.is_none()
+        }) {
+            return Err(CostPersistError::Storage(
+                "cost vector contains an invalid usage completion revision".into(),
+            ));
+        }
         let mut per_model_usage = indexmap::IndexMap::new();
         for entry in self.per_model_usage {
             if per_model_usage
@@ -177,6 +189,7 @@ impl CostStateVector {
             total_lines_added: self.total_lines_added,
             total_lines_removed: self.total_lines_removed,
             last_usage: self.last_usage,
+            last_usage_revision: self.last_usage_revision,
             last_cache_read_input_tokens: self.last_cache_read_input_tokens,
             last_cache_creation_input_tokens: self.last_cache_creation_input_tokens,
             external_nano_usd: self.external_nano_usd,
@@ -223,6 +236,66 @@ pub enum CostPersistError {
 /// Result sent to the mutation owner. The mutation id remains stable on every
 /// retry, including a failed durable acknowledgment.
 pub type CostPersistResult = Result<CostPersistAck, CostPersistError>;
+
+/// Distinct journal operations for registered model attempts. An intent does
+/// not advance the cost revision; a receipt folds one checked contribution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttemptPersistMutation {
+    /// Immutable authorization retained before dispatch.
+    Intent(crate::AttemptIntent),
+    /// Actual or conservatively incomplete observation.
+    Receipt(crate::AttemptReceipt),
+}
+
+/// Acknowledgment of an attempt mutation. Original mutation acknowledgments
+/// remain stable on retry even when the current cost projection is newer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptPersistAck {
+    /// Original journal/cost revision for this mutation identity.
+    pub persistence: CostPersistAck,
+    /// Current authoritative projection, not an old duplicate's stale vector.
+    pub state: CostStateVector,
+    /// A receipt's checked contribution; absent for an intent.
+    pub receipt: Option<crate::AttemptFoldAck>,
+    /// False for an idempotent duplicate. Never reapply its old contribution.
+    pub applied: bool,
+}
+
+/// Queue request transferred synchronously after budget authorization.
+pub struct AttemptPersistRequest {
+    /// Originating session, checked independently of the payload's identity.
+    pub session_id: SessionId,
+    /// Intent or receipt to validate and append.
+    pub mutation: AttemptPersistMutation,
+    /// Retained completion result. Dropping a receiver does not cancel I/O.
+    pub ack: oneshot::Sender<Result<AttemptPersistAck, CostPersistError>>,
+}
+
+/// Capacity in the same bounded coordinator queue used by ordinary cost
+/// mutations. Acquire before taking monetary/output authorization locks.
+pub struct AttemptPersistPermit {
+    enqueue: Option<Box<dyn FnOnce(AttemptPersistRequest) -> Result<(), CostPersistError> + Send>>,
+}
+
+impl AttemptPersistPermit {
+    /// Bind one owned coordinator queue slot.
+    #[must_use]
+    pub fn new<F>(enqueue: F) -> Self
+    where
+        F: FnOnce(AttemptPersistRequest) -> Result<(), CostPersistError> + Send + 'static,
+    {
+        Self {
+            enqueue: Some(Box::new(enqueue)),
+        }
+    }
+
+    /// Consume capacity with a synchronous enqueue, without a cancellation gap.
+    pub fn enqueue(mut self, request: AttemptPersistRequest) -> Result<(), CostPersistError> {
+        self.enqueue
+            .take()
+            .expect("attempt permit is consumed once")(request)
+    }
+}
 
 /// Request transferred to the app-owned WAL coordinator.
 pub struct CostPersistRequest {
@@ -277,6 +350,17 @@ pub trait CostPersistence: Send + Sync {
         &self,
         session_id: SessionId,
     ) -> Result<CostPersistPermit, CostPersistError>;
+
+    /// Reserve an attempt journal slot. Legacy/mobile hosts remain compatible
+    /// but cannot silently authorize unjournaled registered model attempts.
+    async fn acquire_attempt_permit(
+        &self,
+        _session_id: SessionId,
+    ) -> Result<AttemptPersistPermit, CostPersistError> {
+        Err(CostPersistError::Rejected(
+            "registered model-attempt persistence is unavailable".into(),
+        ))
+    }
 }
 
 /// Hydration result installed before a session becomes active.
@@ -579,6 +663,34 @@ mod tests {
             vector.try_into_state(),
             Err(CostPersistError::Storage(message)) if message.contains("duplicate")
         ));
+    }
+
+    #[test]
+    fn usage_completion_revision_round_trips_and_rejects_invalid_order() {
+        let state = CostState {
+            cost_revision: 4,
+            last_usage: Some(crate::Usage::default()),
+            last_usage_revision: Some(2),
+            ..Default::default()
+        };
+        let vector = CostStateVector::from(&state);
+        assert_eq!(vector.clone().try_into_state().unwrap(), state);
+        for revision in [0, 5] {
+            let mut invalid = vector.clone();
+            invalid.last_usage_revision = Some(revision);
+            assert!(invalid.try_into_state().is_err());
+        }
+        let mut missing_usage = vector.clone();
+        missing_usage.last_usage = None;
+        assert!(missing_usage.try_into_state().is_err());
+        let mut legacy = serde_json::to_value(&vector).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("last_usage_revision");
+        let restored: CostStateVector = serde_json::from_value(legacy).unwrap();
+        assert!(restored.last_usage_revision.is_none());
+        assert!(restored.try_into_state().is_ok());
     }
 
     #[test]

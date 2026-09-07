@@ -341,7 +341,7 @@ fn block_kind_of(content_block: &ContentBlock) -> BlockKind {
 ///   - `cache_read_input_tokens` → `billable_tokens.cache_read`
 ///   - `server_tool_use` → `server_tool_use`
 ///   - `speed` → `speed`
-fn merge_usage(seed: &Usage, delta: &Usage) -> Usage {
+pub(crate) fn merge_usage(seed: &Usage, delta: &Usage) -> Usage {
     let bt_seed = &seed.billable_tokens;
     let bt_delta = &delta.billable_tokens;
     Usage {

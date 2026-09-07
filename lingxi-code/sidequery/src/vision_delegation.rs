@@ -730,6 +730,7 @@ fn spawn_query(
     join_set.spawn(async move {
         let response = client
             .query(SideQueryRequest {
+                model_attempt: None,
                 model: packet.model.clone(),
                 profile: packet.profile.clone(),
                 system_prompt: Some(system_prompt().to_string()),

@@ -21,6 +21,9 @@ use thiserror::Error;
 /// Parameters for one side-query LLM call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SideQueryRequest {
+    /// Host-owned registered logical call; request JSON cannot supply it.
+    #[serde(skip)]
+    pub model_attempt: Option<platform_api::ModelAttemptContext>,
     /// Model id (e.g. `claude-haiku-4-5`).
     pub model: String,
     /// Optional provider profile that owns `model`.
@@ -118,6 +121,9 @@ pub enum SideQueryError {
 /// Strict JSON-schema side query (Fusion analyst / synthesizer).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrictStructuredQueryRequest {
+    /// Host-owned registered logical call; request JSON cannot supply it.
+    #[serde(skip)]
+    pub model_attempt: Option<platform_api::ModelAttemptContext>,
     /// Model id.
     pub model: String,
     /// Optional provider profile.

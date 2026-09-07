@@ -825,15 +825,17 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         opts: agent::api::SubagentApiCallOpts,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         self.service
-            .stream_with_opts(
+            .stream_with_attempt_opts(
                 model,
                 profile,
                 system,
                 messages,
                 tools,
+                None,
                 effort,
                 opts.max_output_tokens,
                 opts.query_source_label.as_deref(),
+                opts.model_attempt,
             )
             .await
     }
@@ -850,7 +852,7 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         opts: agent::api::SubagentApiCallOpts,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         self.service
-            .stream_forced_with_opts(
+            .stream_with_attempt_opts(
                 model,
                 profile,
                 system,
@@ -860,6 +862,7 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
                 effort,
                 opts.max_output_tokens,
                 opts.query_source_label.as_deref(),
+                opts.model_attempt,
             )
             .await
     }
@@ -1204,6 +1207,7 @@ mod tests {
                 None,
                 agent::api::SubagentApiCallOpts {
                     max_output_tokens: Some(777),
+                    model_attempt: None,
                     query_source_label: Some("fusion_panel".to_string()),
                 },
             )
@@ -1220,7 +1224,8 @@ mod tests {
         );
         drop(auto_seen);
 
-        let forced_transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let forced_transport =
+            FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let forced_seam: Arc<dyn agent::SubagentApiClient> =
             Arc::new(make_adapter(forced_transport.clone()));
         let _ = forced_seam
@@ -1234,6 +1239,7 @@ mod tests {
                 None,
                 agent::api::SubagentApiCallOpts {
                     max_output_tokens: Some(321),
+                    model_attempt: None,
                     query_source_label: Some("fusion_panel".to_string()),
                 },
             )
@@ -1243,7 +1249,10 @@ mod tests {
             .last()
             .expect("the forced opts-aware call reached the transport");
         assert_eq!(
-            forced_request.body_json.get("max_tokens").and_then(serde_json::Value::as_u64),
+            forced_request
+                .body_json
+                .get("max_tokens")
+                .and_then(serde_json::Value::as_u64),
             Some(321),
             "forced opts-aware wire max_tokens must equal the requested ceiling; body: {}",
             forced_request.body_json

@@ -70,6 +70,12 @@ impl FoundryClaudeCodec {
 }
 
 impl WireCodec for FoundryClaudeCodec {
+    fn response_usage(
+        &self,
+        response: &ProviderResponse,
+    ) -> Option<(crate::Usage, crate::ModelAttemptUsageCompleteness)> {
+        self.inner.response_usage(response)
+    }
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
         // Foundry wire == Anthropic Messages wire: no URL/body rewrite.
         self.inner.encode_request(request)

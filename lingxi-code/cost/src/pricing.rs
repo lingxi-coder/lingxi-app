@@ -105,14 +105,14 @@ pub enum NonTokenBillableUnit {
 }
 
 /// A unit price expressed in nano-USD per token.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MoneyPerToken {
     /// Price per token in nano-USD (1 USD = 10^9 nano-USD).
     pub nano_usd_per_token: u64,
 }
 
 /// All rate information needed to cost one model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelPricing {
     /// The model these rates apply to.
     pub model_ref: ModelRef,
@@ -128,7 +128,7 @@ pub struct ModelPricing {
 }
 
 /// Provenance for a [`ModelPricing`] entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PricingSource {
     /// Compiled-in reference rates for a known provider.
     BuiltInReference {

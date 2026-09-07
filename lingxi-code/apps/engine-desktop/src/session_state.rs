@@ -9,9 +9,11 @@
 
 use async_trait::async_trait;
 use cost::{
-    CostDurabilityGate, CostHydration, CostHydrator, CostMutationId, CostMutationRecord,
-    CostMutationSource, CostPersistAck, CostPersistError, CostPersistPermit, CostPersistRequest,
-    CostPersistResult, CostPersistence, CostState, CostStateVector, CostTracker,
+    AttemptIntent, AttemptLedger, AttemptPersistAck, AttemptPersistMutation, AttemptPersistPermit,
+    AttemptPersistRequest, AttemptReceipt, CostDurabilityGate, CostHydration, CostHydrator,
+    CostMutationId, CostMutationRecord, CostMutationSource, CostPersistAck, CostPersistError,
+    CostPersistPermit, CostPersistRequest, CostPersistResult, CostPersistence, CostState,
+    CostStateVector, CostTracker,
 };
 pub use platform_api::{DurableFusionOutboxRecord, DurableFusionTerminalRecord};
 use platform_api::{FusionPublicationReceipt, FusionPublicationStatus, FusionRunIdentity};
@@ -25,6 +27,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, Notify};
 
 const COST_QUEUE_CAPACITY: usize = 64;
+
+mod attempts;
+use attempts::AttemptProjection;
 
 #[derive(Debug, Clone, Default)]
 struct CoordinatorProjection {
@@ -47,6 +52,7 @@ struct CachedCostResult {
 }
 
 struct HydratedCostLedger {
+    attempts: AttemptProjection,
     hydration: CostHydration,
     durable_results: std::collections::HashMap<CostMutationId, CachedCostResult>,
     fusion_terminals: std::collections::HashMap<String, DurableFusionTerminalRecord>,
@@ -66,6 +72,8 @@ struct SessionProjectionSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionEvent {
+    AttemptIntent(AttemptIntent),
+    AttemptReceipt(AttemptReceipt, CostStateVector),
     /// New mixed-journal cost mutation.
     Cost(CostMutationRecord),
     /// Terminal computation plus optional Slash outbox item.
@@ -76,6 +84,10 @@ enum SessionEvent {
 
 fn encode_session_event(event: &SessionEvent) -> Result<serde_json::Value, CostPersistError> {
     let (tag, payload) = match event {
+        SessionEvent::AttemptIntent(intent) => ("AttemptIntent", serde_json::to_value(intent)),
+        SessionEvent::AttemptReceipt(receipt, state) => {
+            ("AttemptReceipt", serde_json::to_value((receipt, state)))
+        }
         SessionEvent::Cost(record) => ("Cost", serde_json::to_value(record)),
         SessionEvent::FusionTerminal(record) => ("FusionTerminal", serde_json::to_value(record)),
         SessionEvent::FusionOutbox(record) => ("FusionOutbox", serde_json::to_value(record)),
@@ -130,6 +142,7 @@ fn decode_projection_snapshot(
 }
 
 enum SessionMutation {
+    Attempt(AttemptPersistRequest),
     Cost(CostPersistRequest),
     FusionTerminal {
         event_id: String,
@@ -474,9 +487,11 @@ enum WriterTaskExit {
 /// drops, the channel closes, the receiver drains, and the writer lease can be
 /// released instead of being pinned by a self-owned sender cycle.
 struct CoordinatorState {
+    mutation_gate: Mutex<()>,
     session_id: SessionId,
     journal: Arc<DurableJournal>,
     projection: Mutex<CoordinatorProjection>,
+    attempts: Mutex<AttemptProjection>,
     /// Stable mutation outcomes retained after ack receivers are dropped.
     results: Mutex<std::collections::HashMap<CostMutationId, CachedCostResult>>,
     writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
@@ -812,9 +827,11 @@ impl SessionStateCoordinator {
         let (close_tx, _close_rx) = watch::channel(false);
         Ok(Arc::new(Self {
             state: Arc::new(CoordinatorState {
+                mutation_gate: Mutex::new(()),
                 session_id,
                 journal: Arc::new(journal),
                 projection: Mutex::new(CoordinatorProjection::default()),
+                attempts: Mutex::new(AttemptProjection::new(session_id)),
                 results: Mutex::new(std::collections::HashMap::new()),
                 writer_lease,
                 durability_gate: CostDurabilityGate::default(),
@@ -934,7 +951,7 @@ impl SessionStateCoordinator {
                     if let Some(block) = hydration_block {
                         block.wait();
                     }
-                    state.hydrate_blocking()
+                    state.hydrate_blocking_with_recovery(true)
                 }
             })
             .await
@@ -979,6 +996,23 @@ impl SessionStateCoordinator {
                     break;
                 };
                 match mutation {
+                    SessionMutation::Attempt(request) => {
+                        let worker = state.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            let result =
+                                worker.persist_attempt(request.session_id, request.mutation);
+                            if let Err(error) = &result {
+                                worker.durability_gate.freeze(error.to_string());
+                            }
+                            let _ = request.ack.send(result);
+                        })
+                        .await;
+                        if let Err(error) = result {
+                            state
+                                .durability_gate
+                                .freeze(format!("attempt persistence worker failed: {error}"));
+                        }
+                    }
                     SessionMutation::Cost(request) => {
                         let worker = state.clone();
                         let mutation_id = request.mutation_id.clone();
@@ -1317,6 +1351,10 @@ impl SessionStateCoordinator {
 
 impl CoordinatorState {
     fn persist_request(&self, request: CostPersistRequest) {
+        let _serial = self
+            .mutation_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mutation_id = request.mutation_id.clone();
         let record = CostMutationRecord {
             cost_revision: request.cost_revision,
@@ -1398,7 +1436,7 @@ impl CoordinatorState {
         };
         let persisted = match decode_session_event(entry.event.clone()) {
             Ok(SessionEvent::Cost(record)) => record,
-            Ok(SessionEvent::FusionTerminal(_) | SessionEvent::FusionOutbox(_)) => {
+            Ok(_) => {
                 return Err(CostPersistError::Storage(
                     "cost mutation id refers to a non-cost session event".into(),
                 ));
@@ -1461,6 +1499,9 @@ impl CoordinatorState {
                 "cost mutation revision is not the next durable revision".into(),
             ));
         }
+        if let Some(reason) = self.durability_gate.frozen_reason() {
+            return Err(CostPersistError::Frozen(reason));
+        }
         let event = match encode_session_event(&SessionEvent::Cost(record.clone())) {
             Ok(event) => event,
             Err(error) => return Err(error),
@@ -1502,6 +1543,10 @@ impl CoordinatorState {
         event_id: &str,
         record: &DurableFusionTerminalRecord,
     ) -> CostPersistResult {
+        let _serial = self
+            .mutation_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if event_id != record.event_id {
             return Err(CostPersistError::Rejected(
                 "fusion terminal event id is not stable".into(),
@@ -1571,6 +1616,9 @@ impl CoordinatorState {
                 .as_ref()
                 .map_or(0, |(state, _)| state.cost_revision)
         };
+        if let Some(reason) = self.durability_gate.frozen_reason() {
+            return Err(CostPersistError::Frozen(reason));
+        }
         let event = encode_session_event(&SessionEvent::FusionTerminal(record.clone()))?;
         let append = self
             .journal
@@ -1612,6 +1660,10 @@ impl CoordinatorState {
         event_id: &str,
         record: &DurableFusionOutboxRecord,
     ) -> CostPersistResult {
+        let _serial = self
+            .mutation_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if event_id != outbox_event_id(record) {
             return Err(CostPersistError::Rejected(
                 "fusion outbox event id is not stable".into(),
@@ -1665,6 +1717,9 @@ impl CoordinatorState {
                 .as_ref()
                 .map_or(0, |(state, _)| state.cost_revision)
         };
+        if let Some(reason) = self.durability_gate.frozen_reason() {
+            return Err(CostPersistError::Frozen(reason));
+        }
         let event = encode_session_event(&SessionEvent::FusionOutbox(record.clone()))?;
         let append = self
             .journal
@@ -1750,7 +1805,25 @@ impl CoordinatorState {
     }
 
     fn hydrate_blocking(&self) -> Result<CostHydration, CostPersistError> {
+        self.hydrate_blocking_with_recovery(false)
+    }
+
+    fn hydrate_blocking_with_recovery(
+        &self,
+        recover: bool,
+    ) -> Result<CostHydration, CostPersistError> {
+        let _serial = self
+            .mutation_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(reason) = self.durability_gate.frozen_reason() {
+            return Err(CostPersistError::Frozen(reason));
+        }
         let hydrated = hydrate_from_journal(&self.journal, self.session_id)?;
+        *self
+            .attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hydrated.attempts;
         let mut results = self
             .results
             .lock()
@@ -1780,7 +1853,24 @@ impl CoordinatorState {
             projection.fusion_outbox = hydrated.fusion_outbox;
             projection.fusion_acks = hydrated.fusion_acks;
         }
-        Ok(hydrated.hydration)
+        drop(results);
+        // Only startup recovery can manufacture Unknown, never a provider
+        // response. Persist every unresolved intent before this session is live.
+        if recover {
+            self.recover_attempts()?;
+        }
+        let projection = self
+            .projection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (state, journal_revision) = projection
+            .latest
+            .clone()
+            .expect("hydration installed state");
+        Ok(CostHydration {
+            state,
+            journal_revision,
+        })
     }
 }
 
@@ -1804,6 +1894,7 @@ fn hydrate_from_journal(
     let mut fusion_terminals = std::collections::HashMap::new();
     let mut fusion_outbox = std::collections::HashMap::new();
     let mut fusion_acks = std::collections::HashMap::new();
+    let mut attempts = AttemptProjection::new(session_id);
     let mut fold_error = None;
     let replay = journal
         .replay_durable_with(|entry| {
@@ -1819,6 +1910,7 @@ fn hydrate_from_journal(
                     &mut fusion_terminals,
                     &mut fusion_outbox,
                     &mut fusion_acks,
+                    &mut attempts,
                 ) {
                     fold_error = Some(error);
                 }
@@ -1831,6 +1923,7 @@ fn hydrate_from_journal(
     if !replay.journal_present {
         return match journal.read_snapshot::<serde_json::Value>() {
             Ok(None) => Ok(HydratedCostLedger {
+                attempts,
                 hydration: CostHydration {
                     state: CostState {
                         session_id,
@@ -1861,6 +1954,7 @@ fn hydrate_from_journal(
         tracing::warn!("cost snapshot rebuild deferred: {error}");
     }
     Ok(HydratedCostLedger {
+        attempts,
         hydration: CostHydration {
             state: latest,
             journal_revision: replay.last_revision,
@@ -1885,6 +1979,12 @@ fn decode_session_event(value: serde_json::Value) -> Result<SessionEvent, CostPe
     }
     let (tag, payload) = envelope.into_iter().next().expect("one tag was validated");
     match tag.as_str() {
+        "AttemptIntent" => serde_json::from_value(payload)
+            .map(SessionEvent::AttemptIntent)
+            .map_err(|error| CostPersistError::Storage(error.to_string())),
+        "AttemptReceipt" => serde_json::from_value::<(AttemptReceipt, CostStateVector)>(payload)
+            .map(|(receipt, state)| SessionEvent::AttemptReceipt(receipt, state))
+            .map_err(|error| CostPersistError::Storage(error.to_string())),
         "Cost" => serde_json::from_value(payload)
             .map(SessionEvent::Cost)
             .map_err(|error| CostPersistError::Storage(error.to_string())),
@@ -1927,12 +2027,18 @@ fn fold_session_entry(
     fusion_terminals: &mut std::collections::HashMap<String, DurableFusionTerminalRecord>,
     fusion_outbox: &mut std::collections::HashMap<String, DurableFusionOutboxRecord>,
     fusion_acks: &mut std::collections::HashMap<String, CostPersistAck>,
+    attempts: &mut AttemptProjection,
 ) -> Result<(), CostPersistError> {
     let event = match decode_session_event(entry.event.clone()) {
         Ok(event) => event,
         Err(_) => SessionEvent::Cost(decode_legacy_flat_cost(entry.event.clone())?),
     };
     match event {
+        event @ (SessionEvent::AttemptIntent(_) | SessionEvent::AttemptReceipt(_, _)) => {
+            attempts.replay(event, &entry.event_id, entry.journal_revision, latest)?;
+            *last_cost_revision = latest.cost_revision;
+            Ok(())
+        }
         SessionEvent::Cost(event) => fold_cost_entry(
             entry,
             session_id,
@@ -2077,6 +2183,39 @@ fn fold_cost_entry(
 
 #[async_trait]
 impl CostPersistence for SessionStateCoordinator {
+    async fn acquire_attempt_permit(
+        &self,
+        session_id: SessionId,
+    ) -> Result<AttemptPersistPermit, CostPersistError> {
+        if session_id != self.state.session_id {
+            return Err(CostPersistError::Rejected(
+                "attempt permit belongs to a different session".into(),
+            ));
+        }
+        self.ensure_admission_open()?;
+        if let Some(reason) = self.state.durability_gate.frozen_reason() {
+            return Err(CostPersistError::Frozen(reason));
+        }
+        let permit = self
+            .queue_tx
+            .clone()
+            .reserve_owned()
+            .await
+            .map_err(|_| CostPersistError::Rejected("session state queue is closed".into()))?;
+        self.ensure_admission_open()?;
+        if let Some(reason) = self.state.durability_gate.frozen_reason() {
+            return Err(CostPersistError::Frozen(reason));
+        }
+        let gate = self.state.durability_gate.clone();
+        Ok(AttemptPersistPermit::new(move |request| {
+            if let Some(reason) = gate.frozen_reason() {
+                return Err(CostPersistError::Frozen(reason));
+            }
+            permit.send(SessionMutation::Attempt(request));
+            Ok(())
+        }))
+    }
+
     async fn acquire_permit(
         &self,
         session_id: SessionId,

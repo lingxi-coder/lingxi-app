@@ -491,6 +491,7 @@ fn loop_ctx(
 /// Build a `SubagentContext` with the minimum fields the runner reads.
 fn fresh_subagent_ctx() -> SubagentContext {
     SubagentContext {
+        model_attempt: None,
         agent_id: AgentId::new(),
         parent_agent_id: None,
         agent_name: None,
@@ -2376,6 +2377,35 @@ impl crate::api::SubagentApiClient for OptsOnlyCapturingApiClient {
 /// `query_source_label`) is silently dropped before it ever reaches the inner
 /// adapter, and a client that implements ONLY the opts seam is driven through
 /// its unimplemented non-opts fallback and panics.
+#[tokio::test]
+async fn registered_panel_rounds_derive_fresh_calls_and_preserve_registration() {
+    let api = OptsOnlyCapturingApiClient::new(vec![
+        tool_use_response("Read", Some("tool_use")),
+        text_response("done", Some("end_turn")),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 4);
+    let registration = platform_api::ModelAttemptRun::new(Arc::new(()));
+    let original = registration
+        .context(platform_api::ModelAttemptStage::Panel, Some(2))
+        .unwrap();
+    ctx.model_attempt = Some(original.clone());
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    assert!(drain(out_rx)
+        .await
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    let opts = api.opts_seen();
+    assert_eq!(opts.len(), 2);
+    let first = opts[0].model_attempt.as_ref().unwrap();
+    let second = opts[1].model_attempt.as_ref().unwrap();
+    assert_eq!(first.registration_id(), original.registration_id());
+    assert_eq!(second.registration_id(), original.registration_id());
+    assert_eq!(first.panel_slot(), Some(2));
+    assert_ne!(first.logical_call_id(), second.logical_call_id());
+}
+
 #[tokio::test]
 async fn workflow_watchdog_wrapper_threads_opts_to_the_inner_client() {
     let api = OptsOnlyCapturingApiClient::new(vec![

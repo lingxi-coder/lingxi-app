@@ -110,6 +110,626 @@ mod tests {
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
+    #[derive(Default)]
+    struct AttemptProbe {
+        events: Mutex<Vec<&'static str>>,
+        observations: Mutex<Vec<(crate::Usage, crate::ModelAttemptUsageCompleteness)>>,
+        fail_settlement: bool,
+    }
+
+    struct ProbeLease {
+        probe: Arc<AttemptProbe>,
+        finished: bool,
+    }
+
+    impl Drop for ProbeLease {
+        fn drop(&mut self) {
+            if !self.finished {
+                self.probe.events.lock().unwrap().push("drop-owned");
+            }
+        }
+    }
+
+    struct ProbeSettlement(Arc<AttemptProbe>);
+
+    #[async_trait::async_trait]
+    impl crate::ModelAttemptHooks for Arc<AttemptProbe> {
+        async fn begin(
+            &self,
+            _: &platform_api::ModelAttemptContext,
+            request: &LlmRequest,
+            prepared: &crate::PreparedLlmCall,
+        ) -> Result<Box<dyn crate::ModelAttemptLease>, LlmError> {
+            assert!(request.model_attempt.is_some());
+            if request.stream {
+                assert_eq!(
+                    prepared.provider_request.stream_transport,
+                    crate::ProviderStreamTransport::Http
+                );
+            }
+            self.events.lock().unwrap().push("begin");
+            Ok(Box::new(ProbeLease {
+                probe: self.clone(),
+                finished: false,
+            }))
+        }
+    }
+
+    impl crate::ModelAttemptLease for ProbeLease {
+        fn mark_dispatched(&mut self) -> Result<(), LlmError> {
+            self.probe.events.lock().unwrap().push("dispatch");
+            Ok(())
+        }
+        fn observe_usage(
+            &mut self,
+            usage: &crate::Usage,
+            completeness: crate::ModelAttemptUsageCompleteness,
+        ) {
+            self.probe
+                .observations
+                .lock()
+                .unwrap()
+                .push((usage.clone(), completeness));
+        }
+        fn finish(mut self: Box<Self>) -> Box<dyn crate::ModelAttemptSettlement> {
+            self.finished = true;
+            self.probe.events.lock().unwrap().push("finish-owned");
+            Box::new(ProbeSettlement(self.probe.clone()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ModelAttemptSettlement for ProbeSettlement {
+        async fn wait(self: Box<Self>) -> Result<(), LlmError> {
+            self.0.events.lock().unwrap().push("settled");
+            if self.0.fail_settlement {
+                return Err(LlmError::Transport {
+                    message: "fake persistence failed".into(),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    fn registered_request() -> LlmRequest {
+        let mut request =
+            LlmRequest::new("claude-sonnet-4-20250514").with_user_text("fake request");
+        request.max_tokens = Some(100);
+        request.model_attempt = Some(
+            platform_api::ModelAttemptRun::new(Arc::new(()))
+                .context(platform_api::ModelAttemptStage::Panel, Some(0))
+                .unwrap(),
+        );
+        request
+    }
+
+    struct HttpOnlyProbeTransport {
+        frames: Vec<Vec<u8>>,
+        http_calls: std::sync::atomic::AtomicUsize,
+        ws_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Transport for HttpOnlyProbeTransport {
+        fn execute<'a>(
+            &'a self,
+            _: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+            Box::pin(async { panic!("registered stream must not become nonstream fallback") })
+        }
+        fn open_stream<'a>(
+            &'a self,
+            request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            assert_eq!(
+                request.stream_transport,
+                crate::ProviderStreamTransport::Http
+            );
+            self.http_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let frames = self.frames.clone();
+            Box::pin(async move {
+                Ok(StreamingResponse {
+                    status: 200,
+                    headers: BTreeMap::new(),
+                    frames: Box::new(ScriptedFrames::new(frames)),
+                })
+            })
+        }
+        fn open_responses_websocket_session<'a>(
+            &'a self,
+            _: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<Box<dyn crate::ResponsesWebSocketTransportSession>, LlmError>>
+        {
+            self.ws_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async {
+                Err(LlmError::Transport {
+                    message: "unmetered WebSocket path reached".into(),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_websocket_capable_route_uses_one_http_attempt_without_fallback() {
+        use futures::StreamExt;
+        let transport = Arc::new(HttpOnlyProbeTransport {
+            frames: vec![
+                br#"{"type":"response.created","response":{"id":"r1","model":"model","output":[]}}"#.to_vec(),
+                br#"{"type":"response.completed","response":{"id":"r1","model":"model","status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":3,"total_tokens":7}}}"#.to_vec(),
+            ], http_calls: Default::default(), ws_calls: Default::default(),
+        });
+        let service = make_adapter_for_protocol_with_websocket(
+            ProtocolFamily::OpenAiResponses,
+            ProviderId::OpenAI,
+            "https://api.openai.com/v1",
+            "test",
+            "model",
+            transport.clone(),
+            true,
+        );
+        let mut request = registered_request();
+        request.model = "model".into();
+        request.stream = true;
+        assert_eq!(
+            service
+                .client
+                .prepare(&request)
+                .await
+                .unwrap()
+                .provider_request
+                .stream_transport,
+            crate::ProviderStreamTransport::ResponsesWebSocket
+        );
+        let probe = Arc::new(AttemptProbe::default());
+        service.set_model_attempt_hooks(Arc::new(probe.clone()));
+        let mut stream = service.stream_request(request).await.unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        assert_eq!(
+            transport
+                .http_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            transport.ws_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            *probe.events.lock().unwrap(),
+            vec!["begin", "dispatch", "finish-owned", "settled"]
+        );
+        assert_eq!(
+            probe.observations.lock().unwrap().last().unwrap().1,
+            crate::ModelAttemptUsageCompleteness::Complete
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_gemini_partial_usage_is_owned_before_content_and_not_promoted_by_eof() {
+        use futures::StreamExt;
+        for drop_early in [false, true] {
+            let transport = Arc::new(HttpOnlyProbeTransport {
+                frames: vec![br#"{"candidates":[{"content":{"parts":[{"text":"partial"}]}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":4,"thoughtsTokenCount":6,"totalTokenCount":15}}"#.to_vec()],
+                http_calls: Default::default(), ws_calls: Default::default(),
+            });
+            let service = make_adapter_for_protocol_with_transport(
+                ProtocolFamily::GeminiGenerateContent,
+                ProviderId::Gemini,
+                "https://generativelanguage.googleapis.com/v1beta",
+                "test",
+                "model",
+                transport,
+            );
+            let probe = Arc::new(AttemptProbe::default());
+            service.set_model_attempt_hooks(Arc::new(probe.clone()));
+            let mut request = registered_request();
+            request.model = "model".into();
+            let mut stream = service.stream_request(request).await.unwrap();
+            stream.next().await.unwrap().unwrap();
+            {
+                let observations = probe.observations.lock().unwrap();
+                let (usage, completeness) = observations.last().unwrap();
+                assert_eq!(usage.billable_tokens.output, 4);
+                assert_eq!(usage.billable_tokens.reasoning_output, 6);
+                assert_eq!(*completeness, crate::ModelAttemptUsageCompleteness::Partial);
+            }
+            if !drop_early {
+                while let Some(event) = stream.next().await {
+                    event.unwrap();
+                }
+            }
+            drop(stream);
+            assert!(probe
+                .observations
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(_, completeness)| *completeness
+                    == crate::ModelAttemptUsageCompleteness::Partial));
+            assert_eq!(
+                probe.events.lock().unwrap().last().copied(),
+                Some(if drop_early { "drop-owned" } else { "settled" })
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn registered_dispatch_header_retry_preserves_one_settlement_per_send() {
+        let _guard = cedar_lattice_write();
+        let _enabled = CedarLatticeOn::set();
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(
+                500,
+                serde_json::json!({"type":"error","error":{"type":"api_error","message":"retry"}}),
+            )),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let service = make_adapter(transport.clone());
+        let probe = Arc::new(AttemptProbe::default());
+        service.set_model_attempt_hooks(Arc::new(probe.clone()));
+        let request = registered_request();
+        let control = resolve_retry_control_with_settings(
+            &request.model,
+            None,
+            false,
+            &ResolveRetryEnv::from_process_env(),
+            Some(0),
+        );
+        service
+            .drive_non_stream(request, control, DispatchHeaderState::default())
+            .await
+            .unwrap();
+        assert_eq!(transport.seen_count(), 2);
+        assert!(transport
+            .seen_headers(0)
+            .contains_key("anthropic-dispatch-id"));
+        assert!(!transport
+            .seen_headers(1)
+            .contains_key("anthropic-dispatch-id"));
+        assert_eq!(
+            *probe.events.lock().unwrap(),
+            vec![
+                "begin",
+                "dispatch",
+                "finish-owned",
+                "settled",
+                "begin",
+                "dispatch",
+                "finish-owned",
+                "settled"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_absent_hooks_and_direct_backend_reject_before_wire() {
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 200,
+            headers: BTreeMap::new(),
+            body_json: ok_response_json(),
+            request_id: None,
+        });
+        let adapter = make_adapter(transport.clone());
+        let request = registered_request();
+        assert!(adapter
+            .execute_side_query_request(request.clone())
+            .await
+            .is_err());
+        assert!(adapter.stream_request(request.clone()).await.is_err());
+        assert!(adapter
+            .client
+            .execute(&request, transport.as_ref())
+            .await
+            .is_err());
+        assert_eq!(transport.seen_count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn registered_physical_retries_settle_each_attempt_before_next_send() {
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Err(LlmError::Transport {
+                message: "fake connect error".into(),
+            }),
+            FakeResponse::Ok(ProviderResponse {
+                status: 200,
+                headers: BTreeMap::new(),
+                body_json: ok_response_json(),
+                request_id: None,
+            }),
+        ]);
+        let adapter = make_adapter(transport.clone());
+        let probe = Arc::new(AttemptProbe::default());
+        adapter.set_model_attempt_hooks(Arc::new(probe.clone()));
+        adapter
+            .execute_side_query_request(registered_request())
+            .await
+            .unwrap();
+        assert_eq!(transport.seen_count(), 2);
+        assert_eq!(
+            *probe.events.lock().unwrap(),
+            vec![
+                "begin",
+                "dispatch",
+                "finish-owned",
+                "settled",
+                "begin",
+                "dispatch",
+                "finish-owned",
+                "settled"
+            ]
+        );
+        let observations = probe.observations.lock().unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].0.billable_tokens.input, 5);
+        assert_eq!(
+            observations[0].1,
+            crate::ModelAttemptUsageCompleteness::Complete
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_settlement_failure_is_terminal_and_never_transport_retried() {
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 200,
+            headers: BTreeMap::new(),
+            body_json: ok_response_json(),
+            request_id: None,
+        });
+        let adapter = make_adapter(transport.clone());
+        let probe = Arc::new(AttemptProbe {
+            fail_settlement: true,
+            ..AttemptProbe::default()
+        });
+        adapter.set_model_attempt_hooks(Arc::new(probe));
+        assert!(matches!(
+            adapter
+                .execute_side_query_request(registered_request())
+                .await,
+            Err(LlmError::CostUnavailable { .. })
+        ));
+        assert_eq!(transport.seen_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn registered_stream_observes_before_yield_and_drop_retains_partial_usage() {
+        use futures::StreamExt;
+        let adapter = make_adapter(ScriptedStreamTransport::anthropic_success());
+        let probe = Arc::new(AttemptProbe::default());
+        adapter.set_model_attempt_hooks(Arc::new(probe.clone()));
+        let mut stream = adapter.stream_request(registered_request()).await.unwrap();
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            LlmEvent::MessageStart { .. }
+        ));
+        {
+            let seen = probe.observations.lock().unwrap();
+            assert_eq!(seen.len(), 1);
+            assert_eq!(seen[0].0.billable_tokens.input, 1);
+            assert_eq!(seen[0].1, crate::ModelAttemptUsageCompleteness::Partial);
+        }
+        drop(stream);
+        assert_eq!(
+            *probe.events.lock().unwrap(),
+            vec!["begin", "dispatch", "drop-owned"]
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_stream_final_usage_merges_cumulative_counters_once() {
+        use futures::StreamExt;
+        let adapter = make_adapter(ScriptedStreamTransport::anthropic_success());
+        let probe = Arc::new(AttemptProbe::default());
+        adapter.set_model_attempt_hooks(Arc::new(probe.clone()));
+        let mut stream = adapter.stream_request(registered_request()).await.unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        let seen = probe.observations.lock().unwrap();
+        let (usage, completeness) = seen.last().unwrap();
+        assert_eq!(usage.billable_tokens.input, 1);
+        assert_eq!(usage.billable_tokens.output, 1);
+        assert_eq!(
+            *completeness,
+            crate::ModelAttemptUsageCompleteness::Complete
+        );
+        assert_eq!(
+            *probe.events.lock().unwrap(),
+            vec!["begin", "dispatch", "finish-owned", "settled"]
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_success_without_provider_usage_remains_incomplete() {
+        let mut body = ok_response_json();
+        body.as_object_mut().unwrap().remove("usage");
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse {
+            status: 200,
+            headers: BTreeMap::new(),
+            body_json: body,
+            request_id: None,
+        }));
+        let probe = Arc::new(AttemptProbe::default());
+        adapter.set_model_attempt_hooks(Arc::new(probe.clone()));
+        adapter
+            .execute_side_query_request(registered_request())
+            .await
+            .unwrap();
+        assert_eq!(
+            probe.observations.lock().unwrap()[0].1,
+            crate::ModelAttemptUsageCompleteness::Partial
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_http_content_decode_error_preserves_independently_extracted_usage() {
+        let mut body = ok_response_json();
+        body["content"] = serde_json::json!([{"type":"tool_use","id":"tool1","input":{}}]);
+        let transport = FakeTransport::always(ProviderResponse::json(200, body));
+        let service = make_adapter(transport.clone());
+        let probe = Arc::new(AttemptProbe::default());
+        service.set_model_attempt_hooks(Arc::new(probe.clone()));
+        assert!(service
+            .execute_side_query_request(registered_request())
+            .await
+            .is_err());
+        assert_eq!(transport.seen_count(), 1);
+        let seen = probe.observations.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0.billable_tokens.input, 5);
+        assert_eq!(seen[0].0.billable_tokens.output, 2);
+        assert_eq!(seen[0].1, crate::ModelAttemptUsageCompleteness::Complete);
+        assert_eq!(
+            probe.events.lock().unwrap().last().copied(),
+            Some("settled")
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_responses_failed_event_retains_usage_as_partial_before_error() {
+        use futures::StreamExt;
+        let transport = Arc::new(HttpOnlyProbeTransport {
+            frames: vec![br#"{"type":"response.failed","response":{"id":"r1","status":"failed","error":{"code":"server_error","message":"failed"},"usage":{"input_tokens":10,"output_tokens":7,"output_tokens_details":{"reasoning_tokens":3}}}}"#.to_vec()],
+            http_calls: Default::default(), ws_calls: Default::default(),
+        });
+        let service = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::OpenAiResponses,
+            ProviderId::OpenAI,
+            "https://api.openai.com/v1",
+            "test",
+            "model",
+            transport,
+        );
+        let probe = Arc::new(AttemptProbe::default());
+        service.set_model_attempt_hooks(Arc::new(probe.clone()));
+        let mut request = registered_request();
+        request.model = "model".into();
+        let mut stream = service.stream_request(request).await.unwrap();
+        assert!(stream.next().await.unwrap().is_err());
+        let seen = probe.observations.lock().unwrap();
+        let (usage, completeness) = seen.last().unwrap();
+        assert_eq!(usage.billable_tokens.input, 10);
+        assert_eq!(usage.billable_tokens.output, 4);
+        assert_eq!(usage.billable_tokens.reasoning_output, 3);
+        assert_eq!(*completeness, crate::ModelAttemptUsageCompleteness::Partial);
+        assert_eq!(
+            probe.events.lock().unwrap().last().copied(),
+            Some("settled")
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_anthropic_output_deltas_retain_cache_ttl_without_double_counting() {
+        use futures::StreamExt;
+        let transport = Arc::new(ScriptedStreamTransport {
+            frames: vec![
+                br#"{"type":"message_start","message":{"id":"m","model":"claude-sonnet-4-20250514","usage":{"input_tokens":2,"output_tokens":0,"cache_creation_input_tokens":100,"cache_creation":{"ephemeral_1h_input_tokens":100}}}}"#.to_vec(),
+                br#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#.to_vec(),
+                br#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#.to_vec(),
+                br#"{"type":"message_stop"}"#.to_vec(),
+            ], status: 200, headers: BTreeMap::new(),
+        });
+        let service = make_adapter(transport);
+        let probe = Arc::new(AttemptProbe::default());
+        service.set_model_attempt_hooks(Arc::new(probe.clone()));
+        let mut stream = service.stream_request(registered_request()).await.unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        let seen = probe.observations.lock().unwrap();
+        let (usage, completeness) = seen.last().unwrap();
+        assert_eq!(usage.billable_tokens.cache_write, 100);
+        assert_eq!(usage.billable_tokens.output, 5);
+        assert_eq!(
+            usage
+                .provider_metadata
+                .pointer("/cache_creation/ephemeral_1h_input_tokens"),
+            Some(&serde_json::json!(100))
+        );
+        assert_eq!(
+            *completeness,
+            crate::ModelAttemptUsageCompleteness::Complete
+        );
+        assert_eq!(seen[1], seen[2]);
+    }
+
+    #[tokio::test]
+    async fn registered_complete_usage_requires_provider_input_and_output_but_accepts_explicit_zero(
+    ) {
+        for (protocol, provider, input_key, output_key, usage_key, mut body) in [
+            (
+                ProtocolFamily::AnthropicMessages,
+                ProviderId::AnthropicFirstParty,
+                "input_tokens",
+                "output_tokens",
+                "usage",
+                ok_response_json(),
+            ),
+            (
+                ProtocolFamily::OpenAiChat,
+                ProviderId::OpenAI,
+                "prompt_tokens",
+                "completion_tokens",
+                "usage",
+                serde_json::json!({"id":"r","model":"model","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}),
+            ),
+            (
+                ProtocolFamily::OpenAiResponses,
+                ProviderId::OpenAI,
+                "input_tokens",
+                "output_tokens",
+                "usage",
+                serde_json::json!({"id":"r","model":"model","status":"completed","output":[]}),
+            ),
+            (
+                ProtocolFamily::GeminiGenerateContent,
+                ProviderId::Gemini,
+                "promptTokenCount",
+                "candidatesTokenCount",
+                "usageMetadata",
+                serde_json::json!({"responseId":"r","modelVersion":"model","candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}),
+            ),
+        ] {
+            for shape in 0..3 {
+                let mut usage = serde_json::json!({"total_tokens": 10});
+                if shape > 0 {
+                    usage[input_key] = serde_json::json!(0);
+                }
+                if shape == 2 {
+                    usage[output_key] = serde_json::json!(0);
+                    usage["total_tokens"] = serde_json::json!(0);
+                }
+                body[usage_key] = usage;
+                let transport = FakeTransport::always(ProviderResponse::json(200, body.clone()));
+                let service = make_adapter_for_protocol_with_transport(
+                    protocol.clone(),
+                    provider.clone(),
+                    "https://example.test/v1",
+                    "test",
+                    "model",
+                    transport.clone(),
+                );
+                let probe = Arc::new(AttemptProbe::default());
+                service.set_model_attempt_hooks(Arc::new(probe.clone()));
+                let mut request = registered_request();
+                request.model = "model".into();
+                service.execute_side_query_request(request).await.unwrap();
+                assert_eq!(transport.seen_count(), 1);
+                assert_eq!(
+                    probe.observations.lock().unwrap().last().unwrap().1,
+                    if shape == 2 {
+                        crate::ModelAttemptUsageCompleteness::Complete
+                    } else {
+                        crate::ModelAttemptUsageCompleteness::Partial
+                    },
+                    "protocol {protocol:?}, shape {shape}"
+                );
+            }
+        }
+    }
+
     fn ok_response_json() -> serde_json::Value {
         serde_json::json!({
             "id": "msg_test",
@@ -118,6 +738,117 @@ mod tests {
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 5, "output_tokens": 2}
         })
+    }
+
+    #[tokio::test]
+    async fn registered_contradictory_totals_and_incomplete_cache_splits_stay_partial() {
+        for (metadata, complete) in [
+            (
+                serde_json::json!({"input_tokens":0,"output_tokens":0,"total_tokens":10}),
+                false,
+            ),
+            (
+                serde_json::json!({"input_tokens":0,"output_tokens":0,"total_tokens":0}),
+                true,
+            ),
+            (
+                serde_json::json!({"input_tokens":2,"output_tokens":5,"cache_creation_input_tokens":100,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":50}}),
+                false,
+            ),
+            (
+                serde_json::json!({"input_tokens":2,"output_tokens":5,"cache_creation_input_tokens":100,"cache_creation":{"ephemeral_5m_input_tokens":50,"ephemeral_1h_input_tokens":50}}),
+                true,
+            ),
+            (
+                serde_json::json!({"input_tokens":2,"output_tokens":5,"cache_creation_input_tokens":100,"cache_creation":{"ephemeral_1h_input_tokens":50}}),
+                true,
+            ),
+            (
+                serde_json::json!({"input_tokens":2,"output_tokens":5,"cache_creation_input_tokens":100,"cache_creation":{"ephemeral_5m_input_tokens":50}}),
+                false,
+            ),
+            (
+                serde_json::json!({"input_tokens":2,"output_tokens":5,"cache_creation_input_tokens":100,"cache_creation":{"ephemeral_5m_input_tokens":100}}),
+                true,
+            ),
+        ] {
+            let mut body = ok_response_json();
+            body["usage"] = metadata;
+            let transport = FakeTransport::always(ProviderResponse::json(200, body));
+            let service = make_adapter(transport.clone());
+            let probe = Arc::new(AttemptProbe::default());
+            service.set_model_attempt_hooks(Arc::new(probe.clone()));
+            service
+                .execute_side_query_request(registered_request())
+                .await
+                .unwrap();
+            assert_eq!(transport.seen_count(), 1);
+            assert_eq!(
+                probe.observations.lock().unwrap().last().unwrap().1,
+                if complete {
+                    crate::ModelAttemptUsageCompleteness::Complete
+                } else {
+                    crate::ModelAttemptUsageCompleteness::Partial
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_malformed_optional_billing_and_kimi_cache_overflow_stay_partial() {
+        for key in [
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+            "reasoning_output_tokens",
+        ] {
+            let mut body = ok_response_json();
+            body["usage"][key] = serde_json::json!("malformed");
+            let service = make_adapter(FakeTransport::always(ProviderResponse::json(200, body)));
+            let probe = Arc::new(AttemptProbe::default());
+            service.set_model_attempt_hooks(Arc::new(probe.clone()));
+            service
+                .execute_side_query_request(registered_request())
+                .await
+                .unwrap();
+            assert_eq!(
+                probe.observations.lock().unwrap().last().unwrap().1,
+                crate::ModelAttemptUsageCompleteness::Partial,
+                "{key}"
+            );
+        }
+        for (nested, complete) in [(None, false), (Some(2), true)] {
+            let mut usage =
+                serde_json::json!({"prompt_tokens":5,"completion_tokens":1,"cached_tokens":9});
+            if let Some(nested) = nested {
+                usage["prompt_tokens_details"] = serde_json::json!({"cached_tokens":nested});
+            }
+            let body = serde_json::json!({"id":"r","model":"model","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":usage});
+            let service = make_adapter_for_protocol_with_transport(
+                ProtocolFamily::OpenAiChat,
+                ProviderId::OpenAI,
+                "https://example.test/v1",
+                "test",
+                "model",
+                FakeTransport::always(ProviderResponse::json(200, body)),
+            );
+            let probe = Arc::new(AttemptProbe::default());
+            service.set_model_attempt_hooks(Arc::new(probe.clone()));
+            let mut request = registered_request();
+            request.model = "model".into();
+            service.execute_side_query_request(request).await.unwrap();
+            let seen = probe.observations.lock().unwrap();
+            assert_eq!(
+                seen.last().unwrap().1,
+                if complete {
+                    crate::ModelAttemptUsageCompleteness::Complete
+                } else {
+                    crate::ModelAttemptUsageCompleteness::Partial
+                }
+            );
+            if complete {
+                assert_eq!(seen.last().unwrap().0.billable_tokens.cache_read, 2);
+            }
+        }
     }
 
     fn make_adapter_with_subscriber(
@@ -271,6 +1002,26 @@ mod tests {
         model: &str,
         transport: Arc<dyn Transport>,
     ) -> ApiService {
+        make_adapter_for_protocol_with_websocket(
+            protocol,
+            provider_id,
+            base_url,
+            profile_name,
+            model,
+            transport,
+            false,
+        )
+    }
+
+    fn make_adapter_for_protocol_with_websocket(
+        protocol: ProtocolFamily,
+        provider_id: ProviderId,
+        base_url: &str,
+        profile_name: &str,
+        model: &str,
+        transport: Arc<dyn Transport>,
+        supports_websockets: bool,
+    ) -> ApiService {
         let azure = if matches!(protocol, ProtocolFamily::AzureOpenAi) {
             Some(crate::AzureConfig {
                 api_version: "2024-02-01".to_string(),
@@ -305,7 +1056,7 @@ mod tests {
                     pricing: PricingConfig::default(),
                     signing: None,
                     azure,
-                    supports_websockets: false,
+                    supports_websockets,
                     supports_websocket_compression: false,
                     websocket_connect_timeout_ms: None,
                     vision_delegate: None,

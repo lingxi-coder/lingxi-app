@@ -37,7 +37,7 @@ use async_trait::async_trait;
 use llm_client::LlmTransportBridge;
 use llm_client::{
     AuthStrategy, Capabilities, ClientConfig, Credential, CredentialConfig, DefaultLlmClient,
-    LlmRequest, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
+    LlmError, LlmRequest, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
     StaticCredentialProvider, SystemBlock,
 };
 use platform_api::http::{RawByteStream, SseStream};
@@ -399,30 +399,36 @@ impl SideQueryClient for ProviderSideQueryClient {
         if let ProviderSideQueryBackend::Session(service) = &self.backend {
             let wants_structured = request.output_format.is_some();
             let query_source = request.query_source.as_str();
-            let resp = service
-                .messages_create_side_query_with_thinking(
-                    &request.model,
-                    request.profile.as_deref(),
-                    request.system_prompt.as_deref(),
-                    request.messages,
-                    request.tools,
-                    // Fork compaction resolves the parent's ordinary output
-                    // budget; other side queries carry their explicit cap.
-                    Some(request.max_tokens),
-                    convert_tool_choice(request.tool_choice.as_ref()),
-                    request.stop_sequences,
-                    request.thinking,
-                    request.effort,
-                    request.temperature,
-                    Some(query_source),
-                )
-                .await?;
+            let mut canonical = service.build_side_query_request_with_thinking(
+                &request.model,
+                request.profile.as_deref(),
+                request.system_prompt.as_deref(),
+                request.messages,
+                request.tools,
+                // Fork compaction resolves the parent's ordinary output
+                // budget; other side queries carry their explicit cap.
+                Some(request.max_tokens),
+                convert_tool_choice(request.tool_choice.as_ref()),
+                request.stop_sequences,
+                request.thinking,
+                request.effort,
+                request.temperature,
+                Some(query_source),
+            )?;
+            canonical.model_attempt = request.model_attempt;
+            let resp = service.execute_side_query_request(canonical).await?;
             return Ok(decode_response(resp, wants_structured, first_text_only));
         }
 
         let ProviderSideQueryBackend::Direct { client, transport } = &self.backend else {
             unreachable!("session backend returned above")
         };
+        if request.model_attempt.is_some() {
+            return Err(LlmError::InvalidRequest {
+                message: "registered side query requires session accounting hooks".into(),
+            }
+            .into());
+        }
 
         // Build the LlmRequest from the SideQueryRequest DTO.
         let system: Vec<SystemBlock> = request
@@ -517,8 +523,8 @@ impl SideQueryClient for ProviderSideQueryClient {
                 // its own, so `None` here means the same "no reasoning
                 // field at all" that `SideQueryRequest{thinking: None}`
                 // already means for the non-strict path above.
-                let stream = service
-                    .stream_json_schema_with_thinking(
+                let mut canonical = service
+                    .build_json_schema_request_with_thinking(
                         &request.model,
                         request.profile.as_deref(),
                         request.system_prompt.as_deref(),
@@ -530,11 +536,20 @@ impl SideQueryClient for ProviderSideQueryClient {
                         temperature,
                         Some(query_source.as_str()),
                     )
+                    .map_err(map_structured_llm_error)?;
+                canonical.model_attempt = request.model_attempt;
+                let stream = service
+                    .stream_request(canonical)
                     .await
                     .map_err(map_structured_llm_error)?;
                 collect_completed_response(stream).await?
             }
             ProviderSideQueryBackend::Direct { client, transport } => {
+                if request.model_attempt.is_some() {
+                    return Err(map_structured_llm_error(LlmError::InvalidRequest {
+                        message: "registered side query requires session accounting hooks".into(),
+                    }));
+                }
                 let system: Vec<SystemBlock> = request
                     .system_prompt
                     .as_deref()
@@ -960,6 +975,7 @@ mod tests {
 
     fn req(output_format: Option<serde_json::Value>) -> SideQueryRequest {
         SideQueryRequest {
+            model_attempt: None,
             model: "claude-haiku-4-5".into(),
             profile: None,
             system_prompt: Some("system".into()),
@@ -976,6 +992,34 @@ mod tests {
             query_source: QuerySource::MemorySelector,
             skip_system_prompt_prefix: false,
         }
+    }
+
+    #[tokio::test]
+    async fn registered_side_queries_reject_direct_backend_and_json_cannot_grant_authority() {
+        let transport = Arc::new(StubTransport::new("unused"));
+        let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
+        let run = platform_api::ModelAttemptRun::new(Arc::new(()));
+        let mut request = req(None);
+        let ordinary = serde_json::to_value(&request).unwrap();
+        request.model_attempt = Some(
+            run.context(platform_api::ModelAttemptStage::Synthesis, None)
+                .unwrap(),
+        );
+        assert_eq!(serde_json::to_value(&request).unwrap(), ordinary);
+        let mut forged = ordinary;
+        forged["model_attempt"] = serde_json::json!({"logical_call_id": 1});
+        assert!(serde_json::from_value::<SideQueryRequest>(forged)
+            .unwrap()
+            .model_attempt
+            .is_none());
+        assert!(client.query(request).await.is_err());
+        let mut strict = strict_req();
+        strict.model_attempt = Some(
+            run.context(platform_api::ModelAttemptStage::Analyst, None)
+                .unwrap(),
+        );
+        assert!(client.query_json_schema(strict).await.is_err());
+        assert!(transport.received.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1497,6 +1541,7 @@ mod tests {
 
     fn strict_req() -> crate::side_query::StrictStructuredQueryRequest {
         crate::side_query::StrictStructuredQueryRequest {
+            model_attempt: None,
             model: "claude-sonnet-4-20250514".into(),
             profile: Some("anthropic".into()),
             system_prompt: Some("system".into()),
@@ -1789,6 +1834,88 @@ mod tests {
             matches!(err, SideQueryError::InvalidResponse(_)),
             "got {err:?}"
         );
+    }
+
+    #[derive(Default)]
+    struct SchemaAttemptProbe {
+        usages: Mutex<Vec<(llm_client::Usage, llm_client::ModelAttemptUsageCompleteness)>>,
+        settled: std::sync::atomic::AtomicBool,
+    }
+
+    struct SchemaAttemptLease(Arc<SchemaAttemptProbe>);
+    struct SchemaAttemptHooks(Arc<SchemaAttemptProbe>);
+
+    #[async_trait]
+    impl llm_client::ModelAttemptHooks for SchemaAttemptHooks {
+        async fn begin(
+            &self,
+            _: &platform_api::ModelAttemptContext,
+            _: &LlmRequest,
+            _: &llm_client::PreparedLlmCall,
+        ) -> Result<Box<dyn llm_client::ModelAttemptLease>, LlmError> {
+            Ok(Box::new(SchemaAttemptLease(self.0.clone())))
+        }
+    }
+
+    impl llm_client::ModelAttemptLease for SchemaAttemptLease {
+        fn mark_dispatched(&mut self) -> Result<(), LlmError> {
+            Ok(())
+        }
+        fn observe_usage(
+            &mut self,
+            usage: &llm_client::Usage,
+            completeness: llm_client::ModelAttemptUsageCompleteness,
+        ) {
+            self.0
+                .usages
+                .lock()
+                .unwrap()
+                .push((usage.clone(), completeness));
+        }
+        fn finish(self: Box<Self>) -> Box<dyn llm_client::ModelAttemptSettlement> {
+            self
+        }
+    }
+
+    #[async_trait]
+    impl llm_client::ModelAttemptSettlement for SchemaAttemptLease {
+        async fn wait(self: Box<Self>) -> Result<(), LlmError> {
+            self.0
+                .settled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_schema_error_preserves_actual_usage_and_settles_before_parse() {
+        let transport = Arc::new(StreamStubTransport::text_response("{\"ok\":tr"));
+        let client = structured_session_client(transport.clone(), None);
+        let probe = Arc::new(SchemaAttemptProbe::default());
+        let ProviderSideQueryBackend::Session(service) = &client.backend else {
+            unreachable!()
+        };
+        service.set_model_attempt_hooks(Arc::new(SchemaAttemptHooks(probe.clone())));
+        let mut request = strict_req();
+        request.model_attempt = Some(
+            platform_api::ModelAttemptRun::new(Arc::new(()))
+                .context(platform_api::ModelAttemptStage::Analyst, None)
+                .unwrap(),
+        );
+        assert!(matches!(
+            client.query_json_schema(request).await,
+            Err(SideQueryError::InvalidResponse(_))
+        ));
+        assert!(probe.settled.load(std::sync::atomic::Ordering::SeqCst));
+        let usages = probe.usages.lock().unwrap();
+        let (usage, completeness) = usages.last().unwrap();
+        assert_eq!(usage.billable_tokens.input, 1);
+        assert_eq!(usage.billable_tokens.output, 1);
+        assert_eq!(
+            *completeness,
+            llm_client::ModelAttemptUsageCompleteness::Complete
+        );
+        assert_eq!(transport.received_bodies.lock().unwrap().len(), 1);
     }
 
     /// F003: the Session backend previously dropped `temperature` and

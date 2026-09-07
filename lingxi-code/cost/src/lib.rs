@@ -8,6 +8,7 @@
 //! for the M3-05 extensions.
 #![forbid(unsafe_code)]
 
+pub mod attempt;
 pub mod budget;
 pub mod calculator;
 pub mod events;
@@ -20,6 +21,11 @@ pub mod token_usage_replay;
 pub mod tracker;
 pub mod usage;
 
+pub use attempt::{
+    calculate_pinned_attempt_cost, AttemptBillingMode, AttemptContribution, AttemptDisposition,
+    AttemptFoldAck, AttemptFoldError, AttemptIntent, AttemptLedger, AttemptReceipt, AttemptStage,
+    PreparedAttemptFold,
+};
 pub use budget::{
     BudgetCheckResult, BudgetConfig, BudgetEnforcer, BudgetExceedPolicy,
     BUDGET_EXCEEDED_THRESHOLD_BPS, BUDGET_WARNING_THRESHOLD_BPS,
@@ -27,6 +33,7 @@ pub use budget::{
 pub use calculator::CostCalculator;
 pub use events::{emit_api_success, ApiSuccessFields, EVENT_NAME_API_SUCCESS};
 pub use persistence::{
+    AttemptPersistAck, AttemptPersistMutation, AttemptPersistPermit, AttemptPersistRequest,
     CostDurabilityGate, CostHydration, CostHydrator, CostMutationId, CostMutationRecord,
     CostMutationSource, CostPersistAck, CostPersistError, CostPersistPermit, CostPersistRequest,
     CostPersistResult, CostPersistence, CostStateVector,
@@ -42,8 +49,8 @@ pub use token_usage_replay::{
     ReplayTurnStatus,
 };
 pub use tracker::{
-    CostModelResponse, CostResponseObservation, CostResponseReceipt, CostResponseSettlement,
-    CostSessionScope, CostState, CostTracker, ModelUsage, PreparedCostSession,
-    RetainedCostResponse,
+    CostAttemptReceipt, CostAttemptSettlement, CostModelResponse, CostResponseObservation,
+    CostResponseReceipt, CostResponseSettlement, CostSessionScope, CostState, CostTracker,
+    ModelUsage, PreparedCostSession, RetainedCostResponse,
 };
 pub use usage::{ApiSpeed, ServerToolUsage, TokenUsage, Usage};

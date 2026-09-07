@@ -2818,6 +2818,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             budget,
         };
         let request = SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: effective_type.to_string(),
             prompt: parsed.prompt.clone(),
             observer: selected.observer.clone().or_else(|| {
@@ -3948,6 +3949,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
         };
 
         let request = SubagentSpawnRequest {
+            model_attempt: None,
             // Propagate the RESOLVED effective type (fork → `fork`; omitted →
             // general-purpose; explicit-validated otherwise), not the raw input.
             subagent_type: effective_type.clone(),

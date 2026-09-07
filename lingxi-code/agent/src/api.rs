@@ -276,7 +276,11 @@ pub trait SubagentApiClient: Send + Sync {
         effort: Option<serde_json::Value>,
         opts: SubagentApiCallOpts,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        let _ = opts;
+        if opts.model_attempt.is_some() {
+            return Err(LlmError::InvalidRequest {
+                message: "registered model attempt requires an opts-aware host adapter".into(),
+            });
+        }
         self.messages_create_stream_in(model, profile, system, messages, tools, effort)
             .await
     }
@@ -294,7 +298,11 @@ pub trait SubagentApiClient: Send + Sync {
         effort: Option<serde_json::Value>,
         opts: SubagentApiCallOpts,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        let _ = opts;
+        if opts.model_attempt.is_some() {
+            return Err(LlmError::InvalidRequest {
+                message: "registered model attempt requires an opts-aware host adapter".into(),
+            });
+        }
         self.messages_create_stream_forced_in(
             model,
             profile,
@@ -311,6 +319,8 @@ pub trait SubagentApiClient: Send + Sync {
 /// Optional per-round-trip Fusion / COGS knobs.
 #[derive(Debug, Clone, Default)]
 pub struct SubagentApiCallOpts {
+    /// Trusted per-logical-call capability; retries retain this exact context.
+    pub model_attempt: Option<platform_api::ModelAttemptContext>,
     /// Output token cap for this turn.
     pub max_output_tokens: Option<u32>,
     /// COGS query-source label.

@@ -25,6 +25,9 @@ use std::time::Duration;
 use telemetry::AnalyticsBus;
 use tokio::sync::{mpsc, Mutex, OwnedMutexGuard, RwLock};
 
+mod attempts;
+pub use attempts::{CostAttemptReceipt, CostAttemptSettlement};
+
 /// Persisted snapshot of one session's cumulative cost and usage.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CostState {
@@ -57,6 +60,10 @@ pub struct CostState {
     /// Most recent request usage for status-line `current_usage`.
     #[serde(default)]
     pub last_usage: Option<Usage>,
+    /// Cost revision at which the latest usage originally completed. A late
+    /// attempt correction must not replace a newer ordinary response's usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_usage_revision: Option<u64>,
     /// Cache-read tokens associated with [`Self::last_usage`].
     #[serde(default)]
     pub last_cache_read_input_tokens: u64,
@@ -531,6 +538,7 @@ struct SessionEntry {
     durability_gate: CostDurabilityGate,
     missing_durable_authority: bool,
     response_settlements: std::sync::Mutex<HashMap<CostMutationId, Arc<CostResponseSlot>>>,
+    attempt_settlements: std::sync::Mutex<HashMap<String, Arc<attempts::AttemptSlot>>>,
 }
 
 impl SessionEntry {
@@ -546,6 +554,7 @@ impl SessionEntry {
             durability_gate: CostDurabilityGate::default(),
             missing_durable_authority: false,
             response_settlements: std::sync::Mutex::new(HashMap::new()),
+            attempt_settlements: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -561,6 +570,7 @@ impl SessionEntry {
             durability_gate: CostDurabilityGate::default(),
             missing_durable_authority: true,
             response_settlements: std::sync::Mutex::new(HashMap::new()),
+            attempt_settlements: std::sync::Mutex::new(HashMap::new()),
         })
     }
 }
@@ -578,6 +588,7 @@ impl SessionLedger {
                 durability_gate: CostDurabilityGate::default(),
                 missing_durable_authority: false,
                 response_settlements: std::sync::Mutex::new(HashMap::new()),
+                attempt_settlements: std::sync::Mutex::new(HashMap::new()),
             }),
         );
         Self {
@@ -720,6 +731,7 @@ impl CostTracker {
             durability_gate,
             missing_durable_authority: false,
             response_settlements: std::sync::Mutex::new(HashMap::new()),
+            attempt_settlements: std::sync::Mutex::new(HashMap::new()),
         }));
         self.ledger
             .hydrated_sessions
@@ -797,6 +809,20 @@ impl CostTracker {
                 }
             }
             for slot in slots {
+                if let Err(error) = slot.wait().await {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+            let attempts = entry
+                .attempt_settlements
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            for slot in attempts {
                 if let Err(error) = slot.wait().await {
                     if first_error.is_none() {
                         first_error = Some(error);
@@ -1083,6 +1109,7 @@ impl CostTracker {
                     }),
                 missing_durable_authority: false,
                 response_settlements: std::sync::Mutex::new(HashMap::new()),
+                attempt_settlements: std::sync::Mutex::new(HashMap::new()),
             });
             entries.insert(session_id, replacement.clone());
             replacement
@@ -1214,6 +1241,7 @@ impl CostTracker {
                     durability_gate,
                     missing_durable_authority: false,
                     response_settlements: std::sync::Mutex::new(HashMap::new()),
+                    attempt_settlements: std::sync::Mutex::new(HashMap::new()),
                 });
                 entries.insert(session_id, entry.clone());
                 entry
@@ -1334,6 +1362,7 @@ impl CostTracker {
             durability_gate: source.durability_gate.clone(),
             missing_durable_authority: source.missing_durable_authority,
             response_settlements: std::sync::Mutex::new(HashMap::new()),
+            attempt_settlements: std::sync::Mutex::new(HashMap::new()),
         });
         assert!(entries.insert(session_id, replacement).is_none());
         let mut hydrated = self
@@ -1576,6 +1605,7 @@ impl CostTracker {
                     .saturating_add(s.web_search_requests);
             }
             staged.last_usage = Some(usage);
+            staged.last_usage_revision = Some(next_revision);
             staged.last_cache_read_input_tokens = cache_read_input_tokens;
             staged.last_cache_creation_input_tokens = cache_creation_input_tokens;
             match preflight_permit {

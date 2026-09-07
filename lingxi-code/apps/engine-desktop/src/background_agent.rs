@@ -575,6 +575,7 @@ mod tests {
 
     fn request(name: Option<&str>) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: "general-purpose".into(),
             prompt: "go".into(),
             observer: None,

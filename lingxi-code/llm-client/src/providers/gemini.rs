@@ -34,6 +34,22 @@ impl GeminiCodec {
 }
 
 impl WireCodec for GeminiCodec {
+    fn response_usage(
+        &self,
+        response: &ProviderResponse,
+    ) -> Option<(crate::Usage, crate::ModelAttemptUsageCompleteness)> {
+        let usage = response
+            .body_json
+            .get("usageMetadata")
+            .filter(|value| value.is_object())
+            .map(decode_usage)?;
+        Some(crate::model_attempt::response_usage_observation(
+            usage,
+            response.status,
+            "promptTokenCount",
+            "candidatesTokenCount",
+        ))
+    }
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
         reject_unsupported_request_intent(request)?;
 
@@ -250,6 +266,24 @@ struct GeminiStreamDecoder {
 }
 
 impl StreamDecoder for GeminiStreamDecoder {
+    fn observed_usage(&self) -> Option<(crate::Usage, crate::ModelAttemptUsageCompleteness)> {
+        self.usage.clone().map(|usage| {
+            let complete = self.stop_reason.is_some()
+                && crate::model_attempt::complete_usage_for(
+                    &usage,
+                    "promptTokenCount",
+                    "candidatesTokenCount",
+                );
+            (
+                usage,
+                if complete {
+                    crate::ModelAttemptUsageCompleteness::Complete
+                } else {
+                    crate::ModelAttemptUsageCompleteness::Partial
+                },
+            )
+        })
+    }
     fn decode_frame(&mut self, frame: RawStreamFrame) -> Result<Vec<LlmEvent>, LlmError> {
         let text = std::str::from_utf8(&frame.bytes).map_err(|_| LlmError::InvalidRequest {
             message: "Gemini stream frame is not valid UTF-8".to_string(),

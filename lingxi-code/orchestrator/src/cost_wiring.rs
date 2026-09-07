@@ -66,6 +66,150 @@ pub(crate) fn llm_usage_to_cost_usage(usage: &LlmUsage) -> Usage {
     }
 }
 
+/// Checked conversion for registered attempts. The caller supplies normalized,
+/// disjoint billable buckets; this function never subtracts reasoning a second
+/// time or resolves prices. Missing TTL metadata keeps the legacy 5m bucket.
+/// A supplied TTL split must reconcile exactly with the normalized cache total;
+/// one supplied tier determines the other by checked subtraction.
+pub fn llm_usage_to_cost_usage_checked(usage: &LlmUsage) -> Result<Usage, cost::AttemptFoldError> {
+    use cost::AttemptFoldError;
+    let metadata = &usage.provider_metadata;
+    for container in [
+        "cache_creation",
+        "server_tool_use",
+        "prompt_tokens_details",
+        "completion_tokens_details",
+        "input_tokens_details",
+        "output_tokens_details",
+    ] {
+        if metadata
+            .get(container)
+            .is_some_and(|value| !value.is_object())
+        {
+            return Err(AttemptFoldError::Invalid(
+                "malformed billing metadata object",
+            ));
+        }
+    }
+    // Validate only recognized billing fields. Absence is permitted; a value
+    // present with the wrong type must not be converted into a fabricated zero.
+    for path in [
+        "/input_tokens",
+        "/output_tokens",
+        "/cache_creation_input_tokens",
+        "/cache_read_input_tokens",
+        "/reasoning_output_tokens",
+        "/prompt_tokens",
+        "/completion_tokens",
+        "/total_tokens",
+        "/cached_tokens",
+        "/promptTokenCount",
+        "/candidatesTokenCount",
+        "/thoughtsTokenCount",
+        "/cachedContentTokenCount",
+        "/totalTokenCount",
+        "/cache_creation/ephemeral_5m_input_tokens",
+        "/cache_creation/ephemeral_1h_input_tokens",
+        "/server_tool_use/web_search_requests",
+        "/prompt_tokens_details/cached_tokens",
+        "/completion_tokens_details/reasoning_tokens",
+        "/input_tokens_details/cached_tokens",
+        "/output_tokens_details/reasoning_tokens",
+    ] {
+        if metadata
+            .pointer(path)
+            .is_some_and(|value| value.as_u64().is_none())
+        {
+            return Err(AttemptFoldError::Invalid("malformed numeric billing field"));
+        }
+    }
+    let total = usage.billable_tokens.cache_write;
+    if metadata
+        .get("cache_creation_input_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|reported| reported != total)
+    {
+        return Err(AttemptFoldError::Invalid(
+            "cache total disagrees with normalized usage",
+        ));
+    }
+    let five = metadata
+        .pointer("/cache_creation/ephemeral_5m_input_tokens")
+        .and_then(serde_json::Value::as_u64);
+    let hour = metadata
+        .pointer("/cache_creation/ephemeral_1h_input_tokens")
+        .and_then(serde_json::Value::as_u64);
+    let (cache_write, cache_write_1h) = match (five, hour) {
+        (Some(five), Some(hour)) => {
+            if five.checked_add(hour).ok_or(AttemptFoldError::Arithmetic)? != total {
+                return Err(AttemptFoldError::Invalid(
+                    "cache TTL split disagrees with total",
+                ));
+            }
+            (five, hour)
+        }
+        (Some(five), None) => (
+            five,
+            total
+                .checked_sub(five)
+                .ok_or(AttemptFoldError::Arithmetic)?,
+        ),
+        (None, Some(hour)) => (
+            total
+                .checked_sub(hour)
+                .ok_or(AttemptFoldError::Arithmetic)?,
+            hour,
+        ),
+        (None, None) => {
+            if metadata.get("cache_creation").is_some() && total != 0 {
+                return Err(AttemptFoldError::Invalid(
+                    "cache TTL object has no recognized split",
+                ));
+            }
+            (total, 0)
+        }
+    };
+    if metadata
+        .pointer("/server_tool_use/web_search_requests")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|reported| {
+            usage.server_tool_use.map(|tools| tools.web_search_requests) != Some(reported)
+        })
+    {
+        return Err(AttemptFoldError::Invalid(
+            "server-tool count disagrees with normalized usage",
+        ));
+    }
+    let server_tool_use = usage
+        .server_tool_use
+        .map(|tools| {
+            u32::try_from(tools.web_search_requests)
+                .map(|web_search_requests| ServerToolUsage {
+                    web_search_requests,
+                })
+                .map_err(|_| AttemptFoldError::Arithmetic)
+        })
+        .transpose()?;
+    Ok(Usage {
+        tokens: TokenUsage {
+            input: usage.billable_tokens.input,
+            output: usage.billable_tokens.output,
+            cache_write,
+            cache_read: usage.billable_tokens.cache_read,
+            reasoning_output: usage.billable_tokens.reasoning_output,
+            cache_write_1h,
+        },
+        server_tool_use,
+        speed: usage.speed.as_deref().map(|speed| {
+            if speed == "fast" {
+                ApiSpeed::Fast
+            } else {
+                ApiSpeed::Standard
+            }
+        }),
+    })
+}
+
 fn llm_provider_to_cost_provider(provider: &llm_client::ProviderId) -> ProviderId {
     match provider {
         llm_client::ProviderId::AnthropicFirstParty => ProviderId::Anthropic,
@@ -270,6 +414,102 @@ mod tests {
             speed,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn checked_usage_preserves_disjoint_tokens_and_infers_only_reconciled_ttl() {
+        for split in [
+            serde_json::json!({"ephemeral_5m_input_tokens":12,"ephemeral_1h_input_tokens":18}),
+            serde_json::json!({"ephemeral_1h_input_tokens":18}),
+            serde_json::json!({"ephemeral_5m_input_tokens":12}),
+        ] {
+            let mut usage = make_llm_usage(
+                100,
+                40,
+                30,
+                10,
+                Some(LlmServerToolUsage {
+                    web_search_requests: 3,
+                }),
+                Some("fast".into()),
+            );
+            usage.billable_tokens.reasoning_output = 60;
+            usage.provider_metadata =
+                serde_json::json!({"cache_creation_input_tokens":30,"cache_creation":split});
+            let before = usage.clone();
+            let result = llm_usage_to_cost_usage_checked(&usage).unwrap();
+            assert_eq!(
+                (result.tokens.cache_write, result.tokens.cache_write_1h),
+                (12, 18)
+            );
+            assert_eq!(
+                (result.tokens.output, result.tokens.reasoning_output),
+                (40, 60)
+            );
+            assert_eq!((result.tokens.input, result.tokens.cache_read), (100, 10));
+            assert_eq!(result.server_tool_use.unwrap().web_search_requests, 3);
+            assert_eq!(result.speed, Some(ApiSpeed::Fast));
+            assert_eq!(usage, before);
+        }
+        let usage = make_llm_usage(100, 50, 30, 10, None, None);
+        assert_eq!(
+            llm_usage_to_cost_usage_checked(&usage).unwrap(),
+            llm_usage_to_cost_usage(&usage)
+        );
+    }
+
+    #[test]
+    fn checked_usage_rejects_cache_mismatch_underflow_overflow_and_malformed_fields() {
+        for metadata in [
+            serde_json::json!({"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":10}}),
+            serde_json::json!({"cache_creation":{"ephemeral_1h_input_tokens":31}}),
+            serde_json::json!({"cache_creation":{"ephemeral_5m_input_tokens":31}}),
+            serde_json::json!({"cache_creation":{"ephemeral_5m_input_tokens":u64::MAX,"ephemeral_1h_input_tokens":1}}),
+            serde_json::json!({"cache_creation_input_tokens":29}),
+            serde_json::json!({"cache_creation":{}}),
+            serde_json::json!({"cache_creation":"bad"}),
+            serde_json::json!({"cache_creation":{"ephemeral_1h_input_tokens":"18"}}),
+            serde_json::json!({"cache_read_input_tokens":-1}),
+            serde_json::json!({"reasoning_output_tokens":1.5}),
+            serde_json::json!({"server_tool_use":{"web_search_requests":"1"}}),
+        ] {
+            let mut usage = make_llm_usage(100, 50, 30, 10, None, None);
+            usage.provider_metadata = metadata;
+            assert!(
+                llm_usage_to_cost_usage_checked(&usage).is_err(),
+                "{:?}",
+                usage.provider_metadata
+            );
+        }
+    }
+
+    #[test]
+    fn checked_usage_rejects_server_tool_overflow_without_changing_legacy_clamp() {
+        let usage = make_llm_usage(
+            0,
+            0,
+            0,
+            0,
+            Some(LlmServerToolUsage {
+                web_search_requests: u64::from(u32::MAX) + 1,
+            }),
+            None,
+        );
+        assert_eq!(
+            llm_usage_to_cost_usage_checked(&usage),
+            Err(cost::AttemptFoldError::Arithmetic)
+        );
+        assert_eq!(
+            llm_usage_to_cost_usage(&usage)
+                .server_tool_use
+                .unwrap()
+                .web_search_requests,
+            u32::MAX
+        );
+        let mut inconsistent = make_llm_usage(0, 0, 0, 0, None, None);
+        inconsistent.provider_metadata =
+            serde_json::json!({"server_tool_use":{"web_search_requests":1}});
+        assert!(llm_usage_to_cost_usage_checked(&inconsistent).is_err());
     }
 
     #[test]

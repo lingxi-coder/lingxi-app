@@ -87,6 +87,12 @@ impl VertexGeminiCodec {
 }
 
 impl WireCodec for VertexGeminiCodec {
+    fn response_usage(
+        &self,
+        response: &ProviderResponse,
+    ) -> Option<(crate::Usage, crate::ModelAttemptUsageCompleteness)> {
+        self.inner.response_usage(response)
+    }
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
         // Delegate to the inner Gemini codec for body construction.
         let mut provider_request = self.inner.encode_request(request)?;

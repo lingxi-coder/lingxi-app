@@ -343,6 +343,7 @@ impl SkillTool {
             ctx.origin_session_id
         };
         let request = platform_api::subagent_spawn::SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: desc
                 .agent
                 .clone()

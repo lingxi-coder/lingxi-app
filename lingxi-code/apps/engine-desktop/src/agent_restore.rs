@@ -194,6 +194,7 @@ mod tests {
 
     fn request() -> SubagentSpawnRequest {
         SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: "general-purpose".into(),
             prompt: "the original prompt".into(),
             observer: None,

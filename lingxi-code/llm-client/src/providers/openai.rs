@@ -117,6 +117,22 @@ impl OpenAiChatCodec {
 }
 
 impl WireCodec for OpenAiChatCodec {
+    fn response_usage(
+        &self,
+        response: &ProviderResponse,
+    ) -> Option<(crate::Usage, crate::ModelAttemptUsageCompleteness)> {
+        let usage = response
+            .body_json
+            .get("usage")
+            .filter(|value| value.is_object())
+            .map(normalize_usage)?;
+        Some(crate::model_attempt::response_usage_observation(
+            usage,
+            response.status,
+            "prompt_tokens",
+            "completion_tokens",
+        ))
+    }
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
         reject_unsupported_content_blocks(request)?;
 
@@ -486,6 +502,24 @@ struct OpenAiStreamDecoder {
 }
 
 impl StreamDecoder for OpenAiStreamDecoder {
+    fn observed_usage(&self) -> Option<(Usage, crate::ModelAttemptUsageCompleteness)> {
+        self.usage.clone().map(|usage| {
+            let complete = self.stop_reason.is_some()
+                && crate::model_attempt::complete_usage_for(
+                    &usage,
+                    "prompt_tokens",
+                    "completion_tokens",
+                );
+            (
+                usage,
+                if complete {
+                    crate::ModelAttemptUsageCompleteness::Complete
+                } else {
+                    crate::ModelAttemptUsageCompleteness::Partial
+                },
+            )
+        })
+    }
     fn decode_frame(&mut self, frame: RawStreamFrame) -> Result<Vec<LlmEvent>, LlmError> {
         let text = std::str::from_utf8(&frame.bytes).map_err(|_| LlmError::InvalidRequest {
             message: "OpenAI stream frame is not valid UTF-8".to_string(),

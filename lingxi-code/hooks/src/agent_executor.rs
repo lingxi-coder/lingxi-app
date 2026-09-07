@@ -101,6 +101,7 @@ impl AgentExecutor {
         };
 
         let req = SubagentSpawnRequest {
+            model_attempt: None,
             // Hook-spawned verifier is a top-level spawn (no parent agent) ⇒ depth 0.
             depth: 0,
             // Top-level spawn ⇒ the spawner's own default model anchors resolution.

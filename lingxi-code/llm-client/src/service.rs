@@ -184,6 +184,7 @@ pub struct SubscriberState {
 
 /// State threaded through the `futures::stream::unfold` loop in `drive_stream`.
 struct StreamState {
+    attempt: crate::model_attempt::WireAttempt,
     decoder: Box<dyn crate::StreamDecoder>,
     frames: Box<dyn crate::FrameStream>,
     /// First frame already pulled by the drive loop's dispatch body-phase
@@ -290,6 +291,7 @@ pub trait RetryReporter: Send + Sync {
 
 /// Production service: drives `DefaultLlmClient` with full retry/rate-limit/betas.
 pub struct ApiService {
+    model_attempt_hooks: RwLock<Option<Arc<dyn crate::ModelAttemptHooks>>>,
     client: Arc<DefaultLlmClient>,
     transport: Arc<dyn Transport>,
     /// Subscriber state for the 429 gate (Task 8 wires real value).
@@ -639,6 +641,87 @@ fn extra_metadata_object_uncached() -> Option<serde_json::Map<String, serde_json
 }
 
 impl ApiService {
+    /// Execute a canonical side-query request through the same host hooks and
+    /// retry driver as the high-level side-query entry points.
+    pub async fn execute_side_query_request(
+        &self,
+        mut request: LlmRequest,
+    ) -> Result<LlmResponse, LlmError> {
+        request.stream = false;
+        let control = resolve_retry_control_with_settings(
+            &request.model,
+            None,
+            self.effective_subscriber().is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
+        );
+        self.drive_non_stream(request, control, DispatchHeaderState::AUXILIARY)
+            .await
+    }
+
+    /// Stream a canonical request through the accounting-aware physical driver.
+    pub async fn stream_request(
+        &self,
+        mut request: LlmRequest,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        request.stream = true;
+        self.drive_stream(request).await
+    }
+
+    /// Opt-aware panel stream. Context remains typed and never enters the body.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stream_with_attempt_opts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        forced_tool: Option<&str>,
+        effort: Option<serde_json::Value>,
+        max_tokens: Option<u32>,
+        query_source: Option<&str>,
+        model_attempt: Option<platform_api::ModelAttemptContext>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let mut request =
+            self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        request.effort = effort;
+        request.query_source = query_source.map(str::to_string);
+        request.model_attempt = model_attempt;
+        if let Some(name) = forced_tool {
+            request.tool_choice = Some(crate::ToolChoice::Tool { name: name.into() });
+        }
+        self.drive_stream(request).await
+    }
+    /// Install the host's registered-attempt authority after composition.
+    /// Ordinary requests without context never invoke this hook.
+    pub fn set_model_attempt_hooks(&self, hooks: Arc<dyn crate::ModelAttemptHooks>) {
+        *self
+            .model_attempt_hooks
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hooks);
+    }
+
+    async fn begin_model_attempt(
+        &self,
+        request: &LlmRequest,
+        prepared: &crate::PreparedLlmCall,
+    ) -> Result<crate::model_attempt::WireAttempt, LlmError> {
+        let Some(context) = request.model_attempt.as_ref() else {
+            return Ok(crate::model_attempt::WireAttempt::new(None));
+        };
+        let hooks = self
+            .model_attempt_hooks
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(crate::model_attempt::missing_hooks_error)?;
+        let lease = hooks
+            .begin(context, request, prepared)
+            .await
+            .map_err(crate::model_attempt::accounting_error)?;
+        Ok(crate::model_attempt::WireAttempt::new(Some(lease)))
+    }
     /// Resolve the selected main route plus an optional same-profile vision delegate.
     pub fn resolve_media_route(
         &self,
@@ -791,6 +874,7 @@ impl ApiService {
             .unwrap_or_default();
         Self {
             client,
+            model_attempt_hooks: RwLock::new(None),
             transport,
             subscriber,
             subscription: None,
@@ -2588,11 +2672,13 @@ impl ApiService {
             };
             Self::log_deepseek_prepared_request(&req.model, &prepared, false);
             self.inject_headers(&mut prepared, &request_id, dispatch);
-
+            let mut attempt = self.begin_model_attempt(&req, &prepared).await?;
+            attempt.mark_dispatched()?;
             let resp_result = self.transport.execute(&prepared.provider_request).await;
 
             match resp_result {
                 Err(transport_err) => {
+                    attempt.finish().await?;
                     // (cc 2.1.219) dispatch-header degradation: a connection
                     // error on an attempt that carried anthropic-dispatch-id
                     // strips it for the rest of this query and retries
@@ -2640,7 +2726,24 @@ impl ApiService {
                         .get("x-should-retry")
                         .is_some_and(|v| v.as_str() == "false");
 
-                    match prepared.route.codec.decode_response(provider_resp.clone()) {
+                    let extracted_usage = prepared.route.codec.response_usage(&provider_resp);
+                    if let Some((usage, completeness)) = &extracted_usage {
+                        attempt.observe(usage, *completeness);
+                    }
+                    let decoded = prepared.route.codec.decode_response(provider_resp.clone());
+                    if extracted_usage.is_none() {
+                        if let Ok(response) = &decoded {
+                            let completeness =
+                                if crate::model_attempt::has_usage_report(&response.usage) {
+                                    crate::ModelAttemptUsageCompleteness::Complete
+                                } else {
+                                    crate::ModelAttemptUsageCompleteness::Partial
+                                };
+                            attempt.observe(&response.usage, completeness);
+                        }
+                    }
+                    attempt.finish().await?;
+                    match decoded {
                         Ok(mut response) => {
                             // Feed rate-limit headers from every 2xx success response.
                             self.record_rate_limit_from_headers(
@@ -2840,6 +2943,9 @@ impl ApiService {
                                     continue;
                                 }
                                 DriveStep::Fallback { fallback_model } => {
+                                    if req.model_attempt.is_some() {
+                                        return Err(decode_err);
+                                    }
                                     // Switch to the fallback model; advance the
                                     // chain index so the next iteration's ctl
                                     // points at chain[chain_idx] (or is
@@ -3544,10 +3650,24 @@ impl ApiService {
                 )
             });
 
+            let registered = req.model_attempt.is_some();
+            if registered {
+                prepared.provider_request.stream_transport = crate::ProviderStreamTransport::Http;
+            }
+            let mut attempt = self.begin_model_attempt(&req, &prepared).await?;
+
             // Open stream through the prepared-call path so injected headers are
             // preserved while OpenAI Responses providers can reuse a WebSocket
             // session and apply previous_response_id deltas.
             let open = async {
+                if registered {
+                    attempt.mark_dispatched()?;
+                    let streaming = self
+                        .transport
+                        .open_stream(&prepared.provider_request)
+                        .await?;
+                    return Ok((prepared, streaming));
+                }
                 let mut responses_ws_session = self.responses_ws_session.lock().await;
                 self.client
                     .open_prepared_stream_with_session(
@@ -3573,6 +3693,7 @@ impl ApiService {
             };
             match opened {
                 Err(transport_err) => {
+                    attempt.finish().await?;
                     // The oracle permits one `StreamNoResponse` retry across the
                     // whole request, then terminates before generic retry logic.
                     // On the first occurrence it still flows through dispatch
@@ -3631,7 +3752,10 @@ impl ApiService {
                             match frames.next_frame().await {
                                 Ok(Some(frame)) => body.extend_from_slice(&frame.bytes),
                                 Ok(None) => break,
-                                Err(e) => return Err(e),
+                                Err(e) => {
+                                    attempt.finish().await?;
+                                    return Err(e);
+                                }
                             }
                         }
                         let body_json: serde_json::Value =
@@ -3642,10 +3766,16 @@ impl ApiService {
                             body_json: body_json.clone(),
                             request_id: None,
                         };
+                        if let Some((usage, completeness)) =
+                            prepared.route.codec.response_usage(&err_response)
+                        {
+                            attempt.observe(&usage, completeness);
+                        }
                         let decode_err = match prepared.route.codec.decode_response(err_response) {
                             Err(e) => e,
                             Ok(_) => LlmError::ProviderInternal,
                         };
+                        attempt.finish().await?;
 
                         // Mirror the non-stream path: for 429s, resolve the
                         // actual retry delay from the real response headers
@@ -3825,6 +3955,7 @@ impl ApiService {
                                 attempt_carried_dispatch,
                                 first_err,
                             ) {
+                                attempt.finish().await?;
                                 telemetry::emit_dispatch_header_fallback(
                                     &self.analytics,
                                     &req.model,
@@ -3841,6 +3972,7 @@ impl ApiService {
                     // Assemble events via a manual unfold that drives next_frame + decode.
                     // We keep a queue of pre-decoded events and drain them first.
                     let stream_state = StreamState {
+                        attempt,
                         decoder,
                         frames,
                         seed,
@@ -3865,6 +3997,11 @@ impl ApiService {
                                         LlmEvent::MessageStop | LlmEvent::Completed { .. }
                                     );
                                     if is_terminal && !s.done {
+                                        if let Err(error) = s.attempt.finish().await {
+                                            s.finished = true;
+                                            s.queue.clear();
+                                            return Some((Err(error), s));
+                                        }
                                         s.done = true;
                                         let elapsed_ms =
                                             u64::try_from(s.started.elapsed().as_millis())
@@ -3881,6 +4018,9 @@ impl ApiService {
                                     return Some((Ok(event), s));
                                 }
                                 if s.finished {
+                                    if let Err(error) = s.attempt.finish().await {
+                                        return Some((Err(error), s));
+                                    }
                                     return None;
                                 }
                                 // Watchdog: bound the blocking frame read by the
@@ -3906,8 +4046,23 @@ impl ApiService {
                                 };
                                 match frame {
                                     Ok(Some(frame)) => match s.decoder.decode_frame(frame) {
-                                        Ok(events) => s.queue.extend(events),
+                                        Ok(events) => {
+                                            if let Some((usage, completeness)) =
+                                                s.decoder.observed_usage()
+                                            {
+                                                s.attempt.observe(&usage, completeness);
+                                            } else {
+                                                s.attempt.observe_events(&events);
+                                            }
+                                            s.queue.extend(events);
+                                        }
                                         Err(e) => {
+                                            if let Some((usage, completeness)) =
+                                                s.decoder.observed_usage()
+                                            {
+                                                s.attempt.observe(&usage, completeness);
+                                            }
+                                            let e = s.attempt.finish().await.err().unwrap_or(e);
                                             s.finished = true;
                                             if !s.done {
                                                 s.done = true;
@@ -3926,8 +4081,23 @@ impl ApiService {
                                     Ok(None) => {
                                         s.finished = true;
                                         match s.decoder.finish() {
-                                            Ok(events) => s.queue.extend(events),
+                                            Ok(events) => {
+                                                if let Some((usage, completeness)) =
+                                                    s.decoder.observed_usage()
+                                                {
+                                                    s.attempt.observe(&usage, completeness);
+                                                } else {
+                                                    s.attempt.observe_events(&events);
+                                                }
+                                                s.queue.extend(events);
+                                            }
                                             Err(e) => {
+                                                if let Some((usage, completeness)) =
+                                                    s.decoder.observed_usage()
+                                                {
+                                                    s.attempt.observe(&usage, completeness);
+                                                }
+                                                let e = s.attempt.finish().await.err().unwrap_or(e);
                                                 if !s.done {
                                                     s.done = true;
                                                     telemetry::emit_failed(
@@ -3944,6 +4114,12 @@ impl ApiService {
                                         }
                                     }
                                     Err(e) => {
+                                        if let Some((usage, completeness)) =
+                                            s.decoder.observed_usage()
+                                        {
+                                            s.attempt.observe(&usage, completeness);
+                                        }
+                                        let e = s.attempt.finish().await.err().unwrap_or(e);
                                         s.finished = true;
                                         if !s.done {
                                             s.done = true;

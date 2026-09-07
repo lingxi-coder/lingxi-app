@@ -259,6 +259,7 @@ mod tests {
     /// allocated slot runs the legacy reducer-driven stub (no API calls).
     fn make_ctx() -> SubagentContext {
         SubagentContext {
+            model_attempt: None,
             agent_id: AgentId::new(),
             parent_agent_id: None,
             agent_name: None,

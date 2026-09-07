@@ -22,6 +22,7 @@ pub mod error;
 pub mod eventstream;
 pub mod fusion_hints;
 pub mod model;
+pub mod model_attempt;
 pub mod oauth;
 pub mod prompt_format;
 pub mod protocol;
@@ -82,6 +83,9 @@ pub use error::{
 };
 pub use eventstream::{crc32, EventStreamMessage, EventStreamSplitter};
 pub use fusion_hints::hints_for;
+pub use model_attempt::{
+    ModelAttemptHooks, ModelAttemptLease, ModelAttemptSettlement, ModelAttemptUsageCompleteness,
+};
 pub use platform_api::ModelBillingMode;
 pub use protocol::{
     stream_provider_metadata_from_headers, validate_capabilities, CacheControl, CacheEdit,

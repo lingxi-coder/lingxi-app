@@ -45,6 +45,10 @@ pub enum ProviderStreamTransport {
 /// Canonical request passed to provider protocols.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LlmRequest {
+    /// Host-only registered logical call. JSON cannot create or forward this
+    /// authority, and it is never included in a provider request body.
+    #[serde(skip)]
+    pub model_attempt: Option<platform_api::ModelAttemptContext>,
     /// Requested model id or alias.
     pub model: String,
     /// Optional provider profile that disambiguates `model` when the same id is
@@ -951,6 +955,14 @@ impl RawStreamFrame {
 
 /// Provider wire codec.
 pub trait WireCodec: std::fmt::Debug + Send + Sync {
+    /// Extract actual normalized usage independently of content/tool decoding.
+    /// Malformed answer content must not erase provider billing observations.
+    fn response_usage(
+        &self,
+        _response: &ProviderResponse,
+    ) -> Option<(Usage, crate::ModelAttemptUsageCompleteness)> {
+        None
+    }
     /// Encode a canonical request into a provider envelope.
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError>;
     /// Decode a provider envelope into a canonical response.
@@ -979,6 +991,12 @@ impl StreamDecoder for NoopStreamDecoder {
 
 /// Provider stream decoder.
 pub trait StreamDecoder: std::fmt::Debug + Send {
+    /// Latest actual normalized usage retained while decoding, even when no
+    /// public event was emitted. Registered accounting samples this before
+    /// yielding content; ordinary streaming event shape stays unchanged.
+    fn observed_usage(&self) -> Option<(Usage, crate::ModelAttemptUsageCompleteness)> {
+        None
+    }
     /// Seed decoder-visible provider metadata captured before frames are read.
     ///
     /// HTTP streaming transports expose control-plane data such as rate-limit

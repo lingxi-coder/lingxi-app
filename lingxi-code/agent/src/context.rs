@@ -23,6 +23,8 @@ use tool_api::content_replacement::ContentReplacementState;
 /// re-allocating.
 #[derive(Clone)]
 pub struct SubagentContext {
+    /// Typed registered run context, retained across rounds and never serialized.
+    pub model_attempt: Option<platform_api::ModelAttemptContext>,
     /// Stable identifier for this spawn — every event carries this id.
     pub agent_id: AgentId,
     /// Parent agent id, when this agent was dispatched by another agent.

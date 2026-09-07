@@ -244,6 +244,7 @@ impl ForkedAgentRunner {
         });
 
         let request = SideQueryRequest {
+            model_attempt: None,
             model,
             profile: cp.tool_use_options.model_profile.clone(),
             // Replay the parent's already-rendered system prompt verbatim;

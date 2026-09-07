@@ -68,6 +68,7 @@ pub mod mailbox;
 pub mod mcp;
 pub mod mobile_linux;
 pub mod mobile_runtime_environment;
+pub mod model_attempt;
 pub mod model_capabilities;
 pub mod notification;
 pub mod orchestrator;
@@ -185,6 +186,10 @@ pub use mobile_runtime_environment::{
     MobileDeviceClass, MobileExecutionTarget, MobileHostEnvironment, MobileHostOs,
     MobileLaunchMode, MobileLifecyclePolicy, MobileNetworkPolicy, MobileRuntimeEnvironment,
     MobileToolRuntime, MOBILE_RUNTIME_ENVIRONMENT_VERSION,
+};
+pub use model_attempt::{
+    ModelAttemptContext, ModelAttemptContextError, ModelAttemptRegistrationId, ModelAttemptRun,
+    ModelAttemptStage,
 };
 pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{

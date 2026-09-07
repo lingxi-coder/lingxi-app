@@ -37,6 +37,22 @@ impl OpenAiResponsesCodec {
 }
 
 impl WireCodec for OpenAiResponsesCodec {
+    fn response_usage(
+        &self,
+        response: &ProviderResponse,
+    ) -> Option<(crate::Usage, crate::ModelAttemptUsageCompleteness)> {
+        let usage = response
+            .body_json
+            .get("usage")
+            .filter(|value| value.is_object())
+            .map(normalize_usage)?;
+        Some(crate::model_attempt::response_usage_observation(
+            usage,
+            response.status,
+            "input_tokens",
+            "output_tokens",
+        ))
+    }
     #[allow(clippy::too_many_lines)]
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
         reject_unsupported_content_blocks(request)?;
@@ -433,11 +449,30 @@ struct OpenAiResponsesStreamDecoder {
     has_function_call: bool,
     stop_reason: Option<String>,
     usage: Option<crate::Usage>,
+    usage_terminal: bool,
     provider_metadata: Value,
     done: bool,
 }
 
 impl StreamDecoder for OpenAiResponsesStreamDecoder {
+    fn observed_usage(&self) -> Option<(crate::Usage, crate::ModelAttemptUsageCompleteness)> {
+        self.usage.clone().map(|usage| {
+            let complete = self.usage_terminal
+                && crate::model_attempt::complete_usage_for(
+                    &usage,
+                    "input_tokens",
+                    "output_tokens",
+                );
+            (
+                usage,
+                if complete {
+                    crate::ModelAttemptUsageCompleteness::Complete
+                } else {
+                    crate::ModelAttemptUsageCompleteness::Partial
+                },
+            )
+        })
+    }
     fn set_provider_metadata(&mut self, metadata: Value) {
         self.provider_metadata = metadata;
     }
@@ -489,6 +524,14 @@ impl StreamDecoder for OpenAiResponsesStreamDecoder {
                 self.handle_terminal_response(root.get("response"), &mut out);
             }
             Some("response.failed") => {
+                if let Some(usage) = root
+                    .get("response")
+                    .and_then(|response| response.get("usage"))
+                    .filter(|value| value.is_object())
+                {
+                    self.usage = Some(normalize_usage(usage));
+                }
+                self.usage_terminal = false;
                 return Err(decode_failed_event(&root));
             }
             Some("error") => {
@@ -706,6 +749,7 @@ impl OpenAiResponsesStreamDecoder {
         if let Some(response) = response {
             self.stop_reason = map_stop_reason(response, self.has_function_call);
             self.usage = response.get("usage").map(normalize_usage);
+            self.usage_terminal = true;
             if let Some(usage) = &mut self.usage {
                 attach_stream_metadata_to_usage(usage, &self.provider_metadata);
             }

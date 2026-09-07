@@ -1537,6 +1537,7 @@ impl PoolSubagentSpawner {
             )]
         };
         SubagentContext {
+            model_attempt: None,
             agent_id: AgentId::new(),
             parent_agent_id: None,
             agent_name: None,
@@ -1956,6 +1957,7 @@ impl PoolSubagentSpawner {
         ctx.max_output_tokens_per_turn = request.max_output_tokens_per_turn;
         ctx.max_input_bytes_per_turn = request.max_input_bytes_per_turn;
         ctx.query_source_label = request.query_source_label.clone();
+        ctx.model_attempt = request.model_attempt.clone();
         // G011: thread the caller's correlation id (Fusion's `{run_id}:p{index}`)
         // onto the child so its transcript can be matched back to a run.
         ctx.correlation_id = request.correlation_id.clone();
@@ -3473,6 +3475,7 @@ mod tests {
         });
         let spawner = PoolSubagentSpawner::new(pool).with_api_client(api.clone());
         let request = SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: "general-purpose".into(),
             prompt: "do work".into(),
             observer: Some(platform_api::subagent_spawn::ObserverSpec::new("Explore")),
@@ -6215,6 +6218,7 @@ mod tests {
         // `AgentModel::Inherit` against THAT model, not the boot default.
         let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-opus-4-7");
         let req = SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
             observer: None,
@@ -6279,6 +6283,7 @@ mod tests {
             .with_default_model("boot-model")
             .with_default_model_provider(Arc::new(|| Some("live-model".to_string())));
         let mut req = SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: "general-purpose".to_string(),
             prompt: String::new(),
             observer: None,
@@ -7020,6 +7025,7 @@ mod tests {
         // general-purpose is Inherit; request a haiku override → resolves to the
         // concrete haiku id (different tier from the opus parent).
         let mut req = SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
             observer: None,
@@ -7147,6 +7153,7 @@ mod tests {
             budget: Arc::new(DummyBudget),
         };
         let base_req = || SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
             observer: None,
@@ -7266,6 +7273,7 @@ mod tests {
         };
         // No `mode` call param — the override must come purely from frontmatter.
         let req = SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
             observer: None,
@@ -7342,6 +7350,7 @@ mod tests {
             budget: Arc::new(DummyBudget),
         };
         let req = SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
             observer: None,
@@ -7410,6 +7419,7 @@ mod tests {
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let spawner = PoolSubagentSpawner::new(pool);
         let req = SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
             observer: None,
@@ -7492,6 +7502,7 @@ mod tests {
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let spawner = PoolSubagentSpawner::new(pool);
         let req = SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
             observer: None,
@@ -7603,6 +7614,7 @@ mod tests {
         let spawner = Arc::new(PoolSubagentSpawner::new(pool.clone()));
 
         let req = SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
             observer: None,
@@ -7713,6 +7725,7 @@ mod tests {
             budget: Arc::new(DummyBudget),
         };
         let mut req = SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
             observer: None,
@@ -7809,6 +7822,7 @@ mod tests {
         let pool = Arc::new(StateMachinePool::new(runtime, 1));
         let spawner = PoolSubagentSpawner::new(pool);
         let request = SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: "general-purpose".to_string(),
             prompt: "go".to_string(),
             observer: None,
@@ -8226,6 +8240,7 @@ mod tests {
         let invoker: Arc<dyn ToolInvoker> = Arc::new(DummyInvoker);
         let budget: Arc<dyn BudgetEnforcerHandle> = Arc::new(DummyBudget);
         let req = SubagentSpawnRequest {
+            model_attempt: None,
             subagent_type: "general-purpose".into(),
             prompt: "go".into(),
             observer: None,

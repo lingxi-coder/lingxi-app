@@ -1446,6 +1446,27 @@ async fn run_subagent_loop(
             let mut wake_message: Option<String> = None;
             let watchdog = api_client.workflow_query_watchdog();
             let mut watchdog_retry_count = 0_u32;
+            let model_attempt = match ctx
+                .model_attempt
+                .as_ref()
+                .map(|context| context.fresh_call())
+                .transpose()
+            {
+                Ok(context) => context,
+                Err(error) => {
+                    emit_failed(
+                        &out_tx,
+                        transcript.as_ref(),
+                        &history,
+                        &mut transcript_written,
+                        agent_id,
+                        error.to_string(),
+                        cumulative_usage.clone(),
+                    )
+                    .await;
+                    return;
+                }
+            };
             let response = loop {
                 // (M9) A wake message injected below rides into the next
                 // round-trip as a user turn (mirrors the persist-park path,
@@ -1484,6 +1505,7 @@ async fn run_subagent_loop(
                     let messages_for_api = cap_input_bytes(&history, ctx.max_input_bytes_per_turn)
                         .map_err(|message| (Vec::new(), LlmError::InvalidRequest { message }))?;
                     let call_opts = crate::api::SubagentApiCallOpts {
+                        model_attempt: model_attempt.clone(),
                         max_output_tokens: ctx.max_output_tokens_per_turn,
                         query_source_label: ctx.query_source_label.clone(),
                     };
@@ -1585,6 +1607,28 @@ async fn run_subagent_loop(
                 };
                 let attempt_result = if !event_channel_open {
                     api_call.await
+                } else if model_attempt.is_some() {
+                    // Registered panel calls cannot silently abandon one wire
+                    // owner and issue another for an unrelated event. Keep the
+                    // same future until response or explicit user cancellation.
+                    tokio::pin!(api_call);
+                    loop {
+                        tokio::select! {
+                            biased;
+                            ev = event_rx.recv(), if event_channel_open => {
+                                match ev {
+                                    Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
+                                        emit_killed(&out_tx, transcript.as_ref(), &history,
+                                            &mut transcript_written, agent_id).await;
+                                        return;
+                                    }
+                                    None => event_channel_open = false,
+                                    Some(_) => {}
+                                }
+                            }
+                            response = &mut api_call => break response,
+                        }
+                    }
                 } else {
                     tokio::select! {
                         biased;
@@ -1630,6 +1674,7 @@ async fn run_subagent_loop(
 
                 if let Err((_partial_blocks, error)) = &attempt_result {
                     if is_workflow_watchdog_timeout(error)
+                        && model_attempt.is_none()
                         && watchdog.is_some_and(|policy| watchdog_retry_count < policy.max_retries)
                     {
                         watchdog_retry_count = watchdog_retry_count.saturating_add(1);

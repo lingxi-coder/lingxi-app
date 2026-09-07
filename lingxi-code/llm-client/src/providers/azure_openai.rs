@@ -80,6 +80,12 @@ impl AzureOpenAiCodec {
 }
 
 impl WireCodec for AzureOpenAiCodec {
+    fn response_usage(
+        &self,
+        response: &ProviderResponse,
+    ) -> Option<(crate::Usage, crate::ModelAttemptUsageCompleteness)> {
+        self.inner.response_usage(response)
+    }
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
         // Delegate to the OpenAI codec to build the body, then:
         // 1. Replace the URL with the Azure deployment URL.

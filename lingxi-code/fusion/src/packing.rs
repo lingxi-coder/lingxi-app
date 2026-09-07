@@ -308,6 +308,7 @@ fn strict_request(
     system_prompt: &str,
 ) -> StrictStructuredQueryRequest {
     StrictStructuredQueryRequest {
+        model_attempt: None,
         model: analyst.model.clone(),
         profile: Some(analyst.profile.clone()),
         system_prompt: Some(system_prompt.to_string()),
@@ -327,6 +328,7 @@ fn plain_request(
     output_tokens: u32,
 ) -> SideQueryRequest {
     SideQueryRequest {
+        model_attempt: None,
         model: request.parent_model.clone(),
         profile: Some(request.parent_profile.clone()),
         system_prompt: Some(system_prompt),

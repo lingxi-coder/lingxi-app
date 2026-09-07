@@ -51,6 +51,8 @@ import {
 } from '../audio/flow/controller';
 import { sanitizeSpeakableText } from '../audio/flow/segmenter';
 import { shouldAutoplayTrackedReply } from '../audio/autoplay';
+import { ArchiveChatDialog } from './ArchiveChatDialog';
+import type { ScheduledCronJob } from '../bridge/scheduledTaskDraft';
 import { Icon } from './Icon';
 import { commandPaletteIcon } from './commandPaletteIcons';
 import { MarkdownContent } from './MarkdownContent';
@@ -168,7 +170,7 @@ function ConnectionDot({ bridge }: { bridge: UseBridge }) {
   );
 }
 
-function SessionRow({ session, active, pinned, opening, status, onClick, onPin }: {
+function SessionRow({ session, active, pinned, opening, status, onClick, onPin, onArchive }: {
   session: SessionRowDto;
   active: boolean;
   pinned: boolean;
@@ -176,6 +178,7 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin }
   status?: ReturnType<UseBridge['sessionRuntimeStatus']>;
   onClick(): void;
   onPin(): void;
+  onArchive(): void;
 }) {
   const t = useT();
   const highlighted = active || opening;
@@ -199,7 +202,7 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin }
         title={session.title || 'Untitled session'}
         style={{
           width: '100%', minHeight: 43, display: 'grid', gap: 1,
-          padding: '6px 34px 6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
+          padding: '6px 62px 6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
           background: active ? t.surfaceActive : opening ? t.surface : 'transparent', color: highlighted ? t.text : t.text2,
           cursor: opening ? 'wait' : 'pointer',
           fontSize: 13, fontWeight: active ? 600 : 500,
@@ -223,7 +226,7 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin }
         title={pinned ? 'Unpin session' : 'Pin session'}
         onClick={(event) => { event.stopPropagation(); onPin(); }}
         style={{
-          position: 'absolute', right: 4, top: 4, width: 26, height: 26,
+          position: 'absolute', right: 32, top: 4, width: 26, height: 26,
           display: 'grid', placeItems: 'center', border: 0, borderRadius: 6,
           background: active ? 'transparent' : t.sidebarBg, color: pinned ? t.accent : t.text3,
           cursor: 'pointer',
@@ -231,11 +234,19 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin }
       >
         <Icon name="pin" size={13} stroke={1.8} />
       </button>
+      <button type="button" className="sidebar-row-action" aria-label={`Archive ${session.title || 'Untitled chat'}`} title="Archive chat" disabled={opening} onClick={onArchive}
+        style={{ position: 'absolute', right: 4, top: 4, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, color: t.text3, background: 'transparent', cursor: 'pointer' }}><Icon name="archive" size={13} /></button>
     </div>
   );
 }
 
-export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onOpenSettings(): void }) {
+export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenScheduled, onOpenChat }: {
+  bridge: UseBridge;
+  onOpenSettings(): void;
+  scheduled?: boolean;
+  onOpenScheduled?(): void;
+  onOpenChat?(): void;
+}) {
   const t = useT();
   const asideRef = useRef<HTMLElement>(null);
   const resizingPointerRef = useRef<number | null>(null);
@@ -251,6 +262,28 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
   const [menuProject, setMenuProject] = useState<string | null>(null);
   const [openingSessionKey, setOpeningSessionKey] = useState<string | null>(null);
   const [editingProject, setEditingProject] = useState<string | null>(null);
+  const [archiveTarget, setArchiveTarget] = useState<{projectPath: string; sessionId: string; title: string} | null>(null);
+  const [archiveJobs, setArchiveJobs] = useState<ScheduledCronJob[]>([]);
+  const [archiveLoading, setArchiveLoading] = useState(false);
+  const [archiving, setArchiving] = useState(false);
+  const [archiveError, setArchiveError] = useState('');
+  const archiveRequest = useRef(0);
+  const closeArchive = () => { archiveRequest.current++; setArchiveTarget(null); };
+  const prepareArchive = async (projectPath: string, sessionId: string, title: string) => {
+    const version = ++archiveRequest.current;
+    setArchiveTarget({ projectPath, sessionId, title });
+    setArchiveJobs([]); setArchiveError(''); setArchiveLoading(true);
+    try { const jobs = await bridge.preflightSessionArchive(projectPath, sessionId); if (version === archiveRequest.current) setArchiveJobs(jobs); }
+    catch (cause) { if (version === archiveRequest.current) setArchiveError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { if (version === archiveRequest.current) setArchiveLoading(false); }
+  };
+  const confirmArchive = async () => {
+    if (!archiveTarget || archiving) return;
+    setArchiving(true); setArchiveError('');
+    try { await bridge.archiveSession(archiveTarget.projectPath, archiveTarget.sessionId); closeArchive(); }
+    catch (cause) { setArchiveError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setArchiving(false); }
+  };
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
   const [resizingSidebar, setResizingSidebar] = useState(false);
 
@@ -291,19 +324,21 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
     [pinnedSessions],
   );
   const openSidebarSession = useCallback((projectPath: string, sessionId: string) => {
+    onOpenChat?.();
     const key = `${projectPath}\0${sessionId}`;
     setOpeningSessionKey(key);
     void bridge.openSession(projectPath, sessionId)
       .catch(() => undefined)
       .finally(() => setOpeningSessionKey((current) => current === key ? null : current));
-  }, [bridge.openSession]);
+  }, [bridge.openSession, onOpenChat]);
   const editProject = useCallback((projectPath: string) => {
+    onOpenChat?.();
     setExpandedProjects((current) => current.has(projectPath) ? current : new Set([...current, projectPath]));
     setEditingProject(projectPath);
     void bridge.newSession(projectPath)
       .catch(() => undefined)
       .finally(() => setEditingProject((current) => current === projectPath ? null : current));
-  }, [bridge.newSession]);
+  }, [bridge.newSession, onOpenChat]);
   const pinInput = (projectPath: string, sessionId: string, title: string) => ({ projectPath, sessionId, title });
   const startSidebarResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -336,6 +371,7 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
   }, []);
 
   return (
+    <>
     <aside
       className="desktop-sidebar"
       ref={asideRef}
@@ -353,21 +389,30 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
           className="sidebar-primary-action"
           type="button"
           disabled={bridge.sessionLoading || editingProject !== null}
-          onClick={() => selectedProject ? editProject(selectedProject) : invoke(bridge.addProject)}
+          onClick={() => { onOpenChat?.(); selectedProject ? editProject(selectedProject) : invoke(bridge.addProject); }}
           style={{
             width: '100%', minHeight: 42, display: 'flex', alignItems: 'center', gap: 11,
-            padding: '8px 11px', borderRadius: 11, border: 0, background: t.surface,
+            padding: '8px 11px', borderRadius: 11, border: 0, background: 'transparent',
             color: t.text, cursor: bridge.sessionLoading || editingProject !== null ? 'wait' : 'pointer', opacity: bridge.sessionLoading || editingProject !== null ? .5 : 1,
-            textAlign: 'left', fontSize: 13.5, fontWeight: 600,
-            boxShadow: t.dark
-              ? '0 0 0 1px rgba(255,255,255,.055), 0 1px 2px rgba(0,0,0,.18)'
-              : '0 0 0 1px rgba(35,28,63,.055), 0 1px 2px rgba(35,28,63,.05), 0 5px 14px rgba(35,28,63,.035)',
+            textAlign: 'left', fontSize: 13.5, fontWeight: 500,
           }}
         >
           {editingProject
             ? <span className="beta-spinner" role="status" aria-label="Opening project draft" />
-            : <Icon name="pencil" size={16} color={t.text2} stroke={1.8} />}
-          <span>{editingProject ? 'Opening draft…' : selectedProject ? 'New session' : 'Add your first project'}</span>
+            : <Icon name="compose" size={20} color={t.text2} stroke={1.8} />}
+          <span>{editingProject ? 'Opening draft…' : 'New chat'}</span>
+        </button>
+        <button
+          type="button"
+          className="sidebar-primary-action"
+          aria-current={scheduled ? 'page' : undefined}
+          onClick={onOpenScheduled}
+          style={{ width: '100%', minHeight: 42, marginTop: 4, display: 'flex', alignItems: 'center', gap: 11,
+            padding: '8px 11px', borderRadius: 11, border: 0, background: scheduled ? t.surfaceActive : 'transparent',
+            color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 13.5, fontWeight: 500 }}
+        >
+          <Icon name="clock" size={20} stroke={1.8} />
+          <span>Scheduled</span>
         </button>
       </div>
 
@@ -384,7 +429,7 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                 : current
                   ? formatSessionMetadata(current.modified_rfc3339, current.message_count)
                   : 'Unavailable';
-              const active = visibleSession?.projectPath === pinned.projectPath && visibleSession.sessionId === pinned.sessionId;
+              const active = !scheduled && visibleSession?.projectPath === pinned.projectPath && visibleSession.sessionId === pinned.sessionId;
               const opening = openingSessionKey === `${pinned.projectPath}\0${pinned.sessionId}`;
               const status = bridge.sessionRuntimeStatus(pinned.sessionId);
               const attention = status?.connection.status === 'error' || status?.error
@@ -404,7 +449,7 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                     onClick={() => openSidebarSession(pinned.projectPath, pinned.sessionId)}
                     title={`${title}\n${pinned.projectPath}`}
                     style={{
-                      width: '100%', minHeight: 43, display: 'grid', gap: 1, padding: '6px 34px 6px 10px',
+                      width: '100%', minHeight: 43, display: 'grid', gap: 1, padding: '6px 62px 6px 10px',
                       border: 0, borderRadius: 8, background: active ? t.surfaceActive : opening ? t.surface : 'transparent',
                       color: t.text2, textAlign: 'left', cursor: opening ? 'wait' : 'pointer',
                     }}
@@ -426,10 +471,12 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                     aria-label={`Unpin ${title}`}
                     title="Unpin session"
                     onClick={() => invoke(() => bridge.setSessionPinned(pinInput(pinned.projectPath, pinned.sessionId, title), false))}
-                    style={{ position: 'absolute', right: 4, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.accent, cursor: 'pointer' }}
+                    style={{ position: 'absolute', right: 32, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.accent, cursor: 'pointer' }}
                   >
                     <Icon name="pin" size={13} stroke={1.8} />
                   </button>
+                  <button type="button" className="sidebar-row-action" aria-label={`Archive ${title}`} title="Archive chat" onClick={() => void prepareArchive(pinned.projectPath, pinned.sessionId, title)}
+                    style={{ position: 'absolute', right: 4, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, color: t.text3, background: 'transparent', cursor: 'pointer' }}><Icon name="archive" size={13} /></button>
                 </div>
               );
             })}
@@ -475,6 +522,7 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                     aria-controls={open ? `project-sessions-${encodeURIComponent(projectPath)}` : undefined}
                     title={projectPath}
                     onClick={() => {
+                      onOpenChat?.();
                       setExpandedProjects((current) => {
                         const next = new Set(current);
                         if (next.has(projectPath)) next.delete(projectPath);
@@ -545,11 +593,12 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                         <SessionRow
                           key={session.uuid}
                           session={session}
-                          active={visibleSession?.projectPath === projectPath && visibleSession.sessionId === session.uuid}
+                          active={!scheduled && visibleSession?.projectPath === projectPath && visibleSession.sessionId === session.uuid}
                           pinned={pinned}
                           opening={opening}
                           status={bridge.sessionRuntimeStatus(session.uuid)}
                           onClick={() => openSidebarSession(projectPath, session.uuid)}
+                          onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || 'Untitled chat')}
                           onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || 'Untitled session'), !pinned))}
                         />
                       );
@@ -565,6 +614,13 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
             );
           })}
         </section>
+        {!!settings?.archivedSessions?.length && <details style={{ marginTop: 16, padding: '0 8px', color: t.text3 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 12 }}>Archived chats ({settings.archivedSessions.length})</summary>
+          {settings.archivedSessions.map((session) => <button key={`${session.projectPath}-${session.sessionId}`} type="button" title="Restore and open chat" onClick={() => openSidebarSession(session.projectPath, session.sessionId)}
+            style={{ display: 'flex', width: '100%', gap: 8, padding: '10px 0', border: 0, background: 'transparent', color: t.text2, textAlign: 'left', cursor: 'pointer' }}>
+            <Icon name="archive" size={14} /><span>{session.title || 'Archived chat'}</span>
+          </button>)}
+        </details>}
       </nav>
 
       <div className="desktop-sidebar-footer" style={{ padding: 10, borderTop: `0.5px solid ${t.border}`, display: 'flex', flexDirection: 'column', gap: 5 }}>
@@ -600,6 +656,8 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
         style={{ color: t.accent }}
       />
     </aside>
+    {archiveTarget && <ArchiveChatDialog title={archiveTarget.title} jobs={archiveJobs} loading={archiveLoading} busy={archiving} error={archiveError} onClose={closeArchive} onConfirm={() => void confirmArchive()} />}
+    </>
   );
 }
 

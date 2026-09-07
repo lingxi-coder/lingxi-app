@@ -585,6 +585,13 @@ pub enum ClientEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Authoritative scheduled task snapshot after a management operation.
+    CronResult {
+        request_id: String,
+        jobs: Vec<CronJobDto>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -766,4 +773,23 @@ pub enum AudioOpDto {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         voice: Option<String>,
     },
+}
+
+/// A durable task from the workspace's existing cron scheduler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct CronJobDto {
+    pub id: String,
+    pub cron: String,
+    pub prompt: String,
+    pub recurring: bool,
+    pub durable: bool,
+    pub permanent: bool,
+    pub created_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_fired_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }

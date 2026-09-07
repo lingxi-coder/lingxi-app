@@ -113,7 +113,28 @@ export class SettingsStore {
     this.persist();
   }
 
+  isSessionArchived(ref: SessionRef): boolean {
+    return this.settings.archivedSessions?.some((item) => item.projectPath === ref.projectPath && item.sessionId === ref.sessionId) ?? false;
+  }
+
+  setSessionArchived(ref: SessionRef, archived: boolean, title?: string): void {
+    this.validateSessionRef(ref);
+    const previous = this.settings;
+    const previousDraft = this.volatileActiveSession;
+    const matches = (item: SessionRef) => item.projectPath === ref.projectPath && item.sessionId === ref.sessionId;
+    this.settings = { ...previous, archivedSessions: (previous.archivedSessions ?? []).filter((item) => !matches(item)) };
+    if (archived) {
+      this.settings.archivedSessions!.push({ ...ref, ...(title ? { title: title.slice(0, 512) } : {}), archivedAt: new Date().toISOString() });
+      this.settings.pinnedSessions = previous.pinnedSessions.filter((item) => !matches(item));
+      if (this.settings.activeSession && matches(this.settings.activeSession)) delete this.settings.activeSession;
+      if (this.volatileActiveSession && matches(this.volatileActiveSession)) this.volatileActiveSession = undefined;
+    }
+    try { this.persist(); }
+    catch (error) { this.settings = previous; this.volatileActiveSession = previousDraft; throw error; }
+  }
+
   setSessionPinned(session: PinnedSessionRecord, pinned: boolean): PublicSettings {
+    if (pinned && this.isSessionArchived(session)) throw new Error('Restore this archived chat before pinning it.');
     this.settings = withSessionPinned(this.settings, session, pinned);
     this.persist();
     return this.getPublic();

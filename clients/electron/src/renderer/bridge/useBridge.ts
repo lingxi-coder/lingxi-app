@@ -1,5 +1,8 @@
+import { requestCronManagement } from './cronManagement';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
+  CronJobDto,
+  CronRequestDto,
   AgentDto,
   AskUserQuestionRequestDto,
   AuthStateDto,
@@ -196,6 +199,8 @@ export interface UseBridge {
   addProject(): Promise<WorkspaceMetadata | null>;
   activateProject(path: string): Promise<WorkspaceMetadata | null>;
   removeProject(path: string): Promise<void>;
+  preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
+  archiveSession(projectPath: string, sessionId: string): Promise<void>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
   openSession(projectPath: string, sessionId: string): Promise<void>;
   listProjectSessions(projectPath: string): Promise<void>;
@@ -270,6 +275,7 @@ export interface UseBridge {
   /** `remove_mcp_server` — idempotent removal from exactly the named scope. Refetches the MCP listing afterward. */
   removeMcpServer(scope: McpScopeDto, name: string): Promise<void>;
   /** Native Desktop skill administration. Write commands resolve only after the correlated terminal operation event. */
+  manageCron(request: CronRequestDto): Promise<CronJobDto[]>;
   skillAdmin(command: SkillAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
   /** Native Desktop MCP administration with strict validation, revision/CAS, approval, and live reconcile. */
   mcpAdmin(command: McpAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
@@ -1741,6 +1747,21 @@ export function useBridge(): UseBridge {
     catch (cause) { if (isCurrentNavigationOperation(operationId)) capture(cause); }
   }, [applyBootstrap, beginNavigationOperation, capture, host, isCurrentNavigationOperation]);
 
+  const preflightSessionArchive = useCallback((projectPath: string, sessionId: string) => {
+    if (!host) return Promise.reject(new Error('Desktop host unavailable.'));
+    return host.preflightSessionArchive(projectPath, sessionId);
+  }, [host]);
+  const archiveSession = useCallback(async (projectPath: string, sessionId: string) => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    const operationId = beginNavigationOperation();
+    try {
+      const snapshot = await host.archiveSession(projectPath, sessionId);
+      if (isCurrentNavigationOperation(operationId)) applyBootstrap(snapshot);
+    } catch (error) {
+      try { const snapshot = await host.bootstrap(); if (isCurrentNavigationOperation(operationId)) applyBootstrap(snapshot); } catch { /* Preserve the original archival error. */ }
+      throw error;
+    }
+  }, [host, beginNavigationOperation, isCurrentNavigationOperation, applyBootstrap]);
   const setSessionPinned = useCallback(async (session: SessionPinInput, pinned: boolean) => {
     if (!host) return;
     const operationId = nextOperationId(pinOperationRef.current);
@@ -2175,6 +2196,13 @@ export function useBridge(): UseBridge {
     },
     [command, refreshMcpServers],
   );
+  const manageCron = useCallback((request: CronRequestDto): Promise<CronJobDto[]> => {
+    const sessionId = activeSessionIdRef.current;
+    if (sessionLoadingRef.current || !host || !sessionId) {
+      return Promise.reject(new Error('Open a connected session before managing scheduled tasks.'));
+    }
+    return requestCronManagement(host, sessionId, request);
+  }, [host]);
   const runConfigurationAdmin = useCallback(async (
     domain: ConfigurationDomainDto,
     envelope:
@@ -2231,6 +2259,7 @@ export function useBridge(): UseBridge {
   );
 
   return {
+    manageCron,
     hosted,
     loading,
     bootstrap,
@@ -2283,6 +2312,8 @@ export function useBridge(): UseBridge {
     addProject,
     activateProject,
     removeProject,
+    archiveSession,
+    preflightSessionArchive,
     setSessionPinned,
     openSession,
     listProjectSessions,

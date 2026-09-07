@@ -62,6 +62,12 @@ pub struct CronTask {
     /// read/write round-trips. Omitted when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permanent: Option<bool>,
+    /// Optional absolute expiration, epoch milliseconds. Absent means indefinite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    /// Conversation that owns this task, when created through Desktop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// The whole on-disk document: `{ "tasks": [ … ] }`.
@@ -194,6 +200,8 @@ mod tests {
                 last_fired_at: None,
                 recurring: Some(true),
                 permanent: None,
+                expires_at: None,
+                session_id: None,
             }],
         };
         let s = serialize_tasks(&doc);
@@ -222,6 +230,8 @@ mod tests {
                 last_fired_at: Some(2),
                 recurring: Some(true),
                 permanent: Some(true),
+                expires_at: None,
+                session_id: None,
             }],
         };
         let s = serialize_tasks(&doc);

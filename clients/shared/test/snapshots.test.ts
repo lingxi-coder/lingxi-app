@@ -1494,6 +1494,14 @@ function validateCommand(name: string, v: unknown): void {
       );
       if ('credential_override' in o) assert.ok(isString(o['credential_override']));
       break;
+    case 'cron_manage': {
+      assert.ok(isString(o['request_id']));
+      const request = o['request'] as Record<string, unknown>;
+      assert.ok(['list', 'create', 'update', 'delete'].includes(request['action'] as string));
+      for (const key of ['id', 'cron', 'prompt']) if (key in request) assert.ok(isString(request[key]));
+      for (const key of ['recurring', 'durable']) if (key in request) assert.equal(typeof request[key], 'boolean');
+      break;
+    }
     case 'set_model':
       assert.ok(isString(o['model']));
       break;
@@ -2179,6 +2187,17 @@ function validateEvent(name: string, v: unknown): void {
     case 'audio_request':
       assert.ok(isNumber(o['request_id']));
       validateAudioOp(o['op']);
+      break;
+    case 'cron_result':
+      assert.ok(isString(o['request_id']));
+      assert.ok(Array.isArray(o['jobs']));
+      for (const job of o['jobs'] as Record<string, unknown>[]) {
+        for (const key of ['id', 'cron', 'prompt']) assert.ok(isString(job[key]));
+        for (const key of ['recurring', 'durable', 'permanent']) assert.equal(typeof job[key], 'boolean');
+        assert.ok(isNumber(job['created_at']));
+        if ('last_fired_at' in job) assert.ok(isNumber(job['last_fired_at']));
+      }
+      if ('error' in o) assert.ok(isString(o['error']));
       break;
     case 'configuration_operation':
       assert.ok(['skill', 'mcp', 'plugin', 'hook'].includes(o['domain'] as string));

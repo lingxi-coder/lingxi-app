@@ -124,6 +124,49 @@ pub struct SessionStoreContext {
 }
 
 impl SessionStoreContext {
+    /// Retain a zero-message conversation that owns a durable scheduled task.
+    async fn ensure_scheduled_chat(&self, session_id: &str) -> Result<(), String> {
+        let session_uuid = protocol::SessionId::parse_prefixed(session_id)
+            .ok_or("Invalid scheduled task chat identity")?
+            .as_uuid()
+            .to_string();
+        let session_id = session_uuid.as_str();
+        let path = orchestrator::transcript_paths::main_transcript_path(
+            &self.lingxi_home,
+            &self.session_cwd,
+            session_id,
+        );
+        let reader = session::jsonl::reader::JsonlReader::new(path.clone(), self.fs.clone());
+        let mut title = "Scheduled task".to_string();
+        match reader.read_routed().await {
+            Ok(loaded) => {
+                if !loaded.messages_in_order.is_empty()
+                    || loaded.mobile_empty_sessions.contains(session_id)
+                {
+                    return Ok(());
+                }
+                if loaded.malformed_line_count > 0 {
+                    return Err("Cannot attach a scheduled task to an unreadable chat".into());
+                }
+                if let Some(existing) = loaded.custom_titles.get(session_id) {
+                    title.clone_from(existing);
+                }
+            }
+            Err(session::jsonl::reader::ReaderError::Fs(platform_api::FsError::NotFound(_))) => {}
+            Err(error) => {
+                // The desktop filesystem may wrap ENOENT as FsError::Io.
+                // Verify absence without treating permission/corruption errors as empty.
+                if !matches!(tokio::fs::try_exists(&path).await, Ok(false)) {
+                    return Err(format!("Cannot read the scheduled task's chat: {error}"));
+                }
+            }
+        }
+        session::jsonl::writer::JsonlWriter::new(path, self.fs.clone())
+            .append_mobile_empty_session(session_id, &title)
+            .await
+            .map_err(|error| format!("Cannot retain the scheduled task's chat: {error}"))
+    }
+
     /// Build a session-store context rooted at the desktop config directory and
     /// the connection's project cwd.
     #[must_use]
@@ -3012,6 +3055,60 @@ impl CommandRouter for EngineCommandRouter {
     #[allow(clippy::too_many_lines)]
     async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>) {
         match command {
+            ClientCommand::CronManage {
+                request_id,
+                request,
+            } => {
+                if request.action != "list" && !self.handle.workspace_trusted().await {
+                    sink.emit(ClientEvent::CronResult {
+                        request_id,
+                        jobs: Vec::new(),
+                        error: Some("Trust this workspace before changing scheduled tasks".into()),
+                    })
+                    .await;
+                    return;
+                }
+                let status = self.handle.get_status_snapshot().await;
+                let owner_id = status
+                    .session_id
+                    .strip_prefix("sess:")
+                    .unwrap_or(&status.session_id);
+                if request.action == "create" {
+                    let anchor = match self.session_store.as_ref() {
+                        Some(store) => store.ensure_scheduled_chat(owner_id).await,
+                        None => Err("Scheduled task chat storage is unavailable".into()),
+                    };
+                    if let Err(error) = anchor {
+                        sink.emit(ClientEvent::CronResult {
+                            request_id,
+                            jobs: Vec::new(),
+                            error: Some(error),
+                        })
+                        .await;
+                        return;
+                    }
+                }
+                let cwd = status.cwd;
+                let fs = platform_posix::PosixFileSystem::new(cwd.clone());
+                let result = engine_desktop::cron_management::manage(
+                    &fs,
+                    &cwd,
+                    request,
+                    &self.tasks,
+                    owner_id,
+                )
+                .await;
+                let (jobs, error) = match result {
+                    Ok(jobs) => (jobs, None),
+                    Err(error) => (Vec::new(), Some(error)),
+                };
+                sink.emit(ClientEvent::CronResult {
+                    request_id,
+                    jobs,
+                    error,
+                })
+                .await;
+            }
             // ── Provider credentials ────────────────────────────────────────
             ClientCommand::ListProviderCredentials {
                 operation_id,
@@ -4397,5 +4494,54 @@ openrouter and burn a panel slot on LlmError::Authentication: {published:?}"
 too — its key never touched the keychain, so only the delete-side \
 notification can lower the entry: {published:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod scheduled_chat_anchor_tests {
+    use super::SessionStoreContext;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn scheduled_chat_anchor_is_listed_without_messages_and_is_idempotent() {
+        for metadata_only in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let cwd = temp.path().join("project");
+            std::fs::create_dir_all(&cwd).unwrap();
+            let home = temp.path().join("home");
+            let fs: Arc<dyn platform_api::FileSystem> =
+                Arc::new(platform_posix::PosixFileSystem::new(temp.path().into()));
+            let store = SessionStoreContext::new(
+                home.clone(),
+                cwd.to_string_lossy().into_owned(),
+                fs.clone(),
+            );
+            let id = "11111111-2222-3333-4444-555555555555";
+            let path =
+                orchestrator::transcript_paths::main_transcript_path(&home, &store.session_cwd, id);
+            if metadata_only {
+                session::jsonl::writer::JsonlWriter::new(path.clone(), fs.clone())
+                    .append_permission_mode("default")
+                    .await
+                    .unwrap();
+            }
+            store
+                .ensure_scheduled_chat(&format!("sess:{id}"))
+                .await
+                .unwrap();
+            let before = std::fs::read_to_string(&path).unwrap();
+            store.ensure_scheduled_chat(id).await.unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+            let catalog = session::jsonl::list_recent_sessions_with_diagnostics(
+                &home,
+                &store.session_cwd,
+                10,
+                fs,
+            )
+            .await
+            .unwrap();
+            assert_eq!(catalog.sessions.len(), 1);
+            assert_eq!(catalog.sessions[0].message_count, 0);
+        }
     }
 }

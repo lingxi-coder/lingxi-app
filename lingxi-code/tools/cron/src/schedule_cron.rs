@@ -298,8 +298,6 @@ pub const SIX_FIELD_REJECTION: &str =
 pub const NEXT_FIRE_HORIZON_MINUTES: u64 = 60 * 24 * 366;
 /// Maximum number of scheduled jobs allowed at once (CronCreateTool.ts:25).
 const MAX_JOBS: usize = 50;
-/// Recurring jobs auto-expire after this many days (CronCreateTool.ts prompt.ts).
-const DEFAULT_MAX_AGE_DAYS: i64 = 7;
 
 /// Absolute path to the single project tasks file
 /// (`<project_root>/.lingxi/scheduled_tasks.json`). 1:1 with claude-code, which
@@ -524,9 +522,7 @@ fn build_result_content(
     };
     if recurring {
         let tail = if scheduler_active {
-            format!(
-                "Auto-expires after {DEFAULT_MAX_AGE_DAYS} days. Use CronDelete to cancel sooner."
-            )
+            "Runs until cancelled. Use CronDelete to cancel.".to_string()
         } else {
             "NOTE: this platform has no active cron scheduler, so the job will NOT fire automatically; use CronList to review or CronDelete to remove it.".to_string()
         };
@@ -593,7 +589,7 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
             },
             "recurring": {
                 "type": "boolean",
-                "description": format!("true (default) = fire on every cron match until deleted or auto-expired after {DEFAULT_MAX_AGE_DAYS} days. false = fire once at the next match, then auto-delete. Use false for \"remind me at X\" one-shot requests with pinned minute/hour/dom/month.")
+                "description": "true (default) = fire on every cron match until deleted. false = fire once at the next match, then auto-delete."
             },
             "durable": {
                 "type": "boolean",
@@ -836,6 +832,9 @@ impl Tool for CronCreateTool {
                 last_fired_at: None,
                 recurring: Some(recurring),
                 permanent: None,
+                expires_at: None,
+                session_id: call_ctx.origin_session_id.as_ref().or(self.ctx.session_id.as_ref())
+                    .map(|id| id.as_uuid().to_string()),
             });
             let body = cron::tasks_file::serialize_tasks(&doc);
             bytes_written = body.len();
@@ -951,7 +950,6 @@ mod tests {
         assert_eq!(CRON_CREATE_TOOL_NAME, "CronCreate");
         assert_eq!(CRON_SUBDIR, "cron");
         assert_eq!(MAX_JOBS, 50);
-        assert_eq!(DEFAULT_MAX_AGE_DAYS, 7);
     }
 
     #[test]
@@ -1017,7 +1015,7 @@ mod tests {
         let r = build_result_content("d12345678", "Every day at 9:00 AM", true, false, true);
         assert!(r.contains("Scheduled recurring job d12345678 (Every day at 9:00 AM)."));
         assert!(r.contains("Session-only (not written to disk, dies when Claude exits)"));
-        assert!(r.contains("Auto-expires after 7 days. Use CronDelete to cancel sooner."));
+        assert!(r.contains("Runs until cancelled. Use CronDelete to cancel."));
 
         let o = build_result_content("d87654321", "February 28 at 2:30pm", false, true, true);
         assert!(o.contains("Scheduled one-shot task d87654321 (February 28 at 2:30pm)."));
@@ -1066,10 +1064,13 @@ mod tests {
     async fn durable_job_persists_to_single_project_file() {
         let tmp = tempfile::tempdir().unwrap();
         let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let mut call_ctx = fresh_ctx();
+        let owner = protocol::SessionId::new();
+        call_ctx.origin_session_id = Some(owner.clone());
         let out = tool
             .call(
                 json!({"cron": "*/5 9-17 * * 1-5", "prompt": "echo hi", "durable": true}),
-                fresh_ctx(),
+                call_ctx,
                 fresh_tx(),
             )
             .await
@@ -1097,6 +1098,8 @@ mod tests {
         assert_eq!(doc.tasks[0].id, id);
         assert_eq!(doc.tasks[0].recurring, Some(true));
         assert_eq!(doc.tasks[0].last_fired_at, None);
+        assert_eq!(doc.tasks[0].session_id, Some(owner.as_uuid().to_string()));
+        assert_eq!(doc.tasks[0].expires_at, None);
         // `createdAt` is derived from the clock in epoch MILLISECONDS. The test
         // StubClock is anchored at the Unix epoch, so this is 0 here — the ms
         // conversion (`as_millis`) is exercised by the scheduler round-trip tests

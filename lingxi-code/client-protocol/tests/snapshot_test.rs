@@ -174,6 +174,9 @@ where
 #[allow(clippy::too_many_lines)] // a flat data table: one row per ClientEvent variant
 fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
     vec![
+        ("event/cron_result.json", ClientEvent::CronResult {
+            request_id: "cron-1".into(), jobs: Vec::new(), error: None,
+        }),
         (
             "event/error.json",
             ClientEvent::Error {
@@ -1290,6 +1293,13 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
 #[allow(clippy::too_many_lines)]
 fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
     vec![
+        ("command/cron_manage.json", ClientCommand::CronManage {
+            request_id: "cron-1".into(),
+            request: client_protocol::commands::CronRequestDto {
+                action: "list".into(), id: None, cron: None, prompt: None,
+                recurring: None, durable: None, expires_at: None, no_expiry: None,
+            },
+        }),
         (
             "command/send_prompt.json",
             ClientCommand::SendPrompt {

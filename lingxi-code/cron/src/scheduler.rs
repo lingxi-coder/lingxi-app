@@ -8,7 +8,7 @@ use crate::lock::{try_acquire_lock, CronLockError};
 use crate::schedule::{parse_cron, CronExpression};
 use platform_api::task_registry::TaskRegistryHandle;
 use platform_api::{Clock, FileSystem, FsError, RuntimeSpawner};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
 use std::time::{Duration, SystemTime};
@@ -94,12 +94,8 @@ pub async fn unregister_live_job(
     Ok(scheduler_for(registry)?.unregister_job(id, owner).await)
 }
 
-/// Default auto-expiry age for a RECURRING cron job — 7 days, matching
-/// claude-code `DEFAULT_CRON_JITTER_CONFIG.recurringMaxAgeMs`
-/// (`604_800_000` ms) and the Rust `CronCreate` result text. After this long
-/// since `created_at`, a recurring job is removed after its next due fire —
-/// honoring the `CronCreate` promise "Auto-expires after 7 days. Use
-/// `CronDelete` to cancel sooner."
+/// Optional seven-day compatibility preset for explicit host overrides.
+/// Production schedulers have no global age limit; tasks may set `expiresAt`.
 pub const DEFAULT_RECURRING_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Claude Code's recurring jitter is at most half of the schedule interval.
@@ -169,10 +165,6 @@ pub struct CronTaskDef {
 /// `max_age == None` disables expiry entirely (unlimited); and a `created_at` in
 /// the future (clock skew) is treated as not-yet-aged.
 ///
-/// (claude-code also exempts `permanent` tasks; the Rust `CronCreate` schema has
-/// no permanent/exempt flag — its `durable` flag is a persistence toggle, not an
-/// expiry exemption — so every recurring job is subject to the max age, matching
-/// the unconditional "Auto-expires after 7 days" the tool reports.)
 #[must_use]
 pub(crate) fn is_recurring_task_aged(
     now: SystemTime,
@@ -369,6 +361,8 @@ fn is_job_due_with<F: Fn(u64) -> i64>(task: &CronTaskDef, now: SystemTime, offse
 pub struct CronScheduler {
     tasks: Arc<RwLock<HashMap<String, CronTaskDef>>>,
     session_tasks: Arc<RwLock<HashMap<String, SessionCronTask>>>,
+    /// Durable identities must never fall back to session execution after disk deletion.
+    durable_ids: RwLock<HashSet<String>>,
     task_registry: Arc<TaskRegistry>,
     fs: Arc<dyn FileSystem>,
     clock: Arc<dyn Clock>,
@@ -382,7 +376,7 @@ pub struct CronScheduler {
     /// single tasks file.
     lock_dir: PathBuf,
     /// Auto-expiry age for RECURRING jobs; `None` disables expiry (unlimited).
-    /// Defaults to [`DEFAULT_RECURRING_MAX_AGE`].
+    /// Defaults to no age limit.
     recurring_max_age: Option<Duration>,
     tick_handle: Mutex<Option<platform_api::BackgroundTaskHandle>>,
 }
@@ -433,13 +427,14 @@ impl CronScheduler {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             session_tasks: Arc::new(RwLock::new(HashMap::new())),
+            durable_ids: RwLock::new(HashSet::new()),
             task_registry,
             fs,
             clock,
             runtime,
             tasks_file,
             lock_dir,
-            recurring_max_age: Some(DEFAULT_RECURRING_MAX_AGE),
+            recurring_max_age: None,
             tick_handle: Mutex::new(None),
         }
     }
@@ -493,12 +488,14 @@ impl CronScheduler {
                 .await
             {
                 tracing::warn!("cron: skipping job {} with invalid schedule: {e}", t.id);
+            } else {
+                self.durable_ids.write().await.insert(t.id);
             }
         }
     }
 
     /// Override the recurring auto-expiry age (`None` = unlimited / never
-    /// expire). Defaults to [`DEFAULT_RECURRING_MAX_AGE`] (7 days).
+    /// expire). Defaults to no age limit.
     #[must_use]
     pub fn with_recurring_max_age(mut self, age: Option<Duration>) -> Self {
         self.recurring_max_age = age;
@@ -583,6 +580,9 @@ impl CronScheduler {
             },
         );
         drop(tasks);
+        if durable {
+            self.durable_ids.write().await.insert(task.id.clone());
+        }
         if !durable {
             self.session_tasks
                 .write()
@@ -611,6 +611,7 @@ impl CronScheduler {
             return false;
         }
         self.session_tasks.write().await.remove(id);
+        self.durable_ids.write().await.remove(id);
         self.tasks.write().await.remove(id).is_some()
     }
 
@@ -705,7 +706,77 @@ impl CronScheduler {
         }
     }
 
+    /// Refresh shared durable state before using schedules to select due jobs.
+    /// Keep direct registrations and session-only tasks independent of the file.
+    async fn refresh_durable_tasks(&self) {
+        let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file)
+        else {
+            return;
+        };
+        let _process_guard = crate::lock_cron_file().await;
+        let Ok(_file_guard) =
+            crate::tasks_file::lock_scheduled_tasks(self.fs.as_ref(), project_root).await
+        else {
+            return;
+        };
+        let doc = match crate::tasks_file::read_tasks_body(self.fs.as_ref(), project_root).await {
+            Ok(body) => match serde_json::from_str::<crate::tasks_file::ScheduledTasks>(&body) {
+                Ok(doc) => doc,
+                Err(error) => {
+                    tracing::warn!("cron: cannot refresh invalid durable state: {error}");
+                    return;
+                }
+            },
+            Err(FsError::NotFound(_)) => crate::tasks_file::ScheduledTasks::default(),
+            Err(_) => return,
+        };
+        // Keep identity reconciliation atomic with live registration. Registration
+        // releases the tasks lock before taking this lock, so this order is safe.
+        let mut durable_ids = self.durable_ids.write().await;
+        let previous = durable_ids.clone();
+        let session_ids: HashSet<_> = self.session_tasks.read().await.keys().cloned().collect();
+        let mut current = HashSet::new();
+        let mut tasks = self.tasks.write().await;
+        for task in doc.tasks {
+            if session_ids.contains(&task.id)
+                || (tasks.contains_key(&task.id) && !previous.contains(&task.id))
+            {
+                continue;
+            }
+            let Ok(schedule) = parse_cron(&task.cron) else {
+                continue;
+            };
+            let local = tasks.get(&task.id);
+            let created_at = if task.created_at > 0 {
+                SystemTime::UNIX_EPOCH + Duration::from_millis(task.created_at)
+            } else {
+                local.map_or_else(|| self.clock.now(), |local| local.created_at)
+            };
+            let definition = CronTaskDef {
+                id: task.id.clone(),
+                schedule,
+                prompt: task.prompt,
+                agent_type: local.and_then(|local| local.agent_type.clone()),
+                last_run: task
+                    .last_fired_at
+                    .filter(|ms| *ms > 0)
+                    .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms)),
+                enabled: local.is_none_or(|local| local.enabled),
+                created_at,
+                recurring: task.recurring.unwrap_or(false),
+            };
+            current.insert(task.id.clone());
+            tasks.insert(task.id, definition);
+        }
+        for id in previous.difference(&current) {
+            tasks.remove(id);
+        }
+        drop(tasks);
+        *durable_ids = current;
+    }
+
     async fn tick(&self) {
+        self.refresh_durable_tasks().await;
         let now = self.clock.now();
 
         // Due-detection with missed-run CATCH-UP (`is_job_due`): fires at the
@@ -737,6 +808,7 @@ impl CronScheduler {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&key);
         self.session_tasks.write().await.clear();
+        self.durable_ids.write().await.clear();
         self.tasks.write().await.clear();
         cancel_result
     }
@@ -763,7 +835,7 @@ impl CronScheduler {
 
         let body = match crate::tasks_file::read_tasks_body(self.fs.as_ref(), project_root).await {
             Ok(body) => body,
-            Err(FsError::NotFound(_)) => return self.claim_in_memory_due_job(id, now).await,
+            Err(FsError::NotFound(_)) => return self.claim_missing_disk_job(id, now).await,
             Err(error) => {
                 // An unreadable durable state file is not evidence that this is
                 // an in-memory-only job. Fail closed or a transient I/O error
@@ -786,8 +858,23 @@ impl CronScheduler {
             }
         };
         let Some(on_disk) = doc.tasks.into_iter().find(|task| task.id == id) else {
-            return self.claim_in_memory_due_job(id, now).await;
+            return self.claim_missing_disk_job(id, now).await;
         };
+
+        if on_disk
+            .expires_at
+            .is_some_and(|expiry| expiry <= unix_epoch_ms(now))
+        {
+            if let Some(updated) = tasks_file_without(&body, id) {
+                if crate::tasks_file::write_tasks_body(self.fs.as_ref(), project_root, &updated)
+                    .await
+                    .is_ok()
+                {
+                    self.unregister_job(id, None).await;
+                }
+            }
+            return None;
+        }
 
         let authoritative = match parse_cron(&on_disk.cron) {
             Ok(schedule) => CronTaskDef {
@@ -856,6 +943,15 @@ impl CronScheduler {
             })
     }
 
+    async fn claim_missing_disk_job(&self, id: &str, now: SystemTime) -> Option<ClaimedCronJob> {
+        let was_durable = self.durable_ids.write().await.remove(id);
+        if was_durable {
+            self.tasks.write().await.remove(id);
+            return None;
+        }
+        self.claim_in_memory_due_job(id, now).await
+    }
+
     async fn claim_in_memory_due_job(&self, id: &str, now: SystemTime) -> Option<ClaimedCronJob> {
         let mut tasks = self.tasks.write().await;
         let original_task = tasks.get(id).cloned()?;
@@ -917,6 +1013,7 @@ impl CronScheduler {
         expires_after_fire: bool,
     ) -> Option<TaskSpawnInput> {
         let mut tasks = self.tasks.write().await;
+        tasks.insert(authoritative.id.clone(), authoritative.clone());
         let remove_after_fire =
             finalize_fired_job(&mut tasks, &authoritative.id, now) || expires_after_fire;
         if expires_after_fire {
@@ -927,6 +1024,10 @@ impl CronScheduler {
                 *task = authoritative.clone();
                 task.last_run = Some(now);
             }
+        }
+        drop(tasks);
+        if remove_after_fire {
+            self.durable_ids.write().await.remove(&authoritative.id);
         }
         if expires_after_fire {
             tracing::info!(
@@ -1047,6 +1148,10 @@ impl CronScheduler {
     }
 
     async fn restore_authoritative_task(&self, authoritative: CronTaskDef) {
+        self.durable_ids
+            .write()
+            .await
+            .insert(authoritative.id.clone());
         self.tasks
             .write()
             .await
@@ -1131,7 +1236,7 @@ mod expiry_tests {
     }
 
     #[test]
-    fn default_max_age_is_7_days() {
+    fn explicit_seven_day_age_preset() {
         assert_eq!(DEFAULT_RECURRING_MAX_AGE, DAY * 7);
     }
 
@@ -1742,6 +1847,7 @@ mod scheduler_tick_tests {
             Arc::new(UnusedRuntime),
             PathBuf::from(TASKS_PATH),
         )
+        .with_recurring_max_age(Some(super::DEFAULT_RECURRING_MAX_AGE))
     }
 
     #[tokio::test]
@@ -2192,5 +2298,277 @@ mod scheduler_tick_tests {
                 .unwrap()
         );
         super::LIVE_SCHEDULERS.lock().unwrap().remove(&key);
+    }
+    #[tokio::test]
+    async fn durable_live_registration_fires_without_restarting_scheduler() {
+        let created_ms = (NOW - 120) * 1000;
+        let body = format!(
+            r#"{{"tasks":[{{"id":"duilive01","cron":"* * * * *","prompt":"saved UI task","createdAt":{created_ms},"recurring":true}}]}}"#
+        );
+        let fs = MemFs::with(TASKS_PATH, &body);
+        let clock = FixedClock::at_secs(NOW);
+        let (registry, handler) = registry_with_dream_handler(fs.clone());
+        let scheduler = Arc::new(scheduler(registry.clone(), fs, clock.clone()));
+        let key = super::task_registry_identity(&registry);
+        super::LIVE_SCHEDULERS
+            .lock()
+            .unwrap()
+            .insert(key, Arc::downgrade(&scheduler));
+        let registry = registry as Arc<dyn platform_api::task_registry::TaskRegistryHandle>;
+        super::register_live_job(
+            &registry,
+            SessionCronTask {
+                id: "duilive01".into(),
+                cron: "* * * * *".into(),
+                prompt: "saved UI task".into(),
+                created_at: SystemTime::UNIX_EPOCH + Duration::from_millis(created_ms),
+                last_fired_at: None,
+                recurring: true,
+                owner: None,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        scheduler.tick().await;
+        assert_eq!(
+            handler.spawn_count(),
+            1,
+            "a UI-created live job must dispatch through the Dream handler"
+        );
+        scheduler.tick().await;
+        assert_eq!(handler.spawn_count(), 1, "same minute must not double-fire");
+        super::LIVE_SCHEDULERS.lock().unwrap().remove(&key);
+    }
+
+    #[tokio::test]
+    async fn deleted_durable_job_never_fires_from_another_scheduler() {
+        for missing_file in [false, true] {
+            let created_ms = (NOW - 120) * 1000;
+            let body = format!(
+                r#"{{"tasks":[{{"id":"ddeleted1","cron":"* * * * *","prompt":"deleted","createdAt":{created_ms},"recurring":true}}]}}"#
+            );
+            let fs = MemFs::with(TASKS_PATH, &body);
+            let clock = FixedClock::at_secs(NOW);
+            let (registry_a, handler_a) = registry_with_dream_handler(fs.clone());
+            let (registry_b, handler_b) = registry_with_dream_handler(fs.clone());
+            let a = scheduler(registry_a, fs.clone(), clock.clone());
+            let b = scheduler(registry_b, fs.clone(), clock.clone());
+            a.load_persisted().await;
+            b.load_persisted().await;
+            if missing_file {
+                fs.files.lock().await.remove(TASKS_PATH);
+            } else {
+                fs.files
+                    .lock()
+                    .await
+                    .insert(TASKS_PATH.into(), r#"{"tasks":[]}"#.into());
+            }
+            a.unregister_job("ddeleted1", None).await;
+            b.process_due_ids(clock.now(), vec!["ddeleted1".into()])
+                .await;
+            assert_eq!(handler_a.spawn_count() + handler_b.spawn_count(), 0);
+            assert!(!b.tasks.read().await.contains_key("ddeleted1"));
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_expiration_survives_reload_and_absent_expiration_is_indefinite() {
+        for expired in [false, true] {
+            let created_ms = (NOW - 30 * 24 * 60 * 60) * 1000;
+            let expiry = if expired {
+                format!(",\"expiresAt\":{}", (NOW - 1) * 1000)
+            } else {
+                String::new()
+            };
+            let body = format!(
+                r#"{{"tasks":[{{"id":"dexpiry01","cron":"* * * * *","prompt":"expiry test","createdAt":{created_ms},"recurring":true{expiry}}}]}}"#
+            );
+            let fs = MemFs::with(TASKS_PATH, &body);
+            let clock = FixedClock::at_secs(NOW);
+            let (registry, handler) = registry_with_dream_handler(fs.clone());
+            let scheduler = CronScheduler::new(
+                registry,
+                fs.clone(),
+                clock,
+                Arc::new(UnusedRuntime),
+                PathBuf::from(TASKS_PATH),
+            );
+            assert!(scheduler.recurring_max_age.is_none());
+            scheduler.load_persisted().await;
+            scheduler.tick().await;
+            assert_eq!(handler.spawn_count(), usize::from(!expired));
+            assert_eq!(
+                scheduler.tasks.read().await.contains_key("dexpiry01"),
+                !expired
+            );
+            let doc = crate::tasks_file::parse_tasks(&fs.get(TASKS_PATH).await.unwrap());
+            assert_eq!(doc.tasks.len(), usize::from(!expired));
+        }
+    }
+
+    #[tokio::test]
+    async fn tick_refreshes_peer_edits_and_new_durable_jobs() {
+        let created_ms = (NOW - 120) * 1000;
+        let body = format!(
+            r#"{{"tasks":[{{"id":"dpeeredit","cron":"0 0 1 1 *","prompt":"old","createdAt":{created_ms},"recurring":true}}]}}"#
+        );
+        let fs = MemFs::with(TASKS_PATH, &body);
+        let clock = FixedClock::at_secs(NOW);
+        let (registry, handler) = registry_with_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs.clone(), clock.clone());
+        scheduler.load_persisted().await;
+        assert!(!super::is_job_due(
+            &scheduler.tasks.read().await["dpeeredit"],
+            clock.now()
+        ));
+        let edited = format!(
+            r#"{{"tasks":[{{"id":"dpeeredit","cron":"* * * * *","prompt":"updated","createdAt":{created_ms},"recurring":true}},{{"id":"dpeernew1","cron":"* * * * *","prompt":"new","createdAt":{created_ms},"recurring":true}}]}}"#
+        );
+        fs.files.lock().await.insert(TASKS_PATH.into(), edited);
+        scheduler.tick().await;
+        assert_eq!(handler.spawn_count(), 2);
+        scheduler.tick().await;
+        assert_eq!(
+            handler.spawn_count(),
+            2,
+            "persisted firing history must survive refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn authoritative_recurring_flag_controls_claim_finalization() {
+        for recurring in [true, false] {
+            let created_ms = (NOW - 120) * 1000;
+            let body = format!(
+                r#"{{"tasks":[{{"id":"dpeerflag","cron":"* * * * *","prompt":"test","createdAt":{created_ms},"recurring":{recurring}}}]}}"#
+            );
+            let fs = MemFs::with(TASKS_PATH, &body);
+            let clock = FixedClock::at_secs(NOW);
+            let (registry, handler) = registry_with_dream_handler(fs.clone());
+            let scheduler = scheduler(registry, fs, clock.clone());
+            scheduler.load_persisted().await;
+            scheduler
+                .tasks
+                .write()
+                .await
+                .get_mut("dpeerflag")
+                .unwrap()
+                .recurring = !recurring;
+            scheduler
+                .process_due_ids(clock.now(), vec!["dpeerflag".into()])
+                .await;
+            assert_eq!(handler.spawn_count(), 1);
+            assert_eq!(
+                scheduler.tasks.read().await.contains_key("dpeerflag"),
+                recurring
+            );
+            assert_eq!(
+                scheduler.durable_ids.read().await.contains("dpeerflag"),
+                recurring
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_refresh_preserves_other_registrations_and_corrupt_storage() {
+        let created_ms = (NOW - 120) * 1000;
+        let body = format!(
+            r#"{{"tasks":[{{"id":"drefresh1","cron":"* * * * *","prompt":"saved","createdAt":{created_ms},"recurring":true}}]}}"#
+        );
+        let fs = MemFs::with(TASKS_PATH, &body);
+        let clock = FixedClock::at_secs(NOW);
+        let (registry, handler) = registry_with_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs.clone(), clock.clone());
+        scheduler.load_persisted().await;
+        scheduler
+            .register("direct", "* * * * *", "direct", None)
+            .await
+            .unwrap();
+        scheduler
+            .register_tool_job(
+                SessionCronTask {
+                    id: "session".into(),
+                    cron: "* * * * *".into(),
+                    prompt: "session".into(),
+                    created_at: clock.now(),
+                    last_fired_at: None,
+                    recurring: true,
+                    owner: None,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        fs.files
+            .lock()
+            .await
+            .insert(TASKS_PATH.into(), "invalid".into());
+        scheduler.refresh_durable_tasks().await;
+        assert_eq!(scheduler.tasks.read().await.len(), 3);
+        scheduler
+            .process_due_ids(clock.now(), vec!["drefresh1".into()])
+            .await;
+        assert_eq!(
+            handler.spawn_count(),
+            0,
+            "corrupt durable state must never fire"
+        );
+        fs.files
+            .lock()
+            .await
+            .insert(TASKS_PATH.into(), r#"{"tasks":[]}"#.into());
+        scheduler.refresh_durable_tasks().await;
+        let tasks = scheduler.tasks.read().await;
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.contains_key("direct"));
+        assert!(tasks.contains_key("session"));
+    }
+    #[tokio::test]
+    async fn durable_refresh_serializes_identity_with_live_registration() {
+        let fs = MemFs::with(TASKS_PATH, r#"{"tasks":[]}"#);
+        let clock = FixedClock::at_secs(NOW);
+        let (registry, _) = registry_with_dream_handler(fs.clone());
+        let scheduler = Arc::new(scheduler(registry, fs, clock.clone()));
+        let tasks_guard = scheduler.tasks.write().await;
+        let refreshing = {
+            let scheduler = scheduler.clone();
+            tokio::spawn(async move { scheduler.refresh_durable_tasks().await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if scheduler.durable_ids.try_write().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("refresh must hold identity lock while waiting to reconcile tasks");
+        let registering = {
+            let scheduler = scheduler.clone();
+            tokio::spawn(async move {
+                scheduler
+                    .register_tool_job(
+                        SessionCronTask {
+                            id: "dregister".into(),
+                            cron: "* * * * *".into(),
+                            prompt: "new".into(),
+                            created_at: clock.now(),
+                            last_fired_at: None,
+                            recurring: true,
+                            owner: None,
+                        },
+                        true,
+                    )
+                    .await
+                    .unwrap();
+            })
+        };
+        drop(tasks_guard);
+        refreshing.await.unwrap();
+        registering.await.unwrap();
+        assert!(scheduler.durable_ids.read().await.contains("dregister"));
+        assert!(scheduler.tasks.read().await.contains_key("dregister"));
     }
 }

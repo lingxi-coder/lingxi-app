@@ -801,6 +801,7 @@ test('project session catalogs are patched independently and preserved in bootst
     empty_session: false,
   });
   const settings = {
+    isSessionArchived: () => false,
     getWorkspace: () => projectA,
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
     getPublic: () => ({ version: 1, activeProject: projectA, projects: [projectA, projectB], pinnedSessions: [] }),
@@ -835,6 +836,7 @@ test('host catalog generations keep only the newest deferred response', async ()
     list: async () => (++calls === 1 ? first.promise : second.promise),
   };
   const settings = {
+    isSessionArchived: () => false,
     getWorkspace: () => projectPath,
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
     getPublic: () => ({ version: 1, activeProject: projectPath, projects: [projectPath], pinnedSessions: [] }),

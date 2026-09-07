@@ -65,6 +65,11 @@ export function Icon({ name, size = 16, color = 'currentColor', stroke = 1.6, st
     case 'dot': return <svg {...p}><circle cx="12" cy="12" r="3" fill={color} stroke="none" /></svg>;
     case 'circle': return <svg {...p}><circle cx="12" cy="12" r="6" /></svg>;
     case 'goal': return <svg {...p}><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3" /></svg>;
+    case 'archive': return <svg {...p}><rect x="3" y="3" width="18" height="5" rx="1" /><path d="M5 8v12h14V8M10 12h4" /></svg>;
+    case 'compose': return <svg {...p}><path d="M12 3H7a4 4 0 0 0-4 4v10a4 4 0 0 0 4 4h10a4 4 0 0 0 4-4v-5" /><path d="m10 14 1-4L18.5 2.5a2.12 2.12 0 0 1 3 3L14 13z" /></svg>;
+    case 'bell': return <svg {...p}><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9 0 1 18 1 18 0 0-2-3-2-3-9M10 21h4" /></svg>;
+    case 'notebook': return <svg {...p}><rect x="6" y="3" width="14" height="18" rx="3" /><path d="M3 7h5M3 12h5M3 17h5M11 8h5M11 12h3" /></svg>;
+    case 'fileSearch': return <svg {...p}><path d="M11 21H6a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3h8l5 5v3M13 3v6h6" /><circle cx="16" cy="17" r="4" /><path d="m19 20 3 3" /></svg>;
     case 'pencil': return <svg {...p}><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" /></svg>;
     case 'sliders': return <svg {...p}><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" /></svg>;
     case 'clock': return <svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3.5 2" /></svg>;

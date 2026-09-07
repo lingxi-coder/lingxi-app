@@ -85,6 +85,8 @@ export const CH_MICROPHONE_ACCESS_GET = 'lingxi:microphone-access:get';
 export const CH_PROJECT_SESSIONS_LIST = 'lingxi:project-sessions:list';
 export const CH_SESSION_NEW = 'lingxi:session:new';
 export const CH_SESSION_OPEN = 'lingxi:session:open';
+export const CH_SESSION_ARCHIVE = 'lingxi:session:archive';
+export const CH_SESSION_ARCHIVE_PREFLIGHT = 'lingxi:session:archive-preflight';
 export const CH_SESSION_CLEAR = 'lingxi:session:clear';
 export const CH_WORKSPACE_FILE_PREVIEW = 'lingxi:workspace-file:preview';
 
@@ -420,6 +422,19 @@ export class HostController {
         const ref = { projectPath: project, sessionId } satisfies SessionRef;
         return this.openSessionAndActivateInternal(ref);
       });
+    });
+    this.ipc.handle(CH_SESSION_ARCHIVE_PREFLIGHT, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
+      this.assertSender(event);
+      const ref = this.archiveRef(projectPath, sessionId);
+      const row = await this.assertSessionBelongsToProject(ref);
+      return this.bridge.withBackgroundSession(ref, row?.empty_session === true, row?.resume_model, async (runtime) => {
+        const jobs = await runtime.manageCron({ action: 'list' });
+        return jobs.filter((job) => job.session_id === ref.sessionId || job.session_id === `sess:${ref.sessionId}`);
+      });
+    });
+    this.ipc.handle(CH_SESSION_ARCHIVE, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
+      this.assertSender(event);
+      return this.enqueueNavigation(() => this.archiveSessionInternal(this.archiveRef(projectPath, sessionId)));
     });
     this.ipc.handle(CH_SESSION_CLEAR, async (event: IpcMainInvokeEvent, sessionId: unknown) => {
       this.assertSender(event);
@@ -1013,7 +1028,7 @@ export class HostController {
     try {
       const result = await this.sessionCatalog.list(projectPath);
       const state = {
-        sessions: result.sessions.map(({
+        sessions: result.sessions.filter((session) => !this.settings.isSessionArchived({ projectPath, sessionId: session.uuid })).map(({
           empty_session: _emptySession,
           resume_model: _resumeModel,
           ...session
@@ -1067,8 +1082,43 @@ export class HostController {
     // session_resumed event. A failed/corrupt resume leaves the visible session
     // and selected Project unchanged.
     this.settings.activateProject(project);
+    const wasArchived = this.settings.isSessionArchived(canonical);
+    if (wasArchived) this.settings.setSessionArchived(canonical, false);
     this.settings.setActiveSession(canonical);
+    if (wasArchived) await this.loadProjectSessions(project);
     return this.bootstrap();
+  }
+
+  private archiveRef(projectPath: unknown, sessionId: unknown): SessionRef {
+    const project = this.requireProject(projectPath);
+    if (!isSessionId(sessionId)) throw new Error('invalid session id');
+    return { projectPath: project, sessionId };
+  }
+
+  private async archiveSessionInternal(ref: SessionRef): Promise<BootstrapState> {
+    const row = await this.assertSessionBelongsToProject(ref);
+    return this.bridge.withBackgroundSession(ref, row?.empty_session === true, row?.resume_model, async (runtime) => {
+      const release = runtime.beginArchive();
+      let removed = 0;
+      try {
+        const jobs = (await runtime.manageCron({ action: 'list' })).filter((job) => job.session_id === ref.sessionId || job.session_id === `sess:${ref.sessionId}`);
+        if (jobs.some((job) => job.permanent)) throw new Error('This chat has a system task that cannot be removed.');
+        for (const job of jobs) { await runtime.manageCron({ action: 'delete', id: job.id }); removed++; }
+        const active = this.settings.getPublic().activeSession?.sessionId === ref.sessionId;
+        const title = row?.title ?? this.catalogs.get(ref.projectPath)?.sessions.find((item) => item.uuid === ref.sessionId)?.title;
+        this.settings.setSessionArchived(ref, true, title);
+        await this.bridge.closeSession(ref);
+        await this.loadProjectSessions(ref.projectPath);
+        if (active) {
+          const replacement = await this.bridge.newSession(ref.projectPath);
+          this.settings.setActiveSessionDraft(replacement);
+        }
+        return this.bootstrap();
+      } catch (error) {
+        if (!this.settings.isSessionArchived(ref)) throw new Error(`Chat was not archived. ${removed ? `${removed} scheduled task(s) were already removed. ` : ''}${error instanceof Error ? error.message : String(error)}`);
+        throw new Error(`Chat was archived, but opening the next chat failed: ${error instanceof Error ? error.message : String(error)}`);
+      } finally { release(); }
+    });
   }
 
   private async removeProjectInternal(project: string): Promise<BootstrapState> {
@@ -1102,6 +1152,7 @@ export class HostController {
       return activeSession;
     }
     const catalog = await this.sessionCatalog.list(project);
+    catalog.sessions = catalog.sessions.filter((session) => !this.settings.isSessionArchived({ projectPath: project, sessionId: session.uuid }));
     this.catalogs.set(project, {
       sessions: catalog.sessions.map(({
         empty_session: _emptySession,
@@ -1144,7 +1195,7 @@ export class HostController {
     for (const channel of [
       CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET,
-      CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR,
+      CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
       CH_WORKSPACE_FILES_SEARCH,
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
       CH_PROVIDER_CONNECTION_TEST,

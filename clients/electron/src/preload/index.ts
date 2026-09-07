@@ -1,3 +1,4 @@
+import type { CronJobDto } from '@lingxi/bridge-client';
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type {
   AskUserQuestionRequestDto,
@@ -76,6 +77,8 @@ const CH_CLIPBOARD_WRITE_TEXT = 'lingxi:clipboard:writeText';
 const CH_PROJECT_SESSIONS_LIST = 'lingxi:project-sessions:list';
 const CH_SESSION_NEW = 'lingxi:session:new';
 const CH_SESSION_OPEN = 'lingxi:session:open';
+const CH_SESSION_ARCHIVE = 'lingxi:session:archive';
+const CH_SESSION_ARCHIVE_PREFLIGHT = 'lingxi:session:archive-preflight';
 const CH_SESSION_CLEAR = 'lingxi:session:clear';
 const CH_WORKSPACE_FILE_PREVIEW = 'lingxi:workspace-file:preview';
 
@@ -182,6 +185,8 @@ export interface LingxiApi {
   listProjectSessions(projectPath: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   newSession(projectPath: string, model?: string): Promise<BootstrapState>;
   openSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
+  preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
+  archiveSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
   clearSession(sessionId: string): Promise<void>;
   sendPrompt(sessionId: string, text: string, images?: ImageRefDto[]): Promise<void>;
   approve(sessionId: string, requestId: number, response?: PermissionResponseDto): Promise<void>;
@@ -258,6 +263,8 @@ const api: LingxiApi = {
   listProjectSessions: (projectPath) => ipcRenderer.invoke(CH_PROJECT_SESSIONS_LIST, projectPath) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
   newSession: (projectPath, model) => ipcRenderer.invoke(CH_SESSION_NEW, projectPath, model) as Promise<BootstrapState>,
   openSession: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId) as Promise<BootstrapState>,
+  preflightSessionArchive: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_ARCHIVE_PREFLIGHT, projectPath, sessionId) as Promise<CronJobDto[]>,
+  archiveSession: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_ARCHIVE, projectPath, sessionId) as Promise<BootstrapState>,
   clearSession: (sessionId) => ipcRenderer.invoke(CH_SESSION_CLEAR, sessionId) as Promise<void>,
   sendPrompt: (sessionId, text, images) => ipcRenderer.invoke(CH_SEND_PROMPT, sessionId, text, images ?? []) as Promise<void>,
   approve: (sessionId, requestId, response) => ipcRenderer.invoke(CH_APPROVE, sessionId, requestId, response) as Promise<void>,

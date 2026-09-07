@@ -6,7 +6,7 @@ The user invoked `/loop` with no prompt (input was empty or just the interval `1
    - `cron`: the expression from step 1
    - `prompt`: the literal string `<<autonomous-loop>>` — it expands at fire time to the full autonomous-loop instructions on first delivery, and to a short reminder on subsequent fires (the long instructions stay in the cached message-prefix).
    - `recurring`: `true`
-3. Briefly confirm: what's scheduled, the cron expression, the human-readable cadence, that recurring tasks auto-expire after 7 days, and that they can cancel sooner with CronDelete (include the job ID). Mention this is the autonomous default and that the autonomous-loop instructions are baked in.
+3. Briefly confirm: what's scheduled, the cron expression, the human-readable cadence, that recurring tasks run until cancelled, and that they can cancel with CronDelete (include the job ID). Mention this is the autonomous default and that the autonomous-loop instructions are baked in.
 4. **Then immediately run the autonomous check now**, following the instructions inlined below. Don't wait for the first cron fire.
 ## Autonomous-loop instructions (for the immediate execution and every fire)
 # Autonomous loop check

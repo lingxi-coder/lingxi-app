@@ -82,12 +82,12 @@ test('real Electron preserves Sidebar focus and supports native resize dragging'
       sidebarExists: true,
     });
     assert.deepEqual(result.afterTab, {
-      activeText: 'New session',
+      activeText: 'New chat',
       activeIsSidebar: true,
     });
     assert.deepEqual(result.afterDismiss, {
       promptOpen: false,
-      activeText: 'New session',
+      activeText: 'New chat',
       activeIsSidebar: true,
     });
     assert.deepEqual(result.resize, { before: 260, after: 360 });

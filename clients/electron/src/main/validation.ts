@@ -399,6 +399,36 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
   if (typeof type !== 'string' || !ALLOWED_COMMANDS.has(type)) throw new Error('command is not allowed');
 
   switch (type) {
+    case 'cron_manage': {
+      exactKeys(input, ['type', 'request_id', 'request']);
+      const request_id = string(input['request_id'], 'cron request id', 128);
+      const request = object(input['request']);
+      const action = string(request['action'], 'cron action', 16);
+      if (!['list', 'create', 'update', 'delete'].includes(action)) throw new Error('invalid cron action');
+      const keys = action === 'list' ? ['action'] : action === 'delete' ? ['action', 'id']
+        : action === 'create' ? ['action', 'cron', 'prompt', 'recurring', 'durable', 'expires_at', 'no_expiry']
+        : ['action', 'id', 'cron', 'prompt', 'recurring', 'durable', 'expires_at', 'no_expiry'];
+      exactKeys(request, keys);
+      const result: Extract<ClientCommand, { type: 'cron_manage' }>['request'] = {
+        action: action as 'list' | 'create' | 'update' | 'delete',
+      };
+      if (action === 'update' || action === 'delete') result.id = string(request['id'], 'cron task id', 128);
+      for (const key of ['cron', 'prompt'] as const) {
+        if (action === 'create' || request[key] !== undefined) {
+          result[key] = string(request[key], `cron ${key}`, key === 'cron' ? 256 : 100_000);
+        }
+      }
+      for (const key of ['recurring', 'durable', 'no_expiry'] as const) {
+        if (request[key] !== undefined) {
+          if (typeof request[key] !== 'boolean') throw new Error(`invalid cron ${key}`);
+          result[key] = request[key];
+        }
+      }
+      if (request['expires_at'] !== undefined) result.expires_at = integer(request['expires_at'], 'cron expiry', 1, Number.MAX_SAFE_INTEGER);
+      if (result.no_expiry === true && result.expires_at !== undefined) throw new Error('conflicting cron expiry');
+      if (result.durable === false) throw new Error('scheduled tasks must be durable');
+      return { type, request_id, request: result };
+    }
     case 'set_model':
       exactKeys(input, ['type', 'model']);
       return { type, model: string(input['model'], 'model', 256) };

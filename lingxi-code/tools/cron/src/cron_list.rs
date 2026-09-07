@@ -354,6 +354,8 @@ mod tests {
             last_fired_at: None,
             recurring: Some(recurring),
             permanent: None,
+            expires_at: None,
+            session_id: None,
         }
     }
 

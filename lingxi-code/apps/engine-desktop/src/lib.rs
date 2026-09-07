@@ -32,6 +32,7 @@ pub mod auto_mode_propose;
 mod background_agent;
 mod connect;
 mod cron_command;
+pub mod cron_management;
 pub mod file_changed_watch;
 pub mod fork_resume;
 mod fusion_command;

@@ -42,6 +42,7 @@ import type {
 } from './protocol.js';
 
 export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
+  cron_manage: true,
   send_prompt: true,
   cancel: true,
   attach_turn: true,
@@ -113,6 +114,7 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
 };
 
 export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
+  cron_result: true,
   error: true,
   system_notice: true,
   ask_user_question: true,

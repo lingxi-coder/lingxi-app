@@ -180,7 +180,32 @@ export type AudioResultDto =
  * `#[non_exhaustive]` on the Rust side ⇒ a future variant is additive; consumers
  * should treat the union as open-ended.
  */
+export interface CronRequestDto {
+  action: 'list' | 'create' | 'update' | 'delete';
+  id?: string;
+  cron?: string;
+  prompt?: string;
+  recurring?: boolean;
+  durable?: boolean;
+  no_expiry?: boolean;
+  expires_at?: number;
+}
+
+export interface CronJobDto {
+  expires_at?: number;
+  session_id?: string;
+  id: string;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  durable: boolean;
+  permanent: boolean;
+  created_at: number;
+  last_fired_at?: number;
+}
+
 export type ClientCommand =
+  | { type: 'cron_manage'; request_id: string; request: CronRequestDto }
   // ── Turn driving ──────────────────────────────────────────────────────────
   | {
       type: 'send_prompt';
@@ -1913,6 +1938,7 @@ export type AudioOpDto =
  * `#[non_exhaustive]` on the Rust side ⇒ a future variant is additive.
  */
 export type ClientEvent =
+  | { type: 'cron_result'; request_id: string; jobs: CronJobDto[]; error?: string }
   // ── Error ─────────────────────────────────────────────────────────────────
   | { type: 'error'; kind: ErrorKindDto; message: string }
   | { type: 'system_notice'; message: string; is_error: boolean }

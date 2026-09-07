@@ -11497,6 +11497,8 @@ impl MobileCronStoreHandle {
             last_fired_at: None,
             recurring: Some(recurring),
             permanent: None,
+            expires_at: None,
+            session_id: None,
         };
         document.tasks.push(task.clone());
         cron::write_tasks_body(
@@ -11682,7 +11684,7 @@ impl MobileEngineHandle {
             fs,
             clock,
             &firer,
-            Some(cron::default_recurring_max_age()),
+            cron::default_recurring_max_age(),
         )
         .await
         .into_iter()

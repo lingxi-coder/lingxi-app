@@ -9,6 +9,7 @@ import type {
 export type DesktopDisposition = 'exposed' | 'host_private' | 'degraded' | 'not_applicable';
 
 export const CLIENT_COMMAND_DISPOSITIONS = {
+  cron_manage: 'exposed',
   send_prompt: 'host_private',
   cancel: 'host_private',
   attach_turn: 'not_applicable',
@@ -96,6 +97,7 @@ export const REFRESH_LISTING_DISPOSITIONS = {
 } as const satisfies Record<ListingKindDto['type'], DesktopDisposition>;
 
 export const CLIENT_EVENT_DISPOSITIONS = {
+  cron_result: 'exposed',
   error: 'exposed',
   system_notice: 'exposed',
   ask_user_question: 'exposed',
@@ -221,6 +223,7 @@ export const APP_EVENT_DISPOSITIONS = {
  * stay out.
  */
 export const ALLOWED_CLIENT_COMMAND_TYPES = [
+  'cron_manage',
   'set_model',
   'list_models',
   'list_sessions',

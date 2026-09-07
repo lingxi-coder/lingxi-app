@@ -2013,3 +2013,98 @@ test('a window detached while still alive does not have its own request handed b
     'the request must move to the window that is staying',
   );
 });
+
+test('foreground open activates a session already opening for archive preflight', async () => {
+  const ref = { projectPath: '/workspace', sessionId: 'cccccccc-dddd-4eee-8fff-000000000001' };
+  const gate = deferred<void>();
+  const originalStart = SessionRuntime.prototype.start;
+  const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  SessionRuntime.prototype.start = async function () { await gate.promise; (this as any).state = { status: 'connected' }; };
+  SessionRuntime.prototype.resumeOwnedSession = async function () {};
+  const manager = new SessionRuntimeManager({ launchConfig: (r) => ({ workspace: r.projectPath, sessionId: r.sessionId, trusted: true }) });
+  try {
+    const background = manager.openSession(ref, false, undefined, false);
+    const foreground = manager.openSession(ref);
+    gate.resolve();
+    assert.strictEqual(await background, await foreground);
+    assert.equal((manager as any).activeSessionId, ref.sessionId);
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+  }
+});
+
+test('background session leases survive cache pressure and trim after archive preflight', async () => {
+  const refs = [1, 2, 3].map((n) => ({ projectPath: '/workspace', sessionId: `cccccccc-dddd-4eee-8fff-00000000000${n}` }));
+  const originalStart = SessionRuntime.prototype.start;
+  const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  SessionRuntime.prototype.start = async function () { (this as any).state = { status: 'connected' }; };
+  SessionRuntime.prototype.resumeOwnedSession = async function () {};
+  const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1, launchConfig: (r) => ({ workspace: r.projectPath, sessionId: r.sessionId, trusted: true }) });
+  try {
+    await manager.openSession(refs[0]!);
+    for (const ref of refs.slice(1)) {
+      await manager.withBackgroundSession(ref, false, undefined, async (runtime) => {
+        (manager as any).trimCache();
+        assert.strictEqual(manager.get(ref.sessionId), runtime, 'operation must retain its runtime');
+        assert.equal(manager.size, 2, 'active chat and preflight remain live');
+      });
+      assert.equal(manager.size, 1, 'cancelled preflight cannot leak a child process');
+      assert.ok(manager.get(refs[0]!.sessionId));
+    }
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+  }
+});
+
+test('successful scheduled creation commits the draft owner, while rejection keeps it reusable', async () => {
+  const originalStart = SessionRuntime.prototype.start;
+  const commits: string[] = [];
+  SessionRuntime.prototype.start = async function () {
+    (this as any).activeWorkspace = '/workspace';
+    (this as any).activeWorkspaceTrusted = true;
+    (this as any).state = { status: 'connected' };
+  };
+  const manager = new SessionRuntimeManager({
+    launchConfig: (r) => ({ workspace: r.projectPath, sessionId: r.sessionId, trusted: true }),
+    onFirstPromptSent: (ref) => { commits.push(ref.sessionId); },
+  });
+  try {
+    const ref = await manager.newSession('/workspace');
+    const runtime = manager.require(ref);
+    const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void };
+    client.sendCommand = () => {};
+    (runtime as any).client = client;
+    (runtime as any).wireClient(client, 0);
+    const create = (id: string) => runtime.dispatchCommand({ type: 'cron_manage', request_id: id, request: { action: 'create', cron: '0 9 * * *', prompt: 'Check updates' } });
+    const rejected = create('rejected');
+    assert.throws(() => runtime.beginArchive(), /pending interactions/);
+    client.emit('event', { type: 'cron_result', request_id: 'rejected', jobs: [], error: 'Save failed' });
+    await assert.rejects(rejected, /Save failed/);
+    assert.deepEqual(commits, []);
+    assert.equal((await manager.newSession('/workspace')).sessionId, ref.sessionId);
+    const accepted = create('accepted');
+    client.emit('event', { type: 'cron_result', request_id: 'accepted', jobs: [] });
+    await accepted;
+    assert.deepEqual(commits, [ref.sessionId]);
+    const next = await manager.newSession('/workspace');
+    assert.notEqual(next.sessionId, ref.sessionId);
+    const nextRuntime = manager.require(next);
+    const nextClient = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void };
+    nextClient.sendCommand = () => {};
+    (nextRuntime as any).client = nextClient;
+    (nextRuntime as any).wireClient(nextClient, 0);
+    const backgroundCreate = nextRuntime.dispatchCommand({ type: 'cron_manage', request_id: 'background', request: { action: 'create', cron: '0 9 * * *', prompt: 'Check updates' } });
+    await manager.openSession(ref);
+    nextClient.emit('event', { type: 'cron_result', request_id: 'background', jobs: [] });
+    await backgroundCreate;
+    assert.deepEqual(commits, [ref.sessionId], 'background completion must not replace the active selection');
+    assert.notEqual((await manager.newSession('/workspace')).sessionId, next.sessionId, 'background success still commits its draft');
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    await manager.dispose();
+  }
+});

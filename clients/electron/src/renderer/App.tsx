@@ -12,12 +12,14 @@ import { AskUserQuestionPrompt } from './components/AskUserQuestionPrompt';
 import { PermissionPrompt } from './components/PermissionPrompt';
 import { PlanTasks } from './components/PlanTasks';
 import { SettingsScreen } from './components/settings/SettingsScreen';
+import { ScheduledTasks } from './components/ScheduledTasks';
 import { Stage } from './components/Stage';
 import { Theme } from './theme/ThemeContext';
 import { tokens, watchThemePreference, type ThemeMode } from './theme/tokens';
 import { RuntimeCenterInspector, RuntimeCenterOverview } from './components/RuntimeCenter';
 
 export function App() {
+  const [page, setPage] = useState<'chat' | 'scheduled'>('chat');
   const [theme, setTheme] = useState<ThemeMode>('dark');
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
   const palette = useMemo(() => tokens(theme === 'dark'), [theme]);
@@ -66,10 +68,17 @@ export function App() {
         <SettingsBackground active={settingsRoute !== null}>
           <BetaSidebar
             bridge={bridge}
+            scheduled={page === 'scheduled'}
+            onOpenScheduled={() => setPage('scheduled')}
+            onOpenChat={() => setPage('chat')}
             onOpenSettings={() => openSettings()}
           />
 
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
+          <div style={{ display: page === 'scheduled' ? 'contents' : 'none' }}>
+          <ScheduledTasks key={bridge.activeSession?.sessionId ?? workspace?.path ?? 'no-project'} bridge={bridge} visible={page === 'scheduled'} />
+          </div>
+          <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
           <BetaTopBar
             bridge={bridge}
             runtimeCenterOpen={bridge.runtimeCenter.overviewOpen}
@@ -116,6 +125,8 @@ export function App() {
             </>
           )}
 
+          </div>
+
           <PermissionPrompt
             request={bridge.sessionLoading ? null : bridge.pendingPermission}
             onApprove={(requestId, response) => { void bridge.approve(requestId, response).catch(() => undefined); }}
@@ -135,7 +146,7 @@ export function App() {
             onCancel={(requestId) => { void bridge.cancelAskUserQuestion(requestId).catch(() => undefined); }}
           />
           </main>
-          {!bridge.sessionLoading && <RuntimeCenterInspector bridge={bridge} />}
+          {page === 'chat' && !bridge.sessionLoading && <RuntimeCenterInspector bridge={bridge} />}
         </SettingsBackground>
 
         {settingsRoute && (

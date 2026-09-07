@@ -388,6 +388,8 @@ mod tests {
                     last_fired_at: None,
                     recurring: Some(true),
                     permanent: None,
+                    expires_at: None,
+                    session_id: None,
                 })
                 .collect(),
         };

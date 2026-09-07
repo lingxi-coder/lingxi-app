@@ -1,3 +1,4 @@
+import type { CronJobDto, CronRequestDto } from '@lingxi/bridge-client';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
@@ -671,6 +672,8 @@ export class SessionRuntime {
   private readonly pendingCredentialOperations = new Map<number, PendingCredentialOperation>();
   private readonly pendingRuntimeCredentialLoads = new Map<string, Promise<void>>();
   private readonly pendingProviderConnectionTests = new Map<number, PendingProviderConnectionTest>();
+  private archiving = false;
+  private readonly pendingCron = new Map<string, { resolve: (jobs: CronJobDto[]) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; creating: boolean }>();
   private activeTurn = false;
   private activeTurnId: number | undefined;
   private cancellingTurn = false;
@@ -706,6 +709,41 @@ export class SessionRuntime {
     this.sessionId = opts.sessionId ?? randomUUID();
     this.projectPath = opts.projectPath ?? '';
     this.diagnostics = opts.diagnostics ?? new DiagnosticBuffer();
+  }
+
+  beginArchive(): () => void {
+    if (this.archiving || this.activeTurn || this.pendingInteractions > 0 || this.pendingCron.size > 0) throw new Error('Wait for active work and pending interactions before archiving this chat.');
+    this.archiving = true;
+    return () => { this.archiving = false; };
+  }
+
+  get cronOperationPending(): boolean {
+    return this.archiving || this.pendingCron.size > 0;
+  }
+
+  manageCron(request: CronRequestDto): Promise<CronJobDto[]> {
+    return this.sendCronCommand({ type: 'cron_manage', request_id: randomUUID(), request });
+  }
+
+  private sendCronCommand(command: Extract<ClientCommand, { type: 'cron_manage' }>): Promise<CronJobDto[]> {
+    const { request_id, request } = command;
+    if (this.pendingCron.has(request_id)) return Promise.reject(new Error('Scheduled task request is already pending.'));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingCron.delete(request_id);
+        this.notifyActivityChanged();
+        reject(new Error('Scheduled task operation timed out.'));
+      }, 30_000);
+      this.pendingCron.set(request_id, { resolve, reject, timer, creating: request.action === 'create' });
+      this.notifyActivityChanged();
+      try { this.requireClient().sendCommand(command); }
+      catch (error) {
+        clearTimeout(timer);
+        this.pendingCron.delete(request_id);
+        this.notifyActivityChanged();
+        reject(error);
+      }
+    });
   }
 
   get connectionState(): ConnectionState {
@@ -1345,6 +1383,23 @@ export class SessionRuntime {
         this.diagnostics.add('warn', 'bridge', `dropped unowned turn event: ${event.type}`);
         return;
       }
+      if (event.type === 'cron_result') {
+        const pending = this.pendingCron.get(event.request_id);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pendingCron.delete(event.request_id);
+          if (event.error) pending.reject(new Error(event.error));
+          else {
+            // Successful creation also persists an empty transcript anchor in the engine.
+            // The owning chat must no longer be reused as an unsent draft.
+            if (pending.creating && !this.sessionIdentityCommitted && this.opts.onFirstPromptSent?.() !== false) {
+              this.sessionIdentityCommitted = true;
+            }
+            pending.resolve(event.jobs);
+          }
+          this.notifyActivityChanged();
+        }
+      }
       if (event.type === 'provider_credential_status') {
         this.handleProviderCredentialStatus(event);
       }
@@ -1521,6 +1576,7 @@ export class SessionRuntime {
   }
 
   sendPrompt(text: unknown, images: unknown = []): void {
+    if (this.archiving) throw new Error('This chat is being archived.');
     const prompt = validatePrompt(text);
     const validatedImages = validateImageRefs(images);
     const needsIdentityCommit = !this.sessionIdentityCommitted;
@@ -1692,7 +1748,12 @@ export class SessionRuntime {
    * actual (unchanged) mode, so nothing to revert.
    */
   async dispatchCommand(command: unknown): Promise<void> {
+    if (this.archiving) throw new Error('This chat is being archived.');
     const validated = validateClientCommand(command, this.activeWorkspace);
+    if (validated.type === 'cron_manage') {
+      await this.sendCronCommand(validated);
+      return;
+    }
     assertCommandAllowedDuringTurn(validated, this.activeTurn);
     if (validated.type === 'set_permission_mode' && validated.mode === 'bypassPermissions') {
       const accepted = (await this.opts.confirmBypassPermissions?.()) ?? false;
@@ -1890,6 +1951,8 @@ export class SessionRuntime {
   }
 
   private async stopBridge(): Promise<void> {
+    for (const pending of this.pendingCron.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled task connection interrupted.')); }
+    this.pendingCron.clear();
     ++this.generation;
     this.rejectPendingSessionResume(new Error('session resume was interrupted'));
     this.clearTurnInteractions();
@@ -2025,7 +2088,8 @@ export class BridgeManager extends SessionRuntime {}
  */
 export class SessionRuntimeManager {
   private readonly runtimes = new Map<string, SessionRuntime>();
-  private readonly openingSessions = new Map<string, { projectPath: string; promise: Promise<SessionRuntime> }>();
+  private readonly openingSessions = new Map<string, { projectPath: string; promise: Promise<SessionRuntime>; activate: boolean }>();
+  private readonly backgroundSessionLeases = new Map<string, number>();
   private readonly draftSessions = new Map<string, SessionRef>();
   private readonly openingDraftSessions = new Map<string, Promise<SessionRef>>();
   private readonly closingProjects = new Set<string>();
@@ -2079,10 +2143,12 @@ export class SessionRuntimeManager {
     return runtime.sessionId === this.activeSessionId
       || runtime.turnActive
       || runtime.pendingInteractions > 0
+      || runtime.cronOperationPending
       || status === 'spawning'
       || status === 'restarting'
       || status === 'connecting'
-      || this.openingSessions.has(runtime.sessionId);
+      || this.openingSessions.has(runtime.sessionId)
+      || this.backgroundSessionLeases.has(runtime.sessionId);
   }
 
   private trimCache(): void {
@@ -2173,7 +2239,7 @@ export class SessionRuntimeManager {
     }
   }
 
-  openSession(ref: SessionRef, empty = false, resumeModel?: string): Promise<SessionRuntime> {
+  openSession(ref: SessionRef, empty = false, resumeModel?: string, activate = true): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const existing = this.runtimes.get(ref.sessionId);
@@ -2183,19 +2249,23 @@ export class SessionRuntimeManager {
     const pending = this.openingSessions.get(ref.sessionId);
     if (pending) {
       if (pending.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
+      pending.activate ||= activate;
       return pending.promise;
     }
     if (!existing && resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
     if (existing?.connectionState.status === 'connected') {
-      this.activate(existing);
+      if (activate) this.activate(existing);
       return Promise.resolve(existing);
     }
 
-    const promise = this.openSessionInternal(ref, existing, empty);
+    const promise = this.openSessionInternal(ref, existing, empty).then((runtime) => {
+      if (this.openingSessions.get(ref.sessionId)?.activate) this.activate(runtime);
+      return runtime;
+    });
     const trackedPromise = promise.finally(() => {
       if (this.openingSessions.get(ref.sessionId)?.promise === trackedPromise) this.openingSessions.delete(ref.sessionId);
     });
-    this.openingSessions.set(ref.sessionId, { projectPath: ref.projectPath, promise: trackedPromise });
+    this.openingSessions.set(ref.sessionId, { projectPath: ref.projectPath, promise: trackedPromise, activate });
     return trackedPromise;
   }
 
@@ -2209,7 +2279,6 @@ export class SessionRuntimeManager {
         runtime = await this.ensure(ref, true);
       }
       if (!empty) await runtime.resumeOwnedSession();
-      this.activate(runtime);
       return runtime;
     } catch (error) {
       if (!existing && runtime) {
@@ -2219,6 +2288,25 @@ export class SessionRuntimeManager {
         await runtime.dispose().catch(() => undefined);
       }
       throw error;
+    }
+  }
+
+  /** Keep an inactive runtime alive for the whole host operation, then enforce the cache bound. */
+  async withBackgroundSession<T>(
+    ref: SessionRef,
+    empty: boolean,
+    resumeModel: string | undefined,
+    operation: (runtime: SessionRuntime) => Promise<T>,
+  ): Promise<T> {
+    assertSessionRef(ref);
+    this.backgroundSessionLeases.set(ref.sessionId, (this.backgroundSessionLeases.get(ref.sessionId) ?? 0) + 1);
+    try {
+      return await operation(await this.openSession(ref, empty, resumeModel, false));
+    } finally {
+      const count = (this.backgroundSessionLeases.get(ref.sessionId) ?? 1) - 1;
+      if (count) this.backgroundSessionLeases.set(ref.sessionId, count);
+      else this.backgroundSessionLeases.delete(ref.sessionId);
+      this.trimCache();
     }
   }
 
@@ -2428,7 +2516,7 @@ export class SessionRuntimeManager {
           return true;
         }
         try {
-          onFirstPromptSent(ref);
+          if (this.activeSessionId === ref.sessionId) onFirstPromptSent(ref);
           this.clearDraftSession(ref);
           return true;
         } catch (error) {

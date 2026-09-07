@@ -415,6 +415,12 @@ final class LocalAppWebViewController {
     struct QaDocument: Equatable, Sendable {
         let loadedURL: URL
         let navigationGeneration: UInt64
+        /// How many full documents this WebView has started loading. Only
+        /// `didStartProvisionalNavigation` raises it; a same-document history
+        /// commit never does. `navigationGeneration` alone cannot separate the
+        /// two, which is what lets an event action attest an SPA route it
+        /// committed without also attesting a document it merely raced.
+        let documentLoadGeneration: UInt64
     }
 
     let appID: String
@@ -430,6 +436,13 @@ final class LocalAppWebViewController {
     private(set) var isReady = true
     private(set) var committedURL: URL?
     private(set) var navigationGeneration: UInt64 = 0
+    private(set) var documentLoadGeneration: UInt64 = 0
+    /// Destination of a Host-requested history traversal, taken from the
+    /// authoritative back/forward list. A same-document step produces no
+    /// navigation callback at all, so this is what authenticates the URL
+    /// change that completes it.
+    private var pendingHistoryURL: URL?
+    private var pendingHistoryGeneration: UInt64?
     private var expectedURL: URL?
     private var isClosed = false
 
@@ -461,12 +474,75 @@ final class LocalAppWebViewController {
         committedURL = nil
     }
 
+    /// A full document load has started. Raises the load counter and drops any
+    /// pending history traversal: a real navigation supersedes it, and leaving
+    /// it armed would let a later URL change complete a step that WebKit is
+    /// already servicing as a document load.
+    func beginDocumentLoad() {
+        documentLoadGeneration &+= 1
+        pendingHistoryURL = nil
+        pendingHistoryGeneration = nil
+    }
+
     @discardableResult
     func beginNavigation(expectedURL: URL) -> UInt64 {
         navigationGeneration &+= 1
         self.expectedURL = expectedURL
         committedURL = nil
         isReady = false
+        pendingHistoryURL = nil
+        pendingHistoryGeneration = nil
+        return navigationGeneration
+    }
+
+    /// A Host-requested `goBack()`. The destination comes from the WebView's
+    /// own back/forward list, never from the model, and only that exact URL
+    /// can complete the step.
+    @discardableResult
+    func beginHistoryNavigation(to destination: URL) -> UInt64 {
+        navigationGeneration &+= 1
+        committedURL = nil
+        isReady = false
+        pendingHistoryURL = destination
+        pendingHistoryGeneration = navigationGeneration
+        return navigationGeneration
+    }
+
+    /// A URL change with no navigation callback behind it: `pushState`,
+    /// `replaceState`, a fragment step, or a same-document `goBack()`.
+    ///
+    /// WebKit has no PUBLIC same-document navigation delegate callback --
+    /// `didSameDocumentNavigation` is SPI and appears nowhere in the iOS SDK
+    /// headers -- so the observable seam is KVO on `WKWebView.url`, which the
+    /// header documents as KVO compliant. The caller confirms on the next main
+    /// queue turn; see `observeSameDocumentNavigation`.
+    @discardableResult
+    func commitSameDocumentNavigation(_ url: URL) -> UInt64? {
+        guard !isClosed, let expectedURL else { return nil }
+        guard Self.sameRuntimeIdentity(expectedURL, url) else {
+            // The page moved itself outside the Host runtime identity. A
+            // still-ready document would let a later Inspect attest state that
+            // belongs to a page this URL no longer names.
+            isReady = false
+            committedURL = nil
+            return nil
+        }
+        if let pendingHistoryURL, let pendingHistoryGeneration {
+            guard url == pendingHistoryURL, pendingHistoryGeneration == navigationGeneration else {
+                return nil
+            }
+            self.pendingHistoryURL = nil
+            self.pendingHistoryGeneration = nil
+            committedURL = url
+            isReady = true
+            return navigationGeneration
+        }
+        // A page-created history entry has to move from the document that is
+        // loaded right now. A repeat of the same URL is a no-op, not a step.
+        guard isReady, let current = committedURL, current != url else { return nil }
+        navigationGeneration &+= 1
+        committedURL = url
+        isReady = true
         return navigationGeneration
     }
 
@@ -518,7 +594,8 @@ final class LocalAppWebViewController {
         else { return nil }
         return QaDocument(
             loadedURL: committedURL,
-            navigationGeneration: navigationGeneration
+            navigationGeneration: navigationGeneration,
+            documentLoadGeneration: documentLoadGeneration
         )
     }
 
@@ -593,6 +670,10 @@ final class LocalAppWebViewController {
                     action: request.action,
                     result: result
                 )
+                let interactiveNavigation = Self.qaActionMayAdvanceDocument(
+                    action: request.action,
+                    result: result
+                )
                 let minimumGeneration = intentionalNavigation
                     ? before.navigationGeneration &+ 1
                     : before.navigationGeneration
@@ -605,7 +686,8 @@ final class LocalAppWebViewController {
                 guard Self.qaDocumentMatches(
                     before: before,
                     after: after,
-                    intentionalNavigation: intentionalNavigation
+                    intentionalNavigation: intentionalNavigation,
+                    allowInteractiveNavigation: interactiveNavigation
                 ) else {
                     return .failure("Local App QA document changed during the action")
                 }
@@ -622,13 +704,41 @@ final class LocalAppWebViewController {
                 && (action == .navigate || action == .back || action == .reload)
         }
 
+        /// Event actions can legitimately submit a form or commit an SPA
+        /// history entry. They are still not navigation actions: what they may
+        /// advance is bounded in `qaDocumentMatches`.
+        static func qaActionMayAdvanceDocument(
+            action: AppUiActionKindDto,
+            result: LocalAppUIExecutionResult
+        ) -> Bool {
+            guard result.error == nil else { return false }
+            switch action {
+            case .click, .fill, .select, .toggle, .pointer, .key: return true
+            case .inspect, .scroll, .navigate, .back, .reload, .captureView: return false
+            }
+        }
+
         static func qaDocumentMatches(
             before: QaDocument,
             after: QaDocument,
-            intentionalNavigation: Bool
+            intentionalNavigation: Bool,
+            allowInteractiveNavigation: Bool = false
         ) -> Bool {
             if intentionalNavigation {
                 return after.navigationGeneration > before.navigationGeneration
+            }
+            if allowInteractiveNavigation {
+                // A successful event action may advance the document, but ONLY
+                // through same-document history commits. A full document load
+                // starting during the action raises documentLoadGeneration, and
+                // the action's result was produced in the document that load
+                // replaced: attesting it against the new one would bind the
+                // evidence to a route it never ran in, and which route won
+                // would depend on when waitForQaDocument happened to poll.
+                return after.documentLoadGeneration == before.documentLoadGeneration
+                    && (after.navigationGeneration > before.navigationGeneration
+                        || (after.navigationGeneration == before.navigationGeneration
+                            && after.loadedURL == before.loadedURL))
             }
             return after.navigationGeneration == before.navigationGeneration
                 && after.loadedURL == before.loadedURL
@@ -643,8 +753,15 @@ final class LocalAppWebViewController {
             }
 
             if request.action == .back {
-                guard webView.canGoBack else { return .failure(String(localized: "local_apps_error_ui_no_history")) }
-                markNotReady()
+                // A same-document step produces no navigation callback, so
+                // `markNotReady()` alone used to leave the document unready
+                // forever and every Back over a pushState entry timed out.
+                // Arm the destination from the WebView's own back/forward list
+                // and let the URL change complete it.
+                guard let destination = webView.backForwardList.backItem?.url else {
+                    return .failure(String(localized: "local_apps_error_ui_no_history"))
+                }
+                beginHistoryNavigation(to: destination)
                 webView.goBack()
                 return encodedResult(["ok": true, "action": "back"])
             }
@@ -1405,6 +1522,7 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         webView.isInspectable = false
         context.coordinator.broker.webView = webView
         context.coordinator.controller.webView = webView
+        context.coordinator.observeSameDocumentNavigation(in: webView)
         context.coordinator.beginNavigation(to: url, in: webView)
         LocalAppWebViewRegistry.shared.register(context.coordinator.controller, appID: appID)
         return webView
@@ -1424,6 +1542,7 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         // Unregister first so `bridge_detached` can still be evaluated into
         // the live page before close removes handlers and clears references.
         LocalAppWebViewRegistry.shared.unregister(coordinator.controller, appID: coordinator.broker.appID)
+        coordinator.stopObservingSameDocumentNavigation()
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
@@ -1434,6 +1553,7 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         /// document; `didFinish` validates the committed URL separately.
         var requestedURL: URL?
         private var navigationGenerations: [ObjectIdentifier: UInt64] = [:]
+        private var urlObservation: NSKeyValueObservation?
         var onExternalNavigation: (URL) -> Void
         var onBridgeRequest: ((LocalAppBridgeRequest) -> Void)? {
             didSet { broker.onRequest = onBridgeRequest }
@@ -1474,6 +1594,43 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
             }
         }
 
+        /// WebKit has no public same-document navigation callback, so
+        /// `pushState`/`replaceState`/fragment commits are observed through
+        /// `WKWebView.url`, which the WebKit header documents as KVO compliant.
+        ///
+        /// The observation confirms on the NEXT main queue turn rather than
+        /// committing inline. A cross-document load also changes `url`, and the
+        /// order in which WebKit delivers that change relative to
+        /// `didStartProvisionalNavigation` is not something this code can pin
+        /// down off-device. Deferring one turn lets a provisional start that
+        /// shares the call stack land first, and `isLoading` rejects one that
+        /// is already in flight. Should the order still come out the other way,
+        /// the outcome is a REFUSAL, never a wrong attestation: the stray
+        /// commit advances `navigationGeneration`, which a non-interactive
+        /// action rejects outright, and the load then raises
+        /// `documentLoadGeneration`, which an interactive one rejects.
+        func observeSameDocumentNavigation(in webView: WKWebView) {
+            urlObservation = webView.observe(\.url, options: [.new]) { [weak self] observed, _ in
+                // Hop to the main queue rather than assuming this callback is
+                // already on it: KVO delivers on whichever thread mutated the
+                // property, and `assumeIsolated` on the wrong one traps.
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self,
+                              let url = observed.url,
+                              !observed.isLoading
+                        else { return }
+                        self.controller.commitSameDocumentNavigation(url)
+                    }
+                }
+            }
+        }
+
+        func stopObservingSameDocumentNavigation() {
+            urlObservation?.invalidate()
+            urlObservation = nil
+        }
+
         func beginNavigation(to url: URL, in webView: WKWebView) {
             requestedURL = url
             let generation = controller.beginNavigation(expectedURL: url)
@@ -1483,6 +1640,9 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation?) {
+            // Every cross-document load, whoever started it. This is the only
+            // thing that separates an SPA route commit from a new document.
+            controller.beginDocumentLoad()
             guard let navigation else {
                 controller.markNotReady()
                 return

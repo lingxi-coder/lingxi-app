@@ -67,12 +67,160 @@ final class LocalAppsStoreTests: XCTestCase {
         XCTAssertNil(controller.qaDocument(expectedURL: runtimeB), "a detached controller cannot be revived")
     }
 
+    func testSameDocumentCommitAdvancesTheRouteWithoutADocumentLoad() throws {
+        let runtime = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/?lingxi_runtime=42"))
+        let first = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/first?tab=all&lingxi_runtime=42"))
+        let second = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/second?lingxi_runtime=42"))
+        let controller = LocalAppWebViewController(
+            appID: "tracker",
+            broker: LocalAppBridgeBroker(appID: "tracker")
+        )
+        controller.webView = WKWebView()
+
+        let load = controller.beginNavigation(expectedURL: runtime)
+        controller.beginDocumentLoad()
+        controller.markReady(committedURL: runtime, navigationGeneration: load)
+        let loaded = try XCTUnwrap(controller.qaDocument(expectedURL: runtime))
+        XCTAssertEqual(loaded.documentLoadGeneration, 1)
+
+        // pushState: a new route, a new generation, the SAME document load.
+        XCTAssertEqual(controller.commitSameDocumentNavigation(first), load &+ 1)
+        let routed = try XCTUnwrap(controller.qaDocument(expectedURL: runtime))
+        XCTAssertEqual(routed.loadedURL, first)
+        XCTAssertEqual(
+            routed.documentLoadGeneration,
+            loaded.documentLoadGeneration,
+            "a same-document history commit is not a document load"
+        )
+        XCTAssertNil(
+            controller.commitSameDocumentNavigation(first),
+            "a repeat of the loaded URL is a no-op, not a step"
+        )
+        XCTAssertEqual(controller.commitSameDocumentNavigation(second), load &+ 2)
+
+        // A full load raises the counter and nothing else does.
+        let reload = controller.beginNavigation(expectedURL: runtime)
+        controller.beginDocumentLoad()
+        controller.markReady(committedURL: runtime, navigationGeneration: reload)
+        XCTAssertEqual(try XCTUnwrap(controller.qaDocument(expectedURL: runtime)).documentLoadGeneration, 2)
+    }
+
+    func testSameDocumentCommitAuthenticatesOnlyTheRequestedHistoryDestination() throws {
+        let runtime = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/?lingxi_runtime=42"))
+        let first = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/first?lingxi_runtime=42"))
+        let second = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/second?lingxi_runtime=42"))
+        let foreign = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/first?lingxi_runtime=41"))
+        let controller = LocalAppWebViewController(
+            appID: "tracker",
+            broker: LocalAppBridgeBroker(appID: "tracker")
+        )
+        controller.webView = WKWebView()
+
+        let load = controller.beginNavigation(expectedURL: runtime)
+        controller.beginDocumentLoad()
+        controller.markReady(committedURL: runtime, navigationGeneration: load)
+        controller.commitSameDocumentNavigation(first)
+        controller.commitSameDocumentNavigation(second)
+
+        // Host Back: only the destination taken from the back/forward list can
+        // complete it. Before this existed, a same-document step produced no
+        // navigation callback and the document never became ready again.
+        let back = controller.beginHistoryNavigation(to: first)
+        XCTAssertNil(controller.qaDocument(expectedURL: runtime), "the step is not complete yet")
+        XCTAssertNil(
+            controller.commitSameDocumentNavigation(second),
+            "a delayed callback for the current entry cannot complete Back"
+        )
+        XCTAssertEqual(controller.commitSameDocumentNavigation(first), back)
+        XCTAssertEqual(try XCTUnwrap(controller.qaDocument(expectedURL: runtime)).loadedURL, first)
+
+        // A URL outside the Host runtime identity invalidates the document
+        // rather than leaving it attestable.
+        XCTAssertNil(controller.commitSameDocumentNavigation(foreign))
+        XCTAssertNil(
+            controller.qaDocument(expectedURL: runtime),
+            "old state must not attest after a foreign runtime URL"
+        )
+    }
+
+    func testEventActionMayAttestAnSpaRouteButNotADocumentAFullLoadReplaced() throws {
+        let runtime = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/?lingxi_runtime=42"))
+        let route = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/settings?lingxi_runtime=42"))
+        let other = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/other?lingxi_runtime=42"))
+        let before = LocalAppWebViewController.QaDocument(
+            loadedURL: runtime,
+            navigationGeneration: 7,
+            documentLoadGeneration: 2
+        )
+        let routed = LocalAppWebViewController.QaDocument(
+            loadedURL: route,
+            navigationGeneration: 8,
+            documentLoadGeneration: 2
+        )
+        // Same generation arithmetic; only the document load differs.
+        let reloaded = LocalAppWebViewController.QaDocument(
+            loadedURL: other,
+            navigationGeneration: 8,
+            documentLoadGeneration: 3
+        )
+        let ok = LocalAppUIExecutionResult(resultJSON: "{\"ok\":true}", error: nil)
+        let failed = LocalAppUIExecutionResult.failure("target was not found")
+
+        XCTAssertTrue(LocalAppWebViewController.qaActionMayAdvanceDocument(action: .click, result: ok))
+        XCTAssertFalse(LocalAppWebViewController.qaActionMayAdvanceDocument(action: .click, result: failed))
+        XCTAssertFalse(LocalAppWebViewController.qaActionMayAdvanceDocument(action: .captureView, result: ok))
+        XCTAssertFalse(LocalAppWebViewController.qaActionMayAdvanceDocument(action: .inspect, result: ok))
+
+        XCTAssertTrue(
+            LocalAppWebViewController.qaDocumentMatches(
+                before: before,
+                after: routed,
+                intentionalNavigation: false,
+                allowInteractiveNavigation: true
+            )
+        )
+        XCTAssertFalse(
+            LocalAppWebViewController.qaDocumentMatches(
+                before: before,
+                after: reloaded,
+                intentionalNavigation: false,
+                allowInteractiveNavigation: true
+            ),
+            "a cross-document load during an event action cannot be attested"
+        )
+        XCTAssertTrue(
+            LocalAppWebViewController.qaDocumentMatches(
+                before: before,
+                after: before,
+                intentionalNavigation: false,
+                allowInteractiveNavigation: true
+            ),
+            "the pre-action document is still the one the action ran in"
+        )
+        XCTAssertFalse(
+            LocalAppWebViewController.qaDocumentMatches(
+                before: before,
+                after: routed,
+                intentionalNavigation: false
+            ),
+            "an action that may not advance still needs the exact document"
+        )
+        XCTAssertTrue(
+            LocalAppWebViewController.qaDocumentMatches(
+                before: before,
+                after: reloaded,
+                intentionalNavigation: true
+            ),
+            "Navigate/Back/Reload ARE the load and stay judged by generation"
+        )
+    }
+
     func testQaNonNavigationRequiresExactPrePostDocumentAndIntentionalNavigationAdvancesGeneration() throws {
         let firstURL = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/?lingxi_runtime=42"))
         let routeURL = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/settings?lingxi_runtime=42"))
-        let before = LocalAppWebViewController.QaDocument(loadedURL: firstURL, navigationGeneration: 7)
-        let routeAfter = LocalAppWebViewController.QaDocument(loadedURL: routeURL, navigationGeneration: 8)
-        let sameDocument = LocalAppWebViewController.QaDocument(loadedURL: firstURL, navigationGeneration: 7)
+        let before = LocalAppWebViewController.QaDocument(loadedURL: firstURL, navigationGeneration: 7, documentLoadGeneration: 2)
+        let routeAfter = LocalAppWebViewController.QaDocument(loadedURL: routeURL, navigationGeneration: 8, documentLoadGeneration: 2)
+        let sameDocument = LocalAppWebViewController.QaDocument(loadedURL: firstURL, navigationGeneration: 7, documentLoadGeneration: 2)
 
         XCTAssertFalse(
             LocalAppWebViewController.qaDocumentMatches(
@@ -101,8 +249,8 @@ final class LocalAppsStoreTests: XCTestCase {
     func testQaFailedNavigationPreservesErrorWithoutAdvancingGeneration() throws {
         let runtimeURL = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/?lingxi_runtime=42"))
         let routeURL = try XCTUnwrap(URL(string: "http://127.0.0.1:43123/settings?lingxi_runtime=42"))
-        let before = LocalAppWebViewController.QaDocument(loadedURL: runtimeURL, navigationGeneration: 7)
-        let routeAfter = LocalAppWebViewController.QaDocument(loadedURL: routeURL, navigationGeneration: 8)
+        let before = LocalAppWebViewController.QaDocument(loadedURL: runtimeURL, navigationGeneration: 7, documentLoadGeneration: 2)
+        let routeAfter = LocalAppWebViewController.QaDocument(loadedURL: routeURL, navigationGeneration: 8, documentLoadGeneration: 2)
         let controller = LocalAppWebViewController(
             appID: "tracker",
             broker: LocalAppBridgeBroker(appID: "tracker")
@@ -157,7 +305,8 @@ final class LocalAppsStoreTests: XCTestCase {
         )
         let document = LocalAppWebViewController.QaDocument(
             loadedURL: requested,
-            navigationGeneration: 3
+            navigationGeneration: 3,
+            documentLoadGeneration: 1
         )
         let wrapped = controller.wrapQaResult(
             .failure("target was not found"),

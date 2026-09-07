@@ -43,11 +43,11 @@ use platform_api::subagent_spawn::{SelectedAgentMeta, SubagentListingEntry};
 use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use platform_api::{
     BackgroundTaskHandle, BudgetEnforcerHandle, FusionActivation, FusionError, FusionExecutor,
-    FusionInheritance, FusionModelRef, FusionOrigin, FusionPreset, FusionRunId,
-    FusionRunIdentity, FusionSubmission, FusionPreparedSummary, FusionRunFactsRecorder,
-    PreparedFusionRun, RuntimeSpawner, SubagentInheritance, SubagentResult,
-    SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
-    FusionRunRecorder, FusionRunRecorderFactory, FusionTerminalCapability,
+    FusionInheritance, FusionModelRef, FusionOrigin, FusionPreparedSummary, FusionPreset,
+    FusionRunFactsRecorder, FusionRunId, FusionRunIdentity, FusionRunRecorder,
+    FusionRunRecorderFactory, FusionSubmission, FusionTerminalCapability, PreparedFusionRun,
+    RuntimeSpawner, SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest,
+    SubagentSpawner, ToolInvoker,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -1255,14 +1255,13 @@ struct WorkflowFusionOpts {
 }
 
 struct WorkflowFusionDispatch {
-    prompt: String,
-    opts_json: String,
-    reply: oneshot::Sender<String>,
+    calls: Vec<(String, String)>,
+    reply: oneshot::Sender<Vec<String>>,
 }
 
 enum WorkflowBridgeRequest {
     AgentBatch(Vec<(String, String)>, oneshot::Sender<Vec<String>>),
-    Fusion(WorkflowFusionDispatch),
+    FusionBatch(WorkflowFusionDispatch),
 }
 
 /// A live worker-cancel record: the background-task handle plus the runtime that
@@ -2889,7 +2888,10 @@ mod captured_output_tests {
     #[async_trait]
     impl FusionExecutor for BillingProbe {
         fn agent_surface(&self) -> platform_api::FusionAgentSurface {
-            platform_api::FusionAgentSurface { enabled: true, ..Default::default() }
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                ..Default::default()
+            }
         }
 
         async fn run(
@@ -2906,9 +2908,14 @@ mod captured_output_tests {
             submission: FusionSubmission,
         ) -> Result<PreparedFusionRun, FusionError> {
             if let Some(expected) = &self.expected_scope {
-                assert!(submission.inherit.output_scope.as_ref()
-                    .is_some_and(|actual| actual.shares_account(expected)),
-                    "workflow preparation must forward the exact captured output account");
+                assert!(
+                    submission
+                        .inherit
+                        .output_scope
+                        .as_ref()
+                        .is_some_and(|actual| actual.shares_account(expected)),
+                    "workflow preparation must forward the exact captured output account"
+                );
             }
             self.calls.fetch_add(1, Ordering::Relaxed);
             let control = platform_api::FusionRunControl::new_with_billing_mode(
@@ -3568,21 +3575,24 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                 }
                 reply_rx.blocking_recv().unwrap_or_default()
             };
-            let fusion_runner = move |prompt: &str, opts_json: &str| -> String {
+            let fusion_runner = move |prompts: &[String], opts_json: &[String]| -> Vec<String> {
                 let (reply_tx, reply_rx) = oneshot::channel();
+                let unavailable =
+                    || vec![wf_throw(workflow::WORKFLOW_FUSION_UNAVAILABLE_MESSAGE); prompts.len()];
                 if fusion_req_tx
                     .blocking_send(WorkflowFusionDispatch {
-                        prompt: prompt.to_string(),
-                        opts_json: opts_json.to_string(),
+                        calls: prompts
+                            .iter()
+                            .cloned()
+                            .zip(opts_json.iter().cloned())
+                            .collect(),
                         reply: reply_tx,
                     })
                     .is_err()
                 {
-                    return wf_throw(workflow::WORKFLOW_FUSION_UNAVAILABLE_MESSAGE);
+                    return unavailable();
                 }
-                reply_rx
-                    .blocking_recv()
-                    .unwrap_or_else(|_| wf_throw(workflow::WORKFLOW_FUSION_UNAVAILABLE_MESSAGE))
+                reply_rx.blocking_recv().unwrap_or_else(|_| unavailable())
             };
             // `phase()`/`log()` fire this live; an unbounded `send` is non-blocking
             // and needs no runtime, so it is safe from the script thread. The host
@@ -3603,7 +3613,7 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                     let _ = tx.send(workflow_progress_update(p));
                 }
             };
-            let outcome = workflow::run_with_progress_and_fusion(
+            let outcome = workflow::run_with_progress_and_fusion_batch(
                 &script_owned,
                 runner,
                 fusion_runner,
@@ -3663,7 +3673,7 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
             }
             maybe = fusion_req_rx.recv(), if fusion_open => {
                 match maybe {
-                    Some(call) => Some(WorkflowBridgeRequest::Fusion(call)),
+                    Some(call) => Some(WorkflowBridgeRequest::FusionBatch(call)),
                     None => {
                         fusion_open = false;
                         None
@@ -3681,8 +3691,8 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
         if output_accounting_failed.load(Ordering::Acquire) {
             let error = wf_throw("workflow output accounting failed; further dispatch is disabled");
             match work {
-                WorkflowBridgeRequest::Fusion(call) => {
-                    let _ = call.reply.send(error);
+                WorkflowBridgeRequest::FusionBatch(batch) => {
+                    let _ = batch.reply.send(vec![error; batch.calls.len()]);
                 }
                 WorkflowBridgeRequest::AgentBatch(calls, reply) => {
                     let _ = reply.send(vec![error; calls.len()]);
@@ -3691,7 +3701,29 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
             continue;
         }
         match work {
-            WorkflowBridgeRequest::Fusion(call) => {
+            WorkflowBridgeRequest::FusionBatch(batch) => {
+                let fusion_concurrency = fusion.as_ref().map_or(1, |executor| {
+                    executor.workflow_batch_concurrency().clamp(1, 2)
+                });
+                // Only plan the next call when an execution slot is available.
+                // In rollback=1 this retains the prior budget/cap/cache timing.
+                // Prefix and cap state never move into concurrent futures.
+                let fusion = &fusion;
+                let workflow_run_id = &workflow_run_id;
+                let workflow_session_uuid = &workflow_session_uuid;
+                let parent_model = &parent_model;
+                let parent_model_profile = &parent_model_profile;
+                let tool_invoker = &tool_invoker;
+                let budget = &budget;
+                let fusion_cancel = &fusion_cancel;
+                let output_scope = &output_scope;
+                let output_accounting_failed = &output_accounting_failed;
+                let terminal_recorder = &terminal_recorder;
+                let worker_progress_tx = &worker_progress_tx;
+                let spent = &spent;
+                let journal = &journal;
+                let journal_writer = &journal_writer;
+                let results = futures::stream::iter(batch.calls).map(|(prompt, opts_json)| {
                 // Advance the SAME resume cursor `agent()` advances (`running_key`)
                 // for EVERY fusion() dispatch — cap refusal, budget refusal, parse
                 // rejection, or a real run — mirroring the agent() arm's Phase A,
@@ -3706,15 +3738,15 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                 // where it was, so every subsequently journaled agent() key
                 // (chained off the pre-refusal cursor) misses on replay and the
                 // whole downstream fleet re-spawns instead of hitting the journal.
-                let normalized_opts = normalize_fusion_opts_for_chain_key(&call.opts_json);
-                let key = fusion_chain_key(&running_key, &call.prompt, &normalized_opts);
+                let normalized_opts = normalize_fusion_opts_for_chain_key(&opts_json);
+                let key = fusion_chain_key(&running_key, &prompt, &normalized_opts);
                 running_key.clone_from(&key);
-
+                let ready = (|| {
+                if output_accounting_failed.load(Ordering::Acquire) {
+                    return Some(wf_throw("workflow output accounting failed; further dispatch is disabled"));
+                }
                 if fusion_calls_seen >= fusion_cap {
-                    let _ = call
-                        .reply
-                        .send(wf_throw(&workflow_fusion_cap_message(fusion_cap)));
-                    continue;
+                    return Some(wf_throw(&workflow_fusion_cap_message(fusion_cap)));
                 }
                 // Mirror the agent() batch's budget ceiling (line ~2547 below):
                 // fusion() output tokens are NOT free just because they are
@@ -3741,10 +3773,9 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                         platform_api::WorkflowOutputScope::spent,
                     );
                     if turn_spent >= total {
-                        let _ = call.reply.send(wf_throw(&workflow_budget_exceeded_message(
+                        return Some(wf_throw(&workflow_budget_exceeded_message(
                             turn_spent, total,
                         )));
-                        continue;
                     }
                 }
                 fusion_calls_seen = fusion_calls_seen.saturating_add(1);
@@ -3782,14 +3813,18 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                         .as_ref()
                         .and_then(|j| j.lock().unwrap().get(&key).cloned())
                 };
-                let response = if let Some(cached) = cached {
-                    cached
-                } else {
-                    gone_live = true;
+                if cached.is_none() { gone_live = true; }
+                cached
+                })();
+                async move {
+                    if let Some(ready) = ready { return ready; }
+                    if output_accounting_failed.load(Ordering::Acquire) {
+                        return wf_throw("workflow output accounting failed; further dispatch is disabled");
+                    }
                     match parse_workflow_fusion_request(
                         fusion.as_ref(),
-                        &call.prompt,
-                        &call.opts_json,
+                        &prompt,
+                        &opts_json,
                         workflow_run_id.as_deref().unwrap_or_default(),
                         parent_model.as_deref(),
                         parent_model_profile.as_deref(),
@@ -3825,6 +3860,20 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                                 request,
                                 inherit,
                                 identity: identity.clone(),
+                            }).and_then(|prepared| {
+                                if fusion_concurrency > 1
+                                    && (output_scope.is_none() || prepared.control().billing_mode()
+                                        != platform_api::ModelAttemptBillingMode::MeteredAttempts)
+                                {
+                                    // Use the same recorded preflight-refusal
+                                    // path below; do not lose this run's terminal
+                                    // merely because the host capability is invalid.
+                                    Err(FusionError::InvalidConfiguration(
+                                        "parallel fusion requires metered attempts and the captured output scope".into(),
+                                    ))
+                                } else {
+                                    Ok(prepared)
+                                }
                             });
                             let preparation_error = prepared_result
                                 .as_ref()
@@ -3918,6 +3967,11 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                                 // leaving `spent` unmoved for a call that already
                                 // burned a real panel fan-out.
                                 let (outcome, last_realized_output_tokens) =
+                                    // A different in-flight call may have failed
+                                    // accounting while this call was preparing.
+                                    if output_accounting_failed.load(Ordering::Acquire) {
+                                        return wf_throw("workflow output accounting failed; further dispatch is disabled");
+                                    } else {
                                     workflow_fusion_with_progress(
                                         prepared.activate(
                                             FusionActivation::now(),
@@ -3926,7 +3980,8 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                                         fusion_prog_rx,
                                         forward_progress_tx,
                                     )
-                                    .await;
+                                    .await
+                                    };
                                 let known_output = outcome
                                     .result
                                     .as_ref()
@@ -4004,8 +4059,9 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                         }
                         Err(error) => wf_throw(&error.to_string()),
                     }
-                };
-                let _ = call.reply.send(response);
+                }
+                }).buffered(fusion_concurrency).collect::<Vec<_>>().await;
+                let _ = batch.reply.send(results);
             }
             WorkflowBridgeRequest::AgentBatch(calls, reply) => {
                 // Phase A — sequential, in call order: prefix-cache decision per call.

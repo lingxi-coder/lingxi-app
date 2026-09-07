@@ -24,6 +24,349 @@ use tokio_util::sync::CancellationToken;
 
 use crate::handlers::CONFIG_DIR_ENV_LOCK as ENV_LOCK;
 
+mod fusion_batch_contract_tests {
+    use super::*;
+    use platform_api::{
+        ModelAttemptBillingMode, WorkflowOutputAccount, WorkflowOutputEventId, WorkflowOutputScope,
+    };
+
+    struct Output(protocol::SessionId, protocol::MessageId);
+    impl WorkflowOutputAccount for Output {
+        fn session_id(&self) -> protocol::SessionId {
+            self.0
+        }
+        fn generation_id(&self) -> protocol::MessageId {
+            self.1
+        }
+        fn spent(&self) -> u64 {
+            0
+        }
+        fn record_legacy(&self, _: WorkflowOutputEventId, _: u64) -> Result<(), BudgetError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct TerminalRecorder(StdMutex<Vec<platform_api::FusionRunOutcome>>);
+
+    #[async_trait]
+    impl platform_api::FusionRunRecorder for TerminalRecorder {
+        async fn record_terminal(
+            &self,
+            outcome: platform_api::FusionRunOutcome,
+            slash_target: Option<platform_api::FusionSlashPublicationTarget>,
+        ) -> platform_api::FusionPublicationReceipt {
+            assert!(
+                slash_target.is_none(),
+                "workflow cannot publish a slash outbox"
+            );
+            self.0.lock().unwrap().push(outcome);
+            platform_api::FusionPublicationReceipt::not_required()
+        }
+    }
+
+    struct BatchExecutor {
+        cap: usize,
+        mode: ModelAttemptBillingMode,
+        failure: Option<String>,
+        events: mpsc::UnboundedSender<String>,
+        gates: Vec<tokio::sync::Semaphore>,
+        active: AtomicU32,
+        maximum: AtomicU32,
+        started: AtomicU32,
+        journal: Arc<StdMutex<HashMap<String, String>>>,
+        recorder: Arc<TerminalRecorder>,
+    }
+    struct Active(Arc<BatchExecutor>);
+    impl Drop for Active {
+        fn drop(&mut self) {
+            self.0.active.fetch_sub(1, AtomicOrdering::SeqCst);
+        }
+    }
+    impl BatchExecutor {
+        fn new(
+            cap: usize,
+            mode: ModelAttemptBillingMode,
+            failure: Option<String>,
+            open: bool,
+        ) -> (Arc<Self>, mpsc::UnboundedReceiver<String>) {
+            let (events, receiver) = mpsc::unbounded_channel();
+            (
+                Arc::new(Self {
+                    cap,
+                    mode,
+                    failure,
+                    events,
+                    gates: (0..21)
+                        .map(|_| tokio::sync::Semaphore::new(usize::from(open)))
+                        .collect(),
+                    active: AtomicU32::new(0),
+                    maximum: AtomicU32::new(0),
+                    started: AtomicU32::new(0),
+                    journal: Arc::new(StdMutex::new(HashMap::new())),
+                    recorder: Arc::new(TerminalRecorder::default()),
+                }),
+                receiver,
+            )
+        }
+    }
+    #[async_trait]
+    impl FusionExecutor for BatchExecutor {
+        fn workflow_batch_concurrency(&self) -> usize {
+            self.cap
+        }
+        fn agent_surface(&self) -> FusionAgentSurface {
+            FusionAgentSurface {
+                enabled: true,
+                ..Default::default()
+            }
+        }
+        async fn run(
+            &self,
+            _: FusionRequest,
+            _: FusionInheritance,
+            _: Option<mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<FusionResult, FusionError> {
+            panic!("trusted preparation required")
+        }
+        fn prepare(
+            self: Arc<Self>,
+            submission: FusionSubmission,
+        ) -> Result<PreparedFusionRun, FusionError> {
+            let prompt = submission.request.prompt;
+            let index = prompt.parse::<usize>().unwrap();
+            let control = platform_api::FusionRunControl::new_with_billing_mode(
+                submission.identity.clone(),
+                10_000,
+                submission.inherit.cancel,
+                FusionRunFactsRecorder::default(),
+                self.mode,
+            );
+            Ok(PreparedFusionRun::new(
+                FusionPreparedSummary {
+                    identity: submission.identity,
+                    duration_ms: 10_000,
+                    planned_panels: Some(2),
+                },
+                control.clone(),
+                move |_, _| async move {
+                    self.started.fetch_add(1, AtomicOrdering::SeqCst);
+                    let active = self.active.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                    self.maximum.fetch_max(active, AtomicOrdering::SeqCst);
+                    let _active = Active(self.clone());
+                    let _ = self.events.send(format!("start:{index}"));
+                    let _permit = self.gates[index].acquire().await.unwrap();
+                    if self.mode == ModelAttemptBillingMode::MeteredAttempts {
+                        control.facts().set_attempt_settlement(
+                            if self.failure.as_ref() == Some(&prompt) {
+                                platform_api::FusionAttemptSettlementStatus::Failed {
+                                    reason: "test receipt failure".into(),
+                                }
+                            } else {
+                                platform_api::FusionAttemptSettlementStatus::Settled
+                            },
+                        );
+                    }
+                    let mut result = workflow_fusion_result();
+                    result.run_id = control.identity().run_id.to_string();
+                    result.final_text = prompt;
+                    let _ = self.events.send(format!("done:{index}"));
+                    platform_api::FusionRunOutcome::from_control(&control, Ok(result))
+                },
+            ))
+        }
+    }
+
+    async fn run_batch(
+        executor: Arc<BatchExecutor>,
+        scope: bool,
+        count: usize,
+    ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
+        let session = protocol::SessionId::new();
+        let recorder = executor.recorder.clone();
+        let script = format!("return await Promise.allSettled(Array.from({{length:{count}}}, (_, i) => fusion(String(i))));");
+        run_workflow_script_with_live_updates_and_fusion_recorded(
+            &script,
+            DEFAULT_WORKFLOW_SUBAGENT,
+            "batch",
+            Arc::new(EchoSpawner::default()),
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            None,
+            None,
+            Some(executor.journal.clone()),
+            None,
+            Some(100),
+            None,
+            0,
+            NestedConfig {
+                session_uuid: Some(session.to_string()),
+                ..Default::default()
+            },
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            CancellationToken::new(),
+            Some(executor),
+            Some("batch".into()),
+            Some("model".into()),
+            Some("profile".into()),
+            None,
+            Arc::new(AnalyticsBus::new()),
+            None,
+            None,
+            None,
+            Some(recorder),
+            scope.then(|| {
+                WorkflowOutputScope::new(Arc::new(Output(session, protocol::MessageId::new())))
+            }),
+        )
+        .await
+    }
+
+    async fn event(events: &mut mpsc::UnboundedReceiver<String>) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+            .await
+            .expect("bounded batch progress")
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn workflow_fusion_batch_two_active_third_waits_and_results_stay_ordered() {
+        let (executor, mut events) =
+            BatchExecutor::new(2, ModelAttemptBillingMode::MeteredAttempts, None, false);
+        let run = tokio::spawn(run_batch(executor.clone(), true, 3));
+        assert_eq!(event(&mut events).await, "start:0");
+        assert_eq!(event(&mut events).await, "start:1");
+        assert!(events.try_recv().is_err());
+        executor.gates[1].add_permits(1);
+        assert_eq!(event(&mut events).await, "done:1");
+        assert_eq!(executor.started.load(AtomicOrdering::SeqCst), 2);
+        executor.gates[0].add_permits(1);
+        assert_eq!(event(&mut events).await, "done:0");
+        assert_eq!(event(&mut events).await, "start:2");
+        executor.gates[2].add_permits(1);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let values: Value = serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+        for index in 0..3 {
+            assert_eq!(values[index]["value"]["final_text"], index.to_string());
+        }
+        assert_eq!(executor.maximum.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(executor.active.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn workflow_fusion_batch_rollback_one_keeps_calls_serial() {
+        for mode in [
+            ModelAttemptBillingMode::LegacyAggregate,
+            ModelAttemptBillingMode::MeteredAttempts,
+        ] {
+            let (executor, mut events) = BatchExecutor::new(1, mode, None, false);
+            let run = tokio::spawn(run_batch(executor.clone(), true, 3));
+            for index in 0..3 {
+                assert_eq!(event(&mut events).await, format!("start:{index}"));
+                assert!(events.try_recv().is_err());
+                executor.gates[index].add_permits(1);
+                assert_eq!(event(&mut events).await, format!("done:{index}"));
+            }
+            run.await.unwrap().unwrap();
+            assert_eq!(executor.maximum.load(AtomicOrdering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_fusion_batch_two_refuses_legacy_or_missing_scope_before_activation() {
+        for (mode, scope) in [
+            (ModelAttemptBillingMode::LegacyAggregate, true),
+            (ModelAttemptBillingMode::MeteredAttempts, false),
+        ] {
+            let (executor, _) = BatchExecutor::new(2, mode, None, true);
+            let outcome = run_batch(executor.clone(), scope, 3).await.unwrap();
+            let values: Value = serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+            assert!(values
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|value| value["status"] == "rejected"));
+            assert_eq!(executor.started.load(AtomicOrdering::SeqCst), 0);
+            let recorded = executor.recorder.0.lock().unwrap();
+            assert_eq!(
+                recorded.len(),
+                3,
+                "exactly one terminal refusal per queued call"
+            );
+            let identities: StdHashSet<_> = recorded
+                .iter()
+                .map(|outcome| outcome.identity.run_id.to_string())
+                .collect();
+            assert_eq!(
+                identities.len(),
+                3,
+                "terminal refusals must not be duplicated"
+            );
+            for outcome in recorded.iter() {
+                assert!(outcome.result.is_err());
+                assert_eq!(outcome.identity.origin, FusionOrigin::Workflow);
+                assert_eq!(outcome.facts.allocated_panels, Some(0));
+                assert_eq!(outcome.facts.attempts, Some(0));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_fusion_batch_failed_receipt_stops_next_call_and_drains_inflight() {
+        let (executor, mut events) = BatchExecutor::new(
+            2,
+            ModelAttemptBillingMode::MeteredAttempts,
+            Some("1".into()),
+            false,
+        );
+        let run = tokio::spawn(run_batch(executor.clone(), true, 3));
+        assert_eq!(event(&mut events).await, "start:0");
+        assert_eq!(event(&mut events).await, "start:1");
+        executor.gates[1].add_permits(1);
+        assert_eq!(event(&mut events).await, "done:1");
+        // The supervisor has completed; wait for the bridge to consume its
+        // failure and journal the retained answer before releasing call 0.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !executor
+                .journal
+                .lock()
+                .unwrap()
+                .values()
+                .any(|result| result.contains("test receipt failure"))
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        executor.gates[0].add_permits(1);
+        let outcome = run.await.unwrap().unwrap();
+        let values: Value = serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+        assert_eq!(values[1]["value"]["attempt_settlement"]["status"], "failed");
+        assert_eq!(values[2]["status"], "rejected");
+        assert_eq!(executor.started.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(executor.active.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn workflow_fusion_batch_twenty_one_calls_preserves_hard_cap() {
+        let (executor, _) =
+            BatchExecutor::new(2, ModelAttemptBillingMode::MeteredAttempts, None, true);
+        let outcome = run_batch(executor.clone(), true, 21).await.unwrap();
+        let values: Value = serde_json::from_str(outcome.result.as_deref().unwrap()).unwrap();
+        assert_eq!(values.as_array().unwrap().len(), 21);
+        assert!(values.as_array().unwrap()[..20]
+            .iter()
+            .all(|value| value["status"] == "fulfilled"));
+        assert_eq!(values[20]["status"], "rejected");
+        assert_eq!(executor.started.load(AtomicOrdering::SeqCst), 20);
+    }
+}
+
 #[tokio::test]
 async fn nested_name_resolves_plugin_snapshot_after_saved_miss() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
@@ -500,7 +843,9 @@ fn workflow_fusion_rejects_an_empty_parent_run_id_before_preparation() {
         Some("openai"),
     )
     .expect_err("an empty workflow run id must fail before prepare");
-    assert!(matches!(error, FusionError::InvalidRequest(message) if message.contains("non-empty workflow run id")));
+    assert!(
+        matches!(error, FusionError::InvalidRequest(message) if message.contains("non-empty workflow run id"))
+    );
 }
 
 /// Mirrors `RejectedFusionExecutor` (apps/engine-desktop) — a

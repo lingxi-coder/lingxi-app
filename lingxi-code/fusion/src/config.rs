@@ -62,6 +62,9 @@ pub struct FusionRuntimeConfig {
     pub allowed_profiles: Vec<String>,
     /// Per-workflow `fusion()` call cap.
     pub workflow_fusion_call_cap: u32,
+    /// Requested Fusion batch concurrency. Effective concurrency also requires
+    /// the attempt host's atomic output-reservation capability.
+    pub workflow_concurrency: u8,
 }
 
 impl FusionRuntimeConfig {
@@ -105,6 +108,7 @@ impl FusionRuntimeConfig {
             allow_cross_provider_for_workflow: false,
             allowed_profiles: Vec::new(),
             workflow_fusion_call_cap: 20,
+            workflow_concurrency: 2,
         }
     }
 
@@ -195,6 +199,9 @@ impl FusionRuntimeConfig {
         }
         if let Some(n) = settings.workflow_fusion_call_cap {
             cfg.workflow_fusion_call_cap = n;
+        }
+        if let Some(n) = settings.workflow_concurrency {
+            cfg.workflow_concurrency = n;
         }
 
         // F004 / F011 item 6 (round-3 review fix): `FusionSettingsJson::validate`
@@ -316,6 +323,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_concurrency_defaults_to_two_and_supports_sequential_rollback() {
+        assert_eq!(FusionRuntimeConfig::defaults().workflow_concurrency, 2);
+        for value in [1, 2] {
+            let settings = FusionSettingsJson {
+                workflow_concurrency: Some(value),
+                ..Default::default()
+            };
+            assert_eq!(
+                FusionRuntimeConfig::from_settings(&settings)
+                    .unwrap()
+                    .workflow_concurrency,
+                value
+            );
+        }
+        for value in [0, 3] {
+            assert!(FusionRuntimeConfig::from_settings(&FusionSettingsJson {
+                workflow_concurrency: Some(value),
+                ..Default::default()
+            })
+            .is_err());
+        }
+    }
 
     #[test]
     fn completion_policy_defaults_and_merged_partial_rejection() {

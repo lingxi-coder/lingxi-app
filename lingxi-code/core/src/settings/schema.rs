@@ -826,6 +826,10 @@ pub struct FusionSettingsJson {
     /// Per-workflow `fusion()` call cap. Hard-clamped to `1..=20`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_fusion_call_cap: Option<u32>,
+    /// Fusion-only workflow concurrency (1..=2). One is the sequential rollback.
+    /// Hosts without atomic output reservations remain sequential either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_concurrency: Option<u8>,
 }
 
 impl FusionSettingsJson {
@@ -1042,6 +1046,14 @@ impl FusionSettingsJson {
                 ));
             }
         }
+        if self
+            .workflow_concurrency
+            .is_some_and(|value| !(1..=2).contains(&value))
+        {
+            return Err(SchemaViolation(
+                "fusion.workflowConcurrency must be in 1..=2".into(),
+            ));
+        }
         // F011 item 6: `minSuccessfulPanels` above BOTH preset panel counts
         // can never be met by an automatic run — the runtime would silently
         // clamp it at spawn time instead of ever meeting the documented bar.
@@ -1201,15 +1213,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fusion_workflow_concurrency_is_optional_and_bounded() {
+        let absent: FusionSettingsJson = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.workflow_concurrency, None);
+        assert!(serde_json::to_value(absent)
+            .unwrap()
+            .get("workflowConcurrency")
+            .is_none());
+        for value in [1, 2] {
+            let settings: FusionSettingsJson =
+                serde_json::from_value(serde_json::json!({"workflowConcurrency": value})).unwrap();
+            settings.validate().unwrap();
+            assert_eq!(
+                serde_json::to_value(settings).unwrap()["workflowConcurrency"],
+                value
+            );
+        }
+        for value in [0, 3] {
+            let settings: FusionSettingsJson =
+                serde_json::from_value(serde_json::json!({"workflowConcurrency": value})).unwrap();
+            assert!(settings.validate().is_err());
+        }
+        for value in [
+            serde_json::json!(true),
+            serde_json::json!(1.5),
+            serde_json::json!(256),
+        ] {
+            assert!(serde_json::from_value::<FusionSettingsJson>(
+                serde_json::json!({"workflowConcurrency": value}),
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
     fn fusion_completion_policy_is_typed_optional_and_validated() {
         let absent: FusionSettingsJson = serde_json::from_str("{}").unwrap();
         assert_eq!(absent.completion_policy, None);
-        assert!(
-            serde_json::to_value(&absent)
-                .unwrap()
-                .get("completionPolicy")
-                .is_none()
-        );
+        assert!(serde_json::to_value(&absent)
+            .unwrap()
+            .get("completionPolicy")
+            .is_none());
         for (name, policy) in [
             ("wait_all", FusionCompletionPolicy::WaitAll),
             (

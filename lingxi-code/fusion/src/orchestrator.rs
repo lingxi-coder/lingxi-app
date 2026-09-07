@@ -2624,6 +2624,21 @@ impl FusionExecutor for FusionOrchestrator {
             .load()
             .map_or(20, |config| config.workflow_fusion_call_cap)
     }
+
+    fn workflow_batch_concurrency(&self) -> usize {
+        let Some(registrar) = &self.attempt_registrar else {
+            return 1;
+        };
+        let Ok(config) = self.config_source.load() else {
+            return 1;
+        };
+        if !config.enabled {
+            return 1;
+        }
+        usize::from(config.workflow_concurrency)
+            .min(registrar.workflow_batch_concurrency())
+            .clamp(1, 2)
+    }
 }
 
 fn validate_request(mut request: FusionRequest) -> Result<FusionRequest, FusionError> {

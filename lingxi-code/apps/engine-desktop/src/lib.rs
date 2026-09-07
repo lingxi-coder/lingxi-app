@@ -5107,6 +5107,10 @@ impl platform_api::FusionExecutor for DesktopFusionExecutor {
     fn workflow_fusion_call_cap(&self) -> u32 {
         self.inner.workflow_fusion_call_cap()
     }
+
+    fn workflow_batch_concurrency(&self) -> usize {
+        self.inner.workflow_batch_concurrency()
+    }
 }
 
 /// Install one shared physical-attempt host only after durable boot has

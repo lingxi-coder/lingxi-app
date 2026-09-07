@@ -223,7 +223,13 @@ fn budget(tracker: Arc<cost::CostTracker>) -> Arc<cost::BudgetEnforcer> {
 
 #[tokio::test]
 async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare() {
-    let (tmp, cfg) = tests::test_config(true);
+    let (tmp, mut cfg) = tests::test_config(true);
+    cfg.flag_settings = Some(
+        serde_json::from_value(serde_json::json!({
+            "fusion": {"enabled": true}
+        }))
+        .unwrap(),
+    );
     let session = protocol::SessionId::new();
     let lease = platform_api::live_sessions::LiveSessionDir::at_live(tmp.path().join("sessions"))
         .claim_session_id(&session.to_string(), std::process::id())
@@ -264,7 +270,19 @@ async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare(
         2,
         "factory must install this exact host in ApiService"
     );
+    let mut rollback = cfg.clone();
+    rollback.flag_settings = Some(
+        serde_json::from_value(serde_json::json!({
+            "fusion": {"enabled": true, "workflowConcurrency": 1}
+        }))
+        .unwrap(),
+    );
+    assert_eq!(
+        executor(&rollback, Some(host.clone()), pricing.clone()).workflow_batch_concurrency(),
+        1
+    );
     let executor = executor(&cfg, Some(host.clone()), pricing);
+    assert_eq!(executor.workflow_batch_concurrency(), 2);
     assert_eq!(
         Arc::strong_count(&host),
         3,
@@ -315,6 +333,12 @@ async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare(
 async fn desktop_fusion_composition_ephemeral_remains_legacy_and_requires_pool_admission() {
     let (_tmp, mut cfg) = tests::test_config(true);
     cfg.session_persistence = false;
+    cfg.flag_settings = Some(
+        serde_json::from_value(serde_json::json!({
+            "fusion": {"enabled": true, "workflowConcurrency": 2}
+        }))
+        .unwrap(),
+    );
     let session = protocol::SessionId::new();
     let pricing = Arc::new(cost::PricingCatalog::builtin_reference());
     let (tx, _) = tokio::sync::mpsc::channel(1);
@@ -322,7 +346,9 @@ async fn desktop_fusion_composition_ephemeral_remains_legacy_and_requires_pool_a
     let budget = budget(tracker.clone());
     let host = desktop_fusion_attempts(service(), budget.clone(), tracker, pricing.clone(), None);
     assert!(host.is_none());
-    let prepared = executor(&cfg, host, pricing)
+    let executor = executor(&cfg, host, pricing);
+    assert_eq!(executor.workflow_batch_concurrency(), 1);
+    let prepared = executor
         .prepare(submission(session, budget.clone()))
         .unwrap();
     assert_eq!(

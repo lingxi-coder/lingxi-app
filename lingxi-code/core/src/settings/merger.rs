@@ -676,23 +676,46 @@ mod tests {
 
     #[test]
     fn fusion_completion_policy_cross_layer_conflict_is_preserved_for_validation() {
-        let lower: SettingsJson = serde_json::from_str(
-            r#"{"fusion":{"completionPolicy":"quorum_after_grace"}}"#,
-        ).unwrap();
-        let upper: SettingsJson = serde_json::from_str(
-            r#"{"fusion":{"partialOk":false}}"#,
-        ).unwrap();
+        let lower: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"completionPolicy":"quorum_after_grace"}}"#)
+                .unwrap();
+        let upper: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"partialOk":false}}"#).unwrap();
         lower.fusion.as_ref().unwrap().validate().unwrap();
         upper.fusion.as_ref().unwrap().validate().unwrap();
         let merged = merge(lower, upper);
         let settings = merged.fusion.unwrap();
-        assert_eq!(settings.completion_policy, Some(crate::settings::schema::FusionCompletionPolicy::QuorumAfterGrace));
+        assert_eq!(
+            settings.completion_policy,
+            Some(crate::settings::schema::FusionCompletionPolicy::QuorumAfterGrace)
+        );
         assert!(settings.validate().is_err());
-        let reset: SettingsJson = serde_json::from_str(
-            r#"{"fusion":{"completionPolicy":"wait_all"}}"#,
-        ).unwrap();
-        let merged = merge(SettingsJson { fusion: Some(settings), ..Default::default() }, reset);
+        let reset: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"completionPolicy":"wait_all"}}"#).unwrap();
+        let merged = merge(
+            SettingsJson {
+                fusion: Some(settings),
+                ..Default::default()
+            },
+            reset,
+        );
         merged.fusion.unwrap().validate().unwrap();
+    }
+
+    #[test]
+    fn fusion_workflow_concurrency_rollback_overrides_only_its_field() {
+        let lower = serde_json::from_value(serde_json::json!({
+            "fusion": {"enabled": true, "workflowConcurrency": 2}
+        }))
+        .unwrap();
+        let upper = serde_json::from_value(serde_json::json!({
+            "fusion": {"workflowConcurrency": 1}
+        }))
+        .unwrap();
+        let settings = merge(lower, upper).fusion.unwrap();
+        assert_eq!(settings.enabled, Some(true));
+        assert_eq!(settings.workflow_concurrency, Some(1));
+        settings.validate().unwrap();
     }
 
     #[test]

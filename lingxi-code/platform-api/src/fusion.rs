@@ -2510,6 +2510,15 @@ pub trait FusionExecutor: Send + Sync + 'static {
         None
     }
 
+    /// Trusted per-workflow Fusion concurrency, sampled at the batch boundary.
+    /// Values above one require metered prepared runs whose every physical
+    /// request atomically reserves money and the original output account before
+    /// dispatch. A scope or billing-mode label alone is not this capability.
+    /// Legacy and unqualified hosts remain sequential; callers hard-cap at two.
+    fn workflow_batch_concurrency(&self) -> usize {
+        1
+    }
+
     /// Agent listing / intercept gate. Default is disabled (inert).
     fn agent_surface(&self) -> FusionAgentSurface {
         FusionAgentSurface::default()

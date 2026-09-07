@@ -110,9 +110,10 @@ globalThis.__wf_pump = () => {
   const fq = globalThis.__wf_fusion_queue;
   if (fq.length === 0) return false;
   globalThis.__wf_fusion_queue = [];
+  const fusionResults = globalThis.__wf_dispatch_fusion_batch(fq.map((x) => x.prompt), fq.map((x) => JSON.stringify(x.opts || {})));
   for (let i = 0; i < fq.length; i++) {
     const item = fq[i];
-    const r = globalThis.__wf_dispatch_fusion(item.prompt, JSON.stringify(item.opts || {}));
+    const r = fusionResults[i];
     if (typeof r === "string" && r.startsWith(globalThis.__WF_THROW_PREFIX)) {
       // The host-side refusal shapes `tasks::handlers::local_workflow` can
       // send back before ever calling the executor (`err.name` mirrors the
@@ -1186,8 +1187,53 @@ where
 // thin wrapper delegating here — splitting the QuickJS FFI glue further is a
 // correctness-risk restructure out of proportion to a lint, not a genuine
 // readability problem.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
 pub fn run_with_progress_and_fusion<R, F, P>(
+    script: &str,
+    agent_runner: R,
+    mut fusion_runner: F,
+    on_progress: P,
+    budget: Option<Arc<dyn WorkflowBudgetSource>>,
+    allow_nested: bool,
+    args: Option<String>,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<RunOutcome, WorkflowError>
+where
+    R: FnMut(&[String], &[String]) -> Vec<String> + 'static,
+    F: FnMut(&str, &str) -> String + 'static,
+    P: FnMut(&Progress) + 'static,
+{
+    run_with_progress_and_fusion_batch(
+        script,
+        agent_runner,
+        move |prompts, opts| {
+            prompts
+                .iter()
+                .zip(opts)
+                .map(|(prompt, opts)| fusion_runner(prompt, opts))
+                .collect()
+        },
+        on_progress,
+        budget,
+        allow_nested,
+        args,
+        cancel,
+    )
+}
+
+/// Execute queued Fusion calls through one ordered batch callback. The host
+/// chooses safe concurrency; this VM layer neither grants budget nor spawns
+/// parallel workers. The scalar API remains a sequential compatibility adapter.
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
+pub fn run_with_progress_and_fusion_batch<R, F, P>(
     script: &str,
     agent_runner: R,
     fusion_runner: F,
@@ -1199,7 +1245,7 @@ pub fn run_with_progress_and_fusion<R, F, P>(
 ) -> Result<RunOutcome, WorkflowError>
 where
     R: FnMut(&[String], &[String]) -> Vec<String> + 'static,
-    F: FnMut(&str, &str) -> String + 'static,
+    F: FnMut(&[String], &[String]) -> Vec<String> + 'static,
     P: FnMut(&Progress) + 'static,
 {
     use rquickjs::{Context, Function, Runtime};
@@ -1329,11 +1375,18 @@ where
         let fr = fusion_runner.clone();
         globals
             .set(
-                "__wf_dispatch_fusion",
+                "__wf_dispatch_fusion_batch",
                 Function::new(
                     ctx.clone(),
-                    move |prompt: String, opts_json: String| -> String {
-                        (fr.borrow_mut())(&prompt, &opts_json)
+                    move |prompts: Vec<String>, opts_json: Vec<String>| -> Vec<String> {
+                        if prompts.len() != opts_json.len() {
+                            return vec![format!("{WF_THROW_PREFIX}fusion() batch prompt/options length mismatch"); prompts.len()];
+                        }
+                        let results = (fr.borrow_mut())(&prompts, &opts_json);
+                        if results.len() != prompts.len() {
+                            return vec![format!("{WF_THROW_PREFIX}fusion() host returned {} results for {} calls", results.len(), prompts.len()); prompts.len()];
+                        }
+                        results
                     },
                 )
                 .map_err(eng)?,
@@ -2613,6 +2666,104 @@ log('wf=' + (typeof workflow))
             }]
         );
         assert_eq!(out.result.as_deref(), Some(r#"{"status":"needs_parent"}"#));
+    }
+
+    #[test]
+    fn fusion_batch_dispatches_pending_calls_together_in_order() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let out = run_with_progress_and_fusion_batch(
+            "return await Promise.all([fusion('a', {maxPanel: 2}), fusion('b')]);",
+            no_agents,
+            move |prompts, opts| {
+                recorded.lock().unwrap().push(prompts.to_vec());
+                assert_eq!(opts, &[r#"{"maxPanel":2}"#.to_string(), "{}".into()]);
+                prompts
+                    .iter()
+                    .map(|prompt| serde_json::json!({"answer":prompt}).to_string())
+                    .collect()
+            },
+            |_: &Progress| {},
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![vec!["a".to_string(), "b".to_string()]]
+        );
+        assert_eq!(
+            out.result.as_deref(),
+            Some(r#"[{"answer":"a"},{"answer":"b"}]"#)
+        );
+    }
+
+    #[test]
+    fn fusion_batch_scalar_adapter_remains_ordered_and_sequential() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let out = run_with_progress_and_fusion(
+            "return await Promise.all([fusion('a'), fusion('b')]);",
+            no_agents,
+            move |prompt, _| {
+                recorded.lock().unwrap().push(prompt.to_string());
+                serde_json::json!({"answer":prompt}).to_string()
+            },
+            |_: &Progress| {},
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(*calls.lock().unwrap(), vec!["a", "b"]);
+        assert_eq!(
+            out.result.as_deref(),
+            Some(r#"[{"answer":"a"},{"answer":"b"}]"#)
+        );
+    }
+
+    #[test]
+    fn fusion_batch_rejections_keep_per_item_error_names() {
+        let out = run_with_progress_and_fusion_batch(
+            "return await Promise.all([fusion('a').catch(e => e.name), fusion('b')]);",
+            no_agents,
+            |_, _| {
+                vec![
+                    format!("{WF_THROW_PREFIX}Workflow fusion() call cap reached (20)"),
+                    r#"{"answer":"b"}"#.into(),
+                ]
+            },
+            |_: &Progress| {},
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            out.result.as_deref(),
+            Some(r#"["WorkflowFusionCapError",{"answer":"b"}]"#)
+        );
+    }
+
+    #[test]
+    fn fusion_batch_rejects_short_and_extra_host_result_vectors() {
+        for count in [1, 3] {
+            let out = run_with_progress_and_fusion_batch(
+                "return await Promise.all([fusion('a').catch(e => e.message), fusion('b').catch(e => e.message)]);", no_agents,
+                move |_, _| vec!["{}".into(); count],
+                |_: &Progress| {}, None, false, None, None,
+            ).unwrap();
+            let messages: Vec<String> =
+                serde_json::from_str(out.result.as_deref().unwrap()).unwrap();
+            assert_eq!(
+                messages,
+                vec![format!("fusion() host returned {count} results for 2 calls"); 2]
+            );
+        }
     }
 
     /// Host-side `fusion()` rejections carry a distinguishable `err.name`

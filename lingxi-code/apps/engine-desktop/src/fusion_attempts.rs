@@ -129,6 +129,12 @@ impl DesktopFusionAttempts {
 }
 
 impl fusion::FusionAttemptRegistrar for DesktopFusionAttempts {
+    fn workflow_batch_concurrency(&self) -> usize {
+        // Registration requires the originating durable scope; begin() binds
+        // its exact account and atomically reserves money/output before wire.
+        2
+    }
+
     fn register(
         &self,
         captured: fusion::FusionAttemptRegistration,

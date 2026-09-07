@@ -186,6 +186,7 @@ struct ReservationBook {
     attempt_origins: HashMap<String, protocol::MessageId>,
     output_scopes: HashMap<protocol::MessageId, output::OutputScopeState>,
     next_output_generation: u64,
+    output_recovery_loaded: bool,
 }
 
 impl ReservationBook {
@@ -197,6 +198,7 @@ impl ReservationBook {
             attempt_origins: HashMap::new(),
             output_scopes: HashMap::new(),
             next_output_generation: 0,
+            output_recovery_loaded: false,
         }
     }
 
@@ -1067,6 +1069,7 @@ mod tests {
                         ..Default::default()
                     },
                     journal_revision: 0,
+                    attempt_outputs: Vec::new(),
                 },
                 Arc::new(RequestPersistence { requests }),
                 lease,

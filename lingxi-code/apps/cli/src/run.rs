@@ -3068,6 +3068,9 @@ enum FusionPrintOutcome {
     /// The computation produced an answer, but publication failed. Keep the
     /// answer visible while returning a non-zero process result.
     PublicationFailed { answer: String, reason: String },
+    /// Computation succeeded but reliable accounting failed. Publication may
+    /// still have succeeded; keep both the answer and non-zero exit status.
+    FailedWithAnswer { answer: String, reason: String },
     /// `Failed` — the recorded failure reason (falls back to a generic
     /// message when the reason was never recorded).
     Failed(String),
@@ -3089,6 +3092,7 @@ fn fusion_result_exit_code(outcome: Option<&FusionPrintOutcome>) -> i32 {
         }
         Some(
             FusionPrintOutcome::PublicationFailed { .. }
+            | FusionPrintOutcome::FailedWithAnswer { .. }
             | FusionPrintOutcome::Failed(_)
             | FusionPrintOutcome::Other(_),
         )
@@ -3098,11 +3102,11 @@ fn fusion_result_exit_code(outcome: Option<&FusionPrintOutcome>) -> i32 {
 
 /// Whether `state` is DONE for print mode's purposes — terminal, AND (for a
 /// `Completed` run specifically) its publication attempt has a terminal typed
-/// receipt. `finish_fusion_terminal` flips the task to `Completed` before the
+/// receipt. `finish_fusion_terminal` flips the task to a terminal state before the
 /// handler awaits `FusionCompletionSink::publish`, so a waiter must remain on
 /// `Pending`; `Published`, durable `Queued`, and explicit publication failures
-/// are all ready to report with their distinct exit semantics. `Failed` and
-/// `Killed` runs never invoke the completion sink.
+/// are all ready to report with their distinct exit semantics. A failed run
+/// with a retained answer also waits; computation failures and kills do not.
 fn fusion_result_ready(state: &tasks::state::TaskState) -> bool {
     let tasks::state::TaskState::LocalFusion(fusion) = state else {
         return state.base().status.is_terminal();
@@ -3110,9 +3114,12 @@ fn fusion_result_ready(state: &tasks::state::TaskState) -> bool {
     if !fusion.base.status.is_terminal() {
         return false;
     }
-    if fusion.base.status != tasks::state::TaskStatus::Completed {
-        // Failed/Killed runs never invoke the completion sink, so they are
-        // ready as soon as their computational terminal status lands.
+    if fusion.base.status != tasks::state::TaskStatus::Completed
+        && !(fusion.base.status == tasks::state::TaskStatus::Failed
+            && fusion.final_text.is_some())
+    {
+        // Computation failures/kills have no answer to publish. Accounting
+        // failures do retain an answer and must await its publication tail.
         return true;
     }
     // `result_published` is retained as a compatibility read for task rows
@@ -3156,12 +3163,13 @@ fn fusion_print_outcome(state: &tasks::state::TaskState) -> Option<FusionPrintOu
                 }
             }
         }
-        tasks::state::TaskStatus::Failed => FusionPrintOutcome::Failed(
-            fusion
-                .error
-                .clone()
-                .unwrap_or_else(|| "fusion run failed".to_string()),
-        ),
+        tasks::state::TaskStatus::Failed => {
+            let reason = fusion.error.clone().unwrap_or_else(|| "fusion run failed".to_string());
+            match &fusion.final_text {
+                Some(answer) => FusionPrintOutcome::FailedWithAnswer { answer: answer.clone(), reason },
+                None => FusionPrintOutcome::Failed(reason),
+            }
+        }
         other => FusionPrintOutcome::Other(format!("{other:?}")),
     })
 }
@@ -3318,10 +3326,10 @@ where
                     )
                     .await;
                 }
-                Some(FusionPrintOutcome::PublicationFailed { answer, reason }) => {
+                Some(FusionPrintOutcome::PublicationFailed { answer, reason }
+                    | FusionPrintOutcome::FailedWithAnswer { answer, reason }) => {
                     // Preserve the computational answer for the caller even
-                    // though the process must fail: the storage error is a
-                    // publication problem, not a computation failure.
+                    // though publication or accounting failed independently.
                     sink.command_output("fusion", answer).await;
                     sink.error("fusion", reason).await;
                 }
@@ -7454,6 +7462,36 @@ mod tests {
             fusion_print_outcome(&state),
             Some(FusionPrintOutcome::FinalText("legacy answer".to_string()))
         );
+    }
+
+    #[tokio::test]
+    async fn fusion_accounting_failure_keeps_answer_and_waits_for_publication() {
+        let mut pending = fusion_state(
+            tasks::state::TaskStatus::Failed,
+            Some("computed despite accounting failure"),
+            Some("Fusion accounting failed: durable receipt rejected"),
+        );
+        let tasks::state::TaskState::LocalFusion(fusion) = &mut pending else {
+            unreachable!();
+        };
+        fusion.result_published = false;
+        fusion.publication_status = platform_api::FusionPublicationStatus::Pending;
+        assert!(!fusion_result_ready(&pending));
+        let mut published = pending.clone();
+        let tasks::state::TaskState::LocalFusion(fusion) = &mut published else {
+            unreachable!();
+        };
+        fusion.publication_status = platform_api::FusionPublicationStatus::Published;
+        assert!(fusion_result_ready(&published));
+        let lookup = ScriptedLookup::new(vec![Some(pending), Some(published)]);
+        let sink = RecordingFusionSink::default();
+        let outcome = await_local_fusion_result_bounded(
+            "ftest0001", &lookup, &sink,
+            std::time::Duration::from_millis(1), std::time::Duration::from_secs(1),
+        ).await;
+        assert_eq!(fusion_result_exit_code(outcome.as_ref()), exit_codes::RUNTIME_ERROR);
+        assert_eq!(sink.outputs.lock().await.as_slice(), &[("fusion".to_string(), "computed despite accounting failure".to_string())]);
+        assert_eq!(sink.errors.lock().await.as_slice(), &[("fusion".to_string(), "Fusion accounting failed: durable receipt rejected".to_string())]);
     }
 
     #[test]

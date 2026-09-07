@@ -127,6 +127,20 @@ async fn finalize_fusion_outcome(
     // `platform_api::FusionProgress::egress_profiles`.
     last_egress_profiles: Option<Vec<String>>,
 ) {
+    let accounting_failed =
+        if let Some(platform_api::FusionAttemptSettlementStatus::Failed { reason }) =
+            &outcome.facts.attempt_settlement
+        {
+            status_sink
+                .set_fusion_error(
+                    worker_task_id,
+                    format!("Fusion accounting failed: {reason}"),
+                )
+                .await;
+            true
+        } else {
+            false
+        };
     match &outcome.result {
         Ok(result) => {
             let body =
@@ -191,7 +205,11 @@ async fn finalize_fusion_outcome(
                     worker_task_id,
                     result.run_id.clone(),
                     result.final_text.clone(),
-                    TaskStatus::Completed,
+                    if accounting_failed {
+                        TaskStatus::Failed
+                    } else {
+                        TaskStatus::Completed
+                    },
                 )
                 .await;
             if legacy_sink {

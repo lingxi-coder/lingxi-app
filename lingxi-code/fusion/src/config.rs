@@ -1,5 +1,6 @@
 //! Runtime Fusion settings with defaults applied.
 
+pub use lingxi_core::settings::schema::FusionCompletionPolicy;
 use lingxi_core::settings::schema::FusionSettingsJson;
 use platform_api::{FusionError, FusionPreset, FUSION_MAX_PANEL, FUSION_MIN_PANEL};
 
@@ -25,6 +26,8 @@ pub struct FusionRuntimeConfig {
     pub min_successful_panels: u8,
     /// Continue when some panels fail.
     pub partial_ok: bool,
+    /// Wait for every panel unless quorum completion is explicitly enabled.
+    pub completion_policy: FusionCompletionPolicy,
     /// Per-panel turn cap.
     pub panel_max_turns: u32,
     /// Per-turn output token cap.
@@ -73,6 +76,7 @@ impl FusionRuntimeConfig {
             max_panel: FUSION_MAX_PANEL,
             min_successful_panels: FUSION_MIN_PANEL,
             partial_ok: true,
+            completion_policy: FusionCompletionPolicy::WaitAll,
             panel_max_turns: 12,
             panel_max_output_tokens_per_turn: 8192,
             panel_reserved_input_tokens_per_turn: 32768,
@@ -140,6 +144,9 @@ impl FusionRuntimeConfig {
         if let Some(v) = settings.partial_ok {
             cfg.partial_ok = v;
         }
+        if let Some(policy) = settings.completion_policy {
+            cfg.completion_policy = policy;
+        }
         if let Some(n) = settings.panel_max_turns {
             cfg.panel_max_turns = n;
         }
@@ -200,6 +207,11 @@ impl FusionRuntimeConfig {
         // but `cfg` here is the fully MERGED, concrete view across every tier,
         // and nothing else re-checks these two invariants on it. Enforce both
         // here, after every field above has taken its default or override.
+        if !cfg.partial_ok && cfg.completion_policy == FusionCompletionPolicy::QuorumAfterGrace {
+            return Err(FusionError::InvalidConfiguration(
+                "fusion.completionPolicy quorum_after_grace requires fusion.partialOk=true".into(),
+            ));
+        }
         let stage_sum = cfg
             .panel_total_timeout_ms
             .saturating_add(
@@ -304,6 +316,44 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_policy_defaults_and_merged_partial_rejection() {
+        assert_eq!(
+            FusionRuntimeConfig::defaults().completion_policy,
+            FusionCompletionPolicy::WaitAll
+        );
+        assert_eq!(
+            FusionRuntimeConfig::from_settings(&FusionSettingsJson::default())
+                .unwrap()
+                .completion_policy,
+            FusionCompletionPolicy::WaitAll
+        );
+        let quorum = FusionSettingsJson {
+            completion_policy: Some(FusionCompletionPolicy::QuorumAfterGrace),
+            ..Default::default()
+        };
+        quorum.validate().unwrap();
+        assert_eq!(
+            FusionRuntimeConfig::from_settings(&quorum)
+                .unwrap()
+                .completion_policy,
+            FusionCompletionPolicy::QuorumAfterGrace
+        );
+        let no_partial = FusionSettingsJson {
+            partial_ok: Some(false),
+            ..Default::default()
+        };
+        no_partial.validate().unwrap();
+        let merged = FusionSettingsJson {
+            partial_ok: no_partial.partial_ok,
+            ..quorum
+        };
+        assert!(matches!(
+            FusionRuntimeConfig::from_settings(&merged),
+            Err(FusionError::InvalidConfiguration(_))
+        ));
+    }
 
     #[test]
     fn defaults_keep_fusion_disabled() {

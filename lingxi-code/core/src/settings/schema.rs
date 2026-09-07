@@ -730,6 +730,16 @@ pub struct SettingsJson {
     pub fusion: Option<FusionSettingsJson>,
 }
 
+/// Panel completion policy. Missing settings retain the wait-all behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FusionCompletionPolicy {
+    #[default]
+    WaitAll,
+    /// After the first quorum, allow a fixed ten-second grace period.
+    QuorumAfterGrace,
+}
+
 /// Typed `settings.fusion` object. Every field is `Option` so a partial layer
 /// can set a subset. Runtime defaults are applied by the Fusion orchestrator;
 /// [`SettingsJson::validate`] rejects values that would be dangerous if used.
@@ -758,6 +768,9 @@ pub struct FusionSettingsJson {
     /// Continue when some panels fail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_ok: Option<bool>,
+    /// Opt-in early quorum completion; omitted means wait_all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_policy: Option<FusionCompletionPolicy>,
     /// Per-panel turn cap (1..=12).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panel_max_turns: Option<u32>,
@@ -822,6 +835,13 @@ impl FusionSettingsJson {
     /// Invalid *present* values fail the settings load.
     pub fn validate(&self) -> Result<(), crate::settings::SettingsError> {
         use crate::settings::SettingsError::SchemaViolation;
+        if self.partial_ok == Some(false)
+            && self.completion_policy == Some(FusionCompletionPolicy::QuorumAfterGrace)
+        {
+            return Err(SchemaViolation(
+                "fusion.completionPolicy quorum_after_grace requires fusion.partialOk=true".into(),
+            ));
+        }
         if let Some(preset) = self.preset.as_deref() {
             if preset != "quality" && preset != "fast" {
                 return Err(SchemaViolation(format!(
@@ -1179,6 +1199,53 @@ fn validate_enum(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fusion_completion_policy_is_typed_optional_and_validated() {
+        let absent: FusionSettingsJson = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.completion_policy, None);
+        assert!(
+            serde_json::to_value(&absent)
+                .unwrap()
+                .get("completionPolicy")
+                .is_none()
+        );
+        for (name, policy) in [
+            ("wait_all", FusionCompletionPolicy::WaitAll),
+            (
+                "quorum_after_grace",
+                FusionCompletionPolicy::QuorumAfterGrace,
+            ),
+        ] {
+            let settings: FusionSettingsJson =
+                serde_json::from_value(serde_json::json!({"completionPolicy": name})).unwrap();
+            assert_eq!(settings.completion_policy, Some(policy));
+            settings.validate().unwrap();
+            assert_eq!(
+                serde_json::to_value(settings).unwrap()["completionPolicy"],
+                name
+            );
+        }
+        assert!(
+            serde_json::from_str::<FusionSettingsJson>(r#"{"completionPolicy":"fast"}"#).is_err()
+        );
+        assert!(
+            serde_json::from_str::<FusionSettingsJson>(r#"{"completionPolicy":true}"#).is_err()
+        );
+        let invalid: FusionSettingsJson =
+            serde_json::from_str(r#"{"completionPolicy":"quorum_after_grace","partialOk":false}"#)
+                .unwrap();
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("completionPolicy")
+        );
+        let wait_all: FusionSettingsJson =
+            serde_json::from_str(r#"{"completionPolicy":"wait_all","partialOk":false}"#).unwrap();
+        wait_all.validate().unwrap();
+    }
 
     #[test]
     fn fusion_min_successful_above_both_preset_counts_is_rejected() {

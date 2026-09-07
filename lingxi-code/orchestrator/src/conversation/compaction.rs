@@ -1360,10 +1360,12 @@ impl ConversationOrchestrator {
         // response's output tokens here accumulates the main-loop side of the
         // pool. A launched workflow's subagents add their output tokens to the
         // same `Arc`, so `budget.spent()` reads main loop + all workflows.
-        self.compaction_runtime.output_token_pool.fetch_add(
-            usage.billable_tokens.output,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        if self.model_runtime.output_scopes.is_none() {
+            self.compaction_runtime.output_token_pool.fetch_add(
+                usage.billable_tokens.output,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
     }
 
     pub(crate) async fn compaction_cost_scope(

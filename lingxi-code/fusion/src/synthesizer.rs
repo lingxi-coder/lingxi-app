@@ -31,6 +31,7 @@ pub enum SynthError {
 }
 
 /// Run the parent-model merge using the route limits captured at preparation.
+#[cfg(test)]
 pub(crate) async fn synthesize_with_limits(
     client: Arc<dyn SideQueryClient>,
     config: &FusionRuntimeConfig,
@@ -39,8 +40,20 @@ pub(crate) async fn synthesize_with_limits(
     panels: &[PanelInternal],
     limits: ModelLimits,
 ) -> Result<(String, cost::Usage), (SynthError, cost::Usage)> {
+    synthesize_registered(client, config, request, analysis, panels, limits, None).await
+}
+
+pub(crate) async fn synthesize_registered(
+    client: Arc<dyn SideQueryClient>,
+    config: &FusionRuntimeConfig,
+    request: &FusionRequest,
+    analysis: &FusionAnalysis,
+    panels: &[PanelInternal],
+    limits: ModelLimits,
+    attempt_run: Option<&platform_api::ModelAttemptRun>,
+) -> Result<(String, cost::Usage), (SynthError, cost::Usage)> {
     let output_tokens = limits.output_cap(config.synthesizer_max_output_tokens);
-    let req = match packing::prepare_synth_request(
+    let mut req = match packing::prepare_synth_request(
         client.as_ref(),
         request,
         analysis,
@@ -51,6 +64,12 @@ pub(crate) async fn synthesize_with_limits(
         Ok(req) => req,
         Err(_) => return Err((SynthError::Failed, cost::Usage::default())),
     };
+    if let Some(run) = attempt_run {
+        req.model_attempt = match run.context(platform_api::ModelAttemptStage::Synthesis, None) {
+            Ok(context) => Some(context),
+            Err(_) => return Err((SynthError::Failed, cost::Usage::default())),
+        };
+    }
     let outcome = timeout(
         Duration::from_millis(config.synthesizer_timeout_ms),
         client.query(req),

@@ -217,6 +217,10 @@ impl std::fmt::Debug for ResponsesWebSocketSession {
 }
 
 impl DefaultLlmClient {
+    pub(crate) fn profile_pricing_config(&self, profile: &str) -> Option<crate::PricingConfig> {
+        self.registry.profile_pricing_config(profile)
+    }
+
     pub fn from_config(config: ClientConfig) -> Result<Self, LlmError> {
         let registry = ModelRegistry::from_config(config.clone())?;
         let mut routes = BTreeMap::new();

@@ -24,7 +24,7 @@ pub mod usage;
 pub use attempt::{
     calculate_pinned_attempt_cost, AttemptBillingMode, AttemptContribution, AttemptDisposition,
     AttemptFoldAck, AttemptFoldError, AttemptIntent, AttemptLedger, AttemptReceipt, AttemptStage,
-    AttemptUsageContract, PreparedAttemptFold,
+    AttemptOutputRecovery, AttemptOutputRevision, AttemptOutputScope, AttemptUsageContract, PreparedAttemptFold,
 };
 pub use budget::{
     BudgetCheckResult, BudgetConfig, BudgetEnforcer, BudgetExceedPolicy,

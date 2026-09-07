@@ -322,7 +322,7 @@ impl DesktopFusionRecorder {
         message_uuid: &str,
         cwd: &std::path::Path,
     ) -> serde_json::Value {
-        let body = outcome.result.as_ref().map_or_else(
+        let mut body = outcome.result.as_ref().map_or_else(
             |error| {
                 format!(
                     "<fusion-error>{}</fusion-error>",
@@ -331,6 +331,14 @@ impl DesktopFusionRecorder {
             },
             tasks::fusion_result_xml,
         );
+        if let Some(platform_api::FusionAttemptSettlementStatus::Failed { reason }) =
+            &outcome.facts.attempt_settlement
+        {
+            body.push_str(&format!(
+                "\n<fusion-accounting-error>{}</fusion-accounting-error>",
+                tasks::escape_xml(reason)
+            ));
+        }
         // This is a transcript timestamp, not a persistence identity. It is
         // RFC3339 so the normal loader can order the row; retries reuse the
         // already-persisted payload rather than rebuilding it.
@@ -934,9 +942,15 @@ mod tests {
             FusionOrigin::Slash,
             None,
         );
-        FusionRunOutcome {
-            identity: identity.clone(),
-            result: Ok(FusionResult {
+        let control = platform_api::FusionRunControl::new(
+            identity.clone(),
+            1_000,
+            tokio_util::sync::CancellationToken::new(),
+            platform_api::FusionRunFactsRecorder::default(),
+        );
+        let mut outcome = FusionRunOutcome::from_control(
+            &control,
+            Ok(FusionResult {
                 schema_version: 1,
                 run_id: identity.run_id.to_string(),
                 status: FusionStatus::Completed,
@@ -948,9 +962,32 @@ mod tests {
                 timing: FusionTiming::default(),
                 egress_profiles: vec![],
             }),
-            facts: FusionRunFacts::default(),
-            publication: FusionPublicationReceipt::pending(),
-        }
+        );
+        outcome.publication = FusionPublicationReceipt::pending();
+        outcome
+    }
+
+    #[test]
+    fn accounting_failure_is_disclosed_without_erasing_the_answer() {
+        let session = protocol::SessionId::new();
+        let mut outcome = completed_outcome(session);
+        outcome.facts.attempt_settlement =
+            Some(platform_api::FusionAttemptSettlementStatus::Failed {
+                reason: "ledger <unavailable>".into(),
+            });
+        let payload = DesktopFusionRecorder::transcript_payload(
+            &outcome,
+            FusionSlashPublicationTarget {
+                session_id: session,
+            },
+            &DesktopFusionRecorder::message_uuid(&outcome),
+            std::path::Path::new("/test"),
+        );
+        let body = payload["message"]["content"][0]["text"].as_str().unwrap();
+        assert!(body.contains("answer"));
+        assert!(body.contains(
+            "<fusion-accounting-error>ledger &lt;unavailable&gt;</fusion-accounting-error>"
+        ));
     }
 
     #[test]
@@ -962,9 +999,15 @@ mod tests {
             FusionOrigin::Slash,
             None,
         );
-        let outcome = FusionRunOutcome {
-            identity: identity.clone(),
-            result: Ok(FusionResult {
+        let control = platform_api::FusionRunControl::new(
+            identity.clone(),
+            1_000,
+            tokio_util::sync::CancellationToken::new(),
+            platform_api::FusionRunFactsRecorder::default(),
+        );
+        let mut outcome = FusionRunOutcome::from_control(
+            &control,
+            Ok(FusionResult {
                 schema_version: 1,
                 run_id: identity.run_id.to_string(),
                 status: FusionStatus::Completed,
@@ -976,9 +1019,8 @@ mod tests {
                 timing: FusionTiming::default(),
                 egress_profiles: vec![],
             }),
-            facts: FusionRunFacts::default(),
-            publication: FusionPublicationReceipt::queued(),
-        };
+        );
+        outcome.publication = FusionPublicationReceipt::queued();
         let uuid = DesktopFusionRecorder::message_uuid(&outcome);
         let payload = DesktopFusionRecorder::transcript_payload(
             &outcome,

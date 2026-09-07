@@ -10,17 +10,45 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use thiserror::Error;
 
-/// Immutable accounting contract selected before a run acquires reservations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AttemptBillingMode {
-    /// Existing run-level settlement; attempt receipts may not charge this mode.
-    LegacyAggregate,
-    /// Incremental wire-attempt contributions replace aggregate settlement.
-    MeteredAttempts,
-}
+/// Shared immutable contract; persisted variant names remain unchanged.
+pub use platform_api::ModelAttemptBillingMode as AttemptBillingMode;
 
 /// Shared platform stage metadata; it grants no dispatch authority.
 pub use platform_api::ModelAttemptStage as AttemptStage;
+
+/// Original output generation retained for restart reconciliation, never the
+/// currently selected turn. Live admission stamps this from its bound account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptOutputScope {
+    /// Captured turn or command-only generation.
+    pub generation_id: protocol::MessageId,
+    /// Immutable ceiling of that generation.
+    pub max_output_tokens: Option<u64>,
+}
+
+/// Compact validated output contribution for startup hydration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttemptOutputRevision {
+    /// Receipt revision, one or its one allowed correction.
+    pub revision: u64,
+    /// Exact, conservative unknown, or proven not sent.
+    pub disposition: AttemptDisposition,
+    /// Output occupancy, distinct from known token counters.
+    pub output: u64,
+}
+
+/// A recovered attempt's original output account and deduplication markers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptOutputRecovery {
+    /// Original generation; never install it as the current turn implicitly.
+    pub scope: AttemptOutputScope,
+    /// Stable physical attempt identity.
+    pub attempt_id: String,
+    /// First accepted receipt, retained for identical retry recognition.
+    pub first: AttemptOutputRevision,
+    /// Latest accepted replacement.
+    pub current: AttemptOutputRevision,
+}
 
 /// Pinned normalized usage reachability, not a source of implicit free rates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +67,10 @@ pub struct AttemptIntent {
     pub schema_version: u32,
     /// Canonical session authority.
     pub session_id: SessionId,
+    /// Older journals may omit this; they must never charge a new turn during
+    /// recovery. Every newly admitted bound attempt receives an explicit scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_scope: Option<AttemptOutputScope>,
     /// Stable unique physical-send identity.
     pub attempt_id: String,
     /// Owning Fusion run identity.
@@ -228,6 +260,30 @@ pub struct AttemptLedger {
 }
 
 impl AttemptLedger {
+    /// Recover compact output contributions after intent recovery has settled
+    /// every incomplete send. Legacy unbound intents cannot name a new turn.
+    pub fn output_recovery(&self) -> Vec<AttemptOutputRecovery> {
+        self.attempts
+            .values()
+            .filter_map(|entry| {
+                let scope = entry.intent.output_scope.clone()?;
+                let (_, first) = entry.receipts.first_key_value()?;
+                let (_, current) = entry.receipts.last_key_value()?;
+                let revision = |entry: &ReceiptEntry| AttemptOutputRevision {
+                    revision: entry.receipt.revision,
+                    disposition: entry.receipt.disposition,
+                    output: entry.ack.contribution.output_occupancy,
+                };
+                Some(AttemptOutputRecovery {
+                    scope,
+                    attempt_id: entry.intent.attempt_id.clone(),
+                    first: revision(first),
+                    current: revision(current),
+                })
+            })
+            .collect()
+    }
+
     /// Empty fold authority for one canonical session.
     #[must_use]
     pub fn new(session_id: SessionId) -> Self {
@@ -611,6 +667,7 @@ mod tests {
         AttemptIntent {
             schema_version: 1,
             session_id,
+            output_scope: None,
             attempt_id: id.into(),
             run_id: "run".into(),
             logical_call_id: id.into(),

@@ -2413,6 +2413,18 @@ async fn workflow_fusion_with_progress<T>(
     }
 }
 
+fn encode_workflow_fusion_result(
+    result: &platform_api::FusionResult,
+    settlement: Option<&platform_api::FusionAttemptSettlementStatus>,
+) -> Result<String, serde_json::Error> {
+    let Some(settlement) = settlement else {
+        return serde_json::to_string(result);
+    };
+    let mut value = serde_json::to_value(result)?;
+    value["attempt_settlement"] = serde_json::to_value(settlement)?;
+    serde_json::to_string(&value)
+}
+
 /// Known output across the entire agent run, including separately reported
 /// reasoning. Older spawners omit cumulative usage, so retain their final
 /// report as a fallback. A failed run can still have already-billed output.
@@ -2864,6 +2876,196 @@ mod captured_output_tests {
             .try_recv()
             .unwrap()
             .starts_with("[workflow_fusion]"));
+    }
+
+    struct BillingProbe {
+        mode: platform_api::ModelAttemptBillingMode,
+        succeeds: bool,
+        settlement_failed: bool,
+        calls: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl FusionExecutor for BillingProbe {
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface { enabled: true, ..Default::default() }
+        }
+
+        async fn run(
+            &self,
+            _: platform_api::FusionRequest,
+            _: platform_api::FusionInheritance,
+            _: Option<mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, FusionError> {
+            panic!("workflow must use trusted preparation")
+        }
+
+        fn prepare(
+            self: Arc<Self>,
+            submission: FusionSubmission,
+        ) -> Result<PreparedFusionRun, FusionError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let control = platform_api::FusionRunControl::new_with_billing_mode(
+                submission.identity.clone(),
+                1_000,
+                submission.inherit.cancel.clone(),
+                FusionRunFactsRecorder::default(),
+                self.mode,
+            );
+            let summary = FusionPreparedSummary {
+                identity: submission.identity,
+                duration_ms: 1_000,
+                planned_panels: Some(2),
+            };
+            Ok(PreparedFusionRun::new(
+                summary,
+                control.clone(),
+                move |_, progress| async move {
+                    if let Some(tx) = progress {
+                        tx.try_send(platform_api::FusionProgress {
+                            stage: platform_api::FusionStage::Analyzing,
+                            panel_id: None,
+                            message: String::new(),
+                            realized_output_tokens: Some(31),
+                            egress_profiles: None,
+                            panels_allocated: None,
+                        })
+                        .unwrap();
+                    }
+                    let result = if self.succeeds {
+                        Ok(platform_api::FusionResult {
+                            schema_version: 1,
+                            run_id: control.identity().run_id.to_string(),
+                            status: platform_api::FusionStatus::Completed,
+                            decision: platform_api::FusionDecision::Merged,
+                            final_text: "answer".into(),
+                            analysis: None,
+                            panels: vec![],
+                            usage: platform_api::FusionUsage {
+                                output_tokens: 17,
+                                ..Default::default()
+                            },
+                            timing: Default::default(),
+                            egress_profiles: vec![],
+                        })
+                    } else {
+                        Err(FusionError::Internal)
+                    };
+                    if self.mode == platform_api::ModelAttemptBillingMode::MeteredAttempts {
+                        let status = if self.settlement_failed {
+                            platform_api::FusionAttemptSettlementStatus::Failed {
+                                reason: "ledger unavailable".into(),
+                            }
+                        } else {
+                            platform_api::FusionAttemptSettlementStatus::Settled
+                        };
+                        control.facts().set_attempt_settlement(status);
+                    }
+                    platform_api::FusionRunOutcome::from_control(&control, result)
+                },
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn captured_output_failed_settlement_preserves_answer_and_blocks_next_call() {
+        let probe = Arc::new(ExecutionProbe {
+            session: protocol::SessionId::new(),
+            generation: protocol::MessageId::new(),
+            events: std::sync::Mutex::new(HashMap::new()),
+            calls: AtomicU64::new(0),
+            result: None,
+        });
+        let calls = Arc::new(AtomicU64::new(0));
+        let executor = Arc::new(BillingProbe {
+            mode: platform_api::ModelAttemptBillingMode::MeteredAttempts,
+            succeeds: true,
+            settlement_failed: true,
+            calls: calls.clone(),
+        });
+        run_workflow_script_with_live_updates_and_fusion_recorded(
+            "const first = await fusion('first'); if (first.final_text !== 'answer' || first.attempt_settlement.status !== 'failed') throw new Error('lost answer or failure'); try { await fusion('second'); } catch (error) { if (String(error).includes('accounting failed')) return first.final_text; throw error; } throw new Error('second call was admitted');",
+            DEFAULT_WORKFLOW_SUBAGENT, "workflow", probe.clone(), probe.clone(), probe.clone(),
+            None, None, None, None, Some(100), None, 0, NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)), CancellationToken::new(),
+            Some(executor), Some("settlement-failure".into()), Some("model".into()), Some("profile".into()),
+            None, Arc::new(AnalyticsBus::new()), None, None, None, None,
+            Some(WorkflowOutputScope::new(probe)),
+        ).await.unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn captured_output_metered_fusion_never_recharges_legacy_output() {
+        use platform_api::ModelAttemptBillingMode::{LegacyAggregate, MeteredAttempts};
+        for mode in [LegacyAggregate, MeteredAttempts] {
+            for succeeds in [false, true] {
+                for scoped in [false, true] {
+                    let probe = Arc::new(ExecutionProbe {
+                        session: protocol::SessionId::new(),
+                        generation: protocol::MessageId::new(),
+                        events: std::sync::Mutex::new(HashMap::new()),
+                        calls: AtomicU64::new(0),
+                        result: None,
+                    });
+                    let account = WorkflowOutputScope::new(probe.clone());
+                    let pool = Arc::new(AtomicU64::new(0));
+                    let result = run_workflow_script_with_live_updates_and_fusion_recorded(
+                        "return await fusion('question');",
+                        DEFAULT_WORKFLOW_SUBAGENT,
+                        "workflow",
+                        probe.clone(),
+                        probe.clone(),
+                        probe.clone(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(100),
+                        Some(pool.clone()),
+                        0,
+                        NestedConfig::default(),
+                        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        CancellationToken::new(),
+                        Some(Arc::new(BillingProbe {
+                            mode,
+                            succeeds,
+                            settlement_failed: false,
+                            calls: Arc::new(AtomicU64::new(0)),
+                        })),
+                        Some("billing-probe".into()),
+                        Some("model".into()),
+                        Some("profile".into()),
+                        None,
+                        Arc::new(AnalyticsBus::new()),
+                        None,
+                        None,
+                        None,
+                        None,
+                        scoped.then(|| account.clone()),
+                    )
+                    .await;
+                    assert_eq!(
+                        result.is_ok(),
+                        succeeds,
+                        "{mode:?}, scoped={scoped}: {result:?}"
+                    );
+                    let expected = if mode == MeteredAttempts {
+                        0
+                    } else if succeeds {
+                        17
+                    } else {
+                        31
+                    };
+                    assert_eq!(account.spent(), if scoped { expected } else { 0 });
+                    assert_eq!(
+                        pool.load(Ordering::Relaxed),
+                        if scoped { 0 } else { expected },
+                        "{mode:?}, scoped={scoped}: {result:?}"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -3729,6 +3931,16 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                                             .map(|usage| usage.output_tokens)
                                     })
                                     .or(last_realized_output_tokens);
+                                if matches!(
+                                    outcome.facts.attempt_settlement,
+                                    Some(
+                                        platform_api::FusionAttemptSettlementStatus::Failed { .. }
+                                    )
+                                ) {
+                                    // Preserve the computed answer below, but a script
+                                    // cannot use it as permission for another paid call.
+                                    output_accounting_failed.store(true, Ordering::Release);
+                                }
                                 let record_output = |tokens| {
                                     if let Some(scope) = &output_scope {
                                         scope.record_legacy(
@@ -3743,13 +3955,24 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                                     }
                                 };
                                 // There is no await between final progress drain and publication.
-                                let output_record = known_output.map(record_output).transpose();
+                                let output_record = if outcome.billing_mode()
+                                    == platform_api::ModelAttemptBillingMode::LegacyAggregate
+                                {
+                                    known_output.map(record_output).transpose()
+                                } else {
+                                    // The captured attempt receipts already own output,
+                                    // including unknown/failed calls. Never charge it twice.
+                                    Ok(None)
+                                };
                                 if let Err(error) = output_record {
                                     output_accounting_failed.store(true, Ordering::Release);
                                     wf_throw(&error.to_string())
                                 } else {
                                     match outcome.result {
-                                        Ok(result) => match serde_json::to_string(&result) {
+                                        Ok(result) => match encode_workflow_fusion_result(
+                                            &result,
+                                            outcome.facts.attempt_settlement.as_ref(),
+                                        ) {
                                             Ok(encoded) => {
                                                 if let Some(j) = journal.as_ref() {
                                                     j.lock()

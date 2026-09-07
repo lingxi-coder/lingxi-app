@@ -832,6 +832,9 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         )
     });
 
+    // Retain paid usage in the owned cost mutation before surfacing output failure.
+    orch.check_output_accounting()?;
+
     // Inline tool descriptions may grow after MCP/plugin discovery. Commit an
     // append-only replacement only after a successful non-API-error response;
     // deferred entries are excluded and existing descriptions are immutable.
@@ -1517,6 +1520,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
             OrchestratorError::Internal(format!("cost durability preflight failed: {error}"))
         })?;
     }
+    let mut output_observation = orch.capture_main_output().await?;
     let first = if let Some(params) = hint_params {
         // The controller is live: take the hint-carrying seam. `params.body` is
         // `None` when the estimated savings are under the floor — the oracle
@@ -1576,7 +1580,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // provider error message by `llm_client`; the PTL truncator treats `0` as
     // "unknown" and falls back to its 20% heuristic.
     let token_gap: u64 = match first {
-        Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
+        Ok(resp) => {
+            if let Some(observation) = &mut output_observation {
+                observation.observe(&resp.usage);
+                let _ = observation.finish();
+            }
+            return Ok(PtlCallOutcome::Response(Box::new(resp)));
+        }
         Err(LlmError::ContextOverflow { token_gap }) => token_gap,
         Err(other) => {
             // Context-hint error half (oracle `onRequestError`). A 422/424 is
@@ -1627,7 +1637,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         .messages_create(model, profile, system, retry, tools.clone())
                         .await
                     {
-                        Ok(resp) => Ok(PtlCallOutcome::Response(Box::new(resp))),
+                        Ok(resp) => {
+                            if let Some(observation) = &mut output_observation {
+                                observation.observe(&resp.usage);
+                                let _ = observation.finish();
+                            }
+                            Ok(PtlCallOutcome::Response(Box::new(resp)))
+                        }
                         Err(e) => Err(e.into()),
                     };
                 }
@@ -1675,7 +1691,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     .messages_create(model, profile, system, retry, tools.clone())
                     .await
                 {
-                    Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
+                    Ok(resp) => {
+                        if let Some(observation) = &mut output_observation {
+                            observation.observe(&resp.usage);
+                            let _ = observation.finish();
+                        }
+                        return Ok(PtlCallOutcome::Response(Box::new(resp)));
+                    }
                     Err(LlmError::ContextOverflow { .. }) => {}
                     Err(other) => return Err(other.into()),
                 }
@@ -1830,7 +1852,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     .messages_create(model, profile, system, history, tools)
                     .await
                 {
-                    Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
+                    Ok(resp) => {
+                        if let Some(observation) = &mut output_observation {
+                            observation.observe(&resp.usage);
+                            let _ = observation.finish();
+                        }
+                        return Ok(PtlCallOutcome::Response(Box::new(resp)));
+                    }
                     Err(LlmError::ContextOverflow { .. }) => {}
                     Err(other) => return Err(other.into()),
                 }

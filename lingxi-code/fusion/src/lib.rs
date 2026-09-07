@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod analyst;
+mod attempts;
 mod budget;
 mod config;
 mod decision;
@@ -20,8 +21,13 @@ mod progress;
 mod snapshot;
 mod synthesizer;
 
+pub use attempts::{
+    FusionAttemptFinalizer, FusionAttemptLivePolicy, FusionAttemptRegistrar,
+    FusionAttemptRegistration, FusionAttemptSettlement, FusionAttemptSettlementError,
+    FusionAttemptSummary, FusionPanelAttemptFence, RegisteredFusionAttempts,
+};
 pub use budget::{CapturedPriceBook, FusionPriceBook, FusionQuote, ModelRates};
-pub use config::{FusionConfigSource, FusionRuntimeConfig};
+pub use config::{FusionCompletionPolicy, FusionConfigSource, FusionRuntimeConfig};
 pub use model_resolver::{CatalogModel, ModelLimits, ModelSource, ResolvedPanel, ResolvedSet};
 pub use orchestrator::FusionOrchestrator;
 pub use snapshot::{CatalogRevision, CatalogSnapshot, FusionRuntimeSnapshot};

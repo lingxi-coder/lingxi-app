@@ -67,6 +67,14 @@ pub struct ModelRegistry {
 }
 
 impl ModelRegistry {
+    pub(crate) fn profile_pricing_config(&self, profile: &str) -> Option<crate::PricingConfig> {
+        self.config
+            .providers
+            .iter()
+            .find(|provider| provider.profile_name == profile)
+            .map(|provider| provider.pricing.clone())
+    }
+
     fn effective_metadata(
         provider: &crate::ProviderProfile,
         model: &crate::ModelProfile,
@@ -312,5 +320,37 @@ impl ModelRegistry {
     /// Resolve a route and optional same-profile vision delegate unscoped.
     pub fn resolve_media_route(&self, requested: &str) -> Result<MediaRoute, LlmError> {
         self.resolve_media_route_in(requested, None)
+    }
+}
+
+#[cfg(test)]
+mod pricing_policy_tests {
+    use super::*;
+
+    #[test]
+    fn profile_pricing_policy_retains_explicit_overrides_without_metadata_inference() {
+        let mut provider = crate::builtin_presets()
+            .providers
+            .into_iter()
+            .next()
+            .unwrap();
+        provider.profile_name = "captured-profile".into();
+        provider.pricing.overrides = vec![(
+            "billing-only-alias".into(),
+            crate::TokenPricing::input_output(3.0, 7.0),
+        )];
+        let expected = provider.pricing.clone();
+        let registry = ModelRegistry::from_config(crate::ClientConfig {
+            providers: vec![provider],
+        })
+        .unwrap();
+        let mut captured = registry.profile_pricing_config("captured-profile").unwrap();
+        assert_eq!(captured, expected);
+        captured.overrides.clear();
+        assert_eq!(
+            registry.profile_pricing_config("captured-profile"),
+            Some(expected)
+        );
+        assert!(registry.profile_pricing_config("other-profile").is_none());
     }
 }

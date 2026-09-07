@@ -381,6 +381,7 @@ mod tests {
                     ..Default::default()
                 },
                 journal_revision: 0,
+                attempt_outputs: Vec::new(),
             })
         }
     }
@@ -416,6 +417,7 @@ mod tests {
                         ..Default::default()
                     },
                     journal_revision: 0,
+                    attempt_outputs: Vec::new(),
                 },
                 Arc::new(TestPersistence(requests)),
                 Arc::new(TestLease(session.to_string())),

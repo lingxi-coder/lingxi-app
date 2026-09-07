@@ -31,7 +31,7 @@ impl From<AttemptAdmissionError> for BeginFailure {
 impl CostTracker {
     pub(crate) fn begin_budgeted_attempt(
         &self,
-        intent: AttemptIntent,
+        mut intent: AttemptIntent,
         publication: BoundAttemptBudget,
         max_reserved_nano_usd: u64,
         session_limit: Option<u64>,
@@ -40,6 +40,7 @@ impl CostTracker {
         let authority = self.selected_entry();
         self.preflight_authority(&authority)?;
         publication.validate_tracker(self)?;
+        publication.capture_output_scope(&mut intent)?;
         if intent.session_id != authority.session_id
             || authority.persistence.is_none()
             || intent.billing_mode != AttemptBillingMode::MeteredAttempts

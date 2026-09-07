@@ -1859,6 +1859,8 @@ impl CoordinatorState {
         if recover {
             self.recover_attempts()?;
         }
+        let attempt_outputs = self.attempts.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner).output_recovery();
         let projection = self
             .projection
             .lock()
@@ -1870,6 +1872,7 @@ impl CoordinatorState {
         Ok(CostHydration {
             state,
             journal_revision,
+            attempt_outputs,
         })
     }
 }
@@ -1930,6 +1933,7 @@ fn hydrate_from_journal(
                         ..Default::default()
                     },
                     journal_revision: 0,
+                    attempt_outputs: Vec::new(),
                 },
                 durable_results: std::collections::HashMap::new(),
                 fusion_terminals,
@@ -1958,6 +1962,7 @@ fn hydrate_from_journal(
         hydration: CostHydration {
             state: latest,
             journal_revision: replay.last_revision,
+            attempt_outputs: Vec::new(),
         },
         durable_results,
         fusion_terminals,

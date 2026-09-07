@@ -675,6 +675,27 @@ mod tests {
     }
 
     #[test]
+    fn fusion_completion_policy_cross_layer_conflict_is_preserved_for_validation() {
+        let lower: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{"completionPolicy":"quorum_after_grace"}}"#,
+        ).unwrap();
+        let upper: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{"partialOk":false}}"#,
+        ).unwrap();
+        lower.fusion.as_ref().unwrap().validate().unwrap();
+        upper.fusion.as_ref().unwrap().validate().unwrap();
+        let merged = merge(lower, upper);
+        let settings = merged.fusion.unwrap();
+        assert_eq!(settings.completion_policy, Some(crate::settings::schema::FusionCompletionPolicy::QuorumAfterGrace));
+        assert!(settings.validate().is_err());
+        let reset: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{"completionPolicy":"wait_all"}}"#,
+        ).unwrap();
+        let merged = merge(SettingsJson { fusion: Some(settings), ..Default::default() }, reset);
+        merged.fusion.unwrap().validate().unwrap();
+    }
+
+    #[test]
     fn fusion_deep_merge_overrides_scalars_and_replaces_arrays() {
         let prev = SettingsJson {
             fusion: Some(crate::settings::schema::FusionSettingsJson {

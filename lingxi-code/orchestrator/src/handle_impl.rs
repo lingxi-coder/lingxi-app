@@ -350,6 +350,8 @@ impl ConversationOrchestrator {
             .map_err(|error| {
                 HandleError::ActionFailed(format!("Cost session preparation failed: {error}"))
             })?;
+        let prepared_output = self.prepare_output_session(new_session_id_value).await
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
         let (prepared_cost, durable_lock) = prepared.map_or((None, None), |prepared| {
             let (cost, durable_lock) = prepared.into_parts();
             (Some(cost), durable_lock)
@@ -365,6 +367,7 @@ impl ConversationOrchestrator {
         // synchronous critical section so caller cancellation cannot split it.
         prepared_transcript.activate();
         self.model_runtime.activate_cost_session(prepared_cost);
+        self.install_output_session(prepared_output);
         s.history.clear();
         s.transcript_only_messages.clear();
         s.compact_summary_messages.clear();
@@ -417,6 +420,8 @@ impl ConversationOrchestrator {
             .map_err(|error| {
                 HandleError::ActionFailed(format!("Cost session preparation failed: {error}"))
             })?;
+        let prepared_output = self.prepare_output_session(session_id).await
+            .map_err(|error| HandleError::ActionFailed(error.to_string()))?;
         let (prepared_cost, durable_lock) = prepared.map_or((None, None), |prepared| {
             let (cost, durable_lock) = prepared.into_parts();
             (Some(cost), durable_lock)
@@ -431,6 +436,7 @@ impl ConversationOrchestrator {
         let mut s = self.session.lock().await;
         prepared_transcript.activate();
         self.model_runtime.activate_cost_session(prepared_cost);
+        self.install_output_session(prepared_output);
         s.history = history;
         if !runtime.model.is_empty() {
             let listings = self.api.list_model_listings();

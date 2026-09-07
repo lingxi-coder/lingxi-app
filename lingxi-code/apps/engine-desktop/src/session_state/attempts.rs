@@ -27,6 +27,10 @@ fn fold_error(error: cost::AttemptFoldError) -> CostPersistError {
 }
 
 impl AttemptProjection {
+    pub(super) fn output_recovery(&self) -> Vec<cost::AttemptOutputRecovery> {
+        self.ledger.output_recovery()
+    }
+
     pub(super) fn new(session_id: SessionId) -> Self {
         Self {
             ledger: AttemptLedger::new(session_id),
@@ -310,6 +314,7 @@ mod tests {
         AttemptIntent {
             schema_version: 1,
             session_id,
+            output_scope: None,
             attempt_id: id.into(),
             run_id: "test-run".into(),
             logical_call_id: id.into(),
@@ -429,7 +434,12 @@ mod tests {
         let session = SessionId::new();
         let coordinator = open(root.path(), session);
         coordinator.hydrate_blocking().unwrap();
-        let authorization = intent(session, "interrupted");
+        let mut authorization = intent(session, "interrupted");
+        let generation = protocol::MessageId::new();
+        authorization.output_scope = Some(cost::AttemptOutputScope {
+            generation_id: generation,
+            max_output_tokens: Some(100),
+        });
         coordinator
             .state
             .persist_attempt(
@@ -448,12 +458,24 @@ mod tests {
         let recovered = reopened.hydrate_blocking().unwrap();
         assert_eq!(recovered.state.total_nano_usd, 1000);
         assert_eq!(recovered.state.cost_revision, 1);
+        assert_eq!(recovered.attempt_outputs.len(), 1);
+        assert_eq!(recovered.attempt_outputs[0].scope.generation_id, generation);
+        assert_eq!(
+            recovered.attempt_outputs[0].current.disposition,
+            AttemptDisposition::Unknown
+        );
+        assert_eq!(
+            recovered.attempt_outputs[0].current.output,
+            authorization.authorized_output_tokens
+        );
         reopened.close_and_drain().await.unwrap();
         worker.await.unwrap();
         drop(reopened);
         let reopened = open(root.path(), session);
         let worker = reopened.start().await.unwrap();
-        assert_eq!(reopened.hydrate_blocking().unwrap().state.cost_revision, 1);
+        let again = reopened.hydrate_blocking().unwrap();
+        assert_eq!(again.state.cost_revision, 1);
+        assert_eq!(again.attempt_outputs, recovered.attempt_outputs);
         reopened.close_and_drain().await.unwrap();
         worker.await.unwrap();
     }

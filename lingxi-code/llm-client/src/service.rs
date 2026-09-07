@@ -3496,6 +3496,14 @@ impl ApiService {
         self.model_listings.clone()
     }
 
+    /// Capture the configured pricing policy for one exact provider profile.
+    /// Unlike diagnostic model metadata, this preserves explicit override
+    /// declarations. It exposes no credentials and does not resolve a price.
+    #[must_use]
+    pub fn profile_pricing_config(&self, profile: &str) -> Option<crate::PricingConfig> {
+        self.client.profile_pricing_config(profile)
+    }
+
     // ── OpenAI Responses WebSocket preconnect ────────────────────────────────
 
     /// Best-effort startup preconnect for OpenAI Responses WebSocket profiles.

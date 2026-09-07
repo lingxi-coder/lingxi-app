@@ -337,6 +337,16 @@ impl ConversationOrchestrator {
         self
     }
 
+    /// Attach the host's shared output book. Inert unless explicitly wired.
+    #[must_use]
+    pub fn with_workflow_output_scopes(
+        mut self,
+        scopes: Arc<dyn platform_api::WorkflowOutputScopes>,
+    ) -> Self {
+        self.model_runtime.output_scopes = Some(scopes);
+        self
+    }
+
     /// Attach an app-owned durable session switcher for hot clear/resume.
     /// The switcher hydrates and claims a destination before the live
     /// orchestrator session identity changes; legacy hosts leave it unset.

@@ -35,6 +35,7 @@ mod cron_command;
 pub mod file_changed_watch;
 pub mod fork_resume;
 mod fusion_command;
+mod fusion_attempts;
 pub mod fusion_recorder;
 pub mod ide;
 pub mod session_agents;
@@ -11690,17 +11691,41 @@ pub async fn build(
     //       2.1.217 stops background subagents when that ceiling is reached;
     //       `Halt` makes each child runner's turn-boundary budget check enforce
     //       the same limit. With no CLI ceiling this remains unlimited.
+    let shared_budget_enforcer = Arc::new(cost::BudgetEnforcer::new(
+        cost::BudgetConfig {
+            max_session_nano_usd: orch_cfg.max_budget_nano_usd,
+            max_turn_nano_usd: None,
+            max_turn_tokens: None,
+            warning_thresholds: Vec::new(),
+            on_exceed: cost::BudgetExceedPolicy::Halt,
+        },
+        cost_tracker.clone(),
+    ));
+    // Main responses and workflows must publish to the same session/turn
+    // book that will authorize physical Fusion attempts. Disabled-persistence
+    // hosts retain the legacy counters, since these scopes require durability.
+    let workflow_output_scopes = session_state_manager
+        .as_ref()
+        .map(|_| shared_budget_enforcer.workflow_output_scopes());
+    if let Some(scopes) = &workflow_output_scopes {
+        if let Err(error) = scopes
+            .ensure_current(main_session_id, protocol::MessageId::new(), orch_cfg.token_budget)
+            .await
+        {
+            let cleanup = if let Some(coordinator) = &session_state {
+                coordinator.close_and_drain().await.err()
+            } else {
+                None
+            };
+            let message = cleanup.map_or_else(
+                || error.to_string(),
+                |cleanup| format!("{error}; coordinator cleanup failed: {cleanup}"),
+            );
+            return Err(BuildError::DurableSession(message));
+        }
+    }
     let budget_enforcer: Arc<dyn platform_api::budget::BudgetEnforcerHandle> =
-        Arc::new(cost::BudgetEnforcer::new(
-            cost::BudgetConfig {
-                max_session_nano_usd: orch_cfg.max_budget_nano_usd,
-                max_turn_nano_usd: None,
-                max_turn_tokens: None,
-                warning_thresholds: Vec::new(),
-                on_exceed: cost::BudgetExceedPolicy::Halt,
-            },
-            cost_tracker.clone(),
-        ));
+        shared_budget_enforcer;
 
     // (5) Memory filler + the permission gate. The gate is the F2-01 branch
     //     point: the CLI opts into the always-allow `NoOpPermissionGate`; a
@@ -13112,35 +13137,37 @@ pub async fn build(
         analytics_bus.clone(),
         pricing.clone(),
     );
+    let local_workflow_handler = tasks::handlers::LocalWorkflowHandler::new(
+        subagent_spawner.clone(),
+        local_workflow_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+        budget_enforcer.clone(),
+        task_registry_inner.output_manager.clone(),
+    )
+    // Durable hosts share a captured session/turn account. Legacy hosts keep
+    // the late-bound pool and baseline used by the existing budget reader.
+    .with_token_budget(orch_cfg.token_budget)
+    .with_output_pool_cell(local_workflow_output_pool.clone())
+    .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
+    .with_workspace_permission_leases(workspace_leases.clone(), cwd.clone())
+    .with_worktree_manager(worktree_manager.clone())
+    .with_fusion(fusion_executor.clone())
+    .with_terminal_recorder_opt(fusion_recorder.clone())
+    .with_terminal_recorder_factory(fusion_recorder_factory.clone())
+    .with_status_sink(
+        local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
+    )
+    .with_workflow_progress_sink(local_workflow_event_sink.clone()
+        as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>)
+    // Nested workflow names resolve against the same plugin registry.
+    .with_plugin_workflows(plugin_workflow_registry.clone());
+    let local_workflow_handler = if let Some(scopes) = &workflow_output_scopes {
+        local_workflow_handler.with_output_scopes(scopes.clone())
+    } else {
+        local_workflow_handler
+    };
     task_registry_inner.register_handler(
         tasks::TaskType::LocalWorkflow,
-        Arc::new(
-            tasks::handlers::LocalWorkflowHandler::new(
-                subagent_spawner.clone(),
-                local_workflow_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
-                budget_enforcer.clone(),
-                task_registry_inner.output_manager.clone(),
-            )
-            // The script's `budget.total` = the turn's token target
-            // (`OrchestratorConfig.token_budget`); `spent()` reads the shared
-            // pool (main loop + all workflows) once `output_pool_cell` is bound.
-            .with_token_budget(orch_cfg.token_budget)
-            .with_output_pool_cell(local_workflow_output_pool.clone())
-            .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
-            .with_workspace_permission_leases(workspace_leases.clone(), cwd.clone())
-            .with_worktree_manager(worktree_manager.clone())
-            .with_fusion(fusion_executor.clone())
-            .with_terminal_recorder_opt(fusion_recorder.clone())
-            .with_terminal_recorder_factory(fusion_recorder_factory.clone())
-            .with_status_sink(
-                local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
-            )
-            .with_workflow_progress_sink(local_workflow_event_sink.clone()
-                as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>)
-            // §14 — nested `workflow({name})` resolves a plugin workflow after
-            // the project/user directories miss.
-            .with_plugin_workflows(plugin_workflow_registry.clone()),
-        ),
+        Arc::new(local_workflow_handler),
     );
 
     // Fusion `/fusion` + Agent `subagent_type: "fusion"` share one orchestrator.
@@ -14673,6 +14700,11 @@ pub async fn build(
             ))
         }
         _ => orch_builder,
+    };
+    let orch_builder = if let Some(scopes) = workflow_output_scopes {
+        orch_builder.with_workflow_output_scopes(scopes)
+    } else {
+        orch_builder
     };
     let orch = Arc::new(orch_builder);
     orch.attach_owned_session_switches();

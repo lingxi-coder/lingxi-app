@@ -693,6 +693,7 @@ impl StreamingTurnDriver<'_> {
             })?;
         }
         let mut cost_receipt = None;
+        let output_observation = orch.capture_main_output().await?;
 
         // Either an open stream to pump, or a turn already RECOVERED from a
         // connect-phase prompt-too-long (#1, see the ContextOverflow arm).
@@ -707,7 +708,7 @@ impl StreamingTurnDriver<'_> {
             )
             .await
         {
-            Ok(s) => OpenedModelStream::Stream(s),
+            Ok(s) => OpenedModelStream::Stream(super::output_accounting_impl::account_stream(s, output_observation)),
             // #1 (main-loop parity): a connect-phase 413 / prompt-too-long
             // surfaces HERE as `LlmError::ContextOverflow` — the adapter's
             // `drive_stream` returns `Err` on connect status >= 400, so it
@@ -779,6 +780,8 @@ impl StreamingTurnDriver<'_> {
                             &pumped_from_recovery,
                             api_call_started.elapsed(),
                         );
+                        orch.check_output_accounting()?;
+
                         // P2-04: when a `MessageDisplay` hook is active the
                         // completed-message pass below is the single on-screen
                         // render (with `displayContent` substitution) — skip the
@@ -985,6 +988,7 @@ impl StreamingTurnDriver<'_> {
             })?;
         }
 
+        let mut output_observation = orch.capture_main_output().await?;
         let resp = orch
             .api
             .messages_create_seeded(
@@ -998,6 +1002,11 @@ impl StreamingTurnDriver<'_> {
             .await
             .map_err(OrchestratorError::ApiCall)?;
 
+        if let Some(observation) = &mut output_observation {
+            observation.observe(&resp.usage);
+            let _ = observation.finish();
+        }
+
         // Convert LlmResponse → PumpedTurn so the rest of the streaming
         // turn loop can proceed identically.
         let pumped_from_fallback = llm_response_to_pumped_turn(&resp);
@@ -1009,6 +1018,8 @@ impl StreamingTurnDriver<'_> {
             &pumped_from_fallback,
             api_call_started.elapsed(),
         );
+
+        orch.check_output_accounting()?;
 
         // Emit text blocks from the non-streaming response to the output
         // stream, mirroring the batched path (turn_loop.rs step 4:
@@ -1157,7 +1168,7 @@ impl StreamingTurnDriver<'_> {
                     crate::streaming_loop::PumpedTurn,
                     crate::streaming_loop::PumpFailure,
                 > = loop {
-                    match crate::streaming_loop::pump_stream_with_executor_tracked(
+                    let observed_pump = crate::streaming_loop::pump_stream_with_executor_tracked(
                         cur_stream,
                         &orch.output,
                         ExecutorPump {
@@ -1167,8 +1178,21 @@ impl StreamingTurnDriver<'_> {
                             suppress_live_text: display_hook_active,
                         },
                     )
-                    .await
-                    {
+                    .await;
+                    if let Err(error) = orch.check_output_accounting() {
+                        let retained = match &observed_pump {
+                            Ok(pumped) => pumped,
+                            Err(failure) => &failure.partial,
+                        };
+                        // The error must not discard known paid usage. This
+                        // synchronous handoff survives dropping its waiter.
+                        let _receipt = Self::begin_stream_cost_response(
+                            orch, cost_scope.as_ref(), &model, model_profile.as_deref(),
+                            retained, api_call_started.elapsed(),
+                        );
+                        return Err(error);
+                    }
+                    match observed_pump {
                         Ok(p) => break Ok(p),
                         Err(f)
                             if crate::streaming_loop::is_transient_mid_stream(&f.error)
@@ -1218,6 +1242,7 @@ impl StreamingTurnDriver<'_> {
                                     ))
                                 })?;
                             }
+                            let output_observation = orch.capture_main_output().await?;
                             match orch
                                 .streaming_api
                                 .stream(
@@ -1230,7 +1255,7 @@ impl StreamingTurnDriver<'_> {
                                 .await
                             {
                                 Ok(s) => {
-                                    cur_stream = s;
+                                    cur_stream = super::output_accounting_impl::account_stream(s, output_observation);
                                     continue;
                                 }
                                 // Re-open failed: surface as the terminal
@@ -1787,6 +1812,7 @@ impl StreamingTurnDriver<'_> {
             });
         }
 
+        orch.begin_output_turn(user_msg.id()).await?;
         let mut loop_state =
             StreamingTurnState::new(orch, prior_message_id.unwrap_or_else(|| user_msg.id()));
         let final_message_id;
@@ -2371,6 +2397,7 @@ impl ConversationOrchestrator {
         // Turn-start output baseline (claude-code `xtr` via `UAc(e)`): snapshot the
         // cumulative pool as this turn begins, so a workflow launched this turn
         // reads `budget.spent()` = `pool - baseline` (output spent THIS turn).
+        self.begin_output_turn(MessageId::new()).await?;
         self.compaction_runtime.turn_start_output_baseline.store(
             self.compaction_runtime
                 .output_token_pool
@@ -3254,6 +3281,7 @@ impl ConversationOrchestrator {
         // Turn-start output baseline (claude-code `xtr` via `UAc(e)`): snapshot
         // the cumulative pool as this turn begins, so a workflow launched this
         // turn reads `budget.spent()` = output spent THIS turn.
+        self.begin_output_turn(MessageId::new()).await?;
         self.compaction_runtime.turn_start_output_baseline.store(
             self.compaction_runtime
                 .output_token_pool

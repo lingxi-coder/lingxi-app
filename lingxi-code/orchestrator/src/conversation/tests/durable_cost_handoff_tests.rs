@@ -264,6 +264,7 @@ fn durable_tracker(
                     ..CostState::default()
                 },
                 journal_revision: 0,
+                attempt_outputs: Vec::new(),
             },
             persistence,
             lease,

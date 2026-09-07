@@ -116,6 +116,20 @@ impl fmt::Debug for WorkflowOutputScope {
 /// Host-owned current-scope publication. Capturing does not create a turn.
 #[async_trait]
 pub trait WorkflowOutputScopes: Send + Sync {
+    /// Return the existing session account unchanged, or atomically publish
+    /// an initial command-only generation when none exists. Never reinterpret
+    /// a durability/identity error as absence. Hosts call this before exposing
+    /// a newly activated session to workflows that can run before a model turn.
+    /// The default is fail-closed for providers without initialization support.
+    async fn ensure_current(
+        &self,
+        session_id: SessionId,
+        _initial_generation: MessageId,
+        _max_output_tokens: Option<u64>,
+    ) -> Result<WorkflowOutputScope, BudgetError> {
+        self.capture(session_id)
+    }
+
     /// Begin or retrieve the shared account for this session and generation.
     /// Conflicting limits for an existing generation must fail, not reset it.
     async fn begin_turn(

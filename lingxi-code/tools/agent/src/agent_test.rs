@@ -723,6 +723,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     struct PreparedAllocationFusion {
         result: platform_api::FusionResult,
         allocated_panels: u8,
+        settlement_failure: Option<String>,
     }
 
     #[async_trait::async_trait]
@@ -750,6 +751,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             let runner_control = control.clone();
             let result = self.result.clone();
             let allocated_panels = self.allocated_panels;
+            let settlement_failure = self.settlement_failure.clone();
             Ok(platform_api::PreparedFusionRun::new(
                 platform_api::FusionPreparedSummary {
                     identity,
@@ -765,6 +767,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                             .facts()
                             .set_allocated_panels(allocated_panels);
                         result.run_id = runner_control.identity().run_id.to_string();
+                        if let Some(reason) = settlement_failure {
+                            runner_control.facts().set_attempt_settlement(
+                                platform_api::FusionAttemptSettlementStatus::Failed { reason },
+                            );
+                        }
                         platform_api::FusionRunOutcome::from_control(&runner_control, Ok(result))
                     }
                 },
@@ -1278,6 +1285,31 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
     }
 
+    #[tokio::test]
+    async fn fusion_settlement_failure_preserves_answer_and_emits_failed_not_completed() {
+        let sink = Arc::new(InMemorySink::new());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+        let bctx = wired_ctx_with_bus(arc_mock_spawner(), bus).await;
+        let result = sample_fusion_result(platform_api::FusionStatus::Completed);
+        let answer = result.final_text.clone();
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(PreparedAllocationFusion {
+            result, allocated_panels: 3, settlement_failure: Some("durable receipt rejected".into()),
+        }));
+        let output = tool.call(serde_json::json!({"description":"deliberate","prompt":"review this","subagent_type":"fusion"}),
+            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())), fresh_tx()).await.expect("computed answer remains available");
+        assert!(output.is_error);
+        assert_eq!(output.data["status"], "failed");
+        assert_eq!(output.data["computationStatus"], "completed");
+        assert_eq!(output.data["attemptSettlement"]["status"], "failed");
+        assert_eq!(output.data["attemptSettlement"]["reason"], "durable receipt rejected");
+        assert!(output.model_content.as_ref().unwrap().contains(&answer));
+        assert!(output.model_content.as_ref().unwrap().contains("accounting failed"));
+        let events = sink.events().await;
+        assert_eq!(events.iter().filter(|event| event.name == AGENT_FAILED).count(), 1);
+        assert!(!events.iter().any(|event| event.name == AGENT_COMPLETED_M4_05));
+    }
+
     /// [round-4 review, finding 9] The Ok-path spawn-quota release counts
     /// EVERY panel `result.panels` carries, including ones the orchestrator
     /// finished with `error_category: Some("spawn")` — a pre-allocation
@@ -1425,6 +1457,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let tool = AgentTool::new(bctx).with_fusion(Arc::new(PreparedAllocationFusion {
             result,
             allocated_panels: 2,
+            settlement_failure: None,
         }));
         tool.call(
             serde_json::json!({

@@ -56,6 +56,7 @@ async fn setup() -> (
                         ..Default::default()
                     },
                     journal_revision: 0,
+                    attempt_outputs: Vec::new(),
                 },
                 Arc::new(Persistence(tx)),
                 Arc::new(Lease(session.to_string())),

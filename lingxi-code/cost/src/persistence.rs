@@ -370,6 +370,8 @@ pub struct CostHydration {
     pub state: CostState,
     /// Last authoritative journal revision.
     pub journal_revision: u64,
+    /// Original-generation attempt occupancy, derived from validated receipts.
+    pub attempt_outputs: Vec<crate::AttemptOutputRecovery>,
 }
 
 /// App-tier state loader used during boot and hot session switches.

@@ -72,6 +72,7 @@ pub mod model_attempt;
 pub mod model_capabilities;
 pub mod notification;
 pub mod orchestrator;
+pub mod panel_pool;
 pub mod parked_agent_store;
 pub mod permission_gate;
 pub mod platform;
@@ -145,7 +146,7 @@ pub use filesystem::{
 pub use fusion::{
     normalize_dimensions, panel_never_dispatched, parse_fusion_model_ref, parse_fusion_models,
     validate_panel_report, DurableFusionOutboxRecord, DurableFusionTerminalRecord, EvidenceKind,
-    FusionActivation, FusionAgentSurface, FusionAnalysis, FusionCompletionSink,
+    FusionActivation, FusionAgentSurface, FusionAnalysis, FusionAttemptSettlementStatus, FusionCompletionSink,
     FusionContradiction, FusionCostClass, FusionDecision, FusionError, FusionExecutor,
     FusionInheritance, FusionLatencyClass, FusionModelHints, FusionModelRef,
     FusionNeedsParentReason, FusionOrigin, FusionPreparedSummary, FusionPreset, FusionProgress,
@@ -189,8 +190,8 @@ pub use mobile_runtime_environment::{
     MobileToolRuntime, MOBILE_RUNTIME_ENVIRONMENT_VERSION,
 };
 pub use model_attempt::{
-    ModelAttemptContext, ModelAttemptContextError, ModelAttemptRegistrationId, ModelAttemptRun,
-    ModelAttemptStage,
+    ModelAttemptBillingMode, ModelAttemptContext, ModelAttemptContextError,
+    ModelAttemptRegistrationId, ModelAttemptRun, ModelAttemptStage,
 };
 pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{
@@ -211,6 +212,7 @@ pub use orchestrator::{
     RecapOutcome, RegisterRepoRootOutcome, RegisterRepoRootRequest, ResumeRuntimeSnapshot,
     RewindRowData, SkillInfo, StatusSnapshot, TurnOutcome,
 };
+pub use panel_pool::{PanelPoolLease, PanelPoolPermit};
 pub use permission_gate::{
     AutoModePrompt, PermissionDecision, PermissionGate, PermissionRequestSource,
 };

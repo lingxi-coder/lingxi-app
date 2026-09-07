@@ -465,10 +465,29 @@ impl FusionActivation {
     }
 }
 
+/// Durable attempt settlement is independent of computation and publication.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum FusionAttemptSettlementStatus {
+    /// Registered producers/finalizers have not finished yet.
+    Pending,
+    /// Every accepted attempt has completed durable settlement.
+    Settled,
+    /// Computation may still have an answer, but accounting is unavailable.
+    Failed {
+        /// Safe diagnostic, excluding prompts, credentials and provider bodies.
+        reason: String,
+    },
+}
+
 /// Reliable run facts. Progress events are a lossy UI projection and never
 /// replace this recorder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FusionRunFacts {
+    /// Absent for legacy aggregate runners. A computed answer does not imply
+    /// that accepted physical attempts have settled successfully.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_settlement: Option<FusionAttemptSettlementStatus>,
     /// Number of routes resolved before any provider call, when known.
     #[serde(default)]
     pub resolved_panels: Option<u8>,
@@ -504,6 +523,29 @@ pub struct FusionRunFacts {
 pub struct FusionRunFactsRecorder(Arc<std::sync::Mutex<FusionRunFacts>>);
 
 impl FusionRunFactsRecorder {
+    /// Record the host-owned attempt finalizer status without changing the
+    /// computation result or the independent transcript publication receipt.
+    pub fn set_attempt_settlement(&self, status: FusionAttemptSettlementStatus) {
+        let mut facts = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(
+            facts.attempt_settlement,
+            Some(FusionAttemptSettlementStatus::Failed { .. })
+        ) || (matches!(
+            facts.attempt_settlement,
+            Some(FusionAttemptSettlementStatus::Settled)
+        ) && matches!(status, FusionAttemptSettlementStatus::Pending))
+        {
+            return;
+        }
+        if matches!(status, FusionAttemptSettlementStatus::Failed { .. }) {
+            facts.usage_incomplete = true;
+        }
+        facts.attempt_settlement = Some(status);
+    }
+
     /// Snapshot facts without exposing the lock to callers.
     #[must_use]
     pub fn snapshot(&self) -> FusionRunFacts {
@@ -526,7 +568,11 @@ impl FusionRunFactsRecorder {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         facts.usage = Some(usage);
-        facts.usage_incomplete = incomplete;
+        facts.usage_incomplete = incomplete
+            || matches!(
+                facts.attempt_settlement,
+                Some(FusionAttemptSettlementStatus::Failed { .. })
+            );
     }
 
     /// Record a terminal/preflight state that provably made no provider call.
@@ -541,7 +587,10 @@ impl FusionRunFactsRecorder {
         facts.dispatched_panels = Some(0);
         facts.attempts = Some(0);
         facts.usage = Some(FusionUsage::default());
-        facts.usage_incomplete = false;
+        facts.usage_incomplete = matches!(
+            facts.attempt_settlement,
+            Some(FusionAttemptSettlementStatus::Failed { .. })
+        );
         facts.confirmed_egress.clear();
         facts.possible_egress.clear();
     }
@@ -669,6 +718,21 @@ impl FusionRunFactsRecorder {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .timing = timing;
     }
+
+    /// Replace provisional stage egress with authoritative attempt facts.
+    pub fn replace_egress(&self, mut confirmed: Vec<String>, mut possible: Vec<String>) {
+        confirmed.sort();
+        confirmed.dedup();
+        possible.sort();
+        possible.dedup();
+        possible.retain(|profile| confirmed.binary_search(profile).is_err());
+        let mut facts = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        facts.confirmed_egress = confirmed;
+        facts.possible_egress = possible;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -692,6 +756,7 @@ struct FusionControlState {
 #[derive(Clone)]
 pub struct FusionRunControl {
     identity: FusionRunIdentity,
+    billing_mode: crate::ModelAttemptBillingMode,
     duration: Duration,
     cancel: CancellationToken,
     facts: FusionRunFactsRecorder,
@@ -709,9 +774,33 @@ impl FusionRunControl {
         cancel: CancellationToken,
         facts: FusionRunFactsRecorder,
     ) -> Self {
+        Self::new_with_billing_mode(
+            identity,
+            duration_ms,
+            cancel,
+            facts,
+            crate::ModelAttemptBillingMode::LegacyAggregate,
+        )
+    }
+
+    /// Capture the host's accounting contract before activation. Select
+    /// metered mode only when every paid stage uses registered attempts;
+    /// serialized request metadata must never choose this value.
+    #[must_use]
+    pub fn new_with_billing_mode(
+        identity: FusionRunIdentity,
+        duration_ms: u64,
+        cancel: CancellationToken,
+        facts: FusionRunFactsRecorder,
+        billing_mode: crate::ModelAttemptBillingMode,
+    ) -> Self {
+        if billing_mode == crate::ModelAttemptBillingMode::MeteredAttempts {
+            facts.set_attempt_settlement(FusionAttemptSettlementStatus::Pending);
+        }
         let (terminal_tx, _terminal_rx) = watch::channel(None);
         Self {
             identity,
+            billing_mode,
             duration: Duration::from_millis(duration_ms),
             cancel,
             facts,
@@ -730,6 +819,12 @@ impl FusionRunControl {
     #[must_use]
     pub fn identity(&self) -> &FusionRunIdentity {
         &self.identity
+    }
+
+    /// Immutable host-selected accounting contract, shared by every terminal path.
+    #[must_use]
+    pub fn billing_mode(&self) -> crate::ModelAttemptBillingMode {
+        self.billing_mode
     }
 
     /// Shared facts recorder.
@@ -960,8 +1055,39 @@ impl FusionRunControl {
         result: Result<FusionResult, FusionError>,
         publication: FusionPublicationReceipt,
     ) -> FusionRunOutcome {
-        let candidate = FusionRunOutcome::from_control(self, result);
+        let candidate = self.terminal_candidate(result);
         self.publish_terminal_candidate(candidate, publication)
+    }
+
+    fn terminal_candidate(&self, result: Result<FusionResult, FusionError>) -> FusionRunOutcome {
+        if self.billing_mode == crate::ModelAttemptBillingMode::MeteredAttempts {
+            let activated = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .activated_at
+                .is_some();
+            let mut facts = self
+                .facts
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matches!(
+                facts.attempt_settlement,
+                None | Some(FusionAttemptSettlementStatus::Pending)
+            ) {
+                facts.attempt_settlement = Some(if activated {
+                    facts.usage_incomplete = true;
+                    FusionAttemptSettlementStatus::Failed {
+                        reason: "registered attempt settlement did not complete".into(),
+                    }
+                } else {
+                    // An unactivated prepared closure cannot acquire holds or send.
+                    FusionAttemptSettlementStatus::Settled
+                });
+            }
+        }
+        FusionRunOutcome::from_control(self, result)
     }
 
     fn publish_terminal_candidate(
@@ -991,6 +1117,7 @@ impl FusionRunControl {
 /// One terminal Fusion envelope, including reliable identity and facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FusionRunOutcome {
+    billing_mode: crate::ModelAttemptBillingMode,
     /// Immutable identity.
     pub identity: FusionRunIdentity,
     /// Legacy computation result or failure.
@@ -1010,6 +1137,7 @@ impl FusionRunOutcome {
         result: Result<FusionResult, FusionError>,
     ) -> Self {
         Self {
+            billing_mode: control.billing_mode,
             identity: control.identity.clone(),
             result,
             facts: control.facts.snapshot(),
@@ -1021,6 +1149,12 @@ impl FusionRunOutcome {
     #[must_use]
     pub fn into_legacy_result(self) -> Result<FusionResult, FusionError> {
         self.result
+    }
+
+    /// Whether attempt receipts or the legacy aggregate own accounting.
+    #[must_use]
+    pub fn billing_mode(&self) -> crate::ModelAttemptBillingMode {
+        self.billing_mode
     }
 }
 
@@ -1237,7 +1371,7 @@ impl PreparedFusionRun {
                 // cooperative token. Resolve the natural/cancel winner and
                 // cross the finalization boundary in one atomic transition.
                 let result = supervisor_control.claim_supervisor_result(runner_result);
-                let candidate = FusionRunOutcome::from_control(&supervisor_control, result.clone());
+                let candidate = supervisor_control.terminal_candidate(result.clone());
                 let publication =
                     Self::record_terminal_candidate(candidate.clone(), terminal_capability).await;
                 supervisor_control.publish_terminal_candidate(candidate, publication);
@@ -1299,7 +1433,7 @@ impl PreparedFusionRun {
         result: Result<FusionResult, FusionError>,
         capability: Option<FusionTerminalCapability>,
     ) -> FusionRunOutcome {
-        let candidate = FusionRunOutcome::from_control(&control, result.clone());
+        let candidate = control.terminal_candidate(result.clone());
         let publication = Self::record_terminal_candidate(candidate.clone(), capability).await;
         control.publish_terminal_candidate(candidate, publication)
     }
@@ -2090,6 +2224,9 @@ pub enum FusionError {
     /// Session spawn cap cannot admit the panel batch.
     #[error("fusion spawn limit exceeded")]
     SpawnLimitExceeded,
+    /// Whole-group capacity admission failed before any panel was spawned.
+    #[error("fusion panel admission rejected: {0}")]
+    PanelAdmissionRejected(String),
     /// Every panel failed.
     #[error("all fusion panels failed")]
     AllPanelsFailed,
@@ -2141,6 +2278,7 @@ impl FusionError {
                 | Self::BudgetReservationUnavailable
                 | Self::BudgetExceeded
                 | Self::SpawnLimitExceeded
+                | Self::PanelAdmissionRejected(_)
                 | Self::AllPanelsFailedPreflight
         )
     }
@@ -3233,6 +3371,167 @@ mod tests {
         assert!(!control.claim_terminal());
         assert!(control.claim_finalizing());
         assert!(control.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn billing_mode_is_owned_by_supervisor_not_runner() {
+        use crate::ModelAttemptBillingMode::{LegacyAggregate, MeteredAttempts};
+        for (captured, offered) in [
+            (LegacyAggregate, MeteredAttempts),
+            (MeteredAttempts, LegacyAggregate),
+        ] {
+            let (_, legacy, summary) = terminal_test_control(FusionOrigin::Agent);
+            assert_eq!(legacy.billing_mode(), LegacyAggregate);
+            let control = FusionRunControl::new_with_billing_mode(
+                legacy.identity().clone(),
+                1_000,
+                CancellationToken::new(),
+                FusionRunFactsRecorder::default(),
+                captured,
+            );
+            let foreign = FusionRunControl::new_with_billing_mode(
+                legacy.identity().clone(),
+                1_000,
+                CancellationToken::new(),
+                FusionRunFactsRecorder::default(),
+                offered,
+            );
+            let (recorder, seen, _) =
+                ProbeTerminalRecorder::new(false, false, FusionPublicationReceipt::not_required());
+            let prepared =
+                PreparedFusionRun::new(summary, control.clone(), move |_, _| async move {
+                    FusionRunOutcome::from_control(&foreign, Err(FusionError::Internal))
+                })
+                .with_terminal_capability(FusionTerminalCapability::new(recorder));
+            let outcome = prepared.activate(FusionActivation::now(), None).await;
+            assert_eq!(outcome.billing_mode(), captured);
+            assert_eq!(seen.await.unwrap().0.billing_mode(), captured);
+            assert_eq!(control.wait_terminal().await.billing_mode(), captured);
+        }
+    }
+
+    #[tokio::test]
+    async fn billing_mode_survives_panic_cancel_and_unactivated_drop() {
+        use crate::ModelAttemptBillingMode::MeteredAttempts;
+        for path in 0..5 {
+            let (_, legacy, summary) = terminal_test_control(FusionOrigin::Agent);
+            let control = FusionRunControl::new_with_billing_mode(
+                legacy.identity().clone(),
+                1_000,
+                CancellationToken::new(),
+                FusionRunFactsRecorder::default(),
+                MeteredAttempts,
+            );
+            let runner_control = control.clone();
+            let (recorder, seen, _) =
+                ProbeTerminalRecorder::new(false, false, FusionPublicationReceipt::not_required());
+            let prepared = PreparedFusionRun::new(summary, control.clone(), move |_, _| {
+                assert_ne!(path, 0, "synchronous runner panic");
+                async move {
+                    assert_ne!(path, 1, "poll panic");
+                    if path == 3 {
+                        assert!(runner_control.request_cancel());
+                    }
+                    FusionRunOutcome::from_control(&runner_control, Err(FusionError::Internal))
+                }
+            })
+            .with_terminal_capability(FusionTerminalCapability::new(recorder));
+            if path == 2 {
+                assert!(control.request_cancel());
+            }
+            if path == 4 {
+                drop(prepared);
+            } else {
+                assert_eq!(
+                    prepared
+                        .activate(FusionActivation::now(), None)
+                        .await
+                        .billing_mode(),
+                    MeteredAttempts
+                );
+            }
+            let recorded = tokio::time::timeout(Duration::from_secs(2), seen)
+                .await
+                .unwrap()
+                .unwrap()
+                .0;
+            assert_eq!(recorded.billing_mode(), MeteredAttempts);
+            if matches!(path, 2 | 4) {
+                assert_eq!(
+                    recorded.facts.attempt_settlement,
+                    Some(FusionAttemptSettlementStatus::Settled)
+                );
+            } else {
+                assert!(matches!(
+                    recorded.facts.attempt_settlement,
+                    Some(FusionAttemptSettlementStatus::Failed { .. })
+                ));
+            }
+            assert_eq!(
+                control.wait_terminal().await.billing_mode(),
+                MeteredAttempts
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn billing_mode_accounting_failure_preserves_computed_answer() {
+        for explicit_failure in [false, true] {
+            let (_, legacy, summary) = terminal_test_control(FusionOrigin::Agent);
+            let control = FusionRunControl::new_with_billing_mode(
+                legacy.identity().clone(),
+                1_000,
+                CancellationToken::new(),
+                FusionRunFactsRecorder::default(),
+                crate::ModelAttemptBillingMode::MeteredAttempts,
+            );
+            let expected = terminal_test_result(&control.identity().run_id);
+            let result = expected.clone();
+            let runner_control = control.clone();
+            let prepared = PreparedFusionRun::new(summary, control, move |_, _| async move {
+                if explicit_failure {
+                    let facts = runner_control.facts();
+                    facts.set_attempt_settlement(FusionAttemptSettlementStatus::Failed {
+                        reason: "durable writer unavailable".into(),
+                    });
+                    facts.set_known_zero();
+                    facts.replace_usage(FusionUsage::default(), false);
+                    facts.set_attempt_settlement(FusionAttemptSettlementStatus::Settled);
+                    facts.set_attempt_settlement(FusionAttemptSettlementStatus::Pending);
+                }
+                FusionRunOutcome::from_control(&runner_control, Ok(result))
+            });
+            let outcome = prepared.activate(FusionActivation::now(), None).await;
+            assert_eq!(outcome.result, Ok(expected));
+            assert!(matches!(
+                outcome.facts.attempt_settlement,
+                Some(FusionAttemptSettlementStatus::Failed { .. })
+            ));
+            assert!(outcome.facts.usage_incomplete);
+            assert_eq!(
+                outcome.publication,
+                FusionPublicationReceipt::not_required()
+            );
+        }
+    }
+
+    #[test]
+    fn billing_mode_legacy_facts_keep_wire_compatibility() {
+        let value = serde_json::to_value(FusionRunFacts::default()).unwrap();
+        assert!(value.get("attempt_settlement").is_none());
+        assert_eq!(
+            serde_json::from_value::<FusionRunFacts>(value)
+                .unwrap()
+                .attempt_settlement,
+            None
+        );
+        let facts = FusionRunFactsRecorder::default();
+        facts.set_attempt_settlement(FusionAttemptSettlementStatus::Settled);
+        facts.set_attempt_settlement(FusionAttemptSettlementStatus::Pending);
+        assert_eq!(
+            facts.snapshot().attempt_settlement,
+            Some(FusionAttemptSettlementStatus::Settled)
+        );
     }
 
     #[tokio::test]

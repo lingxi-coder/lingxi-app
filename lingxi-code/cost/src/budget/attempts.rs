@@ -26,6 +26,38 @@ impl BoundAttemptBudget {
         self.account.tracker.clone()
     }
 
+    pub(crate) fn capture_output_scope(
+        &self,
+        intent: &mut crate::AttemptIntent,
+    ) -> Result<(), crate::CostPersistError> {
+        let book = self
+            .account
+            .session
+            .lock_reservations(&self.account.tracker.durability_gate())
+            .map_err(|error| crate::CostPersistError::Rejected(error.to_string()))?;
+        let state = book
+            .output_scopes
+            .get(&self.account.generation_id)
+            .ok_or_else(|| {
+                crate::CostPersistError::Rejected("attempt output scope disappeared".into())
+            })?;
+        let captured = crate::attempt::AttemptOutputScope {
+            generation_id: self.account.generation_id,
+            max_output_tokens: state.max_output_tokens,
+        };
+        if intent
+            .output_scope
+            .as_ref()
+            .is_some_and(|supplied| supplied != &captured)
+        {
+            return Err(crate::CostPersistError::Rejected(
+                "attempt output generation mismatch".into(),
+            ));
+        }
+        intent.output_scope = Some(captured);
+        Ok(())
+    }
+
     pub(crate) fn authorize_and_enqueue(
         &self,
         intent: &crate::AttemptIntent,
@@ -143,16 +175,11 @@ impl From<BudgetError> for AttemptAdmissionError {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct OutputRevision {
-    revision: u64,
-    disposition: AttemptDisposition,
-    output: u64,
-}
+type OutputRevision = crate::AttemptOutputRevision;
 
 pub(super) struct PublishedAttemptOutput {
-    first: OutputRevision,
-    current: OutputRevision,
+    pub(super) first: OutputRevision,
+    pub(super) current: OutputRevision,
 }
 
 fn invalid(reason: &'static str) -> BudgetError {

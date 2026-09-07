@@ -85,6 +85,7 @@ impl RealizedSpendSink<'_> {
         generic_prompt: &str,
         dispatch: &PanelDispatch,
     ) {
+        if self.facts.snapshot().attempt_settlement.is_some() { return; }
         let in_flight = in_flight_panels(collected, panels, generic_prompt, dispatch);
         if let Ok(mut guard) = self.realized_tokens.lock() {
             // Output tokens only — an in-flight panel has provably sent its
@@ -579,11 +580,14 @@ type PanelTaskOutput = (usize, ResolvedPanel, String, Duration, PanelFinish);
 #[derive(Clone, Default)]
 pub(crate) struct PanelTaskBarrier {
     inner: Arc<PanelTaskBarrierInner>,
+    pub(crate) attempt_run: Option<Arc<platform_api::ModelAttemptRun>>,
+    pub(crate) panel_fence: Option<Arc<dyn crate::FusionPanelAttemptFence>>,
 }
 
 #[derive(Default)]
 struct PanelTaskBarrierInner {
     abort_handles: Mutex<Vec<AbortHandle>>,
+    producer_drain: Mutex<Option<Arc<dyn platform_api::panel_pool::PanelPoolDrain>>>,
     active: AtomicUsize,
     drained: Notify,
 }
@@ -599,6 +603,12 @@ impl Drop for PanelTaskDone {
 }
 
 impl PanelTaskBarrier {
+    pub(crate) fn set_producer_drain(&self, drain: Arc<dyn platform_api::panel_pool::PanelPoolDrain>) {
+        *self.inner.producer_drain.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(drain);
+    }
+    fn close_panel_admission(&self) {
+        if let Some(fence) = &self.panel_fence { fence.close(); }
+    }
     fn begin(&self) -> PanelTaskDone {
         self.inner.active.fetch_add(1, Ordering::SeqCst);
         PanelTaskDone(Arc::clone(&self.inner))
@@ -613,6 +623,9 @@ impl PanelTaskBarrier {
     }
 
     pub(crate) async fn abort_and_wait(&self) {
+        // A faulty host close callback must not skip physical producer drain
+        // while the supervisor is already recovering an inner panic.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.close_panel_admission()));
         let handles = {
             let mut handles = self
                 .inner
@@ -627,10 +640,47 @@ impl PanelTaskBarrier {
         loop {
             let drained = self.inner.drained.notified();
             if self.inner.active.load(Ordering::SeqCst) == 0 {
-                return;
+                break;
             }
             drained.await;
         }
+        let producer = self.inner.producer_drain.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        if let Some(producer) = producer { producer.wait().await; }
+    }
+}
+
+#[cfg(test)]
+mod producer_drain_test {
+    use super::*;
+    use std::future::Future;
+
+    struct Gate(tokio::sync::Semaphore);
+    #[async_trait::async_trait]
+    impl platform_api::panel_pool::PanelPoolDrain for Gate {
+        async fn wait(&self) { self.0.acquire().await.unwrap().forget(); }
+    }
+    struct PanicClose;
+    #[async_trait::async_trait]
+    impl crate::FusionPanelAttemptFence for PanicClose {
+        fn close(&self) { panic!("injected host close panic"); }
+        async fn wait(&self) -> Result<(), FusionError> { Ok(()) }
+    }
+
+    #[tokio::test]
+    async fn supervisor_retains_producer_drain_after_local_ticket_and_fence_panic() {
+        let gate = Arc::new(Gate(tokio::sync::Semaphore::new(0)));
+        let mut barrier = PanelTaskBarrier::default();
+        barrier.panel_fence = Some(Arc::new(PanicClose));
+        {
+            let local: Arc<dyn platform_api::panel_pool::PanelPoolDrain> = gate.clone();
+            barrier.set_producer_drain(local);
+        }
+        assert_eq!(barrier.inner.active.load(Ordering::SeqCst), 0);
+        let mut wait = Box::pin(barrier.abort_and_wait());
+        assert!(std::future::poll_fn(|cx| std::task::Poll::Ready(wait.as_mut().poll(cx))).await.is_pending());
+        gate.0.add_permits(1);
+        wait.await;
     }
 }
 
@@ -710,7 +760,10 @@ fn spawn_panel_tasks(
     dispatch: &Arc<PanelDispatch>,
     facts: Option<&FusionRunFactsRecorder>,
     task_barrier: &PanelTaskBarrier,
+    admission: Option<platform_api::PanelPoolLease>,
 ) -> (JoinSet<PanelTaskOutput>, HashMap<tokio::task::Id, usize>) {
+    let mut permits = admission.map(platform_api::PanelPoolLease::into_permits)
+        .unwrap_or_default().into_iter();
     let mut join_set = JoinSet::new();
     let mut task_index: HashMap<tokio::task::Id, usize> = HashMap::with_capacity(panels.len());
     // [Finding 16] The host-side spawn `name` must identify the same panel
@@ -758,10 +811,18 @@ fn spawn_panel_tasks(
         let total = panels.len();
         let facts = facts.cloned();
         let task_done = task_barrier.begin();
+        // Captured before the task's first poll so aborting an unpolled panel
+        // returns capacity without falsely reporting an allocation.
+        let permit = permits.next();
+        let attempt_context = task_barrier.attempt_run.as_ref().map(|run| {
+            u32::try_from(index).map_err(|_| ()).and_then(|slot| {
+                run.context(platform_api::ModelAttemptStage::Panel, Some(slot)).map_err(|_| ())
+            })
+        }).transpose();
         let abort_handle = join_set.spawn(async move {
             let _task_done = task_done;
             let started = Instant::now();
-            let request = spawn_request(
+            let mut request = spawn_request(
                 &panel,
                 prompt,
                 &schema,
@@ -776,7 +837,13 @@ fn spawn_panel_tasks(
                 tool_invoker: subagent.tool_invoker,
                 budget: subagent.budget,
             };
-            let outcome = if panel_deadline <= Instant::now() {
+            let context_failed = match attempt_context {
+                Ok(context) => { request.model_attempt = context; false },
+                Err(()) => true,
+            };
+            let outcome = if context_failed {
+                PanelFinish::Failed { category: "not_dispatched".into(), detail: Some("attempt context unavailable".into()) }
+            } else if panel_deadline <= Instant::now() {
                 PanelFinish::TotalTimedOut
             } else {
                 tokio::select! {
@@ -822,15 +889,14 @@ fn spawn_panel_tasks(
                                     total,
                                     facts: facts.clone(),
                                 });
-                            spawner
-                                .spawn_workflow_with_observer(
-                                    request,
-                                    inherit,
-                                    None,
-                                    Some(allocation_observer),
-                                    panel_watchdog,
-                                )
-                                .await
+                            match permit {
+                                Some(permit) => spawner.spawn_workflow_with_observer_admitted(
+                                    request, inherit, None, Some(allocation_observer), panel_watchdog, permit,
+                                ).await,
+                                None => spawner.spawn_workflow_with_observer(
+                                    request, inherit, None, Some(allocation_observer), panel_watchdog,
+                                ).await,
+                            }
                         },
                     ) => {
                         match result {
@@ -910,6 +976,7 @@ pub async fn run_panels(
         progress,
         sink,
         &task_barrier,
+        None,
     )
     .await;
     task_barrier.abort_and_wait().await;
@@ -936,8 +1003,19 @@ pub(crate) async fn run_panels_supervised(
     // `RealizedSpendSink`.
     sink: Option<&RealizedSpendSink<'_>>,
     task_barrier: &PanelTaskBarrier,
+    admission: Option<platform_api::PanelPoolLease>,
 ) -> Result<Vec<PanelInternal>, FusionError> {
+    if admission.as_ref().is_some_and(|lease| lease.len() != panels.len()) {
+        return Err(FusionError::PanelAdmissionRejected("host returned the wrong panel count".into()));
+    }
     let schema = serde_json::to_string(&panel_report_json_schema()).unwrap_or_default();
+    let quorum_enabled = config.completion_policy
+        == crate::config::FusionCompletionPolicy::QuorumAfterGrace;
+    if quorum_enabled && !partial_ok {
+        return Err(FusionError::InvalidConfiguration(
+            "fusion.completionPolicy quorum_after_grace requires partial results".into(),
+        ));
+    }
     let total = panels.len();
     let min_successful = usize::from(
         config
@@ -983,12 +1061,14 @@ pub(crate) async fn run_panels_supervised(
         &dispatch,
         sink.map(|sink| &sink.facts),
         task_barrier,
+        admission,
     );
 
     let mut collected: Vec<(usize, PanelInternal)> = Vec::with_capacity(total);
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let mut bar_aborted = false;
+    let mut quorum_deadline: Option<Instant> = None;
     // `allocated_count` can advance after the first dispatch notification:
     // the panel task enters the spawner before its allocation receipt runs.
     // Keep the last published count so a cancellation path can publish the
@@ -999,6 +1079,7 @@ pub(crate) async fn run_panels_supervised(
         tokio::select! {
             biased;
             () = inherit.cancel.cancelled() => {
+                task_barrier.close_panel_admission();
                 join_set.abort_all();
                 // [Round-9 review item 1] The drain here used to be
                 // `while join_set.join_next().await.is_some() {}` — every
@@ -1138,18 +1219,35 @@ pub(crate) async fn run_panels_supervised(
                     None => break,
                 }
             }
+            // Biased AFTER join_next: drain every already-ready payload before
+            // aborting the unfinished siblings, retaining their real usage.
+            () = async {
+                match quorum_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if !bar_aborted => {
+                task_barrier.close_panel_admission();
+                join_set.abort_all();
+                bar_aborted = true;
+            }
+        }
+        if quorum_enabled && quorum_deadline.is_none() && succeeded >= min_successful {
+            quorum_deadline = Some(Instant::now() + Duration::from_secs(10));
         }
         if !bar_aborted {
             let remaining = total.saturating_sub(collected.len());
             let cannot_reach_min = succeeded.saturating_add(remaining) < min_successful;
             let any_failure_requires_all = !partial_ok && failed > 0;
             if remaining > 0 && (cannot_reach_min || any_failure_requires_all) {
+                task_barrier.close_panel_admission();
                 join_set.abort_all();
                 bar_aborted = true;
             }
         }
     }
 
+    task_barrier.close_panel_admission();
     collected.sort_by_key(|(index, _)| *index);
     Ok(collected
         .into_iter()
@@ -3335,6 +3433,121 @@ mod cancel_drain_settlement_tests {
     use platform_api::subagent_spawn::{SubagentInheritance, SubagentSpawnError};
     use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
     use tokio_util::sync::CancellationToken;
+
+    struct QuorumSpawner {
+        release_third: Arc<Notify>,
+        third_returned: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl SubagentSpawner for QuorumSpawner {
+        async fn spawn(
+            &self,
+            request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            match request.model_profile.as_deref() {
+                Some("third") => {
+                    self.release_third.notified().await;
+                    self.third_returned.notify_one();
+                }
+                Some("fourth") => std::future::pending::<()>().await,
+                _ => {}
+            }
+            Ok(completed_with_real_usage())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quorum_grace_is_fixed_and_drains_every_slot_with_real_usage() {
+        let config = FusionRuntimeConfig {
+            completion_policy: crate::config::FusionCompletionPolicy::QuorumAfterGrace,
+            ..FusionRuntimeConfig::defaults()
+        };
+        let inherit = FusionInheritance::new(SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: Arc::new(InertBudget),
+        }, CancellationToken::new());
+        let mut panels = two_panels();
+        panels.push(ResolvedPanel { profile: "third".into(), model: "model".into() });
+        panels.push(ResolvedPanel { profile: "fourth".into(), model: "model".into() });
+        let release_third = Arc::new(Notify::new());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let progress = Some(tx);
+        let mut run = Box::pin(run_panels(Arc::new(QuorumSpawner { release_third: release_third.clone(), third_returned: Arc::new(Notify::new()) }),
+            &inherit, &config, true, "task", &panels, "quorum", Duration::from_secs(60), &progress, None));
+        // Keep the collector under test ownership: no scheduling ambiguity at expiry.
+        for target in [2, 3] {
+            if target == 3 {
+                tokio::time::advance(Duration::from_secs(9)).await;
+                release_third.notify_one();
+            }
+            loop {
+                tokio::select! {
+                    result = &mut run => panic!("premature completion: {result:?}"),
+                    event = rx.recv() => {
+                        if matches!(event.unwrap().stage, FusionStage::RunningPanels { completed, .. } if completed >= target) { break; }
+                    }
+                }
+            }
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let result = run.await.unwrap();
+        assert_eq!(result.len(), 4);
+        assert_eq!(result.iter().filter(|p| p.status == PanelRunStatus::Completed).count(), 3);
+        for panel in &result[..3] {
+            assert_eq!(panel.usage.as_ref().unwrap().output_tokens, REAL_OUTPUT_TOKENS);
+        }
+        assert_eq!(result[3].profile, "fourth");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quorum_expiry_keeps_ready_payload_and_wait_all_keeps_waiting() {
+        for quorum in [false, true] {
+            let config = FusionRuntimeConfig {
+                completion_policy: if quorum { crate::config::FusionCompletionPolicy::QuorumAfterGrace } else { crate::config::FusionCompletionPolicy::WaitAll },
+                ..FusionRuntimeConfig::defaults()
+            };
+            let cancel = CancellationToken::new();
+            let inherit = FusionInheritance::new(SubagentInheritance {
+                tool_invoker: Arc::new(InertInvoker), budget: Arc::new(InertBudget),
+            }, cancel.clone());
+            let mut panels = two_panels();
+            panels.push(ResolvedPanel { profile: "third".into(), model: "model".into() });
+            panels.push(ResolvedPanel { profile: "fourth".into(), model: "model".into() });
+            let release_third = Arc::new(Notify::new());
+            let third_returned = Arc::new(Notify::new());
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+            let progress = Some(tx);
+            let mut run = Box::pin(run_panels(Arc::new(QuorumSpawner { release_third: release_third.clone(), third_returned: third_returned.clone() }),
+                &inherit, &config, true, "task", &panels, "quorum", Duration::from_secs(60), &progress, None));
+            loop {
+                tokio::select! {
+                    result = &mut run => panic!("premature completion: {result:?}"),
+                    event = rx.recv() => {
+                        if matches!(event.unwrap().stage, FusionStage::RunningPanels { completed: 2, .. }) { break; }
+                    }
+                }
+            }
+            // Do not poll the collector while making both its timer and payload ready.
+            tokio::time::advance(Duration::from_secs(10)).await;
+            release_third.notify_one();
+            third_returned.notified().await;
+            if quorum {
+                let result = run.await.unwrap();
+                assert_eq!(result.len(), 4);
+                assert_eq!(result[2].status, PanelRunStatus::Completed);
+                assert_eq!(result[2].usage.as_ref().unwrap().output_tokens, REAL_OUTPUT_TOKENS);
+            } else {
+                std::future::poll_fn(|cx| {
+                    assert!(std::future::Future::poll(run.as_mut(), cx).is_pending());
+                    std::task::Poll::Ready(())
+                }).await;
+                cancel.cancel();
+                assert!(matches!(run.await, Err(FusionError::Cancelled)));
+            }
+        }
+    }
 
     struct InertInvoker;
     #[async_trait]

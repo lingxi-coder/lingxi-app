@@ -11,6 +11,17 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+/// Accounting contract selected by trusted host preparation, not request JSON.
+/// Serialization supports the durable attempt journal; this enum alone grants
+/// no registration or dispatch authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelAttemptBillingMode {
+    /// Existing run-level settlement owns money and output publication.
+    LegacyAggregate,
+    /// Durable physical-attempt receipts own money and output publication.
+    MeteredAttempts,
+}
+
 /// The paid stage of a registered Fusion run; this metadata grants no rights.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

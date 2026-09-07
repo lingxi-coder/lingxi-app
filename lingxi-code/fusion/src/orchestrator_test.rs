@@ -1,5 +1,251 @@
 //! Fake-spawner / fake-side-query tests for the Fusion orchestrator.
 
+#[test]
+fn completion_policy_request_no_partial_rejects_before_attempt_registration() {
+    let mut config = test_config();
+    config.completion_policy = crate::FusionCompletionPolicy::QuorumAfterGrace;
+    let spawner = FakeSpawner::new(three_ok());
+    let registered = Arc::new(AtomicUsize::new(0));
+    let orchestrator = Arc::new(FusionOrchestrator::new(
+        spawner.clone(), ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+        Arc::new(config), Arc::new(catalog()),
+    ).with_attempt_registrar(Arc::new(AttemptRegistrarProbe {
+        reject: false, fail_settlement: false, registered: registered.clone(),
+        settled: Arc::new(AtomicUsize::new(0)), barrier: None,
+    })));
+    let mut request = request("strict full panel");
+    request.partial_ok = false;
+    let identity = FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Slash, None);
+    let result = orchestrator.prepare(FusionSubmission::new(request, inherit(), identity).unwrap());
+    assert!(matches!(result, Err(FusionError::InvalidRequest(_))));
+    assert_eq!(registered.load(Ordering::SeqCst), 0);
+    assert!(spawner.requests.lock().unwrap().is_empty());
+}
+
+struct AttemptQueryProbe {
+    inner: Arc<ScriptedAnalyst>,
+    contexts: Mutex<Vec<platform_api::ModelAttemptContext>>,
+}
+#[async_trait]
+impl SideQueryClient for AttemptQueryProbe {
+    async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
+        self.contexts.lock().unwrap().push(request.model_attempt.clone().expect("registered synthesis"));
+        self.inner.query(request).await
+    }
+    async fn query_json_schema(&self, request: StrictStructuredQueryRequest) -> Result<StrictStructuredQueryResponse, SideQueryError> {
+        self.contexts.lock().unwrap().push(request.model_attempt.clone().expect("registered analyst"));
+        self.inner.query_json_schema(request).await
+    }
+}
+
+struct AttemptRegistrarProbe {
+    reject: bool,
+    fail_settlement: bool,
+    registered: Arc<AtomicUsize>,
+    settled: Arc<AtomicUsize>,
+    barrier: Option<(Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>)>,
+}
+struct AttemptFinalizerProbe {
+    fail: bool,
+    settled: Arc<AtomicUsize>,
+    barrier: Option<(Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>)>,
+}
+impl crate::FusionAttemptRegistrar for AttemptRegistrarProbe {
+    fn register(&self, captured: crate::FusionAttemptRegistration) -> Result<crate::RegisteredFusionAttempts, FusionError> {
+        self.registered.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(captured.control.billing_mode(), platform_api::ModelAttemptBillingMode::MeteredAttempts);
+        if self.reject { return Err(FusionError::InvalidConfiguration("registration rejected".into())); }
+        assert!(captured.live_policy.validate(platform_api::ModelAttemptStage::Panel, Some(0)).is_err(), "registration must not authorize unactivated wire calls");
+        assert!(captured.live_policy.validate(platform_api::ModelAttemptStage::Panel, Some(u32::MAX)).is_err());
+        Ok(crate::RegisteredFusionAttempts { panel_fence: None,
+            run: Arc::new(platform_api::ModelAttemptRun::new(Arc::new(()))),
+            finalizer: Box::new(AttemptFinalizerProbe { fail: self.fail_settlement, settled: self.settled.clone(), barrier: self.barrier.clone() }),
+        })
+    }
+}
+impl crate::FusionAttemptFinalizer for AttemptFinalizerProbe {
+    fn finish(self: Box<Self>) -> Box<dyn crate::FusionAttemptSettlement> { self }
+}
+#[async_trait]
+impl crate::FusionAttemptSettlement for AttemptFinalizerProbe {
+    async fn wait(self: Box<Self>) -> Result<crate::FusionAttemptSummary, crate::FusionAttemptSettlementError> {
+        self.settled.fetch_add(1, Ordering::SeqCst);
+        if let Some((started, release)) = &self.barrier {
+            started.add_permits(1);
+            release.acquire().await.unwrap().forget();
+        }
+        let summary = crate::FusionAttemptSummary {
+            usage: platform_api::FusionUsage { realized_nano_usd: 777, output_tokens: 91, provider_requests: 8, estimated: self.fail, ..Default::default() },
+            confirmed_egress: vec!["actual-wire-profile".into()], possible_egress: vec![],
+        };
+        if self.fail { Err(crate::FusionAttemptSettlementError { error: FusionError::Internal, summary }) }
+        else { Ok(summary) }
+    }
+}
+
+#[tokio::test]
+async fn registered_attempts_all_stages_and_repair_keep_authoritative_settlement() {
+    for (mode, fail) in [(AnalystMode::Merge, false), (AnalystMode::InvalidThenPick, true)] {
+        let spawner = FakeSpawner::new(three_ok());
+        let query = Arc::new(AttemptQueryProbe { inner: ScriptedAnalyst::new(mode, vec![Ok("merged answer".into())]), contexts: Mutex::new(vec![]) });
+        let registered = Arc::new(AtomicUsize::new(0));
+        let settled = Arc::new(AtomicUsize::new(0));
+        let orchestrator = Arc::new(FusionOrchestrator::new(spawner.clone(), query.clone(), Arc::new(test_config()), Arc::new(catalog()))
+            .with_attempt_registrar(Arc::new(AttemptRegistrarProbe { reject: false, fail_settlement: fail, registered: registered.clone(), settled: settled.clone(), barrier: None })));
+        let identity = FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Slash, None);
+        let legacy_budget = RecordingBudget::new();
+        let parent = FusionInheritance::new(SubagentInheritance { tool_invoker: Arc::new(InertInvoker), budget: legacy_budget.clone() }, CancellationToken::new());
+        let prepared = orchestrator.prepare(FusionSubmission::new(request("task"), parent, identity).unwrap()).unwrap();
+        assert_eq!(registered.load(Ordering::SeqCst), 1);
+        assert_eq!(settled.load(Ordering::SeqCst), 0);
+        assert!(spawner.requests.lock().unwrap().is_empty());
+        let outcome = prepared.activate(FusionActivation::now(), None).await;
+        let result = outcome.result.expect("computation survives settlement failure");
+        assert!(!result.final_text.is_empty());
+        assert_eq!(result.usage.realized_nano_usd, 777);
+        assert_eq!(result.usage.output_tokens, 91);
+        assert_eq!(outcome.facts.usage.as_ref().unwrap().realized_nano_usd, 777);
+        assert_eq!(settled.load(Ordering::SeqCst), 1);
+        assert_eq!(legacy_budget.reserve_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(legacy_budget.commit_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(legacy_budget.release_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(matches!(outcome.facts.attempt_settlement, Some(platform_api::FusionAttemptSettlementStatus::Failed { .. })), fail);
+        let requests = spawner.requests.lock().unwrap();
+        let mut slots = requests.iter().map(|request| {
+            let context = request.model_attempt.as_ref().expect("registered panel");
+            assert_eq!(context.stage(), platform_api::ModelAttemptStage::Panel);
+            context.panel_slot().unwrap()
+        }).collect::<Vec<_>>();
+        slots.sort();
+        assert_eq!(slots, vec![0, 1, 2]);
+        let contexts = query.contexts.lock().unwrap();
+        assert_eq!(contexts.len(), 2);
+        assert_ne!(contexts[0].logical_call_id(), contexts[1].logical_call_id());
+        assert_eq!(contexts[0].registration_id(), contexts[1].registration_id());
+        assert_eq!(contexts[1].stage(), if fail { platform_api::ModelAttemptStage::Analyst } else { platform_api::ModelAttemptStage::Synthesis });
+    }
+}
+
+#[test]
+fn registered_attempts_registration_failure_never_falls_back() {
+    let spawner = FakeSpawner::new(three_ok());
+    let orchestrator = Arc::new(FusionOrchestrator::new(spawner.clone(), ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]), Arc::new(test_config()), Arc::new(catalog()))
+        .with_attempt_registrar(Arc::new(AttemptRegistrarProbe { reject: true, fail_settlement: false, registered: Arc::new(AtomicUsize::new(0)), settled: Arc::new(AtomicUsize::new(0)), barrier: None })));
+    let identity = FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Slash, None);
+    assert!(orchestrator.prepare(FusionSubmission::new(request("task"), inherit(), identity).unwrap()).is_err());
+    assert!(spawner.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn registered_attempts_finish_and_wait_panics_preserve_computed_answer() {
+    struct PanicRegistrar { finish: bool, dropped: Arc<AtomicBool> }
+    struct PanicFinalizer { finish: bool, dropped: Arc<AtomicBool> }
+    impl Drop for PanicFinalizer {
+        fn drop(&mut self) { self.dropped.store(true, Ordering::SeqCst); }
+    }
+    impl crate::FusionAttemptRegistrar for PanicRegistrar {
+        fn register(&self, _: crate::FusionAttemptRegistration) -> Result<crate::RegisteredFusionAttempts, FusionError> {
+            Ok(crate::RegisteredFusionAttempts { panel_fence: None,
+                run: Arc::new(platform_api::ModelAttemptRun::new(Arc::new(()))),
+                finalizer: Box::new(PanicFinalizer { finish: self.finish, dropped: self.dropped.clone() }),
+            })
+        }
+    }
+    impl crate::FusionAttemptFinalizer for PanicFinalizer {
+        fn finish(self: Box<Self>) -> Box<dyn crate::FusionAttemptSettlement> {
+            assert!(!self.finish, "injected synchronous finish panic");
+            self
+        }
+    }
+    #[async_trait]
+    impl crate::FusionAttemptSettlement for PanicFinalizer {
+        async fn wait(self: Box<Self>) -> Result<crate::FusionAttemptSummary, crate::FusionAttemptSettlementError> {
+            panic!("injected asynchronous wait panic");
+        }
+    }
+    for finish in [true, false] {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let orchestrator = Arc::new(FusionOrchestrator::new(FakeSpawner::new(three_ok()),
+            ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]), Arc::new(test_config()), Arc::new(catalog()))
+            .with_attempt_registrar(Arc::new(PanicRegistrar { finish, dropped: dropped.clone() })));
+        let identity = FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Slash, None);
+        let prepared = orchestrator.prepare(FusionSubmission::new(request("task"), inherit(), identity).unwrap()).unwrap();
+        let outcome = prepared.activate(FusionActivation::now(), None).await;
+        let result = outcome.result.expect("accounting panic must not erase computed answer");
+        assert!(!result.final_text.is_empty());
+        assert!(matches!(outcome.facts.attempt_settlement, Some(platform_api::FusionAttemptSettlementStatus::Failed { .. })));
+        assert!(outcome.facts.usage_incomplete);
+        assert!(dropped.load(Ordering::SeqCst), "host cleanup owner must be dropped");
+    }
+}
+
+#[test]
+fn registered_attempts_live_policy_checks_whole_panel_group_and_activation() {
+    struct Capture(Mutex<Option<crate::FusionAttemptRegistration>>);
+    impl crate::FusionAttemptRegistrar for Capture {
+        fn register(&self, captured: crate::FusionAttemptRegistration) -> Result<crate::RegisteredFusionAttempts, FusionError> {
+            *self.0.lock().unwrap() = Some(captured);
+            Ok(crate::RegisteredFusionAttempts { panel_fence: None,
+                run: Arc::new(platform_api::ModelAttemptRun::new(Arc::new(()))),
+                finalizer: Box::new(AttemptFinalizerProbe { fail: false, settled: Arc::new(AtomicUsize::new(0)), barrier: None }),
+            })
+        }
+    }
+    let config = Arc::new(Mutex::new(test_config()));
+    let config_source = {
+        let config = config.clone();
+        Arc::new(move || Ok(config.lock().unwrap().clone())) as Arc<dyn crate::FusionConfigSource>
+    };
+    let catalog_state = Arc::new(Mutex::new(catalog()));
+    let capture = Arc::new(Capture(Mutex::new(None)));
+    let orchestrator = Arc::new(FusionOrchestrator::new(FakeSpawner::new(three_ok()),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]), config_source,
+        Arc::new(MutableCatalog(catalog_state.clone()))).with_attempt_registrar(capture.clone()));
+    let identity = FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Slash, None);
+    let _prepared = orchestrator.prepare(FusionSubmission::new(request("task"), inherit(), identity).unwrap()).unwrap();
+    let captured = capture.0.lock().unwrap().take().unwrap();
+    let routes = captured.resolved.clone();
+    assert_eq!(routes.panels.len(), 3);
+    assert!(captured.live_policy.validate(platform_api::ModelAttemptStage::Panel, Some(0)).is_err());
+    assert!(captured.control.activate_at(tokio::time::Instant::now()));
+    let mut added = catalog_state.lock().unwrap()[0].clone();
+    added.profile = "added-profile".into();
+    added.model = "added-model".into();
+    catalog_state.lock().unwrap().push(added);
+    for slot in 0..3 {
+        captured.live_policy.validate(platform_api::ModelAttemptStage::Panel, Some(slot)).unwrap();
+    }
+    assert_eq!(captured.resolved, routes, "catalog additions cannot reroute captured slots");
+    config.lock().unwrap().max_panel = 2;
+    for slot in 0..3 {
+        assert!(captured.live_policy.validate(platform_api::ModelAttemptStage::Panel, Some(slot)).is_err());
+    }
+}
+
+#[tokio::test]
+async fn registered_attempts_terminal_waits_for_finalizer_after_panels_drain() {
+    let started = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let spawner = FakeSpawner::new(three_ok());
+    let orchestrator = Arc::new(FusionOrchestrator::new(spawner.clone(), ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]), Arc::new(test_config()), Arc::new(catalog()))
+        .with_attempt_registrar(Arc::new(AttemptRegistrarProbe {
+            reject: false, fail_settlement: false, registered: Arc::new(AtomicUsize::new(0)),
+            settled: Arc::new(AtomicUsize::new(0)), barrier: Some((started.clone(), release.clone())),
+        })));
+    let identity = FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Slash, None);
+    let prepared = orchestrator.prepare(FusionSubmission::new(request("task"), inherit(), identity).unwrap()).unwrap();
+    let control = prepared.control();
+    let run = tokio::spawn(async move { prepared.activate(FusionActivation::now(), None).await });
+    started.acquire().await.unwrap().forget();
+    assert_eq!(spawner.live.load(Ordering::SeqCst), 0);
+    assert!(!control.is_terminal());
+    assert!(!run.is_finished());
+    release.add_permits(1);
+    let outcome = run.await.unwrap();
+    assert!(outcome.result.is_ok());
+    assert!(matches!(outcome.facts.attempt_settlement, Some(platform_api::FusionAttemptSettlementStatus::Settled)));
+}
+
 use super::*;
 use crate::config::FusionRuntimeConfig;
 use crate::model_resolver::{CatalogModel, ModelSource, ResolvedPanel};

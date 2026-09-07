@@ -540,6 +540,7 @@ struct SessionEntry {
     missing_durable_authority: bool,
     response_settlements: std::sync::Mutex<HashMap<CostMutationId, Arc<CostResponseSlot>>>,
     attempt_settlements: std::sync::Mutex<HashMap<String, Arc<attempts::AttemptSlot>>>,
+    attempt_outputs: Arc<Vec<crate::AttemptOutputRecovery>>,
 }
 
 impl SessionEntry {
@@ -556,6 +557,7 @@ impl SessionEntry {
             missing_durable_authority: false,
             response_settlements: std::sync::Mutex::new(HashMap::new()),
             attempt_settlements: std::sync::Mutex::new(HashMap::new()),
+            attempt_outputs: Arc::new(Vec::new()),
         })
     }
 
@@ -572,6 +574,7 @@ impl SessionEntry {
             missing_durable_authority: true,
             response_settlements: std::sync::Mutex::new(HashMap::new()),
             attempt_settlements: std::sync::Mutex::new(HashMap::new()),
+            attempt_outputs: Arc::new(Vec::new()),
         })
     }
 }
@@ -590,6 +593,7 @@ impl SessionLedger {
                 missing_durable_authority: false,
                 response_settlements: std::sync::Mutex::new(HashMap::new()),
                 attempt_settlements: std::sync::Mutex::new(HashMap::new()),
+                attempt_outputs: Arc::new(Vec::new()),
             }),
         );
         Self {
@@ -733,6 +737,7 @@ impl CostTracker {
             missing_durable_authority: false,
             response_settlements: std::sync::Mutex::new(HashMap::new()),
             attempt_settlements: std::sync::Mutex::new(HashMap::new()),
+            attempt_outputs: Arc::new(hydration.attempt_outputs),
         }));
         self.ledger
             .hydrated_sessions
@@ -878,6 +883,29 @@ impl CostTracker {
     pub(crate) fn preflight_durable(&self) -> Result<(), CostPersistError> {
         let authority = self.selected_entry();
         self.preflight_authority(&authority)
+    }
+
+    /// Validate a permanently captured, hydrated durable origin before a
+    /// host registers model attempts. Unlike ordinary preflight, this rejects
+    /// ephemeral trackers even when durable persistence is globally optional.
+    /// It grants no hold or dispatch permission; every attempt rechecks later.
+    pub fn validate_attempt_host_binding(
+        &self,
+        session_id: SessionId,
+    ) -> Result<(), CostPersistError> {
+        let authority = self.scope.as_ref().ok_or_else(|| {
+            CostPersistError::Rejected("attempt host requires a captured session scope".into())
+        })?;
+        if authority.session_id != session_id || authority.persistence.is_none() {
+            return Err(CostPersistError::Rejected(
+                "attempt host requires its originating durable session".into(),
+            ));
+        }
+        self.preflight_authority(authority)
+    }
+
+    pub(crate) fn recovered_attempt_outputs(&self) -> Arc<Vec<crate::AttemptOutputRecovery>> {
+        self.selected_entry().attempt_outputs.clone()
     }
 
     fn preflight_authority(&self, authority: &SessionEntry) -> Result<(), CostPersistError> {
@@ -1132,6 +1160,7 @@ impl CostTracker {
                 missing_durable_authority: false,
                 response_settlements: std::sync::Mutex::new(HashMap::new()),
                 attempt_settlements: std::sync::Mutex::new(HashMap::new()),
+                attempt_outputs: Arc::new(hydration.attempt_outputs),
             });
             entries.insert(session_id, replacement.clone());
             replacement
@@ -1264,6 +1293,7 @@ impl CostTracker {
                     missing_durable_authority: false,
                     response_settlements: std::sync::Mutex::new(HashMap::new()),
                     attempt_settlements: std::sync::Mutex::new(HashMap::new()),
+                    attempt_outputs: Arc::new(hydration.attempt_outputs),
                 });
                 entries.insert(session_id, entry.clone());
                 entry
@@ -1385,6 +1415,7 @@ impl CostTracker {
             missing_durable_authority: source.missing_durable_authority,
             response_settlements: std::sync::Mutex::new(HashMap::new()),
             attempt_settlements: std::sync::Mutex::new(HashMap::new()),
+            attempt_outputs: source.attempt_outputs.clone(),
         });
         assert!(entries.insert(session_id, replacement).is_none());
         let mut hydrated = self
@@ -2302,6 +2333,7 @@ mod tests {
                 ..Default::default()
             },
             journal_revision: 0,
+            attempt_outputs: Vec::new(),
         }
     }
 
@@ -2350,6 +2382,25 @@ mod tests {
         let snap = rx.recv().await.unwrap();
         // 1000 * 5000 + 500 * 25000 = 5_000_000 + 12_500_000 = 17_500_000 nano-USD = $0.0175
         assert_eq!(snap.total_nano_usd, 17_500_000);
+    }
+
+    #[test]
+    fn attempt_host_binding_requires_fixed_durable_unfrozen_origin() {
+        let (persist_tx, _) = mpsc::channel(8);
+        let session = SessionId::new();
+        let ephemeral = CostTracker::new(session, Arc::new(PricingCatalog::empty()), persist_tx.clone());
+        assert!(ephemeral.scoped(session).validate_attempt_host_binding(session).is_err());
+        let (requests, _) = tokio::sync::mpsc::unbounded_channel();
+        let tracker = CostTracker::new(session, Arc::new(PricingCatalog::empty()), persist_tx)
+            .try_with_durable_persistence(hydration(session), Arc::new(TestPersistence { requests }),
+                Arc::new(TestLease(session.to_string())), CostDurabilityGate::default()).unwrap();
+        assert!(tracker.validate_attempt_host_binding(session).is_err());
+        let captured = tracker.scoped(session);
+        assert!(captured.validate_attempt_host_binding(session).is_ok());
+        assert!(captured.validate_attempt_host_binding(SessionId::new()).is_err());
+        assert!(tracker.scoped(SessionId::new()).validate_attempt_host_binding(session).is_err());
+        captured.durability_gate().freeze("host unavailable");
+        assert!(matches!(captured.validate_attempt_host_binding(session), Err(CostPersistError::Frozen(_))));
     }
 
     #[tokio::test]

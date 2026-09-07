@@ -38,6 +38,10 @@ tokio::task_local! {
     static WORKFLOW_TRANSCRIPT_SUBDIR_OVERRIDE: Option<std::path::PathBuf>;
     static WORKFLOW_QUERY_WATCHDOG_OVERRIDE:
         std::cell::RefCell<Option<platform_api::WorkflowQueryWatchdog>>;
+    // Consumed at spawn_with_observer entry, before any user/MCP callback.
+    // Never copy this authority into inheritance or observer follow-ups.
+    static PANEL_POOL_PERMIT_OVERRIDE:
+        std::cell::RefCell<Option<crate::pool::TrackedPoolPermit>>;
 }
 
 /// Runs a future with a workflow-scoped child transcript directory override.
@@ -2602,6 +2606,10 @@ impl SubagentSpawner for PoolSubagentSpawner {
         progress: Option<tokio::sync::mpsc::Sender<String>>,
         observer: Option<Arc<dyn SubagentSpawnObserver>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
+        let admitted = PANEL_POOL_PERMIT_OVERRIDE
+            .try_with(|permit| permit.borrow_mut().take())
+            .ok()
+            .flatten();
         let observer_spec = request
             .observer
             .clone()
@@ -2671,11 +2679,11 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 }
             }) as Arc<dyn Fn(AgentId) + Send + Sync>
         });
-        let (_aid, mut rx) = match self
-            .pool
-            .allocate_with_receipt(ctx, allocation_receipt)
-            .await
-        {
+        let allocation = match admitted {
+            Some(permit) => self.pool.allocate_admitted_with_receipt(ctx, allocation_receipt, permit).await,
+            None => self.pool.allocate_with_receipt(ctx, allocation_receipt).await,
+        };
+        let (_aid, mut rx) = match allocation {
             Ok(pair) => pair,
             Err(e) => {
                 // §24b: the pool never got a runner started for this spawn, so
@@ -3036,6 +3044,34 @@ impl SubagentSpawner for PoolSubagentSpawner {
             .await
     }
 
+    async fn reserve_fusion_panel_group(
+        &self,
+        count: usize,
+        deadline: tokio::time::Instant,
+        cancel: platform_api::panel_pool::PanelAdmissionCancellation,
+    ) -> Result<platform_api::PanelPoolLease, SubagentSpawnError> {
+        self.pool.reserve_panel_group(count, deadline, cancel).await
+    }
+
+    async fn spawn_workflow_with_observer_admitted(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<String>>,
+        observer: Option<Arc<dyn SubagentSpawnObserver>>,
+        watchdog: platform_api::WorkflowQueryWatchdog,
+        permit: platform_api::PanelPoolPermit,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        let permit = self.pool.take_panel_permit(permit)
+            .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?;
+        // Keep this scope's immediate callee callback-free: the spawn entry
+        // must take the token before it can suspend or run third-party code.
+        PANEL_POOL_PERMIT_OVERRIDE.scope(
+            std::cell::RefCell::new(Some(permit)),
+            self.spawn_workflow_with_observer(request, inherit, progress, observer, watchdog),
+        ).await
+    }
+
     async fn concurrent_subagent_count(&self) -> usize {
         self.pool.slot_count().await
     }
@@ -3270,6 +3306,10 @@ pub(crate) fn agent_source_to_claude_str(source: AgentSource) -> &'static str {
         AgentSource::AdditionalDirectory => "additionalDirectory",
     }
 }
+
+#[cfg(test)]
+#[path = "handle/panel_admission_test.rs"]
+mod panel_admission_test;
 
 #[cfg(test)]
 mod tests {

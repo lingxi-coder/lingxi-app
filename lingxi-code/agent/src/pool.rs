@@ -5,15 +5,19 @@
 //! avoids stack growth in deep fork chains and gives unified
 //! scheduling / cancellation. See spec §10.5.
 
+mod capacity;
+use capacity::CapacityCore;
+pub(crate) use capacity::TrackedPoolPermit;
+
 use crate::context::SubagentContext;
 use crate::runner::SubagentEvent;
 use platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 use protocol::AgentId;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
 #[cfg(test)]
-use tokio::sync::Notify;
-use tokio::sync::{mpsc, OwnedSemaphorePermit, RwLock, Semaphore};
+use tokio::sync::{Notify, Semaphore};
 
 /// One slot in the [`StateMachinePool`].
 ///
@@ -28,7 +32,7 @@ pub struct StateMachineSlot {
     /// Sender used by the host to deliver `Event`s into the slot.
     pub event_tx: mpsc::Sender<lingxi_core::Event>,
     /// Capacity permit held for the entire lifetime of this slot.
-    _capacity_permit: OwnedSemaphorePermit,
+    _capacity_permit: Arc<TrackedPoolPermit>,
 }
 
 /// Fixed-capacity table of active subagent slots.
@@ -38,7 +42,7 @@ pub struct StateMachineSlot {
 /// runner emits as it processes the conversation.
 pub struct StateMachinePool {
     slots: Arc<RwLock<HashMap<AgentId, StateMachineSlot>>>,
-    capacity: Arc<Semaphore>,
+    capacity: Arc<CapacityCore>,
     runtime: Arc<dyn RuntimeSpawner>,
     #[cfg(test)]
     post_spawn_wait: Arc<RwLock<Option<Arc<Notify>>>>,
@@ -89,7 +93,8 @@ impl StateMachinePool {
     pub fn new(runtime: Arc<dyn RuntimeSpawner>, max_concurrent: usize) -> Self {
         Self {
             slots: Arc::new(RwLock::new(HashMap::new())),
-            capacity: Arc::new(Semaphore::new(max_concurrent)),
+            capacity: CapacityCore::new(max_concurrent)
+                .expect("pool capacity exceeds semaphore maximum"),
             runtime,
             #[cfg(test)]
             post_spawn_wait: Arc::new(RwLock::new(None)),
@@ -122,23 +127,82 @@ impl StateMachinePool {
         ctx: SubagentContext,
         allocation_receipt: Option<Arc<dyn Fn(AgentId) + Send + Sync>>,
     ) -> Result<(AgentId, mpsc::Receiver<SubagentEvent>), PoolError> {
-        // Reserve capacity atomically before spawning the runner. A len/read
-        // check can race when multiple parallel Agent tool calls allocate at
-        // once and let all of them pass the same stale count.
-        let capacity_permit = self
+        let permit = self
             .capacity
-            .clone()
-            .try_acquire_owned()
+            .acquire_ordinary()
             .map_err(|_| PoolError::TooManyAgents)?;
+        self.allocate_admitted_with_receipt(ctx, allocation_receipt, permit)
+            .await
+    }
+
+    pub(crate) async fn reserve_panel_group(
+        &self,
+        count: usize,
+        deadline: tokio::time::Instant,
+        cancel: platform_api::panel_pool::PanelAdmissionCancellation,
+    ) -> Result<platform_api::PanelPoolLease, platform_api::SubagentSpawnError> {
+        self.capacity
+            .reserve_group(count, deadline, cancel)
+            .await
+            .map(|mut permits| {
+                let drain = capacity::PoolGroupDrain::new(permits.len());
+                for permit in &mut permits {
+                    permit.track_group(drain.clone());
+                }
+                platform_api::PanelPoolLease::with_drain(
+                    permits
+                        .into_iter()
+                        .map(platform_api::PanelPoolPermit::new)
+                        .collect(),
+                    drain,
+                )
+            })
+            .map_err(|error| {
+                platform_api::SubagentSpawnError::Runtime(format!(
+                    "Fusion panel admission rejected: {error:?}"
+                ))
+            })
+    }
+
+    pub(crate) fn take_panel_permit(
+        &self,
+        permit: platform_api::PanelPoolPermit,
+    ) -> Result<TrackedPoolPermit, PoolError> {
+        let permit = permit
+            .into_inner::<TrackedPoolPermit>()
+            .ok_or(PoolError::WrongPool)?;
+        if !self.capacity.owns(&permit) {
+            return Err(PoolError::WrongPool);
+        }
+        Ok(permit)
+    }
+
+    pub(crate) async fn allocate_admitted_with_receipt(
+        &self,
+        ctx: SubagentContext,
+        allocation_receipt: Option<Arc<dyn Fn(AgentId) + Send + Sync>>,
+        permit: TrackedPoolPermit,
+    ) -> Result<(AgentId, mpsc::Receiver<SubagentEvent>), PoolError> {
+        if !self.capacity.owns(&permit) {
+            return Err(PoolError::WrongPool);
+        }
+        let capacity_permit = Arc::new(permit);
         let agent_id = ctx.agent_id;
         let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(100);
         let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(100);
 
+        // Capture before spawn/first poll: cancellation acknowledgement is
+        // not proof the accepted runner was destroyed. Both the local/slot
+        // owner and the actual runner must release before capacity returns.
+        let runner_capacity = capacity_permit.clone();
         let task = self
             .runtime
             .spawn(
                 "subagent-state-machine",
-                Box::pin(crate::runner::run_subagent(ctx, event_rx, out_tx)),
+                Box::pin(async move {
+                    let _capacity = runner_capacity;
+                    crate::runner::run_subagent(ctx, event_rx, out_tx).await;
+                }),
             )
             .await?;
         let mut cancel_guard = AllocateCancelGuard::new(self.runtime.clone(), task.clone());
@@ -228,6 +292,9 @@ impl StateMachinePool {
 /// Failure modes for [`StateMachinePool`] operations.
 #[derive(Debug, thiserror::Error)]
 pub enum PoolError {
+    /// A transferred capacity owner did not originate in this pool.
+    #[error("panel permit belongs to a different pool")]
+    WrongPool,
     /// All `max_concurrent` slots are in use.
     #[error("too many agents — pool full")]
     TooManyAgents,
@@ -353,6 +420,88 @@ mod tests {
         assert_eq!(pool.slot_count().await, 0);
     }
 
+    #[tokio::test]
+    async fn admitted_group_transfers_slots_without_reacquiring() {
+        let pool = StateMachinePool::new(Arc::new(MockRuntimeSpawner::default()), 2);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let lease = pool
+            .reserve_panel_group(
+                2,
+                deadline,
+                platform_api::panel_pool::PanelAdmissionCancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pool.capacity.available_permits(), 0);
+        assert_eq!(pool.slot_count().await, 0, "reservation is not allocation");
+        assert!(matches!(
+            pool.allocate(make_ctx()).await,
+            Err(PoolError::TooManyAgents)
+        ));
+        let mut ids = Vec::new();
+        for permit in lease.into_permits() {
+            let permit = pool.take_panel_permit(permit).unwrap();
+            let (id, _events) = pool
+                .allocate_admitted_with_receipt(make_ctx(), None, permit)
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+        assert_eq!(pool.slot_count().await, 2);
+        for id in ids {
+            pool.deallocate(&id).await.unwrap();
+        }
+        let returned = pool
+            .reserve_panel_group(
+                2,
+                deadline,
+                platform_api::panel_pool::PanelAdmissionCancellation::new(),
+            )
+            .await
+            .unwrap();
+        drop(returned);
+        assert_eq!(pool.capacity.available_permits(), 2);
+    }
+
+    #[tokio::test]
+    async fn admitted_wrong_pool_and_unpolled_drop_return_original_capacity() {
+        let pool = StateMachinePool::new(Arc::new(MockRuntimeSpawner::default()), 1);
+        let other = StateMachinePool::new(Arc::new(MockRuntimeSpawner::default()), 1);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let permit = pool
+            .reserve_panel_group(
+                1,
+                deadline,
+                platform_api::panel_pool::PanelAdmissionCancellation::new(),
+            )
+            .await
+            .unwrap()
+            .into_permits()
+            .pop()
+            .unwrap();
+        assert!(matches!(
+            other.take_panel_permit(permit),
+            Err(PoolError::WrongPool)
+        ));
+        assert_eq!(pool.capacity.available_permits(), 1);
+        assert_eq!(other.capacity.available_permits(), 1);
+        let permit = pool
+            .reserve_panel_group(
+                1,
+                deadline,
+                platform_api::panel_pool::PanelAdmissionCancellation::new(),
+            )
+            .await
+            .unwrap()
+            .into_permits()
+            .pop()
+            .unwrap();
+        let permit = pool.take_panel_permit(permit).unwrap();
+        drop(pool.allocate_admitted_with_receipt(make_ctx(), None, permit));
+        assert_eq!(pool.capacity.available_permits(), 1);
+        assert_eq!(pool.slot_count().await, 0);
+    }
+
     /// The allocation fact must be published immediately after the runtime
     /// task is created, before the slot-table insertion can suspend.  Fusion
     /// uses this receipt for quota/accounting; waiting for the normal async
@@ -393,6 +542,145 @@ mod tests {
         let _ = allocation.await;
         tokio::task::yield_now().await;
         assert_eq!(pool.slot_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn dropped_allocation_keeps_capacity_until_runner_cancellation_finishes() {
+        struct CancelGate {
+            inner: MockRuntimeSpawner,
+            entered: Semaphore,
+            release: Semaphore,
+        }
+        #[async_trait::async_trait]
+        impl RuntimeSpawner for CancelGate {
+            async fn spawn(
+                &self,
+                name: &str,
+                task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+            ) -> Result<BackgroundTaskHandle, RuntimeError> {
+                // Keep the accepted runner future alive independently of its
+                // inbound channel, until the runtime actually cancels it.
+                self.inner
+                    .spawn(
+                        name,
+                        Box::pin(async move {
+                            std::future::pending::<()>().await;
+                            drop(task);
+                        }),
+                    )
+                    .await
+            }
+            async fn sleep(&self, duration: std::time::Duration) {
+                self.inner.sleep(duration).await;
+            }
+            async fn cancel(&self, task: &BackgroundTaskHandle) -> Result<(), RuntimeError> {
+                self.entered.add_permits(1);
+                self.release.acquire().await.unwrap().forget();
+                self.inner.cancel(task).await
+            }
+        }
+        let runtime = Arc::new(CancelGate {
+            inner: MockRuntimeSpawner::default(),
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        let pool = Arc::new(StateMachinePool::new(runtime.clone(), 1));
+        pool.set_post_spawn_wait(Arc::new(Notify::new())).await;
+        let allocated = Arc::new(Semaphore::new(0));
+        let receipt: Arc<dyn Fn(AgentId) + Send + Sync> = Arc::new({
+            let allocated = allocated.clone();
+            move |_| allocated.add_permits(1)
+        });
+        let task = tokio::spawn({
+            let pool = pool.clone();
+            async move { pool.allocate_with_receipt(make_ctx(), Some(receipt)).await }
+        });
+        allocated.acquire().await.unwrap().forget();
+        task.abort();
+        let _ = task.await;
+        runtime.entered.acquire().await.unwrap().forget();
+        let available_before_stop = pool.capacity.available_permits();
+        // Always unblock cleanup, including on the failing baseline assertion.
+        runtime.release.add_permits(1);
+        assert_eq!(
+            available_before_stop, 0,
+            "the runner still owns physical capacity"
+        );
+        let permit = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            pool.capacity.reserve_group(
+                1,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(2),
+                platform_api::panel_pool::PanelAdmissionCancellation::new(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(permit);
+        assert_eq!(pool.slot_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_ack_does_not_release_a_live_runner_capacity() {
+        type Runner = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+        #[derive(Default)]
+        struct CooperativeRuntime {
+            runner: std::sync::Mutex<Option<Runner>>,
+        }
+        #[async_trait::async_trait]
+        impl RuntimeSpawner for CooperativeRuntime {
+            async fn spawn(
+                &self,
+                name: &str,
+                task: Runner,
+            ) -> Result<BackgroundTaskHandle, RuntimeError> {
+                *self.runner.lock().unwrap() = Some(task);
+                Ok(BackgroundTaskHandle {
+                    task_name: name.to_owned(),
+                    task_id: 1,
+                })
+            }
+            async fn sleep(&self, duration: std::time::Duration) {
+                tokio::time::sleep(duration).await;
+            }
+            async fn cancel(&self, _: &BackgroundTaskHandle) -> Result<(), RuntimeError> {
+                // Acknowledgement requests shutdown, not future destruction.
+                Ok(())
+            }
+        }
+        let runtime = Arc::new(CooperativeRuntime::default());
+        let pool = StateMachinePool::new(runtime.clone(), 1);
+        let lease = pool
+            .reserve_panel_group(
+                1,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(2),
+                platform_api::panel_pool::PanelAdmissionCancellation::new(),
+            )
+            .await
+            .unwrap();
+        let (mut permits, drain) = lease.into_parts();
+        let drain = drain.expect("production group carries a producer drain");
+        let permit = pool.take_panel_permit(permits.pop().unwrap()).unwrap();
+        let (id, _events) = pool
+            .allocate_admitted_with_receipt(make_ctx(), None, permit)
+            .await
+            .unwrap();
+        pool.deallocate(&id).await.unwrap();
+        assert_eq!(pool.slot_count().await, 0);
+        let available_before_drop = pool.capacity.available_permits();
+        let mut draining = Box::pin(drain.wait());
+        assert!(
+            futures::poll!(&mut draining).is_pending(),
+            "cancel ack cannot complete producer drain"
+        );
+        drop(runtime.runner.lock().unwrap().take());
+        assert_eq!(
+            available_before_drop, 0,
+            "cancel ack is not runner destruction"
+        );
+        assert_eq!(pool.capacity.available_permits(), 1);
+        draining.await;
     }
 
     /// `send_event` routes an inbound `lingxi_core::Event` into the slot's runner.

@@ -999,6 +999,50 @@ fn make_output_manager(fs: Arc<dyn FileSystem>) -> (tempfile::TempDir, Arc<TaskO
     (dir, mgr)
 }
 
+#[tokio::test]
+async fn accounting_failure_retains_answer_but_does_not_report_success() {
+    let fs = Arc::new(InMemoryFs::new());
+    let (_directory, output) = make_output_manager(fs.clone());
+    let path = output.allocate("accounting-failure").await.unwrap();
+    let status = Arc::new(RecordingStatusSink::default());
+    let status_trait: Arc<dyn TaskStatusSink> = status.clone();
+    let completion: Arc<dyn FusionCompletionSink> = Arc::new(CountingCompletionSink::default());
+    let control = platform_api::FusionRunControl::new_with_billing_mode(
+        FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Agent, None),
+        1_000,
+        CancellationToken::new(),
+        platform_api::FusionRunFactsRecorder::default(),
+        platform_api::ModelAttemptBillingMode::MeteredAttempts,
+    );
+    control
+        .facts()
+        .set_attempt_settlement(platform_api::FusionAttemptSettlementStatus::Failed {
+            reason: "ledger unavailable".into(),
+        });
+    let outcome = FusionRunOutcome::from_control(&control, Ok(dummy_result()));
+    finalize_fusion_outcome(
+        &outcome,
+        &output,
+        &path,
+        "accounting-failure",
+        &status_trait,
+        &completion,
+        TEST_CONVERSATION_ID,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status.last_status(), Some(TaskStatus::Failed));
+    assert!(status.errors()[0].1.contains("ledger unavailable"));
+    assert!(status.events().contains(&"outcome".to_string()));
+    assert!(fs
+        .files
+        .lock()
+        .await
+        .values()
+        .any(|body| body.contains("needs parent")));
+}
+
 fn make_handler(
     executor: Arc<dyn FusionExecutor>,
     output_manager: Arc<TaskOutputManager>,

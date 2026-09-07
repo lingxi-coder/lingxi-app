@@ -834,6 +834,29 @@ fn fusion_tool_result(result: platform_api::FusionResult) -> ToolCallResult {
     }
 }
 
+/// Preserve computation independently from reliable attempt settlement status.
+fn fusion_tool_result_with_settlement(
+    result: platform_api::FusionResult,
+    settlement: Option<&platform_api::FusionAttemptSettlementStatus>,
+) -> ToolCallResult {
+    let mut output = fusion_tool_result(result);
+    if let Some(settlement) = settlement {
+        output.data["attemptSettlement"] = json!(settlement);
+        if matches!(settlement, platform_api::FusionAttemptSettlementStatus::Failed { .. }) {
+            output.data["computationStatus"] = output.data["status"].clone();
+            output.data["status"] = json!("failed");
+            output.is_error = true;
+            // Keep the computed answer visible, but never present it as an
+            // ordinary successful tool call. Detailed safe diagnostics remain
+            // structured data, not instructions appended to the model prompt.
+            if let Some(answer) = &mut output.model_content {
+                answer.push_str("\n\nFusion accounting failed; the computed answer is retained, but accounting remains unavailable.");
+            }
+        }
+    }
+    output
+}
+
 /// Map a terminal [`platform_api::FusionError`] to the [`ToolError`] surfaced
 /// to the model (F008). Explicit arms for the load-bearing distinctions the
 /// generic `InvalidInput(other.to_string())` fallback erased:
@@ -868,6 +891,7 @@ fn fusion_tool_error(err: platform_api::FusionError) -> ToolError {
         FusionError::Internal
         | FusionError::AllPanelsFailed
         | FusionError::AllPanelsFailedPreflight
+        | FusionError::PanelAdmissionRejected(_)
         | FusionError::MinPanelsNotMet
         | FusionError::PanelSetIncomplete
         | FusionError::TimedOutEmpty => ToolError::Internal(err.to_string()),
@@ -950,6 +974,7 @@ fn fusion_error_is_preflight(err: &platform_api::FusionError) -> bool {
             // also cover panels that DID call a provider and lost, so it
             // stays charged.
             | FusionError::AllPanelsFailedPreflight
+            | FusionError::PanelAdmissionRejected(_)
     )
 }
 
@@ -1817,14 +1842,14 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                     // function return) does not act on it again.
                     guard.disarm();
                 }
-                Self::emit_completed(
-                    bus,
-                    invocation_id,
-                    started.elapsed().as_millis() as u64,
-                    FUSION_AGENT_TYPE,
-                )
-                .await;
-                Ok(fusion_tool_result(result))
+                if matches!(&facts.attempt_settlement, Some(platform_api::FusionAttemptSettlementStatus::Failed { .. })) {
+                    Self::emit_failed(bus, invocation_id, "fusion_accounting_failed", started.elapsed().as_millis() as u64).await;
+                } else {
+                    Self::emit_completed(
+                        bus, invocation_id, started.elapsed().as_millis() as u64, FUSION_AGENT_TYPE,
+                    ).await;
+                }
+                Ok(fusion_tool_result_with_settlement(result, facts.attempt_settlement.as_ref()))
             }
             Err(err) => {
                 // F008: only a PREFLIGHT error guarantees zero provider

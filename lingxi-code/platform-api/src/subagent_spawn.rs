@@ -843,6 +843,32 @@ pub fn max_subagent_spawn_depth() -> u32 {
 /// Spawn-a-subagent seam used by `AgentTool`.
 #[async_trait]
 pub trait SubagentSpawner: Send + Sync {
+    /// Atomically reserve the entire panel group after activation. A host
+    /// without this capability must fail closed, not fall back to racing
+    /// ordinary spawns. Queue time counts against the original deadline.
+    async fn reserve_fusion_panel_group(
+        &self,
+        _count: usize,
+        _deadline: tokio::time::Instant,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<crate::PanelPoolLease, SubagentSpawnError> {
+        Err(SubagentSpawnError::Runtime("atomic panel admission is unavailable".into()))
+    }
+
+    /// Consume a previously reserved slot from this same pool. Implementations
+    /// must preserve watchdog/observer cleanup and must never reacquire.
+    async fn spawn_workflow_with_observer_admitted(
+        &self,
+        _request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<String>>,
+        _observer: Option<Arc<dyn SubagentSpawnObserver>>,
+        _watchdog: WorkflowQueryWatchdog,
+        _permit: crate::PanelPoolPermit,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        Err(SubagentSpawnError::Runtime("admitted panel spawning is unavailable".into()))
+    }
+
     /// Allocate a subagent slot, pump its state machine to completion, and
     /// return the terminal [`SubagentResult`].
     ///

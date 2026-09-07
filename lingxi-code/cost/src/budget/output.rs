@@ -81,6 +81,85 @@ struct BudgetOutputScopes {
     enforcer: BudgetEnforcer,
 }
 
+impl ReservationBook {
+    fn restore_attempt_outputs(
+        &mut self,
+        recovered: &[crate::AttemptOutputRecovery],
+    ) -> Result<(), BudgetError> {
+        if self.output_recovery_loaded {
+            return Ok(());
+        }
+        let mut scopes: HashMap<MessageId, OutputScopeState> = HashMap::new();
+        let mut origins = HashMap::new();
+        let mut order = self.next_output_generation;
+        for item in recovered {
+            use crate::AttemptDisposition::{Exact, ProvenNotSent, Unknown};
+            let corrected = item.first.revision == 1
+                && item.first.disposition == Unknown
+                && item.current.revision == 2
+                && item.current.disposition == Exact;
+            if item.first.revision != 1
+                || (item.current != item.first && !corrected)
+                || (item.first.disposition == ProvenNotSent && item.first.output != 0)
+                || (item.current.disposition == ProvenNotSent && item.current.output != 0)
+                || self.attempt_origins.contains_key(&item.attempt_id)
+                || origins
+                    .insert(item.attempt_id.clone(), item.scope.generation_id)
+                    .is_some()
+                || self.output_scopes.contains_key(&item.scope.generation_id)
+            {
+                return Err(BudgetError::Internal(
+                    "invalid recovered output identity or revision".into(),
+                ));
+            }
+            let generation = item.scope.generation_id;
+            if !scopes.contains_key(&generation) {
+                order = order.checked_add(1).ok_or_else(|| {
+                    BudgetError::Internal("output generation sequence exhausted".into())
+                })?;
+                scopes.insert(
+                    generation,
+                    OutputScopeState {
+                        binding_id: MessageId::new(),
+                        spent: 0,
+                        max_output_tokens: item.scope.max_output_tokens,
+                        generation_order: order,
+                        legacy_events: HashMap::new(),
+                        snapshot: Arc::new(AtomicU64::new(0)),
+                        owner: Weak::new(),
+                        attempts: HashMap::new(),
+                    },
+                );
+            }
+            let scope = scopes.get_mut(&generation).expect("recovery scope staged");
+            if scope.max_output_tokens != item.scope.max_output_tokens {
+                return Err(BudgetError::Internal(
+                    "recovered output scope limit conflict".into(),
+                ));
+            }
+            scope.spent = scope
+                .spent
+                .checked_add(item.current.output)
+                .ok_or_else(|| BudgetError::Internal("recovered output overflow".into()))?;
+            scope.snapshot.store(scope.spent, Ordering::Release);
+            scope.attempts.insert(
+                item.attempt_id.clone(),
+                super::attempts::PublishedAttemptOutput {
+                    first: item.first,
+                    current: item.current,
+                },
+            );
+        }
+        // One atomic in-memory commit after all recovered facts validate.
+        // No account becomes current and no provider request is replayed.
+        self.output_scopes.extend(scopes);
+        self.attempt_origins.extend(origins);
+        self.next_output_generation = order;
+        self.output_recovery_loaded = true;
+        Ok(())
+    }
+}
+
 impl BudgetEnforcer {
     /// Resolve the exact process-local account before entering a persistence
     /// turn. Metadata equality alone never authenticates an output scope.
@@ -140,13 +219,13 @@ impl BudgetEnforcer {
     }
 }
 
-#[async_trait::async_trait]
-impl WorkflowOutputScopes for BudgetOutputScopes {
-    async fn begin_turn(
+impl BudgetOutputScopes {
+    async fn publish_turn(
         &self,
         session_id: SessionId,
         generation_id: MessageId,
         max_output_tokens: Option<u64>,
+        only_if_missing: bool,
     ) -> Result<WorkflowOutputScope, BudgetError> {
         if self
             .enforcer
@@ -164,9 +243,38 @@ impl WorkflowOutputScopes for BudgetOutputScopes {
         // This is a publication gate only, not a second accounting book. It
         // orders concurrent begin calls across their async session lookup.
         let _publication = self.enforcer.sessions.output_publication.lock().await;
+        tracker
+            .preflight_durable()
+            .map_err(|error| BudgetError::Internal(error.to_string()))?;
+        if only_if_missing {
+            let existing = self
+                .enforcer
+                .sessions
+                .current_outputs
+                .lock()
+                .map_err(|_| {
+                    output_error(&tracker.durability_gate(), "output scope registry poisoned")
+                })?
+                .get(&session_id)
+                .cloned();
+            if let Some(account) = existing {
+                account
+                    .tracker
+                    .preflight_durable()
+                    .map_err(|error| BudgetError::Internal(error.to_string()))?;
+                return Ok(WorkflowOutputScope::new(account));
+            }
+        }
         let session = self.enforcer.session_state_for(session_id).await;
         let account = {
             let mut book = session.lock_reservations(&tracker.durability_gate())?;
+            tracker
+                .preflight_durable()
+                .map_err(|error| BudgetError::Internal(error.to_string()))?;
+            if let Err(error) = book.restore_attempt_outputs(&tracker.recovered_attempt_outputs()) {
+                tracker.durability_gate().freeze(error.to_string());
+                return Err(error);
+            }
             if let Some(existing) = book.output_scopes.get(&generation_id) {
                 if existing.max_output_tokens != max_output_tokens {
                     return Err(BudgetError::Internal(
@@ -228,6 +336,29 @@ impl WorkflowOutputScopes for BudgetOutputScopes {
         drop(_publication);
         drop(retired);
         Ok(WorkflowOutputScope::new(account))
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkflowOutputScopes for BudgetOutputScopes {
+    async fn ensure_current(
+        &self,
+        session_id: SessionId,
+        initial_generation: MessageId,
+        max_output_tokens: Option<u64>,
+    ) -> Result<WorkflowOutputScope, BudgetError> {
+        self.publish_turn(session_id, initial_generation, max_output_tokens, true)
+            .await
+    }
+
+    async fn begin_turn(
+        &self,
+        session_id: SessionId,
+        generation_id: MessageId,
+        max_output_tokens: Option<u64>,
+    ) -> Result<WorkflowOutputScope, BudgetError> {
+        self.publish_turn(session_id, generation_id, max_output_tokens, false)
+            .await
     }
 
     fn capture(&self, session_id: SessionId) -> Result<WorkflowOutputScope, BudgetError> {
@@ -303,6 +434,230 @@ mod tests {
             .await
             .is_err());
         assert_eq!(factory.capture(session).unwrap().spent(), 12);
+    }
+
+    #[tokio::test]
+    async fn output_scope_ensure_preserves_current_spend_and_limit() {
+        let enforcer = enforcer();
+        let session = enforcer.session_id().await;
+        let factory = enforcer.workflow_output_scopes();
+        let initial = factory
+            .ensure_current(session, MessageId::new(), Some(100))
+            .await
+            .unwrap();
+        initial
+            .record_legacy(WorkflowOutputEventId::MainResponse(MessageId::new()), 17)
+            .unwrap();
+        let again = factory
+            .ensure_current(session, MessageId::new(), Some(999))
+            .await
+            .unwrap();
+        assert!(initial.shares_account(&again));
+        assert_eq!(again.spent(), 17);
+        let state = enforcer.session_state_for(session).await;
+        assert_eq!(
+            state.reservations.lock().unwrap().output_scopes[&initial.generation_id()]
+                .max_output_tokens,
+            Some(100)
+        );
+    }
+
+    fn recovered(generation: MessageId, id: &str, output: u64) -> crate::AttemptOutputRecovery {
+        let revision = crate::AttemptOutputRevision {
+            revision: 1,
+            disposition: crate::AttemptDisposition::Unknown,
+            output,
+        };
+        crate::AttemptOutputRecovery {
+            scope: crate::AttemptOutputScope {
+                generation_id: generation,
+                max_output_tokens: Some(100),
+            },
+            attempt_id: id.into(),
+            first: revision,
+            current: revision,
+        }
+    }
+
+    #[tokio::test]
+    async fn output_scope_recovery_keeps_unknown_spend_in_original_generation() {
+        struct Lease(String);
+        impl platform_api::live_sessions::SessionWriterLease for Lease {
+            fn session_id(&self) -> &str {
+                &self.0
+            }
+        }
+        struct NoWrites;
+        #[async_trait::async_trait]
+        impl crate::CostPersistence for NoWrites {
+            async fn acquire_permit(
+                &self,
+                _: SessionId,
+            ) -> Result<crate::CostPersistPermit, crate::CostPersistError> {
+                panic!("output hydration must not replay provider or ledger writes")
+            }
+        }
+        let session = SessionId::new();
+        let old_generation = MessageId::new();
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let tracker = CostTracker::new(session, Arc::new(crate::PricingCatalog::empty()), tx)
+            .with_durable_persistence(
+                crate::CostHydration {
+                    state: crate::CostState {
+                        session_id: session,
+                        ..Default::default()
+                    },
+                    journal_revision: 1,
+                    attempt_outputs: vec![recovered(old_generation, "interrupted", 20)],
+                },
+                Arc::new(NoWrites),
+                Arc::new(Lease(session.to_string())),
+                crate::CostDurabilityGate::default(),
+            );
+        let config = enforcer().config;
+        let enforcer = BudgetEnforcer::new(config, Arc::new(tracker));
+        let factory = enforcer.workflow_output_scopes();
+        let current = factory
+            .ensure_current(session, MessageId::new(), Some(100))
+            .await
+            .unwrap();
+        assert_eq!(current.spent(), 0);
+        let old = factory
+            .begin_turn(session, old_generation, Some(100))
+            .await
+            .unwrap();
+        assert_eq!(old.spent(), 20);
+        assert!(factory.capture(session).unwrap().shares_account(&current));
+        assert_eq!(
+            factory
+                .ensure_current(session, MessageId::new(), Some(100))
+                .await
+                .unwrap()
+                .spent(),
+            0
+        );
+        assert_eq!(old.spent(), 20);
+    }
+
+    #[test]
+    fn output_scope_recovery_is_atomic_and_retains_correction_dedupe() {
+        let generation = MessageId::new();
+        let mut book = ReservationBook::new();
+        assert!(book
+            .restore_attempt_outputs(&[
+                recovered(generation, "a", u64::MAX),
+                recovered(generation, "b", 1)
+            ])
+            .is_err());
+        assert!(book.output_scopes.is_empty());
+        assert!(book.attempt_origins.is_empty());
+        assert!(!book.output_recovery_loaded);
+        let mut item = recovered(generation, "a", 20);
+        item.current = crate::AttemptOutputRevision {
+            revision: 2,
+            disposition: crate::AttemptDisposition::Exact,
+            output: 7,
+        };
+        book.restore_attempt_outputs(&[item]).unwrap();
+        assert_eq!(book.output_scopes[&generation].spent, 7);
+        let old_receipt = crate::AttemptReceipt {
+            session_id: SessionId::new(),
+            attempt_id: "a".into(),
+            revision: 1,
+            replaces_revision: None,
+            disposition: crate::AttemptDisposition::Unknown,
+            usage: crate::Usage::default(),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            api_duration_ms: 0,
+            api_duration_without_retries_ms: 0,
+        };
+        assert!(!book
+            .publish_attempt_output(generation, &old_receipt, 20)
+            .unwrap());
+        assert_eq!(book.output_scopes[&generation].spent, 7);
+    }
+
+    #[tokio::test]
+    async fn output_scope_ensure_and_begin_are_one_ordered_publication() {
+        for ensure_first in [true, false] {
+            let enforcer = enforcer();
+            let session = enforcer.session_id().await;
+            let factory = enforcer.workflow_output_scopes();
+            let generation = MessageId::new();
+            let gate = enforcer.sessions.output_publication.lock().await;
+            let ensure = factory.ensure_current(session, MessageId::new(), Some(100));
+            let begin = factory.begin_turn(session, generation, Some(100));
+            if ensure_first {
+                let (initial, turn, ()) = tokio::join!(biased; ensure, begin, async { drop(gate) });
+                let initial = initial.unwrap();
+                let turn = turn.unwrap();
+                assert!(!initial.shares_account(&turn));
+                assert!(factory.capture(session).unwrap().shares_account(&turn));
+            } else {
+                let (turn, initial, ()) = tokio::join!(biased; begin, ensure, async { drop(gate) });
+                assert!(initial.unwrap().shares_account(&turn.unwrap()));
+            }
+            assert_eq!(
+                factory.capture(session).unwrap().generation_id(),
+                generation
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn output_scope_ensure_does_not_rebuild_a_frozen_session() {
+        let enforcer = enforcer();
+        let session = enforcer.session_id().await;
+        let factory = enforcer.workflow_output_scopes();
+        let original = factory
+            .ensure_current(session, MessageId::new(), None)
+            .await
+            .unwrap();
+        enforcer
+            .cost_tracker
+            .durability_gate()
+            .freeze("test failure");
+        assert!(factory
+            .ensure_current(session, MessageId::new(), None)
+            .await
+            .is_err());
+        assert!(factory.capture(session).unwrap().shares_account(&original));
+        assert_eq!(
+            enforcer
+                .session_state_for(session)
+                .await
+                .reservations
+                .lock()
+                .unwrap()
+                .output_scopes
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn output_scope_ensure_rechecks_freeze_after_session_lookup_wait() {
+        let enforcer = enforcer();
+        let session = enforcer.session_id().await;
+        let factory = enforcer.workflow_output_scopes();
+        let registry = enforcer.sessions.sessions.lock().await;
+        let mut ensure = Box::pin(factory.ensure_current(session, MessageId::new(), None));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(ensure.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(enforcer.sessions.output_publication.try_lock().is_err());
+        enforcer
+            .cost_tracker
+            .durability_gate()
+            .freeze("freeze during session lookup");
+        drop(registry);
+        assert!(ensure.await.is_err());
+        assert!(factory.capture(session).is_err());
+        let state = enforcer.session_state_for(session).await;
+        assert!(state.reservations.lock().unwrap().output_scopes.is_empty());
     }
 
     #[tokio::test]

@@ -81,6 +81,7 @@ impl From<AnalystError> for FusionError {
 /// Observer-enabled analyst call with the immutable route limits captured at
 /// preparation. Unknown or insufficient capacity returns before the side
 /// query future is constructed, so no provider call can be paid.
+#[cfg(test)]
 pub(crate) async fn analyze_with_observer_and_limits<F>(
     client: Arc<dyn SideQueryClient>,
     config: &FusionRuntimeConfig,
@@ -88,7 +89,27 @@ pub(crate) async fn analyze_with_observer_and_limits<F>(
     analyst: &ResolvedPanel,
     panels: &[PanelInternal],
     limits: ModelLimits,
+    observe: F,
+) -> Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)>
+where
+    F: FnMut(&AnalystUsage, bool),
+{
+    analyze_registered(
+        client, config, request, analyst, panels, limits, observe, None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn analyze_registered<F>(
+    client: Arc<dyn SideQueryClient>,
+    config: &FusionRuntimeConfig,
+    request: &FusionRequest,
+    analyst: &ResolvedPanel,
+    panels: &[PanelInternal],
+    limits: ModelLimits,
     mut observe: F,
+    attempt_run: Option<&platform_api::ModelAttemptRun>,
 ) -> Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)>
 where
     F: FnMut(&AnalystUsage, bool),
@@ -107,7 +128,7 @@ where
     let mut acc = AnalystUsage::default();
     for attempt in 0..attempts {
         let output_tokens = limits.output_cap(config.analyst_max_output_tokens);
-        let req = match packing::prepare_analyst_request(
+        let mut req = match packing::prepare_analyst_request(
             client.as_ref(),
             request,
             analyst,
@@ -123,6 +144,17 @@ where
                 return Err((AnalystError::Failed(error.category().into()), acc));
             }
         };
+        if let Some(run) = attempt_run {
+            req.model_attempt = match run.context(platform_api::ModelAttemptStage::Analyst, None) {
+                Ok(context) => Some(context),
+                Err(_) => {
+                    return Err((
+                        AnalystError::Failed("attempt context unavailable".into()),
+                        acc,
+                    ))
+                }
+            };
+        }
         // Publish the incremented call count before polling the provider.
         // `true` means the current attempt has no response usage yet; if the
         // outer Fusion future is dropped here, settlement keeps prior known

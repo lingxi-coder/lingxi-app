@@ -52,6 +52,7 @@ fn intent(session: SessionId, id: &str) -> AttemptIntent {
     AttemptIntent {
         schema_version: 1,
         session_id: session,
+        output_scope: None,
         attempt_id: id.into(),
         run_id: "run".into(),
         logical_call_id: id.into(),
@@ -148,10 +149,38 @@ async fn start(
 }
 
 #[tokio::test]
+async fn owned_begin_rejects_a_supplied_output_generation_mismatch() {
+    let (tracker, enforcer, scope, mut requests, permits) = setup(100).await;
+    let mut attempted = intent(scope.session_id(), "mismatch");
+    attempted.output_scope = Some(crate::AttemptOutputScope {
+        generation_id: protocol::MessageId::new(),
+        max_output_tokens: Some(100),
+    });
+    let result = tracker.begin_budgeted_attempt(
+        attempted,
+        enforcer.bind_attempt_budget(&scope).await.unwrap(),
+        100,
+        Some(100),
+        permits.clone().acquire_owned().await.unwrap(),
+    );
+    assert!(result.is_err());
+    assert!(requests.try_recv().is_err());
+    assert_eq!(permits.available_permits(), 1);
+    assert_eq!(scope.spent(), 0);
+}
+
+#[tokio::test]
 async fn owned_begin_cancel_before_intent_ack_settles_not_sent_once() {
     let (tracker, enforcer, scope, mut requests, permits) = setup(100).await;
     let receiver = start(&tracker, &enforcer, &scope, &permits, "cancel", 100).await;
     let request = requests.recv().await.unwrap();
+    let AttemptPersistMutation::Intent(captured) = &request.mutation else {
+        panic!("intent first")
+    };
+    assert_eq!(
+        captured.output_scope.as_ref().unwrap().generation_id,
+        scope.generation_id()
+    );
     assert!(matches!(
         &request.mutation,
         AttemptPersistMutation::Intent(_)

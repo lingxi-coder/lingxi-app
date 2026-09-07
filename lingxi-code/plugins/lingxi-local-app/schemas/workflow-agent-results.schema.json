@@ -167,7 +167,7 @@
             "upstream_failures": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/upstream_failure" } },
             "upstream_findings": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/finding" } }
           },
-          "required": ["qa_handle", "evidence_ids", "status", "issues"]
+          "required": ["qa_handle", "evidence_ids", "status", "issues", "verification_scope", "upstream_failures", "upstream_findings"]
         },
         {
           "type": "object",

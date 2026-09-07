@@ -1592,6 +1592,35 @@ pub fn qa_read_evidence(
     read_evidence_artifact(layout, qa_handle, &evidence)
 }
 
+/// Read one artifact using an already loaded, identity-validated QA session.
+///
+/// Same contract as [`qa_read_evidence`] — including the check that the id
+/// names evidence of THIS session — minus the per-call session load, so a
+/// reverse-ordered causality search over N candidates reads the session once
+/// instead of N times. The membership scan stays: it walks the already loaded
+/// `session.evidence` in memory, which costs nothing next to the artifact read
+/// it guards, and taking a `&QaEvidence` instead would move that invariant out
+/// of the type system and into a doc comment on a `pub` function.
+pub fn qa_read_evidence_from_loaded_session(
+    layout: &AppLayout,
+    session: &QaSession,
+    evidence_id: &str,
+) -> Result<QaEvidenceBlock, AppError> {
+    token(evidence_id, "evidence_id")?;
+    session.identity.validate(layout)?;
+    if session.identity.qa_handle.is_empty() {
+        return Err(AppError::StorageCorrupt(
+            "QA session has no evidence handle".into(),
+        ));
+    }
+    let evidence = session
+        .evidence
+        .iter()
+        .find(|item| item.evidence_id == evidence_id)
+        .ok_or_else(|| AppError::NotFound("QA evidence not found".into()))?;
+    read_evidence_artifact(layout, &session.identity.qa_handle, evidence)
+}
+
 fn read_evidence_artifact(
     layout: &AppLayout,
     qa_handle: &str,
@@ -3585,6 +3614,59 @@ mod tests {
         );
         qa_cleanup_session(&layout, "qa_00000000000000000000000000000000").unwrap();
         assert!(load_qa_session(&layout, "qa_00000000000000000000000000000000").is_err());
+    }
+
+    #[test]
+    fn loaded_session_artifact_read_reuses_session_and_rejects_tampering() {
+        let root = TempDir::new().unwrap();
+        let layout = begin(&root, AppRuntimeProfile::ReactDom);
+        roundtrip(&layout);
+        let session = load_qa_session(&layout, "qa_00000000000000000000000000000000").unwrap();
+        let write = session
+            .evidence
+            .iter()
+            .find(|evidence| evidence.evidence_id == "write")
+            .expect("bridge write evidence");
+
+        // Removing the persisted session proves this path uses the already
+        // loaded authoritative session instead of reloading it per artifact.
+        rooted_fs::remove_file(
+            layout.root(),
+            &session_path(&layout, &session.identity.qa_handle).unwrap(),
+        )
+        .unwrap();
+        let QaEvidenceBlock::Json { content, .. } =
+            qa_read_evidence_from_loaded_session(&layout, &session, &write.evidence_id).unwrap()
+        else {
+            panic!("bridge write evidence must be JSON");
+        };
+        assert_eq!(content["results"][0]["collection"], "chores");
+
+        // A well-formed id that this session does not own is still refused:
+        // skipping the reload must not also skip the membership check.
+        let foreign =
+            qa_read_evidence_from_loaded_session(&layout, &session, "notmyevidence").unwrap_err();
+        assert!(
+            matches!(foreign, AppError::NotFound(_)),
+            "an id outside this session must not resolve: {foreign}"
+        );
+
+        let path = artifact_path(&layout, &session.identity.qa_handle, &write.artifact).unwrap();
+        rooted_fs::atomic_write(
+            layout.root(),
+            &path,
+            br#"{"tampered":true}"#,
+            AtomicWriteOptions {
+                overwrite: true,
+                create_parents: false,
+                file_mode: 0o600,
+                ..AtomicWriteOptions::default()
+            },
+        )
+        .unwrap();
+        let error =
+            qa_read_evidence_from_loaded_session(&layout, &session, &write.evidence_id).unwrap_err();
+        assert!(error.to_string().contains("integrity"));
     }
 
     #[test]

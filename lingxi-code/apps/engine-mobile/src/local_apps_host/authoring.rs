@@ -367,27 +367,55 @@ fn sanitize_untrusted_qa_result(result: Value) -> Value {
     }
 }
 
-fn qa_query_matches_bridge_write(
+fn qa_query_matches_bridge_write_content(
+    write_content: &Value,
+    query: &Value,
+    collection: &str,
+) -> bool {
+    let rows = qa_changed_rows(write_content, collection);
+    if rows.is_empty() {
+        return false;
+    }
+    rows.iter()
+        .any(|(record_id, revision)| qa_query_contains_row(query, collection, record_id, *revision))
+}
+
+fn qa_query_causal_event(
     layout: &local_apps::AppLayout,
     session: &local_apps::QaSession,
     query: &Value,
-    write: &local_apps::QaEvidence,
+    scenario_id: &str,
+    target_id: &str,
     collection: &str,
-) -> Result<bool, String> {
-    let write_content =
-        match local_apps::qa_read_evidence(layout, &session.identity.qa_handle, &write.evidence_id)
-            .map_err(|error| error.to_string())?
-        {
-            local_apps::QaEvidenceBlock::Json { content, .. } => content,
-            _ => return Ok(false),
+) -> Result<Option<String>, String> {
+    for write in session.evidence.iter().rev().filter(|evidence| {
+        evidence.kind == local_apps::QaEvidenceKind::BridgeWrite
+            && evidence.scenario_id == scenario_id
+            && evidence.target_id == target_id
+    }) {
+        let block = local_apps::qa::qa_read_evidence_from_loaded_session(
+            layout,
+            session,
+            &write.evidence_id,
+        )
+        .map_err(|error| error.to_string())?;
+        let local_apps::QaEvidenceBlock::Json { content, .. } = block else {
+            continue;
         };
-    let rows = qa_changed_rows(&write_content, collection);
-    if rows.is_empty() {
-        return Ok(false);
+        if qa_query_matches_bridge_write_content(&content, query, collection) {
+            return Ok(Some(write.event_id.clone()));
+        }
     }
-    Ok(rows.iter().any(|(record_id, revision)| {
-        qa_query_contains_row(query, collection, record_id, *revision)
-    }))
+    Ok(None)
+}
+
+fn upstream_finding_projection(failure: &local_apps::QaUpstreamFailure) -> local_apps::QaFinding {
+    local_apps::QaFinding {
+        id: failure.id.clone(),
+        message: failure.message.clone(),
+        blocking: true,
+        resolved_by_evidence_ids: Vec::new(),
+    }
 }
 
 fn qa_query_collection(input: &Value, content: &Value) -> Option<String> {
@@ -1323,11 +1351,7 @@ impl LocalAppsHostBroker {
             "upstream_findings": session
                 .upstream_failures
                 .iter()
-                .map(|failure| json!({
-                    "id": failure.id.clone(),
-                    "message": failure.message.clone(),
-                    "blocking": true,
-                }))
+                .map(upstream_finding_projection)
                 .collect::<Vec<_>>(),
         }))
     }
@@ -1418,11 +1442,16 @@ impl LocalAppsHostBroker {
         let query_collection = (kind == local_apps::QaEvidenceKind::Query)
             .then(|| qa_query_collection(input, &content))
             .flatten();
-        let caused_by = match kind {
+        // Keep filesystem reads off Tokio. The worker owns the already loaded
+        // session and query payload, then returns both so the caller can retain
+        // the same authoritative values for causality timestamps and evidence
+        // persistence. Reverse ordering still short-circuits at the newest
+        // matching write instead of retaining every candidate JSON artifact.
+        let (caused_by, session, content) = match kind {
             // Only the Host action window may supply this id. Never fall back
             // to an older action: normal/background writes intentionally have
             // no way to enter this branch.
-            local_apps::QaEvidenceKind::BridgeWrite => causal_event_id,
+            local_apps::QaEvidenceKind::BridgeWrite => (causal_event_id, session, content),
             // Query input carries no model-authored causal id. Match the
             // actual query page against the exact collection/record/revision
             // tuple returned by a Host-recorded page write. This is important
@@ -1430,43 +1459,40 @@ impl LocalAppsHostBroker {
             // calls: an A query must point at A's write, never merely B's
             // latest timestamp.
             local_apps::QaEvidenceKind::Query => {
-                let Some(collection) = query_collection.as_deref() else {
+                let Some(collection) = query_collection else {
                     return Err(
                         "qa_query_causality_unresolved: query has no collection identity".into(),
                     );
                 };
-                let write = session
-                    .evidence
-                    .iter()
-                    .rev()
-                    .filter(|evidence| {
-                        evidence.kind == local_apps::QaEvidenceKind::BridgeWrite
-                            && evidence.scenario_id == scenario_id
-                            && evidence.target_id == target_id
-                    })
-                    .find_map(|write| {
-                        match qa_query_matches_bridge_write(
-                            &layout,
-                            &session,
-                            &content,
-                            write,
-                            collection,
-                        ) {
-                            Ok(true) => Some(Ok(write)),
-                            Ok(false) => None,
-                            Err(error) => Some(Err(error)),
-                        }
-                    })
-                    .transpose()
-                    .map_err(|error| format!("qa_query_causality_unresolved: {error}"))?
+                let worker_layout = layout.clone();
+                let worker_session = session;
+                let worker_query = content;
+                let worker_scenario = scenario_id.to_string();
+                let worker_target = target_id.to_string();
+                let (event_id, session, content) = tokio::task::spawn_blocking(move || {
+                    let event_id = qa_query_causal_event(
+                        &worker_layout,
+                        &worker_session,
+                        &worker_query,
+                        &worker_scenario,
+                        &worker_target,
+                        &collection,
+                    )
+                    .map_err(|error| {
+                        format!("qa_query_causality_unresolved: {error}")
+                    })?
                     .ok_or_else(|| {
                         format!(
                             "qa_query_causality_unresolved: query collection {collection:?} does not match a recorded page write"
                         )
                     })?;
-                Some(write.event_id.clone())
+                    Ok::<_, String>((event_id, worker_session, worker_query))
+                })
+                .await
+                .map_err(|error| format!("qa_query_causality_worker_failed: {error}"))??;
+                (Some(event_id), session, content)
             }
-            _ => None,
+            _ => (None, session, content),
         };
         let recorded_at_ms = caused_by
             .as_deref()
@@ -2329,6 +2355,74 @@ mod tests {
         .expect("findings normalize");
         assert_eq!(findings[0].resolved_by_evidence_ids, vec!["evidence-1"]);
         assert!(!findings[0].blocking);
+    }
+
+    #[test]
+    fn upstream_findings_project_the_complete_finding_contract() {
+        let failure = local_apps::QaUpstreamFailure {
+            id: "build-failed".into(),
+            message: "the Host build failed".into(),
+            introduced_at_ms: 7,
+        };
+        let projected = upstream_finding_projection(&failure);
+        assert_eq!(
+            projected,
+            local_apps::QaFinding {
+                id: "build-failed".into(),
+                message: "the Host build failed".into(),
+                blocking: true,
+                resolved_by_evidence_ids: Vec::new(),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(projected).expect("serialize typed Host finding projection"),
+            json!({
+                "id": "build-failed",
+                "message": "the Host build failed",
+                "blocking": true,
+                "resolved_by_evidence_ids": [],
+            })
+        );
+    }
+
+    #[test]
+    fn query_causality_checks_each_write_collection_and_revision() {
+        let earlier_write = json!({
+            "results": [{
+                "collection": "chores",
+                "recordId": "row-a",
+                "revision": 1,
+                "deleted": false
+            }]
+        });
+        let later_nonmatching_write = json!({
+            "results": [{
+                "collection": "notes",
+                "recordId": "row-b",
+                "revision": 2,
+                "deleted": false
+            }]
+        });
+        let matching_query = json!({
+            "records": [{"collection": "chores", "recordId": "row-a", "revision": 1}]
+        });
+        assert!(qa_query_matches_bridge_write_content(
+            &earlier_write,
+            &matching_query,
+            "chores",
+        ));
+        assert!(!qa_query_matches_bridge_write_content(
+            &later_nonmatching_write,
+            &matching_query,
+            "chores",
+        ));
+        assert!(!qa_query_matches_bridge_write_content(
+            &earlier_write,
+            &json!({
+                "records": [{"collection": "chores", "recordId": "row-a", "revision": 9}]
+            }),
+            "chores",
+        ));
     }
 
     #[test]

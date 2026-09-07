@@ -93,15 +93,36 @@ internal data class LocalAppQaEnvelope(
 internal data class LocalAppQaDocument(
     val loadedRuntimeUrl: String,
     val navigationGeneration: Long,
+    /**
+     * How many full documents this WebView has started loading. Every
+     * cross-document load raises it in `onPageStarted`; a same-document
+     * history commit never does. `navigationGeneration` alone cannot separate
+     * the two, so this is what lets an event action attest an SPA route it
+     * committed without also attesting a whole new document it merely raced.
+     * Never reset, for the same reason `navigationGeneration` is not: a stale
+     * snapshot must never compare equal to a later one.
+     */
+    val documentLoadGeneration: Long = 0,
 )
 
 /** Pure lifecycle state so same-port A → B races can be regression-tested on the JVM. */
 internal class LocalAppQaDocumentState(initialRuntimeUrl: String) {
     private var expectedRuntimeUrl = initialRuntimeUrl.asUriOrNull()
     private var pendingStartUrl: URI? = null
+    private var pendingHistoryNavigation = false
     private var activeStartGeneration: Long? = null
     private var activeStartUrl: URI? = null
     private var committedUrl: URI? = null
+    private var deferredVisitedHistoryObserved = false
+    private var deferredVisitedHistoryUrl: URI? = null
+    /**
+     * The last document that reached a committed state. `committedUrl` is
+     * cleared as soon as Host navigation starts; retaining this identity lets
+     * Back reject a delayed callback for the current entry and authenticate
+     * only the requested copied-list destination.
+     */
+    private var lastCommittedUrl: URI? = null
+    private var documentLoadGeneration: Long = 0
     private var ready = false
     private var visualReadyGeneration: Long? = null
     private var activeVisualFenceToken: Long? = null
@@ -112,16 +133,19 @@ internal class LocalAppQaDocumentState(initialRuntimeUrl: String) {
     var navigationGeneration: Long = 0
         private set
 
-    fun beginNavigation(url: String): Long {
+    fun beginNavigation(url: String, isHistoryNavigation: Boolean = false): Long {
         navigationGeneration += 1
         val requested = url.asUriOrNull()
         if (requested?.let(::isLocalAppQaRuntimeUrl) == true || expectedRuntimeUrl == null) {
             expectedRuntimeUrl = requested
         }
         pendingStartUrl = requested
+        pendingHistoryNavigation = isHistoryNavigation
         activeStartGeneration = null
         activeStartUrl = null
         committedUrl = null
+        deferredVisitedHistoryObserved = false
+        deferredVisitedHistoryUrl = null
         ready = false
         visualReadyGeneration = null
         activeVisualFenceToken = null
@@ -131,11 +155,15 @@ internal class LocalAppQaDocumentState(initialRuntimeUrl: String) {
     fun onPageStarted(url: String) {
         if (isDetached) return
         val started = url.asUriOrNull()
-        if (started != pendingStartUrl) navigationGeneration += 1
+        if (!pendingHistoryNavigation && started != pendingStartUrl) navigationGeneration += 1
+        documentLoadGeneration += 1
         pendingStartUrl = null
+        pendingHistoryNavigation = false
         activeStartGeneration = navigationGeneration
         activeStartUrl = started
         committedUrl = null
+        deferredVisitedHistoryObserved = false
+        deferredVisitedHistoryUrl = null
         ready = false
         visualReadyGeneration = null
         activeVisualFenceToken = null
@@ -143,30 +171,107 @@ internal class LocalAppQaDocumentState(initialRuntimeUrl: String) {
 
     fun onPageFinished(url: String): Long? {
         if (isDetached || activeStartGeneration != navigationGeneration) return null
-        val committed = url.asUriOrNull() ?: return null
+        val finished = url.asUriOrNull() ?: return null
+        val started = activeStartUrl
+        val deferred = deferredVisitedHistoryUrl
+        if (deferredVisitedHistoryObserved && deferred == null) {
+            // A foreign or malformed same-document URL was committed while
+            // this document was loading. The later load event must not revive
+            // the pre-history URL as a trusted QA document.
+            invalidateDocument()
+            return null
+        }
         // Ignore an old runtime's late finish without consuming the current
         // generation; the current document may still finish afterward.
-        if (!sameLocalAppRuntimeIdentity(expectedRuntimeUrl, committed) || committed != activeStartUrl) return null
+        if (!sameLocalAppRuntimeIdentity(expectedRuntimeUrl, finished) ||
+            (finished != started && finished != deferred)
+        ) return null
+        val committed = deferred ?: finished
+        if (deferredVisitedHistoryObserved && committed != started) navigationGeneration += 1
         committedUrl = committed
+        lastCommittedUrl = committed
         activeStartGeneration = null
         activeStartUrl = null
+        deferredVisitedHistoryObserved = false
+        deferredVisitedHistoryUrl = null
         ready = true
         visualReadyGeneration = null
         activeVisualFenceToken = null
         return navigationGeneration
     }
 
-    /** Fragment history does not reliably produce onPageStarted callbacks. */
-    fun onSameDocumentNavigationObserved(url: String): Long? {
-        if (isDetached || activeStartGeneration != null || pendingStartUrl == null) return null
+    /**
+     * Fragment history does not reliably produce onPageStarted callbacks.
+     * This is the explicit Host fallback for a navigation already classified
+     * as same-document (Navigate/Back); the native history callback is the
+     * normal path below.
+     */
+    fun onSameDocumentNavigationObserved(url: String): Long? =
+        commitSameDocumentNavigation(url, requirePriorDocument = false)
+
+    /**
+     * Mirrors WebViewClient.doUpdateVisitedHistory. Chromium invokes this for
+     * pushState/replaceState/hash history commits without onPageStarted. An
+     * update observed during a full page-start sequence is retained until its
+     * finish so startup routing cannot be dropped; a full navigation's own
+     * same-URL history callback then collapses to a no-op.
+     */
+    fun onVisitedHistoryUpdated(url: String, isReload: Boolean = false): Long? {
+        if (isDetached || isReload) return null
+        val observed = url.asUriOrNull()
+        if (activeStartGeneration != null) {
+            // Chromium reports same-document commits as soon as that nested
+            // navigation commits, which can be before the enclosing document's
+            // onPageFinished (startup routers commonly replaceState here).
+            // Retain the latest observed URL and fold it into that finish.
+            // A null value deliberately records an untrusted observation.
+            deferredVisitedHistoryObserved = true
+            deferredVisitedHistoryUrl = observed?.takeIf {
+                sameLocalAppRuntimeIdentity(expectedRuntimeUrl, it)
+            }
+            visualReadyGeneration = null
+            activeVisualFenceToken = null
+            return null
+        }
+        if (observed == null || !sameLocalAppRuntimeIdentity(expectedRuntimeUrl, observed)) {
+            // A same-document callback carrying a foreign/malformed runtime
+            // must invalidate the old ready document. Otherwise a QA Inspect
+            // could attest stale state after the page changed its URL.
+            invalidateDocument()
+            return null
+        }
+        return commitSameDocumentNavigation(url, requirePriorDocument = true)
+    }
+
+    private fun commitSameDocumentNavigation(
+        url: String,
+        requirePriorDocument: Boolean,
+    ): Long? {
+        if (isDetached || activeStartGeneration != null) return null
         val committed = url.asUriOrNull() ?: return null
-        if (!sameLocalAppRuntimeIdentity(expectedRuntimeUrl, committed) ||
-            pendingStartUrl != committed
-        ) return null
+        if (!sameLocalAppRuntimeIdentity(expectedRuntimeUrl, committed)) return null
+        val pending = pendingStartUrl
+        val historyNavigation = pendingHistoryNavigation
+        val prior = committedUrl ?: lastCommittedUrl
+        if (historyNavigation) {
+            if (pending == null || prior == null || committed != pending || committed == prior) return null
+        } else if (pending != null) {
+            if (pending != committed ||
+                (requirePriorDocument &&
+                    !isSameLocalAppHistoryDocument(expectedRuntimeUrl, prior, committed))
+            ) return null
+        } else {
+            // A page-created history entry must move from the currently loaded
+            // URL. Duplicate doUpdateVisitedHistory callbacks are no-ops.
+            if (!ready || committedUrl == null || committedUrl == committed) return null
+        }
         pendingStartUrl = null
-        activeStartGeneration = navigationGeneration
-        activeStartUrl = committed
+        pendingHistoryNavigation = false
+        activeStartGeneration = null
+        activeStartUrl = null
+        if (pending == null && !historyNavigation) navigationGeneration += 1
         committedUrl = committed
+        lastCommittedUrl = committed
         ready = true
         visualReadyGeneration = null
         activeVisualFenceToken = null
@@ -206,7 +311,7 @@ internal class LocalAppQaDocumentState(initialRuntimeUrl: String) {
             !sameLocalAppRuntimeIdentity(expected, committed) ||
             (requireVisualFrame && visualReadyGeneration != navigationGeneration)
         ) return null
-        return LocalAppQaDocument(committed.toString(), navigationGeneration)
+        return LocalAppQaDocument(committed.toString(), navigationGeneration, documentLoadGeneration)
     }
 
     /** Validate the observed route against the canonical Host runtime identity. */
@@ -220,9 +325,27 @@ internal class LocalAppQaDocumentState(initialRuntimeUrl: String) {
     fun detach() {
         isDetached = true
         pendingStartUrl = null
+        pendingHistoryNavigation = false
         activeStartGeneration = null
         activeStartUrl = null
         committedUrl = null
+        lastCommittedUrl = null
+        deferredVisitedHistoryObserved = false
+        deferredVisitedHistoryUrl = null
+        ready = false
+        visualReadyGeneration = null
+        activeVisualFenceToken = null
+    }
+
+    private fun invalidateDocument() {
+        pendingStartUrl = null
+        pendingHistoryNavigation = false
+        activeStartGeneration = null
+        activeStartUrl = null
+        committedUrl = null
+        lastCommittedUrl = null
+        deferredVisitedHistoryObserved = false
+        deferredVisitedHistoryUrl = null
         ready = false
         visualReadyGeneration = null
         activeVisualFenceToken = null
@@ -285,12 +408,39 @@ internal fun sameLocalAppRuntimeIdentity(expected: URI?, committed: URI?): Boole
         committedMarkers.size == 1 && committedMarkers[0] == expectedMarker
 }
 
+/** A Host-requested fragment history step must stay in the same document. */
+private fun isSameLocalAppHistoryDocument(
+    expected: URI?,
+    previous: URI?,
+    next: URI?,
+): Boolean =
+    previous != null && next != null &&
+        sameLocalAppRuntimeIdentity(expected, previous) &&
+        sameLocalAppRuntimeIdentity(expected, next) &&
+        previous.rawPath == next.rawPath &&
+        previous.rawQuery == next.rawQuery &&
+        previous.fragment != next.fragment
+
 internal fun sameLocalAppQaDocument(
     before: LocalAppQaDocument,
     after: LocalAppQaDocument,
     intentionalNavigation: Boolean,
+    allowInteractiveNavigation: Boolean = false,
 ): Boolean = if (intentionalNavigation) {
     after.navigationGeneration > before.navigationGeneration
+} else if (allowInteractiveNavigation) {
+    // Event actions may synchronously commit a same-document SPA route, so a
+    // successful action may advance the generation -- but ONLY through
+    // same-document history commits. A full document load starting during the
+    // action raises documentLoadGeneration, and the action's result was
+    // produced in the document that load replaced: attesting it against the
+    // new one would bind the evidence to a route it never ran in, and which
+    // route won would depend on when awaitQaDocument happened to poll. A no-op
+    // event still has to certify the exact pre-action document.
+    after.documentLoadGeneration == before.documentLoadGeneration &&
+        (after.navigationGeneration > before.navigationGeneration ||
+            (after.navigationGeneration == before.navigationGeneration &&
+                after.loadedRuntimeUrl == before.loadedRuntimeUrl))
 } else {
     after.navigationGeneration == before.navigationGeneration &&
         after.loadedRuntimeUrl == before.loadedRuntimeUrl
@@ -304,6 +454,20 @@ internal fun localAppQaNavigationWasAccepted(
         action is LocalAppUiAutomationAction.Back ||
         action is LocalAppUiAutomationAction.Reload
     )
+
+/** Event actions can legitimately submit a form or commit an SPA history entry. */
+internal fun localAppQaActionMayAdvanceDocument(
+    action: LocalAppUiAutomationAction,
+    result: LocalAppUiExecutionResult,
+): Boolean = result.error == null && when (action) {
+    is LocalAppUiAutomationAction.Click,
+    is LocalAppUiAutomationAction.Fill,
+    is LocalAppUiAutomationAction.Select,
+    is LocalAppUiAutomationAction.Toggle,
+    is LocalAppUiAutomationAction.Pointer,
+    is LocalAppUiAutomationAction.Key -> true
+    else -> false
+}
 
 internal fun localAppFrameCommitFenceAvailable(
     sdkInt: Int,
@@ -391,8 +555,8 @@ class LocalAppWebViewController internal constructor(
     private var deletionSuspended = false
     private val qaDocumentState = LocalAppQaDocumentState(initialUrl)
 
-    internal fun beginNavigation(url: String) {
-        qaDocumentState.beginNavigation(url)
+    internal fun beginNavigation(url: String, isHistoryNavigation: Boolean = false) {
+        qaDocumentState.beginNavigation(url, isHistoryNavigation)
     }
 
     internal fun onPageStarted(url: String) {
@@ -401,6 +565,16 @@ class LocalAppWebViewController internal constructor(
 
     internal fun onPageFinished(url: String) {
         val generation = qaDocumentState.onPageFinished(url) ?: return
+        val committed = qaDocumentState.currentDocument(minimumGeneration = generation) ?: return
+        armVisualReadiness(committed.loadedRuntimeUrl, committed.navigationGeneration)
+    }
+
+    internal fun onVisitedHistoryUpdated(url: String, isReload: Boolean) {
+        // Chromium queues onPageStarted before this callback for a committed
+        // cross-document load, while same-document commits deliberately have
+        // no page-start callback. Observe this callback on its native UI turn;
+        // another post would reorder startup replaceState after onPageFinished.
+        val generation = qaDocumentState.onVisitedHistoryUpdated(url, isReload) ?: return
         armVisualReadiness(url, generation)
     }
 
@@ -496,10 +670,12 @@ class LocalAppWebViewController internal constructor(
         attempts: Int = 0,
         onReady: (LocalAppQaDocument?) -> Unit,
     ) {
-        qaDocumentState.document(expected, minimumGeneration, requireVisualFrame)?.let { document ->
-            onReady(document)
-            return
-        }
+        qaDocumentState.document(expected, minimumGeneration, requireVisualFrame)
+            ?.takeIf { document -> webView.url == document.loadedRuntimeUrl }
+            ?.let { document ->
+                onReady(document)
+                return
+            }
         if (qaDocumentState.isDetached || attempts >= 100) {
             onReady(null)
             return
@@ -549,6 +725,7 @@ class LocalAppWebViewController internal constructor(
                     action = qa.action,
                     onResult = { result ->
                         val intentionalNavigation = localAppQaNavigationWasAccepted(qa.action, result)
+                        val interactiveNavigation = localAppQaActionMayAdvanceDocument(qa.action, result)
                         val minimumGeneration = if (intentionalNavigation) {
                             before.navigationGeneration + 1
                         } else {
@@ -566,7 +743,13 @@ class LocalAppWebViewController internal constructor(
                                         "Local App QA document identity changed during the action"
                                     }
                                     onResult(LocalAppUiExecutionResult(null, error))
-                                } else if (!sameLocalAppQaDocument(before, after, intentionalNavigation)) {
+                                } else if (!sameLocalAppQaDocument(
+                                        before,
+                                        after,
+                                        intentionalNavigation,
+                                        allowInteractiveNavigation = interactiveNavigation,
+                                    )
+                                ) {
                                     onResult(LocalAppUiExecutionResult(null, "Local App QA document changed during the action"))
                                 } else {
                                     onResult(attestQaResult(result, expected, after))
@@ -619,16 +802,25 @@ class LocalAppWebViewController internal constructor(
                     onResult(LocalAppUiExecutionResult(resultJson = null, error = "Only trusted loopback navigation is allowed"))
                 }
             }
-            LocalAppUiAutomationAction.Back -> if (webView.canGoBack()) {
+            LocalAppUiAutomationAction.Back -> {
                 val current = Uri.parse(webView.url ?: initialUrl)
                 val history = webView.copyBackForwardList()
                 val target = history.currentIndex
                     .takeIf { it > 0 }
                     ?.let { history.getItemAtIndex(it - 1)?.url }
                     ?.let(Uri::parse)
-                beginNavigation(target?.toString() ?: current.toString())
-                webView.goBack()
-                if (target != null && isSameDocumentNavigation(current, target)) {
+                if (target == null) {
+                    onResult(LocalAppUiExecutionResult(resultJson = null, error = "WebView cannot navigate back"))
+                    return
+                }
+                // canGoBack()/goBack() can ignore same-document pushState
+                // entries even though the authoritative copied list exposes a
+                // previous item. Use that list for admission and the document's
+                // History traversal; the native history callback still owns
+                // destination authentication and completion.
+                beginNavigation(target.toString(), isHistoryNavigation = true)
+                fixedScript("window.history.back();") {}
+                if (isSameDocumentNavigation(current, target)) {
                     webView.post { observeSameDocumentNavigation(target.toString()) }
                 }
                 onResult(
@@ -637,8 +829,6 @@ class LocalAppWebViewController internal constructor(
                         error = null,
                     ),
                 )
-            } else {
-                onResult(LocalAppUiExecutionResult(resultJson = null, error = "WebView cannot navigate back"))
             }
             LocalAppUiAutomationAction.Reload -> {
                 beginNavigation(webView.url ?: initialUrl)
@@ -2181,6 +2371,10 @@ fun LocalAppWebView(
 
                     override fun onPageFinished(view: WebView, url: String) {
                         controller?.onPageFinished(url)
+                    }
+
+                    override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+                        controller?.onVisitedHistoryUpdated(url, isReload)
                     }
 
                     override fun onSafeBrowsingHit(

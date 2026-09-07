@@ -199,6 +199,88 @@ class LocalAppWebViewTest {
     }
 
     @Test
+    fun `successful event actions may attest a committed SPA route but failed events may not`() {
+        val before = LocalAppQaDocument("http://127.0.0.1:43123/?lingxi_runtime=42", 7, 2)
+        val route = LocalAppQaDocument("http://127.0.0.1:43123/settings?lingxi_runtime=42", 8, 2)
+        val click = LocalAppUiAutomationAction.Click(LocalAppUiTarget(elementId = "settings"))
+        val success = LocalAppUiExecutionResult("{\"ok\":true}", null)
+        val failure = LocalAppUiExecutionResult(null, "target not found")
+
+        assertTrue(localAppQaActionMayAdvanceDocument(click, success))
+        assertFalse(localAppQaActionMayAdvanceDocument(click, failure))
+        assertTrue(
+            sameLocalAppQaDocument(
+                before,
+                route,
+                intentionalNavigation = false,
+                allowInteractiveNavigation = true,
+            ),
+        )
+        assertFalse(sameLocalAppQaDocument(before, route, intentionalNavigation = false))
+    }
+
+    @Test
+    fun `an event action may not attest a document that a full load replaced`() {
+        val before = LocalAppQaDocument("http://127.0.0.1:43123/?lingxi_runtime=42", 7, 2)
+        // Same navigation generation arithmetic as the SPA route above, but a
+        // full document load started during the action. The click's result was
+        // produced in the document that load replaced.
+        val loaded = LocalAppQaDocument("http://127.0.0.1:43123/other?lingxi_runtime=42", 8, 3)
+
+        assertFalse(
+            "a cross-document load during an event action cannot be attested",
+            sameLocalAppQaDocument(
+                before,
+                loaded,
+                intentionalNavigation = false,
+                allowInteractiveNavigation = true,
+            ),
+        )
+        // The pre-action document is still certifiable while that load is in
+        // flight: awaitQaDocument can only see it before onPageStarted runs, and
+        // that IS the document the action ran in.
+        assertTrue(
+            sameLocalAppQaDocument(
+                before,
+                before,
+                intentionalNavigation = false,
+                allowInteractiveNavigation = true,
+            ),
+        )
+        // An intentional Navigate/Back/Reload is still judged by generation
+        // alone: those actions ARE the load.
+        assertTrue(sameLocalAppQaDocument(before, loaded, intentionalNavigation = true))
+    }
+
+    @Test
+    fun `only a full page start advances the document load generation`() {
+        val runtime = "http://127.0.0.1:43123/?lingxi_runtime=42"
+        val route = "http://127.0.0.1:43123/settings?lingxi_runtime=42"
+        val state = LocalAppQaDocumentState(runtime)
+        state.beginNavigation(runtime)
+        state.onPageStarted(runtime)
+        state.onPageFinished(runtime)
+        val loaded = state.currentDocument() ?: error("initial document did not commit")
+        assertEquals(1L, loaded.documentLoadGeneration)
+
+        state.onVisitedHistoryUpdated(route)
+        val routed = state.currentDocument() ?: error("SPA route did not commit")
+        assertEquals(route, routed.loadedRuntimeUrl)
+        assertTrue(routed.navigationGeneration > loaded.navigationGeneration)
+        assertEquals(
+            "a same-document history commit is not a document load",
+            loaded.documentLoadGeneration,
+            routed.documentLoadGeneration,
+        )
+
+        state.beginNavigation(route)
+        state.onPageStarted(route)
+        state.onPageFinished(route)
+        val reloaded = state.currentDocument() ?: error("full load did not commit")
+        assertEquals(2L, reloaded.documentLoadGeneration)
+    }
+
+    @Test
     fun `capture frame fence is unavailable below API 29 or without a hardware surface`() {
         assertFalse(localAppFrameCommitFenceAvailable(28, attached = true, hardwareAccelerated = true))
         assertFalse(localAppFrameCommitFenceAvailable(29, attached = false, hardwareAccelerated = true))
@@ -264,10 +346,144 @@ class LocalAppWebViewTest {
         // This mirrors LocalAppWebViewController.Back: it begins the
         // destination from WebBackForwardList, then observes the fragment
         // callback without relying on onPageStarted.
-        val backGeneration = state.beginNavigation(routeA)
+        val backGeneration = state.beginNavigation(routeA, isHistoryNavigation = true)
         assertNotNull(state.onSameDocumentNavigationObserved(routeA))
         state.onVisualFrame(routeA, backGeneration)
         assertEquals(routeA, state.document(URI(runtime))?.loadedRuntimeUrl)
+    }
+
+    @Test
+    fun `visited history commits pushState and replaceState without page started`() {
+        val runtime = "http://127.0.0.1:43123/?lingxi_runtime=42"
+        val state = LocalAppQaDocumentState(runtime)
+        state.beginNavigation(runtime)
+        state.onPageStarted(runtime)
+        val initialGeneration = state.onPageFinished(runtime) ?: error("initial document did not finish")
+
+        val pushed = "http://127.0.0.1:43123/settings?tab=all&lingxi_runtime=42"
+        assertEquals(initialGeneration + 1, state.onVisitedHistoryUpdated(pushed))
+        assertEquals(pushed, state.currentDocument()?.loadedRuntimeUrl)
+        assertNull("duplicate history commits must not advance twice", state.onVisitedHistoryUpdated(pushed))
+
+        val replaced = "http://127.0.0.1:43123/settings?tab=recent&lingxi_runtime=42"
+        assertEquals(initialGeneration + 2, state.onVisitedHistoryUpdated(replaced))
+        assertEquals(replaced, state.currentDocument()?.loadedRuntimeUrl)
+    }
+
+    @Test
+    fun `startup replaceState is retained until the active document finishes`() {
+        val runtime = "http://127.0.0.1:43123/?lingxi_runtime=42"
+        val startupRoute = "http://127.0.0.1:43123/startup?lingxi_runtime=42"
+        val state = LocalAppQaDocumentState(runtime)
+        val loadGeneration = state.beginNavigation(runtime)
+        state.onPageStarted(runtime)
+
+        assertNull(state.onVisitedHistoryUpdated(startupRoute))
+        assertNull("the active load is not ready before its finish", state.currentDocument())
+        assertEquals(loadGeneration + 1, state.onPageFinished(runtime))
+        assertEquals(startupRoute, state.currentDocument()?.loadedRuntimeUrl)
+    }
+
+    @Test
+    fun `invalid startup history cannot be revived by the enclosing page finish`() {
+        val runtime = "http://127.0.0.1:43123/?lingxi_runtime=42"
+        val wrongMarker = "http://127.0.0.1:43123/startup?lingxi_runtime=41"
+        val state = LocalAppQaDocumentState(runtime)
+        state.beginNavigation(runtime)
+        state.onPageStarted(runtime)
+
+        assertNull(state.onVisitedHistoryUpdated(wrongMarker))
+        assertNull(state.onPageFinished(runtime))
+        assertNull("the original URL must not become trusted again", state.currentDocument())
+    }
+
+    @Test
+    fun `visited history commits hash changes and Host back once each`() {
+        val runtime = "http://127.0.0.1:43123/?lingxi_runtime=42"
+        val hashA = "http://127.0.0.1:43123/?lingxi_runtime=42#a"
+        val hashB = "http://127.0.0.1:43123/?lingxi_runtime=42#b"
+        val state = LocalAppQaDocumentState(runtime)
+        state.beginNavigation(runtime)
+        state.onPageStarted(runtime)
+        state.onPageFinished(runtime)
+
+        val firstHistoryGeneration = state.onVisitedHistoryUpdated(hashA)
+        assertEquals(2L, firstHistoryGeneration)
+        assertEquals(hashA, state.currentDocument()?.loadedRuntimeUrl)
+        assertNull(state.onVisitedHistoryUpdated(hashA))
+
+        val secondHistoryGeneration = state.onVisitedHistoryUpdated(hashB)
+        assertEquals(3L, secondHistoryGeneration)
+        assertEquals(hashB, state.currentDocument()?.loadedRuntimeUrl)
+
+        // Host Back begins the expected destination, then the native history
+        // callback commits it. The explicit Host fallback arriving afterward
+        // must observe the already-consumed pending navigation.
+        val backGeneration = state.beginNavigation(hashA, isHistoryNavigation = true)
+        assertEquals(4L, backGeneration)
+        assertEquals(backGeneration, state.onVisitedHistoryUpdated(hashA))
+        assertNull(state.onVisitedHistoryUpdated(hashA))
+        assertEquals(hashA, state.currentDocument()?.loadedRuntimeUrl)
+    }
+
+    @Test
+    fun `visited history does not certify a cross-document load or duplicate finish`() {
+        val runtime = "http://127.0.0.1:43123/?lingxi_runtime=42"
+        val route = "http://127.0.0.1:43123/other?lingxi_runtime=42"
+        val state = LocalAppQaDocumentState(runtime)
+        state.beginNavigation(runtime)
+        state.onPageStarted(runtime)
+        state.onPageFinished(runtime)
+
+        val generation = state.beginNavigation(route)
+        // This callback can precede onPageStarted in the native sequence. A
+        // path change is not Host-known same-document history, so it remains
+        // pending for the real full-load callbacks.
+        assertNull(state.onVisitedHistoryUpdated(route))
+        state.onPageStarted(route)
+        assertNull(state.onVisitedHistoryUpdated(route))
+        assertNull(state.onVisitedHistoryUpdated(route))
+        assertEquals(generation, state.onPageFinished(route))
+        assertNull("a late history callback cannot advance a full load", state.onVisitedHistoryUpdated(route))
+        assertNull("a duplicate finish cannot recertify the document", state.onPageFinished(route))
+        assertEquals(route, state.currentDocument()?.loadedRuntimeUrl)
+    }
+
+    @Test
+    fun `invalid visited history invalidates stale document until a real load finishes`() {
+        val runtime = "http://127.0.0.1:43123/?lingxi_runtime=42"
+        val wrongMarker = "http://127.0.0.1:43123/settings?lingxi_runtime=41"
+        val validRoute = "http://127.0.0.1:43123/settings?lingxi_runtime=42"
+        val state = LocalAppQaDocumentState(runtime)
+        state.beginNavigation(runtime)
+        state.onPageStarted(runtime)
+        state.onPageFinished(runtime)
+
+        assertNull(state.onVisitedHistoryUpdated(wrongMarker))
+        assertNull("old state must not attest after an invalid history URL", state.currentDocument())
+
+        val generation = state.beginNavigation(validRoute)
+        state.onPageStarted(validRoute)
+        assertEquals(generation, state.onPageFinished(validRoute))
+        assertEquals(validRoute, state.currentDocument()?.loadedRuntimeUrl)
+    }
+
+    @Test
+    fun `Host back history callback accepts a different SPA path without page started`() {
+        val runtime = "http://127.0.0.1:43123/?lingxi_runtime=42"
+        val routeA = "http://127.0.0.1:43123/first?lingxi_runtime=42"
+        val routeB = "http://127.0.0.1:43123/second?tab=all&lingxi_runtime=42"
+        val state = LocalAppQaDocumentState(runtime)
+        state.beginNavigation(runtime)
+        state.onPageStarted(runtime)
+        state.onPageFinished(runtime)
+        state.onVisitedHistoryUpdated(routeA)
+        state.onVisitedHistoryUpdated(routeB)
+
+        val backGeneration = state.beginNavigation(routeA, isHistoryNavigation = true)
+        assertNull("a delayed callback for the current entry cannot complete Back", state.onVisitedHistoryUpdated(routeB))
+        assertEquals(backGeneration, state.onVisitedHistoryUpdated(routeA))
+        assertEquals(routeA, state.currentDocument()?.loadedRuntimeUrl)
     }
 
     @Test

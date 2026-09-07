@@ -99,6 +99,62 @@ fn workflow_schemas() -> serde_json::Value {
     serde_json::Value::Object(schemas)
 }
 
+/// The workflow runtime delegates structured-output validation to the Host's
+/// agent runner. These hermetic callbacks bypass that runner, so successful
+/// fixtures must still prove that they contain the required fields of the
+/// exact role schema supplied to `agent({ schema })`.
+///
+/// Presence only — not types, patterns or `minItems`. That is the whole check:
+/// naming it here rather than letting the call sites read as full schema
+/// validation, which is the Host runner's job and is exercised against the real
+/// validator in `agent`'s `local_app_operator_schema_requires_complete_host_qa_projection`.
+///
+/// A failure names the missing field per branch. An earlier revision found the
+/// first branch whose required fields were all present and then asserted
+/// exactly that predicate again, so only the `find` could ever fail and it
+/// failed with the fixture dumped and nothing said about what was missing.
+fn assert_schema_required_fields(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+    label: &str,
+) {
+    assert!(
+        schema.is_object(),
+        "{label} agent call supplied no role schema, so its fixture is ungated: {schema}"
+    );
+    let branches = schema
+        .get("anyOf")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| vec![schema.clone()]);
+    let mut missing_by_branch: Vec<(usize, Vec<&str>)> = Vec::new();
+    for (index, branch) in branches.iter().enumerate() {
+        // Every `$defs` branch in the checked-in role schemas carries
+        // `required` today. A branch without one imposes nothing and would
+        // make this gate vacuous for that role, so it fails here instead.
+        let required = branch["required"].as_array().unwrap_or_else(|| {
+            panic!("{label} role-schema branch {index} has no `required` array: {branch}")
+        });
+        let missing = required
+            .iter()
+            .map(|field| {
+                field.as_str().unwrap_or_else(|| {
+                    panic!("{label} role-schema branch {index} has a non-string required field: {field}")
+                })
+            })
+            .filter(|field| value.get(field).is_none())
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
+            return;
+        }
+        missing_by_branch.push((index, missing));
+    }
+    panic!(
+        "{label} callback fixture satisfies no role-schema branch; \
+         missing required fields per branch: {missing_by_branch:?}; fixture: {value}"
+    );
+}
+
 #[test]
 fn verification_scope_schema_rejects_empty_required_target_lists() {
     let workflow_root = workflow_dir();
@@ -484,8 +540,16 @@ fn first_pass_agent_call_counts_are_exercised_for_each_quality_level() {
                             .lock()
                             .expect("call capture")
                             .push(label.clone());
-                        canned_stage_reply(&label)
-                            .unwrap_or_else(|| passing_qa_reply(&label, "wf_regression", quality))
+                        let reply = canned_stage_reply(&label)
+                            .unwrap_or_else(|| passing_qa_reply(&label, "wf_regression", quality));
+                        let structured: serde_json::Value =
+                            serde_json::from_str(&reply).expect("structured callback fixture JSON");
+                        assert_schema_required_fields(
+                            &options_value["schema"],
+                            &structured,
+                            &label,
+                        );
+                        reply
                     })
                     .collect()
             },
@@ -1305,8 +1369,38 @@ fn operator_report(qa_handle: &str) -> serde_json::Value {
         "evidence_ids": ["native-1"],
         "status": "evidence_collected",
         "issues": [],
+        "verification_scope": {
+            "declared_target_ids": ["primary"],
+            "in_scope_target_ids": ["primary"],
+            "unverified_target_ids": [],
+            "unverified_scenario_ids": []
+        },
+        "upstream_failures": [],
+        "upstream_findings": [],
         "summary": "Host evidence collected"
     })
+}
+
+fn partial_operator_report(qa_handle: &str) -> serde_json::Value {
+    let mut report = operator_report(qa_handle);
+    report["verification_scope"] = serde_json::json!({
+        "declared_target_ids": ["primary", "ipad"],
+        "in_scope_target_ids": ["primary"],
+        "unverified_target_ids": ["ipad"],
+        "unverified_scenario_ids": ["ipad-layout"]
+    });
+    report["upstream_failures"] = serde_json::json!([{
+        "id": "environment:ipad-unavailable",
+        "message": "the iPad device is unavailable",
+        "introduced_at_ms": 10
+    }]);
+    report["upstream_findings"] = serde_json::json!([{
+        "id": "environment:ipad-unavailable",
+        "message": "the iPad device is unavailable",
+        "blocking": true,
+        "resolved_by_evidence_ids": []
+    }]);
+    report
 }
 
 fn qa_candidate_report(
@@ -1902,7 +1996,8 @@ fn infrastructure_failure_never_enters_source_repair() {
                     calls_for_run.lock().expect("call log").push(label.clone());
                     canned_stage_reply(&label).unwrap_or_else(|| {
                         if label.starts_with("operator-") {
-                            operator_report("qa_00000000000000000000000000000000").to_string()
+                            partial_operator_report("qa_00000000000000000000000000000000")
+                                .to_string()
                         } else {
                             serde_json::json!({
                                 "status": "infrastructure_failed",
@@ -1927,6 +2022,11 @@ fn infrastructure_failure_never_enters_source_repair() {
     assert!(
         result.contains("\"status\":\"infrastructure_failed\""),
         "{result}"
+    );
+    assert!(
+        result.contains("\"unverified_target_ids\":[\"ipad\"]")
+            && result.contains("\"unverified_scenario_ids\":[\"ipad-layout\"]"),
+        "partial Host verification scope was lost on infrastructure failure: {result}"
     );
     assert!(result.contains("\"repair_rounds\":0"), "{result}");
     assert!(
@@ -1983,6 +2083,111 @@ fn evidence_resample_is_once_and_separate_from_source_repair() {
     assert!(calls.iter().any(|label| label == "operator-resample"));
     assert!(calls.iter().any(|label| label == "tester-resample"));
     assert!(!calls.iter().any(|label| label.starts_with("repair-")));
+}
+
+#[test]
+fn exhausted_evidence_resample_preserves_build_partial_scope() {
+    let source = build_workflow_script();
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    if let Some(canned) = canned_stage_reply(&label) {
+                        return canned;
+                    }
+                    if label.starts_with("operator-") {
+                        return partial_operator_report(&qa_handle_for_label(&label)).to_string();
+                    }
+                    if label == "tester-0" || label == "tester-resample" {
+                        return serde_json::json!({
+                            "status": "evidence_resample_required",
+                            "qa_handle": if label == "tester-0" {
+                                "qa_00000000000000000000000000000000"
+                            } else {
+                                "qa_11111111111111111111111111111111"
+                            },
+                            "findings": [],
+                            "summary": "capture was incomplete"
+                        })
+                        .to_string();
+                    }
+                    passing_qa_reply(&label, "wf_regression", "balanced")
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    )
+    .expect("exhausted evidence resample should remain structured");
+    let result = outcome.result.expect("workflow result");
+    assert!(
+        result.contains("\"status\":\"verification_failed\""),
+        "{result}"
+    );
+    assert!(result.contains("\"evidence_resamples\":1"), "{result}");
+    assert!(
+        result.contains("\"unverified_target_ids\":[\"ipad\"]")
+            && result.contains("\"unverified_scenario_ids\":[\"ipad-layout\"]"),
+        "partial Host verification scope was lost after exhausted resample: {result}"
+    );
+}
+
+#[test]
+fn verifier_evidence_resample_preserves_build_partial_scope() {
+    let source = build_workflow_script();
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    if let Some(canned) = canned_stage_reply(&label) {
+                        return canned;
+                    }
+                    if label.starts_with("operator-") {
+                        return partial_operator_report(&qa_handle_for_label(&label)).to_string();
+                    }
+                    if label == "verifier" || label == "verifier-resample" {
+                        return serde_json::json!({
+                            "status": "evidence_resample_required",
+                            "qa_handle": if label == "verifier" {
+                                "qa_00000000000000000000000000000000"
+                            } else {
+                                "qa_11111111111111111111111111111111"
+                            },
+                            "findings": [],
+                            "summary": "verifier capture was incomplete"
+                        })
+                        .to_string();
+                    }
+                    passing_qa_reply(&label, "wf_regression", "thorough")
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({"quality_level": "thorough"})).to_string()),
+        None,
+    )
+    .expect("verifier evidence resample should remain structured");
+    let result = outcome.result.expect("workflow result");
+    assert!(
+        result.contains("\"status\":\"verification_failed\""),
+        "{result}"
+    );
+    assert!(
+        result.contains("\"unverified_target_ids\":[\"ipad\"]")
+            && result.contains("\"unverified_scenario_ids\":[\"ipad-layout\"]"),
+        "partial Host verification scope was lost on verifier disposition: {result}"
+    );
 }
 
 #[test]
@@ -2297,6 +2502,14 @@ fn valid_host_evidence_ids_are_not_truncated_from_tester_prompt() {
                             "evidence_ids": evidence_ids,
                             "status": "evidence_collected",
                             "issues": [],
+                            "verification_scope": {
+                                "declared_target_ids": ["primary"],
+                                "in_scope_target_ids": ["primary"],
+                                "unverified_target_ids": [],
+                                "unverified_scenario_ids": []
+                            },
+                            "upstream_failures": [],
+                            "upstream_findings": [],
                             "summary": "complete"
                         })
                         .to_string();
@@ -2367,7 +2580,8 @@ fn post_repair_qa_carries_host_ledger_resolution_and_partial_scope_into_tester()
                             report["upstream_findings"] = serde_json::json!([{
                                 "id": "source:acceptance-save",
                                 "message": "the save action produced no bridge write",
-                                "blocking": true
+                                "blocking": true,
+                                "resolved_by_evidence_ids": []
                             }]);
                             report["upstream_failures"] = serde_json::json!([{
                                 "id": "source:acceptance-save",
@@ -2676,7 +2890,7 @@ fn use_test_returns_infrastructure_failure_without_throwing_or_resampling() {
                     let label = stage_label(options);
                     calls_for_run.lock().expect("call log").push(label.clone());
                     if label.starts_with("operator-") {
-                        operator_report("qa_00000000000000000000000000000000").to_string()
+                        partial_operator_report("qa_00000000000000000000000000000000").to_string()
                     } else {
                         serde_json::json!({
                             "status": "infrastructure_failed",
@@ -2703,9 +2917,115 @@ fn use_test_returns_infrastructure_failure_without_throwing_or_resampling() {
         "{result}"
     );
     assert!(result.contains("\"evidence_resamples\":0"), "{result}");
+    assert!(
+        result.contains("\"unverified_target_ids\":[\"ipad\"]")
+            && result.contains("\"unverified_scenario_ids\":[\"ipad-layout\"]"),
+        "partial Host verification scope was lost on use-test infrastructure failure: {result}"
+    );
     assert_eq!(
         calls.lock().expect("call log").as_slice(),
         ["operator-0", "tester-0"]
+    );
+}
+
+#[test]
+fn use_test_exhausted_evidence_resample_preserves_partial_scope() {
+    let source = std::fs::read_to_string(workflow_dir().join("local-app-use-test.js"))
+        .expect("read use-test workflow");
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    if label.starts_with("operator-") {
+                        return partial_operator_report(&qa_handle_for_label(&label)).to_string();
+                    }
+                    if label == "tester-0" || label == "tester-resample" {
+                        return serde_json::json!({
+                            "status": "evidence_resample_required",
+                            "qa_handle": if label == "tester-0" {
+                                "qa_00000000000000000000000000000000"
+                            } else {
+                                "qa_11111111111111111111111111111111"
+                            },
+                            "findings": [],
+                            "summary": "capture was incomplete"
+                        })
+                        .to_string();
+                    }
+                    passing_qa_reply(&label, "wf_use_test", "balanced")
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(use_test_args("balanced").to_string()),
+        None,
+    )
+    .expect("use-test exhausted evidence resample should remain structured");
+    let result = outcome.result.expect("use-test result");
+    assert!(
+        result.contains("\"status\":\"verification_failed\""),
+        "{result}"
+    );
+    assert!(result.contains("\"evidence_resamples\":1"), "{result}");
+    assert!(
+        result.contains("\"unverified_target_ids\":[\"ipad\"]")
+            && result.contains("\"unverified_scenario_ids\":[\"ipad-layout\"]"),
+        "partial Host verification scope was lost after use-test resample exhaustion: {result}"
+    );
+}
+
+#[test]
+fn use_test_verifier_disposition_preserves_partial_scope() {
+    let source = std::fs::read_to_string(workflow_dir().join("local-app-use-test.js"))
+        .expect("read use-test workflow");
+    let outcome = workflow::run_with_progress(
+        &source,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    if label.starts_with("operator-") {
+                        return partial_operator_report(&qa_handle_for_label(&label)).to_string();
+                    }
+                    if label == "verifier" || label == "verifier-resample" {
+                        return serde_json::json!({
+                            "status": "evidence_resample_required",
+                            "qa_handle": if label == "verifier" {
+                                "qa_00000000000000000000000000000000"
+                            } else {
+                                "qa_11111111111111111111111111111111"
+                            },
+                            "findings": [],
+                            "summary": "verifier capture was incomplete"
+                        })
+                        .to_string();
+                    }
+                    passing_qa_reply(&label, "wf_use_test", "thorough")
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(use_test_args("thorough").to_string()),
+        None,
+    )
+    .expect("use-test verifier disposition should remain structured");
+    let result = outcome.result.expect("use-test result");
+    assert!(
+        result.contains("\"status\":\"verification_failed\""),
+        "{result}"
+    );
+    assert!(
+        result.contains("\"unverified_target_ids\":[\"ipad\"]")
+            && result.contains("\"unverified_scenario_ids\":[\"ipad-layout\"]"),
+        "partial Host verification scope was lost on use-test verifier disposition: {result}"
     );
 }
 
@@ -2916,4 +3236,60 @@ fn callback_fixtures_are_host_shaped_and_invalid_qa_handles_fail_closed() {
     )
     .expect_err("a permissive callback runner must not make a non-Host QA handle green");
     assert!(error.to_string().contains("qa_<32>"), "{error}");
+}
+
+#[test]
+fn missing_qa_begin_projection_fails_closed_in_both_workflows() {
+    let mut malformed = operator_report("qa_00000000000000000000000000000000");
+    malformed
+        .as_object_mut()
+        .expect("operator fixture object")
+        .remove("verification_scope");
+    let malformed = malformed.to_string();
+
+    let build = build_workflow_script();
+    let malformed_for_build = malformed.clone();
+    let build_error = workflow::run_with_progress(
+        &build,
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    canned_stage_reply(&label).unwrap_or_else(|| malformed_for_build.clone())
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    )
+    .expect_err("build must reject an operator response without Host scope");
+    assert!(
+        build_error
+            .to_string()
+            .contains("complete Host QA scope and ledger projection"),
+        "{build_error}"
+    );
+
+    let use_test = std::fs::read_to_string(workflow_dir().join("local-app-use-test.js"))
+        .expect("read use-test workflow");
+    let use_test_error = workflow::run_with_progress(
+        &use_test,
+        move |_prompts, options| options.iter().map(|_options| malformed.clone()).collect(),
+        |_progress| {},
+        None,
+        true,
+        Some(use_test_args("balanced").to_string()),
+        None,
+    )
+    .expect_err("use-test must reject an operator response without Host scope");
+    assert!(
+        use_test_error
+            .to_string()
+            .contains("complete Host QA scope and ledger projection"),
+        "{use_test_error}"
+    );
 }

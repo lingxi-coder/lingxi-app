@@ -2083,6 +2083,79 @@ fn structured_output_validation_and_cap_helpers() {
     assert_eq!(structured_output_retry_cap(), 5);
 }
 
+#[test]
+fn local_app_operator_schema_requires_complete_host_qa_projection() {
+    let document: serde_json::Value = serde_json::from_str(include_str!(
+        "../../plugins/lingxi-local-app/schemas/workflow-agent-results.schema.json"
+    ))
+    .expect("parse checked-in Local App workflow role schemas");
+    let mut schema = document["$defs"]["operator_result"].clone();
+    schema["$defs"] = document["$defs"].clone();
+    let schema = serde_json::to_string(&schema).expect("serialize operator role schema");
+
+    let complete = serde_json::json!({
+        "ok": true,
+        "qa_handle": "qa_00000000000000000000000000000000",
+        "evidence_ids": ["evidence-1"],
+        "status": "evidence_collected",
+        "issues": [],
+        "summary": "Host evidence collected",
+        "verification_scope": {
+            "declared_target_ids": ["primary", "ipad"],
+            "in_scope_target_ids": ["primary"],
+            "unverified_target_ids": ["ipad"],
+            "unverified_scenario_ids": ["ipad-layout"]
+        },
+        "upstream_failures": [{
+            "id": "source:save",
+            "message": "save did not persist",
+            "introduced_at_ms": 10
+        }],
+        "upstream_findings": [{
+            "id": "source:save",
+            "message": "save did not persist",
+            "blocking": true,
+            "resolved_by_evidence_ids": []
+        }]
+    });
+    assert!(
+        validate_structured_output(Some(&schema), &complete).is_ok(),
+        "the complete Host QaBegin projection must satisfy the production validator"
+    );
+
+    let mut missing_scope = complete.clone();
+    missing_scope
+        .as_object_mut()
+        .expect("operator result object")
+        .remove("verification_scope");
+    assert!(
+        validate_structured_output(Some(&schema), &missing_scope).is_err(),
+        "operator output without canonical Host scope must fail closed"
+    );
+
+    for ledger_field in ["upstream_failures", "upstream_findings"] {
+        let mut missing_ledger = complete.clone();
+        missing_ledger
+            .as_object_mut()
+            .expect("operator result object")
+            .remove(ledger_field);
+        assert!(
+            validate_structured_output(Some(&schema), &missing_ledger).is_err(),
+            "operator output without {ledger_field} must fail closed"
+        );
+    }
+
+    let mut incomplete_finding = complete;
+    incomplete_finding["upstream_findings"][0]
+        .as_object_mut()
+        .expect("upstream finding object")
+        .remove("resolved_by_evidence_ids");
+    assert!(
+        validate_structured_output(Some(&schema), &incomplete_finding).is_err(),
+        "Host upstream finding projection must include resolution evidence ids"
+    );
+}
+
 #[tokio::test]
 async fn loop_g1_completed_carries_final_turn_usage_and_tool_count() {
     // G1: the terminal Completed event carries the FINAL turn's usage (claude

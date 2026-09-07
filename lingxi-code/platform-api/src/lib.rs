@@ -100,6 +100,7 @@ pub mod tts;
 pub mod uds_inbox;
 pub mod voice;
 pub mod web_search;
+pub mod workflow_output;
 pub mod worktree;
 
 pub use android_ui::{
@@ -257,6 +258,9 @@ pub use tool_invoker::{
 pub use tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
 pub use voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
 pub use web_search::{WebSearchConfigProvider, WebSearchRuntimeConfig};
+pub use workflow_output::{
+    WorkflowOutputAccount, WorkflowOutputEventId, WorkflowOutputScope, WorkflowOutputScopes,
+};
 #[allow(unused_imports)]
 pub use worktree::*;
 pub use worktree::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};

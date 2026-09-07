@@ -19,6 +19,7 @@ pub struct CostAttemptSettlement {
 
 pub(super) struct AttemptSlot {
     mutation: AttemptPersistMutation,
+    publication_key: Option<protocol::MessageId>,
     result: std::sync::Mutex<Option<Result<CostAttemptSettlement, CostPersistError>>>,
     notify: tokio::sync::Notify,
 }
@@ -84,7 +85,27 @@ impl CostTracker {
         &self,
         mutation: AttemptPersistMutation,
     ) -> Result<CostAttemptReceipt, CostPersistError> {
+        self.submit_attempt_inner(mutation, None)
+    }
+
+    pub(crate) fn submit_budgeted_attempt_receipt(
+        &self,
+        receipt: crate::AttemptReceipt,
+        publication: crate::budget::BoundAttemptBudget,
+    ) -> Result<CostAttemptReceipt, CostPersistError> {
+        publication.validate_tracker(self)?;
+        self.submit_attempt_inner(AttemptPersistMutation::Receipt(receipt), Some(publication))
+    }
+
+    fn submit_attempt_inner(
+        &self,
+        mutation: AttemptPersistMutation,
+        publication: Option<crate::budget::BoundAttemptBudget>,
+    ) -> Result<CostAttemptReceipt, CostPersistError> {
         let authority = self.selected_entry();
+        let publication_key = publication
+            .as_ref()
+            .map(crate::budget::BoundAttemptBudget::key);
         let (session_id, id) = identity(&mutation);
         if session_id != authority.session_id {
             return Err(CostPersistError::Rejected(
@@ -102,7 +123,7 @@ impl CostTracker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(slot) = slots.get(&id) {
-            if slot.mutation != mutation {
+            if slot.mutation != mutation || slot.publication_key != publication_key {
                 let error =
                     CostPersistError::Rejected("attempt submission identity conflict".into());
                 authority.durability_gate.freeze(error.to_string());
@@ -112,6 +133,7 @@ impl CostTracker {
         }
         let slot = Arc::new(AttemptSlot {
             mutation,
+            publication_key,
             result: std::sync::Mutex::new(None),
             notify: tokio::sync::Notify::new(),
         });
@@ -145,13 +167,14 @@ impl CostTracker {
         runtime.spawn(async move {
             turn.wait().await;
             let mutation = worker_slot.mutation.clone();
-            let result =
-                tokio::spawn(async move { tracker.persist_attempt_owned(id, mutation).await })
+            let result = tokio::spawn(async move {
+                tracker
+                    .persist_attempt_owned(id, mutation, publication)
                     .await
-                    .map_err(|error| {
-                        CostPersistError::Storage(format!("attempt owner failed: {error}"))
-                    })
-                    .and_then(|result| result);
+            })
+            .await
+            .map_err(|error| CostPersistError::Storage(format!("attempt owner failed: {error}")))
+            .and_then(|result| result);
             if let Err(error) = &result {
                 gate.freeze(error.to_string());
             }
@@ -165,6 +188,7 @@ impl CostTracker {
         &self,
         id: String,
         mutation: AttemptPersistMutation,
+        publication: Option<crate::budget::BoundAttemptBudget>,
     ) -> Result<CostAttemptSettlement, CostPersistError> {
         let authority = self.selected_entry();
         self.preflight_authority(&authority)?;
@@ -178,6 +202,12 @@ impl CostTracker {
         self.preflight_authority(&authority)?;
         let before = CostStateVector::from(&*authority.state.read().await);
         let receipt_expected = matches!(&mutation, AttemptPersistMutation::Receipt(_));
+        let output_receipt = match &mutation {
+            AttemptPersistMutation::Receipt(receipt) if publication.is_some() => {
+                Some(receipt.clone())
+            }
+            _ => None,
+        };
         let (ack, receiver) = tokio::sync::oneshot::channel();
         permit.enqueue(AttemptPersistRequest {
             session_id: authority.session_id,
@@ -195,7 +225,22 @@ impl CostTracker {
                 "cost projection changed outside the attempt durability turn".into(),
             ));
         }
-        *state = projected;
+        if let Some(publication) = publication {
+            let receipt = output_receipt.as_ref().ok_or_else(|| {
+                CostPersistError::Storage("output publication requires a receipt".into())
+            })?;
+            let output = acknowledged
+                .receipt
+                .as_ref()
+                .ok_or_else(|| {
+                    CostPersistError::Storage("output publication has no contribution".into())
+                })?
+                .contribution
+                .output_occupancy;
+            publication.publish(receipt, output, &mut state, projected)?;
+        } else {
+            *state = projected;
+        }
         Ok(CostAttemptSettlement {
             persistence: acknowledged.persistence,
             receipt: acknowledged.receipt,

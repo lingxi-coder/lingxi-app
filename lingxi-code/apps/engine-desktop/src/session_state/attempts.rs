@@ -349,6 +349,7 @@ mod tests {
             authorized_input_tokens: 100,
             authorized_output_tokens: 200,
             billing_mode: AttemptBillingMode::MeteredAttempts,
+            usage_contract: cost::AttemptUsageContract::AnthropicCacheTtlV1,
         }
     }
 

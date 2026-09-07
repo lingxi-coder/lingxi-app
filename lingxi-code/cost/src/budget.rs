@@ -13,6 +13,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
+mod attempts;
+mod output;
+pub(crate) use attempts::BoundAttemptBudget;
+#[cfg(test)]
+mod settlement_tests;
+
 /// Basis-points threshold at which `tengu_cost_budget_warning` fires.
 ///
 /// 8000 bps = 80% of the configured session limit. Locked by spec §7 line 735
@@ -67,6 +73,9 @@ struct BudgetSessionLedger {
     next_reservation_id: AtomicU64,
     owners: std::sync::Mutex<HashMap<u64, ReservationOwner>>,
     settlements: std::sync::Mutex<HashMap<u64, Arc<SettlementSlot>>>,
+    output_publication: Mutex<()>,
+    current_outputs:
+        std::sync::Mutex<HashMap<protocol::SessionId, Arc<output::BudgetOutputAccount>>>,
 }
 
 /// Shared state for an owned settlement.  A receipt can be dropped while its
@@ -140,7 +149,9 @@ struct BudgetSessionState {
     realized_exceeded: AtomicBool,
     /// Active Fusion (and future) holds. Occupancy is
     /// `realized + sum(reservations)`.
-    reservations: Mutex<ReservationBook>,
+    // Lock order: cost state -> book -> owners. No await, I/O or external
+    // callback while holding this short accounting critical section.
+    reservations: std::sync::Mutex<ReservationBook>,
 }
 
 impl BudgetSessionState {
@@ -148,19 +159,41 @@ impl BudgetSessionState {
         Self {
             warnings_fired: RwLock::new(HashSet::new()),
             realized_exceeded: AtomicBool::new(false),
-            reservations: Mutex::new(ReservationBook::new()),
+            reservations: std::sync::Mutex::new(ReservationBook::new()),
         }
+    }
+
+    fn lock_reservations(
+        &self,
+        gate: &crate::CostDurabilityGate,
+    ) -> Result<std::sync::MutexGuard<'_, ReservationBook>, platform_api::BudgetError> {
+        self.reservations.lock().map_err(|error| {
+            drop(error);
+            let reason = "reservation accounting book was poisoned";
+            gate.freeze(reason);
+            platform_api::BudgetError::Internal(reason.into())
+        })
     }
 }
 
 struct ReservationBook {
     active: HashMap<u64, u64>,
+    attempt_holds: HashMap<String, attempts::AttemptHold>,
+    attempt_runs: HashMap<String, attempts::AttemptRunBudget>,
+    attempt_origins: HashMap<String, protocol::MessageId>,
+    output_scopes: HashMap<protocol::MessageId, output::OutputScopeState>,
+    next_output_generation: u64,
 }
 
 impl ReservationBook {
     fn new() -> Self {
         Self {
             active: HashMap::new(),
+            attempt_holds: HashMap::new(),
+            attempt_runs: HashMap::new(),
+            attempt_origins: HashMap::new(),
+            output_scopes: HashMap::new(),
+            next_output_generation: 0,
         }
     }
 
@@ -168,7 +201,16 @@ impl ReservationBook {
         self.active
             .values()
             .copied()
+            .chain(self.attempt_holds.values().map(|hold| hold.nano_usd))
             .fold(0_u64, u64::saturating_add)
+    }
+
+    fn checked_held(&self) -> Option<u64> {
+        self.active
+            .values()
+            .copied()
+            .chain(self.attempt_holds.values().map(|hold| hold.nano_usd))
+            .try_fold(0_u64, u64::checked_add)
     }
 }
 
@@ -252,6 +294,8 @@ impl BudgetEnforcer {
                 next_reservation_id: AtomicU64::new(reservation_id_seed()),
                 owners: std::sync::Mutex::new(HashMap::new()),
                 settlements: std::sync::Mutex::new(HashMap::new()),
+                output_publication: Mutex::new(()),
+                current_outputs: std::sync::Mutex::new(HashMap::new()),
             }),
             session_scope: None,
         }
@@ -283,10 +327,6 @@ impl BudgetEnforcer {
             .entry(session_id)
             .or_insert_with(|| Arc::new(BudgetSessionState::new()))
             .clone()
-    }
-
-    async fn session_state(&self) -> Arc<BudgetSessionState> {
-        self.session_state_for(self.session_id().await).await
     }
 
     /// Capture the budget book and tracker cell for one session before any
@@ -342,7 +382,21 @@ impl BudgetEnforcer {
 
     /// Sum of active reservation holds.
     pub async fn active_reservation_nano_usd(&self) -> u64 {
-        self.session_state().await.reservations.lock().await.held()
+        let session_id = self.session_id().await;
+        let session = self.session_state_for(session_id).await;
+        let gate = self.cost_tracker.scoped(session_id).durability_gate();
+        let held = match session.lock_reservations(&gate) {
+            Ok(book) => book.held(),
+            // This legacy observation API cannot return an error. Freeze
+            // first, then expose inspectable occupancy; no authorization or
+            // mutation ever recovers a poisoned accounting book.
+            Err(_) => session
+                .reservations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .held(),
+        };
+        held
     }
 
     /// Hold `nano_usd` so concurrent work cannot spend it.
@@ -367,14 +421,19 @@ impl BudgetEnforcer {
         // this same order, so cancellation cannot consume a token while an
         // awaited state lock is still pending.
         let state = state_cell.read().await;
-        let mut book = session.reservations.lock().await;
+        let mut book = session.lock_reservations(&pinned_tracker.durability_gate())?;
         pinned_tracker
             .preflight_durable()
             .map_err(|error| BudgetError::Internal(error.to_string()))?;
         let realized = state.total_nano_usd;
-        let held = book.held();
+        let held = book
+            .checked_held()
+            .ok_or_else(|| BudgetError::Internal("money occupancy overflow".into()))?;
         if let Some(max) = self.config.max_session_nano_usd {
-            let occupancy = realized.saturating_add(held).saturating_add(nano_usd);
+            let occupancy = realized
+                .checked_add(held)
+                .and_then(|current| current.checked_add(nano_usd))
+                .ok_or_else(|| BudgetError::Internal("money occupancy overflow".into()))?;
             if occupancy > max {
                 return Err(BudgetError::Exceeded {
                     current_nano_usd: realized.saturating_add(held),
@@ -437,14 +496,13 @@ impl BudgetEnforcer {
         let Some(owner) = self.owner_for(id) else {
             return;
         };
-        let removed = owner
+        let removed = match owner
             .session
-            .reservations
-            .lock()
-            .await
-            .active
-            .remove(&id.raw())
-            .is_some();
+            .lock_reservations(&owner.tracker.durability_gate())
+        {
+            Ok(mut book) => book.active.remove(&id.raw()).is_some(),
+            Err(_) => return,
+        };
         if removed {
             self.sessions
                 .owners
@@ -475,9 +533,7 @@ impl BudgetEnforcer {
                 tracker.durability_gate().freeze(error.to_string());
                 owner
                     .session
-                    .reservations
-                    .lock()
-                    .await
+                    .lock_reservations(&tracker.durability_gate())?
                     .active
                     .remove(&id.raw());
                 sessions
@@ -497,9 +553,7 @@ impl BudgetEnforcer {
                 tracker.durability_gate().freeze(error.to_string());
                 owner
                     .session
-                    .reservations
-                    .lock()
-                    .await
+                    .lock_reservations(&tracker.durability_gate())?
                     .active
                     .remove(&id.raw());
                 sessions
@@ -513,7 +567,9 @@ impl BudgetEnforcer {
         let state_cell = tracker.selected_state_cell().await;
         let mut state = state_cell.write().await;
         let (snapshot, enqueue) = {
-            let mut book = owner.session.reservations.lock().await;
+            let mut book = owner
+                .session
+                .lock_reservations(&tracker.durability_gate())?;
             if !book.active.contains_key(&id.raw()) {
                 let message = "accepted reservation token disappeared before settlement";
                 tracker.durability_gate().freeze(message);
@@ -730,7 +786,14 @@ impl BudgetEnforcer {
             return BudgetCheckResult::Halt { current, limit };
         }
         let state = state_cell.read().await;
-        let held = session.reservations.lock().await.held();
+        let held = match session.lock_reservations(&tracker.durability_gate()) {
+            Ok(book) => book.held(),
+            Err(error) => {
+                return BudgetCheckResult::Unavailable {
+                    reason: error.to_string(),
+                }
+            }
+        };
         let realized = state.total_nano_usd;
         // `check_and_charge(0)` (Agent / subagent turn gate) means "already
         // over", which is realized spend — a Fusion hold is future capacity
@@ -1008,6 +1071,48 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    #[tokio::test]
+    async fn poisoned_reservation_book_freezes_without_releasing_or_charging_a_hold() {
+        let tracker = make_tracker();
+        let enforcer = BudgetEnforcer::new(
+            BudgetConfig {
+                max_session_nano_usd: Some(1000),
+                max_turn_nano_usd: None,
+                max_turn_tokens: None,
+                warning_thresholds: vec![],
+                on_exceed: BudgetExceedPolicy::Halt,
+            },
+            tracker.clone(),
+        );
+        let hold = enforcer.reserve_nano_usd(400).await.unwrap();
+        let session = enforcer.session_state_for(tracker.session_id().await).await;
+        assert!(std::thread::spawn(move || {
+            let _book = session.reservations.lock().unwrap();
+            panic!("test-only accounting critical-section panic");
+        })
+        .join()
+        .is_err());
+        assert_eq!(enforcer.active_reservation_nano_usd().await, 400);
+        assert!(tracker.durability_gate().frozen_reason().is_some());
+        assert!(enforcer.reserve_nano_usd(1).await.is_err());
+        assert!(matches!(
+            enforcer.check_pre_api_call(1).await,
+            BudgetCheckResult::Unavailable { .. }
+        ));
+        enforcer.release_reservation(hold).await;
+        assert!(enforcer.commit_reservation(hold, 100).await.is_err());
+        assert_eq!(enforcer.active_reservation_nano_usd().await, 400);
+        assert_eq!(
+            tracker
+                .selected_state_cell()
+                .await
+                .read()
+                .await
+                .total_nano_usd,
+            0
+        );
     }
 
     #[tokio::test]

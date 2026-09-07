@@ -22,6 +22,16 @@ pub enum AttemptBillingMode {
 /// Shared platform stage metadata; it grants no dispatch authority.
 pub use platform_api::ModelAttemptStage as AttemptStage;
 
+/// Pinned normalized usage reachability, not a source of implicit free rates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttemptUsageContract {
+    /// Input/output/cache-read/reasoning only; cache creation is unreachable.
+    StandardDisjointTokensV1,
+    /// Conservative six-bucket contract, also used by pre-contract intents.
+    #[default]
+    AnthropicCacheTtlV1,
+}
+
 /// Host-captured immutable wire authorization. No bearer tokens are persisted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptIntent {
@@ -58,6 +68,9 @@ pub struct AttemptIntent {
     pub authorized_output_tokens: u64,
     /// Run-level choice, immutable across every intent for this run.
     pub billing_mode: AttemptBillingMode,
+    /// Immutable supported usage buckets. Old records retain strict validation.
+    #[serde(default)]
+    pub usage_contract: AttemptUsageContract,
 }
 
 /// Meaning of an observation. Unknown counters are lower bounds, not a claim
@@ -545,6 +558,11 @@ fn validate_intent(intent: &AttemptIntent, session_id: SessionId) -> Result<(), 
         TokenClass::ReasoningOutput,
         TokenClass::CacheWrite1h,
     ] {
+        if intent.usage_contract == AttemptUsageContract::StandardDisjointTokensV1
+            && matches!(class, TokenClass::CacheWrite | TokenClass::CacheWrite1h)
+        {
+            continue;
+        }
         if !intent.pricing.token_rates.contains_key(&class) {
             return Err(AttemptFoldError::MissingPrice);
         }
@@ -607,6 +625,7 @@ mod tests {
             authorized_input_tokens: 100,
             authorized_output_tokens: 200,
             billing_mode: AttemptBillingMode::MeteredAttempts,
+            usage_contract: AttemptUsageContract::AnthropicCacheTtlV1,
         }
     }
 
@@ -657,6 +676,81 @@ mod tests {
             replaces_revision: Some(1),
             ..receipt(intent, AttemptDisposition::Exact, count)
         }
+    }
+
+    #[test]
+    fn usage_contract_standard_prices_and_unreachable_receipts_are_checked() {
+        let (mut ledger, mut state, mut intent) = fixture();
+        intent.usage_contract = AttemptUsageContract::StandardDisjointTokensV1;
+        intent.pricing.token_rates.remove(&TokenClass::CacheWrite);
+        intent.pricing.token_rates.remove(&TokenClass::CacheWrite1h);
+        let mut missing = intent.clone();
+        missing
+            .pricing
+            .token_rates
+            .remove(&TokenClass::ReasoningOutput);
+        assert_eq!(
+            ledger.record_intent(missing),
+            Err(AttemptFoldError::MissingPrice)
+        );
+        ledger.record_intent(intent.clone()).unwrap();
+        let before = (ledger.clone(), state.clone());
+        for disposition in [
+            AttemptDisposition::Unknown,
+            AttemptDisposition::Exact,
+            AttemptDisposition::ProvenNotSent,
+        ] {
+            for bucket in 0..3 {
+                let mut bad = receipt(&intent, disposition, 0);
+                match bucket {
+                    0 => bad.usage.tokens.cache_write = 1,
+                    1 => bad.usage.tokens.cache_write_1h = 1,
+                    _ => bad.cache_creation_input_tokens = 1,
+                }
+                assert!(ledger.fold_receipt(&mut state, bad, None).is_err());
+                assert_eq!((ledger.clone(), state.clone()), before);
+            }
+        }
+        let mut exact = receipt(&intent, AttemptDisposition::Exact, 1);
+        exact.usage.tokens.cache_write = 0;
+        exact.usage.tokens.cache_write_1h = 0;
+        exact.cache_creation_input_tokens = 0;
+        ledger.fold_receipt(&mut state, exact, None).unwrap();
+    }
+
+    #[test]
+    fn usage_contract_is_immutable_and_old_json_replays_conservatively() {
+        let (mut ledger, mut state, intent) = fixture();
+        let mut json = serde_json::to_value(&intent).unwrap();
+        json.as_object_mut().unwrap().remove("usage_contract");
+        let old: AttemptIntent = serde_json::from_value(json).unwrap();
+        assert_eq!(old, intent);
+        ledger.record_intent(old.clone()).unwrap();
+        assert!(!ledger.record_intent(intent.clone()).unwrap());
+        let before = ledger.clone();
+        let mut changed = intent.clone();
+        changed.usage_contract = AttemptUsageContract::StandardDisjointTokensV1;
+        assert!(ledger.record_intent(changed).is_err());
+        assert_eq!(ledger, before);
+        let observed = receipt(&old, AttemptDisposition::Exact, 1);
+        let ack = ledger
+            .fold_receipt(&mut state, observed.clone(), None)
+            .unwrap();
+        assert_eq!(
+            ledger
+                .fold_receipt(&mut state, observed, ack.last_usage_revision)
+                .unwrap(),
+            ack
+        );
+        let mut missing = old;
+        missing
+            .pricing
+            .token_rates
+            .remove(&TokenClass::CacheWrite1h);
+        assert_eq!(
+            validate_intent(&missing, missing.session_id),
+            Err(AttemptFoldError::MissingPrice)
+        );
     }
 
     #[test]
@@ -1227,6 +1321,15 @@ fn receipt_contribution(
     intent: &AttemptIntent,
     receipt: &AttemptReceipt,
 ) -> Result<AttemptContribution, AttemptFoldError> {
+    if intent.usage_contract == AttemptUsageContract::StandardDisjointTokensV1
+        && (receipt.usage.tokens.cache_write != 0
+            || receipt.usage.tokens.cache_write_1h != 0
+            || receipt.cache_creation_input_tokens != 0)
+    {
+        return Err(AttemptFoldError::Invalid(
+            "receipt carries cache creation outside pinned usage contract",
+        ));
+    }
     if receipt.api_duration_without_retries_ms > receipt.api_duration_ms {
         return Err(AttemptFoldError::Invalid(
             "non-retry duration exceeds duration",

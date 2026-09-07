@@ -1378,6 +1378,7 @@ pub struct LocalWorkflowHandler {
     /// that the main loop also feeds, so `spent()` reads main loop + all
     /// workflows. When unset (tests), a run falls back to its own private pool.
     output_pool_cell: Option<Arc<OnceLock<Arc<AtomicU64>>>>,
+    output_scopes: Option<Arc<dyn platform_api::WorkflowOutputScopes>>,
     /// Late-bound turn-start output baseline (claude-code `xtr`): the cumulative
     /// output at the start of the CURRENT turn. The composition root publishes
     /// the orchestrator's `turn_start_output_baseline` here. At spawn the handler
@@ -1434,6 +1435,7 @@ impl LocalWorkflowHandler {
             bus: Arc::new(AnalyticsBus::new()),
             token_budget_total: None,
             output_pool_cell: None,
+            output_scopes: None,
             turn_baseline_cell: None,
             workspace_leases: None,
             workspace_root: None,
@@ -1517,6 +1519,16 @@ impl LocalWorkflowHandler {
     #[must_use]
     pub fn with_output_pool_cell(mut self, cell: Arc<OnceLock<Arc<AtomicU64>>>) -> Self {
         self.output_pool_cell = Some(cell);
+        self
+    }
+
+    /// Use the host's shared session/turn output authority for new runs.
+    #[must_use]
+    pub fn with_output_scopes(
+        mut self,
+        scopes: Arc<dyn platform_api::WorkflowOutputScopes>,
+    ) -> Self {
+        self.output_scopes = Some(scopes);
         self
     }
 
@@ -2343,9 +2355,13 @@ struct OwnSpendBudget {
     spent: Arc<std::sync::atomic::AtomicU64>,
     /// Cumulative output at the start of the turn this workflow was spawned in.
     baseline: u64,
+    output_scope: Option<platform_api::WorkflowOutputScope>,
 }
 impl OwnSpendBudget {
     fn turn_spent(&self) -> u64 {
+        if let Some(scope) = &self.output_scope {
+            return scope.spent();
+        }
         self.spent
             .load(std::sync::atomic::Ordering::Relaxed)
             .saturating_sub(self.baseline)
@@ -2357,6 +2373,497 @@ impl workflow::WorkflowBudgetSource for OwnSpendBudget {
     }
     fn spent(&self) -> u64 {
         self.turn_spent()
+    }
+}
+
+/// Drive progress in the same owner as activation. When activation finishes,
+/// synchronously consume buffered final facts before returning to accounting.
+async fn workflow_fusion_with_progress<T>(
+    activation: impl std::future::Future<Output = T>,
+    mut progress: mpsc::Receiver<platform_api::FusionProgress>,
+    forward: Option<mpsc::UnboundedSender<String>>,
+) -> (T, Option<u64>) {
+    tokio::pin!(activation);
+    let mut last_output = None;
+    let mut open = true;
+    let mut observe = |event: platform_api::FusionProgress| {
+        if let Some(tokens) = event.realized_output_tokens {
+            last_output = Some(tokens);
+        }
+        if let Some(tx) = &forward {
+            let _ = tx.send(format!("[workflow_fusion] {}", event.stage.label()));
+        }
+    };
+    loop {
+        tokio::select! {
+            biased;
+            outcome = &mut activation => {
+                while let Ok(event) = progress.try_recv() {
+                    observe(event);
+                }
+                return (outcome, last_output);
+            }
+            event = progress.recv(), if open => {
+                match event {
+                    Some(event) => observe(event),
+                    None => open = false,
+                }
+            }
+        }
+    }
+}
+
+/// Known output across the entire agent run, including separately reported
+/// reasoning. Older spawners omit cumulative usage, so retain their final
+/// report as a fallback. A failed run can still have already-billed output.
+fn known_workflow_agent_output(
+    result: &SubagentResult,
+) -> Result<Option<u64>, platform_api::BudgetError> {
+    let usage = match result {
+        SubagentResult::Completed {
+            usage,
+            cumulative_usage,
+            ..
+        } => {
+            if *cumulative_usage == platform_api::SubagentUsage::default() {
+                usage
+            } else {
+                cumulative_usage
+            }
+        }
+        SubagentResult::Failed { usage, .. } => usage,
+        SubagentResult::Killed { .. } => return Ok(None),
+    };
+    usage
+        .output_tokens
+        .checked_add(usage.reasoning_output_tokens)
+        .map(Some)
+        .ok_or_else(|| platform_api::BudgetError::Internal("workflow agent output overflow".into()))
+}
+
+#[cfg(test)]
+mod captured_output_tests {
+    use super::*;
+    use platform_api::{
+        BudgetError, WorkflowOutputAccount, WorkflowOutputEventId, WorkflowOutputScope,
+    };
+    use std::sync::atomic::Ordering;
+
+    struct Account {
+        session: protocol::SessionId,
+        generation: protocol::MessageId,
+        spent: AtomicU64,
+    }
+    impl WorkflowOutputAccount for Account {
+        fn session_id(&self) -> protocol::SessionId {
+            self.session
+        }
+        fn generation_id(&self) -> protocol::MessageId {
+            self.generation
+        }
+        fn spent(&self) -> u64 {
+            self.spent.load(Ordering::Relaxed)
+        }
+        fn record_legacy(&self, _: WorkflowOutputEventId, tokens: u64) -> Result<(), BudgetError> {
+            self.spent.fetch_add(tokens, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+    fn scope(session: protocol::SessionId) -> WorkflowOutputScope {
+        WorkflowOutputScope::new(Arc::new(Account {
+            session,
+            generation: protocol::MessageId::new(),
+            spent: AtomicU64::new(0),
+        }))
+    }
+    fn reader(scope: WorkflowOutputScope) -> OwnSpendBudget {
+        OwnSpendBudget {
+            total: Some(100),
+            spent: Arc::new(AtomicU64::new(900)),
+            baseline: 0,
+            output_scope: Some(scope),
+        }
+    }
+
+    struct ExecutionProbe {
+        session: protocol::SessionId,
+        generation: protocol::MessageId,
+        events: std::sync::Mutex<HashMap<WorkflowOutputEventId, u64>>,
+        calls: AtomicU64,
+        result: Option<SubagentResult>,
+    }
+    impl WorkflowOutputAccount for ExecutionProbe {
+        fn session_id(&self) -> protocol::SessionId {
+            self.session
+        }
+        fn generation_id(&self) -> protocol::MessageId {
+            self.generation
+        }
+        fn spent(&self) -> u64 {
+            self.events.lock().unwrap().values().sum()
+        }
+        fn record_legacy(
+            &self,
+            event: WorkflowOutputEventId,
+            tokens: u64,
+        ) -> Result<(), BudgetError> {
+            let mut events = self.events.lock().unwrap();
+            if let Some(old) = events.get(&event) {
+                assert_eq!(*old, tokens);
+            } else {
+                events.insert(event, tokens);
+            }
+            Ok(())
+        }
+    }
+    #[async_trait]
+    impl SubagentSpawner for ExecutionProbe {
+        async fn spawn(
+            &self,
+            _: SubagentSpawnRequest,
+            _: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if let Some(result) = &self.result {
+                return Ok(result.clone());
+            }
+            Ok(SubagentResult::Completed {
+                agent_id: protocol::AgentId::new(),
+                content: Value::String("answer".into()),
+                usage: platform_api::SubagentUsage {
+                    output_tokens: 7,
+                    ..Default::default()
+                },
+                total_tool_use_count: 0,
+                total_duration_ms: 0,
+                total_tokens: 7,
+                assistant_message_count: 0,
+                response_char_count: 0,
+                last_request_id: None,
+                cumulative_usage: platform_api::SubagentUsage::default(),
+                usage_complete: true,
+            })
+        }
+    }
+    #[async_trait]
+    impl ToolInvoker for ExecutionProbe {
+        async fn invoke(
+            &self,
+            _: &str,
+            _: Value,
+            _: SubagentInvocationContext,
+        ) -> Result<Value, ToolInvokerError> {
+            Ok(Value::Null)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+    #[async_trait]
+    impl BudgetEnforcerHandle for ExecutionProbe {
+        async fn check_and_charge(&self, _: u64) -> Result<(), BudgetError> {
+            Ok(())
+        }
+        async fn snapshot_total_nano_usd(&self) -> u64 {
+            0
+        }
+    }
+
+    #[tokio::test]
+    async fn captured_output_resume_cache_misses_have_distinct_execution_events() {
+        let probe = Arc::new(ExecutionProbe {
+            session: protocol::SessionId::new(),
+            generation: protocol::MessageId::new(),
+            events: std::sync::Mutex::new(HashMap::new()),
+            calls: AtomicU64::new(0),
+            result: None,
+        });
+        let scope = WorkflowOutputScope::new(probe.clone());
+        let journal = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        for script in [
+            "return await agent('first prompt');",
+            "return await agent('changed prompt');",
+            "return await agent('changed prompt');",
+        ] {
+            run_workflow_script_with_live_updates_and_fusion_recorded(
+                script,
+                DEFAULT_WORKFLOW_SUBAGENT,
+                "workflow",
+                probe.clone(),
+                probe.clone(),
+                probe.clone(),
+                None,
+                None,
+                Some(journal.clone()),
+                None,
+                Some(100),
+                None,
+                0,
+                NestedConfig::default(),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                CancellationToken::new(),
+                None,
+                Some("same-resumed-run".into()),
+                None,
+                None,
+                None,
+                Arc::new(AnalyticsBus::new()),
+                None,
+                None,
+                None,
+                None,
+                Some(scope.clone()),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            probe.calls.load(Ordering::Relaxed),
+            2,
+            "both cache misses actually spawned"
+        );
+        assert_eq!(
+            scope.spent(),
+            14,
+            "resume must not deduplicate a new physical execution"
+        );
+        assert_eq!(probe.events.lock().unwrap().len(), 2);
+    }
+
+    fn completed_usage(
+        output: u64,
+        reasoning: u64,
+        cumulative: platform_api::SubagentUsage,
+    ) -> SubagentResult {
+        SubagentResult::Completed {
+            agent_id: protocol::AgentId::new(),
+            content: Value::String("answer".into()),
+            usage: platform_api::SubagentUsage {
+                output_tokens: output,
+                reasoning_output_tokens: reasoning,
+                ..Default::default()
+            },
+            total_tool_use_count: 0,
+            total_duration_ms: 0,
+            total_tokens: output,
+            assistant_message_count: 0,
+            response_char_count: 0,
+            last_request_id: None,
+            cumulative_usage: cumulative,
+            usage_complete: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn captured_output_records_all_known_rounds_reasoning_and_failed_spend() {
+        let cases = [
+            (
+                completed_usage(
+                    7,
+                    3,
+                    platform_api::SubagentUsage {
+                        output_tokens: 21,
+                        reasoning_output_tokens: 9,
+                        ..Default::default()
+                    },
+                ),
+                30,
+            ),
+            (
+                completed_usage(
+                    7,
+                    3,
+                    platform_api::SubagentUsage {
+                        reasoning_output_tokens: 11,
+                        ..Default::default()
+                    },
+                ),
+                11,
+            ),
+            (
+                completed_usage(7, 3, platform_api::SubagentUsage::default()),
+                10,
+            ),
+            (
+                SubagentResult::Failed {
+                    agent_id: protocol::AgentId::new(),
+                    reason: "after paid round".into(),
+                    usage: platform_api::SubagentUsage {
+                        output_tokens: 12,
+                        reasoning_output_tokens: 5,
+                        ..Default::default()
+                    },
+                },
+                17,
+            ),
+        ];
+        for (result, expected) in cases {
+            for scoped in [true, false] {
+                let legacy_expected = match &result {
+                    SubagentResult::Completed { usage, .. } => usage.output_tokens,
+                    _ => 0,
+                };
+                let probe = Arc::new(ExecutionProbe {
+                    session: protocol::SessionId::new(),
+                    generation: protocol::MessageId::new(),
+                    events: std::sync::Mutex::new(HashMap::new()),
+                    calls: AtomicU64::new(0),
+                    result: Some(result.clone()),
+                });
+                let scope = WorkflowOutputScope::new(probe.clone());
+                let legacy_pool = Arc::new(AtomicU64::new(0));
+                let _ = run_workflow_script_with_live_updates_and_fusion_recorded(
+                    "try { return await agent('probe'); } catch (error) { return 'failed'; }",
+                    DEFAULT_WORKFLOW_SUBAGENT,
+                    "workflow",
+                    probe.clone(),
+                    probe.clone(),
+                    probe.clone(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(100),
+                    Some(legacy_pool.clone()),
+                    0,
+                    NestedConfig::default(),
+                    Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    CancellationToken::new(),
+                    None,
+                    Some("run".into()),
+                    None,
+                    None,
+                    None,
+                    Arc::new(AnalyticsBus::new()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    scoped.then(|| scope.clone()),
+                )
+                .await
+                .unwrap();
+                assert_eq!(probe.calls.load(Ordering::Relaxed), 1);
+                assert_eq!(scope.spent(), if scoped { expected } else { 0 });
+                assert_eq!(
+                    legacy_pool.load(Ordering::Relaxed),
+                    if scoped { 0 } else { legacy_expected }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn captured_output_rejects_overflow_without_inventing_killed_usage() {
+        let overflow = completed_usage(u64::MAX, 1, platform_api::SubagentUsage::default());
+        assert!(known_workflow_agent_output(&overflow).is_err());
+        assert_eq!(
+            known_workflow_agent_output(&SubagentResult::Killed {
+                agent_id: protocol::AgentId::new()
+            })
+            .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn captured_output_caught_overflow_cannot_spawn_again() {
+        let probe = Arc::new(ExecutionProbe {
+            session: protocol::SessionId::new(),
+            generation: protocol::MessageId::new(),
+            events: std::sync::Mutex::new(HashMap::new()),
+            calls: AtomicU64::new(0),
+            result: Some(completed_usage(
+                u64::MAX,
+                1,
+                platform_api::SubagentUsage::default(),
+            )),
+        });
+        let scope = WorkflowOutputScope::new(probe.clone());
+        run_workflow_script_with_live_updates_and_fusion_recorded(
+            "try { await agent('overflow'); } catch (e) {} try { await agent('must not dispatch'); } catch (e) {} return 'done';",
+            DEFAULT_WORKFLOW_SUBAGENT, "workflow", probe.clone(), probe.clone(), probe.clone(),
+            None, None, None, None, Some(100), None, 0, NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)), CancellationToken::new(), None,
+            Some("run".into()), None, None, None, Arc::new(AnalyticsBus::new()), None, None, None,
+            None, Some(scope.clone()),
+        ).await.unwrap();
+        assert_eq!(probe.calls.load(Ordering::Relaxed), 1);
+        assert!(
+            probe.events.lock().unwrap().is_empty(),
+            "overflow must not create a fabricated token count"
+        );
+    }
+
+    #[test]
+    fn captured_output_workflows_share_main_and_workflow_spend() {
+        let scope = scope(protocol::SessionId::new());
+        let first = reader(scope.clone());
+        let second = reader(scope.clone());
+        scope
+            .record_legacy(
+                WorkflowOutputEventId::MainResponse(protocol::MessageId::new()),
+                7,
+            )
+            .unwrap();
+        scope
+            .record_legacy(
+                WorkflowOutputEventId::WorkflowAgent {
+                    run_id: "run".into(),
+                    call_index: 1,
+                },
+                11,
+            )
+            .unwrap();
+        assert_eq!(first.turn_spent(), 18);
+        assert_eq!(second.turn_spent(), 18);
+    }
+
+    #[test]
+    fn captured_output_late_parent_and_nested_reads_keep_original_generation() {
+        let session = protocol::SessionId::new();
+        let old = scope(session);
+        let parent = reader(old.clone());
+        let nested = reader(old.clone());
+        let current = reader(scope(session));
+        old.record_legacy(
+            WorkflowOutputEventId::LegacyFusion(FusionRunId::generated()),
+            23,
+        )
+        .unwrap();
+        assert_eq!(parent.turn_spent(), 23);
+        assert_eq!(nested.turn_spent(), 23);
+        assert_eq!(current.turn_spent(), 0);
+    }
+
+    #[tokio::test]
+    async fn captured_output_ready_outcome_drains_final_buffered_progress() {
+        let (tx, rx) = mpsc::channel(2);
+        let (forward, mut forwarded) = mpsc::unbounded_channel();
+        let scope = scope(protocol::SessionId::new());
+        let run = FusionRunId::generated();
+        let activation = async move {
+            tx.try_send(platform_api::FusionProgress {
+                stage: platform_api::FusionStage::Analyzing,
+                panel_id: None,
+                message: String::new(),
+                realized_output_tokens: Some(31),
+                egress_profiles: None,
+                panels_allocated: None,
+            })
+            .unwrap();
+            "failed without usage facts"
+        };
+        let (_, output) = workflow_fusion_with_progress(activation, rx, Some(forward)).await;
+        // No intervening await between completed activation and publication.
+        scope
+            .record_legacy(WorkflowOutputEventId::LegacyFusion(run), output.unwrap())
+            .unwrap();
+        assert_eq!(scope.spent(), 31);
+        assert!(forwarded
+            .try_recv()
+            .unwrap()
+            .starts_with("[workflow_fusion]"));
     }
 }
 
@@ -2740,6 +3247,7 @@ async fn run_workflow_script_with_live_updates_and_fusion(
         phase_telemetry_ctx,
         workflow_metrics_out,
         None,
+        None,
     )
     .await
 }
@@ -2782,6 +3290,7 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
     phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
     workflow_metrics_out: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
     terminal_recorder: Option<Arc<dyn FusionRunRecorder>>,
+    output_scope: Option<platform_api::WorkflowOutputScope>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
     let NestedConfig {
         allow_nested,
@@ -2791,6 +3300,13 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
         session_uuid: workflow_session_uuid,
     } = nested;
     use std::sync::atomic::Ordering;
+    // Resume reuses the persisted run/journal identity, but a real script
+    // execution can issue new calls at the same call indices. Its accounting
+    // namespace must therefore be fresh; nested calls share this execution.
+    let output_execution_id = protocol::MessageId::new().to_string();
+    // Script try/catch must not turn an accounting failure into permission
+    // for another paid call, including later calls in the same batch.
+    let output_accounting_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let emit_phase_telemetry_here = workflow_metrics_out.is_none();
     let workflow_metrics = workflow_metrics_out
@@ -2806,6 +3322,7 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
         total: token_budget_total,
         spent: spent.clone(),
         baseline: turn_start_baseline,
+        output_scope: output_scope.clone(),
     });
     // Request channel: each in-flight batch is (calls, reply-sender), where a
     // call is (prompt, opts_json). A buffer of one suffices — the runner blocks
@@ -2951,6 +3468,18 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
             }
             continue;
         };
+        if output_accounting_failed.load(Ordering::Acquire) {
+            let error = wf_throw("workflow output accounting failed; further dispatch is disabled");
+            match work {
+                WorkflowBridgeRequest::Fusion(call) => {
+                    let _ = call.reply.send(error);
+                }
+                WorkflowBridgeRequest::AgentBatch(calls, reply) => {
+                    let _ = reply.send(vec![error; calls.len()]);
+                }
+            }
+            continue;
+        }
         match work {
             WorkflowBridgeRequest::Fusion(call) => {
                 // Advance the SAME resume cursor `agent()` advances (`running_key`)
@@ -2993,9 +3522,14 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                 // alone and never see a real cap failure once budget frees
                 // up.
                 if let Some(total) = token_budget_total.filter(|&t| t > 0) {
-                    let turn_spent = spent
-                        .load(Ordering::Relaxed)
-                        .saturating_sub(turn_start_baseline);
+                    let turn_spent = output_scope.as_ref().map_or_else(
+                        || {
+                            spent
+                                .load(Ordering::Relaxed)
+                                .saturating_sub(turn_start_baseline)
+                        },
+                        platform_api::WorkflowOutputScope::spent,
+                    );
                     if turn_spent >= total {
                         let _ = call.reply.send(wf_throw(&workflow_budget_exceeded_message(
                             turn_spent, total,
@@ -3154,76 +3688,88 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                             // threaded through both. Left unwrapped here
                             // rather than shipping an override that never
                             // takes effect.
-                            // F005: forward Fusion progress into the SAME
-                            // `worker_progress_tx` string-line channel
-                            // `emit_workflow_agent_snapshot` uses for agent()
-                            // batches, so a workflow's `fusion()` call is no
-                            // longer completely silent between dispatch and
-                            // its (up to 15-minute) result.
-                            let (fusion_prog_tx, mut fusion_prog_rx) =
-                                tokio::sync::mpsc::channel::<platform_api::FusionProgress>(32);
-                            let forward_progress_tx = worker_progress_tx.clone();
-                            // [Finding 12] Track the LAST `realized_output_tokens`
-                            // seen on the progress channel — the orchestrator
-                            // emits one when `check_panel_bar` fails after real
-                            // panel spend (`fusion::orchestrator::run_inner`) so
-                            // this bridge can charge that spend against the
-                            // workflow's own token budget (`spent`) even when
-                            // the overall call ends in `Err` below, instead of
-                            // leaving `spent` unmoved for a call that already
-                            // burned a real panel fan-out.
-                            let progress_forwarder = tokio::spawn(async move {
-                                let mut last_realized_output_tokens: Option<u64> = None;
-                                while let Some(event) = fusion_prog_rx.recv().await {
-                                    if let Some(tokens) = event.realized_output_tokens {
-                                        last_realized_output_tokens = Some(tokens);
-                                    }
-                                    if let Some(tx) = &forward_progress_tx {
-                                        let _ = tx.send(format!(
-                                            "[workflow_fusion] {}",
-                                            event.stage.label()
-                                        ));
-                                    }
-                                }
-                                last_realized_output_tokens
-                            });
-                            let outcome = prepared
-                                .activate(FusionActivation::now(), Some(fusion_prog_tx))
-                                .await;
-                            let last_realized_output_tokens =
-                                progress_forwarder.await.unwrap_or(None);
-                            let facts = outcome.facts;
-                            match outcome.result {
-                                Ok(result) => {
-                                    spent.fetch_add(result.usage.output_tokens, Ordering::Relaxed);
-                                    match serde_json::to_string(&result) {
-                                        Ok(encoded) => {
-                                            if let Some(j) = journal.as_ref() {
-                                                j.lock()
-                                                    .unwrap()
-                                                    .insert(key.clone(), encoded.clone());
-                                            }
-                                            if let Some(writer) = &journal_writer {
-                                                writer.append_result(&key, "", &encoded).await;
-                                            }
-                                            encoded
-                                        }
-                                        Err(_) => {
-                                            wf_throw("fusion() host could not serialize the result")
-                                        }
-                                    }
-                                }
-                                Err(error) => {
-                                    if let Some(usage) = facts.usage {
-                                        spent.fetch_add(usage.output_tokens, Ordering::Relaxed);
-                                    } else if let Some(tokens) = last_realized_output_tokens {
+                                // F005: forward Fusion progress into the SAME
+                                // `worker_progress_tx` string-line channel
+                                // `emit_workflow_agent_snapshot` uses for agent()
+                                // batches, so a workflow's `fusion()` call is no
+                                // longer completely silent between dispatch and
+                                // its (up to 15-minute) result.
+                                let (fusion_prog_tx, fusion_prog_rx) =
+                                    tokio::sync::mpsc::channel::<platform_api::FusionProgress>(32);
+                                let forward_progress_tx = worker_progress_tx.clone();
+                                // [Finding 12] Track the LAST `realized_output_tokens`
+                                // seen on the progress channel — the orchestrator
+                                // emits one when `check_panel_bar` fails after real
+                                // panel spend (`fusion::orchestrator::run_inner`) so
+                                // this bridge can charge that spend against the
+                                // workflow's own token budget (`spent`) even when
+                                // the overall call ends in `Err` below, instead of
+                                // leaving `spent` unmoved for a call that already
+                                // burned a real panel fan-out.
+                                let (outcome, last_realized_output_tokens) =
+                                    workflow_fusion_with_progress(
+                                        prepared.activate(
+                                            FusionActivation::now(),
+                                            Some(fusion_prog_tx),
+                                        ),
+                                        fusion_prog_rx,
+                                        forward_progress_tx,
+                                    )
+                                    .await;
+                                let known_output = outcome
+                                    .result
+                                    .as_ref()
+                                    .ok()
+                                    .map(|result| result.usage.output_tokens)
+                                    .or_else(|| {
+                                        outcome
+                                            .facts
+                                            .usage
+                                            .as_ref()
+                                            .map(|usage| usage.output_tokens)
+                                    })
+                                    .or(last_realized_output_tokens);
+                                let record_output = |tokens| {
+                                    if let Some(scope) = &output_scope {
+                                        scope.record_legacy(
+                                            platform_api::WorkflowOutputEventId::LegacyFusion(
+                                                identity.run_id.clone(),
+                                            ),
+                                            tokens,
+                                        )
+                                    } else {
                                         spent.fetch_add(tokens, Ordering::Relaxed);
+                                        Ok(())
                                     }
+                                };
+                                // There is no await between final progress drain and publication.
+                                let output_record = known_output.map(record_output).transpose();
+                                if let Err(error) = output_record {
+                                    output_accounting_failed.store(true, Ordering::Release);
                                     wf_throw(&error.to_string())
+                                } else {
+                                    match outcome.result {
+                                        Ok(result) => match serde_json::to_string(&result) {
+                                            Ok(encoded) => {
+                                                if let Some(j) = journal.as_ref() {
+                                                    j.lock()
+                                                        .unwrap()
+                                                        .insert(key.clone(), encoded.clone());
+                                                }
+                                                if let Some(writer) = &journal_writer {
+                                                    writer.append_result(&key, "", &encoded).await;
+                                                }
+                                                encoded
+                                            }
+                                            Err(_) => wf_throw(
+                                                "fusion() host could not serialize the result",
+                                            ),
+                                        },
+                                        Err(error) => wf_throw(&error.to_string()),
+                                    }
                                 }
                             }
                         }
-                            }
                         Err(error) => wf_throw(&error.to_string()),
                     }
                 };
@@ -3301,6 +3847,9 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                     let journal = journal.clone();
                     let journal_writer = journal_writer.clone();
                     let spent = spent.clone();
+                    let output_scope = output_scope.clone();
+                    let output_run_id = output_execution_id.clone();
+                    let output_accounting_failed = output_accounting_failed.clone();
                     let nested_fs = nested_fs.clone();
                     let nested_plugin_workflows = nested_plugin_workflows.clone();
                     let budget_total = token_budget_total;
@@ -3311,10 +3860,15 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                     let workflow_metrics = workflow_metrics.clone();
                     let workflow_session_uuid = workflow_session_uuid.clone();
                     async move {
+                        if output_accounting_failed.load(Ordering::Acquire) {
+                            return wf_throw("workflow output accounting failed; further dispatch is disabled");
+                        }
                         if !matches!(&plan, Plan::Resolve(_)) {
                             if let Some(total) = budget_total.filter(|&t| t > 0) {
-                                let turn_spent =
-                                    spent.load(Ordering::Relaxed).saturating_sub(baseline);
+                                let turn_spent = output_scope.as_ref().map_or_else(
+                                    || spent.load(Ordering::Relaxed).saturating_sub(baseline),
+                                    platform_api::WorkflowOutputScope::spent,
+                                );
                                 if turn_spent >= total {
                                     let should_emit = {
                                         let mut metrics = workflow_metrics.lock().await;
@@ -3590,6 +4144,12 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                                 call_index,
                             ))
                         });
+                        // Catalog/observer preparation above can await while
+                        // another batch member fails accounting. Recheck at
+                        // the final dispatch boundary, not only at batch entry.
+                        if output_accounting_failed.load(Ordering::Acquire) {
+                            return wf_throw("workflow output accounting failed; further dispatch is disabled");
+                        }
                         let raw = if let Some(observer) = observer.clone() {
                             spawner
                                 .spawn_workflow_with_observer(
@@ -3609,15 +4169,32 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                             spawner.spawn(request, inherit).await
                         };
                         let terminal_error = subagent_failure_reason(&raw);
+                        if let (Some(scope), Ok(result)) = (&output_scope, &raw) {
+                            let recorded = known_workflow_agent_output(result).and_then(|tokens| {
+                                tokens.map(|tokens| {
+                                    scope.record_legacy(
+                                        platform_api::WorkflowOutputEventId::WorkflowAgent {
+                                            run_id: output_run_id.clone(),
+                                            call_index,
+                                        },
+                                        tokens,
+                                    )
+                                }).transpose()
+                            });
+                            if let Err(error) = recorded {
+                                output_accounting_failed.store(true, Ordering::Release);
+                                return wf_throw(&error.to_string());
+                            }
+                        } else if let Ok(SubagentResult::Completed { usage, .. }) = &raw {
+                            // Preserve the legacy pool's final-turn visible-output contract.
+                            spent.fetch_add(usage.output_tokens, Ordering::Relaxed);
+                        }
                         workflow_metrics.lock().await.record_result(
                             call_index,
                             phase_index,
                             phase_title.clone(),
                             &raw,
                         );
-                        if let Ok(SubagentResult::Completed { usage, .. }) = &raw {
-                            spent.fetch_add(usage.output_tokens, Ordering::Relaxed);
-                        }
                         {
                             let (state, agent_id_str) = match &raw {
                                 Ok(SubagentResult::Completed { agent_id, .. }) => {
@@ -3825,6 +4402,23 @@ impl Task for LocalWorkflowHandler {
                 "workflow session_uuid must be a valid session id".into(),
             ));
         }
+
+        // Capture output authority before allocating or awaiting task work.
+        let output_scope = self
+            .output_scopes
+            .as_ref()
+            .map(|scopes| {
+                let session = session_uuid
+                    .as_deref()
+                    .and_then(protocol::SessionId::parse_prefixed)
+                    .ok_or_else(|| {
+                        TaskError::Internal("scoped workflow requires a canonical session".into())
+                    })?;
+                scopes
+                    .capture(session)
+                    .map_err(|error| TaskError::Internal(error.to_string()))
+            })
+            .transpose()?;
 
         // A local-app build may only run with a lease bound to the exact app
         // workspace. Do this validation before allocating task/spool state so
@@ -4214,6 +4808,7 @@ impl Task for LocalWorkflowHandler {
                     Some(phase_telemetry_ctx.clone()),
                     Some(workflow_metrics.clone()),
                     terminal_recorder.clone(),
+                    output_scope,
                 );
                 let (outcome, (), ()) = tokio::join!(run, drain, live_drain);
                 // Natural completion and TaskStop race on the worker map. Once
@@ -4459,3 +5054,7 @@ impl Task for LocalWorkflowHandler {
 #[cfg(test)]
 #[path = "local_workflow_test.rs"]
 mod local_workflow_test;
+
+#[cfg(test)]
+#[path = "local_workflow_accounting_test.rs"]
+mod local_workflow_accounting_test;

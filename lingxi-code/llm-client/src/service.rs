@@ -696,10 +696,26 @@ impl ApiService {
     /// Install the host's registered-attempt authority after composition.
     /// Ordinary requests without context never invoke this hook.
     pub fn set_model_attempt_hooks(&self, hooks: Arc<dyn crate::ModelAttemptHooks>) {
-        *self
+        let retired = self
             .model_attempt_hooks
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hooks);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(hooks);
+        drop(retired);
+    }
+
+    /// Retire host authority after the host has drained all producers and
+    /// receipts. Registered requests then fail closed; ordinary requests are
+    /// unchanged. Other service owners must not extend a closed session lease.
+    pub fn clear_model_attempt_hooks(&self) {
+        let retired = self
+            .model_attempt_hooks
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        // Host destructors can release their own graphs or reenter the service.
+        // Never run them under the service's hook lock.
+        drop(retired);
     }
 
     async fn begin_model_attempt(

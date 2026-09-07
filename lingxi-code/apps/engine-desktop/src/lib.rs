@@ -46,6 +46,8 @@ mod skill_loader;
 mod watcher_test_support;
 #[cfg(test)]
 mod fusion_pool_admission_test;
+#[cfg(test)]
+mod fusion_attempt_composition_test;
 
 use crate::ide::DesktopIdeHandle;
 use async_trait::async_trait;
@@ -5107,11 +5109,34 @@ impl platform_api::FusionExecutor for DesktopFusionExecutor {
     }
 }
 
+/// Install one shared physical-attempt host only after durable boot has
+/// published its output scope. The registry validates captured session
+/// hydration again during prepare; this factory grants no dispatch authority.
+fn desktop_fusion_attempts(
+    service: Arc<llm_client::ApiService>,
+    budget: Arc<cost::BudgetEnforcer>,
+    tracker: Arc<cost::CostTracker>,
+    pricing: Arc<cost::PricingCatalog>,
+    outputs: Option<Arc<dyn platform_api::WorkflowOutputScopes>>,
+) -> Option<Arc<fusion_attempts::DesktopFusionAttempts>> {
+    outputs.map(|outputs| {
+        let attempts = fusion_attempts::DesktopFusionAttempts::new(
+            service.clone(),
+            budget,
+            tracker,
+            pricing,
+            outputs,
+        );
+        service.set_model_attempt_hooks(attempts.clone());
+        attempts
+    })
+}
+
 fn desktop_fusion_executor(
     spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner>,
     side_query: Arc<dyn sidequery::SideQueryClient>,
     cfg: &DesktopConfig,
-    _managed_raw_tiers: &[String],
+    attempts: Option<Arc<fusion_attempts::DesktopFusionAttempts>>,
     // Round-4 review finding [8]: a `ModelSource` (typically
     // `FusionCatalogModelSource`, `LlmStack::fusion_catalog_source`) instead
     // of a frozen `Vec<CatalogModel>` — the orchestrator already re-queries
@@ -5136,9 +5161,13 @@ fn desktop_fusion_executor(
     }
     let config_source: Arc<dyn fusion::FusionConfigSource> =
         Arc::new(DesktopFusionConfigSource { cfg: cfg.clone() });
-    let inner = fusion::FusionOrchestrator::new(spawner, side_query, config_source, catalog)
+    let mut inner = fusion::FusionOrchestrator::new(spawner, side_query, config_source, catalog)
         .with_bus(bus)
-        .with_price_book(Arc::new(DesktopFusionPriceBook::new(pricing)));
+        .with_price_book(Arc::new(DesktopFusionPriceBook::new(pricing)))
+        .with_panel_admission();
+    if let Some(attempts) = attempts {
+        inner = inner.with_attempt_registrar(attempts);
+    }
     Arc::new(DesktopFusionExecutor {
         inner: Arc::new(inner),
         cfg: cfg.clone(),
@@ -5212,7 +5241,7 @@ mod desktop_fusion_executor_boot_test {
             Arc::new(UnreachableSpawner),
             Arc::new(UnreachableSideQuery),
             &cfg,
-            &[],
+            None,
             Arc::new(Vec::<fusion::CatalogModel>::new()),
             Arc::new(telemetry::AnalyticsBus::new()),
             Arc::new(cost::PricingCatalog::builtin_reference()),
@@ -5263,7 +5292,7 @@ mod desktop_fusion_executor_boot_test {
             Arc::new(UnreachableSpawner),
             Arc::new(UnreachableSideQuery),
             &cfg,
-            &[],
+            None,
             Arc::new(Vec::<fusion::CatalogModel>::new()),
             Arc::new(telemetry::AnalyticsBus::new()),
             Arc::new(cost::PricingCatalog::builtin_reference()),
@@ -7098,6 +7127,7 @@ pub struct DesktopSessionLifecycle {
     task_registry: Arc<tasks::registry::TaskRegistry>,
     command_registry: Arc<RwLock<CommandRegistry>>,
     subagent_spawner: Arc<agent::handle::PoolSubagentSpawner>,
+    fusion_api_service: Arc<llm_client::ApiService>,
     cost_tracker: Arc<cost::CostTracker>,
     session_state_manager: Option<Arc<session_state::SessionStateManager>>,
     fusion_recorder_factory: Option<Arc<fusion_recorder::DesktopFusionRecorderFactory>>,
@@ -7233,6 +7263,12 @@ impl DesktopSessionLifecycle {
             }
         }
         report.complete = report.errors.is_empty();
+        if report.complete {
+            // A service may outlive this session through another API consumer.
+            // Its registered-attempt host must not keep the closed writer claim
+            // alive. Failed producer/receipt drains retain authority for retry.
+            self.fusion_api_service.clear_model_attempt_hooks();
+        }
         report
     }
 }
@@ -11728,6 +11764,13 @@ pub async fn build(
             return Err(BuildError::DurableSession(message));
         }
     }
+    let fusion_attempts = desktop_fusion_attempts(
+        api_service.clone(),
+        shared_budget_enforcer.clone(),
+        cost_tracker.clone(),
+        pricing.clone(),
+        workflow_output_scopes.clone(),
+    );
     let budget_enforcer: Arc<dyn platform_api::budget::BudgetEnforcerHandle> =
         shared_budget_enforcer;
 
@@ -13136,7 +13179,7 @@ pub async fn build(
             api_service.clone(),
         )),
         &cfg,
-        &managed_settings_for_strict,
+        fusion_attempts,
         fusion_catalog_source.clone(),
         analytics_bus.clone(),
         pricing.clone(),
@@ -15666,6 +15709,7 @@ pub async fn build(
         task_registry: task_registry.clone(),
         command_registry: shared_command_registry.clone(),
         subagent_spawner: lifecycle_subagent_spawner,
+        fusion_api_service: api_service,
         cost_tracker,
         session_state_manager,
         fusion_recorder_factory: fusion_recorder_factory_impl.clone(),
@@ -18767,7 +18811,7 @@ still flip to available"
     }
 
     /// Deterministic, env/argv-free config rooted at a sandbox temp dir.
-    fn test_config(use_noop: bool) -> (tempfile::TempDir, DesktopConfig) {
+    pub(super) fn test_config(use_noop: bool) -> (tempfile::TempDir, DesktopConfig) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
         let lingxi_home = cwd.join(".lingxi");
@@ -19442,12 +19486,16 @@ still flip to available"
         );
         let handler = Arc::new(FailingDrain(std::sync::atomic::AtomicBool::new(true)));
         registry.register_handler(tasks::id::TaskType::LocalBash, handler.clone());
+        let hooks = Arc::new(crate::fusion_attempt_composition_test::RetirementProbe);
+        let retained_hooks = Arc::downgrade(&hooks);
+        rt.session_lifecycle.fusion_api_service.set_model_attempt_hooks(hooks);
         // Keep the real registry to drain its production graph on the retry.
         let lifecycle = Arc::get_mut(&mut rt.session_lifecycle).expect("single lifecycle owner");
         let original = std::mem::replace(&mut lifecycle.task_registry, Arc::new(registry));
         let report = lifecycle.shutdown_and_drain().await;
         assert!(!report.complete);
         assert!(!report.errors.is_empty());
+        assert!(retained_hooks.upgrade().is_some(), "failed producer drain must retain attempt hooks");
         assert!(lifecycle.subagent_spawner.tool_registry_handle().get().is_some(),
             "a failed task drain must not retire dependencies used by live workers");
         handler.0.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -19456,6 +19504,7 @@ still flip to available"
         let report = lifecycle.shutdown_and_drain().await;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(report.complete);
+        assert!(retained_hooks.upgrade().is_none(), "successful retry must retire attempt hooks");
         assert!(lifecycle.subagent_spawner.tool_registry_handle().get().is_none());
     }
 
@@ -19468,6 +19517,9 @@ still flip to available"
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
         let registry = Arc::downgrade(&rt.task_registry);
+        // A consumer may retain the service after this session closes. This
+        // must not keep its registered host and durable writer claim alive.
+        let service_keeper = rt.session_lifecycle.fusion_api_service.clone();
         let orchestrator = Arc::downgrade(&rt.orchestrator);
         let pool = Arc::downgrade(&rt.session_lifecycle.subagent_spawner);
         let tool_registry = Arc::downgrade(
@@ -19537,6 +19589,7 @@ still flip to available"
             immediate_lease_zero,
             "the last drained runtime must release its session writer claim"
         );
+        drop(service_keeper);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

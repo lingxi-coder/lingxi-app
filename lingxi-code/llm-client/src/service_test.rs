@@ -427,6 +427,61 @@ mod tests {
         assert_eq!(transport.seen_count(), 0);
     }
 
+    struct HookRetirementProbe {
+        service: std::sync::Weak<ApiService>,
+        unlocked_drop: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ModelAttemptHooks for HookRetirementProbe {
+        async fn begin(
+            &self,
+            _: &platform_api::ModelAttemptContext,
+            _: &LlmRequest,
+            _: &crate::PreparedLlmCall,
+        ) -> Result<Box<dyn crate::ModelAttemptLease>, LlmError> {
+            panic!("retired hooks must never receive a request")
+        }
+    }
+
+    impl Drop for HookRetirementProbe {
+        fn drop(&mut self) {
+            let unlocked = self.service.upgrade()
+                .is_some_and(|service| service.model_attempt_hooks.try_write().is_ok());
+            self.unlocked_drop.store(unlocked, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_hook_retirement_drops_outside_lock_and_rejects_late_wire() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 200, headers: BTreeMap::new(), body_json: ok_response_json(), request_id: None,
+        });
+        let service = Arc::new(make_adapter(transport.clone()));
+        for replacement in [true, false] {
+            let unlocked = Arc::new(AtomicBool::new(false));
+            service.set_model_attempt_hooks(Arc::new(HookRetirementProbe {
+                service: Arc::downgrade(&service), unlocked_drop: unlocked.clone(),
+            }));
+            if replacement {
+                service.set_model_attempt_hooks(Arc::new(Arc::new(AttemptProbe::default())));
+            } else {
+                service.clear_model_attempt_hooks();
+            }
+            assert!(unlocked.load(Ordering::SeqCst), "hook destruction must run outside the write lock");
+        }
+        service.clear_model_attempt_hooks(); // idempotent
+        let error = service.execute_side_query_request(registered_request()).await.unwrap_err();
+        assert!(matches!(error, LlmError::InvalidRequest { message } if message.contains("requires host accounting hooks")));
+        assert!(service.stream_request(registered_request()).await.is_err());
+        assert_eq!(transport.seen_count(), 0);
+        let mut ordinary = registered_request();
+        ordinary.model_attempt = None;
+        service.execute_side_query_request(ordinary).await.unwrap();
+        assert_eq!(transport.seen_count(), 1, "ordinary calls remain unaffected");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn registered_physical_retries_settle_each_attempt_before_next_send() {
         let transport = FakeTransport::sequence(vec![

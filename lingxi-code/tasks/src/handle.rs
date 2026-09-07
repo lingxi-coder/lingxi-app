@@ -116,6 +116,10 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
             Some(a.is_backgrounded),
             a.forked_skill_name.clone(),
         ),
+        // A backgrounded shell is a task the model can address, so it carries
+        // the same `is_backgrounded` flag the `Stop` hook filter reads for
+        // agents (claude-code sets `isBackgrounded` on the `local_bash` record).
+        TaskState::LocalBash(bash) => (None, None, None, None, bash.is_backgrounded, None),
         TaskState::MonitorMcp(m) => (None, Some(m.server_name.clone()), None, None, None, None),
         TaskState::Monitor(_) => (None, None, None, None, None, None),
         // `mcp_task` surfaces BOTH the server and the single tool it detached
@@ -679,6 +683,7 @@ impl TaskRegistryHandle for TaskRegistry {
             registration.command,
             registration.description,
             registration.tool_use_id,
+            registration.cwd,
         )
         .await
         .map(|_| ())
@@ -1144,6 +1149,8 @@ mod tests {
                 command: "cargo build".into(),
                 pid: None,
                 exit_code: None,
+                cwd: None,
+                is_backgrounded: None,
             }))
             .await;
 
@@ -1248,6 +1255,8 @@ mod tests {
                 command: "echo visible".into(),
                 pid: None,
                 exit_code: None,
+                cwd: None,
+                is_backgrounded: None,
             }))
             .await;
 
@@ -1298,7 +1307,9 @@ mod tests {
             command: "cargo build --release".into(),
             pid: None,
             exit_code: None,
-        });
+                cwd: None,
+                is_backgrounded: None,
+            });
         registry.insert_state_for_test(state).await;
 
         let h: &dyn TaskRegistryHandle = registry.as_ref();

@@ -165,6 +165,18 @@ pub struct LocalBashTaskState {
     pub pid: Option<u32>,
     /// Exit code once terminated.
     pub exit_code: Option<i32>,
+    /// Directory the command was launched in (claude-code stores `cwd: Q()` on
+    /// the `local_bash` record, 2.1.263 `Xne`). `#[serde(default)]` so records
+    /// written before the field existed still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Whether this shell is running in the background (claude-code
+    /// `isBackgrounded`: `Xne` registers `true`, the 2 s foreground arming
+    /// `U6t` registers `false`). Only a backgrounded shell is a task the model
+    /// can address, so this is the field the `Stop` hook's `background_tasks`
+    /// filter and `/tasks` read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_backgrounded: Option<bool>,
 }
 
 /// State specific to an in-process agent task.

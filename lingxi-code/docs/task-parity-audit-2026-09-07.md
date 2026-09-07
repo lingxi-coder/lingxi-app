@@ -78,7 +78,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
-| `CW-02` | confirmed | P1 | medium | Timeout→auto-background path mints a second unregistered runner id instead of backgrounding the already-registered task |
+| `CW-02` | confirmed **[already closed by the P0 commit; the verifier read the runner mid-edit and noted the line drift]** | P1 | medium | Timeout→auto-background path mints a second unregistered runner id instead of backgrounding the already-registered task |
 | `CW-04` | confirmed | P2 | medium | Foreground Bash is never registered as a running local_bash task (oracle registers after `cnr` ms of progress), so /tasks, background-all and Ctrl+B cannot see it |
 | `CW-03` | refuted | P3 | low | Background note (port of 2.1.238 L0i) lacks the 2.1.263 `backgroundedToDeliverMessage` arm; comments cite 2.1.238 offsets |
 | `CW-05` | keep | P3 | high | Monitor tool absent on mobile + mobile Shell has no run_in_background — intentional mobile divergence (keep) |
@@ -121,7 +121,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
-| `TID-08` | confirmed | P1 | medium | local_bash record shape: TaskSpawnInput::LocalBash carries no tool_use_id (never stamped) and LocalBashTaskState lacks isBackgrounded/isAdopted/agentId/kind/caller/cwd |
+| `TID-08` | confirmed **[partly closed: tool_use_id, cwd and is_backgrounded now land on the record; the spawn-input variant still lacks them]** | P1 | medium | local_bash record shape: TaskSpawnInput::LocalBash carries no tool_use_id (never stamped) and LocalBashTaskState lacks isBackgrounded/isAdopted/agentId/kind/caller/cwd |
 | `TID-04` | confirmed | P2 | medium | Notified terminal tasks are never evicted from the registry (oracle evicts them on the next attachment pass via Kan/Dlo, and exposes remove/evictTerminal) |
 | `TID-05` | confirmed | P2 | medium | `end_time` is only written on the mcp_task settle path and `total_paused_ms` is never written — every other terminal transition leaves them at None/0 although the oracle stamps `endTime:Date.now()` on each and diffs both in the update patch |
 | `TID-06` | confirmed | P2 | medium | Registry register/update do not emit the SDK `task_started` / `task_updated` system messages (oracle Mlo/Rlo via the same queue `pi` uses for task_notification) |

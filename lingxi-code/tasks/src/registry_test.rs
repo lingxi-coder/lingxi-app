@@ -229,6 +229,7 @@ async fn background_bash_identity_is_registered_settled_and_notified() {
             "sleep 5".into(),
             "wait a bit".into(),
             Some("toolu_1".into()),
+            Some("/work".into()),
         )
         .await
         .unwrap();
@@ -236,6 +237,15 @@ async fn background_bash_identity_is_registered_settled_and_notified() {
     assert_eq!(state.base().status, TaskStatus::Running);
     assert_eq!(state.base().tool_use_id.as_deref(), Some("toolu_1"));
     assert_eq!(state.base().output_file, path);
+    // The record carries the fields claude-code stamps on `Xne`: the launch
+    // directory, and the flag that says this shell is one the model can address.
+    match &state {
+        TaskState::LocalBash(bash) => {
+            assert_eq!(bash.cwd.as_deref(), Some("/work"));
+            assert_eq!(bash.is_backgrounded, Some(true));
+        }
+        other => panic!("expected a local_bash record, got {other:?}"),
+    }
 
     // 3. Settling from the child's exit writes the status trailer claude-code
     //    appends and drives the record terminal.
@@ -268,7 +278,7 @@ async fn settling_a_killed_background_bash_writes_the_killed_trailer() {
     let (_dir, registry) = make_registry();
     let (task_id, path) = registry.allocate_bash_output().await.unwrap();
     registry
-        .register_background_bash(task_id.clone(), "sleep 5".into(), "wait".into(), None)
+        .register_background_bash(task_id.clone(), "sleep 5".into(), "wait".into(), None, None)
         .await
         .unwrap();
     registry.settle_background_bash(&task_id, None, true).await.unwrap();
@@ -292,7 +302,7 @@ async fn stopping_a_background_bash_closes_its_output_file_with_the_killed_trail
     let (_dir, registry) = make_registry();
     let (task_id, path) = registry.allocate_bash_output().await.unwrap();
     registry
-        .register_background_bash(task_id.clone(), "sleep 60".into(), "long one".into(), None)
+        .register_background_bash(task_id.clone(), "sleep 60".into(), "long one".into(), None, None)
         .await
         .unwrap();
     registry.output_manager.append(&path, "partial output\n").await.unwrap();
@@ -349,7 +359,7 @@ async fn discarding_an_unused_bash_identity_removes_its_output_file() {
     );
     // Re-allocating the same identity must be possible after a discard.
     registry
-        .register_background_bash(task_id.clone(), "cmd".into(), "d".into(), None)
+        .register_background_bash(task_id.clone(), "cmd".into(), "d".into(), None, None)
         .await
         .unwrap();
     registry.discard_bash_output(&task_id).await;
@@ -3655,7 +3665,9 @@ async fn named_rested_agent_waits_for_live_background_children_before_notifying(
             command: "sleep 1".into(),
             pid: None,
             exit_code: None,
-        }))
+                cwd: None,
+                is_backgrounded: None,
+            }))
         .await;
 
     registry
@@ -3753,7 +3765,9 @@ async fn deferred_rest_requeue_preserves_newer_payload() {
             command: "sleep 1".into(),
             pid: None,
             exit_code: None,
-        }))
+                cwd: None,
+                is_backgrounded: None,
+            }))
         .await;
 
     registry
@@ -3895,7 +3909,9 @@ async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
             command: "sleep 1".into(),
             pid: None,
             exit_code: None,
-        }))
+                cwd: None,
+                is_backgrounded: None,
+            }))
         .await;
 
     registry
@@ -3973,6 +3989,8 @@ async fn take_pending_skips_already_notified_and_non_terminal() {
                 command: String::new(),
                 pid: None,
                 exit_code: Some(0),
+                cwd: None,
+                is_backgrounded: None,
             }))
             .await;
     }

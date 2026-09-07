@@ -461,6 +461,8 @@ impl TaskRegistry {
                 command: String::new(),
                 pid: None,
                 exit_code: None,
+                cwd: None,
+                is_backgrounded: None,
             }),
             TaskType::Dream => TaskState::Dream(crate::state::DreamTaskState {
                 base,
@@ -477,6 +479,8 @@ impl TaskRegistry {
                 command: String::new(),
                 pid: None,
                 exit_code: None,
+                cwd: None,
+                is_backgrounded: None,
             }),
         };
         self.tasks.write().await.insert(id.clone(), state);
@@ -672,6 +676,7 @@ impl TaskRegistry {
         command: String,
         description: String,
         tool_use_id: Option<String>,
+        cwd: Option<String>,
     ) -> Result<(String, std::path::PathBuf), TaskError> {
         let path = self
             .output_manager
@@ -699,6 +704,10 @@ impl TaskRegistry {
             command,
             pid: None,
             exit_code: None,
+            cwd,
+            // Registration only happens for a shell that is actually being
+            // backgrounded (claude-code `Xne` registers `isBackgrounded: true`).
+            is_backgrounded: Some(true),
         });
         self.tasks.write().await.insert(id.clone(), state);
         self.fire_task_created(&id, TaskType::LocalBash, &description_for_hook)
@@ -2563,6 +2572,8 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
                 command: command.clone(),
                 pid: None,
                 exit_code: None,
+                cwd: None,
+                is_backgrounded: None,
             })
         }
         TaskSpawnInput::LocalAgent {

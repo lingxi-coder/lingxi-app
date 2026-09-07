@@ -220,6 +220,9 @@ pub struct FusionInheritance {
     /// activated. `None` preserves legacy behavior for callers that do not
     /// expose a pre-run runtime snapshot.
     pub effective_timeout_ms: Option<u64>,
+    /// Original workflow output account. This trusted, non-serialized
+    /// capability must not follow a newer turn in the same session.
+    pub output_scope: Option<crate::WorkflowOutputScope>,
 }
 
 impl FusionInheritance {
@@ -230,6 +233,7 @@ impl FusionInheritance {
             subagent,
             cancel,
             effective_timeout_ms: None,
+            output_scope: None,
         }
     }
 
@@ -237,6 +241,13 @@ impl FusionInheritance {
     #[must_use]
     pub fn with_effective_timeout_ms(mut self, timeout_ms: Option<u64>) -> Self {
         self.effective_timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Carry the workflow's already-captured account without re-resolving it.
+    #[must_use]
+    pub fn with_output_scope(mut self, scope: Option<crate::WorkflowOutputScope>) -> Self {
+        self.output_scope = scope;
         self
     }
 

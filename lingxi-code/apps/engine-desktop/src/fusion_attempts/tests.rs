@@ -494,6 +494,138 @@ async fn desktop_attempt_registration_allows_pick_when_optional_synthesis_is_una
     assert_eq!(harness.calls.load(Ordering::SeqCst), 0);
 }
 
+fn workflow_registration(
+    harness: &DurableHarness,
+    scope: Option<WorkflowOutputScope>,
+) -> (Arc<DesktopFusionAttempts>, fusion::FusionAttemptRegistration) {
+    let origin = &harness.authority.captured;
+    let session = origin.control.identity().session_id.unwrap();
+    let mut request = origin.request.clone();
+    request.origin = platform_api::FusionOrigin::Workflow;
+    request.parent_model = "unavailable-parent".into();
+    request.workflow_run_id = Some("original-scope".into());
+    request.conversation_id = Some(session.to_string());
+    let panel = fusion::ResolvedPanel { profile: "profile".into(), model: "wire".into() };
+    let row = fusion::CatalogModel {
+        profile: panel.profile.clone(), model: panel.model.clone(), hints: Default::default(),
+        structured_output: true, limits: route().limits,
+    };
+    let control = platform_api::FusionRunControl::new_with_billing_mode(
+        platform_api::FusionRunIdentity::new(platform_api::FusionRunId::generated(), Some(session), platform_api::FusionOrigin::Workflow, Some("original-scope".into())),
+        60_000, tokio_util::sync::CancellationToken::new(), Default::default(),
+        platform_api::ModelAttemptBillingMode::MeteredAttempts,
+    );
+    let captured = fusion::FusionAttemptRegistration {
+        control,
+        inherit: origin.inherit.clone().with_output_scope(scope),
+        request,
+        resolved: fusion::ResolvedSet { panels: vec![panel.clone()], analyst: panel },
+        snapshot: Arc::new(fusion::FusionRuntimeSnapshot::new(origin.snapshot.config.clone(), fusion::CatalogSnapshot::capture(&vec![row]).unwrap(), origin.snapshot.prices.clone())),
+        live_policy: Arc::new(Live),
+    };
+    let host = DesktopFusionAttempts::new(
+        harness.service.clone(), harness.authority.budget.clone(), harness.authority.tracker.clone(),
+        Arc::new(cost::PricingCatalog::empty().with_entry(route().pricing)),
+        harness.authority.budget.workflow_output_scopes(),
+    );
+    (host, captured)
+}
+
+#[tokio::test]
+async fn desktop_attempt_workflow_late_wire_charges_original_generation() {
+    use fusion::FusionAttemptRegistrar;
+    for complete in [true, false] {
+        let mut harness = DurableHarness::new(complete).await;
+        let original = harness.authority.output.clone();
+        let current = harness.authority.budget.workflow_output_scopes()
+            .begin_turn(original.session_id(), protocol::MessageId::new(), Some(1_000)).await.unwrap();
+        let (host, captured) = workflow_registration(&harness, Some(original.clone()));
+        let control = captured.control.clone();
+        let registered = host.register(captured).unwrap();
+        assert!(control.activate_at(tokio::time::Instant::now()));
+        harness.service.set_model_attempt_hooks(host);
+        let mut request = harness.request.clone();
+        request.model_attempt = Some(registered.run.context(ModelAttemptStage::Panel, Some(0)).unwrap());
+        let service = harness.service.clone();
+        let call = tokio::spawn(async move {
+            let mut stream = service.stream_request(request).await.unwrap();
+            while let Some(event) = stream.next().await { event.unwrap(); }
+        });
+        let intent = harness.queue.recv().await.unwrap();
+        let recorded_generation = match &intent.mutation {
+            cost::AttemptPersistMutation::Intent(intent) => intent.output_scope.as_ref().unwrap().generation_id,
+            _ => panic!("intent expected"),
+        };
+        harness.acknowledge(intent);
+        let receipt = harness.queue.recv().await.unwrap();
+        harness.acknowledge(receipt);
+        call.await.unwrap();
+        let summary = registered.finalizer.finish().wait().await.unwrap();
+        assert_eq!(summary.usage.provider_requests, 1);
+        assert_eq!(recorded_generation, original.generation_id(), "WAL intent must retain the launching turn");
+        assert_eq!(original.spent(), if complete { 8 } else { 50 });
+        assert_eq!(current.spent(), 0);
+        assert_eq!(harness.authority.budget.active_reservation_nano_usd().await, 0);
+    }
+}
+
+#[tokio::test]
+async fn desktop_attempt_workflow_missing_or_foreign_scope_rejects_before_wire() {
+    use fusion::FusionAttemptRegistrar;
+    for foreign in [false, true] {
+        let mut harness = DurableHarness::new(true).await;
+        let scope = foreign.then(|| WorkflowOutputScope::new(Arc::new(Output(protocol::SessionId::new(), protocol::MessageId::new()))));
+        let (host, captured) = workflow_registration(&harness, scope);
+        let result = host.register(captured);
+        assert!(result.is_err(), "workflow cannot recapture current scope when original authority is absent or foreign");
+        assert_eq!(harness.calls.load(Ordering::SeqCst), 0);
+        assert!(harness.queue.try_recv().is_err());
+        assert_eq!(harness.authority.budget.active_reservation_nano_usd().await, 0);
+        assert_eq!(harness.authority.output.spent(), 0);
+    }
+}
+
+#[tokio::test]
+async fn desktop_attempt_workflow_original_limit_blocks_borrowing_new_turn_capacity() {
+    use fusion::FusionAttemptRegistrar;
+    let mut harness = DurableHarness::with_limits(true, 10_000, 1).await;
+    let original = harness.authority.output.clone();
+    let current = harness.authority.budget.workflow_output_scopes()
+        .begin_turn(original.session_id(), protocol::MessageId::new(), Some(1_000)).await.unwrap();
+    let (host, captured) = workflow_registration(&harness, Some(original.clone()));
+    let control = captured.control.clone();
+    let registered = host.register(captured).unwrap();
+    assert!(control.activate_at(tokio::time::Instant::now()));
+    harness.service.set_model_attempt_hooks(host);
+    let mut request = harness.request.clone();
+    request.model_attempt = Some(registered.run.context(ModelAttemptStage::Panel, Some(0)).unwrap());
+    let service = harness.service.clone();
+    let mut call = tokio::spawn(async move {
+        let mut stream = service.stream_request(request).await?;
+        while let Some(event) = stream.next().await { event?; }
+        Ok::<(), LlmError>(())
+    });
+    // A broken implementation can admit against A2. Acknowledge and drain
+    // that path before asserting, so the RED test cannot strand a WAL waiter.
+    let denied_without_intent = tokio::select! {
+        result = &mut call => result.unwrap().is_err(),
+        intent = harness.queue.recv() => {
+            harness.acknowledge(intent.unwrap());
+            let receipt = harness.queue.recv().await.unwrap();
+            harness.acknowledge(receipt);
+            let _ = call.await.unwrap();
+            false
+        }
+    };
+    registered.finalizer.finish().wait().await.unwrap();
+    assert!(denied_without_intent, "A2 headroom must not authorize a call belonging to A1");
+    assert_eq!(harness.calls.load(Ordering::SeqCst), 0);
+    assert!(harness.queue.try_recv().is_err());
+    assert_eq!(original.spent(), 0);
+    assert_eq!(current.spent(), 0);
+    assert_eq!(harness.authority.budget.active_reservation_nano_usd().await, 0);
+}
+
 #[tokio::test]
 async fn desktop_attempt_default_run_cap_keeps_session_and_output_limits() {
     use fusion::FusionAttemptFinalizer;

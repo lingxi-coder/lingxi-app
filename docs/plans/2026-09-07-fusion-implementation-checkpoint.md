@@ -49,10 +49,18 @@ PR05 was completed previously. The approved full optimization plan remains
   and the new late-call, lock-release and production-composition regressions.
   The earlier three pool admission integration tests passed in the 399-test
   suite; the new composition tests have now also executed successfully.
-- Independent review also found a production blocker: late Workflow Fusion
-  calls must inherit the workflow's original output account, not recapture
-  the current turn. Fix and verify same-session A1-to-A2 isolation before
-  enabling bounded Fusion workflow concurrency.
+- Late Workflow Fusion now inherits its original output account; missing or
+  cross-session accounts are rejected, without recapturing the current turn.
+  Three host and two bridge assertions first reproduced the defect. The
+  subsequent nine-crate suite passed 4065 tests (Desktop 405, other counts
+  unchanged), including real fake-wire/receipt checks of A1-to-A2 isolation
+  and refusal to borrow A2's capacity when A1 is exhausted.
+- Repeated command-core builds were caused by nonexistent hard-coded Git
+  watch paths. Command-core and CLI now share worktree-aware Git metadata
+  resolution. Three standalone/Cargo-discoverable regression tests cover
+  archive, unborn/loose/packed refs, linked worktrees and detached HEAD.
+  The next unchanged nine-crate no-run build reported command_core, tui and
+  engine_desktop all `fresh: true` (exit 0); no cache deletion was needed.
 - Core Fusion configuration tests passed (16 tests), including quorum-policy
   typing and cross-layer validation.
 - Finish full affected-package tests, Clippy, app checks and formatting before

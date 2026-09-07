@@ -2883,6 +2883,7 @@ mod captured_output_tests {
         succeeds: bool,
         settlement_failed: bool,
         calls: Arc<AtomicU64>,
+        expected_scope: Option<WorkflowOutputScope>,
     }
 
     #[async_trait]
@@ -2904,6 +2905,11 @@ mod captured_output_tests {
             self: Arc<Self>,
             submission: FusionSubmission,
         ) -> Result<PreparedFusionRun, FusionError> {
+            if let Some(expected) = &self.expected_scope {
+                assert!(submission.inherit.output_scope.as_ref()
+                    .is_some_and(|actual| actual.shares_account(expected)),
+                    "workflow preparation must forward the exact captured output account");
+            }
             self.calls.fetch_add(1, Ordering::Relaxed);
             let control = platform_api::FusionRunControl::new_with_billing_mode(
                 submission.identity.clone(),
@@ -2982,6 +2988,7 @@ mod captured_output_tests {
             succeeds: true,
             settlement_failed: true,
             calls: calls.clone(),
+            expected_scope: Some(WorkflowOutputScope::new(probe.clone())),
         });
         run_workflow_script_with_live_updates_and_fusion_recorded(
             "const first = await fusion('first'); if (first.final_text !== 'answer' || first.attempt_settlement.status !== 'failed') throw new Error('lost answer or failure'); try { await fusion('second'); } catch (error) { if (String(error).includes('accounting failed')) return first.final_text; throw error; } throw new Error('second call was admitted');",
@@ -3032,6 +3039,7 @@ mod captured_output_tests {
                             succeeds,
                             settlement_failed: false,
                             calls: Arc::new(AtomicU64::new(0)),
+                            expected_scope: scoped.then(|| account.clone()),
                         })),
                         Some("billing-probe".into()),
                         Some("model".into()),
@@ -3803,7 +3811,8 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                                     budget: budget.clone(),
                                 },
                                 fusion_cancel.clone(),
-                            );
+                            )
+                            .with_output_scope(output_scope.clone());
                             let identity = FusionRunIdentity::new(
                                 FusionRunId::generated(),
                                 workflow_session_uuid

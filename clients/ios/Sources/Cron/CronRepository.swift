@@ -84,6 +84,14 @@ final class CronRepository {
         await reconcile(reason: "foreground")
     }
 
+    /// Re-arm the OS wake from the current task file without executing anything.
+    /// A task created in chat (the model's `CronCreate`) is only on disk; if the
+    /// user then backgrounds the app, this is the last chance to hand its next
+    /// fire time to `BGTaskScheduler` before the process is suspended.
+    func handleSceneDidEnterBackground() async {
+        await loadState(lastReconciledAtMs: state.scheduling.lastReconciledAtMs)
+    }
+
     func handleBackgroundWake() async {
         bindBackgroundTaskHandlerIfNeeded()
         await reconcile(reason: "background-task")
@@ -296,7 +304,11 @@ final class CronRepository {
                 state.loading = false
                 return
             }
+            // Only schedules the engine will actually fire may arm the OS wake;
+            // `dueOccurrences` filters unsupported tasks out, so waking for them
+            // would burn a background slot and run nothing.
             let nextFire = tasks
+                .filter(\.task.mobileSupported)
                 .compactMap(\.task.nextFireMs)
                 .min()
             try await scheduler.schedule(taskIdentifier: backgroundTaskIdentifier, earliestAtMs: nextFire)

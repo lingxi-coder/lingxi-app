@@ -42,10 +42,21 @@ pub use cron_list::CronListTool;
 pub use remote_trigger::{ClaudeAiAuthProvider, RemoteTriggerTool};
 pub use schedule_cron::CronCreateTool;
 pub use wakeup::{
-    arm_keepalive, arm_keepalive_with_runtime, clamp_delay_seconds, maybe_arm_keepalive,
-    maybe_arm_keepalive_with_runtime, resolve_wakeup_prompt, KeepaliveOutcome, ScheduleWakeupTool,
-    WakeupScheduler, WakeupSchedulerCell, SCHEDULE_WAKEUP_TOOL_NAME,
+    arm_keepalive, arm_keepalive_with_runtime, build_prompt as build_schedule_wakeup_prompt,
+    cancel_dynamic_loop_on_user_abort, clamp_delay_seconds, maybe_arm_keepalive,
+    maybe_arm_keepalive_with_runtime, note_loop_invoked, resolve_wakeup_prompt,
+    schedule_dynamic_wakeup, stop_dynamic_loop, wakeup_target, KeepaliveOutcome,
+    PromptCacheTtl, ScheduleWakeupTool, WakeupScheduler, WakeupSchedulerCell,
+    SCHEDULE_WAKEUP_TOOL_NAME,
 };
+/// PARITY 2.1.263 `EC()`: the cron tools are enabled unless the env kill
+/// switch is set (`CLAUDE_CODE_DISABLE_CRON` → `LINGXI_DISABLE_CRON`); the
+/// `tengu_kairos_cron` gate defaults true and has no backend here.
+#[must_use]
+pub fn cron_tools_enabled() -> bool {
+    !platform_api::env::is_env_truthy(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref())
+}
+
 /// Register the cron scheduling tools against `reg`.
 ///
 /// `RemoteTrigger` is registered WITHOUT an OAuth auth provider (`None`), so its

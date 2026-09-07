@@ -27,9 +27,9 @@ pub mod tasks_file;
 pub use autonomous_loop::{
     begin_loop_tick, get_autonomous_loop_preamble, is_autonomous_loop_sentinel,
     is_loop_default_prompt_enabled, is_loop_default_sentinel, is_loop_dynamic_enabled,
-    is_loop_file_sentinel, is_loop_keepalive_enabled, is_push_notif_enabled,
+    forget_dynamic_loop, is_loop_file_sentinel, is_loop_keepalive_enabled, is_push_notif_enabled,
     log_autonomous_loop_activation, loop_consecutive_keepalives, loop_tick_in_flight_prompt,
-    mark_loop_rescheduled, read_loop_file, reset_autonomous_loop_delivered,
+    mark_loop_rescheduled, note_loop_invoked, read_loop_file, reset_autonomous_loop_delivered,
     reset_loop_runtime_state, resolve_autonomous_loop_fire, resolve_loop_default_fire,
     resolve_loop_file_fire, set_loop_consecutive_keepalives, take_loop_rescheduled,
     take_loop_tick_in_flight_prompt, LoopFile, LoopRuntime, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
@@ -41,7 +41,9 @@ pub use run_due::{
     default_recurring_max_age, lock_cron_file, next_fire_epoch_ms, next_fire_epoch_ms_for_task,
     run_due_jobs, CronJobFirer, FireStatus, FiredJob,
 };
-pub use schedule::{parse_cron, CronExpression, CronField, CronParseError};
+pub use schedule::{
+    human_schedule, iso_8601_utc, local_date_time_string, parse_cron, CronExpression, CronField, CronParseError,
+};
 pub use scheduler::{
     register_live_job, session_jobs, task_registry_identity, unregister_live_job, CronScheduler,
     CronTaskDef, NoActiveCronScheduler, SessionCronTask,
@@ -49,5 +51,6 @@ pub use scheduler::{
 pub use tasks_file::{
     lock_scheduled_tasks, parse_tasks, project_root_from_tasks_path, read_tasks_body,
     scheduled_tasks_lock_path, scheduled_tasks_lock_relative_path, scheduled_tasks_path,
-    scheduled_tasks_relative_path, serialize_tasks, write_tasks_body, CronTask, ScheduledTasks,
+    parse_tasks_strict, scheduled_tasks_relative_path, serialize_tasks, write_tasks_body, CronTask,
+    ScheduledTasks, UnmodeledTask,
 };

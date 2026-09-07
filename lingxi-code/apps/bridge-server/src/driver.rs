@@ -157,6 +157,11 @@ pub struct MsgQueueWakeupScheduler {
     queue: Arc<msgqueue::MessageQueueManager>,
     runtime: Arc<dyn platform_api::RuntimeSpawner>,
     loop_runtime: Arc<tool_cron::LoopRuntime>,
+    /// Wakeups armed but not yet fired (the binary's `kind:"loop"` cron
+    /// entries), each paired with the prompt it will re-inject. A new schedule
+    /// supersedes them; `stop: true` and a user abort cancel them AND forget
+    /// those prompts' loop records (`Ort`), which is why the prompt is kept.
+    pending: Arc<std::sync::Mutex<Vec<(platform_api::BackgroundTaskHandle, String)>>>,
 }
 
 impl MsgQueueWakeupScheduler {
@@ -170,6 +175,7 @@ impl MsgQueueWakeupScheduler {
             queue,
             runtime,
             loop_runtime: Arc::new(tool_cron::LoopRuntime::default()),
+            pending: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -184,6 +190,7 @@ impl MsgQueueWakeupScheduler {
             queue,
             runtime,
             loop_runtime,
+            pending: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 }
@@ -193,14 +200,27 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
     async fn schedule(&self, delay: std::time::Duration, prompt: String, reason: String) {
         let queue = self.queue.clone();
         let runtime = self.runtime.clone();
+        let pending = self.pending.clone();
+        // The task body consumes `prompt`; keep the un-resolved text for the
+        // pending list so `cancel_pending` can report it back for `Ort`.
+        let prompt_for_pending = prompt.clone();
+        let task_id_slot = Arc::new(std::sync::Mutex::new(None::<u64>));
+        let task_id_for_task = task_id_slot.clone();
         // Spawn a detached one-shot timer (engine code must not call
         // `tokio::spawn` directly — D17 — so go through the runtime seam).
-        let _ = runtime
+        let spawned = runtime
             .clone()
             .spawn(
                 "loop-wakeup",
                 Box::pin(async move {
                     runtime.sleep(delay).await;
+                    // Fired: this handle is no longer pending.
+                    if let Some(id) = *task_id_for_task.lock().unwrap_or_else(|e| e.into_inner()) {
+                        pending
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .retain(|(h, _)| h.task_id != id);
+                    }
                     // Resolve the `<<autonomous-loop-dynamic>>` sentinel at fire
                     // time (else passthrough).
                     let resolved = tool_cron::resolve_wakeup_prompt(&prompt);
@@ -225,6 +245,39 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
                 }),
             )
             .await;
+        if let Ok(handle) = spawned {
+            *task_id_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle.task_id);
+            self.pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((handle, prompt_for_pending));
+        }
+    }
+
+    async fn cancel_pending(&self) -> Vec<String> {
+        let armed: Vec<_> =
+            std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut cancelled = Vec::with_capacity(armed.len());
+        let mut still_armed = Vec::new();
+        for (handle, prompt) in armed {
+            if self.runtime.cancel(&handle).await.is_ok() {
+                cancelled.push(prompt);
+            } else {
+                // The timer is still going to fire and re-inject this prompt.
+                // Dropping it from `pending` would make it invisible to a later
+                // `stop: true` / user abort while it silently resumes the loop,
+                // so put it back and say so.
+                tracing::warn!("[loop/dynamic] could not cancel a pending wakeup; still armed");
+                still_armed.push((handle, prompt));
+            }
+        }
+        if !still_armed.is_empty() {
+            self.pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(still_armed);
+        }
+        cancelled
     }
 
     fn loop_runtime(&self) -> Option<Arc<tool_cron::LoopRuntime>> {
@@ -440,13 +493,26 @@ impl OrchestratorTurnDriver {
         if let Some(queue) = self.queue.as_ref() {
             queue.clear_active_turn().await;
         }
-        // KEEPALIVE (binary loading→idle `useEffect`): this is the turn-end edge.
-        // If the just-completed turn was a dynamic `/loop` tick that did NOT
-        // reschedule, arm one fallback heartbeat (`lKi`). `maybe_arm_keepalive`
-        // is a no-op for non-loop-tick turns (no in-flight prompt) and when the
-        // keepalive gate is off, so it is safe to call after EVERY turn.
+        // USER ABORT (binary `t3t`): the user interrupted this turn, so every
+        // pending dynamic-loop wakeup is cancelled, the in-flight tick is
+        // dropped, their chain-start records are forgotten and the loop ends
+        // with `tengu_loop_ended{user_abort}`. A `Now`-command abort is NOT a
+        // user abort — the queue is interrupting to run something else, and the
+        // loop must survive it — so it falls through to the keepalive edge.
+        //
+        // Otherwise: KEEPALIVE (binary loading→idle `useEffect`). If the
+        // just-completed turn was a dynamic `/loop` tick that did NOT reschedule,
+        // arm one fallback heartbeat (`lKi`). `maybe_arm_keepalive` is a no-op
+        // for non-loop-tick turns (no in-flight prompt) and when the keepalive
+        // gate is off, so it is safe to call after EVERY other turn.
+        let user_aborted = cancel_probe.is_cancelled()
+            && self.cancel_reason.as_ref().is_none_or(|reason| {
+                reason.get() == orchestrator::prompt::mid_turn_input::CancelReason::UserInterrupt
+            });
         if let Some(scheduler) = self.wakeup_scheduler.as_ref() {
-            if let Some(runtime) = self.loop_runtime.as_ref() {
+            if user_aborted {
+                tool_cron::cancel_dynamic_loop_on_user_abort(scheduler).await;
+            } else if let Some(runtime) = self.loop_runtime.as_ref() {
                 tool_cron::maybe_arm_keepalive_with_runtime(scheduler, runtime).await;
             } else {
                 tool_cron::maybe_arm_keepalive(scheduler).await;
@@ -895,12 +961,10 @@ mod tests {
         use super::MsgQueueWakeupScheduler;
         use tool_cron::WakeupScheduler;
 
-        // PARITY: the sentinel resolver gate `is_loop_default_prompt_enabled`
-        // (binary `fJr`/`tengu_kairos_loop_prompt`) DEFAULTS OFF (FLAG-ONLY), so a
-        // sentinel passes through verbatim unless the flag is on. Enable it via the
-        // test-only flag override so this test exercises the resolution path, and
-        // clear the shared delivery state so the FIRST-delivery branch fires.
-        telemetry::test_set_flag("tengu_kairos_loop_prompt", true);
+        // PARITY 2.1.263: the sentinel resolver has NO gate any more
+        // (`tengu_kairos_loop_prompt` is absent from the binary), so a sentinel
+        // always resolves. Clear the shared delivery state so the FIRST-delivery
+        // branch fires.
         tool_cron::reset_autonomous_loop_delivered();
 
         let queue = Arc::new(MessageQueueManager::new());
@@ -935,8 +999,6 @@ mod tests {
         assert_ne!(text, "<<autonomous-loop-dynamic>>");
         assert!(text.contains("autonomous"));
         assert!(text.contains("ScheduleWakeup"));
-
-        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
     }
 
     #[tokio::test]
@@ -990,7 +1052,7 @@ mod tests {
         let _serial = LOOP_KA_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
+        // 2.1.263: dynamic mode has no flag; only the keepalive gate is a flag.
         telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
         let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
         // The drain tags a Cron-sourced command as the in-flight loop tick.
@@ -1009,15 +1071,61 @@ mod tests {
         assert_eq!(
             calls.len(),
             1,
-            "a silent loop tick must arm one keepalive (dynamic={}, keepalive={}, in_flight={:?}, consecutive={})",
-            tool_cron::is_loop_dynamic_enabled(),
+            "a silent loop tick must arm one keepalive (keepalive={}, in_flight={:?}, consecutive={})",
             tool_cron::is_loop_keepalive_enabled(),
             loop_runtime.in_flight_prompt(),
             loop_runtime.consecutive_keepalives(),
         );
-        assert_eq!(calls[0], std::time::Duration::from_secs(1200));
+        // 2.1.263 minute-aligns the target (`P(m)`), so the sleep is 1200s
+        // rounded up to the next whole minute.
+        assert!(
+            calls[0] >= std::time::Duration::from_secs(1200)
+                && calls[0] <= std::time::Duration::from_secs(1260),
+            "keepalive delay {:?} must be 1200s ceil'd to a minute",
+            calls[0]
+        );
         drop(calls);
-        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
+        telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
+        loop_runtime.reset();
+    }
+
+    /// PARITY `t3t`: a loop tick the USER aborted arms no keepalive — it cancels
+    /// the pending wakeups, drops the in-flight tick and ends the loop. Without
+    /// the abort branch this turn takes the keepalive edge and arms 1200s.
+    #[tokio::test]
+    async fn user_abort_of_a_loop_tick_ends_the_loop_instead_of_arming_a_keepalive() {
+        let _serial = LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
+        let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
+        loop_runtime.begin_tick("<<autonomous-loop-dynamic>>".to_string());
+
+        let rec = Arc::new(KaRec {
+            calls: std::sync::Mutex::new(Vec::new()),
+            runtime: loop_runtime.clone(),
+        });
+        let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
+        let driver = build_driver(streaming_one_turn()).with_wakeup_scheduler(sched);
+
+        // A pre-cancelled token with no `CancelReasonFlag` wired reads as the
+        // default `UserInterrupt` — exactly the Ctrl+C / ESC path.
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        driver
+            .run_turn_with_cancel("loop tick".to_string(), cancel)
+            .await;
+
+        assert!(
+            rec.calls.lock().unwrap().is_empty(),
+            "a user-aborted loop tick must NOT arm a keepalive"
+        );
+        assert_eq!(
+            loop_runtime.in_flight_prompt(),
+            None,
+            "the aborted tick must be dropped"
+        );
+        assert!(loop_runtime.loop_ended(), "user abort ends the loop");
         telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
         loop_runtime.reset();
     }
@@ -1029,7 +1137,7 @@ mod tests {
         let _serial = LOOP_KA_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
+        // 2.1.263: dynamic mode has no flag; only the keepalive gate is a flag.
         telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
         let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
 
@@ -1045,7 +1153,6 @@ mod tests {
             rec.calls.lock().unwrap().is_empty(),
             "a non-loop turn must NOT arm a keepalive"
         );
-        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
         telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
     }
 }

@@ -347,6 +347,8 @@
     <string name="cron_one_time_datetime_button">단일 날짜/시간</string>
     <string name="cron_open_alarm_settings_button">\"알람 및 리마인더\" 열기</string>
     <string name="cron_pending">대기 중</string>
+    <string name="cron_unsupported_generic">이 기기에서는 이 일정을 실행할 수 없습니다</string>
+    <string name="cron_unsupported_schedule_fmt">실행되지 않음: %1$s</string>
     <string name="cron_preset_every_hour">매시간</string>
     <string name="cron_preset_every_monday_9am">매주 월요일 09:00</string>
     <string name="cron_prompt_field_label">프롬프트 / 작업</string>

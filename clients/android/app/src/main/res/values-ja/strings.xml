@@ -347,6 +347,8 @@
     <string name="cron_one_time_datetime_button">単発の日時</string>
     <string name="cron_open_alarm_settings_button">「アラームとリマインダー」を開く</string>
     <string name="cron_pending">保留中</string>
+    <string name="cron_unsupported_generic">このデバイスではこのスケジュールを実行できません</string>
+    <string name="cron_unsupported_schedule_fmt">実行されません: %1$s</string>
     <string name="cron_preset_every_hour">毎時</string>
     <string name="cron_preset_every_monday_9am">毎週月曜 09:00</string>
     <string name="cron_prompt_field_label">プロンプト／タスク</string>

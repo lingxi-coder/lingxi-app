@@ -353,6 +353,8 @@
     <string name="cron_one_time_datetime_button">单次日期时间</string>
     <string name="cron_open_alarm_settings_button">打开“闹钟和提醒”</string>
     <string name="cron_pending">待定</string>
+    <string name="cron_unsupported_generic">此设备无法运行该计划</string>
+    <string name="cron_unsupported_schedule_fmt">不会运行：%1$s</string>
     <string name="cron_preset_every_hour">每小时</string>
     <string name="cron_preset_every_monday_9am">每周一 09:00</string>
     <string name="cron_prompt_field_label">提示词 / 任务</string>

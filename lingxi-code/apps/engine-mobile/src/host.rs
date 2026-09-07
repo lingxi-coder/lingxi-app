@@ -11174,7 +11174,7 @@ pub struct CronTaskDto {
     pub next_fire_ms: Option<u64>,
     /// Human-readable schedule (e.g. "every day at 9:00am").
     pub human: String,
-    /// Whether Android may schedule this task. Recurring schedules must have a
+    /// Whether this device may schedule this task (iOS and Android). Recurring schedules must have a
     /// minimum interval of 15 minutes; one-shot schedules are exempt.
     pub mobile_supported: bool,
     /// Stable explanation when [`Self::mobile_supported`] is false.
@@ -11299,19 +11299,11 @@ fn task_next_fire_ms(
 const MOBILE_MIN_RECURRING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 fn cron_field_values(field: &cron::CronField, min: u32, max: u32) -> Option<Vec<u32>> {
-    let values = match field {
-        cron::CronField::Any => (min..=max).collect(),
-        cron::CronField::Exact(value) => vec![*value],
-        cron::CronField::Step(step) if *step > 0 => {
-            (min..=max).filter(|value| value % step == 0).collect()
-        }
-        cron::CronField::Step(_) => return None,
-        cron::CronField::Range(start, end) if start <= end => (*start..=*end).collect(),
-        cron::CronField::Range(_, _) => return None,
-        cron::CronField::List(values) if !values.is_empty() => values.clone(),
-        cron::CronField::List(_) => return None,
-    };
-    if values.iter().all(|value| (min..=max).contains(value)) {
+    // `cron::parse_cron` already expands and range-checks every field the way
+    // claude-code's `expandField` does; this only guards the domain it was
+    // handed against the one the caller expects.
+    let values = field.values().to_vec();
+    if !values.is_empty() && values.iter().all(|value| (min..=max).contains(value)) {
         Some(values)
     } else {
         None
@@ -11364,7 +11356,7 @@ fn mobile_cron_schedule_error(cron_expr: &str, recurring: bool) -> Option<String
             .min()
             .unwrap_or(24 * 60);
         if std::time::Duration::from_secs(u64::from(min_gap) * 60) < MOBILE_MIN_RECURRING_INTERVAL {
-            return Some("Android recurring tasks must be at least 15 minutes apart".to_string());
+            return Some("Recurring tasks on this device must be at least 15 minutes apart".to_string());
         }
     }
     None
@@ -11483,7 +11475,22 @@ impl MobileCronStoreHandle {
             .map_err(|error| {
                 MobileEngineError::Internal(format!("lock scheduled_tasks.json: {error}"))
             })?;
-        let mut document = read_cron_tasks(self.fs.as_ref(), &self.cwd).await;
+        // `create` is the one mutation that rewrites the file from whatever it
+        // read: `update`/`delete` bail when the id is absent, so an empty
+        // document makes them no-ops. Only a genuinely ABSENT file may start a
+        // fresh document here — any other read error (EIO, EACCES, the rooted-fs
+        // symlink rejection) is not evidence that there are no tasks, and
+        // starting from `default()` would write the new task over every
+        // existing one.
+        let mut document = match cron::read_tasks_body(self.fs.as_ref(), &self.cwd).await {
+            Ok(body) => cron::parse_tasks(&body),
+            Err(platform_api::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
+            Err(error) => {
+                return Err(MobileEngineError::Internal(format!(
+                    "read scheduled_tasks.json: {error}"
+                )))
+            }
+        };
         let now = self.clock.now();
         let now_ms = now
             .duration_since(std::time::SystemTime::UNIX_EPOCH)

@@ -393,6 +393,19 @@ pub fn emit_push_notification_send(
     );
 }
 
+/// Emit `tengu_loop_dynamic_wakeup_aged_out`.
+///
+/// PARITY 2.1.263 `E(...)`: `i("tengu_loop_dynamic_wakeup_aged_out",
+/// {loop_age_ms:r-p, max_age_ms:f})` when a dynamic loop reaches
+/// `recurringMaxAgeMs` (7 days) since its first wakeup.
+pub fn emit_loop_dynamic_wakeup_aged_out(loop_age_ms: u64, max_age_ms: u64) {
+    tracing::info!(
+        event = crate::tengu::kairos::LOOP_DYNAMIC_WAKEUP_AGED_OUT,
+        loop_age_ms = loop_age_ms,
+        max_age_ms = max_age_ms,
+    );
+}
+
 /// Emit `tengu_loop_keepalive_fired`.
 ///
 /// PARITY: binary `cKi` keepalive branch —

@@ -619,10 +619,9 @@ pub fn run_post_compact_cleanup(query_source: Option<&str>) {
         // PARITY: binary `Zne` post-compact cleanup ends with
         // `if(o)knm.resetAutonomousLoopDelivered()` where `o` = main-thread
         // compact (cc_all.txt). Reset the autonomous-loop first-delivery state
-        // (`iFt`/`Gst`) so the next loop fire re-emits the full preamble. Inert
-        // by default (the resolver gate `tengu_kairos_loop_prompt` is off, so the
-        // DELIVERY state is never mutated) — wired here for structural 1:1 so it
-        // is correct the moment the flag flips.
+        // (`iFt`/`Gst`) so the next loop fire re-emits the full preamble. Live
+        // as of 2.1.263: the resolver gate `tengu_kairos_loop_prompt` no longer
+        // exists, so the sentinels always resolve and DELIVERY is really mutated.
         tool_cron::reset_autonomous_loop_delivered();
     }
 
@@ -1169,8 +1168,7 @@ mod tests {
     #[test]
     fn post_compact_resets_autonomous_loop_delivered_on_main_thread() {
         use tool_cron::{resolve_autonomous_loop_fire, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL};
-        // Enable the resolver gate (flag-only) via the test override.
-        telemetry::test_set_flag("tengu_kairos_loop_prompt", true);
+        // 2.1.263: the resolver has no gate; sentinels always resolve.
         tool_cron::reset_autonomous_loop_delivered();
 
         let preamble_head = "# Autonomous loop check\n";
@@ -1197,7 +1195,6 @@ mod tests {
             "main-thread compact must reset → preamble re-delivered"
         );
 
-        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
         tool_cron::reset_autonomous_loop_delivered();
     }
 }

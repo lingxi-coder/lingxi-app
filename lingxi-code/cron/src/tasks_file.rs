@@ -70,11 +70,137 @@ pub struct CronTask {
     pub session_id: Option<String>,
 }
 
+/// claude-code `ensureClaudeRuntimeFilesExcluded` — the runtime files the
+/// scheduler creates inside the project are appended to `.git/info/exclude`
+/// once per process, under a marker line, so they never show up as untracked.
+/// (`.claude/` → `.lingxi/`; the marker is `# lingxi-code-runtime`.)
+pub const RUNTIME_EXCLUDE_MARKER: &str = "# lingxi-code-runtime";
+/// The patterns appended after [`RUNTIME_EXCLUDE_MARKER`].
+pub const RUNTIME_EXCLUDE_PATTERNS: [&str; 10] = [
+    "**/.lingxi/scheduled_tasks.lock",
+    "**/.lingxi/scheduled_tasks.json",
+    "**/.lingxi/routines/.state/",
+    "**/.lingxi/worktrees/",
+    "**/.lingxi/checkpoints/",
+    "**/.lingxi/mailbox/",
+    "**/.lingxi/agent-registry.json",
+    "**/.lingxi/agent-memory-local",
+    "**/.lingxi/first-run",
+    "**/.lingxi/assistant-daemon-state.json",
+];
+
+static RUNTIME_EXCLUDE_ENSURED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// Resolve the git directory that owns `project_root` (a `.git` directory, or
+/// a `.git` file pointing at a worktree's git dir, whose `commondir` is the
+/// shared repository) — claude-code `Nw(dir)` then `yL(gitDir) ?? gitDir`.
+fn git_common_dir(project_root: &Path) -> Option<std::path::PathBuf> {
+    let dot_git = project_root.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else if dot_git.is_file() {
+        let pointer = std::fs::read_to_string(&dot_git).ok()?;
+        let target = pointer.trim().strip_prefix("gitdir:")?.trim();
+        let target = Path::new(target);
+        if target.is_absolute() {
+            target.to_path_buf()
+        } else {
+            project_root.join(target)
+        }
+    } else {
+        return None;
+    };
+    let common = std::fs::read_to_string(git_dir.join("commondir")).ok().map(|s| {
+        let s = s.trim();
+        let p = Path::new(s);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            git_dir.join(p)
+        }
+    });
+    Some(common.unwrap_or(git_dir))
+}
+
+/// Append the runtime exclude block to `<git dir>/info/exclude` unless the
+/// marker is already present. Best effort and idempotent per process
+/// (claude-code `ensureClaudeRuntimeFilesExcluded`, logged on failure only).
+pub fn ensure_runtime_files_excluded(project_root: &Path) {
+    if !RUNTIME_EXCLUDE_ENSURED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(project_root.to_path_buf())
+    {
+        return;
+    }
+    let Some(git_dir) = git_common_dir(project_root) else {
+        return;
+    };
+    let info = git_dir.join("info");
+    let exclude = info.join("exclude");
+    let existing = match std::fs::read_to_string(&exclude) {
+        Ok(existing) => {
+            if existing.contains(RUNTIME_EXCLUDE_MARKER) {
+                return;
+            }
+            existing
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Err(error) = std::fs::create_dir_all(&info) {
+                tracing::warn!("ensureRuntimeFilesExcluded: {error}");
+                return;
+            }
+            String::new()
+        }
+        Err(error) => {
+            tracing::warn!("ensureRuntimeFilesExcluded: {error}");
+            return;
+        }
+    };
+    let lead = if !existing.is_empty() && !existing.ends_with('\n') { "\n" } else { "" };
+    let mut block = String::from(RUNTIME_EXCLUDE_MARKER);
+    for pattern in RUNTIME_EXCLUDE_PATTERNS {
+        block.push('\n');
+        block.push_str(pattern);
+    }
+    block.push('\n');
+    use std::io::Write as _;
+    let appended = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&exclude)
+        .and_then(|mut f| f.write_all(format!("{lead}{block}").as_bytes()));
+    if let Err(error) = appended {
+        tracing::warn!("ensureRuntimeFilesExcluded: {error}");
+    }
+}
+
 /// The whole on-disk document: `{ "tasks": [ … ] }`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ScheduledTasks {
     /// Every durable scheduled cron job.
     pub tasks: Vec<CronTask>,
+    /// Entries [`parse_tasks`] could NOT model — an unparseable cron, a
+    /// wrong-typed field, a record a newer writer produced. They are skipped for
+    /// scheduling exactly as claude-code skips them, but carried here verbatim
+    /// so that a read-modify-write ([`serialize_tasks`] after a `retain`/`push`)
+    /// puts them back instead of silently deleting a record the user can still
+    /// repair by hand. Every write path in the port re-serializes the whole
+    /// document, so without this a malformed sibling evaporates the first time
+    /// any OTHER task fires, is deleted, or is created.
+    #[serde(skip)]
+    pub unmodeled: Vec<UnmodeledTask>,
+}
+
+/// One entry [`parse_tasks`] skipped, kept with its position in the original
+/// `tasks` array so [`serialize_tasks`] can splice it back where it was.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnmodeledTask {
+    /// Index of this entry in the `tasks` array it was read from.
+    pub index: usize,
+    /// The entry exactly as it appeared on disk.
+    pub raw: serde_json::Value,
 }
 
 /// Absolute path to the single tasks file for `project_root`
@@ -148,22 +274,123 @@ pub async fn write_tasks_body(
         .await
 }
 
-/// Parse a tasks-file body into [`ScheduledTasks`]. A missing/empty/garbage body
-/// yields an empty document (claude-code treats an unreadable file as no tasks).
+/// Parse a tasks-file body into [`ScheduledTasks`] the way claude-code's
+/// `loadScheduledTasks` does: a missing/empty/garbage body or a non-array
+/// `tasks` yields an empty document, and each entry is checked on its own — an
+/// entry missing a string `id`/`cron`/`prompt` or a numeric `createdAt` is
+/// skipped (`[ScheduledTasks] skipping malformed task: …`), and one whose cron
+/// does not parse is skipped (`[ScheduledTasks] skipping task ${id} with invalid
+/// cron '…'`) — so one bad record never disables the healthy ones.
 #[must_use]
 pub fn parse_tasks(body: &str) -> ScheduledTasks {
-    serde_json::from_str(body).unwrap_or_default()
+    parse_tasks_strict(body).unwrap_or_default()
+}
+
+/// [`parse_tasks`] for the scheduler's authoritative reads: per-entry tolerance
+/// is identical, but a body that is not a JSON object with a `tasks` array is an
+/// error rather than an empty document, so corrupt durable state is never
+/// reinterpreted as "no tasks" on a firing path.
+pub fn parse_tasks_strict(body: &str) -> Result<ScheduledTasks, String> {
+    let doc = serde_json::from_str::<serde_json::Value>(body).map_err(|e| e.to_string())?;
+    let Some(entries) = doc.get("tasks").and_then(serde_json::Value::as_array) else {
+        return Err("expected an object with a `tasks` array".to_string());
+    };
+    let mut unmodeled: Vec<UnmodeledTask> = Vec::new();
+    let tasks = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let mut skip = |entry: &serde_json::Value| {
+                unmodeled.push(UnmodeledTask {
+                    index,
+                    raw: entry.clone(),
+                });
+            };
+            let (Some(id), Some(cron), Some(prompt), Some(created_at)) = (
+                entry.get("id").and_then(serde_json::Value::as_str),
+                entry.get("cron").and_then(serde_json::Value::as_str),
+                entry.get("prompt").and_then(serde_json::Value::as_str),
+                entry.get("createdAt").and_then(serde_json::Value::as_f64),
+            ) else {
+                tracing::warn!("[ScheduledTasks] skipping malformed task: {entry}");
+                skip(entry);
+                return None;
+            };
+            if crate::schedule::parse_cron(cron).is_err() {
+                tracing::warn!("[ScheduledTasks] skipping task {id} with invalid cron '{cron}'");
+                skip(entry);
+                return None;
+            }
+            // A present-but-non-positive `expiresAt` is NOT an expiry instant:
+            // `0` / a negative / `NaN` would normalise to `Some(0)`, which every
+            // reader tests as `expiry <= now` and deletes the task. Treat those
+            // the way `lastFiredAt` is treated downstream — as absent.
+            let ms = |v: f64| if v.is_finite() && v > 0.0 { v as u64 } else { 0 };
+            Some(CronTask {
+                id: id.to_string(),
+                cron: cron.to_string(),
+                prompt: prompt.to_string(),
+                created_at: ms(created_at),
+                last_fired_at: entry
+                    .get("lastFiredAt")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(ms),
+                // claude-code normalises `recurring` / `permanent` to present-only-when-true.
+                recurring: entry
+                    .get("recurring")
+                    .and_then(serde_json::Value::as_bool)
+                    .filter(|v| *v),
+                permanent: entry
+                    .get("permanent")
+                    .and_then(serde_json::Value::as_bool)
+                    .filter(|v| *v),
+                expires_at: entry
+                    .get("expiresAt")
+                    .and_then(serde_json::Value::as_f64)
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .map(ms),
+                session_id: entry
+                    .get("sessionId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect();
+    Ok(ScheduledTasks { tasks, unmodeled })
 }
 
 /// Serialize [`ScheduledTasks`] to the EXACT bytes claude-code writes:
 /// `JSON.stringify(body, null, 2) + '\n'` — pretty 2-space indent plus a single
 /// trailing newline.
+///
+/// Entries the parser could not model ([`ScheduledTasks::unmodeled`]) are
+/// spliced back at their original positions, so a read-modify-write preserves
+/// records this port skips rather than deleting them. With no such entries this
+/// is byte-identical to serializing the struct directly (`serde_json` is built
+/// with `preserve_order`, so the field order of every task is unchanged).
 #[must_use]
 pub fn serialize_tasks(tasks: &ScheduledTasks) -> String {
-    // `serde_json::to_string_pretty` uses a 2-space indent (matching
-    // `JSON.stringify(_, null, 2)`); append the trailing newline claude-code adds.
-    let mut s =
-        serde_json::to_string_pretty(tasks).unwrap_or_else(|_| "{\n  \"tasks\": []\n}".into());
+    let fallback = || String::from("{\n  \"tasks\": []\n}");
+    let mut s = if tasks.unmodeled.is_empty() {
+        // `serde_json::to_string_pretty` uses a 2-space indent (matching
+        // `JSON.stringify(_, null, 2)`).
+        serde_json::to_string_pretty(tasks).unwrap_or_else(|_| fallback())
+    } else {
+        let mut entries: Vec<serde_json::Value> = tasks
+            .tasks
+            .iter()
+            .map(|task| serde_json::to_value(task).unwrap_or(serde_json::Value::Null))
+            .collect();
+        // Ascending by recorded index (the order `parse_tasks_strict` collects
+        // them in), clamped because the modeled tasks may have shrunk or grown.
+        for skipped in &tasks.unmodeled {
+            let at = skipped.index.min(entries.len());
+            entries.insert(at, skipped.raw.clone());
+        }
+        serde_json::to_string_pretty(&serde_json::json!({ "tasks": entries }))
+            .unwrap_or_else(|_| fallback())
+    };
+    // The trailing newline claude-code adds.
     s.push('\n');
     s
 }
@@ -203,6 +430,7 @@ mod tests {
                 expires_at: None,
                 session_id: None,
             }],
+            ..Default::default()
         };
         let s = serialize_tasks(&doc);
         // camelCase keys, epoch-ms number, trailing newline, 2-space indent.
@@ -233,6 +461,7 @@ mod tests {
                 expires_at: None,
                 session_id: None,
             }],
+            ..Default::default()
         };
         let s = serialize_tasks(&doc);
         let id_at = s.find("\"id\"").unwrap();
@@ -255,6 +484,125 @@ mod tests {
         assert_eq!(parse_tasks(""), ScheduledTasks::default());
         assert_eq!(parse_tasks("not json"), ScheduledTasks::default());
         assert_eq!(parse_tasks("{}"), ScheduledTasks::default());
+        assert_eq!(parse_tasks(r#"{"tasks":"nope"}"#), ScheduledTasks::default());
+    }
+
+    // PARITY 2.1.263 `Q7e`: malformed entries and invalid crons are skipped
+    // individually; the healthy entries still load.
+    #[test]
+    fn malformed_entries_are_skipped_one_by_one() {
+        let body = r#"{"tasks":[
+            {"id":"bad1","cron":"* * * * *","createdAt":1},
+            {"id":42,"cron":"* * * * *","prompt":"p","createdAt":1},
+            {"id":"bad3","cron":"* * * * *","prompt":"p","createdAt":"1"},
+            {"id":"badcron","cron":"61 * * * *","prompt":"p","createdAt":1},
+            {"id":"ok","cron":"*/5 * * * *","prompt":"p","createdAt":1.9,"lastFiredAt":2,"recurring":false,"permanent":false,"extra":true}
+        ]}"#;
+        let doc = parse_tasks(body);
+        assert_eq!(doc.tasks.len(), 1);
+        let ok = &doc.tasks[0];
+        assert_eq!(ok.id, "ok");
+        assert_eq!(ok.created_at, 1, "JS numbers are accepted, truncated to ms");
+        assert_eq!(ok.last_fired_at, Some(2));
+        assert_eq!(ok.recurring, None, "`recurring: false` normalises to absent");
+        assert_eq!(ok.permanent, None);
+        assert_eq!(doc.unmodeled.len(), 4, "the four skipped entries are kept");
+        assert_eq!(
+            doc.unmodeled.iter().map(|u| u.index).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+    }
+
+    // A skipped entry must SURVIVE a read-modify-write. Every write path in the
+    // port re-serializes the whole document, so without this a record the parser
+    // cannot model is silently deleted the first time any OTHER task fires, is
+    // deleted, or is created — and the user loses a task they could have
+    // repaired by hand.
+    #[test]
+    fn a_read_modify_write_preserves_entries_the_parser_skips() {
+        let body = r#"{
+  "tasks": [
+    {
+      "id": "badcron",
+      "cron": "0 9 * * MON",
+      "prompt": "keep me",
+      "createdAt": 1
+    },
+    {
+      "id": "ok",
+      "cron": "*/5 * * * *",
+      "prompt": "p",
+      "createdAt": 1
+    }
+  ]
+}
+"#;
+        let mut doc = parse_tasks(body);
+        assert_eq!(doc.tasks.len(), 1, "the named-weekday cron is skipped");
+        // Delete the healthy task, exactly as a one-shot auto-delete does.
+        doc.tasks.retain(|t| t.id != "ok");
+        let written = serialize_tasks(&doc);
+        assert!(
+            written.contains("\"id\": \"badcron\"") && written.contains("0 9 * * MON"),
+            "the skipped entry must still be on disk:\n{written}"
+        );
+        // It is still skipped for scheduling, and still preserved.
+        let reread = parse_tasks(&written);
+        assert!(reread.tasks.is_empty());
+        assert_eq!(reread.unmodeled.len(), 1);
+    }
+
+    // `expiresAt: 0` (and a negative / non-finite one) is not an expiry instant.
+    // Normalising it to `Some(0)` makes every reader test `expiry <= now` and
+    // delete a healthy task.
+    #[test]
+    fn a_non_positive_expires_at_reads_as_absent_not_as_already_expired() {
+        for raw in ["0", "-1", "-0.5"] {
+            let body = format!(
+                r#"{{"tasks":[{{"id":"a","cron":"* * * * *","prompt":"p","createdAt":1,"expiresAt":{raw}}}]}}"#
+            );
+            let doc = parse_tasks(&body);
+            assert_eq!(doc.tasks.len(), 1, "expiresAt {raw}");
+            assert_eq!(doc.tasks[0].expires_at, None, "expiresAt {raw}");
+        }
+        let doc = parse_tasks(
+            r#"{"tasks":[{"id":"a","cron":"* * * * *","prompt":"p","createdAt":1,"expiresAt":5}]}"#,
+        );
+        assert_eq!(doc.tasks[0].expires_at, Some(5));
+    }
+
+    #[test]
+    fn runtime_exclude_block_is_appended_once_and_respects_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(root.join(".git").join("info")).unwrap();
+        std::fs::write(root.join(".git/info/exclude"), "*.log").unwrap();
+        ensure_runtime_files_excluded(&root);
+        let got = std::fs::read_to_string(root.join(".git/info/exclude")).unwrap();
+        let expected = format!(
+            "*.log\n{RUNTIME_EXCLUDE_MARKER}\n{}\n",
+            RUNTIME_EXCLUDE_PATTERNS.join("\n")
+        );
+        assert_eq!(got, expected);
+        // Second call (same process) and a fresh process with the marker present
+        // both leave the file alone.
+        ensure_runtime_files_excluded(&root);
+        RUNTIME_EXCLUDE_ENSURED.lock().unwrap().remove(&root);
+        ensure_runtime_files_excluded(&root);
+        assert_eq!(std::fs::read_to_string(root.join(".git/info/exclude")).unwrap(), expected);
+        // A worktree `.git` FILE resolves through `gitdir:` and `commondir`.
+        let wt = tmp.path().join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        let wt_git = root.join(".git/worktrees/wt");
+        std::fs::create_dir_all(&wt_git).unwrap();
+        std::fs::write(wt_git.join("commondir"), "../..\n").unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
+        std::fs::remove_file(root.join(".git/info/exclude")).unwrap();
+        ensure_runtime_files_excluded(&wt);
+        let got = std::fs::read_to_string(root.join(".git/info/exclude")).unwrap();
+        assert!(got.starts_with(RUNTIME_EXCLUDE_MARKER));
+        // No repository at all: a no-op.
+        ensure_runtime_files_excluded(&tmp.path().join("nowhere"));
     }
 
     #[test]

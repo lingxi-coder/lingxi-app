@@ -36,6 +36,11 @@ struct CronTaskRecord: Identifiable, Hashable, Codable, Sendable {
     var recurring: Bool
     var nextFireMs: UInt64?
     var human: String
+    /// Engine-reported reason the host cannot run this schedule (for example a
+    /// recurring interval under 15 minutes). `nil` means the task is runnable.
+    var unsupportedReason: String? = nil
+
+    var mobileSupported: Bool { unsupportedReason == nil }
 }
 
 struct CronOccurrence: Hashable, Codable, Sendable {

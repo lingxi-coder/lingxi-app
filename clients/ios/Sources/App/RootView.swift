@@ -2117,6 +2117,7 @@ struct RootView: View {
                 await VoicePreviewPlayback.shared.stop()
                 await VoiceAudioSessionCoordinator.shared.suspendForBackground()
             }
+            Task { await cronRepository.handleSceneDidEnterBackground() }
         case .active:
             conversationBackgroundExecution.setTurnActive(
                 source.model.requiresBackgroundExecution,

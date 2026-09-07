@@ -41,10 +41,14 @@ pub async fn manage(
                 .map_err(|e| e.to_string())?,
         )
     };
+    // Per-entry tolerance, same as the scheduler's authoritative reads: a single
+    // malformed record must not make list / create / update / DELETE fail for
+    // every other task while the scheduler keeps firing them. `parse_tasks_strict`
+    // still rejects a body that is not `{ "tasks": [...] }`, and it carries the
+    // entries it skips so this read-modify-write does not erase them.
     let mut doc: ScheduledTasks = match cron::read_tasks_body(fs, cwd).await {
-        Ok(body) => {
-            serde_json::from_str(&body).map_err(|e| format!("Cannot read scheduled tasks: {e}"))?
-        }
+        Ok(body) => cron::tasks_file::parse_tasks_strict(&body)
+            .map_err(|e| format!("Cannot read scheduled tasks: {e}"))?,
         Err(FsError::NotFound(_)) => ScheduledTasks::default(),
         Err(e) => return Err(e.to_string()),
     };
@@ -174,7 +178,8 @@ fn apply(doc: &mut ScheduledTasks, request: CronRequestDto) -> Result<(), String
             prompt: request.prompt.unwrap(),
             created_at,
             last_fired_at: None,
-            recurring: Some(request.recurring.unwrap_or(true)),
+            // PARITY `nCe`: the `recurring` key is written only when true.
+            recurring: request.recurring.unwrap_or(true).then_some(true),
             permanent: None,
             expires_at: request.expires_at,
             session_id: None,
@@ -201,7 +206,7 @@ fn apply(doc: &mut ScheduledTasks, request: CronRequestDto) -> Result<(), String
                 task.expires_at = request.expires_at;
             }
             if let Some(recurring) = request.recurring {
-                task.recurring = Some(recurring);
+                task.recurring = recurring.then_some(true);
             }
         }
     }

@@ -100,6 +100,82 @@ final class CronRepositoryTests: XCTestCase {
         XCTAssertEqual(scheduledEarliestTimes, [8_000])
     }
 
+    func testUnsupportedScheduleNeverArmsTheBackgroundWake() async throws {
+        let global = CronScope.global(appSandboxRoot: "/tmp")
+        let store = FakeCronStore(tasks: [
+            CronTaskRecord(
+                id: "too-frequent",
+                cron: "*/5 * * * *",
+                prompt: "每 5 分钟",
+                createdAtMs: 1,
+                lastFiredAtMs: nil,
+                recurring: true,
+                nextFireMs: 5_000,
+                human: "每 5 分钟",
+                unsupportedReason: "recurring tasks must be at least 15 minutes apart"
+            ),
+            CronTaskRecord(
+                id: "supported",
+                cron: "0 8 * * *",
+                prompt: "早一点",
+                createdAtMs: 2,
+                lastFiredAtMs: nil,
+                recurring: true,
+                nextFireMs: 8_000,
+                human: "每天 08:00"
+            ),
+        ])
+        let scheduler = FakeScheduler(mode: .bestEffortBackground, note: "系统调度不是精确闹钟")
+        let repository = makeRepository(
+            scopes: [global],
+            activeScopeID: global.scopeID,
+            storeProvider: FakeStoreProvider(stores: [global.scopeID: store]),
+            scheduler: scheduler
+        )
+
+        await repository.refresh()
+
+        // The engine's `dueOccurrences` filters unsupported tasks out, so waking
+        // the app for them would run nothing; the earliest wake must skip them.
+        XCTAssertEqual(repository.state.scheduling.nextEarliestAtMs, 8_000)
+        let scheduledEarliestTimes = await scheduler.scheduledEarliestTimes
+        XCTAssertEqual(scheduledEarliestTimes, [8_000])
+        XCTAssertEqual(repository.state.tasks.count, 2, "unsupported tasks stay listed so the user can fix them")
+        XCTAssertFalse(repository.state.tasks.first { $0.task.id == "too-frequent" }!.task.mobileSupported)
+    }
+
+    func testBackgroundTransitionReArmsWakeWithoutExecuting() async throws {
+        let global = CronScope.global(appSandboxRoot: "/tmp")
+        let store = FakeCronStore(tasks: [
+            CronTaskRecord(
+                id: "due-now",
+                cron: "* * * * *",
+                prompt: "已到期",
+                createdAtMs: 0,
+                lastFiredAtMs: nil,
+                recurring: true,
+                nextFireMs: 1,
+                human: "每分钟"
+            ),
+        ])
+        let scheduler = FakeScheduler(mode: .bestEffortBackground, note: "系统调度不是精确闹钟")
+        let executor = FakeExecutor(dueResult: .failure(SimpleError("must not execute while backgrounding")))
+        let repository = makeRepository(
+            scopes: [global],
+            activeScopeID: global.scopeID,
+            storeProvider: FakeStoreProvider(stores: [global.scopeID: store]),
+            executor: executor,
+            scheduler: scheduler
+        )
+
+        await repository.handleSceneDidEnterBackground()
+
+        let scheduledEarliestTimes = await scheduler.scheduledEarliestTimes
+        XCTAssertEqual(scheduledEarliestTimes, [1])
+        let dueCalls = await executor.dueCalls
+        XCTAssertEqual(dueCalls.count, 0, "backgrounding only hands the next fire to the OS")
+    }
+
     func testReconcileDeduplicatesRepeatedDeliveryAndRecordsHistory() async throws {
         let global = CronScope.global(appSandboxRoot: "/tmp")
         let task = CronTaskRecord(

@@ -1,0 +1,108 @@
+# Cron subsystem audit vs Claude Code 2.1.263 — 2026-09-06
+
+Oracle: `~/.local/share/claude/versions/2.1.263` (Mach-O). The binary embeds
+plain JS source for many chunks after a `// @bun @bytecode` header; the cron
+modules were split out with a script and read whole (scratchpad
+`chunks/src_<offset>.js`). Provenance per module:
+
+| Oracle module | Chunk offset | What it holds |
+|---|---|---|
+| scheduler `UJt` | 185518810 | lock, tick `W()`, load `V()`, missed one-shot text `be()`, watcher |
+| tasks file / cron parse | 160104868 | `JI` parse, `f1e` next date, `K_` human, `Q7e`/`Ybt`/`nCe`/`SK`/`qQn`/`vj`, jitter `mN`, `eXe`/`Jbt`, `zQn` |
+| tool shared | 160120926 | names, `nJ = recurringMaxAgeMs/86400000`, `EC()`/`yK()` gates, description + prompt builders |
+| CronCreate / CronDelete / CronList | 175543944 / 175550889 / 175556142 | schemas, validation, result text |
+| ScheduleWakeup prompt/description | 160129740 | `iZn` (3 TTL variants), `aZn` |
+| ScheduleWakeup runtime | 160855441 | `JXn`/`QXn`/`ZXn`/`t3t`, clamp `F()`, aged-out |
+| ScheduleWakeup tool def | inside 160988549 | `Uqo`/`Hqo` schemas, `call`, result mapping |
+| loop sentinels / tick prompts | 176789295 | `resolveLoopDefaultFire`, preamble `.md` files |
+| `/loop` skill | 183309485 | dispatch + prompt builders |
+| RemoteTrigger | 175582326 | backend-only |
+
+## Headline facts (2.1.263)
+
+- **Recurring jobs still auto-expire after 7 days.** `mN.recurringMaxAgeMs = 604800000`; `Fe()` = `recurring && !permanent && now - createdAt >= maxAge`; fires one final time, then deletes; log `aged out (Nh since creation), deleting after final fire`; event `tengu_scheduled_task_expired{taskId, ageHours}`. CronCreate result text: `Auto-expires after 7 days. Use CronDelete to cancel sooner.`; `recurring` schema text: `… until deleted or auto-expired after 7 days …`; prompt: `Recurring tasks auto-expire after 7 days — they fire one final time, then are deleted. This bounds session lifetime. Tell the user about the 7-day limit when scheduling recurring jobs.`
+- On-disk task fields are exactly `id, cron, prompt, createdAt, lastFiredAt?, recurring? (omitted when false), permanent?, createdBySessionId?, createdByPid?, createdByProcStart?`. There is no `expiresAt` and no `sessionId`.
+- Tasks file `.claude/scheduled_tasks.json` (LingXi: `.lingxi/…`, accepted); single scheduler lock `.claude/scheduled_tasks.lock` with `{sessionId, pid, procStart, acquiredAt}`; chokidar watcher reloads on add/change, clears on unlink; tick every 1000 ms; lock retry 5000 ms.
+- Missed durable one-shots are NOT executed: they are removed and surfaced as the `The following one-shot scheduled task… was missed while Claude was not running… Do NOT execute… First use the AskUserQuestion tool…` prompt.
+- `expandField` steps from the field MINIMUM (`*/5` on day-of-month = 1,6,11,…), accepts `N-M/S`, mixed lists, day-of-week `7` (=0), range-checks every value; a malformed task or invalid cron is skipped individually with a log line.
+- The `/loop` dynamic mode has NO feature gate any more: `tengu_kairos_loop_dynamic` and `tengu_kairos_loop_prompt` do not exist in the binary. `ScheduleWakeup` gained `stop` and `noop`; nothing is schema-required; `stop:true` cancels pending wakeups and ends the loop; a dynamic loop ages out after 7 days; keepalive gate defaults TRUE.
+
+## What was changed in this session (files nobody else was editing)
+
+Two other interactive sessions were writing the cron files at the same time
+(ttys001/ttys002; their loop state under `.omx/state/cron-integration` and
+`.omx/state/expiry-archive`). Edits were confined to files outside their diff.
+
+- `lingxi-code/cron/src/schedule.rs` — `CronField` is now the expanded, sorted, range-checked value set (oracle `expandField`): fixes `*/N` on dom/month (was `value % N == 0`, i.e. 5,10,… instead of 1,6,…), accepts `N-M/S`, mixed lists, dow `7`; rejects out-of-range fields at parse time. Tests added.
+- `lingxi-code/apps/engine-mobile/src/host.rs` — `cron_field_values` follows the new `CronField`; the unsupported-schedule reason no longer says "Android" (iOS shows it too).
+- `lingxi-code/cron/src/autonomous_loop.rs` — removed the two gates 2.1.263 removed; keepalive gate default TRUE with raw-env override; tick prompts carry the `noop` clause and blank lines; Monitor addendum names `stop: true`; preamble join `\n\n---\n\n`; loop.md inline block with `---` rules; truncation footer `\n\n> WARNING`; preambles are the vendored oracle files `cron/src/bundled/loopAutonomousPreamble*.md` (ASCII hyphens, blank lines); per-prompt `DynamicLoopRecord` + loop-ended marker.
+- `lingxi-code/tools/cron/src/wakeup.rs` — rewritten to the 2.1.263 contract: `stop`/`noop` fields, no schema `required`, `Required unless stop` descriptions, output `stopped`/`cancelledWakeups`, description/searchHint/prompt byte-verified against the JS (three TTL variants; LingXi emits the "unknown TTL" variant), clamp = JS `Math.round` with `+∞→3600`, minute-aligned target with the 15 s cache lead, superseding cancel, 7-day aged-out, `stop:true` semantics and texts, keepalive without gate, user-abort helper, exact `ScheduleWakeupInputError` messages; `maxResultSizeChars 1000`, `shouldDefer`.
+- `lingxi-code/apps/bridge-server/src/driver.rs` — `MsgQueueWakeupScheduler` tracks pending wakeup handles and implements `cancel_pending`.
+- `lingxi-code/telemetry/src/lib.rs` — `emit_loop_dynamic_wakeup_aged_out`.
+- iOS `clients/ios/Sources/Cron/*`, `Sources/App/RootView.swift`, tests, and `clients/translations/*.json` (+ hand-inserted keys in the generated catalogs; a full `generate.py` run is lossy at HEAD): unsupported schedules no longer arm the BGTask wake, are labelled in the list, and the app re-arms the wake when it enters the background (covers a chat-created cron followed by backgrounding).
+
+- After the other sessions committed their work (`d6e3a7d93 Make scheduled chats durable and safe to manage`) and went idle, three more alignments landed on top of that commit:
+  - `tools/cron/src/{schedule_cron,cron_delete,cron_list}.rs` — `prompt()`/`description()` are now the 2.1.263 `pbn/ubn/mbn/hbn` texts (`.lingxi/` path; Monitor section omitted because the Monitor tool is gated off; the 7-day paragraph is emitted only while `cron::default_recurring_max_age()` is `Some`, so the model is never promised an expiry the scheduler does not enforce). Fixture `tools/cron/tests/fixtures/cron_create_prompt_2_1_263.txt` was generated by script from the JS. `is_enabled` now honours `LINGXI_DISABLE_CRON` (`EC()`).
+  - `cron/src/tasks_file.rs` — per-entry tolerant parsing (`parse_tasks` / `parse_tasks_strict`) with the oracle's two skip log lines; the scheduler's three authoritative reads use the strict-document/tolerant-entry variant, so one bad record no longer disables every job.
+  - `commands/core/src/bundled/{mod,loop_skill}.rs` + fixtures — `/loop` registration text/argumentHint and dispatch tests follow 2.1.263 (dynamic mode unconditional); the autonomous fixtures embed the vendored oracle preamble.
+
+## Decision 2026-09-07
+
+The user chose the `d6e3a7d93` model: **per-task `expiresAt`; absent means the
+task never expires.** Items 1 and 2 below are therefore ACCEPTED divergences
+from Claude Code (recorded in the memory file `lingxi-accepted-divergences`):
+no global 7-day age limit, no "Auto-expires after 7 days" texts, and the extra
+on-disk fields `expiresAt` / `sessionId`. The CronCreate prompt's 7-day
+paragraph is gated on `cron::default_recurring_max_age()` and so is omitted.
+The dynamic `/loop` aged-out guard (7 days since the loop's first wakeup) is
+unrelated to task expiry and stays oracle-faithful.
+
+## Round 2 (2026-09-07) — remaining items fixed
+
+- **Missed durable one-shots** (`scheduler.rs load_persisted` → `surface_missed_one_shots`): a one-shot whose fire time from `createdAt` already passed is no longer executed; it is removed from the file, `tengu_scheduled_task_missed{count, taskIds}` is emitted, and the oracle `be()` prompt ("…Do NOT execute … First use the AskUserQuestion tool…") is delivered as one scheduled turn. (`cron::missed_one_shots_prompt`, `cron::human_schedule`, `cron::local_date_time_string`.) Mobile's `run_due_jobs` still executes on wake — the OS wake IS the user-visible moment there and the app shows a notification; see the mobile section.
+- **Mobile result fork dropped** (`schedule_cron.rs build_result_content`): every host fires durable jobs, so the oracle result text is emitted unconditionally.
+- **`/loop` dynamic prompt text** (`loop_skill.rs build_dynamic_prompt` / `build_autonomous`): regenerated from the 2.1.263 `A(e)` / `f()` templates (blank-line layout, "decide whether the loop continues", `noop` bullet, `stop: true` in step 6); the five fixtures under `commands/core/tests/fixtures/loop_autonomous/` were rendered by script from the JS with only the accepted no-expiry wording substituted. `CRON_TABLE` verified byte-equal to the oracle `N`.
+- **Scheduler diagnostics**: `[ScheduledTasks] scheduled ${id} for ${iso|never}` at registration, `[ScheduledTasks] firing ${id}[ (recurring)]` + `tengu_scheduled_task_fire{recurring, taskId, autonomousLoopDefault}` on fire, `cron_task_fire/next_fire_unresolvable`.
+- **One-shot anchor** is `createdAt` (`Jbt`), recurring stays `lastFiredAt ?? createdAt`.
+- **`.git/info/exclude` runtime block** (`tasks_file::ensure_runtime_files_excluded`, called from `CronScheduler::start`): `# lingxi-code-runtime` + the ten `**/.lingxi/…` patterns, once per process, worktree-aware.
+- **Cron tools**: `shouldDefer: true`, `getPath` → the tasks file (CronCreate/CronDelete).
+- **RemoteTrigger** (backend-only, claude.ai): description/prompt/searchHint = 2.1.263 (LingXi branding), eight actions with the oracle schema, validation messages, endpoints (`list_runs` → `/v1/code/sessions?trigger_id&limit=10[&cursor]`, `get_run_log` → `/v1/code/sessions/{id}/events?limit=200&sort_order=desc[&cursor]`, `create_webhook_trigger`, `run` body minus `trigger_id`), `job_config.ccr.events` type/role fill-in, `HTTP ${status}\n${json}[\n\n${summary}]` rendering with the scheduled/disabled/`View/manage` summary, trimmed run listing and the condensed run log (transcript, tool_use/tool_result, system init/api_error/api_retry/permission_denied, control requests, rate limits, size budget with the "showing the newest N" notes). Not ported: the claude.ai run URL per row (`wa(id)`, exact path unknown) and the org-setting `isEnabled` gate.
+
+Also in round 2/3: `recurring: false` is omitted on every write path (CronCreate and the Desktop manager), and the reader normalises a literal `false` to absent (`Q7e`).
+
+### Knowingly not aligned (with the reason)
+
+1. **Ownership arbitration.** The oracle keeps ONE scheduler lock per project (`{sessionId,pid,procStart,acquiredAt}`) and gates firing on `te()`: a task with no `createdBySessionId` fires only in the lock holder; another session's task fires only when its pid is dead. LingXi instead takes a per-job claim lock with a pid-liveness check and re-reads the authoritative record before each fire, which also makes double execution impossible, and the Desktop feature already owns a `sessionId` field with different semantics (which chat a task belongs to). Converting would rewrite that feature's data model for no behavioural gain.
+2. **Mobile executes a late one-shot instead of surfacing it.** On desktop a past-due one-shot is a task missed while nothing was running, so it is surfaced for confirmation. On iOS/Android the app is closed by design and the OS wake IS the scheduled moment (delivered late by the platform's own policy, with a notification carrying the result) — requiring a confirmation turn would mean scheduled tasks never run unattended, which is the whole point of the mobile feature.
+3. **`permanent` is not exempt from the recurring age check.** `is_recurring_task_aged` ignores the flag, as it did before this work. It is unreachable: LingXi has no global recurring age (decision above), so the function returns early on `max_age == None` for every production host; only tests pass an explicit age. Plumbing the flag would mean adding a field to the public `CronTaskDef` and touching every construction site for zero production effect.
+
+## Still divergent — follow-ups
+
+### Accepted (see the decision above)
+1. **7-day expiry removed.** `scheduler.rs` `recurring_max_age: None`, `run_due.rs default_recurring_max_age() -> None`, `host.rs` mobile call, CronCreate result `Runs until cancelled…`, `recurring` schema text, `cron_skill.rs` "no automatic expiry", `loop_skill.rs` "run until cancelled" (+ fixtures). Restore `Some(7d)` everywhere and the three texts above; add the `permanent` exemption (`!r.permanent`) which HEAD also lacks.
+2. **`expiresAt` / `sessionId` are not oracle fields** (accepted) (`tasks_file.rs`, `schedule_cron.rs`, `cron_management.rs`, protocol DTOs, Electron UI). Oracle provenance fields are `createdBySessionId/createdByPid/createdByProcStart`. If the desktop UI needs "never expires", the oracle's own exemption flag is `permanent: true`.
+### P0
+3. ~~Missed durable one-shots are executed~~ — fixed on desktop (round 2) (`scheduler.rs` claim path, `run_due.rs`). Oracle surfaces them via the `be()` prompt and removes them (`zQn` + `SK`).
+4. ~~One malformed record empties the whole tasks file~~ — fixed (see above).
+5. ~~Tool `is_enabled` ignores the kill switch~~ — fixed (see above).
+6. ~~Mobile "no active cron scheduler" result fork~~ — fixed (round 2) (`schedule_cron.rs build_result_content`) — with iOS/Android now firing via `run_cron_task_if_due`, the NOTE text is false; drop the fork.
+
+### P1 (model-visible text)
+7. ~~CronCreate `prompt()`/`description()` stubs~~ — fixed; only the Monitor-gated `## Not for live watching` block is still omitted (Monitor tool gated off), and the 7-day paragraph waits on item 1.
+8. ~~CronDelete / CronList `prompt()`~~ — fixed.
+9. ~~`/loop` skill dynamic prompt TEXT~~ — fixed (round 2); previously lagged 2.1.263 `A(e)` (step 4 "decide whether the loop continues", `noop` bullet, step 6 `stop: true`, blank-line layout); dispatch and registration metadata are aligned. The fixtures under `commands/core/tests/fixtures/loop_autonomous/` still pin the 2.1.191 wording of those steps.
+10. ~~`recurring: false` must be OMITTED on disk~~ — fixed (CronCreate writes the key only when true; the reader normalises a literal `false` to absent).
+
+### P2
+11. `refresh_durable_tasks`/`durable_ids` (working tree) re-reads the file under lock every tick; the oracle reloads on file change only and keeps the cached next-fire until it fires. Functionally a superset; not byte-aligned.
+12. CronCreate `data` shape adds `content`; teammate `agentId`, `shouldDefer`, `getPath` absent. The auto-mode `passthrough` message is ~~absent~~ **not applicable** — traced 2026-09-07: the oracle needs `{behavior:"passthrough"}` in auto mode because a tool-local `allow` there SHORT-CIRCUITS the permission pipeline and the classifier would never see the call. In this port the tool-local result is not a bypass: `tool_invoker_impl.rs` (the only dispatch path) reads it solely to honour a `Deny` and to route a protected `Ask`, then runs the outer gate regardless — so an auto-mode branch would change nothing, and there is no classifier to defer to (`tools/agent/src/classifier_handoff.rs` documents that subsystem as absent). Reasoning recorded on `ScheduleWakeupTool::check_permissions`; revisit only if a tool-local `Allow` ever becomes authoritative.
+13. ~~RemoteTrigger (backend-only)~~ — aligned (round 2); previously description/prompt/schema lagged 2.1.263 (adds `create_webhook_trigger`, `list_runs`, `get_run_log`, `session_id`, `cursor`).
+14. Turn-loop: `tengu_loop_dynamic_wakeup_ends_turn` is declared (`telemetry/src/tengu/kairos.rs`) with no emitter and no call site. ~~The user-abort cancel (`t3t`) is not wired~~ — **wired 2026-09-07** at the `drive_turn` turn-end edge (`driver.rs`): a turn whose token was cancelled with reason `UserInterrupt` runs `cancel_dynamic_loop_on_user_abort` INSTEAD of the keepalive edge; a `Now`-command abort deliberately still takes the keepalive path (the queue is interrupting to run something else, so the loop must survive). Covered by `driver::tests::user_abort_of_a_loop_tick_ends_the_loop_instead_of_arming_a_keepalive`.
+15. **No-op loop-tick transcript fold is absent** (oracle `D`/`v`/`K`, chunk @187469000). This is what actually consumes `ScheduleWakeup`'s `noop` — NOT the "collapsed in the user's terminal view" phrasing the tool prompt gives the model. On a loop wakeup the oracle inspects the span since the last `{type:"system", subtype:"scheduled_task_fire", cronKind:"loop"}` anchor and folds it when the span is clean AND the last `ScheduleWakeup` in it carried `noop: true`; it vetoes on `blocking_system_before_anchor` / `blocking_system_in_span` / `tool_abort` / `tool_denial` / `split_tool_pair` / `foreign_user_input` / `queued_command` / `model_reported_work`. A fold appends the resume message `Claude resuming /loop wakeup (…) · N no-op tick(s) since …` carrying `noOpStreak` / `streakStartedAt` / `foldedUuids`, plus the companion meta turn `[N prior /loop wakeup(s) found nothing actionable; loop is healthy.]`, and emits `loop_noop_fold{streak, span_len, tool_uses, span_duration_s}` (or the veto reason as a counter). **Blocked on substrate, not on effort**: the port emits no loop-wakeup transcript message at all (`Claude resuming /loop wakeup` / `Running scheduled task (…)` are absent repo-wide) and has no `cronKind` / `noOpStreak` / `streakStartedAt` / `foldedUuids` / `turnCompanion` transcript fields. Porting it is a transcript-layer feature and needs a design decision about where those messages live, so `noop` stays accepted-but-unconsumed until then. Do NOT land the analyzer unwired.
+
+## Mobile (set + wake) — verified paths
+
+- iOS: `BGProcessingTaskRequest` `com.lingxi.code.cron.reconcile` (Info.plist + `CronModels.swift`), registered at launch, handler → `reconcile("background-task")` → `dueOccurrences` → `runCronTaskIfDue` on a headless engine → notification. Re-armed at launch, foreground, background wake, after UI edits and (new) on entering background.
+- Android: `AlarmManager.setExactAndAllowWhileIdle` → `CronAlarmReceiver` → `CronDispatchWorker` → `CronExecutionWorker` → `runCronTaskIfDue`; 15-minute `PeriodicWorkRequest` watchdog when exact alarms are revoked; boot/time-change receivers; re-armed after every dispatch/execution/UI edit. No manifest gaps.
+- Dead exports on both platforms (0 app call sites): `MobileEngineHandle.run_due_cron_now / next_cron_fire_time / cron_list / cron_create / cron_update / cron_delete`, `MobileCronStoreHandle.validate_schedule`, Android `CronEngineGateway.nextFire`.
+- Remaining iOS asymmetry: a retryable failure is acknowledged after 3 in-process retries (Android defers to WorkManager, 5 attempts).

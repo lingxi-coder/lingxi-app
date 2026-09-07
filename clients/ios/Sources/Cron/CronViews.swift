@@ -224,6 +224,11 @@ private struct CronListView: View {
                 Text(runSummary(for: scoped))
                     .font(.caption)
                     .foregroundStyle(scoped.activeRun == nil ? Color.secondary : Color.orange)
+                if let reason = scoped.task.unsupportedReason {
+                    Text(String(localized: "cron_unsupported_schedule \(reason)"))
+                        .font(.caption)
+                        .foregroundStyle(Color.red)
+                }
             }
         }
         .buttonStyle(.plain)

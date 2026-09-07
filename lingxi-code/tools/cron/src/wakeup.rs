@@ -1,21 +1,19 @@
 //! `ScheduleWakeup` tool — `/loop` dynamic (self-pace) mode.
 //!
-//! Synthesized from the LIVE latest claude-code `/loop` contract (the leaked TS
-//! `loop.ts` predates this mode, so there is NO byte-faithful reference; see
-//! the implementation spec, `loop-impl-spec.md:139-160`). When the user invokes
-//! `/loop` WITHOUT an interval and asks the model to self-pace, the model drives
-//! iterations by calling `ScheduleWakeup`, which schedules a one-shot delayed
-//! self-wakeup that re-injects the `/loop` input after `delaySeconds`.
+//! PARITY: Claude Code 2.1.263 — tool definition `gWn` (schema `Uqo`, output
+//! `Hqo`, prompt `iZn`, description `aZn`) and the runtime module exporting
+//! `JXn` (schedule), `QXn` (keepalive), `ZXn` (stop), `t3t` (user abort). In
+//! 2.1.263 the dynamic mode has NO feature gate: the model's call always
+//! schedules (or ages out), and `stop: true` ends the loop.
 //!
 //! Runtime layering: this tool lives in a LOW crate (`tool-cron`) and cannot
 //! reach the per-connection message queue (owned at the bridge composition
-//! root, with the orchestrator deliberately keeping no msgqueue dep — mirror of
-//! the `MidTurnInputSource` decoupling). So the firing is mediated by the
-//! [`WakeupScheduler`] seam: an injected `Arc<dyn WakeupScheduler>` whose real
-//! impl lives at the composition root and does
-//! `RuntimeSpawner::sleep(delay) → resolve sentinel → MessageQueueManager::enqueue`.
-//! When no scheduler is wired (`None`), the tool is a strict no-op + reports the
-//! known gap (same pattern as `mid_turn_input`'s "no source wired → no-op").
+//! root). Firing is mediated by the [`WakeupScheduler`] seam: an injected
+//! `Arc<dyn WakeupScheduler>` whose real impl lives at the composition root and
+//! does `RuntimeSpawner::sleep(delay) → resolve sentinel → enqueue`, and which
+//! can cancel its pending wakeups (the binary's `kind:"loop"` cron registry).
+//! When no scheduler is wired the tool reports the zero triple (the binary's
+//! `aKi === null` branch) instead of promising a wakeup that cannot fire.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,21 +36,19 @@ use tool_api::tool_trait::{
     ToolStaticContext, ValidationError,
 };
 
-/// Tool name byte-lock. Mirrors the live claude-code tool id (and the subagent
-/// denylist entry `agent/src/runner.rs` `NKE_BASE`).
+use crate::autonomous_loop::{self as al, DynamicLoopRecord};
+
+/// Tool name byte-lock (binary `Xi`).
 pub const SCHEDULE_WAKEUP_TOOL_NAME: &str = "ScheduleWakeup";
 
-/// Lower clamp bound for `delaySeconds` (spec `loop-impl-spec.md:146`).
+/// Lower clamp bound for `delaySeconds` (binary `_=60`).
 pub const MIN_DELAY_SECONDS: i64 = 60;
-/// Upper clamp bound for `delaySeconds` (spec `loop-impl-spec.md:146`).
+/// Upper clamp bound for `delaySeconds` (binary `b=3600`).
 pub const MAX_DELAY_SECONDS: i64 = 3600;
 
 /// Sentinel the model passes as `prompt` for an autonomous `/loop` (no user
-/// prompt). The runtime resolves it back to the autonomous-loop instructions at
-/// fire time. NOTE: ScheduleWakeup ALWAYS uses the `-dynamic` variant; the
-/// sibling CronCreate-mode sentinel `<<autonomous-loop>>` is distinct and must
-/// not be confused. Re-exported from [`crate::autonomous_loop`] so there is a
-/// single source of truth for the literal (binary `Jke`).
+/// prompt). ScheduleWakeup ALWAYS uses the `-dynamic` variant; the sibling
+/// CronCreate-mode sentinel `<<autonomous-loop>>` is distinct.
 pub use crate::autonomous_loop::AUTONOMOUS_LOOP_DYNAMIC_SENTINEL;
 
 /// One-shot self-wakeup scheduling seam (twin of the orchestrator's
@@ -66,12 +62,22 @@ pub use crate::autonomous_loop::AUTONOMOUS_LOOP_DYNAMIC_SENTINEL;
 #[async_trait]
 pub trait WakeupScheduler: Send + Sync {
     /// Schedule a one-shot self-wakeup. `delay` is already clamped to
-    /// `[MIN_DELAY_SECONDS, MAX_DELAY_SECONDS]` by the tool.
+    /// `[MIN_DELAY_SECONDS, MAX_DELAY_SECONDS]` and minute-aligned by the tool.
     async fn schedule(&self, delay: Duration, prompt: String, reason: String);
+
+    /// Cancel every wakeup still pending (the binary's `HL(loopCronIds)`),
+    /// returning the PROMPT of each wakeup that was cancelled.
+    ///
+    /// The prompts — not just the count — are what `ZXn` / `t3t` feed to
+    /// `Ort(prompt)` to forget those loops' chain-start records. Hosts that
+    /// cannot cancel return an empty vec.
+    async fn cancel_pending(&self) -> Vec<String> {
+        Vec::new()
+    }
 
     /// Return the session-scoped loop state owned by this scheduler's host.
     /// Hosts without a session object keep the legacy process-local fallback.
-    fn loop_runtime(&self) -> Option<Arc<crate::autonomous_loop::LoopRuntime>> {
+    fn loop_runtime(&self) -> Option<Arc<al::LoopRuntime>> {
         None
     }
 }
@@ -83,152 +89,349 @@ pub trait WakeupScheduler: Send + Sync {
 /// `MessageQueueManager` + `RuntimeSpawner` exist at `boot::assemble`. So the
 /// tool holds an empty cell whose clone is surfaced on `DesktopRuntime`; the
 /// bridge composition root fills it (`cell.set(scheduler)`) once those inputs
-/// are available. Hosts that own no per-connection queue (mobile / offline /
-/// CLI) simply leave it empty → the tool stays an honest no-op.
+/// are available. Hosts that own no per-connection queue leave it empty.
 pub type WakeupSchedulerCell = Arc<std::sync::OnceLock<Arc<dyn WakeupScheduler>>>;
 
-/// Clamp `delaySeconds` to `[MIN_DELAY_SECONDS, MAX_DELAY_SECONDS]` (spec
-/// `loop-impl-spec.md:146`). Non-finite / fractional inputs floor to a whole
-/// second after clamping.
-#[must_use]
-pub fn clamp_delay_seconds(raw: f64) -> i64 {
-    if !raw.is_finite() {
-        // Treat NaN/inf as the minimum tick (defensive; the schema declares a
-        // number but the runtime is the authority on the clamp).
-        return MIN_DELAY_SECONDS;
-    }
-    let secs = raw.floor() as i64;
-    secs.clamp(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
+/// JS `Math.round` (half rounds toward +∞), saturating into `i64`.
+fn js_round(raw: f64) -> i64 {
+    (raw + 0.5).floor() as i64
 }
 
-// ── Keepalive fallback (binary `lKi` + budget `tqd` / delay `eqd`) ────────────
+/// Binary `F(e)` rounding step: `NaN → 60`, `+∞ → 3600`, `−∞ → 60`, else
+/// `Math.round(e)`. Not yet clamped.
+fn requested_delay_seconds(raw: f64) -> i64 {
+    if raw.is_nan() {
+        MIN_DELAY_SECONDS
+    } else if raw == f64::INFINITY {
+        MAX_DELAY_SECONDS
+    } else if raw == f64::NEG_INFINITY {
+        MIN_DELAY_SECONDS
+    } else {
+        js_round(raw)
+    }
+}
 
-/// `eqd` (cc_all.txt) — the keepalive fallback delay (seconds): one quiet
-/// heartbeat at 1200s if the model did not reschedule.
+/// Clamp `delaySeconds` to `[MIN_DELAY_SECONDS, MAX_DELAY_SECONDS]` after the
+/// binary's rounding step (`F(e)`: `Math.max(_, Math.min(b, o))`).
+#[must_use]
+pub fn clamp_delay_seconds(raw: f64) -> i64 {
+    requested_delay_seconds(raw).clamp(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
+}
+
+/// Binary `F(e)`: `wasClamped = !Number.isFinite(e) || o !== t`.
+#[must_use]
+pub fn delay_was_clamped(raw: f64) -> bool {
+    !raw.is_finite() || requested_delay_seconds(raw) != clamp_delay_seconds(raw)
+}
+
+/// The scheduler's five-minute cache window (`Xbt = 300000`).
+const CACHE_TTL_MS: i64 = 300_000;
+/// `mN.cacheLeadMs` — how far ahead of the cache cliff the wakeup is pulled.
+const CACHE_LEAD_MS: i64 = 15_000;
+/// `mN.recurringMaxAgeMs` — a dynamic loop ends 7 days after its first wakeup.
+const LOOP_MAX_AGE_MS: i64 = 604_800_000;
+/// Binary `S` restart check: a loop whose last wakeup was due more than an hour
+/// ago is a NEW loop for aging purposes (`r > d.lastScheduledFor + b*1000`).
+const LOOP_RESTART_GAP_MS: i64 = MAX_DELAY_SECONDS * 1000;
+
+/// Binary `F(e)` — the resolved wakeup timing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WakeupTarget {
+    /// `clamped` — seconds after clamping.
+    pub clamped_delay_seconds: i64,
+    /// `wasClamped`.
+    pub was_clamped: bool,
+    /// `targetMs` — the whole-minute epoch ms the wakeup is scheduled for.
+    pub target_ms: i64,
+}
+
+/// Binary `P(e)`: round an epoch-ms instant UP to the next whole minute.
+fn ceil_to_minute_ms(ms: i64) -> i64 {
+    let minute = 60_000;
+    let rem = ms.rem_euclid(minute);
+    if rem == 0 {
+        ms
+    } else {
+        ms - rem + minute
+    }
+}
+
+/// Binary `F(e)`: clamp, then place the wakeup on a whole minute at or after
+/// `now + clamped`. For delays inside the five-minute cache window the target
+/// is pulled back by whole minutes until it lands at least `cacheLeadMs` before
+/// the cache cliff (while staying ≥ one minute out).
+#[must_use]
+pub fn wakeup_target(raw: f64, now_ms: i64) -> WakeupTarget {
+    let clamped = clamp_delay_seconds(raw);
+    let was_clamped = delay_was_clamped(raw);
+    let requested_ms = now_ms + clamped * 1000;
+    let mut target_ms = ceil_to_minute_ms(requested_ms);
+    if CACHE_LEAD_MS > 0 && clamped * 1000 <= CACHE_TTL_MS {
+        let limit = CACHE_TTL_MS - CACHE_LEAD_MS;
+        while target_ms - now_ms > limit && target_ms - 60_000 >= now_ms + MIN_DELAY_SECONDS * 1000 {
+            target_ms -= 60_000;
+        }
+    }
+    WakeupTarget {
+        clamped_delay_seconds: clamped,
+        was_clamped,
+        target_ms,
+    }
+}
+
+// ── Keepalive fallback (binary `QXn`, budget `D=1`, delay `O=1200`) ───────────
+
+/// `O` — the keepalive fallback delay (seconds): one quiet heartbeat at 1200s
+/// if the model did not reschedule.
 const KEEPALIVE_DELAY_SECONDS: i64 = 1200;
-/// `tqd` (cc_all.txt) — the consecutive-keepalive budget: after this many
-/// back-to-back keepalives with no model reschedule, the loop ends.
+/// `D` — the consecutive-keepalive budget: after this many back-to-back
+/// keepalives with no model reschedule, the loop ends.
 const KEEPALIVE_BUDGET: u32 = 1;
 
 /// Outcome of an [`arm_keepalive`] attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeepaliveOutcome {
-    /// A fallback wakeup was scheduled (binary `cKi` keepalive branch).
+    /// A fallback wakeup was scheduled (binary `E(…, {viaKeepalive:true})`).
     Armed,
     /// The consecutive-keepalive budget was exhausted → loop ended
-    /// (`tengu_loop_ended{model_stopped, via_keepalive}`).
+    /// (`tengu_loop_ended{model_stopped, via_keepalive:true}`).
     BudgetExhausted,
-    /// The dynamic gate (`q_e`) is off → loop ended (`gate_off`).
-    GateOff,
+    /// The loop reached its maximum age → loop ended (`aged_out`).
+    AgedOut,
 }
 
-/// `lKi` (cc_all.txt) — arm the keepalive fallback when a dynamic /loop tick
-/// completes without the model rescheduling.
-///
-/// PARITY: binary
-/// `lKi(e){if(!q_e())return Vst("gate_off"),null;
-///        if(PZt()>=tqd)return C("[loop] keepalive budget exhausted …"),
-///          Vst("model_stopped",{via_keepalive:!0}),null;
-///        return cKi(eqd,e,{viaKeepalive:!0})}`.
-///
-/// SIMPLIFIED vs the binary `cKi`: the port's [`WakeupScheduler`] is a one-shot
-/// seam with NO loop-cron registry, so the port omits `cKi`'s superseded-cancel
-/// (`sqd`) and aged-out (`recurringMaxAgeMs`/`Ydr`/`IZt`) machinery — there is no
-/// per-loop cron state to age out. The keepalive itself (gate → budget → schedule
-/// 1200s + increment counter + `tengu_loop_keepalive_fired`) is faithful.
-pub async fn arm_keepalive(scheduler: &Arc<dyn WakeupScheduler>, prompt: &str) -> KeepaliveOutcome {
-    use crate::autonomous_loop as al;
-    // `if(!q_e())return Vst("gate_off"),null`
-    if !al::is_loop_dynamic_enabled() {
-        telemetry::emit_loop_ended("gate_off", None);
-        return KeepaliveOutcome::GateOff;
+/// What a successful [`schedule_dynamic_wakeup`] produced (binary `E` return).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScheduledWakeup {
+    /// Epoch ms the wakeup fires.
+    pub scheduled_for_ms: i64,
+    /// Seconds after clamping.
+    pub clamped_delay_seconds: i64,
+    /// Whether the request was clamped.
+    pub was_clamped: bool,
+}
+
+/// Session-or-process loop state accessor: the scheduler's [`al::LoopRuntime`]
+/// when it owns one, else the process-global fallback.
+struct LoopState(Option<Arc<al::LoopRuntime>>);
+
+impl LoopState {
+    fn record(&self, prompt: &str) -> Option<DynamicLoopRecord> {
+        match &self.0 {
+            Some(rt) => rt.dynamic_loop_record(prompt),
+            None => al::dynamic_loop_record(prompt),
+        }
     }
-    // `if(PZt()>=tqd)return …,Vst("model_stopped",{via_keepalive:!0}),null`
-    if al::loop_consecutive_keepalives() >= KEEPALIVE_BUDGET {
+    fn set_record(&self, prompt: &str, record: DynamicLoopRecord) {
+        match &self.0 {
+            Some(rt) => rt.set_dynamic_loop_record(prompt, record),
+            None => al::set_dynamic_loop_record(prompt, record),
+        }
+    }
+    fn keepalives(&self) -> u32 {
+        match &self.0 {
+            Some(rt) => rt.consecutive_keepalives(),
+            None => al::loop_consecutive_keepalives(),
+        }
+    }
+    fn set_keepalives(&self, n: u32) {
+        match &self.0 {
+            Some(rt) => rt.set_consecutive_keepalives(n),
+            None => al::set_loop_consecutive_keepalives(n),
+        }
+    }
+    fn mark_rescheduled(&self) {
+        match &self.0 {
+            Some(rt) => rt.mark_rescheduled(),
+            None => al::mark_loop_rescheduled(),
+        }
+    }
+    fn take_in_flight(&self) -> Option<String> {
+        match &self.0 {
+            Some(rt) => rt.take_in_flight_prompt(),
+            None => al::take_loop_tick_in_flight_prompt(),
+        }
+    }
+    /// `Ort(prompt)` — drop the per-prompt dynamic-loop record.
+    fn forget(&self, prompt: &str) {
+        match &self.0 {
+            Some(rt) => rt.forget_dynamic_loop(prompt),
+            None => al::forget_dynamic_loop(prompt),
+        }
+    }
+    fn loop_ended(&self) -> bool {
+        match &self.0 {
+            Some(rt) => rt.loop_ended(),
+            None => al::loop_ended(),
+        }
+    }
+    fn set_loop_ended(&self, ended: bool) {
+        match &self.0 {
+            Some(rt) => rt.set_loop_ended(ended),
+            None => al::set_loop_ended(ended),
+        }
+    }
+}
+
+/// Binary `L(reason, extras)`: emit `tengu_loop_ended` and mark the loop ended.
+fn end_loop(state: &LoopState, reason: &str, via_keepalive: Option<bool>) {
+    telemetry::emit_loop_ended(reason, via_keepalive);
+    state.set_loop_ended(true);
+}
+
+fn now_epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Binary `E(delay, prompt, {viaKeepalive, reason})` — the single scheduling
+/// path shared by the model's call and the keepalive fallback.
+///
+/// 1. A model call resets the consecutive-keepalive counter.
+/// 2. Pending wakeups for this session are cancelled (superseded).
+/// 3. The loop's age is measured from its first wakeup (a loop idle for more
+///    than an hour restarts); at `recurringMaxAgeMs` (7 days) the loop ends
+///    with `aged_out` and nothing is scheduled.
+/// 4. Otherwise the wakeup is minute-aligned via [`wakeup_target`] and armed.
+pub async fn schedule_dynamic_wakeup(
+    scheduler: &Arc<dyn WakeupScheduler>,
+    raw_delay_seconds: f64,
+    prompt: &str,
+    reason: Option<&str>,
+    via_keepalive: bool,
+) -> Option<ScheduledWakeup> {
+    let state = LoopState(scheduler.loop_runtime());
+    if !via_keepalive {
+        state.set_keepalives(0);
+    }
+    // PARITY `E`: `let m = x()` — superseding cancels the pending wakeups and
+    // reports the count. It does NOT call `Ort`; only `ZXn` / `t3t` forget.
+    let superseded = scheduler.cancel_pending().await.len();
+    let now = now_epoch_ms();
+    let record = state.record(prompt);
+    let restarted = record.is_some_and(|d| now > d.last_scheduled_for_ms + LOOP_RESTART_GAP_MS);
+    let started_at = match record {
+        Some(d) if !restarted => d.started_at_ms,
+        _ => now,
+    };
+    if LOOP_MAX_AGE_MS > 0 && now - started_at >= LOOP_MAX_AGE_MS {
+        if !record.is_some_and(|d| d.aged_out) {
+            state.set_record(
+                prompt,
+                DynamicLoopRecord {
+                    started_at_ms: started_at,
+                    last_scheduled_for_ms: now - (MAX_DELAY_SECONDS - MIN_DELAY_SECONDS) * 1000,
+                    aged_out: true,
+                },
+            );
+            telemetry::emit_loop_dynamic_wakeup_aged_out(
+                (now - started_at).max(0) as u64,
+                LOOP_MAX_AGE_MS as u64,
+            );
+            end_loop(&state, "aged_out", Some(via_keepalive));
+        }
+        return None;
+    }
+    let target = wakeup_target(raw_delay_seconds, now);
+    let delay = Duration::from_millis((target.target_ms - now).max(0) as u64);
+    scheduler
+        .schedule(
+            delay,
+            prompt.to_string(),
+            reason.map_or_else(|| "loop keepalive fallback".to_string(), str::to_string),
+        )
+        .await;
+    state.set_record(
+        prompt,
+        DynamicLoopRecord {
+            started_at_ms: started_at,
+            last_scheduled_for_ms: target.target_ms,
+            aged_out: false,
+        },
+    );
+    state.set_loop_ended(false);
+    state.mark_rescheduled();
+    let scheduled = ScheduledWakeup {
+        scheduled_for_ms: target.target_ms,
+        clamped_delay_seconds: target.clamped_delay_seconds,
+        was_clamped: target.was_clamped,
+    };
+    if via_keepalive {
+        state.set_keepalives(state.keepalives() + 1);
+        tracing::info!(
+            "[loop] keepalive armed (model did not reschedule): {}s fallback",
+            target.clamped_delay_seconds
+        );
+        telemetry::emit_loop_keepalive_fired(
+            target.clamped_delay_seconds as u64,
+            al::is_loop_default_sentinel(prompt),
+        );
+        return Some(scheduled);
+    }
+    let clamped_note = if target.was_clamped {
+        format!(" (clamped from {raw_delay_seconds}s)")
+    } else {
+        String::new()
+    };
+    let reason_note = reason.map_or_else(String::new, |r| format!(" — {r}"));
+    tracing::info!(
+        "[loop] dynamic wakeup scheduled: {}s{clamped_note}{reason_note}",
+        target.clamped_delay_seconds
+    );
+    telemetry::emit_loop_dynamic_wakeup_scheduled(
+        if raw_delay_seconds.is_finite() {
+            raw_delay_seconds
+        } else {
+            0.0
+        },
+        target.clamped_delay_seconds as u64,
+        target.was_clamped,
+        reason.map_or(0, |r| r.encode_utf16().count()),
+        superseded as u64,
+    );
+    Some(scheduled)
+}
+
+/// Binary `QXn(prompt)` — arm the keepalive fallback when a dynamic /loop tick
+/// completes without the model rescheduling: budget check, then the shared
+/// scheduling path with `viaKeepalive: true`.
+pub async fn arm_keepalive(scheduler: &Arc<dyn WakeupScheduler>, prompt: &str) -> KeepaliveOutcome {
+    let state = LoopState(scheduler.loop_runtime());
+    if state.keepalives() >= KEEPALIVE_BUDGET {
         tracing::info!(
             "[loop] keepalive budget exhausted (model declined to reschedule twice) — ending loop"
         );
-        telemetry::emit_loop_ended("model_stopped", Some(true));
+        end_loop(&state, "model_stopped", Some(true));
         return KeepaliveOutcome::BudgetExhausted;
     }
-    // `return cKi(eqd,e,{viaKeepalive:!0})` — schedule the 1200s fallback,
-    // increment the counter, emit keepalive_fired.
-    let delay = clamp_delay_seconds(KEEPALIVE_DELAY_SECONDS as f64);
-    scheduler
-        .schedule(
-            Duration::from_secs(delay as u64),
-            prompt.to_string(),
-            "loop keepalive fallback".to_string(),
-        )
-        .await;
-    al::set_loop_consecutive_keepalives(al::loop_consecutive_keepalives() + 1);
-    telemetry::emit_loop_keepalive_fired(delay as u64, al::is_loop_default_sentinel(prompt));
-    KeepaliveOutcome::Armed
+    match schedule_dynamic_wakeup(scheduler, KEEPALIVE_DELAY_SECONDS as f64, prompt, None, true).await {
+        Some(_) => KeepaliveOutcome::Armed,
+        None => KeepaliveOutcome::AgedOut,
+    }
 }
 
-/// Session-scoped variant of [`arm_keepalive`].
+/// Session-scoped variant of [`arm_keepalive`] (the runtime is the scheduler's).
 pub async fn arm_keepalive_with_runtime(
     scheduler: &Arc<dyn WakeupScheduler>,
     prompt: &str,
-    runtime: &crate::autonomous_loop::LoopRuntime,
+    _runtime: &al::LoopRuntime,
 ) -> KeepaliveOutcome {
-    use crate::autonomous_loop as al;
-    if !al::is_loop_dynamic_enabled() {
-        telemetry::emit_loop_ended("gate_off", None);
-        return KeepaliveOutcome::GateOff;
-    }
-    if runtime.consecutive_keepalives() >= KEEPALIVE_BUDGET {
-        tracing::info!(
-            "[loop] keepalive budget exhausted (model declined to reschedule twice) — ending loop"
-        );
-        telemetry::emit_loop_ended("model_stopped", Some(true));
-        return KeepaliveOutcome::BudgetExhausted;
-    }
-    let delay = clamp_delay_seconds(KEEPALIVE_DELAY_SECONDS as f64);
-    scheduler
-        .schedule(
-            Duration::from_secs(delay as u64),
-            prompt.to_string(),
-            "loop keepalive fallback".to_string(),
-        )
-        .await;
-    runtime.set_consecutive_keepalives(runtime.consecutive_keepalives() + 1);
-    telemetry::emit_loop_keepalive_fired(delay as u64, al::is_loop_default_sentinel(prompt));
-    KeepaliveOutcome::Armed
+    arm_keepalive(scheduler, prompt).await
 }
 
-/// The turn-completion keepalive trigger (binary loading→idle `useEffect`:
-/// `let l=tAt();if(l!==null){I7e(null);if(iKi()&&!Xke())lKi(l)}`).
+/// The turn-completion keepalive trigger (binary loading→idle effect:
+/// `let l=tAt();if(l!==null){I7e(null);if(YXn()&&!BY())QXn(l)}`).
 ///
 /// Call once at every turn's completion edge. Returns `None` when the just-ended
-/// turn was NOT a loop tick (no in-flight prompt), or when the keepalive gate is
-/// off, or when the model rescheduled this turn (the `!Xke()` short-circuit);
-/// otherwise it runs [`arm_keepalive`] (`lKi`) and returns its outcome.
-///
-/// PARITY-NOTE: the in-flight prompt is the RESOLVED tick text (the port resolves
-/// the `<<…dynamic>>` sentinel at enqueue, so the drain only ever sees resolved
-/// text), whereas the binary re-arms with the original sentinel (which re-resolves
-/// to a short reminder on the next fire). The keepalive's gate/budget/telemetry
-/// are faithful; the re-armed prompt content is the resolved tick. Carrying the
-/// original sentinel through the queue for a byte-identical re-arm is a deferred
-/// refinement.
+/// turn was NOT a loop tick (no in-flight prompt), when the keepalive gate is
+/// off, or when the model rescheduled this turn; otherwise runs
+/// [`arm_keepalive`] and returns its outcome.
 pub async fn maybe_arm_keepalive(scheduler: &Arc<dyn WakeupScheduler>) -> Option<KeepaliveOutcome> {
-    use crate::autonomous_loop as al;
-    // `let l=tAt(); if(l===null) return` — only loop-tick turns proceed. `take`
-    // doubles as the binary `I7e(null)` clear.
     let prompt = al::take_loop_tick_in_flight_prompt()?;
-    // Always consume the per-turn reschedule flag (fresh state next turn).
     let rescheduled = al::take_loop_rescheduled();
-    // `iKi()` — keepalive feature gate.
-    if !al::is_loop_keepalive_enabled() {
-        return None;
-    }
-    // `!Xke()` — the model already rescheduled, so a loop wakeup is armed; the
-    // keepalive must not fire. The counter was already reset by the model's
-    // `ScheduleWakeup` success (binary `cKi`'s `if(!r)nAt(0)`), so this branch only
-    // short-circuits — it does NOT reset again (matching the binary `useEffect`,
-    // which owns no counter reset).
-    if rescheduled {
+    if !al::is_loop_keepalive_enabled() || rescheduled {
         return None;
     }
     Some(arm_keepalive(scheduler, &prompt).await)
@@ -237,9 +440,8 @@ pub async fn maybe_arm_keepalive(scheduler: &Arc<dyn WakeupScheduler>) -> Option
 /// Session-scoped variant of [`maybe_arm_keepalive`].
 pub async fn maybe_arm_keepalive_with_runtime(
     scheduler: &Arc<dyn WakeupScheduler>,
-    runtime: &crate::autonomous_loop::LoopRuntime,
+    runtime: &al::LoopRuntime,
 ) -> Option<KeepaliveOutcome> {
-    use crate::autonomous_loop as al;
     let prompt = runtime.take_in_flight_prompt()?;
     let rescheduled = runtime.take_rescheduled();
     if !al::is_loop_keepalive_enabled() || rescheduled {
@@ -248,11 +450,84 @@ pub async fn maybe_arm_keepalive_with_runtime(
     Some(arm_keepalive_with_runtime(scheduler, &prompt, runtime).await)
 }
 
-/// Format an epoch-ms timestamp as local `HH:MM:SS`.
-// PARITY: binary `new Date(e).toTimeString().slice(0,8)` (cc_all.txt:507964) —
-// the LOCAL wall-clock time of the wakeup. Uses the same local-offset source as
-// the cron scheduler so the rendered time matches where the wakeup actually
-// fires.
+/// Binary `ZXn()` — the model called `ScheduleWakeup({stop:true})`: cancel every
+/// pending wakeup, drop the in-flight tick, reset the keepalive counter and end
+/// the loop (terminal event suppressed when the loop already ended). Returns
+/// how many pending wakeups were cancelled.
+pub async fn stop_dynamic_loop(scheduler: Option<&Arc<dyn WakeupScheduler>>) -> usize {
+    let state = LoopState(scheduler.and_then(|s| s.loop_runtime()));
+    let already_ended = state.loop_ended();
+    let in_flight = state.take_in_flight();
+    state.set_keepalives(0);
+    let cancelled_prompts = match scheduler {
+        Some(s) => s.cancel_pending().await,
+        None => Vec::new(),
+    };
+    // PARITY `ZXn`: `for(let l of o) Ort(l.prompt); if(t!==null) Ort(t)` — every
+    // cancelled wakeup's prompt and the in-flight tick's prompt lose their
+    // chain-start record, so a later `/loop` on the same prompt is a NEW loop.
+    let cancelled = cancelled_prompts.len();
+    for prompt in &cancelled_prompts {
+        state.forget(prompt);
+    }
+    if let Some(prompt) = &in_flight {
+        state.forget(prompt);
+    }
+    if already_ended {
+        tracing::info!(
+            "[loop] ScheduleWakeup({{stop:true}}) after loop already ended — cleanup only, terminal event suppressed"
+        );
+        return cancelled;
+    }
+    tracing::info!(
+        "[loop] model called ScheduleWakeup({{stop:true}}) — ending loop ({cancelled} pending wakeup(s) cancelled{})",
+        if in_flight.is_some() { ", tick in flight" } else { "" }
+    );
+    end_loop(&state, "model_stopped", Some(false));
+    cancelled
+}
+
+/// Binary `t3t()` — user abort: cancel every pending wakeup and the in-flight
+/// tick, emit `tengu_loop_ended{user_abort, loops_cancelled}`. Returns the count.
+pub async fn cancel_dynamic_loop_on_user_abort(scheduler: &Arc<dyn WakeupScheduler>) -> usize {
+    let state = LoopState(scheduler.loop_runtime());
+    let in_flight = state.take_in_flight();
+    state.set_keepalives(0);
+    let cancelled_prompts = scheduler.cancel_pending().await;
+    let cancelled = cancelled_prompts.len();
+    if cancelled == 0 && in_flight.is_none() {
+        return 0;
+    }
+    // PARITY `t3t`: same `Ort` sweep as `ZXn`.
+    for prompt in &cancelled_prompts {
+        state.forget(prompt);
+    }
+    if let Some(prompt) = &in_flight {
+        state.forget(prompt);
+    }
+    tracing::info!(
+        "[loop/dynamic] cancelled {cancelled} pending loop wakeup(s) on user abort{}",
+        if in_flight.is_some() { " (tick in flight)" } else { "" }
+    );
+    telemetry::emit_loop_ended("user_abort", None);
+    state.set_loop_ended(true);
+    cancelled
+}
+
+/// Binary `K_n()` — `/loop` was invoked: clear the loop-ended marker.
+///
+/// The process-global arm is [`al::note_loop_invoked`], which the `/loop` skill
+/// itself calls (it can reach `cron` but not this tool crate). This overload
+/// exists for hosts that own a session-scoped runtime.
+pub fn note_loop_invoked(runtime: Option<&al::LoopRuntime>) {
+    match runtime {
+        Some(rt) => rt.set_loop_ended(false),
+        None => al::note_loop_invoked(),
+    }
+}
+
+/// Format an epoch-ms timestamp as local `HH:MM:SS`
+/// (binary `new Date(e).toTimeString().slice(0,8)`).
 #[must_use]
 fn local_hhmmss(epoch_ms: i64) -> String {
     let epoch_secs = epoch_ms.div_euclid(1000);
@@ -267,114 +542,159 @@ fn local_hhmmss(epoch_ms: i64) -> String {
 /// Resolve the `prompt` argument at fire time: the autonomous / loop.md
 /// sentinels expand to the real autonomous-loop tick prompt (full preamble on
 /// first delivery, short reminder afterward); any other prompt passes through
-/// verbatim.
-///
-/// This is the LIVE port of the binary `J4d` / `resolveLoopDefaultFire`
-/// (`nKi(e) ?? sKi(e) ?? e`, cc_all.txt:504966) — see
-/// [`crate::autonomous_loop`]. The bridge `MsgQueueWakeupScheduler` calls this
-/// at fire time (after the sleep, before enqueue), so the first-vs-subsequent
-/// delivery state (binary `iFt`/`Gst`) persists across fires via the module's
-/// process-global. The loop.md file is located relative to the process cwd (the
-/// binary uses `dc()`/`Zn()`, which for a single-project session is the cwd).
+/// verbatim (binary `resolveLoopDefaultFire`).
 #[must_use]
 pub fn resolve_wakeup_prompt(prompt: &str) -> String {
-    // PARITY: binary trims the sentinel comparison implicitly (the model passes
-    // the exact literal); be lenient about surrounding whitespace so a model that
-    // pads the sentinel still resolves it, then fall through to the verbatim
-    // passthrough for any real prompt (which we must NOT trim).
     let trimmed = prompt.trim();
-    if crate::autonomous_loop::is_loop_default_sentinel(trimmed) {
+    if al::is_loop_default_sentinel(trimmed) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        return crate::autonomous_loop::resolve_loop_default_fire(trimmed, &cwd);
+        return al::resolve_loop_default_fire(trimmed, &cwd);
     }
     prompt.to_string()
 }
 
-/// Model-facing SHORT description (the tool's `description()` surface).
-// PARITY: binary XVi (cc_all.txt:504908) — `var Kh="ScheduleWakeup",…,XVi=
-// "Schedule when to resume work in /loop dynamic mode (always pass the
-// `prompt` arg). Call before ending the turn to keep the loop alive; omit the
-// call to end it."` The binary's tool def is `async description(){return XVi}`.
-const DESCRIPTION: &str = "Schedule when to resume work in /loop dynamic mode (always pass the `prompt` arg). Call before ending the turn to keep the loop alive; omit the call to end it.";
+/// Model-facing SHORT description (binary `aZn`).
+const DESCRIPTION: &str = "Schedule when to resume work in /loop dynamic mode (always pass the `prompt` arg unless stopping). Call before ending the turn to keep the loop alive; call with `stop: true` to end the loop immediately.";
 
-/// Model-facing LONG prompt (the tool's `prompt()` surface).
-// PARITY: binary JVi (cc_all.txt:504909-504927) — `async prompt(){return JVi}`.
-// The binary builds JVi with template interpolation of the sentinels
-// (`${"<<autonomous-loop-dynamic>>"}`, `${"<<autonomous-loop>>"}`) and the tool
-// name (`${"ScheduleWakeup"}`); rendered to literals here. Em-dash `—`, `×`,
-// and the trailing newline reproduced exactly.
-const PROMPT: &str = "Schedule when to resume work in /loop dynamic mode — the user invoked /loop without an interval, asking you to self-pace iterations of a specific task.
+/// Binary `searchHint`.
+const SEARCH_HINT: &str = "self-pace the dynamic /loop: pick a delay before the next tick, or stop/end/cancel the dynamic loop with stop:true (a fixed-interval /loop is a recurring cron — cancel it with CronDelete)";
+
+/// Binary `t` — the prompt's intro paragraphs.
+const PROMPT_INTRO: &str = "Schedule when to resume work in /loop dynamic mode — the user invoked /loop without an interval, asking you to self-pace iterations of a specific task.
+
 Do NOT schedule a short-interval wakeup to poll for background work you started — when harness-tracked work finishes, you are re-invoked automatically, so polling is wasted. Instead schedule a long fallback (1200s+) so the loop survives if the work hangs or never notifies. The exception is external work the harness cannot track (a CI run, a deploy, a remote queue) — there, pick a delay matched to how fast that state actually changes.
-Pass the same /loop prompt back via `prompt` each turn so the next firing repeats the task. For an autonomous /loop (no user prompt), pass the literal sentinel `<<autonomous-loop-dynamic>>` as `prompt` instead — the runtime resolves it back to the autonomous-loop instructions at fire time. (There is a similar `<<autonomous-loop>>` sentinel for CronCreate-based autonomous loops; do not confuse the two — ScheduleWakeup always uses the `-dynamic` variant.) Omit the call to end the loop.
-## Picking delaySeconds
-The Anthropic prompt cache has a 5-minute TTL. Sleeping past 300 seconds means the next wake-up reads your full conversation context uncached — slower and more expensive. So the natural breakpoints:
+
+Pass the same /loop prompt back via `prompt` each turn so the next firing repeats the task. For an autonomous /loop (no user prompt), pass the literal sentinel `<<autonomous-loop-dynamic>>` as `prompt` instead — the runtime resolves it back to the autonomous-loop instructions at fire time. (There is a similar `<<autonomous-loop>>` sentinel for CronCreate-based autonomous loops; do not confuse the two — ScheduleWakeup always uses the `-dynamic` variant.) To end the loop, call this tool with `stop: true` (omit every other field) — the loop ends immediately and no further wakeups fire.";
+
+/// Binary `iZn` noop paragraph.
+const PROMPT_NOOP: &str = "Set `noop: true` if nothing changed — you checked and there's nothing to report (\"no change\", \"still waiting\", \"quiet hold\"). Set `noop: false` if something happened worth keeping — you edited a file, posted a message, advanced state, or surfaced a finding. Consecutive `noop: true` ticks are collapsed in the user's terminal view and tracked as a streak, so long quiet holds stay legible to the user without scrolling. Omit `noop` when stopping (`stop: true`).";
+
+/// Binary `iZn(true)` — the 1-hour prompt-cache TTL variant.
+const PROMPT_DELAY_ONE_HOUR_TTL: &str = "## Picking delaySeconds
+
+This session's requests use a 1-hour Anthropic prompt-cache TTL, so effectively every allowed delay (the runtime clamps to [60, 3600]) wakes up with your conversation context still cached. There is no cache cliff inside that range to pace around, and scheduling extra wakeups just to keep the cache warm is pure waste — never do that. (If the session enters usage overage, later requests drop to the 5-minute TTL; don't try to track or preempt that — the guidance here stays the same.)
+
+Match the delay to what you're actually waiting for:
+
+- **Actively polling external state the harness can't notify you about** (a CI run, a deploy, a remote queue): pick the delay from how fast that state actually changes. A CI run that takes ~8 minutes deserves one ~480s check, not eight 60s ones.
+- **The long fallback heartbeat** (something else — a Monitor, a task notification — is the primary wake signal): 1200s+, so quiet wakeups stay rare.
+- **Idle ticks with no specific signal to watch**: default to **1200s–1800s** (20–30 min). The loop still checks back regularly, and the user can always interrupt if they need you sooner.
+
+Don't think in cache windows — think about what you're actually waiting for.";
+
+/// Binary `iZn(false)` — the 5-minute prompt-cache TTL variant.
+const PROMPT_DELAY_FIVE_MINUTE_TTL: &str = "## Picking delaySeconds
+
+This session's requests use the default 5-minute Anthropic prompt-cache TTL. Sleeping past 300 seconds means the next wake-up reads your full conversation context uncached — slower and more expensive. So the natural breakpoints:
+
 - **Under 5 minutes (60s–270s)**: cache stays warm. Right for actively polling external state the harness can't notify you about — a CI run, a deploy, a remote queue.
 - **5 minutes to 1 hour (300s–3600s)**: pay the cache miss. Right when there's no point checking sooner — waiting on something that takes minutes to change, genuinely idle, or as the long fallback heartbeat when something else is the primary wake signal.
+
 **Don't pick 300s.** It's the worst-of-both: you pay the cache miss without amortizing it. If you're tempted to \"wait 5 minutes,\" either drop to 270s (stay in cache) or commit to 1200s+ (one cache miss buys a much longer wait). Don't think in round-number minutes — think in cache windows.
+
 For idle ticks with no specific signal to watch, default to **1200s–1800s** (20–30 min). The loop checks back, you don't burn cache 12× per hour for nothing, and the user can always interrupt if they need you sooner.
+
 Think about what you're actually waiting for, not just \"how long should I sleep.\" If you're polling a CI run that takes ~8 minutes, sleeping 60s burns the cache 8 times before it finishes — sleep ~270s twice instead.
-The runtime clamps to [60, 3600], so you don't need to clamp yourself.
-## The reason field
-One short sentence on what you chose and why. Goes to telemetry and is shown back to the user. \"watching CI run\" beats \"waiting.\" The user reads this to understand what you're doing without having to predict your cadence in advance — make it specific.
-";
+
+The runtime clamps to [60, 3600], so you don't need to clamp yourself.";
+
+/// Binary `iZn(undefined)` — TTL not uniformly known (the variant the binary
+/// emits when the main-thread and sdk TTL signals disagree).
+const PROMPT_DELAY_UNKNOWN_TTL: &str = "## Picking delaySeconds
+
+The Anthropic prompt cache decides how expensive a wake-up is: waking inside the cache TTL re-reads your conversation context cached (fast, cheap); waking past it re-reads everything uncached. The TTL depends on how the session is billed: Claude subscriber sessions get a 1-hour TTL (dropping to 5 minutes during usage overage), while API-key, Bedrock, and Vertex sessions default to 5 minutes.
+
+In either regime: never schedule extra wakeups just to keep the cache warm — they cost more than the cache miss they avoid. Match the delay to what you're actually waiting for: when actively polling external state the harness can't notify you about (a CI run, a deploy, a remote queue), pick the delay from how fast that state actually changes; for idle ticks with no specific signal to watch, default to **1200s–1800s** (20–30 min) — the user can always interrupt if they need you sooner.
+
+On a 5-minute TTL only, two refinements: under 300s (60s–270s) the cache stays warm, so prefer 270s over 300s when actively polling (300s is the worst-of-both — you pay the miss without amortizing it); and commit to 1200s+ rather than repeated ~300s waits, so one cache miss buys a long wait.
+
+The runtime clamps to [60, 3600], so you don't need to clamp yourself.";
+
+/// Binary `iZn` reason paragraph.
+const PROMPT_REASON: &str = "## The reason field
+
+One short sentence on what you chose and why. Goes to telemetry and is shown back to the user. \"watching CI run\" beats \"waiting.\" The user reads this to understand what you're doing without having to predict your cadence in advance — make it specific.";
+
+/// Which prompt-cache TTL the session's requests use (binary `rN(...)` pair).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptCacheTtl {
+    /// Both signals agree on a 1-hour TTL.
+    OneHour,
+    /// Both signals agree on the default 5-minute TTL.
+    FiveMinutes,
+    /// The signals disagree or the TTL is not known.
+    Unknown,
+}
+
+/// Binary `iZn(e)`: intro, noop paragraph, the TTL-specific delay guidance and
+/// the reason paragraph, each separated by a blank line, trailing newline.
+#[must_use]
+pub fn build_prompt(ttl: PromptCacheTtl) -> String {
+    let delay = match ttl {
+        PromptCacheTtl::OneHour => PROMPT_DELAY_ONE_HOUR_TTL,
+        PromptCacheTtl::FiveMinutes => PROMPT_DELAY_FIVE_MINUTE_TTL,
+        PromptCacheTtl::Unknown => PROMPT_DELAY_UNKNOWN_TTL,
+    };
+    format!("{PROMPT_INTRO}\n\n{PROMPT_NOOP}\n\n{delay}\n\n{PROMPT_REASON}\n")
+}
 
 static SCHEMA: Lazy<Value> = Lazy::new(|| {
-    // PARITY: binary P7p (cc_all.txt:507964) — `A.strictObject({delaySeconds:
-    // oU(A.number()).describe(...),reason:A.string().describe(...),prompt:
-    // A.string().describe(...)})`. `strictObject` ⇒ additionalProperties:false.
-    // `oU(A.number())` ⇒ delaySeconds is OPTIONAL/nullable, so it is NOT in
-    // `required` (only reason + prompt are). Param descriptions are the binary's
-    // verbatim text (string-table cc_all.txt:487571-487574).
+    // PARITY: binary `Uqo` — `strictObject({delaySeconds: DM(number).optional(),
+    // reason: string.optional(), prompt: string.optional(), stop:
+    // boolean.optional(), noop: boolean.optional()})`. Nothing is required at
+    // the schema level; `call` enforces the "required unless stop" rule.
     json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
             "delaySeconds": {
                 "type": "number",
-                // PARITY: cc_all.txt:507964 / string-table 487572
-                "description": "Seconds from now to wake up. Clamped to [60, 3600] by the runtime."
+                "description": "Seconds from now to wake up. Clamped to [60, 3600] by the runtime. Required unless `stop` is true."
             },
             "reason": {
                 "type": "string",
-                // PARITY: cc_all.txt:507964 / string-table 487573
-                "description": "One short sentence explaining the chosen delay. Goes to telemetry and is shown to the user. Be specific."
+                "description": "One short sentence explaining the chosen delay. Goes to telemetry and is shown to the user. Be specific. Required unless `stop` is true."
             },
             "prompt": {
                 "type": "string",
-                // PARITY: cc_all.txt:507964 / string-table 487574 — sentinels
-                // `<<autonomous-loop-dynamic>>` (Jke) and `<<autonomous-loop>>`
-                // (Wst) interpolated to literals.
-                "description": "The /loop input to fire on wake-up. Pass the same /loop input verbatim each turn so the next firing re-enters the skill and continues the loop. For autonomous /loop (no user prompt), pass the literal sentinel `<<autonomous-loop-dynamic>>` instead (the dynamic-pacing variant, not the CronCreate-mode `<<autonomous-loop>>`)."
+                "description": "The /loop input to fire on wake-up. Pass the same /loop input verbatim each turn so the next firing re-enters the skill and continues the loop. For autonomous /loop (no user prompt), pass the literal sentinel `<<autonomous-loop-dynamic>>` instead (the dynamic-pacing variant, not the CronCreate-mode `<<autonomous-loop>>`). Required unless `stop` is true."
+            },
+            "stop": {
+                "type": "boolean",
+                "description": "Set to true to end the dynamic loop immediately instead of scheduling another wakeup. When true, all other fields are ignored and no further wakeups fire."
+            },
+            "noop": {
+                "type": "boolean",
+                "description": "true = nothing changed (you checked and there is nothing to report). false = something happened worth keeping (edited a file, posted a message, advanced state, surfaced a finding). Consecutive noop:true ticks are collapsed in the user's terminal view and tracked as a streak. Required unless `stop` is true."
             }
-        },
-        "required": ["reason", "prompt"]
+        }
     })
 });
 
-/// Tool RESULT schema (the binary's `outputSchema`).
-// PARITY: binary O7p (cc_all.txt:507964) — `A.object({scheduledFor:A.number()
-// .describe("Epoch ms timestamp when the next wakeup will fire"),
-// clampedDelaySeconds:A.number().describe("Actual delay used after clamping to
-// runtime bounds"),wasClamped:A.boolean().describe("True if the requested
-// delaySeconds was outside [60, 3600]")})`.
+/// Tool RESULT schema (binary `Hqo`).
 static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
         "properties": {
             "scheduledFor": {
                 "type": "number",
-                // PARITY: string-table cc_all.txt:487576
                 "description": "Epoch ms timestamp when the next wakeup will fire"
             },
             "clampedDelaySeconds": {
                 "type": "number",
-                // PARITY: string-table cc_all.txt:487577
                 "description": "Actual delay used after clamping to runtime bounds"
             },
             "wasClamped": {
                 "type": "boolean",
-                // PARITY: string-table cc_all.txt:487578
                 "description": "True if the requested delaySeconds was outside [60, 3600]"
+            },
+            "stopped": {
+                "type": "boolean",
+                "description": "True when the model ended the loop via `stop: true`"
+            },
+            "cancelledWakeups": {
+                "type": "number",
+                "description": "How many pending dynamic-loop wakeups stop:true cancelled. 0 means nothing was pending — a recurring /loop cron is not cancelled by stop:true."
             }
         }
     })
@@ -385,15 +705,13 @@ pub struct ScheduleWakeupTool {
     ctx: tool_api::BuiltinToolContext,
     /// Set-once wakeup seam (see [`WakeupSchedulerCell`]). Empty until a host
     /// fills it via the clone returned by [`Self::wakeup_cell`]; while empty the
-    /// tool clamps + reports but no wakeup fires (the legitimate unwired-host
-    /// case: mobile / offline / CLI).
+    /// tool reports the zero triple (no wakeup can fire).
     wakeup: WakeupSchedulerCell,
 }
 
 impl ScheduleWakeupTool {
     /// Construct with an empty set-once scheduler cell. The host fills it later
-    /// via the clone from [`Self::wakeup_cell`]; until then scheduling is a
-    /// no-op. The desktop bridge fills it at `boot::assemble`.
+    /// via the clone from [`Self::wakeup_cell`].
     #[must_use]
     pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
         Self {
@@ -403,15 +721,13 @@ impl ScheduleWakeupTool {
     }
 
     /// A clone of the set-once cell, for the composition root to fill once the
-    /// per-connection queue + spawner exist (`cell.set(scheduler)`). Setting it
-    /// after the first set is a no-op (`OnceLock` semantics).
+    /// per-connection queue + spawner exist (`cell.set(scheduler)`).
     #[must_use]
     pub fn wakeup_cell(&self) -> WakeupSchedulerCell {
         self.wakeup.clone()
     }
 
-    /// Construct with a live [`WakeupScheduler`] already wired (used by tests and
-    /// any host that owns the queue/spawner before building the tool).
+    /// Construct with a live [`WakeupScheduler`] already wired.
     #[must_use]
     pub fn with_scheduler(
         ctx: tool_api::BuiltinToolContext,
@@ -453,25 +769,95 @@ async fn emit_completed(bus: &Arc<AnalyticsBus>, duration_ms: u64, scheduled: bo
     bus.log_event(COMPLETED, md).await;
 }
 
-/// PARITY: binary gate-off / `aKi`-null return — `{scheduledFor:0,
-/// clampedDelaySeconds:0, wasClamped:false}` with the `e===0` model text
-/// (cc_all.txt:507964). Used for BOTH the `!q_e()` gate-off branch and the
-/// no-scheduler (aKi-null stand-in) branch.
-fn zero_triple_result(reason: &str) -> ToolCallResult {
+fn result(data: Value) -> ToolCallResult {
     ToolCallResult {
-        data: json!({
-            "scheduledFor": 0,
-            "clampedDelaySeconds": 0,
-            "wasClamped": false,
-            "model_content": "Wakeup not scheduled. Either the /loop dynamic runtime gate is off or the loop reached its maximum duration — the loop has ended; do not re-issue.",
-            "reason": reason,
-        }),
+        data,
         model_content: None,
         new_messages: vec![],
         context_modifier: None,
         is_error: false,
         mcp_meta: None,
     }
+}
+
+/// Binary `mapToolResultToToolResultBlockParam` for `scheduledFor === 0`.
+const NOT_SCHEDULED_TEXT: &str = "Wakeup not scheduled. The loop reached its maximum duration — the loop has ended; do not re-issue.";
+
+/// PARITY: `{scheduledFor:0, clampedDelaySeconds:0, wasClamped:false}` with the
+/// `e===0` model text — the aged-out / no-scheduler branches.
+fn zero_triple_result(reason: &str) -> ToolCallResult {
+    result(json!({
+        "scheduledFor": 0,
+        "clampedDelaySeconds": 0,
+        "wasClamped": false,
+        "model_content": NOT_SCHEDULED_TEXT,
+        "reason": reason,
+    }))
+}
+
+/// Binary `mapToolResultToToolResultBlockParam` for `stopped === true`.
+fn stopped_result(cancelled: usize) -> ToolCallResult {
+    let tail = "If you armed a Monitor for this loop, TaskStop it now; otherwise nothing more to do this turn.";
+    let content = if cancelled == 0 {
+        format!("Loop stopped — any dynamic loop in this session is ended; there was no pending wakeup to cancel. If you are running a fixed-interval /loop (a recurring cron), it is NOT stopped by this call — cancel it with CronDelete. {tail}")
+    } else {
+        format!("Loop stopped — cancelled {cancelled} pending wakeup(s); no further dynamic-loop wakeups scheduled. {tail}")
+    };
+    result(json!({
+        "scheduledFor": 0,
+        "clampedDelaySeconds": 0,
+        "wasClamped": false,
+        "stopped": true,
+        "cancelledWakeups": cancelled,
+        "model_content": content,
+    }))
+}
+
+/// Binary `DM(number)` — accept a JSON number or a numeric string.
+fn coerce_delay(value: Option<&Value>) -> Result<Option<f64>, ValidationError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => Ok(n.as_f64()),
+        Some(Value::String(s)) => s.trim().parse::<f64>().map(Some).map_err(|_| {
+            ValidationError("ScheduleWakeup: `delaySeconds` must be a number".into())
+        }),
+        Some(_) => Err(ValidationError(
+            "ScheduleWakeup: `delaySeconds` must be a number".into(),
+        )),
+    }
+}
+
+/// The binary's `ScheduleWakeupInputError` checks (run in `call` there; here in
+/// `validate_input`, before the turn loop records a tool failure).
+fn validate_wakeup_input(input: &Value) -> Result<(), ValidationError> {
+    if input.get("stop").and_then(Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+    for (key, ty) in [("stop", "boolean"), ("noop", "boolean")] {
+        if input.get(key).is_some_and(|v| !v.is_null() && !v.is_boolean()) {
+            return Err(ValidationError(format!(
+                "ScheduleWakeup: `{key}` must be a {ty}"
+            )));
+        }
+    }
+    let delay = coerce_delay(input.get("delaySeconds"))?;
+    let reason = input.get("reason").and_then(Value::as_str);
+    if delay.is_none() || reason.is_none() {
+        return Err(ValidationError(
+            "`delaySeconds` and `reason` are required when `stop` is not true.".into(),
+        ));
+    }
+    if input.get("prompt").and_then(Value::as_str).is_none() {
+        return Err(ValidationError(
+            "`prompt` is required when `stop` is not true.".into(),
+        ));
+    }
+    if input.get("noop").and_then(Value::as_bool).is_none() {
+        return Err(ValidationError(
+            "`noop` is required when `stop` is not true.".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -483,23 +869,21 @@ impl Tool for ScheduleWakeupTool {
         &SCHEMA
     }
     fn output_schema(&self) -> Option<&Value> {
-        // PARITY: binary `get outputSchema(){return O7p()}` (cc_all.txt:507964).
         Some(&OUTPUT_SCHEMA)
     }
     fn search_hint(&self) -> Option<&str> {
-        // PARITY: binary `searchHint:"self-pace next iteration: pick a delay
-        // before resuming work or running the next /loop tick"`
-        // (cc_all.txt:507964 / string-table 487571).
-        Some("self-pace next iteration: pick a delay before resuming work or running the next /loop tick")
+        Some(SEARCH_HINT)
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
-        // Matches the cron tools: enablement is registration/scheduler-level
-        // (the tool is only registered in the MAIN session loop and is in the
-        // subagent denylist `NKE_BASE`).
+        // Binary: no `isEnabled` — always available where registered (main
+        // session only; denylisted for subagents).
+        true
+    }
+    fn should_defer(&self) -> bool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        100_000
+        1000
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -517,6 +901,20 @@ impl Tool for ScheduleWakeupTool {
         InterruptBehavior::Block
     }
 
+    /// PARITY 2.1.263 `create({permissions})`:
+    /// `if(mode==="auto") return {behavior:"passthrough", message:"Scheduling a
+    /// /loop wakeup requires classifier review."}; return {behavior:"allow", updatedInput}`.
+    ///
+    /// The port has no `passthrough` variant and needs none. In the binary a
+    /// tool-local `allow` SHORT-CIRCUITS the permission pipeline, so auto mode
+    /// has to decline explicitly or the classifier never sees the call. Here the
+    /// tool-local result is not a bypass: `ToolInvoker` reads it only to honour a
+    /// `Deny` and to route a protected `Ask`, then runs the outer permission gate
+    /// regardless (`tool_invoker_impl.rs`, the only dispatch path). An auto-mode
+    /// branch would therefore change nothing — and there is no classifier to hand
+    /// off to either (`tools/agent/src/classifier_handoff.rs` documents that
+    /// subsystem as absent). Revisit this if a tool-local `Allow` ever becomes
+    /// authoritative.
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
@@ -530,15 +928,14 @@ impl Tool for ScheduleWakeupTool {
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        // PARITY: binary `async description(){return XVi}` (cc_all.txt:507964).
         DESCRIPTION.into()
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        // PARITY: binary `async prompt(){return JVi}` (cc_all.txt:507964) — the
-        // long multi-section prompt, NOT the short description. (Bug-fix: this
-        // surface previously returned the short DESCRIPTION.)
-        PROMPT.into()
+        // LingXi is multi-provider and has no uniform Anthropic prompt-cache TTL
+        // signal, so it emits the variant the binary uses when its two TTL
+        // signals disagree.
+        build_prompt(PromptCacheTtl::Unknown)
     }
 
     async fn validate_input(
@@ -546,29 +943,7 @@ impl Tool for ScheduleWakeupTool {
         input: &Value,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        // PARITY: binary P7p declares delaySeconds as `oU(A.number())` —
-        // OPTIONAL/nullable (NOT in `required`). When absent, the binary's
-        // `nqd(undefined)` treats it as NaN → clamps to the minimum (60s). So we
-        // only reject a delaySeconds that is PRESENT but non-number.
-        if input.get("delaySeconds").is_some()
-            && !input.get("delaySeconds").is_some_and(Value::is_null)
-            && input.get("delaySeconds").and_then(Value::as_f64).is_none()
-        {
-            return Err(ValidationError(
-                "ScheduleWakeup: non-number delaySeconds".into(),
-            ));
-        }
-        if input.get("reason").and_then(Value::as_str).is_none() {
-            return Err(ValidationError(
-                "ScheduleWakeup: missing or non-string reason".into(),
-            ));
-        }
-        if input.get("prompt").and_then(Value::as_str).is_none() {
-            return Err(ValidationError(
-                "ScheduleWakeup: missing or non-string prompt".into(),
-            ));
-        }
-        Ok(())
+        validate_wakeup_input(input)
     }
 
     async fn call(
@@ -580,123 +955,68 @@ impl Tool for ScheduleWakeupTool {
         let started = Instant::now();
         let bus = self.ctx.bus.clone();
 
-        // PARITY: delaySeconds is OPTIONAL (binary `oU(A.number())`). Absent ⇒
-        // NaN, which `clamp_delay_seconds` floors to the [60,3600] minimum (the
-        // binary's `nqd(NaN)` → 60s), and which makes `wasClamped` true.
-        let raw_delay = input
-            .get("delaySeconds")
-            .and_then(Value::as_f64)
-            .unwrap_or(f64::NAN);
-        let reason = match input.get("reason").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
-            None => {
-                emit_failed(&bus, "missing_reason", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::InvalidInput(
-                    "ScheduleWakeup: missing or non-string reason".into(),
-                ));
-            }
-        };
-        let prompt = match input.get("prompt").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
-            None => {
-                emit_failed(&bus, "missing_prompt", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::InvalidInput(
-                    "ScheduleWakeup: missing or non-string prompt".into(),
-                ));
-            }
-        };
+        // PARITY: `if(p===!0) return {…stopped:!0, cancelledWakeups: ZXn()}`.
+        if input.get("stop").and_then(Value::as_bool) == Some(true) {
+            let cancelled = stop_dynamic_loop(self.wakeup.get()).await;
+            emit_completed(&bus, started.elapsed().as_millis() as u64, false).await;
+            return Ok(stopped_result(cancelled));
+        }
 
-        // Runtime CLAMPS delaySeconds to [60, 3600] (spec line 146).
-        let delay_secs = clamp_delay_seconds(raw_delay);
+        if let Err(ValidationError(message)) = validate_wakeup_input(&input) {
+            emit_failed(&bus, "invalid_input", started.elapsed().as_millis() as u64).await;
+            return Err(ToolError::InvalidInput(message));
+        }
+        let raw_delay = coerce_delay(input.get("delaySeconds"))
+            .ok()
+            .flatten()
+            .unwrap_or(f64::NAN);
+        let reason = input
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let prompt = input
+            .get("prompt")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
 
         let mut md: LogEventMetadata = HashMap::new();
         md.insert("tool_name".into(), verified_str(SCHEDULE_WAKEUP_TOOL_NAME));
-        md.insert("delay_seconds".into(), AnalyticsValue::Int(delay_secs));
+        md.insert(
+            "delay_seconds".into(),
+            AnalyticsValue::Int(clamp_delay_seconds(raw_delay)),
+        );
         md.insert("_PROTO_reason".into(), pii_str(&reason));
         bus.log_event(STARTED, md).await;
 
-        // PARITY: binary `call()` gates on `q_e()` (isLoopDynamic) FIRST —
-        // `if(!q_e())return Vst("gate_off"),{data:{scheduledFor:0,
-        // clampedDelaySeconds:0,wasClamped:!1}}` (cc_all.txt:507964). With
-        // `tengu_kairos_loop_dynamic` off (the shipped default) ScheduleWakeup is
-        // a no-op that ends the loop. The clamp is computed only on the success
-        // path (inside `aKi`/`cKi`), so the gate-off return is a literal zero
-        // triple.
-        if !crate::autonomous_loop::is_loop_dynamic_enabled() {
-            telemetry::emit_loop_ended("gate_off", None);
-            emit_completed(&bus, started.elapsed().as_millis() as u64, false).await;
-            return Ok(zero_triple_result(&reason));
-        }
-
-        // PARITY: `wasClamped` is true iff the rounded request fell outside
-        // [60,3600] (binary `nqd`: `r=!Number.isFinite(e)||t!==n`).
-        let was_clamped = !raw_delay.is_finite() || raw_delay.round() as i64 != delay_secs;
-
-        // Fire the one-shot wakeup if a scheduler is wired. A host with no
-        // scheduler cell (mobile / offline / CLI own no per-connection queue) is
-        // the port's stand-in for the binary's `aKi(...)===null` branch — return
-        // the zero triple and emit NO loop telemetry (the binary emits the
-        // scheduled/aged-out events INSIDE `aKi`, not on the null return).
+        // A host with no scheduler cell owns no message queue to fire into: the
+        // binary's `aKi(...) === null` stand-in — zero triple, no loop telemetry.
         let Some(wakeup) = self.wakeup.get() else {
             emit_completed(&bus, started.elapsed().as_millis() as u64, false).await;
             return Ok(zero_triple_result(&reason));
         };
-        wakeup
-            .schedule(
-                Duration::from_secs(delay_secs as u64),
-                prompt.clone(),
-                reason.clone(),
-            )
-            .await;
 
-        // PARITY: binary `cKi` resets the consecutive-keepalive counter on any
-        // NON-keepalive schedule (`if(!r)nAt(0)`) — i.e. when the model itself
-        // calls ScheduleWakeup, the keepalive budget is refreshed. Also record the
-        // reschedule (the port's `Xke()=true` signal) so the turn-end keepalive
-        // check sees the model rescheduled and does NOT arm a fallback.
-        if let Some(runtime) = wakeup.loop_runtime() {
-            runtime.set_consecutive_keepalives(0);
-            runtime.mark_rescheduled();
-        } else {
-            crate::autonomous_loop::set_loop_consecutive_keepalives(0);
-            crate::autonomous_loop::mark_loop_rescheduled();
-        }
-
-        // PARITY: binary `cKi` success emit — `chosen_delay_seconds` is the RAW
-        // requested delay (`Number.isFinite(e)?e:0`, NOT rounded); `reason_length`
-        // is JS `String.length` = UTF-16 code units (`o?.length??0`);
-        // `superseded_count` 0 (the port's single-shot scheduler has no multi-loop
-        // cron registry to supersede).
-        let chosen = if raw_delay.is_finite() {
-            raw_delay
-        } else {
-            0.0
+        let Some(scheduled) =
+            schedule_dynamic_wakeup(wakeup, raw_delay, &prompt, Some(&reason), false).await
+        else {
+            emit_completed(&bus, started.elapsed().as_millis() as u64, false).await;
+            return Ok(zero_triple_result(&reason));
         };
-        telemetry::emit_loop_dynamic_wakeup_scheduled(
-            chosen,
-            delay_secs as u64,
-            was_clamped,
-            reason.encode_utf16().count(),
-            0,
-        );
         emit_completed(&bus, started.elapsed().as_millis() as u64, true).await;
 
-        // PARITY: success result `{scheduledFor:r.scheduledFor,
-        // clampedDelaySeconds:r.clampedDelaySeconds, wasClamped:r.wasClamped}` (O7p).
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        let scheduled_for: i64 = now_ms + delay_secs * 1000;
-
-        // PARITY: binary `mapToolResultToToolResultBlockParam` (cc_all.txt:507964)
-        // — string-table 487586-487588: `new Date(e).toTimeString().slice(0,8)` =
-        // local HH:MM:SS; `s=Math.max(0,Math.round((e-Date.now())/1000))`; clamp
-        // suffix ` (clamped to ${t}s from your requested value)`.
-        let hhmmss = local_hhmmss(scheduled_for);
-        let secs = ((scheduled_for - now_ms) as f64 / 1000.0).round().max(0.0) as i64;
-        let clamped_suffix = if was_clamped {
-            format!(" (clamped to {delay_secs}s from your requested value)")
+        // PARITY: `mapToolResultToToolResultBlockParam` — local HH:MM:SS,
+        // `Math.max(0, Math.round((e - Date.now())/1000))`, clamp suffix.
+        let now_ms = now_epoch_ms();
+        let hhmmss = local_hhmmss(scheduled.scheduled_for_ms);
+        let secs = ((scheduled.scheduled_for_ms - now_ms) as f64 / 1000.0)
+            .round()
+            .max(0.0) as i64;
+        let clamped_suffix = if scheduled.was_clamped {
+            format!(
+                " (clamped to {}s from your requested value)",
+                scheduled.clamped_delay_seconds
+            )
         } else {
             String::new()
         };
@@ -704,26 +1024,13 @@ impl Tool for ScheduleWakeupTool {
             "Next wakeup scheduled for {hhmmss} (in {secs}s){clamped_suffix}. Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives."
         );
 
-        Ok(ToolCallResult {
-            data: json!({
-                // PARITY: binary O7p result fields.
-                "scheduledFor": scheduled_for,
-                "clampedDelaySeconds": delay_secs,
-                "wasClamped": was_clamped,
-                // The model-facing rendered text (turn_loop's
-                // `tool_result_to_model_text` prefers `model_content`), mirroring
-                // the binary's `mapToolResultToToolResultBlockParam`.
-                "model_content": model_content,
-                // Telemetry/host convenience (not model-visible): keep `reason`
-                // for the surface that records it.
-                "reason": reason,
-            }),
-            model_content: None,
-            new_messages: vec![],
-            context_modifier: None,
-            is_error: false,
-            mcp_meta: None,
-        })
+        Ok(result(json!({
+            "scheduledFor": scheduled.scheduled_for_ms,
+            "clampedDelaySeconds": scheduled.clamped_delay_seconds,
+            "wasClamped": scheduled.was_clamped,
+            "model_content": model_content,
+            "reason": reason,
+        })))
     }
 }
 
@@ -731,6 +1038,7 @@ impl Tool for ScheduleWakeupTool {
 mod tests {
     use super::*;
     use platform_api::process::ProcessOutput;
+    use std::sync::Mutex;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx_in};
 
     fn dummy_out() -> ProcessOutput {
@@ -742,571 +1050,530 @@ mod tests {
         }
     }
 
+    /// Serialize tests that touch the process-global loop state, and start each
+    /// from a clean slate.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        let g = al::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        al::reset_loop_runtime_state();
+        al::reset_autonomous_loop_delivered();
+        std::env::remove_var("LINGXI_LOOP_KEEPALIVE");
+        telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
+        g
+    }
+
+    /// A scheduler that records calls and can cancel what it armed.
+    struct Rec {
+        calls: Mutex<Vec<(Duration, String, String)>>,
+        /// Prompts of the wakeups still pending (what `cancel_pending` returns).
+        pending: Mutex<Vec<String>>,
+    }
+    impl Rec {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                calls: Mutex::new(Vec::new()),
+                pending: Mutex::new(Vec::new()),
+            })
+        }
+    }
+    #[async_trait]
+    impl WakeupScheduler for Rec {
+        async fn schedule(&self, delay: Duration, prompt: String, reason: String) {
+            self.calls.lock().unwrap().push((delay, prompt.clone(), reason));
+            self.pending.lock().unwrap().push(prompt);
+        }
+        async fn cancel_pending(&self) -> Vec<String> {
+            std::mem::take(&mut *self.pending.lock().unwrap())
+        }
+    }
+
+    fn tool_with(rec: Arc<Rec>) -> ScheduleWakeupTool {
+        let tmp = tempfile::tempdir().unwrap();
+        ScheduleWakeupTool::with_scheduler(
+            shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()),
+            rec,
+        )
+    }
+
     #[test]
     fn constants_locked() {
         assert_eq!(SCHEDULE_WAKEUP_TOOL_NAME, "ScheduleWakeup");
         assert_eq!(MIN_DELAY_SECONDS, 60);
         assert_eq!(MAX_DELAY_SECONDS, 3600);
-        assert_eq!(
-            AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
-            "<<autonomous-loop-dynamic>>"
-        );
+        assert_eq!(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL, "<<autonomous-loop-dynamic>>");
+        assert_eq!(KEEPALIVE_DELAY_SECONDS, 1200);
+        assert_eq!(KEEPALIVE_BUDGET, 1);
+        assert_eq!(LOOP_MAX_AGE_MS, 7 * 24 * 60 * 60 * 1000);
+        assert_eq!(CACHE_TTL_MS, 300_000);
+        assert_eq!(CACHE_LEAD_MS, 15_000);
     }
 
+    // PARITY 2.1.263 `F(e)`: NaN→60, +∞→3600, −∞→60, else Math.round; then
+    // clamp; wasClamped = !isFinite || rounded !== clamped.
     #[test]
-    fn clamp_bounds() {
-        assert_eq!(clamp_delay_seconds(10.0), 60);
-        assert_eq!(clamp_delay_seconds(59.9), 60);
-        assert_eq!(clamp_delay_seconds(60.0), 60);
-        assert_eq!(clamp_delay_seconds(600.0), 600);
-        assert_eq!(clamp_delay_seconds(3600.0), 3600);
-        assert_eq!(clamp_delay_seconds(9999.0), 3600);
-        // Fractional floors after clamping.
-        assert_eq!(clamp_delay_seconds(600.9), 600);
-        // Non-finite (NaN / ±inf) -> minimum tick (defensive).
+    fn clamp_and_round_match_the_binary() {
         assert_eq!(clamp_delay_seconds(f64::NAN), 60);
-        assert_eq!(clamp_delay_seconds(f64::INFINITY), 60);
+        assert_eq!(clamp_delay_seconds(f64::INFINITY), 3600);
         assert_eq!(clamp_delay_seconds(f64::NEG_INFINITY), 60);
+        assert_eq!(clamp_delay_seconds(600.9), 601, "Math.round, not floor");
+        assert_eq!(clamp_delay_seconds(600.5), 601, "JS rounds half up");
+        assert_eq!(clamp_delay_seconds(59.4), 60);
+        assert_eq!(clamp_delay_seconds(-5.0), 60);
+        assert_eq!(clamp_delay_seconds(4000.0), 3600);
+        assert_eq!(clamp_delay_seconds(1e300), 3600);
+        assert!(!delay_was_clamped(600.9));
+        assert!(!delay_was_clamped(60.0));
+        assert!(!delay_was_clamped(3600.0));
+        assert!(delay_was_clamped(59.4));
+        assert!(delay_was_clamped(3600.6));
+        assert!(delay_was_clamped(f64::NAN));
+        assert!(delay_was_clamped(f64::INFINITY));
+    }
+
+    // PARITY 2.1.263 `F(e)` + `P(m)`: the wakeup lands on a whole minute at or
+    // after `now + delay`; inside the 5-minute cache window it is pulled back by
+    // whole minutes to stay ≥ 15 s ahead of the cache cliff.
+    #[test]
+    fn wakeup_target_is_minute_aligned_with_cache_lead() {
+        let now = 1_700_000_010_000; // 1700000010 s ≡ 30 s past the minute
+        let t = wakeup_target(1200.0, now);
+        assert_eq!(t.clamped_delay_seconds, 1200);
+        assert!(!t.was_clamped);
+        assert_eq!(t.target_ms % 60_000, 0);
+        assert_eq!(t.target_ms, now + 1230 * 1000, "ceil to the next minute");
+        // 300 s requested from hh:mm:30 → hh:mm+6:00 (330 s) is past the
+        // 285 s cache lead → pulled back to hh:mm+5:00 (270 s).
+        let t = wakeup_target(300.0, now);
+        assert_eq!(t.target_ms, now + 270 * 1000);
+        // 60 s from hh:mm:30 → next minute is only 30 s out and the pull-back
+        // floor (≥ 60 s) forbids going earlier, so it stays at hh:mm+1:00.
+        let t = wakeup_target(60.0, now);
+        assert_eq!(t.target_ms, now + 90 * 1000);
+        // Already on a minute boundary (1700000040 s ≡ :00): no rounding.
+        let t = wakeup_target(120.0, 1_700_000_040_000);
+        assert_eq!(t.target_ms, 1_700_000_040_000 + 120_000);
     }
 
     #[test]
-    fn schema_shape() {
-        let s = &*SCHEMA;
-        // PARITY: binary P7p `strictObject` ⇒ additionalProperties:false; only
-        // reason + prompt are required (delaySeconds is `oU(A.number())`).
-        assert_eq!(s["additionalProperties"], json!(false));
-        assert_eq!(s["required"], json!(["reason", "prompt"]));
-        assert!(s["properties"]["delaySeconds"].is_object());
-        assert!(s["properties"]["reason"].is_object());
-        assert!(s["properties"]["prompt"].is_object());
-    }
-
-    #[test]
-    fn schema_param_descriptions_byte_exact() {
-        // PARITY: binary P7p `.describe(...)` strings (cc_all.txt:507964 /
-        // string-table 487572-487574).
-        let s = &*SCHEMA;
+    fn schema_matches_uqo() {
+        let props = SCHEMA["properties"].as_object().unwrap();
         assert_eq!(
-            s["properties"]["delaySeconds"]["description"],
-            json!("Seconds from now to wake up. Clamped to [60, 3600] by the runtime.")
+            props.keys().cloned().collect::<Vec<_>>(),
+            vec!["delaySeconds", "reason", "prompt", "stop", "noop"]
+        );
+        assert!(SCHEMA.get("required").is_none(), "nothing is required at the schema level");
+        assert_eq!(SCHEMA["additionalProperties"], json!(false));
+        assert_eq!(
+            props["delaySeconds"]["description"],
+            json!("Seconds from now to wake up. Clamped to [60, 3600] by the runtime. Required unless `stop` is true.")
         );
         assert_eq!(
-            s["properties"]["reason"]["description"],
-            json!("One short sentence explaining the chosen delay. Goes to telemetry and is shown to the user. Be specific.")
+            props["reason"]["description"],
+            json!("One short sentence explaining the chosen delay. Goes to telemetry and is shown to the user. Be specific. Required unless `stop` is true.")
         );
         assert_eq!(
-            s["properties"]["prompt"]["description"],
-            json!("The /loop input to fire on wake-up. Pass the same /loop input verbatim each turn so the next firing re-enters the skill and continues the loop. For autonomous /loop (no user prompt), pass the literal sentinel `<<autonomous-loop-dynamic>>` instead (the dynamic-pacing variant, not the CronCreate-mode `<<autonomous-loop>>`).")
-        );
-    }
-
-    #[test]
-    fn output_schema_byte_exact() {
-        // PARITY: binary O7p (cc_all.txt:507964 / string-table 487576-487578).
-        let s = OUTPUT_SCHEMA.clone();
-        assert_eq!(
-            s["properties"]["scheduledFor"]["description"],
-            json!("Epoch ms timestamp when the next wakeup will fire")
+            props["prompt"]["description"],
+            json!("The /loop input to fire on wake-up. Pass the same /loop input verbatim each turn so the next firing re-enters the skill and continues the loop. For autonomous /loop (no user prompt), pass the literal sentinel `<<autonomous-loop-dynamic>>` instead (the dynamic-pacing variant, not the CronCreate-mode `<<autonomous-loop>>`). Required unless `stop` is true.")
         );
         assert_eq!(
-            s["properties"]["clampedDelaySeconds"]["description"],
-            json!("Actual delay used after clamping to runtime bounds")
+            props["stop"]["description"],
+            json!("Set to true to end the dynamic loop immediately instead of scheduling another wakeup. When true, all other fields are ignored and no further wakeups fire.")
         );
         assert_eq!(
-            s["properties"]["wasClamped"]["description"],
-            json!("True if the requested delaySeconds was outside [60, 3600]")
+            props["noop"]["description"],
+            json!("true = nothing changed (you checked and there is nothing to report). false = something happened worth keeping (edited a file, posted a message, advanced state, surfaced a finding). Consecutive noop:true ticks are collapsed in the user's terminal view and tracked as a streak. Required unless `stop` is true.")
         );
-        assert_eq!(s["properties"]["scheduledFor"]["type"], json!("number"));
+        let out = OUTPUT_SCHEMA["properties"].as_object().unwrap();
         assert_eq!(
-            s["properties"]["clampedDelaySeconds"]["type"],
-            json!("number")
+            out.keys().cloned().collect::<Vec<_>>(),
+            vec!["scheduledFor", "clampedDelaySeconds", "wasClamped", "stopped", "cancelledWakeups"]
         );
-        assert_eq!(s["properties"]["wasClamped"]["type"], json!("boolean"));
-    }
-
-    #[test]
-    fn description_byte_exact() {
-        // PARITY: binary XVi (cc_all.txt:504908) — the short description.
         assert_eq!(
-            DESCRIPTION,
-            "Schedule when to resume work in /loop dynamic mode (always pass the `prompt` arg). Call before ending the turn to keep the loop alive; omit the call to end it."
+            out["cancelledWakeups"]["description"],
+            json!("How many pending dynamic-loop wakeups stop:true cancelled. 0 means nothing was pending — a recurring /loop cron is not cancelled by stop:true.")
         );
     }
 
-    #[test]
-    fn prompt_byte_exact() {
-        // PARITY: binary JVi (cc_all.txt:504909-504927) — the long prompt. Spot
-        // the section headers + sentinel interpolation + trailing newline, and
-        // that it is DISTINCT from the short description.
-        assert_ne!(PROMPT, DESCRIPTION);
-        assert!(PROMPT.starts_with(
-            "Schedule when to resume work in /loop dynamic mode — the user invoked /loop without an interval"
-        ));
-        assert!(PROMPT.contains("## Picking delaySeconds"));
-        assert!(PROMPT.contains("## The reason field"));
-        assert!(PROMPT.contains("`<<autonomous-loop-dynamic>>`"));
-        assert!(PROMPT.contains("`<<autonomous-loop>>`"));
-        assert!(PROMPT.contains("ScheduleWakeup always uses the `-dynamic` variant"));
-        assert!(PROMPT.contains("don't burn cache 12× per hour"));
-        assert!(PROMPT.contains("**1200s–1800s** (20–30 min)"));
-        assert!(PROMPT.contains("The runtime clamps to [60, 3600]"));
-        // Trailing newline reproduced from the binary template literal.
-        assert!(PROMPT.ends_with("make it specific.\n"));
-    }
-
-    #[test]
-    fn search_hint_byte_exact() {
-        // PARITY: binary searchHint (cc_all.txt:507964 / string-table 487571).
-        let tmp = tempfile::tempdir().unwrap();
-        let tool =
-            ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+    #[tokio::test]
+    async fn description_search_hint_and_prompt_surface() {
+        let tool = tool_with(Rec::new());
+        assert_eq!(
+            tool.description(&json!({}), &DescriptionOptions { is_non_interactive_session: false }).await,
+            "Schedule when to resume work in /loop dynamic mode (always pass the `prompt` arg unless stopping). Call before ending the turn to keep the loop alive; call with `stop: true` to end the loop immediately."
+        );
         assert_eq!(
             tool.search_hint(),
-            Some("self-pace next iteration: pick a delay before resuming work or running the next /loop tick")
+            Some("self-pace the dynamic /loop: pick a delay before the next tick, or stop/end/cancel the dynamic loop with stop:true (a fixed-interval /loop is a recurring cron — cancel it with CronDelete)")
+        );
+        assert_eq!(tool.max_result_size_chars(), 1000);
+        assert!(tool.should_defer());
+        let prompt = tool.prompt(&PromptOptions::default()).await;
+        // Structure of `iZn`: intro, noop, delay guidance, reason — blank-line
+        // separated, trailing newline. Lengths are the oracle-derived sizes of
+        // the three variants (chars / bytes: 3148/3180, 3396/3433, 3197/3227).
+        assert_eq!(prompt, build_prompt(PromptCacheTtl::Unknown));
+        assert_eq!(prompt.chars().count(), 3197);
+        assert_eq!(prompt.len(), 3227);
+        assert_eq!(build_prompt(PromptCacheTtl::OneHour).len(), 3180);
+        assert_eq!(build_prompt(PromptCacheTtl::FiveMinutes).len(), 3433);
+        assert!(prompt.starts_with("Schedule when to resume work in /loop dynamic mode — the user invoked /loop without an interval"));
+        assert!(prompt.contains("no further wakeups fire.\n\nSet `noop: true` if nothing changed"));
+        assert!(prompt.contains("Omit `noop` when stopping (`stop: true`).\n\n## Picking delaySeconds\n\nThe Anthropic prompt cache decides how expensive a wake-up is"));
+        assert!(prompt.ends_with("so you don't need to clamp yourself.\n\n## The reason field\n\nOne short sentence on what you chose and why. Goes to telemetry and is shown back to the user. \"watching CI run\" beats \"waiting.\" The user reads this to understand what you're doing without having to predict your cadence in advance — make it specific.\n"));
+        assert!(build_prompt(PromptCacheTtl::FiveMinutes).contains("you don't burn cache 12× per hour"));
+    }
+
+    // PARITY 2.1.263 `ScheduleWakeupInputError` messages.
+    #[tokio::test]
+    async fn required_unless_stop() {
+        let tool = tool_with(Rec::new());
+        let tool = &tool;
+        let err = |v: Value| async move {
+            let ctx = fresh_ctx();
+            tool.validate_input(&v, &ctx).await.err().map(|e| e.0)
+        };
+        assert_eq!(
+            err(json!({"reason": "r", "prompt": "p", "noop": true})).await.as_deref(),
+            Some("`delaySeconds` and `reason` are required when `stop` is not true.")
+        );
+        assert_eq!(
+            err(json!({"delaySeconds": 120, "prompt": "p", "noop": true})).await.as_deref(),
+            Some("`delaySeconds` and `reason` are required when `stop` is not true.")
+        );
+        assert_eq!(
+            err(json!({"delaySeconds": 120, "reason": "r", "noop": true})).await.as_deref(),
+            Some("`prompt` is required when `stop` is not true.")
+        );
+        assert_eq!(
+            err(json!({"delaySeconds": 120, "reason": "r", "prompt": "p"})).await.as_deref(),
+            Some("`noop` is required when `stop` is not true.")
+        );
+        assert_eq!(err(json!({"delaySeconds": 120, "reason": "r", "prompt": "p", "noop": false})).await, None);
+        // `DM(number)` coerces a numeric string; `stop: true` needs nothing else.
+        assert_eq!(err(json!({"delaySeconds": "120", "reason": "r", "prompt": "p", "noop": true})).await, None);
+        assert_eq!(err(json!({"stop": true})).await, None);
+        assert!(err(json!({"delaySeconds": "soon", "reason": "r", "prompt": "p", "noop": true})).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn call_schedules_minute_aligned_wakeup_and_resets_keepalives() {
+        let _s = serial();
+        let rec = Rec::new();
+        let tool = tool_with(rec.clone());
+        al::set_loop_consecutive_keepalives(1);
+        let before = now_epoch_ms();
+        let out = tool
+            .call(
+                json!({"delaySeconds": 9999, "reason": "idle tick", "prompt": "5m /x", "noop": true}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        let scheduled_for = out.data["scheduledFor"].as_i64().unwrap();
+        assert_eq!(scheduled_for % 60_000, 0, "whole-minute target");
+        assert!(scheduled_for >= before + 3600 * 1000);
+        assert_eq!(out.data["clampedDelaySeconds"], json!(3600));
+        assert_eq!(out.data["wasClamped"], json!(true));
+        let mc = out.data["model_content"].as_str().unwrap();
+        assert!(mc.starts_with("Next wakeup scheduled for "));
+        assert!(mc.contains("(clamped to 3600s from your requested value)"));
+        assert!(mc.ends_with(". Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives."));
+        let calls = rec.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0 >= Duration::from_secs(3600) && calls[0].0 <= Duration::from_secs(3660));
+        assert_eq!(calls[0].1, "5m /x");
+        assert_eq!(calls[0].2, "idle tick");
+        drop(calls);
+        assert_eq!(al::loop_consecutive_keepalives(), 0, "a model call resets the keepalive budget");
+        assert!(al::take_loop_rescheduled());
+        assert!(!al::loop_ended());
+        let record = al::dynamic_loop_record("5m /x").unwrap();
+        assert_eq!(record.last_scheduled_for_ms, scheduled_for);
+        assert!(!record.aged_out);
+    }
+
+    #[tokio::test]
+    async fn call_supersedes_pending_wakeups() {
+        let _s = serial();
+        let rec = Rec::new();
+        let tool = tool_with(rec.clone());
+        for _ in 0..2 {
+            tool.call(
+                json!({"delaySeconds": 120, "reason": "r", "prompt": "p", "noop": false}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        }
+        // Each schedule first cancels what was pending (binary `x()`), so at
+        // most one wakeup is ever armed.
+        assert_eq!(rec.pending.lock().unwrap().len(), 1);
+        assert_eq!(rec.calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn stop_true_cancels_pending_and_ends_loop() {
+        let _s = serial();
+        let rec = Rec::new();
+        let tool = tool_with(rec.clone());
+        tool.call(
+            json!({"delaySeconds": 120, "reason": "r", "prompt": "p", "noop": false}),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("ok");
+        al::begin_loop_tick("p".into());
+        al::set_loop_consecutive_keepalives(1);
+        let out = tool
+            .call(json!({"stop": true}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(out.data["stopped"], json!(true));
+        assert_eq!(out.data["cancelledWakeups"], json!(1));
+        assert_eq!(out.data["scheduledFor"], json!(0));
+        assert_eq!(
+            out.data["model_content"],
+            json!("Loop stopped — cancelled 1 pending wakeup(s); no further dynamic-loop wakeups scheduled. If you armed a Monitor for this loop, TaskStop it now; otherwise nothing more to do this turn.")
+        );
+        assert!(al::loop_ended());
+        assert_eq!(al::loop_consecutive_keepalives(), 0);
+        assert!(al::loop_tick_in_flight_prompt().is_none(), "in-flight tick dropped");
+        // Nothing pending: the zero-count wording names the recurring-cron caveat.
+        let again = tool
+            .call(json!({"stop": true, "delaySeconds": 5}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(again.data["cancelledWakeups"], json!(0));
+        assert_eq!(
+            again.data["model_content"],
+            json!("Loop stopped — any dynamic loop in this session is ended; there was no pending wakeup to cancel. If you are running a fixed-interval /loop (a recurring cron), it is NOT stopped by this call — cancel it with CronDelete. If you armed a Monitor for this loop, TaskStop it now; otherwise nothing more to do this turn.")
+        );
+        // Stopping without a wired scheduler still succeeds.
+        let tmp = tempfile::tempdir().unwrap();
+        let unwired = ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let out = unwired
+            .call(json!({"stop": true}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(out.data["cancelledWakeups"], json!(0));
+    }
+
+    /// PARITY `ZXn` → `Ort(prompt)` (`sessionCron.forgetChainStart`): stopping a
+    /// loop drops the per-prompt chain-start record, so a later `/loop` on the
+    /// same prompt is a NEW loop rather than one that inherits the stopped
+    /// loop's `startedAt` (and would age out on its first wakeup).
+    #[tokio::test]
+    async fn stop_forgets_the_cancelled_loops_chain_start() {
+        let _s = serial();
+        let rec = Rec::new();
+        let tool = tool_with(rec.clone());
+        tool.call(
+            json!({"delaySeconds": 120, "reason": "r", "prompt": "p", "noop": false}),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("ok");
+        // Age the record past the 7-day cap while keeping its last wakeup recent,
+        // so the restart-gap escape hatch (`S`) does NOT apply.
+        let now = now_epoch_ms();
+        al::set_dynamic_loop_record(
+            "p",
+            DynamicLoopRecord {
+                started_at_ms: now - LOOP_MAX_AGE_MS - 1000,
+                last_scheduled_for_ms: now,
+                aged_out: false,
+            },
+        );
+
+        let out = tool
+            .call(json!({"stop": true}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(out.data["cancelledWakeups"], json!(1));
+        assert!(
+            al::dynamic_loop_record("p").is_none(),
+            "stop:true must forget the cancelled wakeup's chain start"
+        );
+
+        // Re-arming the same prompt schedules. Without the `Ort` sweep the stale
+        // record survives, the loop reads as 7 days old and this returns the
+        // aged-out zero triple instead.
+        let out = tool
+            .call(
+                json!({"delaySeconds": 120, "reason": "r", "prompt": "p", "noop": false}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        assert_ne!(
+            out.data["scheduledFor"],
+            json!(0),
+            "a restarted loop must not inherit the stopped loop's age"
         );
     }
 
-    #[test]
-    fn local_hhmmss_is_within_a_day() {
-        // Sanity: format is HH:MM:SS and components are in range.
-        let s = local_hhmmss(1_700_000_000_000);
-        let parts: Vec<&str> = s.split(':').collect();
-        assert_eq!(parts.len(), 3);
-        assert_eq!(s.len(), 8);
-        let h: i64 = parts[0].parse().unwrap();
-        let m: i64 = parts[1].parse().unwrap();
-        let sec: i64 = parts[2].parse().unwrap();
-        assert!((0..24).contains(&h));
-        assert!((0..60).contains(&m));
-        assert!((0..60).contains(&sec));
+    #[tokio::test]
+    async fn no_scheduler_returns_zero_triple() {
+        let _s = serial();
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let out = tool
+            .call(
+                json!({"delaySeconds": 120, "reason": "r", "prompt": "p", "noop": true}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(out.data["scheduledFor"], json!(0));
+        assert_eq!(out.data["clampedDelaySeconds"], json!(0));
+        assert_eq!(out.data["wasClamped"], json!(false));
+        assert_eq!(
+            out.data["model_content"],
+            json!("Wakeup not scheduled. The loop reached its maximum duration — the loop has ended; do not re-issue.")
+        );
+    }
+
+    // PARITY 2.1.263 `E(...)`: a loop older than `recurringMaxAgeMs` (7 days)
+    // since its first wakeup ends with `aged_out` and schedules nothing; a
+    // loop whose last wakeup is more than an hour stale restarts its clock.
+    #[tokio::test]
+    async fn aged_out_loop_schedules_nothing_until_it_restarts() {
+        let _s = serial();
+        let rec = Rec::new();
+        let tool = tool_with(rec.clone());
+        let now = now_epoch_ms();
+        al::set_dynamic_loop_record(
+            "old",
+            DynamicLoopRecord {
+                started_at_ms: now - LOOP_MAX_AGE_MS - 1000,
+                last_scheduled_for_ms: now - 10 * 60 * 1000,
+                aged_out: false,
+            },
+        );
+        let out = tool
+            .call(
+                json!({"delaySeconds": 120, "reason": "r", "prompt": "old", "noop": true}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(out.data["scheduledFor"], json!(0));
+        assert!(rec.calls.lock().unwrap().is_empty());
+        assert!(al::dynamic_loop_record("old").unwrap().aged_out);
+        assert!(al::loop_ended());
+        // A second call after aging out is silent (no double terminal event) and
+        // still schedules nothing.
+        let out = tool
+            .call(
+                json!({"delaySeconds": 120, "reason": "r", "prompt": "old", "noop": true}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(out.data["scheduledFor"], json!(0));
+        assert!(rec.calls.lock().unwrap().is_empty());
+        // Stale by more than an hour → treated as a fresh loop → schedules.
+        al::set_dynamic_loop_record(
+            "old",
+            DynamicLoopRecord {
+                started_at_ms: now - LOOP_MAX_AGE_MS - 1000,
+                last_scheduled_for_ms: now - 2 * 60 * 60 * 1000,
+                aged_out: true,
+            },
+        );
+        let out = tool
+            .call(
+                json!({"delaySeconds": 120, "reason": "r", "prompt": "old", "noop": true}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        assert_ne!(out.data["scheduledFor"], json!(0));
+        assert_eq!(rec.calls.lock().unwrap().len(), 1);
+        let record = al::dynamic_loop_record("old").unwrap();
+        assert!(!record.aged_out);
+        assert!(record.started_at_ms >= now);
+    }
+
+    #[tokio::test]
+    async fn keepalive_arms_once_then_exhausts_budget() {
+        let _s = serial();
+        let rec = Rec::new();
+        let sched: Arc<dyn WakeupScheduler> = rec.clone();
+        assert_eq!(arm_keepalive(&sched, "<<autonomous-loop-dynamic>>").await, KeepaliveOutcome::Armed);
+        {
+            let calls = rec.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert!(calls[0].0 >= Duration::from_secs(1200) && calls[0].0 <= Duration::from_secs(1260));
+            assert_eq!(calls[0].1, "<<autonomous-loop-dynamic>>", "the keepalive re-arms the ORIGINAL sentinel");
+        }
+        assert_eq!(al::loop_consecutive_keepalives(), 1);
+        assert_eq!(arm_keepalive(&sched, "<<autonomous-loop-dynamic>>").await, KeepaliveOutcome::BudgetExhausted);
+        assert_eq!(rec.calls.lock().unwrap().len(), 1);
+        assert!(al::loop_ended());
+    }
+
+    #[tokio::test]
+    async fn turn_end_keepalive_defaults_on_and_yields_to_a_model_reschedule() {
+        let _s = serial();
+        let rec = Rec::new();
+        let sched: Arc<dyn WakeupScheduler> = rec.clone();
+        // Not a loop tick → nothing.
+        assert_eq!(maybe_arm_keepalive(&sched).await, None);
+        // Loop tick, model silent → keepalive armed (gate default TRUE in 2.1.263).
+        al::begin_loop_tick("5m /x".into());
+        assert_eq!(maybe_arm_keepalive(&sched).await, Some(KeepaliveOutcome::Armed));
+        // Loop tick, model rescheduled → no keepalive.
+        al::begin_loop_tick("5m /x".into());
+        al::mark_loop_rescheduled();
+        assert_eq!(maybe_arm_keepalive(&sched).await, None);
+        // Gate off via the env var → no keepalive.
+        al::begin_loop_tick("5m /x".into());
+        std::env::set_var("LINGXI_LOOP_KEEPALIVE", "");
+        assert_eq!(maybe_arm_keepalive(&sched).await, None);
+        std::env::remove_var("LINGXI_LOOP_KEEPALIVE");
+        assert_eq!(rec.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn user_abort_cancels_pending_and_ends_loop() {
+        let _s = serial();
+        let rec = Rec::new();
+        let sched: Arc<dyn WakeupScheduler> = rec.clone();
+        assert_eq!(cancel_dynamic_loop_on_user_abort(&sched).await, 0);
+        assert!(!al::loop_ended(), "nothing to cancel → no terminal event");
+        sched.schedule(Duration::from_secs(60), "p".into(), "r".into()).await;
+        al::begin_loop_tick("p".into());
+        assert_eq!(cancel_dynamic_loop_on_user_abort(&sched).await, 1);
+        assert!(al::loop_ended());
+        assert!(al::loop_tick_in_flight_prompt().is_none());
+        note_loop_invoked(None);
+        assert!(!al::loop_ended(), "`/loop` clears the ended marker");
     }
 
     #[test]
     fn sentinel_resolution() {
-        // Serialize against the autonomous_loop resolution tests (shared DELIVERY
-        // global + `CLAUDE_CODE_LOOP_*` env).
-        let _serial = crate::autonomous_loop::TEST_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        // The resolver gate (`is_loop_default_prompt_enabled`) defaults OFF
-        // (binary `tengu_kairos_loop_prompt=false`, FLAG-ONLY); enable it via the
-        // test-only flag override so this test exercises resolution.
-        // (See `autonomous_loop::gate_off_passthrough` for the default-off path.)
-        telemetry::test_set_flag("tengu_kairos_loop_prompt", true);
-        // The DELIVERY global is shared; reset so first-delivery state is known.
-        crate::autonomous_loop::reset_autonomous_loop_delivered();
-        // The autonomous-dynamic sentinel expands to the REAL tick prompt
-        // (preamble + dynamic tick on first delivery).
-        let out = resolve_wakeup_prompt(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL);
-        assert_ne!(out, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL);
-        assert!(out.starts_with("# Autonomous loop check\n"));
-        assert!(out.contains("# Autonomous loop tick (dynamic pacing)"));
-        assert!(out.contains("ScheduleWakeup"));
-        // Whitespace around the sentinel still resolves (second delivery → short
-        // tick, so compare the tick suffix not the whole string).
-        let padded = resolve_wakeup_prompt("  <<autonomous-loop-dynamic>>  ");
-        assert!(padded.starts_with("# Autonomous loop tick (dynamic pacing)"));
-        // The sibling CronCreate-mode sentinel ALSO resolves now (binary J4d
-        // resolves all four sentinels) — to the cron-mode tick.
-        let cron = resolve_wakeup_prompt("<<autonomous-loop>>");
-        assert!(cron.contains("# Autonomous loop tick\n"));
-        assert!(cron.contains("do not call ScheduleWakeup from this tick."));
-        // Any other prompt passes through verbatim (NOT trimmed).
+        let _s = serial();
+        let resolved = resolve_wakeup_prompt("<<autonomous-loop-dynamic>>");
+        assert!(resolved.starts_with("# Autonomous loop check\n\n"));
+        assert!(resolved.contains("\n\n---\n\n# Autonomous loop tick (dynamic pacing)\n\n"));
         assert_eq!(resolve_wakeup_prompt("5m /babysit-prs"), "5m /babysit-prs");
-        assert_eq!(resolve_wakeup_prompt("  spaced  "), "  spaced  ");
-        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
+        assert_eq!(resolve_wakeup_prompt("  5m /x  "), "  5m /x  ", "real prompts are never trimmed");
     }
 
-    #[tokio::test]
-    async fn call_gate_off_returns_zero_triple() {
-        // PARITY: with tengu_kairos_loop_dynamic OFF (shipped default), binary
-        // call() gates off FIRST → Vst("gate_off") + the literal zero triple
-        // {scheduledFor:0, clampedDelaySeconds:0, wasClamped:false}. The clamp is
-        // computed only on the success path, so clampedDelaySeconds is 0 here even
-        // though delaySeconds=10 would clamp to 60 on success.
-        let _serial = crate::autonomous_loop::TEST_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
-        let tmp = tempfile::tempdir().unwrap();
-        let tool =
-            ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
-        let out = tool
-            .call(
-                json!({"delaySeconds": 10, "reason": "poll deploy", "prompt": "check the deploy"}),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .expect("ok");
-        assert_eq!(out.data["scheduledFor"], json!(0));
-        assert_eq!(out.data["clampedDelaySeconds"], json!(0));
-        assert_eq!(out.data["wasClamped"], json!(false));
-        let mc = out.data["model_content"].as_str().unwrap();
-        assert_eq!(
-            mc,
-            "Wakeup not scheduled. Either the /loop dynamic runtime gate is off or the loop reached its maximum duration — the loop has ended; do not re-issue."
-        );
-    }
-
-    #[tokio::test]
-    async fn call_dynamic_on_no_scheduler_returns_zero_triple() {
-        // PARITY: dynamic flag ON but no scheduler wired = the binary's
-        // `aKi(...)===null` branch → {scheduledFor:0, clampedDelaySeconds:0,
-        // wasClamped:false}, and NO loop telemetry (the binary emits inside aKi).
-        let _serial = crate::autonomous_loop::TEST_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
-        let tmp = tempfile::tempdir().unwrap();
-        let tool =
-            ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
-        let out = tool
-            .call(
-                json!({"delaySeconds": 600, "reason": "r", "prompt": "p"}),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .expect("ok");
-        assert_eq!(out.data["scheduledFor"], json!(0));
-        assert_eq!(out.data["clampedDelaySeconds"], json!(0));
-        assert_eq!(out.data["wasClamped"], json!(false));
-        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
-    }
-
-    #[tokio::test]
-    async fn call_absent_delay_clamps_to_min() {
-        // PARITY: delaySeconds optional (binary `oU(A.number())`); absent ⇒ NaN ⇒
-        // clamp to 60, wasClamped true. The clamp surfaces only on the SUCCESS
-        // path (dynamic flag on + scheduler wired).
-        use std::sync::Mutex;
-        struct Rec {
-            calls: Mutex<usize>,
-        }
-        #[async_trait]
-        impl WakeupScheduler for Rec {
-            async fn schedule(&self, _: Duration, _: String, _: String) {
-                *self.calls.lock().unwrap() += 1;
-            }
-        }
-        let _serial = crate::autonomous_loop::TEST_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
-        let rec = Arc::new(Rec {
-            calls: Mutex::new(0),
-        });
-        let tmp = tempfile::tempdir().unwrap();
-        let tool = ScheduleWakeupTool::with_scheduler(
-            shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()),
-            rec.clone(),
-        );
-        let out = tool
-            .call(
-                json!({"reason": "idle", "prompt": "<<autonomous-loop-dynamic>>"}),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .expect("ok");
-        assert_ne!(out.data["scheduledFor"], json!(0));
-        assert_eq!(out.data["clampedDelaySeconds"], json!(60));
-        assert_eq!(out.data["wasClamped"], json!(true));
-        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
-    }
-
-    #[tokio::test]
-    async fn call_with_scheduler_fires_and_resolves_sentinel() {
-        use std::sync::Mutex;
-
-        struct Recorder {
-            calls: Mutex<Vec<(Duration, String, String)>>,
-        }
-        #[async_trait]
-        impl WakeupScheduler for Recorder {
-            async fn schedule(&self, delay: Duration, prompt: String, reason: String) {
-                self.calls.lock().unwrap().push((delay, prompt, reason));
-            }
-        }
-
-        // PARITY: call() gates on is_loop_dynamic_enabled() (q_e) first; turn the
-        // flag on so the success path runs.
-        let _serial = crate::autonomous_loop::TEST_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
-        let rec = Arc::new(Recorder {
-            calls: Mutex::new(Vec::new()),
-        });
-        let tmp = tempfile::tempdir().unwrap();
-        let tool = ScheduleWakeupTool::with_scheduler(
-            shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()),
-            rec.clone(),
-        );
-        let out = tool
-            .call(
-                json!({"delaySeconds": 9999, "reason": "idle tick", "prompt": "5m /x"}),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .expect("ok");
-        // PARITY: scheduled ⇒ scheduledFor != 0; delaySeconds 9999 clamps to 3600.
-        assert_ne!(out.data["scheduledFor"], json!(0));
-        assert_eq!(out.data["clampedDelaySeconds"], json!(3600));
-        assert_eq!(out.data["wasClamped"], json!(true));
-        // PARITY: success model-text shows HH:MM:SS, "(in Ns)", clamp suffix.
-        let mc = out.data["model_content"].as_str().unwrap();
-        assert!(mc.starts_with("Next wakeup scheduled for "));
-        assert!(mc.contains("(clamped to 3600s from your requested value)"));
-        assert!(mc.ends_with(
-            ". Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives."
-        ));
-        let calls = rec.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, Duration::from_secs(3600));
-        // The tool passes the RAW prompt to the seam; the seam (composition root)
-        // applies `resolve_wakeup_prompt` just before enqueue.
-        assert_eq!(calls[0].1, "5m /x");
-        assert_eq!(calls[0].2, "idle tick");
-        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
-    }
-
-    #[tokio::test]
-    async fn cell_filled_after_construction_schedules() {
-        // The composition-root path: the tool is built with `new` (empty cell),
-        // then a host fills the SAME cell later via `wakeup_cell()` — exactly how
-        // `boot::assemble` attaches `MsgQueueWakeupScheduler` after `build`.
-        use std::sync::Mutex;
-
-        struct Recorder {
-            calls: Mutex<usize>,
-        }
-        #[async_trait]
-        impl WakeupScheduler for Recorder {
-            async fn schedule(&self, _: Duration, _: String, _: String) {
-                *self.calls.lock().unwrap() += 1;
-            }
-        }
-
-        // PARITY: call() gates on q_e first; keep the dynamic flag on so the
-        // FILLED-cell path actually schedules (the empty-cell path is the
-        // aKi-null stand-in → zero triple regardless).
-        let _serial = crate::autonomous_loop::TEST_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
-        let tmp = tempfile::tempdir().unwrap();
-        let tool =
-            ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
-        let cell = tool.wakeup_cell();
-
-        // Before the cell is filled, the tool is an honest no-op (aKi-null).
-        let before = tool
-            .call(
-                json!({"delaySeconds": 120, "reason": "r", "prompt": "p"}),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .expect("ok");
-        assert_eq!(before.data["scheduledFor"], json!(0));
-
-        // Host fills the cell post-construction.
-        let rec = Arc::new(Recorder {
-            calls: Mutex::new(0),
-        });
-        assert!(cell.set(rec.clone() as Arc<dyn WakeupScheduler>).is_ok());
-        // A second set is a no-op (OnceLock).
-        assert!(cell.set(rec.clone() as Arc<dyn WakeupScheduler>).is_err());
-
-        // Now the SAME tool instance schedules through the filled cell.
-        let after = tool
-            .call(
-                json!({"delaySeconds": 120, "reason": "r", "prompt": "p"}),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .expect("ok");
-        assert_ne!(after.data["scheduledFor"], json!(0));
-        assert_eq!(*rec.calls.lock().unwrap(), 1);
-        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
-    }
-
-    #[tokio::test]
-    async fn validate_input_rejects_missing_fields() {
-        let tmp = tempfile::tempdir().unwrap();
-        let tool =
-            ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
-        // PARITY: delaySeconds is OPTIONAL ⇒ absent is OK (so long as reason +
-        // prompt are present).
-        assert!(tool
-            .validate_input(&json!({"reason": "r", "prompt": "p"}), &fresh_ctx())
-            .await
-            .is_ok());
-        // But a PRESENT non-number delaySeconds is rejected.
-        assert!(tool
-            .validate_input(
-                &json!({"delaySeconds": "soon", "reason": "r", "prompt": "p"}),
-                &fresh_ctx()
-            )
-            .await
-            .is_err());
-        // Missing reason / prompt are still rejected.
-        assert!(tool
-            .validate_input(&json!({"delaySeconds": 60, "prompt": "p"}), &fresh_ctx())
-            .await
-            .is_err());
-        assert!(tool
-            .validate_input(&json!({"delaySeconds": 60, "reason": "r"}), &fresh_ctx())
-            .await
-            .is_err());
-        assert!(tool
-            .validate_input(
-                &json!({"delaySeconds": 60, "reason": "r", "prompt": "p"}),
-                &fresh_ctx()
-            )
-            .await
-            .is_ok());
-    }
-
-    // ── Keepalive (binary `lKi` / `useEffect`) ───────────────────────────────
-
-    use std::sync::Mutex as StdMutex;
-    struct KaRecorder {
-        calls: StdMutex<Vec<(Duration, String)>>,
-    }
-    #[async_trait]
-    impl WakeupScheduler for KaRecorder {
-        async fn schedule(&self, delay: Duration, prompt: String, _reason: String) {
-            self.calls.lock().unwrap().push((delay, prompt));
-        }
-    }
-
-    /// Serialize + reset the loop runtime globals + flags for keepalive tests.
-    fn ka_guard() -> std::sync::MutexGuard<'static, ()> {
-        let g = crate::autonomous_loop::TEST_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        crate::autonomous_loop::reset_loop_runtime_state();
-        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
-        telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
-        g
-    }
-
-    #[tokio::test]
-    async fn arm_keepalive_gate_off_ends_loop() {
-        let _g = ka_guard();
-        // q_e off → lKi returns gate_off, no schedule.
-        let rec = Arc::new(KaRecorder {
-            calls: StdMutex::new(Vec::new()),
-        });
-        let sched: Arc<dyn WakeupScheduler> = rec.clone();
-        assert_eq!(
-            arm_keepalive(&sched, "<<autonomous-loop-dynamic>>").await,
-            KeepaliveOutcome::GateOff
-        );
-        assert!(rec.calls.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn arm_keepalive_arms_then_exhausts_budget() {
-        let _g = ka_guard();
-        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
-        let rec = Arc::new(KaRecorder {
-            calls: StdMutex::new(Vec::new()),
-        });
-        let sched: Arc<dyn WakeupScheduler> = rec.clone();
-        // First arm: schedules a 1200s fallback, counter → 1.
-        assert_eq!(
-            arm_keepalive(&sched, "<<autonomous-loop-dynamic>>").await,
-            KeepaliveOutcome::Armed
-        );
-        assert_eq!(crate::autonomous_loop::loop_consecutive_keepalives(), 1);
-        {
-            let calls = rec.calls.lock().unwrap();
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].0, Duration::from_secs(1200));
-            assert_eq!(calls[0].1, "<<autonomous-loop-dynamic>>");
-        }
-        // Budget = 1: a second consecutive arm ends the loop (model_stopped).
-        assert_eq!(
-            arm_keepalive(&sched, "<<autonomous-loop-dynamic>>").await,
-            KeepaliveOutcome::BudgetExhausted
-        );
-        // No second schedule.
-        assert_eq!(rec.calls.lock().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn maybe_arm_keepalive_no_in_flight_is_noop() {
-        let _g = ka_guard();
-        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
-        telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
-        let rec = Arc::new(KaRecorder {
-            calls: StdMutex::new(Vec::new()),
-        });
-        let sched: Arc<dyn WakeupScheduler> = rec.clone();
-        // No loop tick was in flight → not a loop-tick turn → nothing.
-        assert_eq!(maybe_arm_keepalive(&sched).await, None);
-        assert!(rec.calls.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn maybe_arm_keepalive_rescheduled_does_not_arm() {
-        let _g = ka_guard();
-        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
-        telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
-        crate::autonomous_loop::begin_loop_tick("<<autonomous-loop-dynamic>>".to_string());
-        // The model rescheduled this turn (the !Xke() short-circuit).
-        crate::autonomous_loop::mark_loop_rescheduled();
-        let rec = Arc::new(KaRecorder {
-            calls: StdMutex::new(Vec::new()),
-        });
-        let sched: Arc<dyn WakeupScheduler> = rec.clone();
-        assert_eq!(maybe_arm_keepalive(&sched).await, None);
-        assert!(rec.calls.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn maybe_arm_keepalive_keepalive_off_does_not_arm() {
-        let _g = ka_guard();
-        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
-        // keepalive flag OFF (iKi) → no arm even though a tick was in flight.
-        crate::autonomous_loop::begin_loop_tick("<<autonomous-loop-dynamic>>".to_string());
-        let rec = Arc::new(KaRecorder {
-            calls: StdMutex::new(Vec::new()),
-        });
-        let sched: Arc<dyn WakeupScheduler> = rec.clone();
-        assert_eq!(maybe_arm_keepalive(&sched).await, None);
-        assert!(rec.calls.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn maybe_arm_keepalive_arms_when_model_silent() {
-        let _g = ka_guard();
-        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
-        telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
-        // A loop tick ran and the model did NOT reschedule → arm the fallback.
-        crate::autonomous_loop::begin_loop_tick("<<autonomous-loop-dynamic>>".to_string());
-        let rec = Arc::new(KaRecorder {
-            calls: StdMutex::new(Vec::new()),
-        });
-        let sched: Arc<dyn WakeupScheduler> = rec.clone();
-        assert_eq!(
-            maybe_arm_keepalive(&sched).await,
-            Some(KeepaliveOutcome::Armed)
-        );
-        let calls = rec.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, Duration::from_secs(1200));
-        // In-flight was cleared (take), so a second completion is a no-op.
-        drop(calls);
-        assert_eq!(maybe_arm_keepalive(&sched).await, None);
-        assert_eq!(rec.calls.lock().unwrap().len(), 1);
-        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
-        telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
+    #[test]
+    fn local_hhmmss_is_within_a_day() {
+        let s = local_hhmmss(1_700_000_000_000);
+        let parts: Vec<i64> = s.split(':').map(|p| p.parse().unwrap()).collect();
+        assert_eq!(parts.len(), 3);
+        assert!(parts[0] < 24 && parts[1] < 60 && parts[2] < 60);
     }
 }

@@ -310,13 +310,11 @@ fn register_loop_skill(reg: &mut CommandRegistry, cron_enabled: bool) {
     reg.register_command(SlashCommand {
         // PARITY: binary `_Zm` (cc_all.txt:521920) `name:"loop"`.
         name: "loop".into(),
-        // PARITY: binary `_Zm` `get description(){if(q_e())return"…self-pace.";
-        // return"…defaults to 10m)"}` (cc_all.txt:521920). `q_e()` =
-        // `tengu_kairos_loop_dynamic` defaults FALSE and is ABSENT from the
-        // port's `features` crate (no flag backend) → the cron variant, which is
-        // the shipped binary default.
+        // PARITY 2.1.263 `G()`: `description:"Run a prompt or slash command on a
+        // recurring interval (e.g. /loop 5m /foo). Omit the interval to let the
+        // model self-pace."` — the dynamic mode is no longer flag-gated.
         description:
-            "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo, defaults to 10m)"
+            "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace."
                 .into(),
         source: CommandSource::Bundled,
         kind: SlashCommandKind::Bundled {
@@ -333,11 +331,9 @@ fn register_loop_skill(reg: &mut CommandRegistry, cron_enabled: bool) {
             "When the user wants to set up a recurring task, poll for status, or run something repeatedly on an interval (e.g. \"check the deploy every 5 minutes\", \"keep running /babysit-prs\"). Do NOT invoke for one-off tasks."
                 .into(),
         ),
-        // PARITY: binary `_Zm` `get argumentHint(){if(isLoopDefaultPromptEnabled())
-        // return"[interval] [prompt]";return"[interval] <prompt>"}`
-        // (cc_all.txt:521920). `isLoopDefaultPromptEnabled()` =
-        // `tengu_kairos_loop_prompt` defaults FALSE / absent → the cron variant.
-        argument_hint: Some("[interval] <prompt>".into()),
+        // PARITY 2.1.263 `G()`: `argumentHint` is `[interval] [prompt]` — the
+        // prompt is optional (no prompt = autonomous loop).
+        argument_hint: Some("[interval] [prompt]".into()),
         // PARITY: binary `_Zm` `userInvocable:!0` (cc_all.txt:521920).
         user_invocable: Some(true),
         // Explicit description ⇒ listing-eligible.
@@ -365,12 +361,12 @@ mod tests {
         assert_eq!(cmd.source, CommandSource::Bundled);
         assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
         assert_eq!(cmd.user_invocable, Some(true));
-        assert_eq!(cmd.argument_hint.as_deref(), Some("[interval] <prompt>"));
+        assert_eq!(cmd.argument_hint.as_deref(), Some("[interval] [prompt]"));
         assert!(cmd.has_user_specified_description);
         assert!(matches!(cmd.kind, SlashCommandKind::Bundled { .. }));
         assert_eq!(
             cmd.description,
-            "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo, defaults to 10m)"
+            "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace."
         );
     }
 
@@ -643,23 +639,26 @@ mod tests {
 
     #[test]
     fn registered_loop_carries_dynamic_prompt_fn() {
-        // `LoopPromptFn` reads process-global feature-flag overrides. Serialize
-        // with the flag-on builder tests in `loop_skill` so this assertion is
-        // deterministic under the default parallel test runner.
+        // `LoopPromptFn` touches process-global loop state (`K_n`, the loop.md
+        // delivery cache). Serialize with the builder tests in `loop_skill` so
+        // this assertion is deterministic under the default parallel runner.
         let _guard = loop_skill::LOOP_TEST_SERIAL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
-        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, true);
         let cmd = reg.resolve("loop").expect("loop registered");
         match &cmd.kind {
             SlashCommandKind::Bundled { prompt_fn, .. } => {
                 let f = prompt_fn.as_ref().expect("prompt_fn set");
-                // Empty args → usage; non-empty → buildPrompt.
-                assert!(f.build("").starts_with("Usage: /loop"));
-                assert!(f.build("5m /x").starts_with("# /loop"));
+                // 2.1.263: empty args → the autonomous default (dynamic pacing);
+                // non-empty → the dynamic prompt builder.
+                assert!(f
+                    .build("")
+                    .starts_with("# /loop — autonomous default with dynamic pacing"));
+                assert!(f
+                    .build("5m /x")
+                    .starts_with("# /loop — schedule a recurring or self-paced prompt"));
             }
             other => panic!("expected Bundled kind, got {other:?}"),
         }

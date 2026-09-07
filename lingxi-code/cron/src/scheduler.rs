@@ -94,6 +94,53 @@ pub async fn unregister_live_job(
     Ok(scheduler_for(registry)?.unregister_job(id, owner).await)
 }
 
+/// PARITY `M()` first-sight diagnostics: `[ScheduledTasks] scheduled ${id} for
+/// ${iso | "never"}`; an unresolvable schedule also counts `next_fire_unresolvable`.
+fn log_scheduled(def: &CronTaskDef) {
+    match next_fire_time(def) {
+        Some(at) => {
+            tracing::info!(
+                "[ScheduledTasks] scheduled {} for {}",
+                def.id,
+                crate::schedule::iso_8601_utc(unix_epoch_ms(at))
+            );
+        }
+        None => {
+            tracing::info!(
+                event = "cron_task_fire",
+                outcome = "next_fire_unresolvable",
+                recurring = def.recurring,
+            );
+            tracing::info!("[ScheduledTasks] scheduled {} for never", def.id);
+        }
+    }
+}
+
+/// PARITY `be(tasks)`: the prompt that surfaces missed durable one-shots.
+#[must_use]
+pub fn missed_one_shots_prompt(missed: &[crate::tasks_file::CronTask]) -> String {
+    let plural = missed.len() > 1;
+    let head = format!(
+        "The following one-shot scheduled task{} missed while Claude was not running. {} already been removed from .lingxi/scheduled_tasks.json.\n\nDo NOT execute {} yet. First use the AskUserQuestion tool to ask whether to run {} now. Only execute if the user confirms.",
+        if plural { "s were" } else { " was" },
+        if plural { "They have" } else { "It has" },
+        if plural { "these prompts" } else { "this prompt" },
+        if plural { "each one" } else { "it" },
+    );
+    let entries: Vec<String> = missed
+        .iter()
+        .map(|t| {
+            format!(
+                "[{}, created {}]\n{}",
+                crate::schedule::human_schedule(&t.cron),
+                crate::schedule::local_date_time_string(t.created_at),
+                t.prompt
+            )
+        })
+        .collect();
+    format!("{head}\n\n{}", entries.join("\n\n"))
+}
+
 /// Optional seven-day compatibility preset for explicit host overrides.
 /// Production schedulers have no global age limit; tasks may set `expiresAt`.
 pub const DEFAULT_RECURRING_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -285,7 +332,13 @@ fn next_fire_with<F: Fn(u64) -> i64>(
     offset_for: &F,
     config: CronJitterConfig,
 ) -> Option<SystemTime> {
-    let anchor = task.last_run.unwrap_or(task.created_at);
+    // PARITY: recurring fires anchor on `lastFiredAt ?? createdAt` (`eXe`);
+    // a one-shot is always computed from `createdAt` (`Jbt(cron, createdAt)`).
+    let anchor = if task.recurring {
+        task.last_run.unwrap_or(task.created_at)
+    } else {
+        task.created_at
+    };
     let next = task.schedule.next_match_after_with(anchor, offset_for)?;
 
     if !task.recurring {
@@ -384,6 +437,10 @@ pub struct CronScheduler {
 struct ClaimedCronJob {
     spawn_input: TaskSpawnInput,
     rollback: ClaimRollback,
+    /// Captured AT CLAIM TIME: claiming a one-shot (or an aged-out recurring
+    /// job) removes it from `self.tasks`, so the fire diagnostics cannot read it
+    /// back out of the map afterwards.
+    recurring: bool,
 }
 
 enum ClaimRollback {
@@ -402,6 +459,15 @@ enum ClaimRollback {
 }
 
 impl ClaimedCronJob {
+    /// The prompt this claim will spawn — read BEFORE [`Self::into_parts`]
+    /// consumes it.
+    fn prompt(&self) -> &str {
+        match &self.spawn_input {
+            TaskSpawnInput::Dream { prompt, .. } => prompt.as_str(),
+            _ => "",
+        }
+    }
+
     fn into_parts(self) -> (TaskSpawnInput, ClaimRollback) {
         (self.spawn_input, self.rollback)
     }
@@ -455,7 +521,7 @@ impl CronScheduler {
         else {
             return; // file absent → nothing to load
         };
-        let doc = match serde_json::from_str::<crate::tasks_file::ScheduledTasks>(&body) {
+        let doc = match crate::tasks_file::parse_tasks_strict(&body) {
             Ok(doc) => doc,
             Err(error) => {
                 // `parse_tasks` intentionally treats corrupt user-facing reads
@@ -468,6 +534,8 @@ impl CronScheduler {
                 return;
             }
         };
+        let now = self.clock.now();
+        let mut missed: Vec<crate::tasks_file::CronTask> = Vec::new();
         for t in doc.tasks {
             // Anchor expiry/catch-up off the persisted ms timestamps. A
             // missing/zero `createdAt` falls back to "now" (a fresh window).
@@ -477,6 +545,25 @@ impl CronScheduler {
                 self.clock.now()
             };
             let recurring = t.recurring.unwrap_or(false);
+            // PARITY `zQn`: a durable ONE-SHOT whose fire time (from `createdAt`)
+            // already passed was missed while nothing was running. It is never
+            // fired: it is removed from the file and surfaced to the user for
+            // confirmation (`onMissed` / the `be()` prompt).
+            //
+            // A one-shot that ALREADY FIRED is not a miss. `lastFiredAt` is
+            // persisted before the launch, and the delete that follows it can
+            // lose the race (a crash, a failed write, a peer holding the lock),
+            // so a stale record can survive a run. Offering it as "missed" would
+            // ask the user to authorise work that already happened.
+            if !recurring && t.last_fired_at.is_none_or(|ms| ms == 0) {
+                let passed = parse_cron(&t.cron)
+                    .ok()
+                    .and_then(|schedule| schedule.next_match_after(created_at));
+                if passed.is_some_and(|next| next < now) {
+                    missed.push(t);
+                    continue;
+                }
+            }
             let last_run = t
                 .last_fired_at
                 .filter(|ms| *ms > 0)
@@ -492,6 +579,90 @@ impl CronScheduler {
                 self.durable_ids.write().await.insert(t.id);
             }
         }
+        if !missed.is_empty() {
+            self.surface_missed_one_shots(project_root, missed).await;
+        }
+    }
+
+    /// PARITY `V(true)` missed-task branch: remove the missed one-shots from the
+    /// tasks file (`SK(ids)`), emit `tengu_scheduled_task_missed`, and hand the
+    /// user the `be()` prompt — which tells the model NOT to run the prompts
+    /// before asking via AskUserQuestion — as one scheduled turn.
+    async fn surface_missed_one_shots(
+        &self,
+        project_root: &Path,
+        missed: Vec<crate::tasks_file::CronTask>,
+    ) {
+        let ids: Vec<String> = missed.iter().map(|t| t.id.clone()).collect();
+        tracing::info!(
+            event = "tengu_scheduled_task_missed",
+            count = missed.len(),
+            task_ids = %ids.join(","),
+        );
+        // Remove FIRST. The prompt states as fact that these tasks "have already
+        // been removed from .lingxi/scheduled_tasks.json", and a task still on
+        // disk is re-registered by the next tick's `refresh_durable_tasks` and
+        // fired — the exact unconfirmed run this branch exists to prevent. So
+        // the removal must land before the claim is made, not after it.
+        let removed = self.remove_missed_from_file(project_root, &ids).await;
+        if !removed {
+            // Say nothing rather than assert a removal that did not happen; the
+            // tasks stay on disk and are re-surfaced by the next startup.
+            tracing::error!(
+                "[ScheduledTasks] could not remove {} missed one-shot task(s); \
+                 not surfacing them this run",
+                ids.len()
+            );
+            return;
+        }
+        let prompt = missed_one_shots_prompt(&missed);
+        if let Err(e) = self
+            .task_registry
+            .spawn(
+                TaskType::Dream,
+                TaskSpawnInput::Dream {
+                    prompt,
+                    max_iterations: None,
+                },
+                "cron: missed one-shot tasks".to_string(),
+            )
+            .await
+        {
+            // The binary removes the missed tasks unconditionally (`SK(ids)`
+            // runs after `onFire`), so a delivery failure never resurrects them
+            // as a silent fire on the next reload.
+            tracing::error!("[ScheduledTasks] failed to surface missed tasks: {e}");
+        }
+        tracing::info!("[ScheduledTasks] surfaced {} missed one-shot task(s)", ids.len());
+    }
+
+    /// Drop `ids` from the tasks file under both cron locks. `false` means the
+    /// file still lists at least one of them.
+    async fn remove_missed_from_file(&self, project_root: &Path, ids: &[String]) -> bool {
+        let _process_guard = crate::lock_cron_file().await;
+        let Ok(_file_guard) =
+            crate::tasks_file::lock_scheduled_tasks(self.fs.as_ref(), project_root).await
+        else {
+            tracing::warn!("[ScheduledTasks] failed to remove missed tasks: lock unavailable");
+            return false;
+        };
+        let Ok(mut body) = crate::tasks_file::read_tasks_body(self.fs.as_ref(), project_root).await
+        else {
+            tracing::warn!("[ScheduledTasks] failed to remove missed tasks: unreadable file");
+            return false;
+        };
+        for id in ids {
+            if let Some(updated) = tasks_file_without(&body, id) {
+                body = updated;
+            }
+        }
+        if let Err(e) =
+            crate::tasks_file::write_tasks_body(self.fs.as_ref(), project_root, &body).await
+        {
+            tracing::warn!("[ScheduledTasks] failed to remove missed tasks: {e}");
+            return false;
+        }
+        true
     }
 
     /// Override the recurring auto-expiry age (`None` = unlimited / never
@@ -540,19 +711,18 @@ impl CronScheduler {
         last_run: Option<SystemTime>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let schedule = parse_cron(schedule_str)?;
-        self.tasks.write().await.insert(
-            id.to_string(),
-            CronTaskDef {
-                id: id.into(),
-                schedule,
-                prompt: prompt.into(),
-                agent_type,
-                last_run,
-                enabled: true,
-                created_at,
-                recurring,
-            },
-        );
+        let def = CronTaskDef {
+            id: id.into(),
+            schedule,
+            prompt: prompt.into(),
+            agent_type,
+            last_run,
+            enabled: true,
+            created_at,
+            recurring,
+        };
+        log_scheduled(&def);
+        self.tasks.write().await.insert(id.to_string(), def);
         Ok(())
     }
 
@@ -566,19 +736,18 @@ impl CronScheduler {
         if !tasks.contains_key(&task.id) && tasks.len() >= 50 {
             return Err(std::io::Error::other("too many scheduled jobs (max 50)").into());
         }
-        tasks.insert(
-            task.id.clone(),
-            CronTaskDef {
-                id: task.id.clone(),
-                schedule,
-                prompt: task.prompt.clone(),
-                agent_type: None,
-                last_run: task.last_fired_at,
-                enabled: true,
-                created_at: task.created_at,
-                recurring: task.recurring,
-            },
-        );
+        let def = CronTaskDef {
+            id: task.id.clone(),
+            schedule,
+            prompt: task.prompt.clone(),
+            agent_type: None,
+            last_run: task.last_fired_at,
+            enabled: true,
+            created_at: task.created_at,
+            recurring: task.recurring,
+        };
+        log_scheduled(&def);
+        tasks.insert(task.id.clone(), def);
         drop(tasks);
         if durable {
             self.durable_ids.write().await.insert(task.id.clone());
@@ -618,6 +787,13 @@ impl CronScheduler {
     /// Spawn the tick loop on the configured [`RuntimeSpawner`]. Safe to call
     /// once; calling again replaces the handle without stopping the prior loop.
     pub async fn start(self: Arc<Self>) -> Result<(), platform_api::RuntimeError> {
+        // PARITY `Y()` → `ie(dir)`: keep the scheduler's runtime files out of
+        // `git status` before the first lock/tick.
+        if let Some(project_root) =
+            crate::tasks_file::project_root_from_tasks_path(&self.tasks_file)
+        {
+            crate::tasks_file::ensure_runtime_files_excluded(project_root);
+        }
         let registry_key = task_registry_identity(&self.task_registry);
         LIVE_SCHEDULERS
             .lock()
@@ -650,10 +826,31 @@ impl CronScheduler {
         Ok(())
     }
 
+    /// PARITY `W()` fire diagnostics: `[ScheduledTasks] firing ${id}${" (recurring)"}`
+    /// + `tengu_scheduled_task_fire{recurring, taskId, autonomousLoopDefault}`.
+    ///
+    /// `recurring` / `prompt` come from the CLAIM, not from `self.tasks`: the
+    /// claim has already removed a one-shot (and an aged-out recurring job) from
+    /// that map, so reading it back would report every one-shot fire with an
+    /// empty prompt and log a recurring job's final run as a one-shot.
+    fn log_fire(id: &str, recurring: bool, prompt: &str) {
+        tracing::info!(
+            "[ScheduledTasks] firing {id}{}",
+            if recurring { " (recurring)" } else { "" }
+        );
+        tracing::info!(
+            event = "tengu_scheduled_task_fire",
+            recurring,
+            task_id = %id,
+            autonomous_loop_default = crate::autonomous_loop::is_loop_default_sentinel(prompt),
+        );
+    }
+
     async fn process_due_ids(&self, now: SystemTime, due_ids: Vec<String>) {
         for id in due_ids {
             if self.session_tasks.read().await.contains_key(&id) {
                 if let Some(claimed_job) = self.claim_in_memory_due_job(&id, now).await {
+                    Self::log_fire(&id, claimed_job.recurring, claimed_job.prompt());
                     let (task_input, rollback) = claimed_job.into_parts();
                     if let Err(e) = self
                         .task_registry
@@ -690,6 +887,7 @@ impl CronScheduler {
             // claim the run BEFORE launch so a peer that already persisted
             // `lastFiredAt`/deletion suppresses this stale due snapshot.
             if let Some(claimed_job) = self.claim_due_job_if_still_due(&id, now).await {
+                Self::log_fire(&id, claimed_job.recurring, claimed_job.prompt());
                 let (task_input, rollback) = claimed_job.into_parts();
                 if let Err(e) = self
                     .task_registry
@@ -720,7 +918,7 @@ impl CronScheduler {
             return;
         };
         let doc = match crate::tasks_file::read_tasks_body(self.fs.as_ref(), project_root).await {
-            Ok(body) => match serde_json::from_str::<crate::tasks_file::ScheduledTasks>(&body) {
+            Ok(body) => match crate::tasks_file::parse_tasks_strict(&body) {
                 Ok(doc) => doc,
                 Err(error) => {
                     tracing::warn!("cron: cannot refresh invalid durable state: {error}");
@@ -847,7 +1045,7 @@ impl CronScheduler {
             }
         };
 
-        let doc = match serde_json::from_str::<crate::tasks_file::ScheduledTasks>(&body) {
+        let doc = match crate::tasks_file::parse_tasks_strict(&body) {
             Ok(doc) => doc,
             Err(error) => {
                 // User-facing listing deliberately treats malformed JSON as an
@@ -934,6 +1132,7 @@ impl CronScheduler {
             .await
             .map(|spawn_input| ClaimedCronJob {
                 spawn_input,
+                recurring: authoritative.recurring,
                 rollback: ClaimRollback::Durable {
                     project_root: project_root.to_path_buf(),
                     authoritative,
@@ -990,6 +1189,7 @@ impl CronScheduler {
                 prompt,
                 max_iterations: None,
             },
+            recurring: original_task.recurring,
             rollback: ClaimRollback::Session {
                 before_task: original_task,
                 before_session_task: original_session_task,
@@ -1721,17 +1921,23 @@ mod scheduler_tick_tests {
 
     struct RecordingDreamHandler {
         spawns: AtomicUsize,
+        prompts: std::sync::Mutex<Vec<String>>,
     }
 
     impl RecordingDreamHandler {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 spawns: AtomicUsize::new(0),
+                prompts: std::sync::Mutex::new(Vec::new()),
             })
         }
 
         fn spawn_count(&self) -> usize {
             self.spawns.load(Ordering::SeqCst)
+        }
+
+        fn prompts(&self) -> Vec<String> {
+            self.prompts.lock().unwrap().clone()
         }
     }
 
@@ -1750,11 +1956,12 @@ mod scheduler_tick_tests {
             input: TaskSpawnInput,
             _ctx: TaskContext,
         ) -> Result<TaskHandle, TaskError> {
-            if !matches!(input, TaskSpawnInput::Dream { .. }) {
+            let TaskSpawnInput::Dream { prompt, .. } = &input else {
                 return Err(TaskError::Internal(format!(
                     "unexpected input for dream handler: {input:?}"
                 )));
-            }
+            };
+            self.prompts.lock().unwrap().push(prompt.clone());
             let seq = self.spawns.fetch_add(1, Ordering::SeqCst) + 1;
             Ok(TaskHandle::new(format!("d{seq:08}"), None))
         }
@@ -2141,31 +2348,64 @@ mod scheduler_tick_tests {
         );
     }
 
+    // PARITY `V(true)` + `zQn`/`be()`: a durable one-shot whose fire time passed
+    // while nothing was running is never executed. It is removed from the file
+    // and surfaced as the confirmation prompt, once.
     #[tokio::test]
-    async fn durable_one_shot_spawn_failure_restores_original_file_body() {
+    async fn missed_durable_one_shot_is_surfaced_not_fired() {
         let created_ms = (NOW - 120) * 1000;
         let body = format!(
-            r#"{{"tasks":[{{"id":"dfailonce","cron":"* * * * *","prompt":"hello","createdAt":{created_ms}}}]}}"#
+            r#"{{"tasks":[{{"id":"dmissed01","cron":"* * * * *","prompt":"deploy it","createdAt":{created_ms}}},{{"id":"dkeep0001","cron":"0 0 1 1 *","prompt":"new year","createdAt":{created_ms},"recurring":true}}]}}"#
+        );
+        let fs = MemFs::with(TASKS_PATH, &body);
+        let clock = FixedClock::at_secs(NOW);
+        let (registry, handler) = registry_with_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs.clone(), clock.clone());
+        scheduler.load_persisted().await;
+
+        assert_eq!(handler.spawn_count(), 1, "one confirmation prompt, not a fire");
+        let prompt = handler.prompts().remove(0);
+        assert!(prompt.starts_with("The following one-shot scheduled task was missed while Claude was not running. It has already been removed from .lingxi/scheduled_tasks.json.\n\nDo NOT execute this prompt yet. First use the AskUserQuestion tool to ask whether to run it now. Only execute if the user confirms.\n\n[Every minute, created "), "{prompt}");
+        assert!(prompt.ends_with("]\ndeploy it"), "{prompt}");
+        assert!(!scheduler.tasks.read().await.contains_key("dmissed01"));
+        assert!(scheduler.tasks.read().await.contains_key("dkeep0001"));
+        let doc = crate::tasks_file::parse_tasks(&fs.get(TASKS_PATH).await.unwrap());
+        assert_eq!(doc.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["dkeep0001"]);
+
+        // Subsequent ticks never fire it (the file no longer lists it).
+        scheduler.tick().await;
+        scheduler.tick().await;
+        assert_eq!(handler.spawn_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn missed_durable_one_shots_plural_prompt_and_delivery_failure_still_removes() {
+        let created_ms = (NOW - 120) * 1000;
+        let body = format!(
+            r#"{{"tasks":[{{"id":"dmissa","cron":"* * * * *","prompt":"a","createdAt":{created_ms}}},{{"id":"dmissb","cron":"* * * * *","prompt":"b","createdAt":{created_ms}}}]}}"#
         );
         let fs = MemFs::with(TASKS_PATH, &body);
         let clock = FixedClock::at_secs(NOW);
         let (registry, handler) = registry_with_failing_dream_handler(fs.clone());
         let scheduler = scheduler(registry, fs.clone(), clock.clone());
         scheduler.load_persisted().await;
-
-        scheduler.tick().await;
-
-        assert_eq!(handler.attempt_count(), 1);
-        assert_eq!(fs.get(TASKS_PATH).await.unwrap(), body);
-        assert_eq!(
-            scheduler
-                .tasks
-                .read()
-                .await
-                .get("dfailonce")
-                .and_then(|task| task.last_run),
-            None
-        );
+        assert_eq!(handler.attempt_count(), 1, "one delivery attempt for both tasks");
+        let doc = crate::tasks_file::parse_tasks(&fs.get(TASKS_PATH).await.unwrap());
+        assert!(doc.tasks.is_empty(), "missed tasks are removed even when delivery fails");
+        assert!(scheduler.tasks.read().await.is_empty());
+        let text = super::missed_one_shots_prompt(&[
+            crate::tasks_file::CronTask {
+                id: "a".into(), cron: "* * * * *".into(), prompt: "a".into(), created_at: created_ms,
+                last_fired_at: None, recurring: None, permanent: None, expires_at: None, session_id: None,
+            },
+            crate::tasks_file::CronTask {
+                id: "b".into(), cron: "0 9 * * 1-5".into(), prompt: "b".into(), created_at: created_ms,
+                last_fired_at: None, recurring: None, permanent: None, expires_at: None, session_id: None,
+            },
+        ]);
+        assert!(text.starts_with("The following one-shot scheduled tasks were missed while Claude was not running. They have already been removed from .lingxi/scheduled_tasks.json.\n\nDo NOT execute these prompts yet. First use the AskUserQuestion tool to ask whether to run each one now. Only execute if the user confirms.\n\n[Every minute, created "));
+        assert!(text.contains("]\na\n\n[Weekdays at 9:00 AM, created "));
+        assert!(text.ends_with("]\nb"));
     }
 
     #[tokio::test]
@@ -2447,7 +2687,10 @@ mod scheduler_tick_tests {
             let clock = FixedClock::at_secs(NOW);
             let (registry, handler) = registry_with_dream_handler(fs.clone());
             let scheduler = scheduler(registry, fs, clock.clone());
-            scheduler.load_persisted().await;
+            // `refresh_durable_tasks` (the watcher-reload analogue) registers file
+            // tasks without the startup missed-one-shot pass, so the past-due
+            // one-shot is a live due job here rather than a surfaced miss.
+            scheduler.refresh_durable_tasks().await;
             scheduler
                 .tasks
                 .write()

@@ -759,6 +759,51 @@ mod next_step_tests {
     }
 
     #[test]
+    fn thinking_signature_400_strips_once_then_terminals() {
+        let mut state = RetryState::default();
+        let ctl = ctl_default();
+        let err = LlmError::InvalidRequest {
+            message: "Invalid signature in thinking block".into(),
+        };
+        let step = next_step(&mut state, &ctl, &err, 0);
+        assert_eq!(step, DriveStep::StripThinkingSignature);
+        assert_eq!(
+            state.attempt, 0,
+            "StripThinkingSignature must not consume a budget attempt"
+        );
+        assert!(state.thinking_signature_stripped);
+
+        let again = next_step(&mut state, &ctl, &err, 0);
+        assert_eq!(
+            again,
+            DriveStep::Terminal,
+            "a second thinking-signature 400 on the same request is terminal"
+        );
+    }
+
+    #[test]
+    fn deepseek_reasoning_content_400_is_terminal() {
+        let mut state = RetryState::default();
+        let ctl = ctl_default();
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::InvalidRequest {
+                message:
+                    "The reasoning_content in the thinking mode must be passed back to the API."
+                        .into(),
+            },
+            0,
+        );
+        assert_eq!(
+            step,
+            DriveStep::Terminal,
+            "DeepSeek reasoning round-trip 400 must not strip thinking"
+        );
+        assert!(!state.thinking_signature_stripped);
+    }
+
+    #[test]
     fn invalid_request_overflow_but_no_room_is_terminal() {
         let mut state = RetryState::default();
         let ctl = ctl_default();

@@ -1883,6 +1883,38 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         self.api.set_thinking_config(thinking);
     }
 
+    /// Copy the session thinking-signature latch onto both API clients so the
+    /// next thinking-capable request strips thinking on the outbound clone.
+    pub(crate) async fn sync_thinking_signature_strip_flag_to_api(&self) {
+        if !self.session.lock().await.thinking_signature_stripped {
+            return;
+        }
+        self.api.set_thinking_signature_stripped(true);
+        self.streaming_api.set_thinking_signature_stripped(true);
+    }
+
+    /// Persist `{type:"thinking_stripped",scope:"all"}` once after a successful
+    /// thinking-signature strip so cold resume restores the latch.
+    pub(crate) async fn persist_thinking_signature_strip_latch(&self) {
+        if !self.api.thinking_signature_stripped()
+            && !self.streaming_api.thinking_signature_stripped()
+        {
+            return;
+        }
+        {
+            let mut session = self.session.lock().await;
+            if session.thinking_signature_stripped {
+                return;
+            }
+            session.thinking_signature_stripped = true;
+        }
+        self.persist_hook_attachment_to_jsonl(serde_json::json!({
+            "type": "thinking_stripped",
+            "scope": "all",
+        }))
+        .await;
+    }
+
     /// Update how the attached output sink presents subsequent thinking blocks.
     pub fn set_thinking_display(&self, mode: Option<&str>) {
         self.output.set_thinking_display(mode);

@@ -32,6 +32,7 @@ use crate::{
 use futures::stream::BoxStream;
 use protocol::{is_nested_media_value, ContentBlock, ConversationMessage};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -425,6 +426,11 @@ pub struct ApiService {
     /// stream this reflects connect-phase retries only (the value the adapter
     /// knows when it returns the `BoxStream`). `0` until the first drive.
     last_retry_count: Mutex<u32>,
+    /// Sticky session latch for thinking-signature 400 recovery.
+    /// Set when a drive strips thinking blocks; later thinking-capable
+    /// requests strip on the outbound clone except DeepSeek / Kimi, which
+    /// must round-trip `reasoning_content`.
+    thinking_signature_stripped: AtomicBool,
     /// Most recently observed RAW per-window utilization snapshot.
     ///
     /// Task 2 (llm-client future-work batch 5): parsed via
@@ -815,6 +821,7 @@ impl ApiService {
             last_rate_limit: Mutex::new(None),
             last_request_id: Mutex::new(None),
             last_retry_count: Mutex::new(0),
+            thinking_signature_stripped: AtomicBool::new(false),
             last_raw_utilization: Mutex::new(None),
             last_429_message: Mutex::new(None),
             pending_429: Mutex::new(None),
@@ -2072,6 +2079,63 @@ impl ApiService {
         *self.last_retry_count.lock().unwrap()
     }
 
+    /// Sticky thinking-signature strip latch (2.1.259 `thinking_stripped`).
+    #[must_use]
+    pub fn thinking_signature_stripped(&self) -> bool {
+        self.thinking_signature_stripped.load(Ordering::Acquire)
+    }
+
+    /// Restore or arm the thinking-signature strip latch. Resume copies the
+    /// JSONL `thinking_stripped` attachment here so later thinking-capable
+    /// turns strip on the outbound clone without mutating persisted history.
+    pub fn set_thinking_signature_stripped(&self, stripped: bool) {
+        self.thinking_signature_stripped
+            .store(stripped, Ordering::Release);
+    }
+
+    /// Apply the session latch before encode so Gemini / OpenAI-compat thinking
+    /// models are not asked to round-trip rejected blocks. DeepSeek / Kimi keep
+    /// `reasoning_content` ([`thinking_must_round_trip`]).
+    fn apply_latched_thinking_strip(&self, req: &mut crate::LlmRequest) {
+        if !self.thinking_signature_stripped() {
+            return;
+        }
+        if crate::model::thinking_signature::thinking_must_round_trip(
+            &req.model,
+            req.profile.as_deref(),
+        ) {
+            return;
+        }
+        crate::model::thinking_signature::strip_thinking_blocks_for_signature_recovery(
+            &mut req.messages,
+        );
+    }
+
+    /// Strip thinking blocks after a thinking-signature 400 on any provider.
+    /// Returns `true` when the caller should retry immediately.
+    async fn handle_thinking_signature_strip(&self, req: &mut crate::LlmRequest) -> bool {
+        let (signed, unsigned) =
+            crate::model::thinking_signature::count_thinking_signature_blocks(&req.messages);
+        if !crate::model::thinking_signature::strip_thinking_blocks_for_signature_recovery(
+            &mut req.messages,
+        ) {
+            return false;
+        }
+        tracing::warn!(
+            "[thinking] server rejected a thinking block; stripping all thinking blocks and retrying."
+        );
+        telemetry::emit_thinking_signature_strip_retry(
+            &self.analytics,
+            req.query_source.as_deref(),
+            &req.model,
+            signed,
+            unsigned,
+        )
+        .await;
+        self.set_thinking_signature_stripped(true);
+        true
+    }
+
     /// The most recently observed RAW per-window utilization snapshot. Backs the
     /// `OrchestratorApiClient::last_raw_utilization` trait override. `None` until
     /// the first recorded response.
@@ -2570,6 +2634,9 @@ impl ApiService {
         let mut aws_auth_attempts: u32 = 0;
         let mut max_tokens_adjusted = false;
         loop {
+            // Strip rejected thinking before encode so Gemini / OpenAI-compat
+            // thinking models can prepare. DeepSeek / Kimi skip this.
+            self.apply_latched_thinking_strip(&mut req);
             // prepare → inject headers → execute.
             let mut prepared = match self.client.prepare(&req).await {
                 Ok(p) => p,
@@ -2838,6 +2905,20 @@ impl ApiService {
                                     max_tokens_adjusted = true;
                                     req.max_tokens = Some(new_max);
                                     continue;
+                                }
+                                DriveStep::StripThinkingSignature => {
+                                    if self.handle_thinking_signature_strip(&mut req).await {
+                                        continue;
+                                    }
+                                    telemetry::emit_failed(
+                                        &self.analytics,
+                                        &req.model,
+                                        &request_id,
+                                        Self::error_kind(&decode_err),
+                                        Self::status_of(&decode_err),
+                                    )
+                                    .await;
+                                    return Err(decode_err);
                                 }
                                 DriveStep::Fallback { fallback_model } => {
                                     // Switch to the fallback model; advance the
@@ -3449,6 +3530,7 @@ impl ApiService {
         let mut dispatch = DispatchHeaderState::default();
 
         loop {
+            self.apply_latched_thinking_strip(&mut req);
             // Prepare so we can inject headers, then call execute_stream via
             // a thin wrapper transport that uses our already-modified request.
             let mut prepared = match self.client.prepare(&req).await {
@@ -3667,6 +3749,11 @@ impl ApiService {
                                 max_tokens_adjusted = true;
                                 req.max_tokens = Some(new_max);
                                 continue;
+                            }
+                            DriveStep::StripThinkingSignature => {
+                                if self.handle_thinking_signature_strip(&mut req).await {
+                                    continue;
+                                }
                             }
                             _ => {}
                         }

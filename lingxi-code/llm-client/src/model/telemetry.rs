@@ -221,6 +221,42 @@ pub async fn emit_max_tokens_overflow_adjustment(
         .await;
 }
 
+/// Emit `tengu_thinking_signature_strip_retry` (claude-code 2.1.259): the
+/// server rejected an Anthropic thinking signature, so the client stripped
+/// thinking blocks and retries.
+///
+/// No-op when `bus` is `None`.
+pub async fn emit_thinking_signature_strip_retry(
+    bus: &Option<Arc<AnalyticsBus>>,
+    query_source: Option<&str>,
+    model: &str,
+    stripped_signed_count: u32,
+    stripped_unsigned_count: u32,
+) {
+    let Some(bus) = bus else { return };
+    let mut m = LogEventMetadata::new();
+    if let Some(query_source) = query_source {
+        m.insert(
+            "query_source".into(),
+            AnalyticsValue::String(Verified::assert_safe(query_source.to_string()).into_inner()),
+        );
+    }
+    m.insert(
+        "model".into(),
+        AnalyticsValue::String(Verified::assert_safe(model.to_string()).into_inner()),
+    );
+    m.insert(
+        "stripped_signed_count".into(),
+        AnalyticsValue::Int(i64::from(stripped_signed_count)),
+    );
+    m.insert(
+        "stripped_unsigned_count".into(),
+        AnalyticsValue::Int(i64::from(stripped_unsigned_count)),
+    );
+    bus.log_event("tengu_thinking_signature_strip_retry", m)
+        .await;
+}
+
 /// Emit `tengu_dispatch_header_fallback` (cc 2.1.219): an attempt carrying the
 /// opt-in `anthropic-dispatch-id: v2s` header failed with an HTTP 5xx
 /// (`reason:"5xx"`, `status` set) or a connection error (`reason:"conn_err"`,

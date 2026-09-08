@@ -886,6 +886,7 @@ impl ConversationOrchestrator {
                 // `cap <= 0` disables the cap (binary `if(bo>0&&…)`), letting a
                 // blocking hook drive until the max_turns top-of-loop guard ends it.
                 let cap: i64 = std::env::var("LINGXI_STOP_HOOK_BLOCK_CAP")
+                    .or_else(|_| std::env::var("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"))
                     .ok()
                     .and_then(|v| v.trim().parse::<i64>().ok())
                     .unwrap_or(8);

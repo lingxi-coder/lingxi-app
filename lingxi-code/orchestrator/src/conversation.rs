@@ -293,6 +293,15 @@ pub trait OrchestratorApiClient: Send + Sync {
         0
     }
 
+    /// Sticky thinking-signature strip latch. Default `false`.
+    fn thinking_signature_stripped(&self) -> bool {
+        false
+    }
+
+    /// Restore or arm the thinking-signature strip latch for later thinking
+    /// turns. No-op on mocks.
+    fn set_thinking_signature_stripped(&self, _stripped: bool) {}
+
     /// Return the FULL most recently observed rate-limit header snapshot.
     ///
     /// Task 8 (llm-client future-work batch 3): unlike
@@ -430,6 +439,14 @@ pub trait StreamingApiClient: Send + Sync {
     fn last_retry_count(&self) -> u32 {
         0
     }
+
+    /// Sticky thinking-signature strip latch. Default `false`.
+    fn thinking_signature_stripped(&self) -> bool {
+        false
+    }
+
+    /// Restore or arm the thinking-signature strip latch. No-op on mocks.
+    fn set_thinking_signature_stripped(&self, _stripped: bool) {}
 }
 
 /// Outcome of a single REPL turn driven by
@@ -567,8 +584,9 @@ fn entrypoint_value() -> String {
 /// The top-level api-error envelope fields claude-code stamps on a synthetic
 /// assistant line built via `createAssistantAPIErrorMessage` (`ql`/`tc`) or the
 /// refusal builder (`fje`). On disk these are SIBLINGS of `message` —
-/// `isApiErrorMessage` (always `true`), an optional `error` category string, and
-/// an optional `apiErrorStatus` HTTP status — read back by the loader's
+/// `isApiErrorMessage` (always `true`), an optional `error` category string,
+/// optional `truncatedAfterOutput` (cc `tZo`, omitted when false), and an
+/// optional `apiErrorStatus` HTTP status — read back by the loader's
 /// transcript reconstruction (`ht=Ie.isApiErrorMessage===!0, st=Ie.apiErrorStatus`).
 ///
 /// Field shapes are pinned against the 2.1.195 binary + real transcripts:
@@ -587,6 +605,10 @@ pub(crate) struct ApiErrorEnvelope {
     pub error: Option<&'static str>,
     pub api_error_status: Option<u16>,
     pub inner_stop_reason: Option<&'static str>,
+    /// `truncatedAfterOutput` on the api-error assistant (cc `Co` / `tZo`).
+    /// Set when the incomplete-response notice follows a partial that already
+    /// yielded real output. Omitted from JSONL when false.
+    pub truncated_after_output: bool,
 }
 
 /// Per-request api-error classifier — the port of claude-code's `Flp`/`KNn`
@@ -710,6 +732,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         error,
         api_error_status: parsed_status.or(api_error_status),
         inner_stop_reason: None,
+        truncated_after_output: false,
     }
 }
 
@@ -1338,6 +1361,12 @@ pub struct ConversationOrchestrator {
     /// tool execution to terminate the conversation. `None` when the feature is
     /// disabled (default) → the turn loop never checks it → byte-identical.
     pub(crate) end_conversation_slot: Option<crate::end_conversation_tool::EndConversationSlot>,
+    /// `/loop` dynamic mode: raised by `ScheduleWakeup` when a call ARMS a
+    /// wakeup, read (and consumed) by the turn loop so a round whose only tool
+    /// call was that one ends the turn instead of feeding the result back.
+    /// `None` on hosts that wire no `ScheduleWakeup` seam → the branch never
+    /// fires → byte-identical.
+    pub(crate) loop_wakeup_armed_slot: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 // Responsibility-focused implementation modules. `conversation.rs` owns the

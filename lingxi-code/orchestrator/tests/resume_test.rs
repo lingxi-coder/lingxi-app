@@ -464,6 +464,154 @@ fn resume_normalizes_stopped_hook_attachment_into_one_meta_message() {
 }
 
 #[test]
+fn resume_normalizes_hook_additional_context_into_one_meta_message() {
+    let sid = Uuid::new_v4();
+    let message_uuid = Uuid::new_v4();
+    let attachment = serde_json::from_value(json!({
+        "type":"attachment",
+        "attachment":{
+            "type":"hook_additional_context",
+            "content":["line-a","line-b"],
+            "hookName":"PostToolUse:Write",
+            "toolUseID":"tool-1",
+            "hookEvent":"PostToolUse"
+        },
+        "uuid":message_uuid.to_string(), "parentUuid":null,
+        "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:00.000Z",
+        "cwd":"/tmp", "version":"0.12.0", "isSidechain":false
+    }))
+    .unwrap();
+
+    let state = state_from_messages(sid, &[attachment]);
+    assert_eq!(state.history.len(), 1);
+    assert!(state.history[0].is_meta());
+    assert_eq!(
+        state.history[0].text_content(),
+        "<system-reminder>\nPostToolUse:Write hook additional context: line-a\nline-b\n</system-reminder>"
+    );
+    assert_eq!(state.history[0].id().as_uuid(), message_uuid);
+}
+
+#[test]
+fn resume_skips_empty_hook_additional_context() {
+    let sid = Uuid::new_v4();
+    let attachment = serde_json::from_value(json!({
+        "type":"attachment",
+        "attachment":{
+            "type":"hook_additional_context",
+            "content":[],
+            "hookName":"PostToolUse:Write",
+            "toolUseID":"tool-1",
+            "hookEvent":"PostToolUse"
+        },
+        "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+        "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:00.000Z",
+        "cwd":"/tmp", "version":"0.12.0", "isSidechain":false
+    }))
+    .unwrap();
+
+    let state = state_from_messages(sid, &[attachment]);
+    assert!(
+        state.history.is_empty(),
+        "empty hook_additional_context must not enter the resumed request"
+    );
+}
+
+#[test]
+fn resume_interleaves_hook_additional_context_with_parallel_tool_results() {
+    let sid = Uuid::new_v4();
+    let assistant_uuid = Uuid::new_v4();
+    let result_a = Uuid::new_v4();
+    let hook_uuid = Uuid::new_v4();
+    let result_b = Uuid::new_v4();
+    let messages = vec![
+        serde_json::from_value(json!({
+            "type":"assistant", "uuid":assistant_uuid.to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:01.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"a","name":"Echo","input":{}},
+                {"type":"tool_use","id":"b","name":"Echo","input":{}}
+            ]}
+        }))
+        .unwrap(),
+        serde_json::from_value(json!({
+            "type":"user", "uuid":result_a.to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:02.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"a","content":"A","is_error":false}
+            ]}
+        }))
+        .unwrap(),
+        serde_json::from_value(json!({
+            "type":"attachment",
+            "attachment":{
+                "type":"hook_additional_context",
+                "content":["HOOK-CTX"],
+                "hookName":"PostToolUse:Echo",
+                "toolUseID":"a",
+                "hookEvent":"PostToolUse"
+            },
+            "uuid":hook_uuid.to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:02.100Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false
+        }))
+        .unwrap(),
+        serde_json::from_value(json!({
+            "type":"user", "uuid":result_b.to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:03.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"b","content":"B","is_error":false}
+            ]}
+        }))
+        .unwrap(),
+    ];
+
+    let state = state_from_messages(sid, &messages);
+    assert_eq!(
+        state.history.len(),
+        4,
+        "assistant + result A + hook ctx + result B"
+    );
+    assert!(matches!(
+        state.history[0],
+        ConversationMessage::Assistant { .. }
+    ));
+    assert_eq!(state.history[1].id().as_uuid(), result_a);
+    assert!(state.history[2].is_meta());
+    assert_eq!(
+        state.history[2].text_content(),
+        "<system-reminder>\nPostToolUse:Echo hook additional context: HOOK-CTX\n</system-reminder>"
+    );
+    assert_eq!(state.history[3].id().as_uuid(), result_b);
+}
+
+#[test]
+fn resume_restores_thinking_stripped_latch_from_attachment() {
+    let sid = Uuid::new_v4();
+    let attachment = serde_json::from_value(json!({
+        "type":"attachment",
+        "attachment":{"type":"thinking_stripped","scope":"all"},
+        "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+        "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:00.000Z",
+        "cwd":"/tmp", "version":"0.12.0", "isSidechain":false
+    }))
+    .unwrap();
+
+    let state = state_from_messages(sid, &[attachment]);
+    assert!(
+        state.thinking_signature_stripped,
+        "thinking_stripped attachment must restore the session latch"
+    );
+    assert!(
+        state.history.is_empty(),
+        "thinking_stripped is a latch marker, not a model-facing message"
+    );
+}
+
+#[test]
 fn resume_without_goal_metadata_defaults_to_none() {
     let sid = Uuid::new_v4();
     let messages = vec![serde_json::from_value(json!({

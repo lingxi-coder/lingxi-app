@@ -123,8 +123,10 @@ fn parent_uuid_null_serializes_as_null_not_missing() {
 #[test]
 fn assistant_api_error_outer_key_order_matches_claude() {
     // claude api-error head: parentUuid, isSidechain, type, uuid, timestamp,
-    // message, requestId?, error?, isApiErrorMessage, apiErrorStatus?, then the
-    // common trailer. Verified against 2.1.x on-disk transcripts.
+    // message, requestId?, error?, errorDetails?, truncatedAfterOutput?,
+    // isApiErrorMessage, apiErrorStatus?, then the common trailer. Verified
+    // against 2.1.x on-disk transcripts; truncatedAfterOutput is omitted when
+    // false.
     let mut extra: Map<String, Value> = Map::new();
     extra.insert("error".into(), Value::String("Overloaded".into()));
     extra.insert("isApiErrorMessage".into(), Value::Bool(true));
@@ -150,6 +152,38 @@ fn assistant_api_error_outer_key_order_matches_claude() {
     };
     let s = serde_json::to_string(&msg).expect("ser");
     let expected = r#"{"parentUuid":"0a1b2c3d-4e5f-6789-abcd-ef0123456789","isSidechain":false,"type":"assistant","uuid":"22222222-3333-4444-5555-666666666666","timestamp":"2026-05-25T14:30:01.000Z","message":{"role":"assistant","content":"API Error"},"error":"Overloaded","isApiErrorMessage":true,"apiErrorStatus":529,"userType":"external","cwd":"/x","sessionId":"11111111-2222-3333-4444-555555555555","version":"0.6.0"}"#;
+    assert_eq!(s, expected);
+}
+
+#[test]
+fn assistant_api_error_truncated_after_output_sits_before_is_api_error_message() {
+    // cc 2.1.263 `Ggr`: error, errorDetails?, truncatedAfterOutput?,
+    // isApiErrorMessage, apiErrorStatus?. Omitted when false.
+    let mut extra: Map<String, Value> = Map::new();
+    extra.insert("error".into(), Value::String("server_error".into()));
+    extra.insert("truncatedAfterOutput".into(), Value::Bool(true));
+    extra.insert("isApiErrorMessage".into(), Value::Bool(true));
+
+    let msg = JsonlMessage {
+        message_type: "assistant".into(),
+        uuid: "22222222-3333-4444-5555-666666666666".into(),
+        parent_uuid: Some("0a1b2c3d-4e5f-6789-abcd-ef0123456789".into()),
+        session_id: "11111111-2222-3333-4444-555555555555".into(),
+        timestamp: "2026-05-25T14:30:01.000Z".into(),
+        cwd: "/x".into(),
+        version: "0.6.0".into(),
+        message: json!({"role":"assistant","content":"API Error"}),
+        is_sidechain: false,
+        user_type: Some("external".into()),
+        git_branch: None,
+        entrypoint: None,
+        slug: None,
+        prompt_id: None,
+        logical_parent_uuid: None,
+        extra,
+    };
+    let s = serde_json::to_string(&msg).expect("ser");
+    let expected = r#"{"parentUuid":"0a1b2c3d-4e5f-6789-abcd-ef0123456789","isSidechain":false,"type":"assistant","uuid":"22222222-3333-4444-5555-666666666666","timestamp":"2026-05-25T14:30:01.000Z","message":{"role":"assistant","content":"API Error"},"error":"server_error","truncatedAfterOutput":true,"isApiErrorMessage":true,"userType":"external","cwd":"/x","sessionId":"11111111-2222-3333-4444-555555555555","version":"0.6.0"}"#;
     assert_eq!(s, expected);
 }
 

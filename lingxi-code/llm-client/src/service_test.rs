@@ -4076,6 +4076,196 @@ mod tests {
         assert_eq!(transport.seen_count(), 2);
     }
 
+    fn assistant_with_thinking() -> protocol::ConversationMessage {
+        protocol::ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![
+                protocol::ContentBlock::Thinking {
+                    thinking: "secret".into(),
+                    signature: Some("sig".into()),
+                },
+                protocol::ContentBlock::Text {
+                    text: "hello".into(),
+                },
+            ],
+            stop_reason: Some("end_turn".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn thinking_signature_400_strips_and_retries_on_anthropic() {
+        let err = serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Invalid signature in thinking block"
+            }
+        });
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(400, err)),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let adapter = make_adapter(transport.clone());
+        let result = adapter
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                vec![assistant_with_thinking()],
+                Vec::new(),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "Anthropic thinking-signature 400 must retry: {result:?}"
+        );
+        assert_eq!(transport.seen_count(), 2);
+        assert!(adapter.thinking_signature_stripped());
+    }
+
+    #[tokio::test]
+    async fn thinking_signature_400_strips_and_retries_on_openai_chat() {
+        let err = serde_json::json!({
+            "error": {
+                "message": "Invalid signature in thinking block",
+                "type": "invalid_request_error"
+            }
+        });
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(400, err)),
+            FakeResponse::Ok(ProviderResponse::json(
+                200,
+                serde_json::json!({
+                    "id": "chatcmpl_test",
+                    "model": "gpt-4o",
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "hello"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+                }),
+            )),
+        ]);
+        let adapter = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::OpenAiChat,
+            ProviderId::OpenAI,
+            "https://api.openai.com",
+            "openai",
+            "gpt-4o",
+            transport.clone(),
+        );
+        let result = adapter
+            .messages_create(
+                "gpt-4o",
+                Some("openai"),
+                None,
+                vec![assistant_with_thinking()],
+                Vec::new(),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "OpenAI-compat thinking models must heal thinking-signature 400: {result:?}"
+        );
+        assert_eq!(transport.seen_count(), 2);
+        assert!(adapter.thinking_signature_stripped());
+    }
+
+    #[tokio::test]
+    async fn latched_thinking_strip_lets_gemini_encode_after_anthropic_thinking() {
+        let transport = FakeTransport::always(ProviderResponse::json(
+            200,
+            serde_json::json!({
+                "responseId": "resp_test",
+                "modelVersion": "gemini-2.5-flash",
+                "candidates": [{
+                    "content": {"role": "model", "parts": [{"text": "hello"}]},
+                    "finishReason": "STOP"
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 5,
+                    "candidatesTokenCount": 2,
+                    "totalTokenCount": 7
+                }
+            }),
+        ));
+        let adapter = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::GeminiGenerateContent,
+            ProviderId::Gemini,
+            "https://generativelanguage.googleapis.com/v1beta",
+            "gemini",
+            "gemini-2.5-flash",
+            transport.clone(),
+        );
+        adapter.set_thinking_signature_stripped(true);
+        let result = adapter
+            .messages_create(
+                "gemini-2.5-flash",
+                Some("gemini"),
+                None,
+                vec![assistant_with_thinking()],
+                Vec::new(),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "latched strip must drop thinking before Gemini encode: {result:?}"
+        );
+        assert_eq!(transport.seen_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn latched_thinking_strip_preserves_deepseek_reasoning_round_trip() {
+        let transport = FakeTransport::always(ProviderResponse::json(
+            200,
+            serde_json::json!({
+                "id": "chatcmpl_test",
+                "model": "deepseek-reasoner",
+                "choices": [{
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+            }),
+        ));
+        let adapter = make_adapter_for_protocol_with_transport(
+            ProtocolFamily::OpenAiChat,
+            ProviderId::OpenAICompatible {
+                name: "deepseek".into(),
+            },
+            "https://api.deepseek.com",
+            "deepseek",
+            "deepseek-reasoner",
+            transport.clone(),
+        );
+        adapter.set_thinking_signature_stripped(true);
+        let result = adapter
+            .messages_create(
+                "deepseek-reasoner",
+                Some("deepseek"),
+                None,
+                vec![assistant_with_thinking()],
+                Vec::new(),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "DeepSeek later turn must still encode: {result:?}"
+        );
+        let body = transport.seen.lock().unwrap()[0].body_json.clone();
+        let messages = body["messages"].as_array().expect("messages");
+        let has_reasoning = messages.iter().any(|message| {
+            message
+                .get("reasoning_content")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| !text.is_empty())
+        });
+        assert!(
+            has_reasoning,
+            "DeepSeek must keep reasoning_content under the latch: {body}"
+        );
+    }
+
     // ── 3c-T1: streaming 429 + retry-after header drives correct delay ────────
 
     struct RawBodyFrames(Option<Vec<u8>>);

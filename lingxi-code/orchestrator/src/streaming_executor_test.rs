@@ -281,6 +281,148 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unknown_tool_suffix_is_empty_for_genuinely_unknown() {
+        let tools = ToolRegistry::new();
+        assert_eq!(unknown_tool_suffix("Nope", &tools, false), "");
+    }
+
+    #[test]
+    fn unknown_tool_suffix_points_glob_and_grep_at_bash() {
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(SafeToolNamed("Bash")) as Arc<dyn Tool>);
+        assert_eq!(
+            unknown_tool_suffix("Glob", &tools, false),
+            ". Glob is not available in this session \u{2014} find files with `find` via the Bash tool instead."
+        );
+        assert_eq!(
+            unknown_tool_suffix("Grep", &tools, false),
+            ". Grep is not available in this session \u{2014} search file contents with `grep` via the Bash tool instead."
+        );
+    }
+
+    #[test]
+    fn unknown_tool_suffix_glob_without_shell_is_disabled() {
+        let tools = ToolRegistry::new();
+        assert_eq!(
+            unknown_tool_suffix("Glob", &tools, false),
+            ". Glob is disabled for this session."
+        );
+    }
+
+    #[test]
+    fn unknown_tool_suffix_names_disconnected_mcp_server() {
+        let tools = ToolRegistry::new();
+        assert_eq!(
+            unknown_tool_suffix("mcp__github__issue", &tools, false),
+            ". Its MCP server 'github' has disconnected. Continue without this tool; it becomes callable again only if the server reconnects."
+        );
+        assert_eq!(
+            unknown_tool_suffix("mcp__github__issue", &tools, true),
+            ". Its MCP server 'github' is not available in this context. Continue without this tool."
+        );
+    }
+
+    #[test]
+    fn unknown_tool_suffix_subagent_restricted_catalog() {
+        let tools = ToolRegistry::new();
+        assert_eq!(
+            unknown_tool_suffix("EnterPlanMode", &tools, true),
+            ". EnterPlanMode is not available inside subagents. Complete the task with the tools provided and return findings to the orchestrator."
+        );
+        assert_eq!(
+            unknown_tool_suffix("WaitForMcpServers", &tools, true),
+            ". WaitForMcpServers is not available inside subagents. Complete the task with the tools provided and return findings to the orchestrator."
+        );
+        assert_eq!(unknown_tool_suffix("EnterPlanMode", &tools, false), "");
+    }
+
+    #[test]
+    fn unknown_tool_suffix_pending_mcp_points_at_wait_for_mcp_servers() {
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(SafeToolNamed("WaitForMcpServers")) as Arc<dyn Tool>);
+        assert_eq!(
+            unknown_tool_suffix("mcp__github__issue", &tools, false),
+            ". The MCP server 'github' is still connecting. Call WaitForMcpServers to wait for it, then try again."
+        );
+        // Subagent skips `l5o` (`r?"":l5o`) and uses the disconnected arm.
+        assert_eq!(
+            unknown_tool_suffix("mcp__github__issue", &tools, true),
+            ". Its MCP server 'github' is not available in this context. Continue without this tool."
+        );
+    }
+
+    struct SafeToolNamed(&'static str);
+    #[async_trait]
+    impl Tool for SafeToolNamed {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            self.0.into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: json!({ "content": "ok" }),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+    }
+
     #[tokio::test]
     async fn add_known_concurrency_safe_tool_is_queued() {
         let orch = orch_with_safe_tool();

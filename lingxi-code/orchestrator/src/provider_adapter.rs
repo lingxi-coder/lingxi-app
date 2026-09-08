@@ -362,6 +362,14 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.service.last_retry_count()
     }
 
+    fn thinking_signature_stripped(&self) -> bool {
+        self.service.thinking_signature_stripped()
+    }
+
+    fn set_thinking_signature_stripped(&self, stripped: bool) {
+        self.service.set_thinking_signature_stripped(stripped);
+    }
+
     /// Task 8 (llm-client future-work batch 3): expose the FULL internal
     /// nine-field snapshot for the turn drivers' `emit_rate_limit` seam.
     /// Delegates to the inherent [`Self::last_rate_limit_info`] (which
@@ -905,6 +913,14 @@ impl StreamingApiClient for ProviderApiAdapter {
     fn last_retry_count(&self) -> u32 {
         self.service.last_retry_count()
     }
+
+    fn thinking_signature_stripped(&self) -> bool {
+        self.service.thinking_signature_stripped()
+    }
+
+    fn set_thinking_signature_stripped(&self, stripped: bool) {
+        self.service.set_thinking_signature_stripped(stripped);
+    }
 }
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -1220,7 +1236,8 @@ mod tests {
         );
         drop(auto_seen);
 
-        let forced_transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let forced_transport =
+            FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let forced_seam: Arc<dyn agent::SubagentApiClient> =
             Arc::new(make_adapter(forced_transport.clone()));
         let _ = forced_seam
@@ -1243,7 +1260,10 @@ mod tests {
             .last()
             .expect("the forced opts-aware call reached the transport");
         assert_eq!(
-            forced_request.body_json.get("max_tokens").and_then(serde_json::Value::as_u64),
+            forced_request
+                .body_json
+                .get("max_tokens")
+                .and_then(serde_json::Value::as_u64),
             Some(321),
             "forced opts-aware wire max_tokens must equal the requested ceiling; body: {}",
             forced_request.body_json

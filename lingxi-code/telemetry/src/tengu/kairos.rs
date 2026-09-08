@@ -44,8 +44,8 @@ pub const LOOP_KEEPALIVE_FIRED: &str = "tengu_loop_keepalive_fired";
 pub const LOOP_DYNAMIC_WAKEUP_AGED_OUT: &str = "tengu_loop_dynamic_wakeup_aged_out";
 
 /// `tengu_loop_dynamic_wakeup_ends_turn` (binary turn-loop branch) — a lone
-/// `ScheduleWakeup` ended the turn. Fields: `queryChainId`, `queryDepth`.
-/// NOTE: emitting this requires the orchestrator turn-end branch (still pending).
+/// `ScheduleWakeup` that armed a `/loop` wakeup ended the turn. Fields:
+/// `queryChainId`, `queryDepth`. Emitted by `turn_loop`'s lone-wakeup arm.
 pub const LOOP_DYNAMIC_WAKEUP_ENDS_TURN: &str = "tengu_loop_dynamic_wakeup_ends_turn";
 
 /// `tengu_push_notification_send` (binary `PushNotification` tool `call`) — a

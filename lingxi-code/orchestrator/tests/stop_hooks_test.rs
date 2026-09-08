@@ -347,6 +347,56 @@ async fn stop_block_continues_until_cap_then_overrides() {
 }
 
 #[tokio::test]
+async fn stop_hook_block_cap_accepts_claude_code_env_alias() {
+    let _env = GOAL_CAP_ENV_LOCK.lock().unwrap();
+    let prior_lx = std::env::var("LINGXI_STOP_HOOK_BLOCK_CAP").ok();
+    let prior_cc = std::env::var("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP").ok();
+    std::env::remove_var("LINGXI_STOP_HOOK_BLOCK_CAP");
+    std::env::set_var("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", "1");
+
+    let api = Arc::new(MockApiClient::new(vec![end_turn("1"), end_turn("2")]));
+    let hooks = exec_with(
+        Arc::new(StopBlockHandler),
+        builtin_hook("stop-block", HookEventType::Stop),
+    )
+    .await;
+    let output = Arc::new(MockOutputStream::new());
+    let o = Arc::new(ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        hooks,
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ));
+
+    let outcome = o.run_turn("hi").await.expect("turn ok");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+    assert_eq!(
+        api.captured_msgs().await.len(),
+        2,
+        "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=1 must cap after the first continuation"
+    );
+    let texts = output.text_events().await;
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("overriding and ending turn")),
+        "cap warning must fire when only the CLAUDE_CODE_ alias is set: {texts:?}"
+    );
+
+    std::env::remove_var("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP");
+    if let Some(v) = prior_lx {
+        std::env::set_var("LINGXI_STOP_HOOK_BLOCK_CAP", v);
+    }
+    if let Some(v) = prior_cc {
+        std::env::set_var("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", v);
+    }
+}
+
+#[tokio::test]
 async fn stop_block_coinciding_with_max_turns_ends_without_feedback() {
     // Binary blocking-branch order: max-turns is checked BEFORE the block cap
     // (`let dt=ie+1,nn=te+1; if(c&&dt>c) return G("tengu_stop_hook_block_count",

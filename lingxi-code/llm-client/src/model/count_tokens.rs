@@ -170,7 +170,11 @@ mod tests {
         // The accessor must be the exact same ceiling-division formula
         // `approximate_tokens` folds its own byte_len through — not a
         // separately-hand-rolled divisor that could silently drift from it.
-        assert_eq!(approximate_tokens_for_bytes(0), 1, "empty input floors to 1");
+        assert_eq!(
+            approximate_tokens_for_bytes(0),
+            1,
+            "empty input floors to 1"
+        );
         assert_eq!(
             approximate_tokens_for_bytes(REQUEST_BYTES_PER_TOKEN),
             1,

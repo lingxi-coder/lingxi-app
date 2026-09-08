@@ -209,6 +209,32 @@ async fn provider_internal_after_completed_block_finalizes_partial() {
     .await;
 }
 
+/// Idle-timeout watchdog after a completed block → watchdog finalize (2.1.263
+/// "The response stopped arriving").
+#[tokio::test]
+async fn idle_timeout_after_completed_block_finalizes_partial() {
+    assert_finalizes(
+        llm_client::model::stream_watchdog::idle_timeout_error(std::time::Duration::from_secs(1)),
+        "watchdog",
+        "API Error: The response stopped arriving. The response above may be incomplete.",
+    )
+    .await;
+}
+
+/// Machine-sleep watchdog after a completed block → stream_suspended finalize.
+#[tokio::test]
+async fn suspend_after_completed_block_finalizes_partial() {
+    assert_finalizes(
+        llm_client::model::stream_watchdog::watchdog_abort_error(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(5),
+        ),
+        "stream_suspended",
+        "API Error: Your computer went to sleep mid-response. The response above may be incomplete.",
+    )
+    .await;
+}
+
 /// Transport connection-drop mid-stream after a completed block → stale_connection.
 #[tokio::test]
 async fn transport_after_completed_block_finalizes_partial() {
@@ -217,7 +243,7 @@ async fn transport_after_completed_block_finalizes_partial() {
             message: "connection reset by peer".into(),
         },
         "stale_connection",
-        "API Error: Connection closed mid-response. The response above may be incomplete.",
+        "API Error: Connection lost mid-response. The response above may be incomplete.",
     )
     .await;
 }
@@ -245,7 +271,7 @@ async fn stream_ended_without_stop_after_completed_block_finalizes_partial() {
     assert!(api.captured_seeds().await.is_empty());
 
     let expected_notice =
-        "API Error: Connection closed mid-response. The response above may be incomplete.";
+        "API Error: Connection lost mid-response. The response above may be incomplete.";
     assert!(output
         .text_events()
         .await
@@ -315,7 +341,7 @@ async fn transport_after_incomplete_text_block_finalizes_visible_partial() {
     );
 
     let expected_notice =
-        "API Error: Connection closed mid-response. The response above may be incomplete.";
+        "API Error: Connection lost mid-response. The response above may be incomplete.";
     assert!(
         output
             .text_events()

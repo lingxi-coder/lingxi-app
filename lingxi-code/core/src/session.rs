@@ -187,6 +187,14 @@ pub struct SessionState {
     /// history snapshot. Unlike `isMeta`, this is a hard context boundary.
     #[serde(default)]
     pub model_context_excluded_messages: HashSet<MessageId>,
+    /// Session latch for thinking-signature 400 recovery
+    /// (`thinking_stripped` attachment, claude-code 2.1.259 `QZ` / `qge("all")`).
+    ///
+    /// When set, later thinking-capable requests strip `thinking` /
+    /// `redacted_thinking` on the outbound clone. DeepSeek / Kimi keep
+    /// `reasoning_content` because those APIs require it. Defaults `false`.
+    #[serde(default)]
+    pub thinking_signature_stripped: bool,
 }
 
 impl SessionState {
@@ -212,6 +220,7 @@ impl SessionState {
             transcript_only_messages: HashSet::new(),
             compact_summary_messages: HashSet::new(),
             model_context_excluded_messages: HashSet::new(),
+            thinking_signature_stripped: false,
         }
     }
 

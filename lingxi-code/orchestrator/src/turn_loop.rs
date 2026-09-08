@@ -170,6 +170,27 @@ pub(crate) const MAX_OUTPUT_TOKENS_RECOVERY_NUDGE: &str = concat!(
     "Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.",
 );
 
+/// Non-interactive main (`-p`) truncated-after-output recovery nudge
+/// (cc 2.1.263 `tZo` / `query_truncated_response_recovery`).
+pub(crate) const TRUNCATED_RESPONSE_RECOVERY_NUDGE_MAIN: &str = concat!(
+    "Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. ",
+    "If none of it survived, answer the request from the start.",
+);
+
+/// Subagent truncated-after-output recovery nudge.
+pub(crate) const TRUNCATED_RESPONSE_RECOVERY_NUDGE_SUBAGENT: &str = concat!(
+    "Your response above was cut off mid-stream and only your next message is delivered. ",
+    "Write the complete response again from the start — no apology, no mention of the cut-off.",
+);
+
+/// `tZo`: recover a truncated-after-output api-error for subagents and for
+/// non-interactive (`-p`) main. Interactive main ends (the notice is enough).
+#[must_use]
+pub(crate) fn truncated_response_recovery_eligible(query_source: &str, interactive: bool) -> bool {
+    let src = crate::config::sanitize_query_source(query_source);
+    src.starts_with("agent") || src == "subagent" || !interactive
+}
+
 /// Byte-exact `isMeta` retry message pushed when a `PermissionDenied` hook
 /// returns `{retry: true}` on the gated auto-mode classifier-deny path. 1:1 with
 /// claude-code `toolExecution.ts:1096`. DORMANT in the external build — the
@@ -663,7 +684,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     let api_success_message_count = u32::try_from(history_snapshot.len()).unwrap_or(u32::MAX);
     let api_success_message_tokens =
         compaction::grouping::estimate_tokens_for_range(&history_snapshot);
-    let response = match call_api_with_ptl_recovery(
+    let api_result = call_api_with_ptl_recovery(
         orch,
         system,
         &model,
@@ -676,8 +697,9 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         date_change_reminder,
         &turn_reminders,
     )
-    .await
-    {
+    .await;
+    orch.persist_thinking_signature_strip_latch().await;
+    let response = match api_result {
         Ok(outcome) => match outcome {
             PtlCallOutcome::Response(resp) => resp,
             PtlCallOutcome::PromptTooLong => {
@@ -1137,6 +1159,36 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         }
     }
 
+    // LONE `ScheduleWakeup` ENDS THE TURN (binary
+    // `if(yo.length===1 && yo[0].name===Xi && Zoe(…)) { if(kg().some(…loop…)) … }`).
+    // A round whose ONLY tool call was `ScheduleWakeup`, and which actually
+    // armed a wakeup, has nothing left to do: the tool's own result already
+    // tells the model the harness will re-invoke it when the wakeup fires, so
+    // feeding that result back just buys one more model round to say so.
+    //
+    // The flag is CONSUMED unconditionally (`swap`) so a call that armed a
+    // wakeup alongside other tools cannot leak into the next round; the guards
+    // then decide whether this round actually takes the branch.
+    let wakeup_armed = orch
+        .loop_wakeup_armed_slot
+        .as_ref()
+        .is_some_and(|slot| slot.swap(false, std::sync::atomic::Ordering::SeqCst));
+    let lone_wakeup_ended_turn = wakeup_armed
+        && !hook_prevent_continuation
+        && !tool_requested_end_turn
+        && matches!(
+            tool_uses.as_slice(),
+            [(_, name, _, _)] if name == SCHEDULE_WAKEUP_TOOL_NAME
+        )
+        && {
+            let session = orch.session();
+            let model = session.lock().await.model.clone();
+            lone_wakeup_ends_turn_model(&model)
+        };
+    if lone_wakeup_ended_turn {
+        emit_loop_dynamic_wakeup_ends_turn_telemetry(orch).await;
+    }
+
     // Finding #73 (batched twin): advance the per-turn todo/task reminder
     // counters for THIS assistant turn, then reset `turns_since_last_todo_write`
     // to 0 if this turn's assistant response invoked the variant's "recent use"
@@ -1204,6 +1256,15 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             stop_reason: "end_turn".to_string(),
             allow_budget_continuation: false,
             tool_requested_end: true,
+        }
+    } else if lone_wakeup_ended_turn {
+        // `tool_requested_end: false` — the tool did not ask (no `toolEndsTurn`
+        // marker); the turn loop decided, as the binary's own arm does.
+        TurnStepOutcome::Ended {
+            final_message_id: assistant_id,
+            stop_reason: "end_turn".to_string(),
+            allow_budget_continuation: false,
+            tool_requested_end: false,
         }
     } else {
         match response.stop_reason.as_deref() {
@@ -1361,6 +1422,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // raw `session.history`.
     turn_reminders: &[ConversationMessage],
 ) -> Result<PtlCallOutcome, OrchestratorError> {
+    orch.sync_thinking_signature_strip_flag_to_api().await;
     // A first request after resume may overflow before any successful call
     // has populated the summary fork's cache-safe slot.
     orch.save_cache_safe_params(system, model, &tools).await;
@@ -2392,11 +2454,13 @@ pub(crate) async fn surface_terminal_api_error(
             error: Some("max_output_tokens"),
             api_error_status: None,
             inner_stop_reason: None,
+            truncated_after_output: false,
         },
         "refusal" => ApiErrorEnvelope {
             error: Some("invalid_request"),
             api_error_status: None,
             inner_stop_reason: Some("refusal"),
+            truncated_after_output: false,
         },
         // `terminal_api_error_text` returned `Some` only for the three reasons
         // above; any other value can't reach here.
@@ -2518,6 +2582,46 @@ pub(crate) async fn surface_model_error(
         bus.log_event("tengu_query_error", metadata).await;
     }
     surface_api_error_notice(orch, error_text, env).await
+}
+
+/// PARITY the binary's `Xi`. Spelled out rather than imported: `orchestrator`
+/// does not depend on `tool-cron`, and the tool name is a model-facing wire
+/// string, not an internal symbol.
+const SCHEDULE_WAKEUP_TOOL_NAME: &str = "ScheduleWakeup";
+
+/// PARITY `Zoe(family, model)` =
+/// `dm(model, "fable_5_mitigations", family) || family === "claude-mythos-5"`
+/// — the model gate on the lone-`ScheduleWakeup` turn end. It is a
+/// model-generation mitigation, so most models never take the branch and keep
+/// feeding the tool result back, exactly as before.
+fn lone_wakeup_ends_turn_model(model_id: &str) -> bool {
+    use platform_api::model_capabilities::{
+        has_capability, normalize_model_id, ModelCapability,
+    };
+    has_capability(model_id, ModelCapability::Fable5Mitigations)
+        || normalize_model_id(model_id) == "claude-mythos-5"
+}
+
+/// PARITY the turn-loop branch that ends a turn on a lone `ScheduleWakeup`:
+/// `i("tengu_loop_dynamic_wakeup_ends_turn", {queryChainId, queryDepth})`.
+pub(crate) async fn emit_loop_dynamic_wakeup_ends_turn_telemetry(
+    orch: &ConversationOrchestrator,
+) {
+    telemetry::emit_loop_dynamic_wakeup_ends_turn(&orch.query_chain_id, 0);
+    let Some(bus) = orch.model_runtime.analytics_bus.as_ref() else {
+        return;
+    };
+    let mut metadata = telemetry::LogEventMetadata::new();
+    metadata.insert(
+        "queryChainId".into(),
+        telemetry::AnalyticsValue::String(orch.query_chain_id.clone()),
+    );
+    metadata.insert("queryDepth".into(), telemetry::AnalyticsValue::Int(0));
+    bus.log_event(
+        telemetry::tengu::kairos::LOOP_DYNAMIC_WAKEUP_ENDS_TURN,
+        metadata,
+    )
+    .await;
 }
 
 pub(crate) async fn emit_tool_result_ended_turn_telemetry(
@@ -3590,29 +3694,33 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         let Some(tool_handle) = orch.tools.find_by_name(name) else {
             // Shared builder so this parity-critical string lives in one place
             // (also used by the streaming executor's add_tool).
+            let is_subagent = {
+                let src = crate::config::sanitize_query_source(&orch.config.query_source);
+                src.starts_with("agent") || src == "subagent"
+            };
+            let suffix =
+                crate::streaming_executor::unknown_tool_suffix(name, &orch.tools, is_subagent);
             let result_block = crate::streaming_executor::synthetic_unknown_tool(
                 tool_use_id.clone(),
                 name,
                 provider_id.clone(),
+                &suffix,
             );
             // Pass the SAME wrapped string the result_block carries as the
             // model text, so the SDK frame's `content` matches the model wire.
             let model_text = match &result_block {
                 ContentBlock::ToolResult { content, .. } => content.clone(),
                 _ => format!(
-                    "<tool_use_error>Error: No such tool available: {name}</tool_use_error>"
+                    "<tool_use_error>Error: No such tool available: {name}{suffix}</tool_use_error>"
                 ),
             };
-            // O1: claude's unknown-tool arm (2.1.220 BIN off 235398500 /
-            // 232971680) stamps the persisted line with the BARE string
-            // `` `Error: No such tool available: ${name}${suffix}` `` — the
-            // unwrapped twin of the `<tool_use_error>` model text. `suffix` is
-            // claude's `Gks` "did you mean" hint, which the port does not
-            // produce, so it is empty here (same as claude when no alias
-            // matches).
+            // O1: claude's unknown-tool arm stamps the persisted line with the
+            // BARE string `` `Error: No such tool available: ${name}${suffix}` ``
+            // — the unwrapped twin of the `<tool_use_error>` model text. `suffix`
+            // is 2.1.263 `Ldt` (Glob/Grep-via-shell, MCP disconnect, …).
             orch.record_tool_use_result(
                 tool_use_id,
-                serde_json::Value::String(format!("Error: No such tool available: {name}")),
+                serde_json::Value::String(format!("Error: No such tool available: {name}{suffix}")),
             )
             .await;
             orch.emit_tool_result_frame(

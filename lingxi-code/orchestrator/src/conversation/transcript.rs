@@ -728,8 +728,9 @@ impl ConversationOrchestrator {
         // `JsonlMessage`'s hand-written `Serialize` (session/jsonl/schema.rs)
         // now places them in claude's EXACT per-kind outer-key order
         // (api-error head: type, uuid, timestamp, message, requestId?, error?,
-        // isApiErrorMessage, apiErrorStatus?) — presence + values + ORDER are
-        // 1:1. See [`ApiErrorEnvelope`].
+        // errorDetails?, truncatedAfterOutput?, isApiErrorMessage,
+        // apiErrorStatus?) — presence + values + ORDER are 1:1. See
+        // [`ApiErrorEnvelope`].
         if let Some(ae) = api_error {
             if let Some(cat) = ae.error {
                 extra.insert(
@@ -741,6 +742,12 @@ impl ConversationOrchestrator {
                 "isApiErrorMessage".to_string(),
                 serde_json::Value::Bool(true),
             );
+            if ae.truncated_after_output {
+                extra.insert(
+                    "truncatedAfterOutput".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
             if let Some(status) = ae.api_error_status {
                 extra.insert(
                     "apiErrorStatus".to_string(),

@@ -445,6 +445,20 @@ pub fn emit_loop_dynamic_wakeup_scheduled(
     );
 }
 
+/// Emit `tengu_loop_dynamic_wakeup_ends_turn`.
+///
+/// PARITY the turn-loop branch `i("tengu_loop_dynamic_wakeup_ends_turn",
+/// {queryChainId, queryDepth})` — a round whose ONLY tool call was
+/// `ScheduleWakeup`, and which actually armed a `/loop` wakeup, ends the turn
+/// instead of feeding the tool result back to the model.
+pub fn emit_loop_dynamic_wakeup_ends_turn(query_chain_id: &str, query_depth: u32) {
+    tracing::info!(
+        event = crate::tengu::kairos::LOOP_DYNAMIC_WAKEUP_ENDS_TURN,
+        query_chain_id = %query_chain_id,
+        query_depth = query_depth,
+    );
+}
+
 /// The `/loop` no-op fold counter. NOT a `tengu_*` analytics event: the oracle
 /// records it through its counter API (`y` / `g`), the same family as
 /// `cron_task_fire`, so the name has no prefix and is not in `tengu::*::NAMES`.

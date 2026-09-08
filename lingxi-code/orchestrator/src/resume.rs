@@ -484,6 +484,7 @@ fn build_state_from_jsonl(
             }
             _ => {
                 flush_pending_assistant(&mut state, pending_assistant.take());
+                restore_thinking_stripped_latch(&mut state, m);
                 if let Some(message) = hook_attachment_message_for_api(m, msg_uuid) {
                     state.history.push(message);
                 }
@@ -534,6 +535,18 @@ fn build_state_from_jsonl(
     (state, last_uuid, runtime_metadata)
 }
 
+fn restore_thinking_stripped_latch(state: &mut SessionState, message: &JsonlMessage) {
+    if message.message_type != "attachment" {
+        return;
+    }
+    let Some(attachment) = message.extra.get("attachment") else {
+        return;
+    };
+    if attachment.get("type").and_then(Value::as_str) == Some("thinking_stripped") {
+        state.thinking_signature_stripped = true;
+    }
+}
+
 fn hook_attachment_message_for_api(
     message: &JsonlMessage,
     message_uuid: Uuid,
@@ -542,19 +555,49 @@ fn hook_attachment_message_for_api(
         return None;
     }
     let attachment = message.extra.get("attachment")?;
-    if attachment.get("type").and_then(serde_json::Value::as_str)
-        != Some("hook_stopped_continuation")
-    {
-        return None;
+    match attachment.get("type").and_then(Value::as_str)? {
+        "hook_stopped_continuation" => {
+            let hook_name = attachment.get("hookName")?.as_str()?;
+            let reason = attachment.get("message")?.as_str()?;
+            Some(ConversationMessage::user_meta(
+                MessageId::from_uuid(message_uuid),
+                format!(
+                    "<system-reminder>\n{hook_name} hook stopped continuation: {reason}\n</system-reminder>"
+                ),
+            ))
+        }
+        "hook_additional_context" => {
+            let hook_name = attachment.get("hookName")?.as_str()?;
+            let content = attachment.get("content")?.as_array()?;
+            if content.is_empty() {
+                return None;
+            }
+            let body = content
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(ConversationMessage::user_meta(
+                MessageId::from_uuid(message_uuid),
+                format!(
+                    "<system-reminder>\n{hook_name} hook additional context: {body}\n</system-reminder>"
+                ),
+            ))
+        }
+        "hook_blocking_error" => {
+            let hook_name = attachment.get("hookName")?.as_str()?;
+            let blocking = attachment.get("blockingError")?;
+            let command = blocking.get("command")?.as_str()?;
+            let error = blocking.get("blockingError")?.as_str()?;
+            Some(ConversationMessage::user_meta(
+                MessageId::from_uuid(message_uuid),
+                format!(
+                    "<system-reminder>\n{hook_name} hook blocking error from command: \"{command}\": {error}\n</system-reminder>"
+                ),
+            ))
+        }
+        _ => None,
     }
-    let hook_name = attachment.get("hookName")?.as_str()?;
-    let reason = attachment.get("message")?.as_str()?;
-    Some(ConversationMessage::user_meta(
-        MessageId::from_uuid(message_uuid),
-        format!(
-            "<system-reminder>\n{hook_name} hook stopped continuation: {reason}\n</system-reminder>"
-        ),
-    ))
 }
 
 fn tool_result_ids(message: &JsonlMessage) -> impl Iterator<Item = &str> {
@@ -1161,6 +1204,7 @@ impl ConversationOrchestrator {
         // replayed values. Both fields are `pub(crate)` so this is allowed
         // from a sibling module in the same crate.
         orch.session = Arc::new(Mutex::new(replayed.state));
+        orch.sync_thinking_signature_strip_flag_to_api().await;
         orch.transcript.last_jsonl_uuid = Arc::new(Mutex::new(
             replayed.last_message_uuid.map(|u| u.to_string()),
         ));

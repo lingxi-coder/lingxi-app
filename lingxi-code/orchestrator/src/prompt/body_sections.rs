@@ -372,8 +372,8 @@ fn has_opus_5_prompt_bundle(model: &str) -> bool {
 /// stop; that is not a transcription slip.
 const ACT_DONT_REDERIVE_SECTION: &str = "When you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey";
 
-/// The Fable-only identity paragraph in the pinned 2.1.220 prompt.
-const FABLE_IDENTITY_SECTION: &str = "This iteration of Claude is Claude Fable 5.1, the newest model in Anthropic's Claude 5 family and part of the Mythos-class tier. Claude Fable 5.1 and Claude Mythos 5.1 share the same capabilities. Claude Fable 5.1 is the most advanced generally available Claude model, while Claude Mythos 5.1 is available only to approved Project Glasswing organizations. For more information, see https://platform.claude.com/docs/en/models/fable-5-1/overview.";
+/// The Fable-only identity paragraph — 2.1.263 `nss` (src_160988549.js @4644692).
+const FABLE_IDENTITY_SECTION: &str = "This iteration of Claude is Claude Fable 5.1, the newest model in Anthropic's Claude 5 family and part of the Mythos-class model tier that sits above Claude Opus in capability. Claude Fable 5.1 and Claude Mythos 5.1 share the same underlying model. Claude Fable 5.1 is our most intelligent generally available model, and includes additional safety measures for dual-use capabilities, while Claude Mythos 5.1 is available without those measures to only approved organizations. Fable 5.1 is the most advanced generally available Claude model. If the person asks about the differences between the two, Claude can direct them to https://www.anthropic.com/claude/fable for more information.";
 
 /// SP-10 — `k9T` @**297083649** (also in 2.1.220 as `lMy` @237498803, so this is
 /// a long-standing port gap, not 2.1.238 drift): the `tool_param_json` slot.
@@ -418,7 +418,7 @@ fn tool_param_json_enabled(model: &str) -> bool {
 /// and Mythos in the pinned 2.1.220 build.
 const FABLE_MYTHOS_MITIGATIONS: &str = "You are operating autonomously. The user is not watching in real time and cannot answer questions mid-task, so asking 'Want me to…?' or 'Shall I…?' will block the work. For reversible actions that follow from the original request, proceed without asking. Stop only for destructive actions or genuine scope changes the user must decide. Offering follow-ups after the task is done is fine; asking permission before doing the work is not.\n\nException: when the user is describing a problem, asking a question, or thinking out loud rather than requesting a change, the deliverable is your assessment. Report your findings and stop. Don't apply a fix until they ask for one.\n\nBefore ending your turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done ('I'll…', 'let me know when…'), do that work now with tool calls. That includes retrying after errors and gathering missing information yourself. Do not stop because the context or session is long. End your turn only when the task is complete or you are blocked on input only the user can provide.\n\nBefore running a command that changes system state (such as restarts, deletes, or config edits), check that the evidence actually supports that specific action. A signal that pattern-matches to a known failure may have a different cause.";
 
-const OPUS_5_TERMINAL_RESTRICTIONS: &str = "Do not call the AgentTool unless the user requested it\nDo not use workflows or deep-research unless the user requested it";
+const OPUS_5_TERMINAL_RESTRICTIONS: &str = "Do not use the Agent tool, workflows, or deep-research unless the user, a LINGXI.md file, or a skill asks for it";
 
 /// `CMy()` — the `act_dont_rederive` gate. `env ?? Ke("tengu_cedar_lantern",
 /// true)`: DEFAULT TRUE, so the section ships unless explicitly turned off.
@@ -807,6 +807,34 @@ mod tests {
         }
     }
 
+    /// 2.1.263 `nss` — Fable identity is the binary paragraph, not the older
+    /// Glasswing / platform-docs rewrite.
+    #[test]
+    fn fable_identity_matches_2_1_263_nss() {
+        let p = format(
+            false,
+            true,
+            &[],
+            true,
+            false,
+            false,
+            "claude-fable-5-1",
+            false,
+        );
+        assert!(
+            p.contains(FABLE_IDENTITY_SECTION),
+            "Fable 5.1 must ship the 2.1.263 nss identity paragraph"
+        );
+        assert!(
+            !p.contains("Project Glasswing"),
+            "Glasswing copy is not in 2.1.263"
+        );
+        assert!(
+            p.contains("https://www.anthropic.com/claude/fable"),
+            "2.1.263 points at anthropic.com/claude/fable"
+        );
+    }
+
     /// SP-10: `tool_param_json` is INERT by default (both upstream gates are
     /// GrowthBook flags that are unset in a stock install), and lands between
     /// `fable_identity` and `# Session-specific guidance` when enabled.
@@ -898,6 +926,14 @@ mod tests {
         let o5 = post_context_sections("claude-opus-5", false).join("\n\n");
         assert!(o5.contains("# Delivering work"), "opus-5 must get it");
         assert!(o5.contains("# Corrections"), "opus-5 must get it");
+        assert!(
+            o5.contains("Do not use the Agent tool, workflows, or deep-research unless the user, a LINGXI.md file, or a skill asks for it"),
+            "opus-5 trailer must match 2.1.263 oir (LINGXI.md rebrand): {o5}"
+        );
+        assert!(
+            !o5.contains("Do not call the AgentTool"),
+            "legacy two-line AgentTool trailer must not ship"
+        );
         // Lean, but WITHOUT the opus-5 bundle:
         for m in ["claude-opus-4-8", "claude-fable-5-1"] {
             let p = post_context_sections(m, false).join("\n\n");

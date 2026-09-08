@@ -1880,6 +1880,35 @@ mod max_output_tokens_recovery_tests {
         assert_eq!(MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, 3);
     }
 
+    #[test]
+    fn truncated_response_recovery_nudge_matches_2_1_263() {
+        use crate::turn_loop::{
+            truncated_response_recovery_eligible, TRUNCATED_RESPONSE_RECOVERY_NUDGE_MAIN,
+            TRUNCATED_RESPONSE_RECOVERY_NUDGE_SUBAGENT,
+        };
+        assert_eq!(
+            TRUNCATED_RESPONSE_RECOVERY_NUDGE_MAIN,
+            "Your response above was cut off mid-stream. Resume directly from where it stops \u{2014} no apology, no recap. If none of it survived, answer the request from the start."
+        );
+        assert_eq!(
+            TRUNCATED_RESPONSE_RECOVERY_NUDGE_SUBAGENT,
+            "Your response above was cut off mid-stream and only your next message is delivered. Write the complete response again from the start \u{2014} no apology, no mention of the cut-off."
+        );
+        assert!(truncated_response_recovery_eligible(
+            "repl_main_thread",
+            false
+        ));
+        assert!(!truncated_response_recovery_eligible(
+            "repl_main_thread",
+            true
+        ));
+        assert!(truncated_response_recovery_eligible(
+            "agent:custom:reviewer",
+            true
+        ));
+        assert!(truncated_response_recovery_eligible("subagent", true));
+    }
+
     /// (Test plan 1) `max_tokens` at recovery_count 0 → Continue, the exact
     /// nudge is appended as a User message, and the counter becomes 1.
     #[tokio::test]
@@ -6083,7 +6112,11 @@ mod pre_cancel_tests {
         fn interrupt_behavior(&self, input: &serde_json::Value) -> InterruptBehavior {
             // Mirrors AgentTool's input-sensitive contract: Fusion owns a
             // settlement boundary; ordinary Agent calls remain cancelable.
-            if input.get("subagent_type").and_then(serde_json::Value::as_str) == Some("fusion") {
+            if input
+                .get("subagent_type")
+                .and_then(serde_json::Value::as_str)
+                == Some("fusion")
+            {
                 InterruptBehavior::Block
             } else {
                 InterruptBehavior::Cancel

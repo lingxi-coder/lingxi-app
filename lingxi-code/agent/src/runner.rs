@@ -669,7 +669,7 @@ fn classify_api_termination(e: &llm_client::LlmError) -> Option<(&'static str, &
         )),
         LlmError::Transport { .. } => Some((
             "server_error",
-            "API Error: Connection closed mid-response. The response above may be incomplete.",
+            "API Error: Connection lost mid-response. The response above may be incomplete.",
         )),
         // A stall is NOT in `CTy`. Claude Code 2.1.238 classifies it through
         // `xtt`:
@@ -707,7 +707,7 @@ fn classify_api_termination(e: &llm_client::LlmError) -> Option<(&'static str, &
         }
         LlmError::StreamInterrupted { .. } => Some((
             "server_error",
-            "API Error: Response stalled mid-stream. The response above may be incomplete.",
+            "API Error: The response stopped arriving. The response above may be incomplete.",
         )),
         // Auth / permission / invalid-request / quota / context / TLS / cost /
         // unsupported-capability / model-unavailable are terminal — CC rethrows

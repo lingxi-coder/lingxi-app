@@ -112,6 +112,7 @@ impl ConversationOrchestrator {
             mid_turn_input: std::sync::OnceLock::new(),
             cancel_reason: std::sync::OnceLock::new(),
             end_conversation_slot: None,
+            loop_wakeup_armed_slot: None,
         }
     }
 
@@ -464,6 +465,19 @@ impl ConversationOrchestrator {
         slot: crate::end_conversation_tool::EndConversationSlot,
     ) -> Self {
         self.end_conversation_slot = Some(slot);
+        self
+    }
+
+    /// Wire the `/loop` wakeup-armed flag (shared with `ScheduleWakeup`). The
+    /// composition root passes the same `Arc` it took from
+    /// `tool_cron::register_all_with_auth`; the turn loop reads+consumes it
+    /// after tool execution. `None` keeps the turn loop byte-identical.
+    #[must_use]
+    pub fn with_loop_wakeup_armed_slot(
+        mut self,
+        slot: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.loop_wakeup_armed_slot = Some(slot);
         self
     }
 

@@ -669,9 +669,10 @@ impl StreamingTurnDriver<'_> {
         let api_success_message_tokens = compaction::grouping::estimate_tokens_for_range(&snapshot);
         let did_fall_back_to_non_streaming = false;
 
+        orch.sync_thinking_signature_strip_flag_to_api().await;
         // Either an open stream to pump, or a turn already RECOVERED from a
         // connect-phase prompt-too-long (#1, see the ContextOverflow arm).
-        let opened = match orch
+        let stream_result = orch
             .streaming_api
             .stream(
                 &model,
@@ -680,8 +681,9 @@ impl StreamingTurnDriver<'_> {
                 snapshot,
                 wire_tools.clone(),
             )
-            .await
-        {
+            .await;
+        orch.persist_thinking_signature_strip_latch().await;
+        let opened = match stream_result {
             Ok(s) => OpenedModelStream::Stream(s),
             // #1 (main-loop parity): a connect-phase 413 / prompt-too-long
             // surfaces HERE as `LlmError::ContextOverflow` — the adapter's
@@ -1156,7 +1158,7 @@ impl StreamingTurnDriver<'_> {
                                 &turn_reminders,
                             )
                             .await;
-                            match orch
+                            let retry_stream = orch
                                 .streaming_api
                                 .stream(
                                     &re_model,
@@ -1165,8 +1167,9 @@ impl StreamingTurnDriver<'_> {
                                     re_snapshot,
                                     wire_tools.clone(),
                                 )
-                                .await
-                            {
+                                .await;
+                            orch.persist_thinking_signature_strip_latch().await;
+                            match retry_stream {
                                 Ok(s) => {
                                     cur_stream = s;
                                     continue;
@@ -1600,6 +1603,7 @@ impl StreamingTurnDriver<'_> {
                 error: Some("server_error"),
                 api_error_status: None,
                 inner_stop_reason: None,
+                truncated_after_output: true,
             };
             partial_finalize_notice_id = Some(
                 crate::turn_loop::surface_api_error_notice(orch, cause.incomplete_notice(), env)
@@ -1893,6 +1897,27 @@ impl StreamingTurnDriver<'_> {
             // stop_reason still rides on the persisted partial assistant line
             // (patched above) for resume fidelity.
             if partial_finalize.is_some() {
+                if crate::turn_loop::truncated_response_recovery_eligible(
+                    &orch.config.query_source,
+                    orch.prompt_is_interactive(),
+                ) && loop_state.recovery.max_output_tokens_recovery_count
+                    < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
+                {
+                    let src = crate::config::sanitize_query_source(&orch.config.query_source);
+                    let is_subagent = src.starts_with("agent") || src == "subagent";
+                    let nudge = if is_subagent {
+                        crate::turn_loop::TRUNCATED_RESPONSE_RECOVERY_NUDGE_SUBAGENT
+                    } else {
+                        crate::turn_loop::TRUNCATED_RESPONSE_RECOVERY_NUDGE_MAIN
+                    };
+                    orch.inject_meta_user_message(nudge).await;
+                    loop_state.recovery.max_output_tokens_recovery_count = loop_state
+                        .recovery
+                        .max_output_tokens_recovery_count
+                        .saturating_add(1);
+                    loop_state.recovery.max_output_tokens_override = None;
+                    continue;
+                }
                 // A finalized partial is terminal before normal tool-result
                 // disposition. Do not leave an end marker from a completed
                 // result live in the session-scoped side table.
@@ -3613,5 +3638,3 @@ pub(super) fn parse_generated_session_name(raw: &str) -> Option<String> {
 // were removed in Task 5 — they drove `api_client::AnthropicProvider` directly.
 // The live path is now `ProviderApiAdapter` (provider_adapter.rs), retargeted
 // in Task 6 to drive `llm_client::DefaultLlmClient`. (3b deletes api-client.)
-
-

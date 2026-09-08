@@ -288,6 +288,163 @@ Running background agents: a1b2c3d4e (survey the crate)"
         assert_eq!(raw, "No task found with ID: a  b");
     }
 
+    // ── Input coercion / steering (claude-code POe / Cce / yDn) ──────────
+
+    fn coerced(input: serde_json::Value) -> Option<(serde_json::Value, String)> {
+        super::coerce_task_create_input(&input).map(|c| (c.input, c.shape_class))
+    }
+
+    #[test]
+    fn a_task_wrapper_is_unwrapped() {
+        let (input, shape) = coerced(json!({"task": "ship the thing"})).expect("repaired");
+        assert_eq!(shape, "task_wrapper_string+backfill_subject");
+        assert_eq!(input["description"], "ship the thing");
+        assert_eq!(input["subject"], "ship the thing");
+
+        let (input, shape) =
+            coerced(json!({"task": {"subject": "s", "description": "d"}})).expect("repaired");
+        assert_eq!(shape, "task_wrapper_object");
+        assert_eq!(input["subject"], "s");
+        assert_eq!(input["description"], "d");
+        assert!(input.get("task").is_none());
+    }
+
+    #[test]
+    fn field_aliases_are_renamed() {
+        let (input, shape) =
+            coerced(json!({"title": "t", "content": "c", "active_form": "doing"}))
+                .expect("repaired");
+        assert_eq!(shape, "alias_title+alias_content+alias_active_form");
+        assert_eq!(input["subject"], "t");
+        assert_eq!(input["description"], "c");
+        assert_eq!(input["activeForm"], "doing");
+    }
+
+    #[test]
+    fn a_missing_half_is_backfilled() {
+        let (input, shape) = coerced(json!({"subject": "just this"})).expect("repaired");
+        assert_eq!(shape, "backfill_description");
+        assert_eq!(input["description"], "just this");
+
+        let long = format!("{} and then some more text that runs on", "x".repeat(60));
+        let (input, shape) = coerced(json!({"description": long.clone()})).expect("repaired");
+        assert_eq!(shape, "backfill_subject");
+        let subject = input["subject"].as_str().unwrap();
+        assert!(subject.chars().count() <= 80, "capped at 80 characters");
+        assert!(long.starts_with(subject), "and it is a prefix of the description");
+        assert!(!subject.ends_with(' '), "trimmed");
+    }
+
+    #[test]
+    fn stray_keys_are_stripped_once_the_call_is_valid() {
+        let (input, shape) = coerced(json!({
+            "subject": "s",
+            "description": "d",
+            "status": "pending",
+            "whatever": 1
+        }))
+        .expect("repaired");
+        assert_eq!(shape, "strip_status+strip_other");
+        assert_eq!(input.as_object().unwrap().len(), 2);
+
+        let (input, shape) =
+            coerced(json!({"subject": "s", "description": "d", "activeForm": 5, "metadata": 7}))
+                .expect("repaired");
+        assert_eq!(shape, "drop_invalid_activeForm+drop_invalid_metadata");
+        assert!(input.get("activeForm").is_none());
+        assert!(input.get("metadata").is_none());
+    }
+
+    /// The WIRING, through the trait the dispatcher actually calls. The tests
+    /// above exercise the free functions; unhooking `coerce_input` from the
+    /// tools leaves every one of them green.
+    #[tokio::test]
+    async fn the_tools_expose_coercion_and_steering_through_the_trait() {
+        use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, make_dummy_fs};
+        use tool_api::tool_trait::Tool;
+        use telemetry::AnalyticsBus;
+        let ctx = ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![std::env::temp_dir()],
+        );
+        let create = TaskCreateTool::new(ctx.clone());
+        let coerced = create
+            .coerce_input(&json!({"title": "t", "content": "c"}))
+            .expect("TaskCreate must coerce through the trait");
+        assert_eq!(coerced.input["subject"], "t");
+        assert_eq!(coerced.shape_class, "alias_title+alias_content");
+
+        // And the steer reaches the dispatcher as a validation failure.
+        let err = create
+            .validate_input(&json!({"tasks": []}), &fresh_ctx())
+            .await
+            .expect_err("a batch call must be steered");
+        assert!(
+            err.0.starts_with("TaskCreate creates ONE task per call"),
+            "got: {}",
+            err.0
+        );
+        assert!(
+            create
+                .validate_input(&json!({"subject": "s", "description": "d"}), &fresh_ctx())
+                .await
+                .is_ok(),
+            "a well-formed call is not steered"
+        );
+
+        let update = TaskUpdateTool::new(ctx);
+        let coerced = update
+            .coerce_input(&json!({"id": "a1b2c3d4e"}))
+            .expect("TaskUpdate must coerce through the trait");
+        assert_eq!(coerced.input["taskId"], "a1b2c3d4e");
+    }
+
+    /// Shapes upstream does NOT repair: it steers them instead, so coercion
+    /// must decline or the steer never gets a chance.
+    #[test]
+    fn unrepairable_shapes_are_left_for_the_steer() {
+        assert!(coerced(json!({"tasks": [{"subject": "a"}]})).is_none());
+        assert!(coerced(json!({"todos": []})).is_none());
+        assert!(coerced(json!({"prompt": "go", "subagent_type": "x"})).is_none());
+        assert!(coerced(json!({"subject": "s", "description": "d"})).is_none());
+    }
+
+    #[test]
+    fn the_steer_sentences_are_byte_exact() {
+        assert_eq!(
+            super::task_create_steer(&json!({"tasks": []})),
+            Some("TaskCreate creates ONE task per call and has no `tasks` or `todos` parameter. Call TaskCreate once per task, passing `subject` (a brief title) and `description` (what needs to be done) as top-level string parameters.")
+        );
+        assert!(super::task_create_steer(&json!({"task": {"todos": []}})).is_some());
+
+        assert_eq!(
+            super::task_create_steer(&json!({"prompt": "go"})),
+            Some("This call used Agent-tool parameters (`prompt`/`subagent_type`). TaskCreate adds an item to the task list and takes `subject` and `description` string parameters. To delegate work to a subagent, use the Agent tool instead.")
+        );
+        assert_eq!(
+            super::task_create_steer(
+                &json!({"prompt": "go", "subject": "s", "description": "d"})
+            ),
+            None
+        );
+        assert_eq!(super::task_create_steer(&json!({"subject": "s"})), None);
+    }
+
+    #[test]
+    fn task_update_accepts_id_and_active_form_aliases() {
+        let c = super::coerce_task_update_input(&json!({"id": "a1b2c3d4e", "active_form": "doing"}))
+            .expect("repaired");
+        assert_eq!(c.shape_class, "alias_id+alias_active_form");
+        assert_eq!(c.input["taskId"], "a1b2c3d4e");
+        assert_eq!(c.input["activeForm"], "doing");
+
+        let c = super::coerce_task_update_input(&json!({"task_id": "a1b2c3d4e"})).expect("repaired");
+        assert_eq!(c.shape_class, "alias_task_id");
+
+        assert!(super::coerce_task_update_input(&json!({"taskId": "a1b2c3d4e"})).is_none());
+    }
+
     // ── Product-A V2 gating (sub-batch [2]) ──────────────────────────────
 
     #[test]

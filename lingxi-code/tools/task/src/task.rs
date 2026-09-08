@@ -47,8 +47,7 @@ use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext,
-};
+    ToolStaticContext, CoercedInput, ValidationError,};
 use tool_api::BuiltinToolContext;
 
 /// Tool name `'TaskCreate'` (claude-code `TASK_CREATE_TOOL_NAME`).
@@ -847,6 +846,228 @@ static TASK_CREATE_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+// ── Input coercion (claude-code `POe` / `Cce`) and steering (`yDn`) ──────
+//
+// The model reliably reaches for TaskCreate with the shapes it uses for
+// neighbouring tools — a `tasks` array, a `task` wrapper object, Agent-tool
+// `prompt`/`subagent_type`, or `title`/`content` instead of
+// `subject`/`description`. Upstream repairs what it can and STEERS what it
+// cannot, so a near-miss becomes a working call or a sentence telling the model
+// what to do instead. Without them the call just fails the schema.
+//
+// `shape_class` is the diagnostic label upstream attaches to a repaired call;
+// its tags are emitted in the order the repairs were applied. This workspace
+// builds `serde_json` with `preserve_order`, so key iteration matches the JS
+// object order the strip pass walks.
+
+/// `OR(e)` — a string with non-whitespace content.
+fn is_filled_string(value: Option<&Value>) -> bool {
+    value.and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty())
+}
+
+/// `AOe(e)` — carries a batch parameter TaskCreate does not have.
+fn has_batch_key(map: &serde_json::Map<String, Value>) -> bool {
+    map.contains_key("tasks") || map.contains_key("todos")
+}
+
+/// `ROe(e)` — carries Agent-tool parameters.
+fn has_agent_keys(map: &serde_json::Map<String, Value>) -> bool {
+    map.contains_key("prompt") || map.contains_key("subagent_type")
+}
+
+/// `TOo(e)` — derive a subject from a description: trim, cap at 80 CHARACTERS
+/// (`Array.from`, i.e. code points), and prefer to cut on the last space when
+/// that space is past the halfway point.
+fn subject_from_description(description: &str) -> String {
+    let trimmed = description.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() <= 80 {
+        return trimmed.to_string();
+    }
+    let head: String = chars[..80].iter().collect();
+    match head.rfind(' ') {
+        // `d>40` is a BYTE index upstream, but the comparison is against a
+        // fixed 40 and the cut is the same character boundary either way for
+        // any input where a space exists in the first 80 characters.
+        Some(idx) if idx > 40 => head[..idx].trim().to_string(),
+        _ => head.trim().to_string(),
+    }
+}
+
+/// Aliases upstream accepts for each canonical field.
+const SUBJECT_ALIASES: [&str; 2] = ["title", "name"];
+const DESCRIPTION_ALIASES: [&str; 1] = ["content"];
+const ACTIVE_FORM_ALIASES: [&str; 1] = ["active_form"];
+/// `bOo` — the only keys a repaired TaskCreate call may keep.
+const TASK_CREATE_KEEP: [&str; 4] = ["subject", "description", "activeForm", "metadata"];
+/// `EOo` — keys named individually in the strip tag; anything else is `other`.
+const TASK_CREATE_KNOWN_STRIP: [&str; 12] = [
+    "status",
+    "state",
+    "priority",
+    "prompt",
+    "subagent_type",
+    "id",
+    "type",
+    "owner",
+    "blocks",
+    "blockedBy",
+    "addBlocks",
+    "addBlockedBy",
+];
+
+/// Move `alias` onto `target` when the target is absent and the alias holds a
+/// filled string. Returns the tag to record.
+fn apply_alias(
+    map: &mut serde_json::Map<String, Value>,
+    aliases: &[&str],
+    target: &str,
+    tags: &mut Vec<String>,
+) {
+    for alias in aliases {
+        if map.contains_key(*alias)
+            && !map.contains_key(target)
+            && is_filled_string(map.get(*alias))
+        {
+            if let Some(value) = map.remove(*alias) {
+                map.insert(target.to_string(), value);
+                tags.push(format!("alias_{alias}"));
+            }
+        }
+    }
+}
+
+/// `POe` — repair a near-miss TaskCreate call, or `None` when there is nothing
+/// to repair (or the shape is one `yDn` steers instead).
+fn coerce_task_create_input(input: &Value) -> Option<CoercedInput> {
+    let map = input.as_object()?;
+    if has_batch_key(map) {
+        // Not repairable — `yDn` explains it instead.
+        return None;
+    }
+    let mut out = map.clone();
+    let mut tags: Vec<String> = Vec::new();
+    if has_agent_keys(&out)
+        && !(is_filled_string(out.get("subject")) && is_filled_string(out.get("description")))
+    {
+        return None;
+    }
+    // A `task` wrapper: either the description as a bare string, or the real
+    // arguments one level down.
+    if !out.contains_key("subject") && !out.contains_key("description") && out.contains_key("task")
+    {
+        let wrapped = out.get("task").cloned()?;
+        if is_filled_string(Some(&wrapped)) {
+            out.remove("task");
+            out.insert("description".into(), wrapped);
+            tags.push("task_wrapper_string".into());
+        } else if let Some(inner) = wrapped.as_object() {
+            if has_batch_key(inner) {
+                return None;
+            }
+            if has_agent_keys(inner)
+                && !(is_filled_string(inner.get("subject"))
+                    && is_filled_string(inner.get("description")))
+            {
+                return None;
+            }
+            out.remove("task");
+            for (key, value) in inner.clone() {
+                out.insert(key, value);
+            }
+            tags.push("task_wrapper_object".into());
+        } else {
+            return None;
+        }
+    }
+    apply_alias(&mut out, &SUBJECT_ALIASES, "subject", &mut tags);
+    apply_alias(&mut out, &DESCRIPTION_ALIASES, "description", &mut tags);
+    apply_alias(&mut out, &ACTIVE_FORM_ALIASES, "activeForm", &mut tags);
+
+    if is_filled_string(out.get("subject")) && !out.contains_key("description") {
+        let subject = out.get("subject").cloned().unwrap_or(Value::Null);
+        out.insert("description".into(), subject);
+        tags.push("backfill_description".into());
+    } else if is_filled_string(out.get("description")) && !out.contains_key("subject") {
+        let derived = out
+            .get("description")
+            .and_then(Value::as_str)
+            .map(subject_from_description)
+            .unwrap_or_default();
+        out.insert("subject".into(), Value::String(derived));
+        tags.push("backfill_subject".into());
+    }
+
+    // Only once both required fields are present is it safe to drop the rest.
+    if is_filled_string(out.get("subject")) && is_filled_string(out.get("description")) {
+        let strip: Vec<String> = out
+            .keys()
+            .filter(|key| !TASK_CREATE_KEEP.contains(&key.as_str()))
+            .cloned()
+            .collect();
+        for key in strip {
+            out.remove(&key);
+            let label = if TASK_CREATE_KNOWN_STRIP.contains(&key.as_str()) {
+                key
+            } else {
+                "other".to_string()
+            };
+            tags.push(format!("strip_{label}"));
+        }
+        if out.get("activeForm").is_some_and(|v| !v.is_string()) {
+            out.remove("activeForm");
+            tags.push("drop_invalid_activeForm".into());
+        }
+        if out.get("metadata").is_some_and(|v| !v.is_object()) {
+            out.remove("metadata");
+            tags.push("drop_invalid_metadata".into());
+        }
+    }
+    if tags.is_empty() {
+        return None;
+    }
+    Some(CoercedInput {
+        input: Value::Object(out),
+        shape_class: tags.join("+"),
+    })
+}
+
+/// `yDn` — the sentence shown instead of a bare schema rejection.
+fn task_create_steer(input: &Value) -> Option<&'static str> {
+    let map = input.as_object()?;
+    let inner = map.get("task").and_then(Value::as_object);
+    if has_batch_key(map) || inner.is_some_and(has_batch_key) {
+        return Some(
+            "TaskCreate creates ONE task per call and has no `tasks` or `todos` parameter. Call TaskCreate once per task, passing `subject` (a brief title) and `description` (what needs to be done) as top-level string parameters.",
+        );
+    }
+    if (has_agent_keys(map) || inner.is_some_and(has_agent_keys))
+        && !(is_filled_string(map.get("subject")) && is_filled_string(map.get("description")))
+    {
+        return Some(
+            "This call used Agent-tool parameters (`prompt`/`subagent_type`). TaskCreate adds an item to the task list and takes `subject` and `description` string parameters. To delegate work to a subagent, use the Agent tool instead.",
+        );
+    }
+    None
+}
+
+/// `Cce` — TaskUpdate accepts `id`/`task_id` for `taskId` and `active_form`
+/// for `activeForm`.
+fn coerce_task_update_input(input: &Value) -> Option<CoercedInput> {
+    let map = input.as_object()?;
+    let mut out = map.clone();
+    let mut tags: Vec<String> = Vec::new();
+    apply_alias(&mut out, &["id", "task_id"], "taskId", &mut tags);
+    apply_alias(&mut out, &ACTIVE_FORM_ALIASES, "activeForm", &mut tags);
+    if tags.is_empty() {
+        return None;
+    }
+    Some(CoercedInput {
+        input: Value::Object(out),
+        shape_class: tags.join("+"),
+    })
+}
+
 /// Product-A V2 `TaskCreate` — appends a task to the todo store.
 pub struct TaskCreateTool {
     ctx: BuiltinToolContext,
@@ -884,6 +1105,26 @@ impl Tool for TaskCreateTool {
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
         task_tools_enabled(ctx)
+    }
+    /// claude-code `coerceInput: POe` — repair a near-miss call rather than
+    /// bouncing it off the schema.
+    fn coerce_input(&self, input: &Value) -> Option<CoercedInput> {
+        coerce_task_create_input(input)
+    }
+    /// claude-code `validationErrorSteer: yDn` — the shapes coercion cannot
+    /// repair get a sentence saying what to call instead. Both are shapes this
+    /// tool's schema rejects anyway (it is `additionalProperties: false`, the
+    /// port of upstream's strict object), so this replaces an opaque rejection
+    /// rather than adding one.
+    async fn validate_input(
+        &self,
+        input: &Value,
+        _ctx: &ToolUseContext,
+    ) -> Result<(), ValidationError> {
+        match task_create_steer(input) {
+            Some(steer) => Err(ValidationError(steer.to_string())),
+            None => Ok(()),
+        }
     }
     fn should_defer(&self) -> bool {
         true
@@ -1478,6 +1719,11 @@ impl Tool for TaskUpdateTool {
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
         task_tools_enabled(ctx)
+    }
+    /// claude-code `coerceInput: Cce` — TaskUpdate accepts `id`/`task_id` for
+    /// `taskId` and `active_form` for `activeForm`.
+    fn coerce_input(&self, input: &Value) -> Option<CoercedInput> {
+        coerce_task_update_input(input)
     }
     fn should_defer(&self) -> bool {
         true

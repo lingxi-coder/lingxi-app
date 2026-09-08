@@ -65,7 +65,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
-| `bg-03` | confirmed | P1 | medium | backgroundEndsWithFinalResponse promises termination at the sync subagent's final response, but nothing reaps the shell |
+| `bg-03` | confirmed **[fixed]** | P1 | medium | backgroundEndsWithFinalResponse promises termination at the sync subagent's final response, but nothing reaps the shell |
 | `bg-04` | confirmed | P1 | high | No foreground arming (U6t after 2 s) ⇒ Ctrl+B, end-of-turn background-all, turn-abort and deliver-message backgrounding are all absent; ctrl+b keybinding is declared but inert |
 | `bg-05` | confirmed **[fixed]** | P1 | medium | Timeout→background is unconditional in the port; oracle gates it on background-tasks-enabled, first-segment ≠ `sleep`, and CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS |
 | `bg-06` | confirmed | P2 | medium | Explicit-background spawn runs in the workspace root instead of the persistent shell cwd |
@@ -152,7 +152,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
-| `AGT-01` | confirmed **[partly fixed: SendMessage now resolves the same aliases as stop/output. The notification still emits the task id, not an address; equating the two ids is wrong (five tests pin the correlation) so the remaining half is a mailbox alias]** | P1 | medium | local_agent task id and agent id are two id spaces; the notification's <task-id> is not a SendMessage address |
+| `AGT-01` | confirmed **[fixed: SendMessage resolves the registry aliases, and the mailbox now resolves the task id the notification carries. Equating the two ids was the wrong shape -- five tests pin the correlation -- so the task id is an alias, not a rename]** | P1 | medium | local_agent task id and agent id are two id spaces; the notification's <task-id> is not a SendMessage address |
 | `AGT-05` | confirmed | P1 | high | Child-agent completion notifications are not routed to the owning agent (lLe/ownerAgentId); every completion drains at the main session |
 | `AGT-02` | confirmed | P2 | medium | TaskStop has no name/agent-id resolution: no ambiguity error, no 'Did you mean', no running-teammates / named-agents / background-agents suffixes, no observer/owner guards, no resting-agent allowance |
 | `AGT-03` | confirmed | P2 | medium | Stopping a parent agent does not cascade to its child agents (no linked abort, no resting-parent cascade, no cascadeSpared) |

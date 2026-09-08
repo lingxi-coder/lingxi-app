@@ -1943,6 +1943,8 @@ export type ClientEvent =
   | { type: 'cron_result'; request_id: string; jobs: CronJobDto[]; error?: string }
   // ── Error ─────────────────────────────────────────────────────────────────
   | { type: 'error'; kind: ErrorKindDto; message: string }
+  | { type: 'message_identity'; message_id: string }
+  | { type: 'message_retracted'; message_id: string }
   | { type: 'system_notice'; message: string; is_error: boolean }
   | { type: 'ask_user_question'; request: AskUserQuestionRequestDto }
   | { type: 'ask_user_question_resolved'; request_id: number }

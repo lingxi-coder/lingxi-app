@@ -99,6 +99,8 @@ export const REFRESH_LISTING_DISPOSITIONS = {
 export const CLIENT_EVENT_DISPOSITIONS = {
   cron_result: 'exposed',
   error: 'exposed',
+  message_identity: 'exposed',
+  message_retracted: 'exposed',
   system_notice: 'exposed',
   ask_user_question: 'exposed',
   ask_user_question_resolved: 'exposed',

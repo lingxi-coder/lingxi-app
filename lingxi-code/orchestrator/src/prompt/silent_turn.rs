@@ -15,8 +15,8 @@
 //! * `l3m = 3` — at most three reminders per silent stretch.
 //! * `u3m(model)` — `CLAUDE_CODE_SILENT_TURN_REMINDER` env, else the model
 //!   capability `silent_turn_reminder` (`JJr`, @296558?): **no capability ⇒
-//!   OFF**. The port has no model-capability table, so the env var is the only
-//!   way in and the default is OFF.
+//!   OFF**. In 2.1.263 `jfr` also enables the Fable 5.1 prompt bundle; the
+//!   port consults the shared model-capability registry for these defaults.
 //! * producer `K4T(e)` @ **296525255**:
 //!   ```js
 //!   let {turnsSinceLastReminder:t, remindersInStretch:r} = Ezm(e);
@@ -84,24 +84,27 @@ const NO_CONTENT_SENTINEL: &str = "(no content)";
 /// `TZ` @283631407 — ditto.
 const NO_RESPONSE_REQUESTED_SENTINEL: &str = "No response requested.";
 
-/// `V4T` @296558223 — tool calls that count as speaking to the user.
-///
-/// The oracle set is `[dy, Iio, U4T, UU, Tbe]`; the audit resolved the first
-/// three as AskUserQuestion / `BRIEF_TOOL_NAME` / `LEGACY_BRIEF_TOOL_NAME`.
-/// `UU` and `Tbe` stayed unresolved and are deliberately NOT guessed — a wrong
-/// name here would end a stretch that the oracle keeps open. LingXi ships no
-/// legacy Brief alias, so the ported set is the two live names.
-pub const SPEAKING_TOOL_NAMES: &[&str] = &["AskUserQuestion", "Brief"];
+/// 2.1.263 `Ffs = new Set([Es,nge,Cfs,Wh,BT])`: AskUserQuestion,
+/// Brief and its legacy alias, ExitPlanMode, and SendUserFile. LingXi does
+/// not ship the legacy Brief alias; all four current tool names count.
+pub const SPEAKING_TOOL_NAMES: &[&str] =
+    &["AskUserQuestion", "Brief", "ExitPlanMode", "SendUserFile"];
 
-/// `u3m(model)` — is the reminder enabled for this session?
-///
-/// `V.CLAUDE_CODE_SILENT_TURN_REMINDER` wins when set; otherwise the oracle
-/// asks the model capability table, which LingXi does not have — so the port
-/// default is OFF.
+/// 2.1.263 `jfr(model)`: an explicit env override wins; otherwise use the
+/// Fable 5.1 prompt bundle or the model's silent-turn capability.
 #[must_use]
-pub fn is_enabled() -> bool {
+pub fn is_enabled(model: &str) -> bool {
     let raw = std::env::var("CLAUDE_CODE_SILENT_TURN_REMINDER").ok();
-    platform_api::env::is_env_truthy(raw.as_deref())
+    enabled_with_override(model, raw.as_deref())
+}
+
+fn enabled_with_override(model: &str, raw: Option<&str>) -> bool {
+    if raw.is_some() {
+        return platform_api::env::is_env_truthy(raw);
+    }
+    let capabilities = platform_api::model_capabilities::capabilities_for_loose(model);
+    capabilities.contains(&"fable_5_1_prompt_bundle")
+        || capabilities.contains(&"silent_turn_reminder")
 }
 
 /// `c3m()` — the reminder text, with the env override applied.
@@ -383,22 +386,40 @@ mod tests {
     }
 
     #[test]
+    fn silent_reminder_defaults_follow_2_1_263_model_capabilities() {
+        for model in [
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+            "anthropic/claude-fable-5-1",
+        ] {
+            assert!(enabled_with_override(model, None), "{model}");
+            assert!(!enabled_with_override(model, Some("0")), "{model}");
+        }
+        for model in ["claude-opus-5", "claude-sonnet-4-6", "other-model"] {
+            assert!(!enabled_with_override(model, None), "{model}");
+            assert!(enabled_with_override(model, Some("1")), "{model}");
+        }
+    }
+
+    #[test]
     fn a_user_facing_tool_call_counts_as_speaking() {
-        let asked = ConversationMessage::Assistant {
-            id: MessageId::new(),
-            content: vec![ContentBlock::ToolUse {
-                id: ToolUseId::new(),
-                name: "AskUserQuestion".into(),
-                input: json!({}),
-                provider_id: None,
-            }],
-            stop_reason: None,
-        };
-        let history = vec![real_user(), asked, tool_result_user(), silent_assistant()];
-        assert_eq!(
-            scan_silent_stretch(&history, &[]).turns_since_last_reminder,
-            1
-        );
+        for name in ["AskUserQuestion", "Brief", "ExitPlanMode", "SendUserFile"] {
+            let asked = ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: ToolUseId::new(),
+                    name: name.into(),
+                    input: json!({}),
+                    provider_id: None,
+                }],
+                stop_reason: None,
+            };
+            let history = vec![real_user(), asked, tool_result_user(), silent_assistant()];
+            assert_eq!(
+                scan_silent_stretch(&history, &[]).turns_since_last_reminder,
+                1
+            );
+        }
     }
 
     #[test]

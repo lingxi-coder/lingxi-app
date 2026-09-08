@@ -1204,25 +1204,26 @@ mod read_file_state_tests {
     }
 
     #[tokio::test]
-    async fn build_wire_tools_coordinator_uses_pool_not_qbt() {
+    async fn build_wire_tools_coordinator_matches_idr_assembly() {
         let cwd = PathBuf::from("/tmp");
         let allowed = [
             "Agent",
             "SendMessage",
             "TaskStop",
-            "AskUserQuestion",
-            "EnterPlanMode",
-            "ExitPlanMode",
+            "Skill",
+            "StructuredOutput",
+            "ListAgents",
+            "Workflow",
+            "ReadNotifications",
             "subscribe_pr_activity",
             "unsubscribe_pr_activity",
         ];
         let hidden = [
             "Read",
             "Bash",
-            "Skill",
-            "ListAgents",
-            "Workflow",
-            "ReadNotifications",
+            "AskUserQuestion",
+            "EnterPlanMode",
+            "ExitPlanMode",
             "TodoWrite",
             "ToolSearch",
         ];
@@ -1238,7 +1239,8 @@ mod read_file_state_tests {
             .collect();
         let orch = orch_with_tools(cwd, tools)
             .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }))
-            .with_coordinator_simple_mode_for_test(false);
+            .with_coordinator_simple_mode_for_test(false)
+            .with_coordinator_pool_for_test(false, &[]);
         let wire = orch.build_wire_tools().await;
         let names: Vec<&str> = wire.iter().map(|t| t["name"].as_str().unwrap()).collect();
         let mut actual = names;
@@ -1973,6 +1975,37 @@ mod max_output_tokens_recovery_tests {
             true
         ));
         assert!(truncated_response_recovery_eligible("subagent", true));
+        for source in [
+            "agent:custom:reviewer",
+            "agent:explore",
+            "hook_agent",
+            "subagent",
+        ] {
+            assert!(crate::turn_loop::truncated_response_recovery_is_subagent(
+                source
+            ));
+            for interactive in [false, true] {
+                assert!(truncated_response_recovery_eligible(source, interactive));
+            }
+        }
+        for source in ["repl_main_thread", "repl_main_thread:compact", "sdk"] {
+            assert!(!crate::turn_loop::truncated_response_recovery_is_subagent(
+                source
+            ));
+            assert!(truncated_response_recovery_eligible(source, false));
+            assert!(!truncated_response_recovery_eligible(source, true));
+        }
+        for source in ["agent", "agentless", "side_question", "compact", "hook", ""] {
+            assert!(!crate::turn_loop::truncated_response_recovery_is_subagent(
+                source
+            ));
+            for interactive in [false, true] {
+                assert!(
+                    !truncated_response_recovery_eligible(source, interactive),
+                    "{source}"
+                );
+            }
+        }
     }
 
     /// (Test plan 1) `max_tokens` at recovery_count 0 → Continue, the exact
@@ -2509,11 +2542,10 @@ mod malformed_and_thinking_only_tests {
 
     #[test]
     fn malformed_nudge_strings_are_byte_exact() {
-        // Default build: clean-retry feature flag OFF (`PZa()` defaults false),
-        // so the first-failure string is the non-clean-retry variant.
+        // cc 2.1.263 unconditionally uses the clean-retry ZZe literal.
         assert_eq!(
             MALFORMED_TOOL_USE_RETRY_NUDGE,
-            "Your tool call was malformed and could not be parsed. Please retry."
+            "The previous response failed to produce a valid tool call. Please retry the tool call now."
         );
         assert_eq!(
             MALFORMED_TOOL_USE_RETRY_FAILED,
@@ -2562,6 +2594,28 @@ mod malformed_and_thinking_only_tests {
             Some(true),
             "malformed-tool retry nudge must be a META user message (isMeta:!0)"
         );
+        assert!(
+            !h.iter()
+                .any(|message| matches!(message, ConversationMessage::Assistant { .. })),
+            "the malformed attempt must not survive into the retry request"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_retry_is_rearmed_after_another_recovery_transition() {
+        let orch = orch_with_responses(vec![
+            malformed_tool_use_response(),
+            mock_message_response(vec![], Some("max_tokens")),
+            malformed_tool_use_response(),
+        ]);
+        let mut state = RecoveryState::default();
+        for _ in 0..3 {
+            let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+                .await
+                .expect("step");
+            assert!(matches!(step, TurnStepOutcome::Continue));
+        }
+        assert!(state.malformed_tool_use_retried);
     }
 
     /// Second malformed `tool_use` (guard already armed) → Ended with
@@ -2797,6 +2851,43 @@ mod malformed_and_thinking_only_tests {
             Some(true),
             "thinking-only nudge must be a META user message (isMeta:!0)"
         );
+    }
+
+    #[tokio::test]
+    async fn completed_batched_responses_without_tools_do_not_requery() {
+        for stop_reason in [Some("stop_sequence"), None] {
+            let orch = orch_with_responses(vec![mock_message_response(
+                vec![llm_client::ContentBlock::Text {
+                    text: "Complete answer".into(),
+                    cache_control: None,
+                }],
+                stop_reason,
+            )]);
+            let mut state = RecoveryState::default();
+            let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+                .await
+                .expect("step");
+            assert!(
+                matches!(step, TurnStepOutcome::Ended { .. }),
+                "stop reason {stop_reason:?} must terminate the turn"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn thinking_only_retry_drops_the_rejected_attempt() {
+        let orch = orch_with_responses(vec![thinking_only_response("end_turn")]);
+        let mut state = RecoveryState::default();
+        execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("step");
+        let h = history(&orch).await;
+        assert!(
+            !h.iter()
+                .any(|message| matches!(message, ConversationMessage::Assistant { .. })),
+            "oracle thinking_only_retry builds messages:[...vr,Cc]"
+        );
+        assert_eq!(last_user_text(&h).as_deref(), Some(THINKING_ONLY_NUDGE));
     }
 
     /// A `stop_sequence` thinking-only response also triggers the nudge.
@@ -7062,4 +7153,15 @@ mod goal_auto_clear_tests {
              \"ship it\u{2026}\". Run /goal again to continue."
         );
     }
+}
+
+#[test]
+fn tool_result_size_matches_javascript_utf16_length() {
+    assert_eq!(super::tool_result_size("中😀a", None), 4);
+    let blocks = vec![
+        serde_json::json!({"type": "text", "text": "中😀"}),
+        serde_json::json!({"type": "image", "text": "ignored"}),
+        serde_json::json!({"type": "text", "text": "a"}),
+    ];
+    assert_eq!(super::tool_result_size("ignored", Some(&blocks)), 4);
 }

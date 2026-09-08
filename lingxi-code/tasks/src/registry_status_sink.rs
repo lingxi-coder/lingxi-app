@@ -59,6 +59,12 @@ impl TaskStatusSink for RegistryStatusSink {
         }
     }
 
+    async fn set_teammate_idle(&self, task_id: &str) {
+        if let Some(registry) = self.registry.get() {
+            let _ = registry.set_teammate_idle(task_id).await;
+        }
+    }
+
     async fn set_awaiting_plan_approval(&self, task_id: &str, awaiting: bool) {
         if let Some(registry) = self.registry.get() {
             let _ = registry.set_awaiting_plan_approval(task_id, awaiting).await;

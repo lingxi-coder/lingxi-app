@@ -151,6 +151,20 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         .expect("workflow_input_schema.json is valid JSON")
 });
 
+/// Oracle B0 removes Cc/Cf/Cs, Default_Ignorable_Code_Point and line separators.
+/// Rust scalar strings cannot contain Cs. Keep the remaining Unicode ranges
+/// explicit so the tool does not need a new regex/Unicode dependency.
+fn hidden_workflow_input_char(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+        '\u{00ad}' | '\u{034f}' | '\u{0600}'..='\u{0605}' | '\u{061c}' | '\u{06dd}' | '\u{070f}' |
+        '\u{0890}'..='\u{0891}' | '\u{08e2}' | '\u{115f}'..='\u{1160}' | '\u{17b4}'..='\u{17b5}' |
+        '\u{180b}'..='\u{180f}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' |
+        '\u{2060}'..='\u{206f}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}' | '\u{feff}' | '\u{ffa0}' |
+        '\u{fff0}'..='\u{fff8}' | '\u{110bd}' | '\u{110cd}' | '\u{13430}'..='\u{1343f}' |
+        '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}' | '\u{e0000}'..='\u{e0fff}')
+}
+
 /// What a [`WorkflowLauncher`] needs to start a workflow run. Mirrors the
 /// Workflow tool's input minus the `title`/`description` fields (which the tool
 /// description marks "Ignored").
@@ -1166,6 +1180,53 @@ impl Tool for WorkflowTool {
     }
     fn input_schema(&self) -> &Value {
         &INPUT_SCHEMA
+    }
+    fn input_validation_issues(&self, input: &Value) -> Vec<Value> {
+        // 2.1.263 Xt retains refinements absent from its exported JSON Schema.
+        let mut issues = Vec::new();
+        if input
+            .get("script")
+            .and_then(Value::as_str)
+            .is_some_and(|script| {
+                script.chars().any(|c| {
+                    let code = u32::from(c);
+                    (code < 32 && code != 9 && code != 10) || (127..=159).contains(&code)
+                })
+            })
+        {
+            issues.push(serde_json::json!({"code":"custom","path":["script"],"message":"script contains control characters that would be hidden in the approval dialog"}));
+        }
+        for key in ["name", "scriptPath"] {
+            if input
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.chars().any(hidden_workflow_input_char))
+            {
+                issues.push(serde_json::json!({"code":"custom","path":[key],"message":"contains control or invisible format characters"}));
+            }
+        }
+        let base_types_parse = input.is_object()
+            && [
+                "script",
+                "name",
+                "description",
+                "title",
+                "scriptPath",
+                "resumeFromRunId",
+            ]
+            .iter()
+            .all(|key| input.get(*key).is_none_or(Value::is_string));
+        if base_types_parse
+            && !["script", "name", "scriptPath"].iter().any(|key| {
+                input
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.is_empty())
+            })
+        {
+            issues.push(serde_json::json!({"code":"custom","path":[],"message":"Must provide script, name, scriptPath, or runId"}));
+        }
+        issues
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         // Port of `fbn()` + `pA()` from claude-code v2.1.245.
@@ -3214,6 +3275,42 @@ mod tests {
             err.0, "Dynamic workflows are disabled by managed settings (`disableWorkflows`).",
             "errorCode 5 message must be byte-exact"
         );
+    }
+
+    #[test]
+    fn schema_refinement_retains_native_issue_shape() {
+        let tool = tool(None);
+        assert_eq!(
+            tool.input_validation_issues(&json!({"script":"a\u{0}b"})),
+            vec![
+                json!({"code":"custom","path":["script"],"message":"script contains control characters that would be hidden in the approval dialog"})
+            ]
+        );
+        assert!(tool
+            .input_validation_issues(&json!({"script":"a\nb\tc"}))
+            .is_empty());
+        assert!(tool
+            .input_validation_issues(&json!({"script":12}))
+            .is_empty());
+    }
+
+    #[test]
+    fn schema_refinements_include_selector_and_invisible_name_failures() {
+        let tool = tool(None);
+        assert_eq!(
+            tool.input_validation_issues(&json!({})),
+            vec![
+                json!({"code":"custom","path":[],"message":"Must provide script, name, scriptPath, or runId"})
+            ]
+        );
+        for key in ["name", "scriptPath"] {
+            assert_eq!(
+                tool.input_validation_issues(&json!({key:"bad\u{034f}name"})),
+                vec![
+                    json!({"code":"custom","path":[key],"message":"contains control or invisible format characters"})
+                ]
+            );
+        }
     }
 
     #[tokio::test]

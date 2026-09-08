@@ -152,6 +152,7 @@ impl ConversationOrchestrator {
         // user input, which `current_prompt_id` reproduces exactly.
         let prompt_id = self.prompt_runtime.current_prompt_id.lock().await.clone();
         HookContext {
+            prompt_transcript: Some(self.prompt_hook_transcript().await),
             session_id,
             cwd: self.current_cwd(),
             transcript_path,
@@ -161,6 +162,30 @@ impl ConversationOrchestrator {
             last_assistant_message,
             agent_type,
             ..Default::default()
+        }
+    }
+
+    /// Snapshot at dispatch, rather than racing the asynchronous JSONL writer.
+    pub(crate) async fn prompt_hook_transcript(&self) -> hooks::PromptHookTranscript {
+        let (messages, message_grouping) = {
+            let session = self.session.lock().await;
+            (
+                session.history.clone(),
+                session.hook_message_grouping.clone(),
+            )
+        };
+        let input = self
+            .compaction_runtime
+            .last_response_input_tokens
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let output = self
+            .compaction_runtime
+            .last_response_output_tokens
+            .load(std::sync::atomic::Ordering::Relaxed);
+        hooks::PromptHookTranscript {
+            messages,
+            message_grouping,
+            last_usage_tokens: usize::try_from(input.saturating_add(output)).unwrap_or(usize::MAX),
         }
     }
 
@@ -520,6 +545,7 @@ impl ConversationOrchestrator {
             .filter(|t| {
                 crate::prompt::goal_checkin::DEFERRING_TASK_LABELS.contains(&t.r#type.as_str())
                     && t.agent_type.as_deref() != Some("main-session")
+                    && !(t.r#type == "teammate" && t.is_idle)
             })
             .map(|t| crate::prompt::goal_checkin::DeferringTask {
                 id: t.id.clone(),
@@ -738,6 +764,16 @@ impl ConversationOrchestrator {
                             .await;
                         return Some(StopHookDisposition::GoalContinue(reason));
                     }
+                }
+                if let Some(response) = result.response.as_ref().filter(|r| r.impossible) {
+                    // 2.1.263 `xY`: an impossible prompt condition clears the
+                    // matching session goal as failed, never as achieved.
+                    self.record_goal_evaluation(response.reason.clone(), false)
+                        .await;
+                    let _ = self
+                        .finish_active_goal_state_and_hook(platform_api::GoalStatusKind::Failed)
+                        .await;
+                    return None;
                 }
                 // The terminal `achieved` attachment below carries the updated
                 // iteration count; avoid writing a redundant intermediate

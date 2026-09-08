@@ -223,3 +223,52 @@ async fn streaming_turn_uses_shared_model_call_preparer() {
         &[ModelCallPath::Streaming]
     );
 }
+
+#[tokio::test]
+async fn thinking_strip_persistence_ignores_worker_only_rejections() {
+    struct SharedRecoveryApi(std::collections::HashMap<MessageId, usize>);
+    #[async_trait]
+    impl OrchestratorApiClient for SharedRecoveryApi {
+        async fn messages_create(
+            &self,
+            _model: &str,
+            _profile: Option<&str>,
+            _system: Option<&str>,
+            _msgs: Vec<ConversationMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+            unreachable!("persistence must not call the provider")
+        }
+        fn thinking_stripped_messages(&self) -> std::collections::HashMap<MessageId, usize> {
+            self.0.clone()
+        }
+    }
+    let worker = MessageId::new();
+    let main = MessageId::new();
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(SharedRecoveryApi([(worker, 0)].into_iter().collect())),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+    orch.session
+        .lock()
+        .await
+        .history
+        .push(ConversationMessage::Assistant {
+            id: main,
+            content: vec![ContentBlock::Thinking {
+                thinking: "main".into(),
+                signature: Some("sig".into()),
+            }],
+            stop_reason: None,
+        });
+    orch.persist_thinking_signature_strip_latch().await;
+    let session = orch.session.lock().await;
+    assert!(!session.thinking_signature_stripped);
+    assert!(session.thinking_stripped_messages.is_empty());
+}

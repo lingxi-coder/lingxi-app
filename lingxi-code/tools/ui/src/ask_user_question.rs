@@ -710,6 +710,46 @@ impl Tool for AskUserQuestionTool {
     fn input_schema(&self) -> &Value {
         &SCHEMA
     }
+    fn input_validation_issues(&self, input: &Value) -> Vec<Value> {
+        // 2.1.263 j$e runs after base types parse, including a dirty (too many
+        // options/questions) parse. Do not reuse the length-rejecting call parser.
+        let Some(questions) = input.get("questions").and_then(Value::as_array) else {
+            return Vec::new();
+        };
+        let mut texts = std::collections::HashSet::new();
+        let mut duplicate = false;
+        for question in questions {
+            let (Some(text), Some(_header), Some(options)) = (
+                question.get("question").and_then(Value::as_str),
+                question.get("header").and_then(Value::as_str),
+                question.get("options").and_then(Value::as_array),
+            ) else {
+                return Vec::new();
+            };
+            if question.get("multiSelect").is_some_and(|v| !v.is_boolean()) {
+                return Vec::new();
+            }
+            duplicate |= !texts.insert(text);
+            let mut labels = std::collections::HashSet::new();
+            for option in options {
+                let (Some(label), Some(_description)) = (
+                    option.get("label").and_then(Value::as_str),
+                    option.get("description").and_then(Value::as_str),
+                ) else {
+                    return Vec::new();
+                };
+                if option.get("preview").is_some_and(|v| !v.is_string()) {
+                    return Vec::new();
+                }
+                duplicate |= !labels.insert(label);
+            }
+        }
+        if duplicate {
+            vec![json!({"code":"custom","path":[],"message":UNIQUENESS_REFINE_MESSAGE})]
+        } else {
+            Vec::new()
+        }
+    }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
     }
@@ -1017,6 +1057,21 @@ mod tests {
         });
         let err = validate_input_internal(&input).unwrap_err();
         assert!(format!("{err}").ends_with(UNIQUENESS_REFINE_MESSAGE));
+        let tool = AskUserQuestionTool::new(shell_test_ctx(dummy_out()));
+        assert_eq!(
+            tool.input_validation_issues(&input),
+            vec![json!({"code":"custom","path":[],"message":UNIQUENESS_REFINE_MESSAGE})]
+        );
+    }
+
+    #[test]
+    fn uniqueness_refinement_runs_on_dirty_but_not_aborted_base_parse() {
+        let tool = AskUserQuestionTool::new(shell_test_ctx(dummy_out()));
+        let q = json!({"question":"Same?","header":"H","options":[opt("A","a"),opt("B","b")]});
+        let mut input = json!({"questions":vec![q; 5]});
+        assert_eq!(tool.input_validation_issues(&input).len(), 1);
+        input["questions"][0]["header"] = json!(12);
+        assert!(tool.input_validation_issues(&input).is_empty());
     }
 
     #[test]

@@ -31,6 +31,16 @@ pub trait Tool: Send + Sync {
         &[]
     }
 
+    /// Canonical V1 tool identity used by tool-pool configuration matching.
+    fn underlying_v1_tool_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// Parent tool identity for a member of a split tool family.
+    fn family_parent_tool_name(&self) -> Option<&str> {
+        None
+    }
+
     /// Short hint shown in tool-search UIs, if any.
     fn search_hint(&self) -> Option<&str> {
         None
@@ -46,6 +56,22 @@ pub trait Tool: Send + Sync {
 
     /// JSON Schema for the tool's input parameters.
     fn input_schema(&self) -> &Value;
+
+    /// Runtime parser schema, distinct from advertised foreign JSON Schema.
+    /// MCP server schemas are inputJSONSchema on the wire; their local parser
+    /// is the passthrough object inherited from H4 (Claude Code 2.1.263).
+    fn input_validation_schema(&self) -> &Value {
+        self.input_schema()
+    }
+
+    /// Native Zod-v4 issues for checks absent from exported JSON Schema.
+    /// Preserve declaration order and object key insertion order: the fallback
+    /// diagnostic is ZodError.message (JSON.stringify(issues, null, 2)).
+    /// Return only refinement/custom checks; structural validation runs first.
+    /// Validators must skip refinements on inputs whose base types cannot parse.
+    fn input_validation_issues(&self, _input: &Value) -> Vec<Value> {
+        Vec::new()
+    }
 
     /// Optional JSON Schema for the tool's output.
     fn output_schema(&self) -> Option<&Value> {

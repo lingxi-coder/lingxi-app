@@ -865,3 +865,25 @@ test('unknown phases preserve the known stage high-water mark and clock', () => 
   state = reduceEvent(state, { type: 'compaction_status', phase: 'restoring' }, 400);
   assert.equal((state.items[0] as Compaction).phaseStartedAt, 100);
 });
+
+
+test('retry retraction removes only the identified completed assistant attempt', () => {
+  let state = reduceEvents(emptyConversation(), [
+    { type: 'text_delta', text: 'keep prior answer' },
+    { type: 'message_identity', message_id: 'prior' },
+    { type: 'message_complete' },
+    { type: 'thinking_delta', thinking: 'failed thought' },
+    { type: 'text_delta', text: 'malformed response' },
+    { type: 'message_identity', message_id: 'failed' },
+    { type: 'message_complete' },
+    { type: 'text_delta', text: 'clean retry' },
+    { type: 'message_retracted', message_id: 'failed' },
+  ]);
+  const serialized = JSON.stringify(state.items);
+  assert.ok(serialized.includes('keep prior answer'));
+  assert.ok(serialized.includes('clean retry'));
+  assert.ok(!serialized.includes('malformed response'));
+  assert.ok(!serialized.includes('failed thought'));
+  assert.ok(state.openAssistantIndex >= 0);
+  assert.equal(reduceEvent(state, { type: 'message_retracted', message_id: 'failed' }), state);
+});

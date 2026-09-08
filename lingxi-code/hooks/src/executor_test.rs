@@ -658,7 +658,8 @@ mod command_arm_tests {
         static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        let allow_json = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#;
+        let allow_json =
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#;
 
         // Baseline: unconfined, the allow lands.
         std::env::remove_var("CLAUDE_CODE_EVAL_CONFINED");
@@ -2385,6 +2386,7 @@ mod command_arm_tests {
         use crate::hook_payload::{HookBackgroundTask, HookSessionCron};
         let ctx = HookContext {
             background_tasks: Some(vec![HookBackgroundTask {
+                is_idle: false,
                 id: "b1".into(),
                 r#type: "shell".into(),
                 status: "running".into(),
@@ -4531,8 +4533,8 @@ mod http_agent_dispatch_tests {
                 response_char_count: 0,
                 last_request_id: None,
                 cumulative_usage: SubagentUsage::default(),
-                        usage_complete: true,
-}))),
+                usage_complete: true,
+            }))),
         });
         let mut registry = HookRegistry::new();
         registry.register(agent_hook());
@@ -4697,6 +4699,65 @@ mod prompt_dispatch_tests {
             async_timeout: None,
             rewake_message: None,
         }
+    }
+
+    #[tokio::test]
+    async fn parent_subagent_stop_consumes_only_matching_child_live_history() {
+        let runner = Arc::new(RecordingRunner {
+            recorded: Mutex::new(Vec::new()),
+            result: Mutex::new(Some(Ok(r#"{"ok":true,"reason":"child complete"}"#.into()))),
+        });
+        let mut registry = HookRegistry::new();
+        let mut hook = prompt_hook();
+        hook.events = vec![HookEventType::SubagentStop];
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_prompt_runner(runner.clone());
+        let session = protocol::SessionId::new();
+        let child = protocol::AgentId::new();
+        let other = protocol::AgentId::new();
+        let snapshot = |text: &str| crate::PromptHookTranscript {
+            messages: vec![protocol::ConversationMessage::user(
+                protocol::MessageId::new(),
+                text.into(),
+            )],
+            last_usage_tokens: 321,
+            ..Default::default()
+        };
+        let child_snapshot = snapshot("child-only unpersisted evidence");
+        exec.publish_agent_prompt_transcript(session, child, child_snapshot.clone());
+        exec.publish_agent_prompt_transcript(session, other, snapshot("other child"));
+        exec.execute_excluding_agent(
+            HookEvent::SubagentStop {
+                agent_id: child,
+                status: "completed".into(),
+                agent_type: "worker".into(),
+            },
+            HookContext {
+                session_id: session,
+                prompt_transcript: Some(snapshot("parent must not leak")),
+                ..Default::default()
+            },
+            child,
+        )
+        .await;
+        let calls = runner.recorded.lock().unwrap();
+        assert_eq!(
+            calls[0].transcript.as_ref().unwrap().messages,
+            child_snapshot.messages
+        );
+        assert_eq!(calls[0].transcript.as_ref().unwrap().last_usage_tokens, 321);
+        drop(calls);
+        assert!(exec.take_agent_prompt_transcript(session, child).is_none());
+        assert!(exec
+            .take_agent_prompt_transcript(protocol::SessionId::new(), other)
+            .is_none());
+        exec.clear_session_hooks(session).await;
+        assert!(exec.take_agent_prompt_transcript(session, other).is_none());
     }
 
     #[tokio::test]

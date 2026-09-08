@@ -514,6 +514,7 @@ async fn populate_stop_hook_snapshot_stamps_both_arrays_when_wired() {
     let reg = ToolRegistry::new();
     let orch = orch_with(reg, None).with_stop_hook_snapshot(Arc::new(FixtureStopSnapshot {
         tasks: vec![HookBackgroundTask {
+            is_idle: false,
             id: "b1".into(),
             r#type: "shell".into(),
             status: "running".into(),
@@ -712,14 +713,17 @@ impl platform_api::coordinator_mode::CoordinatorModeHandle for ReminderCoordinat
 async fn hidden_skill_does_not_emit_or_consume_listing() {
     let mut reg = ToolRegistry::new();
     reg.register_builtin(Arc::new(NamedTool("Skill")));
+    reg.set_session_tool_allowlist(&[]);
     let mode = Arc::new(ReminderCoordinatorMode(std::sync::atomic::AtomicBool::new(
         true,
     )));
-    let orch = orch_with(reg, Some(fixture()))
-        .with_coordinator_mode(mode.clone())
+    let mut orch = orch_with(reg, Some(fixture()))
+        .with_coordinator_mode(mode)
         .with_coordinator_simple_mode_for_test(false);
-    assert!(orch.tools.find_by_name("Skill").is_some());
+    assert!(orch.tools.find_registered("Skill").is_some());
     assert!(orch.skill_listing_reminder_message().await.is_none());
-    mode.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    Arc::get_mut(&mut orch.tools)
+        .expect("fixture exclusively owns registry")
+        .set_session_tool_allowlist(&["Skill".to_string()]);
     assert!(orch.skill_listing_reminder_message().await.is_some());
 }

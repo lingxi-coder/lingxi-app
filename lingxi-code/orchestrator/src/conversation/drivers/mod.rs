@@ -1577,6 +1577,9 @@ impl StreamingTurnDriver<'_> {
         // stream-json P1: signal the message boundary to the output sink so
         // `StreamJsonStream` can flush its accumulated assistant frame.
         orch.output
+            .emit_assistant_message_identity(&assistant_id)
+            .await;
+        orch.output
             .emit_message_boundary(pumped.stop_reason.as_deref(), request_id.as_deref())
             .await;
         let tool_use_parent_uuids = orch
@@ -1903,8 +1906,9 @@ impl StreamingTurnDriver<'_> {
                 ) && loop_state.recovery.max_output_tokens_recovery_count
                     < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
                 {
-                    let src = crate::config::sanitize_query_source(&orch.config.query_source);
-                    let is_subagent = src.starts_with("agent") || src == "subagent";
+                    let is_subagent = crate::turn_loop::truncated_response_recovery_is_subagent(
+                        &orch.config.query_source,
+                    );
                     let nudge = if is_subagent {
                         crate::turn_loop::TRUNCATED_RESPONSE_RECOVERY_NUDGE_SUBAGENT
                     } else {
@@ -2234,11 +2238,8 @@ impl ConversationOrchestrator {
             prompt_len = prompt.len()
         );
         let result = telemetry::otel::with_turn_span("lingxi.orchestrator.turn", async {
-            platform_api::session_flags::scope_non_interactive_session(
-                !self.prompt_is_interactive(),
-                self.try_run_turn(prompt),
-            )
-            .await
+            self.scope_api_session(!self.prompt_is_interactive(), self.try_run_turn(prompt))
+                .await
         })
         .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
@@ -2443,7 +2444,7 @@ impl ConversationOrchestrator {
         // DEFERRED-3: the plain (non-cancelable) streaming entry has no granular
         // user-interrupt token → `None` (behaviour byte-identical to before).
         let result = telemetry::otel::with_turn_span("lingxi.orchestrator.turn.streaming", async {
-            platform_api::session_flags::scope_non_interactive_session(
+            self.scope_api_session(
                 !self.prompt_is_interactive(),
                 Box::pin(self.try_run_turn_streaming(prompt, Vec::new(), None, None, false)),
             )
@@ -2481,11 +2482,12 @@ impl ConversationOrchestrator {
     pub async fn run_async_hook_rewake(&self) -> Result<TurnOutcome, OrchestratorError> {
         let _turn_guard = self.turn_gate.lock().await;
         self.output.emit_turn_started().await;
-        let result = platform_api::session_flags::scope_non_interactive_session(
-            !self.prompt_is_interactive(),
-            Box::pin(self.try_run_turn_streaming("", Vec::new(), None, None, true)),
-        )
-        .await;
+        let result = self
+            .scope_api_session(
+                !self.prompt_is_interactive(),
+                Box::pin(self.try_run_turn_streaming("", Vec::new(), None, None, true)),
+            )
+            .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
         match result {
             Ok(
@@ -2799,6 +2801,12 @@ impl ConversationOrchestrator {
             crate::turn_loop::prior_assistant_used_structured_output(&s.history)
         };
 
+        // The oracle guard checks the immediately preceding transition,
+        // rather than whether any earlier attempt in this turn was malformed.
+        if pumped.stop_reason.as_deref() != Some("tool_use") || !pumped.tool_uses.is_empty() {
+            loop_state.malformed_tool_use_retried = false;
+        }
+
         // 6. Decide loop disposition.
         match pumped.stop_reason.as_deref() {
             // #1 needsFollowUp gate (claude-code `query.ts:554-558`/`832-835`/
@@ -2904,6 +2912,7 @@ impl ConversationOrchestrator {
                     && !pumped_has_visible_text(&pumped.assistant_blocks)
                     && !prior_structured_output
                 {
+                    self.discard_retry_attempt(assistant_id).await;
                     self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                     loop_state.thinking_only_nudged = true;
                     return Ok(StreamingIterationDisposition::Continue);
@@ -2922,9 +2931,8 @@ impl ConversationOrchestrator {
             // loop. On the SECOND (`malformed_tool_use_retried` already set),
             // surface the non-meta terminal message and end the turn. The
             // `!isApiErrorMessage` guard holds (API errors are caught
-            // upstream as `Err(..)`). Default build keeps the clean-retry
-            // feature flag (`PZa()`) OFF, so we do NOT tombstone the leaked
-            // assistant blocks and use the non-clean-retry nudge string.
+            // upstream as `Err(..)`). cc 2.1.263 unconditionally removes
+            // the malformed attempt and injects the clean-retry nudge (`ZZe`).
             Some("tool_use") => {
                 if loop_state.malformed_tool_use_retried {
                     // Second failure → terminal NON-meta message, complete.
@@ -2946,11 +2954,16 @@ impl ConversationOrchestrator {
                         let mut s = self.session.lock().await;
                         s.history.push(failed_msg.clone());
                     }
-                    self.persist_message_to_jsonl(&failed_msg).await;
+                    self.persist_api_error_message_to_jsonl(
+                        &failed_msg,
+                        ApiErrorEnvelope::default(),
+                    )
+                    .await;
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn("end_turn", &cost).await;
                     return Ok(StreamingIterationDisposition::Complete(failed_msg.id()));
                 }
+                self.discard_retry_attempt(assistant_id).await;
                 self.inject_meta_user_message(MALFORMED_TOOL_USE_RETRY_NUDGE)
                     .await;
                 // TS resets the recovery counters on the retry transition so
@@ -2998,6 +3011,7 @@ impl ConversationOrchestrator {
                     && !pumped_has_visible_text(&pumped.assistant_blocks)
                     && !prior_structured_output =>
             {
+                self.discard_retry_attempt(assistant_id).await;
                 self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                 loop_state.thinking_only_nudged = true;
                 return Ok(StreamingIterationDisposition::Continue);
@@ -3049,7 +3063,20 @@ impl ConversationOrchestrator {
                         stop_reason: Some(other.to_string()),
                     };
                     self.session.lock().await.history.push(err_msg.clone());
-                    self.persist_message_to_jsonl(&err_msg).await;
+                    let envelope = match other {
+                        "max_tokens" | "model_context_window_exceeded" => ApiErrorEnvelope {
+                            error: Some("max_output_tokens"),
+                            ..ApiErrorEnvelope::default()
+                        },
+                        "refusal" => ApiErrorEnvelope {
+                            error: Some("invalid_request"),
+                            inner_stop_reason: Some("refusal"),
+                            ..ApiErrorEnvelope::default()
+                        },
+                        _ => ApiErrorEnvelope::default(),
+                    };
+                    self.persist_api_error_message_to_jsonl(&err_msg, envelope)
+                        .await;
                     self.output.emit_text(&text).await;
                     Some(err_msg.id())
                 } else {
@@ -3073,6 +3100,7 @@ impl ConversationOrchestrator {
                     && !pumped_has_visible_text(&pumped.assistant_blocks)
                     && !prior_structured_output
                 {
+                    self.discard_retry_attempt(assistant_id).await;
                     self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                     loop_state.thinking_only_nudged = true;
                     return Ok(StreamingIterationDisposition::Continue);
@@ -3132,7 +3160,7 @@ impl ConversationOrchestrator {
         );
         let result =
             telemetry::otel::with_turn_span("lingxi.orchestrator.turn.cancelable", async {
-                platform_api::session_flags::scope_non_interactive_session(
+                self.scope_api_session(
                     !self.prompt_is_interactive(),
                     self.try_run_turn_cancelable(prompt, cancel),
                 )
@@ -3449,7 +3477,7 @@ impl ConversationOrchestrator {
         let r = telemetry::otel::with_turn_span(
             "lingxi.orchestrator.turn.streaming.cancelable",
             async {
-                platform_api::session_flags::scope_non_interactive_session(
+                self.scope_api_session(
                     !self.prompt_is_interactive(),
                     Box::pin(self.try_run_turn_streaming(
                         prompt,

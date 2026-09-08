@@ -592,6 +592,14 @@ pub enum ClientEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Retract the current or just-completed rejected assistant attempt.
+    MessageRetracted {
+        message_id: String,
+    },
+    /// Correlate the streamed assistant response with its stable identity.
+    MessageIdentity {
+        message_id: String,
+    },
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

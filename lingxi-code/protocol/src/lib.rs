@@ -14,6 +14,7 @@ pub mod effect_result;
 pub mod effects;
 pub mod ids;
 pub mod iso8601;
+pub mod js_utf16;
 pub mod mcp_name;
 pub mod message_size;
 pub mod messages;

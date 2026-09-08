@@ -831,7 +831,12 @@ mod tests {
 
     #[test]
     fn fusion_completed_renders_result_and_omits_error() {
-        let mut n = base("f12345678", "local_fusion", "completed", "Fusion quality same: review");
+        let mut n = base(
+            "f12345678",
+            "local_fusion",
+            "completed",
+            "Fusion quality same: review",
+        );
         n.result = Some("final <answer>".into());
         n.usage = Some(platform_api::task_registry::AgentRunUsage {
             subagent_tokens: 4200,
@@ -845,8 +850,14 @@ mod tests {
             block.contains("<summary>Fusion \"Fusion quality same: review\" finished</summary>"),
             "got: {block}"
         );
-        assert!(block.contains("<result>final &lt;answer&gt;</result>"), "got: {block}");
-        assert!(!block.contains("<error>"), "completed run must not render <error>: {block}");
+        assert!(
+            block.contains("<result>final &lt;answer&gt;</result>"),
+            "got: {block}"
+        );
+        assert!(
+            !block.contains("<error>"),
+            "completed run must not render <error>: {block}"
+        );
         // Review finding #18: `AgentRunUsage.tool_uses` mirrors claude-code's
         // `totalToolUseCount` for `local_agent`/`local_workflow`, but
         // `local_fusion` (this crate has no oracle to follow — see the
@@ -889,8 +900,14 @@ mod tests {
             block.contains("<error>too few fusion models</error>"),
             "got: {block}"
         );
-        assert!(!block.contains("<result>"), "no result on a failed run: {block}");
-        assert!(!block.contains("<usage>"), "no usage clause when None: {block}");
+        assert!(
+            !block.contains("<result>"),
+            "no result on a failed run: {block}"
+        );
+        assert!(
+            !block.contains("<usage>"),
+            "no usage clause when None: {block}"
+        );
         assert!(
             !block.contains("<egress-profiles>"),
             "no egress clause when empty: {block}"

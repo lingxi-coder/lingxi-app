@@ -426,11 +426,9 @@ pub struct ApiService {
     /// stream this reflects connect-phase retries only (the value the adapter
     /// knows when it returns the `BoxStream`). `0` until the first drive.
     last_retry_count: Mutex<u32>,
-    /// Sticky session latch for thinking-signature 400 recovery.
-    /// Set when a drive strips thinking blocks; later thinking-capable
-    /// requests strip on the outbound clone except DeepSeek / Kimi, which
-    /// must round-trip `reasoning_content`.
-    thinking_signature_stripped: AtomicBool,
+    /// Recovery status and rejected historical identities. New message IDs
+    /// remain unaffected, even when their thinking bytes match an older turn.
+    thinking_recovery: crate::thinking_scope::ThinkingRecoveryScope,
     /// Most recently observed RAW per-window utilization snapshot.
     ///
     /// Task 2 (llm-client future-work batch 5): parsed via
@@ -821,7 +819,7 @@ impl ApiService {
             last_rate_limit: Mutex::new(None),
             last_request_id: Mutex::new(None),
             last_retry_count: Mutex::new(0),
-            thinking_signature_stripped: AtomicBool::new(false),
+            thinking_recovery: crate::thinking_scope::ThinkingRecoveryScope::default(),
             last_raw_utilization: Mutex::new(None),
             last_429_message: Mutex::new(None),
             pending_429: Mutex::new(None),
@@ -1144,6 +1142,34 @@ impl ApiService {
         // branch — emitting "[…tools no longer available]" rather than the
         // disabled branch's "[…tool search not enabled]". The request's `tools`
         // remain the availability set (`a`) below.
+        let mut msgs = msgs;
+        let thinking_source_message_ids: Vec<_> = msgs
+            .iter()
+            .filter_map(|message| {
+                if let ConversationMessage::Assistant { id, content, .. } = message {
+                    content
+                        .iter()
+                        .any(|block| {
+                            matches!(
+                                block,
+                                protocol::ContentBlock::Thinking { .. }
+                                    | protocol::ContentBlock::RedactedThinking { .. }
+                            )
+                        })
+                        .then_some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let thinking_recovery_scope = self.thinking_recovery_scope();
+        thinking_recovery_scope.capture(&thinking_source_message_ids);
+        if !crate::model::thinking_signature::thinking_must_round_trip(model, profile) {
+            crate::model::thinking_signature::strip_marked_conversation_thinking(
+                &mut msgs,
+                &thinking_recovery_scope.messages(),
+            );
+        }
         let tool_search_enabled = platform_api::session_flags::tool_search_enabled();
         let available_tool_names: std::collections::HashSet<String> = tools
             .iter()
@@ -1196,6 +1222,8 @@ impl ApiService {
                 crate::prompt_format::split_system_blocks_with(s, enable_caching, split_opts);
         }
         req.messages = messages;
+        req.thinking_source_message_ids = thinking_source_message_ids;
+        req.thinking_recovery_scope = Some(thinking_recovery_scope);
 
         // Exactly one message-level breakpoint, on the last cache-eligible content
         // block of the last message (claude.ts addCacheBreakpoints markerIndex =
@@ -2079,36 +2107,32 @@ impl ApiService {
         *self.last_retry_count.lock().unwrap()
     }
 
-    /// Sticky thinking-signature strip latch (2.1.259 `thinking_stripped`).
+    fn thinking_recovery_scope(&self) -> crate::thinking_scope::ThinkingRecoveryScope {
+        crate::thinking_scope::current().unwrap_or_else(|| self.thinking_recovery.clone())
+    }
+
+    /// Recovery status for the owning query (legacy direct callers use a private scope).
     #[must_use]
     pub fn thinking_signature_stripped(&self) -> bool {
-        self.thinking_signature_stripped.load(Ordering::Acquire)
+        self.thinking_recovery_scope().stripped()
     }
 
-    /// Restore or arm the thinking-signature strip latch. Resume copies the
-    /// JSONL `thinking_stripped` attachment here so later thinking-capable
-    /// turns strip on the outbound clone without mutating persisted history.
+    /// Compatibility arm: capture only the next request's historical identities.
     pub fn set_thinking_signature_stripped(&self, stripped: bool) {
-        self.thinking_signature_stripped
-            .store(stripped, Ordering::Release);
+        self.thinking_recovery_scope().arm(stripped);
     }
 
-    /// Apply the session latch before encode so Gemini / OpenAI-compat thinking
-    /// models are not asked to round-trip rejected blocks. DeepSeek / Kimi keep
-    /// `reasoning_content` ([`thinking_must_round_trip`]).
-    fn apply_latched_thinking_strip(&self, req: &mut crate::LlmRequest) {
-        if !self.thinking_signature_stripped() {
-            return;
-        }
-        if crate::model::thinking_signature::thinking_must_round_trip(
-            &req.model,
-            req.profile.as_deref(),
-        ) {
-            return;
-        }
-        crate::model::thinking_signature::strip_thinking_blocks_for_signature_recovery(
-            &mut req.messages,
-        );
+    pub fn thinking_stripped_messages(
+        &self,
+    ) -> std::collections::HashMap<protocol::MessageId, usize> {
+        self.thinking_recovery_scope().messages()
+    }
+
+    pub fn set_thinking_stripped_messages(
+        &self,
+        messages: std::collections::HashMap<protocol::MessageId, usize>,
+    ) {
+        self.thinking_recovery_scope().merge(messages);
     }
 
     /// Strip thinking blocks after a thinking-signature 400 on any provider.
@@ -2132,7 +2156,17 @@ impl ApiService {
             unsigned,
         )
         .await;
-        self.set_thinking_signature_stripped(true);
+        let scope = req
+            .thinking_recovery_scope
+            .clone()
+            .unwrap_or_else(|| self.thinking_recovery_scope());
+        scope.rejected(
+            req.thinking_source_message_ids
+                .iter()
+                .map(|id| (*id, 0))
+                .collect(),
+        );
+        scope.persist().await;
         true
     }
 
@@ -2636,7 +2670,6 @@ impl ApiService {
         loop {
             // Strip rejected thinking before encode so Gemini / OpenAI-compat
             // thinking models can prepare. DeepSeek / Kimi skip this.
-            self.apply_latched_thinking_strip(&mut req);
             // prepare → inject headers → execute.
             let mut prepared = match self.client.prepare(&req).await {
                 Ok(p) => p,
@@ -3116,8 +3149,9 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<LlmResponse, LlmError> {
-        let mut req =
-            self.build_request(model, profile, system, messages, tools, false, max_tokens)?;
+        let mut req = crate::thinking_scope::isolated(|| {
+            self.build_request(model, profile, system, messages, tools, false, max_tokens)
+        })?;
 
         // `build_request` applies main-turn-only overrides. A forked summary
         // owns these fields independently, so restore its explicit values.
@@ -3158,8 +3192,9 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<LlmResponse, LlmError> {
-        let mut req =
-            self.build_request(model, profile, system, messages, tools, false, max_tokens)?;
+        let mut req = crate::thinking_scope::isolated(|| {
+            self.build_request(model, profile, system, messages, tools, false, max_tokens)
+        })?;
         req.effort = effort;
         req.tool_choice = tool_choice;
         req.stop_sequences = stop_sequences;
@@ -3195,8 +3230,9 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        let mut req =
-            self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        let mut req = crate::thinking_scope::isolated(|| {
+            self.build_request(model, profile, system, messages, tools, true, max_tokens)
+        })?;
         req.tool_choice = tool_choice;
         req.stop_sequences = stop_sequences;
         req.temperature = temperature.map(f64::from);
@@ -3220,8 +3256,9 @@ impl ApiService {
         temperature: Option<f32>,
         query_source: Option<&str>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        let mut req =
-            self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        let mut req = crate::thinking_scope::isolated(|| {
+            self.build_request(model, profile, system, messages, tools, true, max_tokens)
+        })?;
         req.tool_choice = tool_choice;
         req.stop_sequences = stop_sequences;
         req.query_source = query_source.map(str::to_string);
@@ -3530,7 +3567,6 @@ impl ApiService {
         let mut dispatch = DispatchHeaderState::default();
 
         loop {
-            self.apply_latched_thinking_strip(&mut req);
             // Prepare so we can inject headers, then call execute_stream via
             // a thin wrapper transport that uses our already-modified request.
             let mut prepared = match self.client.prepare(&req).await {

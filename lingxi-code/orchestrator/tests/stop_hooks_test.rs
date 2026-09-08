@@ -626,6 +626,63 @@ async fn goal_status_transcript_records_set_progress_and_one_terminal_achievemen
 }
 
 #[tokio::test]
+async fn goal_status_transcript_records_impossible_as_failed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+        dir.path().to_path_buf(),
+    ));
+    let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
+    let api = Arc::new(MockApiClient::new(vec![end_turn("1")]));
+    let runner = Arc::new(ScriptedPromptRunner {
+        seen: StdMutex::new(Vec::new()),
+        scripted: StdMutex::new(VecDeque::from([Ok(
+            r#"{"ok": false, "impossible": true, "reason": "required service is unavailable"}"#
+                .to_string(),
+        )])),
+        on_call: None,
+    });
+    let hooks = exec_with_prompt_runner(runner).await;
+    let orchestrator = Arc::new(
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api,
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            hooks,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_jsonl_writer(writer),
+    );
+
+    orchestrator.set_active_goal("ship it").await;
+    orchestrator.run_turn("hi").await.expect("turn ok");
+    assert!(orchestrator.get_active_goal().await.is_none());
+
+    let statuses = std::fs::read_to_string(path)
+        .expect("goal transcript")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|line| {
+            if line["type"] != "attachment" || line["attachment"]["type"] != "goal_status" {
+                return None;
+            }
+            Some((
+                line["attachment"]["status"].as_str()?.to_string(),
+                line["attachment"]["iterations"].as_u64()?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        statuses,
+        [("set".to_string(), 0), ("failed".to_string(), 1)],
+        "an impossible condition must terminate as failed, never achieved"
+    );
+}
+
+#[tokio::test]
 async fn stop_goal_is_not_capped_by_stop_hook_block_limit() {
     let _env = GOAL_CAP_ENV_LOCK.lock().unwrap();
     let prior_cap = std::env::var("LINGXI_STOP_HOOK_BLOCK_CAP").ok();

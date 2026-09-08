@@ -554,6 +554,7 @@ impl TaskRegistry {
                 base.creator_teammate_name = Some(name.clone());
                 base.creator_team_name = Some(team_name.clone());
                 TaskState::InProcessTeammate(crate::state::InProcessTeammateTaskState {
+                    is_idle: false,
                     awaiting_plan_approval: false,
                     base,
                     agent_id: *agent_id,
@@ -1920,6 +1921,21 @@ impl TaskRegistry {
         }
     }
 
+    /// Record an authoritative idle event without ending the persistent task.
+    pub async fn set_teammate_idle(&self, task_id: &str) -> Result<(), TaskError> {
+        let id = self.canonical_or_raw(task_id).await;
+        let mut tasks = self.tasks.write().await;
+        let state = tasks
+            .get_mut(&id)
+            .ok_or_else(|| TaskError::NotFound(id.clone()))?;
+        if let TaskState::InProcessTeammate(teammate) = state {
+            if !teammate.base.status.is_terminal() {
+                teammate.is_idle = true;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn set_awaiting_plan_approval(
         &self,
         task_id: &str,
@@ -1964,6 +1980,7 @@ impl TaskRegistry {
                 TaskState::RemoteAgent(r) => r.base.status = status,
                 TaskState::InProcessTeammate(t) => {
                     t.base.status = status;
+                    t.is_idle = false;
                     if status.is_terminal() {
                         t.awaiting_plan_approval = false;
                     }
@@ -3301,6 +3318,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
         }
         TaskSpawnInput::InProcessTeammate { agent_id, .. } => {
             TaskState::InProcessTeammate(crate::state::InProcessTeammateTaskState {
+                is_idle: false,
                 awaiting_plan_approval: false,
                 base,
                 agent_id: *agent_id,

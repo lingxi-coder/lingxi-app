@@ -686,6 +686,10 @@ impl<'cb> RataApp<'cb> {
     ) -> io::Result<()> {
         terminal.begin_sync_update()?;
         let result = (|| {
+            if self.chat_widget.take_terminal_replay_required() {
+                terminal.reset_for_replay()?;
+                self.selection.clear();
+            }
             let size = terminal.size()?;
             self.chat_widget.set_terminal_rows(size.height);
             if self.fullscreen {

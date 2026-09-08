@@ -1094,6 +1094,89 @@ impl JsonlWriter {
         self.append_side_record(&value).await
     }
 
+    /// Physically remove a rejected attempt, as cc 2.1.263
+    /// `performRemoveByUuid` does. Preserve untouched rows byte for byte;
+    /// repair children because this writer persists streamed blocks eagerly.
+    /// Returns the surviving chain tail for the next append.
+    pub async fn remove_retry_attempt(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<String>, WriterError> {
+        let _guard = self.lock.lock().await;
+        let path = self.active_path();
+        let source = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| FsError::Io(e.to_string()))?;
+        let mut removed = std::collections::HashMap::new();
+        for line in source.lines() {
+            if let Ok(row) = serde_json::from_str::<serde_json::Value>(line) {
+                if row["type"] == "assistant"
+                    && (row["uuid"] == message_id || row["message"]["id"] == message_id)
+                {
+                    if let Some(id) = row["uuid"].as_str() {
+                        removed
+                            .insert(id.to_owned(), row["parentUuid"].as_str().map(str::to_owned));
+                    }
+                }
+            }
+        }
+        let mut output = String::with_capacity(source.len());
+        let mut tail = None;
+        for line in source.split_inclusive('\n') {
+            let Ok(mut row) = serde_json::from_str::<serde_json::Value>(line) else {
+                output.push_str(line);
+                continue;
+            };
+            if row["uuid"]
+                .as_str()
+                .is_some_and(|id| removed.contains_key(id))
+            {
+                continue;
+            }
+            let mut parent = row["parentUuid"].as_str().map(str::to_owned);
+            let original_parent = parent.clone();
+            let mut visited = std::collections::HashSet::new();
+            while let Some(id) = parent.as_ref() {
+                if !visited.insert(id.clone()) {
+                    break;
+                }
+                let Some(previous) = removed.get(id) else {
+                    break;
+                };
+                parent = previous.clone();
+            }
+            if parent != original_parent {
+                row["parentUuid"] = serde_json::to_value(parent)?;
+                output.push_str(&serde_json::to_string(&row)?);
+                if line.ends_with('\n') {
+                    output.push('\n');
+                }
+            } else {
+                output.push_str(line);
+            }
+            if matches!(
+                row["type"].as_str(),
+                Some("assistant" | "user" | "system" | "attachment")
+            ) {
+                if let Some(id) = row["uuid"].as_str() {
+                    tail = Some(id.to_owned());
+                }
+            }
+        }
+        if !removed.is_empty() {
+            let parent = path
+                .parent()
+                .ok_or_else(|| FsError::Io("transcript has no parent directory".into()))?;
+            let filename = path
+                .file_name()
+                .ok_or_else(|| FsError::Io("transcript has no filename".into()))?;
+            self.fs
+                .write_file_rooted_atomic(parent, Path::new(filename), &output)
+                .await?;
+        }
+        Ok(tail)
+    }
+
     /// Append a context-collapse reset tombstone.
     pub async fn append_context_collapse_reset(
         &self,
@@ -1163,6 +1246,31 @@ mod tests {
         let fs: Arc<dyn FileSystem> =
             Arc::new(platform_posix::fs::PosixFileSystem::new(dir.clone()));
         (dir, path.clone(), JsonlWriter::new(path, fs))
+    }
+
+    #[tokio::test]
+    async fn retry_removal_reparents_all_block_siblings_and_preserves_side_record_bytes() {
+        let (dir, path, writer) = temp_writer("retry-remove");
+        let source = concat!(
+            "{\"type\":\"user\",\"uuid\":\"user\",\"parentUuid\":null}\n",
+            "{\"type\":\"assistant\",\"uuid\":\"block1\",\"parentUuid\":\"user\",\"message\":{\"id\":\"attempt\"}}\n",
+            "{\"type\":\"assistant\",\"uuid\":\"block2\",\"parentUuid\":\"block1\",\"message\":{\"id\":\"attempt\"}}\n",
+            "{ \"type\": \"custom-title\", \"customTitle\": \"keep exact spaces\" }\n",
+            "{\"type\":\"user\",\"uuid\":\"nudge\",\"parentUuid\":\"block2\"}\n"
+        );
+        std::fs::write(&path, source).unwrap();
+        assert_eq!(
+            writer.remove_retry_attempt("attempt").await.unwrap(),
+            Some("nudge".into())
+        );
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("block1"));
+        assert!(!body.contains("block2"));
+        assert!(body
+            .contains("{ \"type\": \"custom-title\", \"customTitle\": \"keep exact spaces\" }\n"));
+        let child: serde_json::Value = serde_json::from_str(body.lines().last().unwrap()).unwrap();
+        assert_eq!(child["parentUuid"], "user");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

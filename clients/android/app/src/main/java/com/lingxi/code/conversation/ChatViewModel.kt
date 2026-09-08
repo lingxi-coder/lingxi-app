@@ -379,6 +379,11 @@ class ChatViewModel(
 
     /** Monotonic reply-stream generation used to reject stale turn events. */
     private var turnToken: Long = 0L
+    private var pendingAssistantIdentity: String? = null
+    private val assistantRowsByIdentity = mutableMapOf<String, String>()
+    private var reasoningBeforeResponse: String? = null
+    private val assistantReasoningByIdentity = mutableMapOf<String, Pair<String, String>>()
+    private var assistantIdentityTurnToken: Long = -1L
     private var durableTurnId: Long? = null
     /** Token used when a durable turn is attached without a local submit collector. */
     private var recoveredTurnToken: Long? = null
@@ -2228,6 +2233,13 @@ class ChatViewModel(
      */
     internal fun reduce(event: ReplyEvent, token: Long = turnToken) {
         if (token != turnToken) return // stale turn — its session was abandoned
+        if (assistantIdentityTurnToken != token) {
+            assistantIdentityTurnToken = token
+            pendingAssistantIdentity = null
+            reasoningBeforeResponse = null
+            assistantRowsByIdentity.clear()
+            assistantReasoningByIdentity.clear()
+        }
         when (event) {
             is ReplyEvent.Thinking -> _state.update {
                 it.copy(
@@ -2238,6 +2250,7 @@ class ChatViewModel(
             }
 
             is ReplyEvent.ReasoningDelta -> _state.update {
+                if (reasoningBeforeResponse == null) reasoningBeforeResponse = it.agentRun?.reasoning.orEmpty()
                 it.copy(
                     streaming = true,
                     agentRun = (it.agentRun ?: AgentRunState(turnId = token))
@@ -2407,12 +2420,55 @@ class ChatViewModel(
                 updateCoordinatorWorkers(event.activeWorkers, event.team)
             }
 
+            is ReplyEvent.MessageIdentity -> {
+                pendingAssistantIdentity = event.messageId
+                reasoningBeforeResponse?.let { before ->
+                    assistantReasoningByIdentity[event.messageId] = before to _state.value.agentRun?.reasoning.orEmpty()
+                }
+                reasoningBeforeResponse = null
+            }
+            is ReplyEvent.MessageRetracted -> {
+                val rowId = assistantRowsByIdentity.remove(event.messageId)
+                val reasoning = assistantReasoningByIdentity.remove(event.messageId)
+                if (rowId == null && reasoning == null) return
+                _state.update { state ->
+                    fun restoreReasoning(run: AgentRunState): AgentRunState {
+                        if (reasoning == null) return run
+                        val (before, after) = reasoning
+                        val restored = when {
+                            run.reasoning == after -> before
+                            after.startsWith(before) && run.reasoning.startsWith(after) ->
+                                before + run.reasoning.removePrefix(after)
+                            else -> return run
+                        }
+                        return run.copy(reasoning = restored, reasoningActive = false, revision = run.revision + 1)
+                    }
+                    val messages = state.messages.mapNotNull { message ->
+                        if (message.id != rowId || message.role != Role.Ai) message
+                        else {
+                            val tools = message.blocks.filterIsInstance<MessageContent.Tool>()
+                            if (tools.isEmpty()) null else message.copy(text = "", blocks = tools)
+                        }
+                    }
+                    state.copy(
+                        messages = messages,
+                        streamingMessage = state.streamingMessage?.takeUnless { it.id == rowId },
+                        agentRun = state.agentRun?.let(::restoreReasoning),
+                        agentRunsByMessageId = state.agentRunsByMessageId
+                            .filterKeys { id -> id != rowId || messages.any { it.id == id } }
+                            .mapValues { (_, run) -> restoreReasoning(run) },
+                    )
+                }
+            }
             is ReplyEvent.MessageComplete -> {
                 val message = event.message ?: return
+                val identity = pendingAssistantIdentity
+                pendingAssistantIdentity = null
                 _state.update { state ->
                     val completed = state.streamingMessage
                         ?.let { live -> message.copy(id = live.id) }
                         ?: message
+                    if (identity != null) assistantRowsByIdentity[identity] = completed.id
                     // Some hosts emit MessageComplete before TurnEnded. Settle
                     // the live run here so tool rows survive the later terminal
                     // event (and a subsequent turn replacing agentRun).

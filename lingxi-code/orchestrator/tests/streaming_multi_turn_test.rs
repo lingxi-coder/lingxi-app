@@ -217,7 +217,7 @@ async fn two_streaming_turns_with_tool_in_between() {
     // The §0.7 "light up thinking/usage" follow-up adds additive `Usage`
     // emits (from `message_start` / `message_delta`) that interleave but
     // are orthogonal to the tool/text ordering this test asserts, so
-    // filter them (and `Thinking`) out before the sequence assertion.
+    // filter them (and `Thinking` and message identity metadata) out before the sequence assertion.
     let kinds: Vec<&str> = events
         .iter()
         .filter_map(|e| match e {
@@ -225,7 +225,9 @@ async fn two_streaming_turns_with_tool_in_between() {
             OutputEvent::ToolCall { .. } => Some("ToolCall"),
             OutputEvent::ToolResult { .. } => Some("ToolResult"),
             OutputEvent::EndTurn { .. } => Some("EndTurn"),
-            OutputEvent::Usage { .. } | OutputEvent::Thinking { .. } => None,
+            OutputEvent::Usage { .. }
+            | OutputEvent::Thinking { .. }
+            | OutputEvent::MessageIdentity { .. } => None,
             _ => Some("Other"),
         })
         .collect();
@@ -296,7 +298,9 @@ async fn streaming_mcp_end_turn_stops_without_a_second_model_call() {
             OutputEvent::ToolCall { .. } => Some("ToolCall"),
             OutputEvent::ToolResult { .. } => Some("ToolResult"),
             OutputEvent::EndTurn { .. } => Some("EndTurn"),
-            OutputEvent::Usage { .. } | OutputEvent::Thinking { .. } => None,
+            OutputEvent::Usage { .. }
+            | OutputEvent::Thinking { .. }
+            | OutputEvent::MessageIdentity { .. } => None,
             _ => Some("Other"),
         })
         .collect();

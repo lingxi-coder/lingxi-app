@@ -4377,6 +4377,7 @@ async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents(
     // the `name@team` alias the spawn path records.
     registry
         .insert_state_for_test(TaskState::InProcessTeammate(InProcessTeammateTaskState {
+            is_idle: false,
             awaiting_plan_approval: false,
             base: TaskStateBase {
                 id: "t-buddy".into(),
@@ -4461,7 +4462,14 @@ async fn stopping_a_resting_parent_cascades_to_its_whole_subtree_silently() {
     let stranger = protocol::AgentId::new();
 
     seed_agent(&registry, "a-parent", parent, None, TaskStatus::Running).await;
-    seed_agent(&registry, "a-child", child, Some(parent), TaskStatus::Running).await;
+    seed_agent(
+        &registry,
+        "a-child",
+        child,
+        Some(parent),
+        TaskStatus::Running,
+    )
+    .await;
     // Depth 2 — the level a one-hop walk silently misses.
     seed_agent(
         &registry,
@@ -4476,7 +4484,14 @@ async fn stopping_a_resting_parent_cascades_to_its_whole_subtree_silently() {
 
     // Arm the parent's rest: `GS` needs BOTH a rest and a live child.
     registry
-        .mark_task_rested(&"a-parent".to_string(), None, None, Some(parent), None, None)
+        .mark_task_rested(
+            &"a-parent".to_string(),
+            None,
+            None,
+            Some(parent),
+            None,
+            None,
+        )
         .await;
 
     registry
@@ -4544,7 +4559,14 @@ async fn a_cyclic_parent_chain_terminates() {
     seed_agent(&registry, "a-loop-a", a, Some(b), TaskStatus::Running).await;
     seed_agent(&registry, "a-loop-b", b, Some(a), TaskStatus::Running).await;
     registry
-        .mark_task_rested(&"a-target".to_string(), None, None, Some(target), None, None)
+        .mark_task_rested(
+            &"a-target".to_string(),
+            None,
+            None,
+            Some(target),
+            None,
+            None,
+        )
         .await;
 
     tokio::time::timeout(
@@ -5448,4 +5470,51 @@ async fn plan_review_flag_preserves_task_lifecycle_and_clears_on_terminal() {
     assert!(
         matches!(registry.get(&id).await.unwrap(),TaskState::InProcessTeammate(teammate) if !teammate.awaiting_plan_approval)
     );
+}
+
+#[tokio::test]
+async fn teammate_idle_sink_projects_idle_and_wake_without_ending_task() {
+    use crate::handlers::TaskStatusSink;
+    use crate::registry_status_sink::RegistryStatusSink;
+    use platform_api::task_registry::TaskRegistryHandle;
+
+    let (_tmp, registry) = make_registry();
+    let registry = Arc::new(registry);
+    let id = registry
+        .create(TaskType::InProcessTeammate, teammate_input(), "work".into())
+        .await
+        .unwrap();
+    let sink = RegistryStatusSink::new();
+    sink.bind(registry.clone());
+    sink.set_status(&id, TaskStatus::Running).await;
+    assert!(
+        !TaskRegistryHandle::get(registry.as_ref(), &id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_idle
+    );
+    sink.set_teammate_idle(&id).await;
+    let idle = TaskRegistryHandle::get(registry.as_ref(), &id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(idle.is_idle);
+    assert_eq!(idle.status, "running");
+    sink.set_status(&id, TaskStatus::Running).await;
+    assert!(
+        !TaskRegistryHandle::get(registry.as_ref(), &id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_idle
+    );
+    sink.set_status(&id, TaskStatus::Killed).await;
+    sink.set_teammate_idle(&id).await;
+    let killed = TaskRegistryHandle::get(registry.as_ref(), &id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!killed.is_idle);
+    assert_eq!(killed.status, "killed");
 }

@@ -116,6 +116,8 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
 export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   cron_result: true,
   error: true,
+  message_identity: true,
+  message_retracted: true,
   system_notice: true,
   ask_user_question: true,
   ask_user_question_resolved: true,

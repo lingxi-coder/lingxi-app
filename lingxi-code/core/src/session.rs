@@ -95,6 +95,10 @@ pub struct SessionState {
     pub session_id: SessionId,
     /// Ordered conversation history.
     pub history: Vec<ConversationMessage>,
+    /// Original assistant grouping flags `(isVirtual, resumedFromIncompleteThinking)`
+    /// retained when JSONL rows are projected into protocol messages.
+    #[serde(default)]
+    pub hook_message_grouping: HashMap<MessageId, (bool, bool)>,
     /// Cumulative token usage across all turns.
     pub usage: CumulativeUsage,
     /// Model identifier (e.g. `"claude-opus-4-7"`).
@@ -187,14 +191,15 @@ pub struct SessionState {
     /// history snapshot. Unlike `isMeta`, this is a hard context boundary.
     #[serde(default)]
     pub model_context_excluded_messages: HashSet<MessageId>,
-    /// Session latch for thinking-signature 400 recovery
-    /// (`thinking_stripped` attachment, claude-code 2.1.259 `QZ` / `qge("all")`).
-    ///
-    /// When set, later thinking-capable requests strip `thinking` /
-    /// `redacted_thinking` on the outbound clone. DeepSeek / Kimi keep
-    /// `reasoning_content` because those APIs require it. Defaults `false`.
+    /// Whether a thinking-signature recovery marker has been observed.
+    /// The actual outbound scope lives in `thinking_stripped_messages`; this
+    /// compatibility flag must never disable freshly generated thinking.
     #[serde(default)]
     pub thinking_signature_stripped: bool,
+    /// First rejected thinking block per historical assistant message. Fresh
+    /// assistant IDs remain eligible to round-trip thinking after recovery.
+    #[serde(default)]
+    pub thinking_stripped_messages: HashMap<MessageId, usize>,
 }
 
 impl SessionState {
@@ -204,6 +209,7 @@ impl SessionState {
         Self {
             session_id,
             history: Vec::new(),
+            hook_message_grouping: HashMap::new(),
             usage: CumulativeUsage::default(),
             model,
             model_profile: None,
@@ -221,6 +227,7 @@ impl SessionState {
             compact_summary_messages: HashSet::new(),
             model_context_excluded_messages: HashSet::new(),
             thinking_signature_stripped: false,
+            thinking_stripped_messages: HashMap::new(),
         }
     }
 

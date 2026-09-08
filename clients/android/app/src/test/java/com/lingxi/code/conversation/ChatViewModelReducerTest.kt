@@ -279,6 +279,26 @@ class ChatViewModelReducerTest {
     private fun newVm() = ChatViewModel(StubSource())
 
     @Test
+    fun retractAssistantMessage_usesIdentityAndPreservesAnotherResponse() {
+        val vm = newVm()
+        vm.reduce(ReplyEvent.ReasoningDelta("failed reasoning"))
+        vm.reduce(ReplyEvent.Delta("failed"))
+        vm.reduce(ReplyEvent.MessageIdentity("failed-id"))
+        vm.reduce(ReplyEvent.MessageComplete(Message(role = Role.Ai, text = "failed")))
+        vm.reduce(ReplyEvent.ReasoningDelta("retained reasoning"))
+        vm.reduce(ReplyEvent.Delta("retained"))
+        vm.reduce(ReplyEvent.MessageIdentity("retained-id"))
+        vm.reduce(ReplyEvent.MessageComplete(Message(role = Role.Ai, text = "retained")))
+        vm.reduce(ReplyEvent.MessageRetracted("unknown"))
+        assertEquals(listOf("failed", "retained"), vm.state.value.messages.map { it.text })
+        vm.reduce(ReplyEvent.MessageRetracted("failed-id"))
+        assertEquals(listOf("retained"), vm.state.value.messages.map { it.text })
+        assertEquals("retained reasoning", vm.state.value.agentRun?.reasoning)
+        vm.reduce(ReplyEvent.MessageRetracted("failed-id"))
+        assertEquals(listOf("retained"), vm.state.value.messages.map { it.text })
+    }
+
+    @Test
     fun compactSlashUsesDedicatedCommandAndCliProgressThenSettles() = runTest(dispatcher) {
         val source = RecordingSource()
         val vm = ChatViewModel(source)

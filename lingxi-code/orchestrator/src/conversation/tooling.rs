@@ -328,6 +328,9 @@ impl ConversationOrchestrator {
                 }
             }
             self.output
+                .emit_assistant_message_identity(&assistant_msg.id())
+                .await;
+            self.output
                 .emit_message_boundary(stop_reason.as_deref(), None)
                 .await;
         }
@@ -823,14 +826,12 @@ impl ConversationOrchestrator {
         }
         let mut tools = self.tools.available_tools(&ToolStaticContext::default());
         let denied = self.perms.tool_wide_deny_names().await;
+        *self
+            .tool_pool_denied_names
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = denied.clone();
         if !denied.is_empty() {
-            let denied_set: std::collections::HashSet<&str> =
-                denied.iter().map(String::as_str).collect();
-            tools.retain(|t| {
-                !denied_set
-                    .iter()
-                    .any(|d| permission::tool_wide_name_matches(d, t.name()))
-            });
+            tools.retain(|t| !self.is_tool_pool_denied(t.as_ref()));
         }
         Self::apply_wait_for_mcp_servers_gate(&mut tools);
         {
@@ -857,10 +858,20 @@ impl ConversationOrchestrator {
                         tools.retain(|t| !blocked.contains(t.name()));
                     }
                 }
+                *self
+                    .main_agent_tool_names
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(tools.iter().map(|tool| tool.name().to_string()).collect());
+            } else {
+                *self
+                    .main_agent_tool_names
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             }
         }
-        if self.is_coordinator_session() {
-            tools.retain(|t| Self::is_coordinator_pool_tool(t.name()));
+        if self.is_coordinator_mode_enabled() {
+            tools.retain(|t| self.is_coordinator_pool_tool(t.as_ref()));
         }
         tools
     }

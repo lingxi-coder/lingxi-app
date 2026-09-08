@@ -232,6 +232,23 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
+    async fn emit_assistant_message_identity(&self, message_id: &protocol::MessageId) {
+        self.sink
+            .emit(ClientEvent::MessageIdentity {
+                message_id: message_id.as_uuid().to_string(),
+            })
+            .await;
+    }
+
+    async fn emit_message_retracted(&self, message_id: &protocol::MessageId) {
+        self.message_blocks.lock().await.clear();
+        self.sink
+            .emit(ClientEvent::MessageRetracted {
+                message_id: message_id.as_uuid().to_string(),
+            })
+            .await;
+    }
+
     async fn emit_system_notice(&self, message: &str, is_error: bool) {
         self.sink
             .emit(ClientEvent::SystemNotice {
@@ -544,6 +561,44 @@ mod tests {
             ClientEvent::TextDelta {
                 text: "hello world".to_string()
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_retraction_carries_identity_and_clears_partial_blocks() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let id = protocol::MessageId::new();
+        stream.emit_text("rejected").await;
+        stream.emit_assistant_message_identity(&id).await;
+        stream.emit_message_retracted(&id).await;
+        stream.emit_text("clean").await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        let events = sink.events().await;
+        assert_eq!(
+            events[1],
+            ClientEvent::MessageIdentity {
+                message_id: id.as_uuid().to_string()
+            }
+        );
+        assert_eq!(
+            events[2],
+            ClientEvent::MessageRetracted {
+                message_id: id.as_uuid().to_string()
+            }
+        );
+        let ClientEvent::MessageComplete {
+            message: Some(message),
+            ..
+        } = events.last().unwrap()
+        else {
+            panic!("missing completed message")
+        };
+        assert_eq!(
+            message.blocks,
+            vec![MessageBlockDto::Text {
+                text: "clean".into()
+            }]
         );
     }
 

@@ -2457,6 +2457,10 @@ impl Drop for SpawnDeallocGuard {
 
 #[async_trait]
 impl SubagentSpawner for PoolSubagentSpawner {
+    fn normalize_teammate_recipient(&self, name: &str) -> String {
+        crate::catalog::normalize_teammate_recipient(name)
+    }
+
     async fn spawn(
         &self,
         request: SubagentSpawnRequest,

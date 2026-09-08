@@ -103,6 +103,7 @@ pub fn build_background_tasks(records: &[TaskRecord]) -> Vec<HookBackgroundTask>
         .iter()
         .filter(|r| keep_task(r))
         .map(|r| HookBackgroundTask {
+            is_idle: r.is_idle,
             id: r.task_id.clone(),
             r#type: type_label(&r.task_type),
             status: r.status.clone(),
@@ -182,6 +183,19 @@ mod tests {
             description: description.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn teammate_idle_metadata_is_preserved_without_changing_hook_wire() {
+        let mut teammate = rec("in_process_teammate", "running", "work");
+        let active = build_background_tasks(&[teammate.clone()]);
+        teammate.is_idle = true;
+        let idle = build_background_tasks(&[teammate]);
+        assert!(idle[0].is_idle);
+        assert_eq!(
+            serde_json::to_value(&active).unwrap(),
+            serde_json::to_value(&idle).unwrap()
+        );
     }
 
     #[test]

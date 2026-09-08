@@ -60,7 +60,10 @@ fn orch_with_bus(
     bus: Arc<AnalyticsBus>,
 ) -> ConversationOrchestrator {
     ConversationOrchestrator::new_with_streaming(
-        OrchestratorConfig::default(),
+        OrchestratorConfig {
+            interactive_session: true,
+            ..OrchestratorConfig::default()
+        },
         api,
         streaming,
         Arc::new(ToolRegistry::new()),
@@ -358,4 +361,49 @@ async fn transport_after_incomplete_text_block_finalizes_visible_partial() {
             .any(|text| text.contains("connection reset by peer")),
         "raw transport details must not be rendered as assistant content"
     );
+}
+
+/// tZo (2.1.263): a non-interactive main session resumes truncated output.
+#[tokio::test]
+async fn noninteractive_partial_finalize_recovers_with_meta_nudge() {
+    let streaming = Arc::new(MockStreamingApiClient::with_fallible_turns(vec![
+        completed_block_then_error(LlmError::ProviderInternal),
+        vec![
+            Ok(message_start("recovery", "claude-opus-4-7")),
+            Ok(content_block_start_text(0)),
+            Ok(text_delta(0, "recovered answer")),
+            Ok(content_block_stop(0)),
+            Ok(orchestrator::test_support::message_delta_stop("end_turn")),
+            Ok(orchestrator::test_support::message_stop()),
+        ],
+    ]));
+    let orch = ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig {
+            interactive_session: false,
+            ..OrchestratorConfig::default()
+        },
+        Arc::new(MockApiClient::new(Vec::new())),
+        streaming.clone(),
+        Arc::new(ToolRegistry::new()),
+        orchestrator::test_support::noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        PathBuf::from("/tmp"),
+    );
+    assert!(matches!(
+        orch.run_turn_streaming("hi").await.unwrap(),
+        ConversationOutcome::EndTurn { .. }
+    ));
+    let calls = streaming.captured_calls().await;
+    assert_eq!(calls.len(), 2);
+    assert!(calls[1].messages.iter().any(|message| matches!(message,
+        ConversationMessage::User { content, is_meta: true, .. }
+            if content.iter().any(|block| matches!(block, ContentBlock::Text { text }
+                if text == "Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start."))
+    )));
+    assert!(calls[1].messages.iter().any(|message| matches!(message,
+        ConversationMessage::Assistant { content, .. }
+            if content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text == "useful"))
+    )), "truncated output is retained during recovery");
 }

@@ -188,7 +188,15 @@ pub(crate) const TRUNCATED_RESPONSE_RECOVERY_NUDGE_SUBAGENT: &str = concat!(
 #[must_use]
 pub(crate) fn truncated_response_recovery_eligible(query_source: &str, interactive: bool) -> bool {
     let src = crate::config::sanitize_query_source(query_source);
-    src.starts_with("agent") || src == "subagent" || !interactive
+    truncated_response_recovery_is_subagent(src)
+        || (!interactive && (src.starts_with("repl_main_thread") || src == "sdk"))
+}
+
+/// cc 2.1.263 `ji`: `agent:*` and `hook_agent` are subagent queries.
+/// Keep the port's established `subagent` alias; sanitization only collapses
+/// custom-agent suffixes and does not otherwise classify query sources.
+pub(crate) fn truncated_response_recovery_is_subagent(query_source: &str) -> bool {
+    query_source.starts_with("agent:") || matches!(query_source, "hook_agent" | "subagent")
 }
 
 /// Byte-exact `isMeta` retry message pushed when a `PermissionDenied` hook
@@ -209,20 +217,10 @@ pub(crate) const PERMISSION_DENIED_RETRY_MESSAGE: &str =
 /// which is the authoritative source for this string in this crate.
 pub(crate) use crate::model::prompt_too_long::PROMPT_TOO_LONG_ERROR_MESSAGE;
 
-/// Byte-exact meta nudge injected when the model returns `stop_reason ==
-/// "tool_use"` but produces ZERO `tool_use` blocks (a malformed / leaked-invoke
-/// response). 1:1 with claude-code v2.1.183 (`bin/claude.exe` offset
-/// ~202945837): the first-failure injection text.
-///
-/// claude-code gates the text on a `tengu_malformed_tool_use_clean_retry`
-/// feature flag (`PZa()`) that DEFAULTS TO FALSE, so the default first-failure
-/// string is this non-clean-retry variant. (The clean-retry variant would be
-/// "The previous response failed to produce a valid tool call. Please retry the
-/// tool call now." — gated behind the flag, not emitted in the default build.)
-/// Injected as a META user message ([`ConversationMessage::user_meta`]), matching
-/// CC's `createUserMessage({…, isMeta:!0})` — it persists with `isMeta:true`.
+/// Clean retry nudge from cc 2.1.263 `ZZe` (src_158021603.js).
+/// `Oer` unconditionally drops the malformed attempt before appending it.
 pub(crate) const MALFORMED_TOOL_USE_RETRY_NUDGE: &str =
-    "Your tool call was malformed and could not be parsed. Please retry.";
+    "The previous response failed to produce a valid tool call. Please retry the tool call now.";
 
 /// Byte-exact NON-meta message emitted on the SECOND malformed-tool-use failure
 /// (the retry also produced no `tool_use` block): the turn terminates as
@@ -1230,6 +1228,14 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             .await;
     }
 
+    // Oer only exhausts two consecutive malformed attempts: every other
+    // transition replaces `malformed_tool_use_retry` in the oracle state.
+    if response.stop_reason.as_deref() != Some("tool_use") || !tool_uses.is_empty() {
+        if let Some(state) = recovery.as_deref_mut() {
+            state.malformed_tool_use_retried = false;
+        }
+    }
+
     // 6. Decide loop disposition.
     let outcome = if end_conversation_requested {
         // The model confirmed (2nd EndConversation call) — end the query.
@@ -1308,9 +1314,9 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                     && !prior_structured_output =>
             {
                 let state = recovery.as_deref_mut().expect("recovery is Some");
-                handle_thinking_only(orch, state).await?
+                handle_thinking_only(orch, assistant_id, state).await?
             }
-            Some("end_turn") => TurnStepOutcome::Ended {
+            Some("end_turn" | "stop_sequence") | None => TurnStepOutcome::Ended {
                 final_message_id: assistant_id,
                 stop_reason: "end_turn".to_string(),
                 allow_budget_continuation: true,
@@ -2858,7 +2864,7 @@ fn is_tool_result_carrier(msg: &ConversationMessage) -> bool {
 /// completed (`stop_reason = "end_turn"`).
 async fn handle_malformed_tool_use(
     orch: &ConversationOrchestrator,
-    _assistant_id: MessageId,
+    assistant_id: MessageId,
     state: &mut RecoveryState,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
     if state.malformed_tool_use_retried {
@@ -2897,6 +2903,7 @@ async fn handle_malformed_tool_use(
         MessageId::new(),
         MALFORMED_TOOL_USE_RETRY_NUDGE.to_string(),
     );
+    orch.discard_retry_attempt(assistant_id).await;
     {
         let mut s = orch.session.lock().await;
         s.history.push(nudge_msg.clone());
@@ -2913,10 +2920,12 @@ async fn handle_malformed_tool_use(
 /// has already checked `!thinking_only_nudged && !has_visible_text(..)`.
 async fn handle_thinking_only(
     orch: &ConversationOrchestrator,
+    assistant_id: MessageId,
     state: &mut RecoveryState,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
     let nudge_msg =
         ConversationMessage::user_meta(MessageId::new(), THINKING_ONLY_NUDGE.to_string());
+    orch.discard_retry_attempt(assistant_id).await;
     {
         let mut s = orch.session.lock().await;
         s.history.push(nudge_msg.clone());
@@ -3323,14 +3332,14 @@ fn tool_result_has_media(content_blocks: Option<&[serde_json::Value]>) -> bool {
 /// the `text` block lengths in an array (non-text blocks contribute 0).
 fn tool_result_size(content: &str, content_blocks: Option<&[serde_json::Value]>) -> usize {
     match content_blocks {
-        None => content.len(),
+        None => content.encode_utf16().count(),
         Some(blocks) => blocks
             .iter()
             .map(|b| {
                 if b.get("type").and_then(serde_json::Value::as_str) == Some("text") {
                     b.get("text")
                         .and_then(serde_json::Value::as_str)
-                        .map_or(0, str::len)
+                        .map_or(0, |text| text.encode_utf16().count())
                 } else {
                     0
                 }
@@ -3370,6 +3379,7 @@ fn tool_result_size(content: &str, content_blocks: Option<&[serde_json::Value]>)
 /// receives the full payload. The caller MUST clear `content_blocks` whenever
 /// this reports `true`.
 struct PersistenceOutcome {
+    utf16_code_units: Option<Vec<u16>>,
     content: String,
     replaced: bool,
 }
@@ -3433,14 +3443,15 @@ async fn apply_tool_result_persistence_with_process_output(
         // seam, but its structured media blocks must remain inline.
         if !tool_result_is_blank(&content, content_blocks) && !tool_result_has_media(content_blocks)
         {
-            let (preview, content_has_more) = trp::preview(&content, trp::PREVIEW_CHARS);
+            let (preview, content_has_more) = trp::preview_utf16(&content, trp::PREVIEW_CHARS);
             let original_size = usize::try_from(output_file.size).unwrap_or(usize::MAX);
-            let replacement = trp::wrap(
+            let exact_replacement = trp::wrap_utf16(
                 original_size,
                 &output_file.path,
-                preview,
+                &preview,
                 content_has_more || output_file.size > trp::PREVIEW_CHARS as u64,
             );
+            let replacement = String::from_utf16_lossy(&exact_replacement);
             tracing::info!(
                 task_id = %output_file.task_id,
                 path = %output_file.path,
@@ -3458,14 +3469,14 @@ async fn apply_tool_result_persistence_with_process_output(
                     telemetry::AnalyticsValue::String(tool_name.to_string()),
                 );
                 metadata.insert("originalSizeBytes".into(), int(original_size));
-                metadata.insert("persistedSizeBytes".into(), int(replacement.len()));
+                metadata.insert("persistedSizeBytes".into(), int(exact_replacement.len()));
                 metadata.insert(
                     "estimatedOriginalTokens".into(),
                     int(original_size.div_ceil(trp::CHARS_PER_TOKEN)),
                 );
                 metadata.insert(
                     "estimatedPersistedTokens".into(),
-                    int(replacement.len().div_ceil(trp::CHARS_PER_TOKEN)),
+                    int(exact_replacement.len().div_ceil(trp::CHARS_PER_TOKEN)),
                 );
                 metadata.insert(
                     "thresholdUsed".into(),
@@ -3474,6 +3485,9 @@ async fn apply_tool_result_persistence_with_process_output(
                 bus.log_event("tengu_tool_result_persisted", metadata).await;
             }
             return PersistenceOutcome {
+                utf16_code_units: String::from_utf16(&exact_replacement)
+                    .is_err()
+                    .then_some(exact_replacement),
                 content: replacement,
                 replaced: true,
             };
@@ -3511,18 +3525,21 @@ async fn apply_tool_result_persistence(
             bus.log_event("tengu_tool_empty_result", metadata).await;
         }
         return PersistenceOutcome {
+            utf16_code_units: None,
             content: format!("({tool_name} completed with no output)"),
             replaced: true,
         };
     }
     if tool_result_has_media(content_blocks) {
         return PersistenceOutcome {
+            utf16_code_units: None,
             content,
             replaced: false,
         };
     }
     let Some(threshold) = threshold else {
         return PersistenceOutcome {
+            utf16_code_units: None,
             content,
             replaced: false,
         };
@@ -3530,12 +3547,14 @@ async fn apply_tool_result_persistence(
     let size = tool_result_size(&content, content_blocks);
     if size <= threshold {
         return PersistenceOutcome {
+            utf16_code_units: None,
             content,
             replaced: false,
         };
     }
     let Some(home) = orch.config_home.as_ref() else {
         return PersistenceOutcome {
+            utf16_code_units: None,
             content,
             replaced: false,
         };
@@ -3550,6 +3569,7 @@ async fn apply_tool_result_persistence(
             // the oracle; an unserializable array is the same "leave it alone".
             Err(_) => {
                 return PersistenceOutcome {
+                    utf16_code_units: None,
                     content,
                     replaced: false,
                 }
@@ -3566,7 +3586,7 @@ async fn apply_tool_result_persistence(
     // The on-disk stem is the port's INTERNAL `ToolUseId`, matching the
     // oracle's `${e.tool_use_id}.txt` — claude-code's internal block-param id
     // likewise differs from the `toolu_…` id it records in the transcript.
-    let persisted = match trp::persist(&dir, tool_use_id.as_str(), &body, is_json).await {
+    let persisted = match trp::persist(home, &dir, tool_use_id.as_str(), &body, is_json).await {
         Ok(p) => p,
         Err(msg) => {
             tracing::error!(
@@ -3574,6 +3594,7 @@ async fn apply_tool_result_persistence(
                 "Failed to persist tool result: {msg}"
             );
             return PersistenceOutcome {
+                utf16_code_units: None,
                 content,
                 replaced: false,
             };
@@ -3584,12 +3605,13 @@ async fn apply_tool_result_persistence(
         "Persisted tool result to {path_display} ({})",
         trp::format_bytes(persisted.original_size)
     );
-    let replacement = trp::wrap(
+    let exact_replacement = trp::wrap_utf16(
         persisted.original_size,
         &path_display,
-        &persisted.preview,
+        &persisted.preview_utf16,
         persisted.has_more,
     );
+    let replacement = String::from_utf16_lossy(&exact_replacement);
     if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
         #[allow(clippy::cast_possible_wrap)]
         fn int(v: usize) -> telemetry::AnalyticsValue {
@@ -3601,19 +3623,22 @@ async fn apply_tool_result_persistence(
             telemetry::AnalyticsValue::String(tool_name.to_string()),
         );
         metadata.insert("originalSizeBytes".into(), int(persisted.original_size));
-        metadata.insert("persistedSizeBytes".into(), int(replacement.len()));
+        metadata.insert("persistedSizeBytes".into(), int(exact_replacement.len()));
         metadata.insert(
             "estimatedOriginalTokens".into(),
             int(persisted.original_size.div_ceil(trp::CHARS_PER_TOKEN)),
         );
         metadata.insert(
             "estimatedPersistedTokens".into(),
-            int(replacement.len().div_ceil(trp::CHARS_PER_TOKEN)),
+            int(exact_replacement.len().div_ceil(trp::CHARS_PER_TOKEN)),
         );
         metadata.insert("thresholdUsed".into(), int(threshold));
         bus.log_event("tengu_tool_result_persisted", metadata).await;
     }
     PersistenceOutcome {
+        utf16_code_units: String::from_utf16(&exact_replacement)
+            .is_err()
+            .then_some(exact_replacement),
         content: replacement,
         replaced: true,
     }
@@ -3772,13 +3797,12 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         // `inputSchema.safeParse`): runs on the RAW `input` (pre-hook), AFTER the
         // unknown-tool arm and BEFORE the `validate_input` gate — the exact order
         // of `checkPermissionsAndCallTool` (safeParse ~615 precedes validateInput
-        // ~683). BEHAVIORAL parity only: the `<tool_use_error>InputValidationError:
-        // …>` wrapper matches, but the detail bytes intentionally differ from
-        // claude-code's Zod `formatZodValidationError` output (unportable). A
+        // ~683). Native refinement issues accompany the exported JSON Schema
+        // so the detail uses Claude's Zod `zue` grouping and JSON fallback. A
         // malformed tool schema is treated as PASS (logged) — see
         // [`crate::schema_validation::validate_tool_input_schema`].
         if let Err(detail) =
-            crate::schema_validation::validate_tool_input_schema(tool_handle.input_schema(), input)
+            crate::schema_validation::validate_tool_schema(tool_handle.as_ref(), input)
         {
             tool_handle
                 .on_input_schema_rejected(
@@ -4009,6 +4033,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         // events at prompt grain.
         let prompt_id = orch.prompt_runtime.current_prompt_id.lock().await.clone();
         let hook_ctx = HookContext {
+            prompt_transcript: Some(orch.prompt_hook_transcript().await),
             session_id,
             cwd: orch.current_cwd(),
             transcript_path,
@@ -5962,7 +5987,12 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         // envelope is computed, the file written, the telemetry fired, and the
         // model still receives the full oversized payload.
         let (final_content, content_blocks) = if persistence.replaced {
-            (persistence.content, None)
+            (
+                persistence.content,
+                persistence
+                    .utf16_code_units
+                    .map(protocol::js_utf16::tool_result_sidecar),
+            )
         } else {
             (persistence.content, content_blocks)
         };
@@ -6088,6 +6118,7 @@ async fn run_post_tool_batch_hooks_inner(
         .map(|w| w.path().to_path_buf())
         .unwrap_or_else(|| orch.computed_transcript_path(&session_id));
     let batch_ctx = HookContext {
+        prompt_transcript: Some(orch.prompt_hook_transcript().await),
         session_id,
         cwd: orch.current_cwd(),
         transcript_path,
@@ -8265,7 +8296,14 @@ mod tool_result_persistence_wiring_tests {
                     .unwrap(),
             )
             .unwrap();
-            let body = "x".repeat(len);
+            let mut body = "x".repeat(len);
+            if input
+                .get("split_surrogate")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                body.replace_range(1999..2001, "😀");
+            }
             Ok(ToolCallResult {
                 data: json!(body),
                 model_content: Some(body),
@@ -8314,6 +8352,70 @@ mod tool_result_persistence_wiring_tests {
             panic!("expected ToolResult");
         };
         content.clone()
+    }
+
+    #[tokio::test]
+    async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
+        use llm_client::WireCodec;
+        use protocol::{ConversationMessage, MessageId};
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("history.jsonl");
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+            path.clone(),
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.path().into())),
+        ));
+        let orch =
+            orch_with(Arc::new(SizedTool), Some(tmp.path().into())).with_jsonl_writer(writer);
+        let mut call = use_of("Sized", 4000).remove(0);
+        call.2["split_surrogate"] = json!(true);
+        let assistant = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            stop_reason: Some("tool_use".into()),
+            content: vec![ContentBlock::ToolUse {
+                id: call.0.clone(),
+                name: "Sized".into(),
+                input: call.2.clone(),
+                provider_id: None,
+            }],
+        };
+        orch.persist_message_to_jsonl(&assistant).await;
+        let (results, ..) = dispatch_tool_uses_tracked(&orch, &vec![call], None)
+            .await
+            .unwrap();
+        let mut user = ConversationMessage::user(MessageId::new(), String::new());
+        if let ConversationMessage::User { content, .. } = &mut user {
+            *content = results;
+        }
+        orch.persist_message_to_jsonl(&user).await;
+        let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
+        let history =
+            crate::resume::state_from_messages(uuid::Uuid::nil(), &loaded.messages_in_order)
+                .history;
+        let request = llm_client::LlmRequest {
+            model: "claude-opus-4-7".into(),
+            messages: llm_client::convert::to_llm_messages(history).unwrap(),
+            ..Default::default()
+        };
+        let codec =
+            llm_client::AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+        for encoded in [
+            codec.encode_request(&request).unwrap(),
+            codec.encode_count_tokens_request(&request).unwrap(),
+        ] {
+            let wire = String::from_utf8(encoded.wire_body_bytes().unwrap()).unwrap();
+            assert!(
+                wire.contains("\\ud83d\\n..."),
+                "exact JS surrogate must reach wire: {wire}"
+            );
+            assert!(
+                !wire.contains("lingxi_tool_result_string_utf16"),
+                "sidecar must not leak"
+            );
+            assert!(
+                !wire.contains('\u{fffd}'),
+                "display replacement must not reach Claude"
+            );
+        }
     }
 
     /// T5 — `o<=i` returns the result UNCHANGED; only a STRICTLY larger body

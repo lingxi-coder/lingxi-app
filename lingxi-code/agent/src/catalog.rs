@@ -1680,9 +1680,15 @@ pub async fn load_agents_from_additional_directory(path: PathBuf) -> Vec<AgentDe
 /// Recipient comparison used by implicit teammate name reservation.
 pub fn normalize_teammate_recipient(name: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
-    let normalized: String = name.nfkc().filter(|c| !c.is_control() || c.is_whitespace()).filter(|c| !matches!(*c, '\u{00ad}' | '\u{0600}'..='\u{0605}' | '\u{06dd}' | '\u{070f}' | '\u{0890}'..='\u{0891}' | '\u{08e2}' | '\u{110bd}' | '\u{110cd}' | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}')).collect();
+    fn js_whitespace(c: char) -> bool {
+        matches!(c, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
+    }
+    let normalized: String = name.nfkc().filter(|c| {
+        js_whitespace(*c) || (!c.is_control() && !matches!(*c, '\u{00ad}' | '\u{0600}'..='\u{0605}' | '\u{06dd}' | '\u{070f}' | '\u{0890}'..='\u{0891}' | '\u{08e2}' | '\u{110bd}' | '\u{110cd}' | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}'))
+    }).collect();
     normalized
-        .split_whitespace()
+        .split(js_whitespace)
+        .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-")
         .to_lowercase()
@@ -1693,6 +1699,17 @@ mod tests {
     use super::*;
     use crate::definition::AgentEffort;
     use tempfile::TempDir;
+
+    #[test]
+    fn recipient_normalizer_matches_javascript_nfkc_and_whitespace() {
+        assert_eq!(normalize_teammate_recipient(" ＭＡＩＮ "), "main");
+        assert_eq!(
+            normalize_teammate_recipient("team\u{feff}lead"),
+            "team-lead"
+        );
+        assert_eq!(normalize_teammate_recipient("ma\u{0085}in"), "main");
+        assert_eq!(normalize_teammate_recipient("ma\u{200b}in"), "main");
+    }
 
     fn parse_name(name: &str) -> Result<AgentDefinition, AgentLoadError> {
         let raw = format!("---\nname: \"{name}\"\ndescription: d\n---\nBody");

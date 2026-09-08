@@ -18,7 +18,7 @@ fn all_3_settings_event_names_are_locked() {
 }
 
 #[test]
-fn registry_is_exactly_416_entries() {
+fn registry_is_exactly_410_entries() {
     // The canonical category-by-category recount lives in
     // event_name_completeness_test. Keep this duplicate doctor-facing guard in
     // sync with that registry count.
@@ -27,5 +27,5 @@ fn registry_is_exactly_416_entries() {
     // event_name_completeness_test. Both must move together — the §11 change
     // updated only that one and this file went red, which is the third time a
     // count-lock site was missed on this backlog.
-    assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 416);
+    assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 410);
 }

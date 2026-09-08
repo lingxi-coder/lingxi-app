@@ -391,6 +391,19 @@ impl Default for MockOutputStream {
 
 #[async_trait]
 impl OutputStream for MockOutputStream {
+    async fn emit_assistant_message_identity(&self, message_id: &protocol::MessageId) {
+        self.events.lock().await.push(OutputEvent::MessageIdentity {
+            message_id: *message_id,
+        });
+    }
+    async fn emit_message_retracted(&self, message_id: &protocol::MessageId) {
+        self.events
+            .lock()
+            .await
+            .push(OutputEvent::MessageRetracted {
+                message_id: *message_id,
+            });
+    }
     async fn emit_text(&self, text: &str) {
         self.events.lock().await.push(OutputEvent::Text {
             text: text.to_string(),
@@ -1328,7 +1341,10 @@ impl OrchestratorHandle for MockOrchestratorHandle {
     }
 
     async fn emit_background_system_notice(&self, body: &str) {
-        self.background_notices.lock().unwrap().push(body.to_string());
+        self.background_notices
+            .lock()
+            .unwrap()
+            .push(body.to_string());
     }
 
     async fn list_model_listings(&self) -> Vec<platform_api::ModelListing> {

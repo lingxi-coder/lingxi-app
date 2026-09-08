@@ -50,6 +50,7 @@ pub struct TranscriptEntry {
 }
 
 /// Appends [`TranscriptEntry`] lines to a per-agent transcript file.
+#[derive(Clone)]
 pub struct AgentTranscriptWriter {
     /// Absolute path the transcript is written to.
     pub transcript_path: PathBuf,
@@ -123,6 +124,20 @@ impl AgentTranscriptWriter {
         self.append_entry(&entry).await
     }
 
+    /// Persist explicit historical thinking ranges before the provider retry.
+    pub async fn record_thinking_recovery(
+        &self,
+        messages: std::collections::HashMap<protocol::MessageId, usize>,
+    ) -> Result<(), platform_api::FsError> {
+        self.record(&ConversationMessage::System {
+            id: protocol::MessageId::new(),
+            content: serde_json::to_string(&messages).expect("thinking ranges serialize"),
+            subtype: Some("thinking_stripped".into()),
+            compact_metadata: None,
+        })
+        .await
+    }
+
     /// Append a terminal lifecycle entry while retaining a normal transcript
     /// message shape for readers that replay only `message` values.
     pub async fn record_terminal(
@@ -166,5 +181,99 @@ impl AgentTranscriptWriter {
         // corrupted the JSONL — and rewrote every prior line on each message,
         // making a long conversation quadratic.
         self.fs.append_file(path_str, &line).await
+    }
+}
+
+/// Consume recovery metadata from a restored worker history. The marker is a
+/// transcript row, never a provider message; explicit IDs preserve fresh blocks
+/// appended after earlier rejections and do not depend on row ordering.
+pub(crate) fn restore_thinking_recovery(
+    history: &mut Vec<ConversationMessage>,
+    scope: &llm_client::thinking_scope::ThinkingRecoveryScope,
+) {
+    history.retain(|message| {
+        if let ConversationMessage::System {
+            content,
+            subtype: Some(subtype),
+            ..
+        } = message
+        {
+            if subtype == "thinking_stripped" {
+                if let Ok(ranges) = serde_json::from_str(content) {
+                    scope.merge(ranges);
+                }
+                return false;
+            }
+        }
+        true
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn worker_thinking_recovery_round_trips_ranges_and_preserves_fresh_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-recovery.jsonl");
+        let writer = AgentTranscriptWriter::new(
+            path.clone(),
+            AgentId::new(),
+            Arc::new(platform_posix::PosixFileSystem::new(
+                dir.path().to_path_buf(),
+            )),
+        );
+        let assistant = |id, text: &str| ConversationMessage::Assistant {
+            id,
+            content: vec![
+                protocol::ContentBlock::Thinking {
+                    thinking: "keep-prefix".into(),
+                    signature: Some("valid".into()),
+                },
+                protocol::ContentBlock::Thinking {
+                    thinking: text.into(),
+                    signature: Some("sig".into()),
+                },
+                protocol::ContentBlock::Text {
+                    text: "answer".into(),
+                },
+            ],
+            stop_reason: Some("end_turn".into()),
+        };
+        let old = assistant(protocol::MessageId::new(), "rejected");
+        let fresh = assistant(protocol::MessageId::new(), "fresh");
+        writer.record(&old).await.unwrap();
+        writer
+            .record_thinking_recovery([(old.id(), 1)].into_iter().collect())
+            .await
+            .unwrap();
+        writer.record(&fresh).await.unwrap();
+        let body = std::fs::read_to_string(path).unwrap();
+        let mut history: Vec<_> = body
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<TranscriptEntry>(line)
+                    .unwrap()
+                    .message
+            })
+            .collect();
+        let scope = llm_client::thinking_scope::ThinkingRecoveryScope::default();
+        restore_thinking_recovery(&mut history, &scope);
+        assert_eq!(history.len(), 2);
+        assert_eq!(scope.messages().get(&old.id()), Some(&1));
+        assert!(!scope.messages().contains_key(&fresh.id()));
+        llm_client::model::thinking_signature::strip_marked_conversation_thinking(
+            &mut history,
+            &scope.messages(),
+        );
+        let ConversationMessage::Assistant { content, .. } = &history[0] else {
+            panic!("assistant")
+        };
+        assert!(
+            matches!(&content[0], protocol::ContentBlock::Thinking { thinking, .. } if thinking == "keep-prefix")
+        );
+        assert_eq!(content.len(), 2);
+        assert_eq!(history[1], fresh);
     }
 }

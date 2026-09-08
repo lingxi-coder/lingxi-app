@@ -998,6 +998,7 @@ mod tests {
             stop_hook_active: false,
             last_assistant_message: None,
             background_tasks: Some(vec![HookBackgroundTask {
+                is_idle: false,
                 id: "bt1".into(),
                 r#type: "shell".into(),
                 status: "running".into(),
@@ -2374,7 +2375,10 @@ mod tests {
         // hookSpecificOutput without hookEventName — the binary REPLACES the
         // message with this one rather than appending.
         assert_eq!(
-            validation_hint(&j(r#"{"hookSpecificOutput":{"permissionDecision":"allow"}}"#)).as_deref(),
+            validation_hint(&j(
+                r#"{"hookSpecificOutput":{"permissionDecision":"allow"}}"#
+            ))
+            .as_deref(),
             Some("hookSpecificOutput is missing required field \"hookEventName\"")
         );
 
@@ -2414,5 +2418,4 @@ mod tests {
         assert_eq!(validation_hint(&j(r#"{}"#)), None);
         assert_eq!(validation_hint(&j(r#"[]"#)), None);
     }
-
 }

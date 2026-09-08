@@ -270,6 +270,24 @@ fn with_workflow_stream_watchdog(
     .boxed()
 }
 
+/// A cancelled/dropped worker future must not leave a pending hook snapshot.
+struct PromptTranscriptCancellationGuard {
+    executor: Option<std::sync::Arc<hooks::HookExecutorImpl>>,
+    session_id: protocol::SessionId,
+    agent_id: protocol::AgentId,
+    completed: bool,
+}
+
+impl Drop for PromptTranscriptCancellationGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            if let Some(executor) = &self.executor {
+                executor.take_agent_prompt_transcript(self.session_id, self.agent_id);
+            }
+        }
+    }
+}
+
 /// Subagent state-machine loop.
 ///
 /// When [`SubagentContext::api_client`] is `Some`, drives the real
@@ -281,14 +299,24 @@ pub async fn run_subagent(
     event_rx: mpsc::Receiver<lingxi_core::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
 ) {
+    let mut snapshot_cleanup = PromptTranscriptCancellationGuard {
+        executor: ctx.hook_executor.clone(),
+        session_id: ctx.hook_session_id,
+        agent_id: ctx.agent_id,
+        completed: false,
+    };
     let non_interactive = ctx
         .session_interactive
         .map_or(ctx.is_async, |interactive| !interactive || ctx.is_async);
-    platform_api::session_flags::scope_non_interactive_session(
-        non_interactive,
-        run_subagent_inner(ctx, event_rx, out_tx),
+    llm_client::thinking_scope::scope_thinking_recovery(
+        llm_client::thinking_scope::ThinkingRecoveryScope::default(),
+        platform_api::session_flags::scope_non_interactive_session(
+            non_interactive,
+            run_subagent_inner(ctx, event_rx, out_tx),
+        ),
     )
     .await;
+    snapshot_cleanup.completed = true;
 }
 
 async fn run_subagent_inner(
@@ -399,6 +427,7 @@ async fn run_subagent_inner(
         )
     });
 
+    let mut live_hook_transcript = hooks::PromptHookTranscript::default();
     let terminal_status = if agent_scoped_stop.is_some() {
         // Proxy: forward events, capture the terminal disposition.
         let (proxy_tx, mut proxy_rx) = mpsc::channel::<SubagentEvent>(16);
@@ -429,7 +458,7 @@ async fn run_subagent_inner(
         // Run the body against the proxy, then drop our proxy sender so the
         // forwarder's `recv()` loop ends and we can read the captured status.
         if ctx.api_client.is_some() {
-            run_subagent_loop(ctx, event_rx, proxy_tx).await;
+            run_subagent_loop(ctx, event_rx, proxy_tx, &mut live_hook_transcript).await;
         } else {
             run_subagent_stub(ctx, event_rx, proxy_tx).await;
         }
@@ -437,7 +466,7 @@ async fn run_subagent_inner(
     } else {
         // No frontmatter hooks: straight passthrough, no proxy overhead.
         if ctx.api_client.is_some() {
-            run_subagent_loop(ctx, event_rx, out_tx).await;
+            run_subagent_loop(ctx, event_rx, out_tx, &mut live_hook_transcript).await;
         } else {
             run_subagent_stub(ctx, event_rx, out_tx).await;
         }
@@ -454,6 +483,7 @@ async fn run_subagent_inner(
     ) = (agent_scoped_stop, terminal_status)
     {
         let stop_ctx = hooks::registry::HookContext {
+            prompt_transcript: Some(live_hook_transcript),
             session_id,
             agent_id: Some(agent_id),
             cwd,
@@ -996,6 +1026,32 @@ async fn flush_transcript(
     }
 }
 
+fn publish_prompt_hook_transcript(
+    ctx: &SubagentContext,
+    history: &[protocol::ConversationMessage],
+    usage: &llm_client::Usage,
+) {
+    if let Some(executor) = &ctx.hook_executor {
+        executor.publish_agent_prompt_transcript(
+            ctx.hook_session_id,
+            ctx.agent_id,
+            hooks::PromptHookTranscript {
+                messages: history.to_vec(),
+                last_usage_tokens: usize::try_from(
+                    usage
+                        .billable_tokens
+                        .input
+                        .saturating_add(usage.billable_tokens.output)
+                        .saturating_add(usage.billable_tokens.cache_read)
+                        .saturating_add(usage.billable_tokens.cache_write),
+                )
+                .unwrap_or(usize::MAX),
+                ..Default::default()
+            },
+        );
+    }
+}
+
 async fn emit_failed(
     out_tx: &mpsc::Sender<SubagentEvent>,
     transcript: Option<&crate::transcript::AgentTranscriptWriter>,
@@ -1102,6 +1158,7 @@ async fn run_subagent_loop(
     ctx: SubagentContext,
     mut event_rx: mpsc::Receiver<lingxi_core::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
+    live_hook_transcript: &mut hooks::PromptHookTranscript,
 ) {
     use protocol::{ContentBlock, ConversationMessage, MessageId};
 
@@ -1225,9 +1282,12 @@ async fn run_subagent_loop(
     // that history (they were persisted on the original run), so re-adding them
     // would duplicate context the agent has seen and re-fire `SubagentStart`
     // for a run that began in another process.
-    let mut history: Vec<ConversationMessage> = Vec::new();
+    let history = &mut live_hook_transcript.messages;
     if let Some(resumed) = &ctx.resumed_history {
         history.extend(resumed.iter().cloned());
+        if let Some(scope) = llm_client::thinking_scope::current() {
+            crate::transcript::restore_thinking_recovery(history, &scope);
+        }
     } else {
         // Keep the engine-owned mobile snapshot at the fixed first-message
         // position, before the variable task/fork prompt. That preserves the
@@ -1286,6 +1346,19 @@ async fn run_subagent_loop(
         )
         .with_correlation_id(ctx.correlation_id.clone())
     });
+    if let (Some(writer), Some(scope)) =
+        (transcript.as_ref(), llm_client::thinking_scope::current())
+    {
+        let writer = writer.clone();
+        scope.set_recorder(std::sync::Arc::new(move |messages| {
+            let writer = writer.clone();
+            Box::pin(async move {
+                if let Err(error) = writer.record_thinking_recovery(messages).await {
+                    tracing::warn!(%error, "could not persist worker thinking recovery");
+                }
+            })
+        }));
+    }
     // Mark a child as live before its first round-trip. A persistent child may
     // later transition to `idle` without terminating; the lifecycle records
     // make that distinction observable to mobile clients tailing the file.
@@ -1310,7 +1383,7 @@ async fn run_subagent_loop(
     // transcript load races this first append. Restored agents skip both paths
     // because their seed is already durable and replayable.
     if ctx.resumed_history.is_none() {
-        flush_transcript(transcript.as_ref(), &history, &mut transcript_written).await;
+        flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
         for message in &ctx.prompt_messages {
             emit_message(&out_tx, agent_id, message).await;
         }
@@ -1391,10 +1464,11 @@ async fn run_subagent_loop(
                             )
                         },
                     );
+                    publish_prompt_hook_transcript(&ctx, history, &last_usage);
                     emit_failed(
                         &out_tx,
                         transcript.as_ref(),
-                        &history,
+                        history,
                         &mut transcript_written,
                         agent_id,
                         error,
@@ -1454,7 +1528,7 @@ async fn run_subagent_loop(
                     history.push(ConversationMessage::user(MessageId::new(), content));
                 }
                 maybe_emit_near_limit_wrap_up(
-                    &mut history,
+                    history,
                     &ctx,
                     api_client.as_ref(),
                     &out_tx,
@@ -1481,8 +1555,10 @@ async fn run_subagent_loop(
                     // partial (empty vec); a mid-stream error yields whatever
                     // blocks were finalized.
                     let profile = ctx.model_profile.as_deref();
-                    let messages_for_api = cap_input_bytes(&history, ctx.max_input_bytes_per_turn)
-                        .map_err(|message| (Vec::new(), LlmError::InvalidRequest { message }))?;
+                    let messages_for_api = cap_input_bytes(history, ctx.max_input_bytes_per_turn)
+                        .map_err(|message| {
+                        (Vec::new(), LlmError::InvalidRequest { message })
+                    })?;
                     let call_opts = crate::api::SubagentApiCallOpts {
                         max_output_tokens: ctx.max_output_tokens_per_turn,
                         query_source_label: ctx.query_source_label.clone(),
@@ -1591,10 +1667,13 @@ async fn run_subagent_loop(
                         ev = event_rx.recv() => {
                             match ev {
                                 Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
+                                    if let Some(executor) = &ctx.hook_executor {
+                                        executor.take_agent_prompt_transcript(ctx.hook_session_id, ctx.agent_id);
+                                    }
                                     emit_killed(
                                         &out_tx,
                                         transcript.as_ref(),
-                                        &history,
+                                        history,
                                         &mut transcript_written,
                                         agent_id,
                                     )
@@ -1654,10 +1733,11 @@ async fn run_subagent_loop(
                 Ok(r) => r,
                 Err((partial_blocks, e)) => {
                     if is_workflow_watchdog_timeout(&e) {
+                        publish_prompt_hook_transcript(&ctx, history, &last_usage);
                         emit_failed(
                             &out_tx,
                             transcript.as_ref(),
-                            &history,
+                            history,
                             &mut transcript_written,
                             agent_id,
                             format!(
@@ -1683,10 +1763,10 @@ async fn run_subagent_loop(
                     let salvaged = translate_response_blocks(&partial_blocks);
                     match classify_api_termination(&e) {
                         Some((_error_kind, api_error_text))
-                            if !final_text_blocks(&history, &salvaged).is_empty() =>
+                            if !final_text_blocks(history, &salvaged).is_empty() =>
                         {
                             let cutoff_note = build_cutoff_note(api_error_text);
-                            let result = build_recovered_result(&history, &salvaged, &cutoff_note);
+                            let result = build_recovered_result(history, &salvaged, &cutoff_note);
                             if !salvaged.is_empty() {
                                 let partial_message = ConversationMessage::Assistant {
                                     id: MessageId::new(),
@@ -1700,15 +1780,12 @@ async fn run_subagent_loop(
                             // Make the transcript observable before publishing the
                             // terminal event. The receiver may release the runner as
                             // soon as it sees `Completed`.
-                            flush_transcript(
-                                transcript.as_ref(),
-                                &history,
-                                &mut transcript_written,
-                            )
-                            .await;
+                            flush_transcript(transcript.as_ref(), history, &mut transcript_written)
+                                .await;
                             if let Some(writer) = transcript.as_ref() {
                                 let _ = writer.record_terminal("completed", None).await;
                             }
+                            publish_prompt_hook_transcript(&ctx, history, &last_usage);
                             let _ = out_tx
                                 .send(SubagentEvent::Completed {
                                     agent_id,
@@ -1729,10 +1806,11 @@ async fn run_subagent_loop(
                             return;
                         }
                         _ => {
+                            publish_prompt_hook_transcript(&ctx, history, &last_usage);
                             emit_failed(
                                 &out_tx,
                                 transcript.as_ref(),
-                                &history,
+                                history,
                                 &mut transcript_written,
                                 agent_id,
                                 format!("subagent api error: {e}"),
@@ -1756,6 +1834,15 @@ async fn run_subagent_loop(
             // hid a provider overrun from `cumulative_usage`/settlement instead
             // of surfacing it; report the provider's real usage verbatim.
             last_usage = response.usage.clone();
+            live_hook_transcript.last_usage_tokens = usize::try_from(
+                last_usage
+                    .billable_tokens
+                    .input
+                    .saturating_add(last_usage.billable_tokens.output)
+                    .saturating_add(last_usage.billable_tokens.cache_read)
+                    .saturating_add(last_usage.billable_tokens.cache_write),
+            )
+            .unwrap_or(usize::MAX);
             accumulate_usage(&mut cumulative_usage, &last_usage);
             emit_progress(
                 &out_tx,
@@ -1840,10 +1927,11 @@ async fn run_subagent_loop(
                     .any(|(_, name, _, _)| matches!(name.as_str(), "Write" | "Edit"));
                 // Dispatch each tool_use through the inherited invoker.
                 let Some(invoker) = &ctx.tool_invoker else {
+                    publish_prompt_hook_transcript(&ctx, history, &last_usage);
                     emit_failed(
                         &out_tx,
                         transcript.as_ref(),
-                        &history,
+                        history,
                         &mut transcript_written,
                         agent_id,
                         "subagent requested a tool but no tool_invoker was inherited".to_string(),
@@ -2029,10 +2117,11 @@ async fn run_subagent_loop(
                             });
                         }
                         Err(platform_api::tool_invoker::ToolInvokerError::Abort(error)) => {
+                            publish_prompt_hook_transcript(&ctx, history, &last_usage);
                             emit_failed(
                                 &out_tx,
                                 transcript.as_ref(),
-                                &history,
+                                history,
                                 &mut transcript_written,
                                 agent_id,
                                 error,
@@ -2096,10 +2185,11 @@ async fn run_subagent_loop(
                 } else {
                     "calls"
                 };
+                publish_prompt_hook_transcript(&ctx, history, &last_usage);
                 emit_failed(
                     &out_tx,
                     transcript.as_ref(),
-                    &history,
+                    history,
                     &mut transcript_written,
                     agent_id,
                     format!(
@@ -2142,7 +2232,7 @@ async fn run_subagent_loop(
                     // without relying on this escalation at all.
                     //
                     // The next round-trip's request is built straight from
-                    // `history` (`cap_input_bytes(&history, ..)` at the top of
+                    // `history` (`cap_input_bytes(history, ..)` at the top of
                     // the turn loop) — every OTHER exit from this arm, and
                     // every tool-dispatch continuation, appends a user message
                     // (the nudge below, or the pushed tool_results) before
@@ -2173,10 +2263,11 @@ async fn run_subagent_loop(
                         // by `max_turns`).
                         continue;
                     }
+                    publish_prompt_hook_transcript(&ctx, history, &last_usage);
                     emit_failed(
                         &out_tx,
                         transcript.as_ref(),
-                        &history,
+                        history,
                         &mut transcript_written,
                         agent_id,
                         // Byte-locked to claude 2.1.195 (binary strings :331985 /
@@ -2200,12 +2291,12 @@ async fn run_subagent_loop(
                 let result = match structured_result.take() {
                     Some(structured) => structured,
                     None => {
-                        build_completed_result(&history, &assistant_blocks, stop_reason.as_deref())
+                        build_completed_result(history, &assistant_blocks, stop_reason.as_deref())
                     }
                 };
                 // Persist all messages before publishing the terminal event; the
                 // consumer is allowed to tear down a one-shot runner immediately.
-                flush_transcript(transcript.as_ref(), &history, &mut transcript_written).await;
+                flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
                 // Keep lifecycle state alongside the transcript so clients that
                 // discover an agent after completion can distinguish it from a
                 // still-running child. Persistent agents retain their parked row
@@ -2214,6 +2305,7 @@ async fn run_subagent_loop(
                     let status = if ctx.persistent { "idle" } else { "completed" };
                     let _ = writer.record_terminal(status, None).await;
                 }
+                publish_prompt_hook_transcript(&ctx, history, &last_usage);
                 let _ = out_tx
                     .send(SubagentEvent::Completed {
                         agent_id,
@@ -2256,10 +2348,11 @@ async fn run_subagent_loop(
             // `max_turns` at all; now that it chooses freely, it can — so this exit
             // has to carry the schema contract too.
             if force_structured_tool.is_some() && structured_result.is_none() {
+                publish_prompt_hook_transcript(&ctx, history, &last_usage);
                 emit_failed(
                     &out_tx,
                     transcript.as_ref(),
-                    &history,
+                    history,
                     &mut transcript_written,
                     agent_id,
                     "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)".to_string(),
@@ -2272,11 +2365,12 @@ async fn run_subagent_loop(
             // stop. claude-code surfaces this as a completion carrying a max-turns
             // reason rather than a hard failure, so the parent can still consume
             // whatever work was produced.
-            flush_transcript(transcript.as_ref(), &history, &mut transcript_written).await;
+            flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
             if let Some(writer) = transcript.as_ref() {
                 let status = if ctx.persistent { "idle" } else { "completed" };
                 let _ = writer.record_terminal(status, None).await;
             }
+            publish_prompt_hook_transcript(&ctx, history, &last_usage);
             let _ = out_tx
                 .send(SubagentEvent::Completed {
                     agent_id,
@@ -2300,7 +2394,7 @@ async fn run_subagent_loop(
         // much a record as a persistent one's, and the `SubagentStop` hook
         // reports its path either way. Best-effort: a transcript write failure
         // must never mask the agent's result.
-        flush_transcript(transcript.as_ref(), &history, &mut transcript_written).await;
+        flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
 
         // ----- Persist decision ------------------------------------------------
         // Non-persistent (batch-8) behavior: end after one turn-set. This preserves
@@ -2333,10 +2427,13 @@ async fn run_subagent_loop(
                     break;
                 }
                 Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
+                    if let Some(executor) = &ctx.hook_executor {
+                        executor.take_agent_prompt_transcript(ctx.hook_session_id, ctx.agent_id);
+                    }
                     emit_killed(
                         &out_tx,
                         transcript.as_ref(),
-                        &history,
+                        history,
                         &mut transcript_written,
                         agent_id,
                     )

@@ -1883,30 +1883,104 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         self.api.set_thinking_config(thinking);
     }
 
-    /// Copy the session thinking-signature latch onto both API clients so the
-    /// next thinking-capable request strips thinking on the outbound clone.
-    pub(crate) async fn sync_thinking_signature_strip_flag_to_api(&self) {
-        if !self.session.lock().await.thinking_signature_stripped {
-            return;
+    pub(crate) fn scope_api_session<'a, F: std::future::Future + 'a>(
+        &'a self,
+        non_interactive: bool,
+        future: F,
+    ) -> impl std::future::Future<Output = F::Output> + 'a {
+        // Keep the large turn future on the heap before building this context
+        // wrapper; otherwise each generic async layer copies its full state.
+        let future = Box::pin(future);
+        async move {
+            let scope = self
+                .transcript
+                .thinking_recovery
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(writer) = self.transcript.jsonl_writer.clone() {
+                let session = self.session.clone();
+                let expected_session = session.lock().await.session_id;
+                let last_uuid = self.transcript.last_jsonl_uuid.clone();
+                let cwd = self.current_cwd();
+                let git_branch = self.resolve_git_branch().await;
+                scope.set_recorder(Arc::new(move |ranges| {
+                    let writer = writer.clone();
+                    let session = session.clone();
+                    let last_uuid = last_uuid.clone();
+                    let cwd = cwd.clone();
+                    let git_branch = git_branch.clone();
+                    Box::pin(async move {
+                        Self::persist_thinking_recovery_snapshot(
+                            writer,
+                            last_uuid,
+                            session,
+                            expected_session,
+                            cwd,
+                            git_branch,
+                            ranges,
+                        )
+                        .await;
+                    })
+                }));
+            }
+            llm_client::thinking_scope::scope_thinking_recovery(
+                scope,
+                platform_api::session_flags::scope_non_interactive_session(non_interactive, future),
+            )
+            .await
         }
-        self.api.set_thinking_signature_stripped(true);
-        self.streaming_api.set_thinking_signature_stripped(true);
     }
 
-    /// Persist `{type:"thinking_stripped",scope:"all"}` once after a successful
-    /// thinking-signature strip so cold resume restores the latch.
+    /// Restore rejected historical identities onto both API clients.
+    pub(crate) async fn sync_thinking_signature_strip_flag_to_api(&self) {
+        let messages = self.session.lock().await.thinking_stripped_messages.clone();
+        self.scope_api_session(!self.prompt_is_interactive(), async {
+            self.api.set_thinking_stripped_messages(messages.clone());
+            self.streaming_api.set_thinking_stripped_messages(messages);
+        })
+        .await;
+    }
+
+    /// Persist a marker for each newly rejected history snapshot, before the
+    /// response is appended. Later responses remain outside the marker's scope.
     pub(crate) async fn persist_thinking_signature_strip_latch(&self) {
-        if !self.api.thinking_signature_stripped()
-            && !self.streaming_api.thinking_signature_stripped()
-        {
-            return;
+        let (mut messages, streaming_messages) = self
+            .scope_api_session(!self.prompt_is_interactive(), async {
+                (
+                    self.api.thinking_stripped_messages(),
+                    self.streaming_api.thinking_stripped_messages(),
+                )
+            })
+            .await;
+        for (id, from) in streaming_messages {
+            messages
+                .entry(id)
+                .and_modify(|current| *current = (*current).min(from))
+                .or_insert(from);
         }
         {
             let mut session = self.session.lock().await;
-            if session.thinking_signature_stripped {
+            // Desktop shares one service with workers and side queries. A
+            // worker-only rejection must not write a marker on the main chain.
+            messages.retain(|id, _| session.history.iter().any(|message| message.id() == *id));
+            let changed = messages.iter().any(|(id, from)| {
+                session
+                    .thinking_stripped_messages
+                    .get(id)
+                    .is_none_or(|current| from < current)
+            });
+            if !changed {
                 return;
             }
             session.thinking_signature_stripped = true;
+            for (id, from) in messages {
+                session
+                    .thinking_stripped_messages
+                    .entry(id)
+                    .and_modify(|current| *current = (*current).min(from))
+                    .or_insert(from);
+            }
         }
         self.persist_hook_attachment_to_jsonl(serde_json::json!({
             "type": "thinking_stripped",

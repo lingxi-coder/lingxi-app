@@ -174,9 +174,26 @@ where
 #[allow(clippy::too_many_lines)] // a flat data table: one row per ClientEvent variant
 fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
     vec![
-        ("event/cron_result.json", ClientEvent::CronResult {
-            request_id: "cron-1".into(), jobs: Vec::new(), error: None,
-        }),
+        (
+            "event/message_identity.json",
+            ClientEvent::MessageIdentity {
+                message_id: "assistant-attempt-1".into(),
+            },
+        ),
+        (
+            "event/message_retracted.json",
+            ClientEvent::MessageRetracted {
+                message_id: "assistant-attempt-1".into(),
+            },
+        ),
+        (
+            "event/cron_result.json",
+            ClientEvent::CronResult {
+                request_id: "cron-1".into(),
+                jobs: Vec::new(),
+                error: None,
+            },
+        ),
         (
             "event/error.json",
             ClientEvent::Error {

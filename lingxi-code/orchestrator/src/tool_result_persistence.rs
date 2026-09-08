@@ -1,39 +1,18 @@
-//! Tool-result persistence — 1:1 port of claude-code 2.1.220's `F0u` /
-//! `x2e` / `Alt` / `xKr` trio (the `<persisted-output>` substitution).
+//! Tool-result persistence — the `<persisted-output>` substitution.
 //!
-//! When a tool's model-facing `tool_result` content exceeds the tool's
-//! persistence threshold, the FULL content is written to
-//! `<config_home>/projects/<project_dir_name(cwd)>/<session-uuid>/tool-results/<id>.txt`
-//! and the model instead receives a short `<persisted-output>` envelope
-//! carrying a preview plus the on-disk path.
+//! Full content exceeding a tool's persistence threshold is stored under
+//! `<config_home>/projects/<project>/<session>/tool-results/<id>.txt`
+//! (or `.json` for content arrays) and replaced by a preview envelope.
 //!
-//! Oracle anchors (all `LC_ALL=C grep -abo -F` offsets into
-//! `~/.local/share/claude/versions/2.1.220`):
+//! Oracle: Claude Code 2.1.263, `src_160701526.js`, `tG` at character
+//! offset 5118 (exclusive persistence), `_7e` at 7648 (preview), and `Vpe`
+//! (envelope). Imported `PIn` / `OIn` / `_L` in `src_157669121.js` supply
+//! directory checking, leaf symlink removal, and checked directory creation.
 //!
-//! - `230268660` — the constant run: `var AKr=50000, gor=500000, RKr=4,
-//!   D0u=400000, O0u=200000, i3=50, P0u=1e4`.
-//! - `230268813` — `function qzg(){return path.join(F7(gn()),kt())}`
-//!   (`<projects>/<sanitized-cwd>/<sessionId>`).
-//! - `230268859` — `function xke(){return path.join(qzg(),was)}` with
-//!   `var was="tool-results"`.
-//! - `230268971` — `async function k2e(){try{await Gi().mkdir(xke())}catch{}}`
-//!   (directory creation, errors swallowed).
-//! - `230269313` — `x2e`: the exclusive write + preview.
-//! - `230269820` — `Alt`: the envelope (byte-verified with `od -c`).
-//! - `230270568` — `F0u`: the empty-result / media / size guards.
-//! - `230270990` — `xKr`: the preview slicer.
-//! - `226176853` — `pl`: the byte formatter.
-//!
-//! # `original_size` is a BYTE length
-//!
-//! Verified against the real binary's own on-disk output: of the 111 files
-//! under `~/.claude/projects/**/tool-results/` whose UTF-8 byte length and
-//! decoded char length format to DIFFERENT `pl()` strings, all 13 that could
-//! be paired back to their transcript line report the **byte** rendering
-//! (e.g. `beid1bot5` — 31 546 bytes / 31 483 chars — is reported as `30.8KB`,
-//! the byte form, not `30.7KB`). Rust's `String::len()` is therefore the
-//! exact analogue and no char conversion is performed anywhere in this
-//! module.
+//! `tG` returns `originalSize:l.length` and `_7e` slices JavaScript UTF-16
+//! code units. The envelope labels these values as bytes, but they are not
+//! UTF-8 file sizes. Externally persisted Bash output has a separate byte-size
+//! path and must not be used to infer these semantics.
 
 use std::path::{Path, PathBuf};
 
@@ -78,12 +57,14 @@ pub fn resolve_threshold(max_result_size_chars: usize, ceiling: Option<usize>) -
 pub struct Persisted {
     /// Absolute path the full content was written to.
     pub filepath: PathBuf,
-    /// BYTE length of the persisted body (`o.length`, see the module docs).
+    /// UTF-16 code-unit length of the persisted body (`l.length` in `tG`).
     pub original_size: usize,
     /// Whether the body was serialized from a content ARRAY (`.json`).
     pub is_json: bool,
     /// The leading slice echoed back to the model.
     pub preview: String,
+    /// Exact JavaScript preview, including a split surrogate at the slice boundary.
+    pub preview_utf16: Vec<u16>,
     /// Whether the body was longer than the preview.
     pub has_more: bool,
 }
@@ -96,7 +77,10 @@ pub struct Persisted {
 pub fn format_bytes(n: usize) -> String {
     /// `${x.toFixed(1).replace(/\.0$/,"")}` — one decimal, trailing `.0` dropped.
     fn fixed1(x: f64) -> String {
-        let s = format!("{x:.1}");
+        // Sizes divided by powers of 1024 are dyadic. JS toFixed rounds
+        // exact decimal ties upward, whereas Rust formatting uses ties-to-even.
+        let rounded = (x * 10.0).round() / 10.0;
+        let s = format!("{rounded:.1}");
         match s.strip_suffix(".0") {
             Some(trimmed) => trimmed.to_string(),
             None => s,
@@ -124,28 +108,45 @@ pub fn format_bytes(n: usize) -> String {
 /// return{preview:e.slice(0,o),hasMore:!0}
 /// ```
 ///
-/// Byte-indexed like the rest of this module; the initial cut is walked back
-/// to the nearest UTF-8 char boundary so slicing can never panic.
+/// Display view of the exact JavaScript preview. Use `preview_utf16` for wire data.
 #[must_use]
-pub fn preview(s: &str, limit: usize) -> (&str, bool) {
-    if s.len() <= limit {
-        return (s, false);
+pub fn preview(s: &str, limit: usize) -> (String, bool) {
+    let (units, more) = preview_utf16(s, limit);
+    (String::from_utf16_lossy(&units), more)
+}
+
+/// JavaScript `slice` and newline midpoint measured in UTF-16 code units.
+#[must_use]
+pub fn preview_utf16(s: &str, limit: usize) -> (Vec<u16>, bool) {
+    let mut units: Vec<u16> = s.encode_utf16().collect();
+    if units.len() <= limit {
+        return (units, false);
     }
-    // `e.slice(0,t)` — walked back to the nearest char boundary so a
-    // multi-byte codepoint straddling the limit is dropped whole.
-    let mut hard = limit;
-    while hard > 0 && !s.is_char_boundary(hard) {
-        hard -= 1;
+    units.truncate(limit);
+    if let Some(index) = units.iter().rposition(|unit| *unit == u16::from(b'\n')) {
+        if index > limit / 2 {
+            units.truncate(index);
+        }
     }
-    let head = &s[..hard];
-    // `n=…lastIndexOf("\n"), o = n > t*0.5 ? n : t` — the newline index is
-    // taken only when it lands in the BACK half of the window. `n * 2 > limit`
-    // avoids the float compare (and `lastIndexOf` returning -1 maps to `None`).
-    let cut = match head.rfind('\n') {
-        Some(i) if i.saturating_mul(2) > limit => i,
-        _ => hard,
-    };
-    (&s[..cut], true)
+    (units, true)
+}
+
+/// Compose the envelope without converting a lone surrogate into UTF-8.
+#[must_use]
+pub fn wrap_utf16(
+    original_size: usize,
+    filepath: &str,
+    preview: &[u16],
+    has_more: bool,
+) -> Vec<u16> {
+    let mut units: Vec<u16> = format!(
+        "{PERSISTED_OUTPUT_OPEN}\nOutput too large ({}). Full output saved to: {filepath}\n\nPreview (first {}):\n",
+        format_bytes(original_size), format_bytes(PREVIEW_CHARS)
+    ).encode_utf16().collect();
+    units.extend_from_slice(preview);
+    units.extend(if has_more { "\n...\n" } else { "\n" }.encode_utf16());
+    units.extend(PERSISTED_OUTPUT_CLOSE.encode_utf16());
+    units
 }
 
 /// Port of claude-code `Alt` (2.1.220 @ 230269820, byte-verified via `od -c`).
@@ -177,31 +178,120 @@ pub fn tool_results_dir(config_home: &Path, cwd: &str, session_uuid: &str) -> Pa
     p
 }
 
-/// Port of claude-code `x2e` (2.1.220 @ 230269313).
-///
-/// Creates the directory (errors swallowed, `k2e`), writes `body` with an
-/// EXCLUSIVE create (`writeExclusive`), and treats an `EEXIST` collision as
-/// SUCCESS — falling through to the same envelope, exactly as the oracle's
-/// `catch(a){if($t(a)!=="EEXIST") …}` does. Any other error is returned to the
-/// caller, which then leaves the tool result unchanged.
+/// Check descendants of the configured root (`PIn`). The root itself may be
+/// a symlink; paths outside it are not checked by the oracle helper.
+async fn check_directory(config_home: &Path, dir: &Path) -> Result<(), String> {
+    let Ok(relative) = dir.strip_prefix(config_home) else {
+        return Ok(());
+    };
+    if relative
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Ok(());
+    }
+    let mut current = config_home.to_path_buf();
+    let mut paths = Vec::new();
+    for part in relative.components() {
+        if matches!(part, std::path::Component::Normal(_)) {
+            current.push(part);
+            paths.push(current.clone());
+        }
+    }
+    for path in paths {
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                return Err(format!(
+                    "tool-results path refused: {} is a link or not a directory",
+                    path.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+            Err(err) => return Err(err.to_string()),
+        }
+    }
+    Ok(())
+}
+
+fn check_link_count(count: u64) -> Result<(), String> {
+    if count > 1 {
+        return Err("tool result path has another name; not persisted".into());
+    }
+    Ok(())
+}
+
+fn check_existing_file(meta: &std::fs::Metadata) -> Result<(), String> {
+    if meta.file_type().is_symlink() {
+        return Err("tool result path is a link; not persisted".into());
+    }
+    if !meta.is_file() {
+        return Err("tool result path is not a regular file; not persisted".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        check_link_count(meta.nlink())?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn check_existing_windows_file(path: &Path) -> Result<(), String> {
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let checked = || -> std::io::Result<(std::fs::Metadata, u32)> {
+        // Metadata-only access also permits existing files without read-data
+        // permission. Inspect the leaf itself, never a reparse-point target.
+        let file = std::fs::OpenOptions::new()
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        let links = platform_api::rooted_fs::file_link_count(&file)?;
+        Ok((metadata, links))
+    };
+    let (metadata, links) = checked()
+        .map_err(|_| "tool result path could not be checked; not persisted".to_string())?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err("tool result path is a link; not persisted".into());
+    }
+    check_existing_file(&metadata)?;
+    check_link_count(u64::from(links))
+}
+
+/// Port of 2.1.263 `tG`: persist exclusively after checking the directory and
+/// removing an existing leaf symlink (`PIn` / `OIn`). Existing regular files
+/// with a single name are tolerated, preserving their contents.
 ///
 /// # Errors
-/// Returns the OS error message when the exclusive create fails for a reason
-/// other than an already-existing path.
-pub async fn persist(dir: &Path, id: &str, body: &str, is_json: bool) -> Result<Persisted, String> {
-    // `k2e`: `try{await Gi().mkdir(xke())}catch{}`. The oracle's wrapper
-    // creates the whole chain (its on-disk sessions carry sibling `subagents`
-    // / `workflows` directories under the same session dir), so `create_dir_all`
-    // is the observable analogue. Errors are swallowed exactly as `catch{}`
-    // does — a failure here simply surfaces as the create error below.
+/// Returns an error if the path is unsafe or the exclusive write fails.
+pub async fn persist(
+    config_home: &Path,
+    dir: &Path,
+    id: &str,
+    body: &str,
+    is_json: bool,
+) -> Result<Persisted, String> {
+    check_directory(config_home, dir).await?;
     let _ = tokio::fs::create_dir_all(dir).await;
-
-    // `kKr(e,t)`: `${e}.${t?"json":"txt"}`.
+    check_directory(config_home, dir).await?;
     let filepath = dir.join(format!("{id}.{}", if is_json { "json" } else { "txt" }));
+    match tokio::fs::symlink_metadata(&filepath).await {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            match tokio::fs::remove_file(&filepath).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.to_string()),
+            }
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.to_string()),
+    }
 
-    // `writeExclusive` → `O_CREAT | O_EXCL`. An EEXIST collision is TOLERATED
-    // (the oracle's catch re-throws only for other codes) and falls through to
-    // the same envelope, leaving the pre-existing file untouched.
     match tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -217,16 +307,24 @@ pub async fn persist(dir: &Path, id: &str, body: &str, is_json: bool) -> Result<
                 return Err(e.to_string());
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let meta = tokio::fs::symlink_metadata(&filepath)
+                .await
+                .map_err(|_| "tool result path could not be checked; not persisted".to_string())?;
+            check_existing_file(&meta)?;
+            #[cfg(windows)]
+            check_existing_windows_file(&filepath)?;
+        }
         Err(e) => return Err(e.to_string()),
     }
 
-    let (pv, has_more) = preview(body, PREVIEW_CHARS);
+    let (preview_utf16, has_more) = preview_utf16(body, PREVIEW_CHARS);
     Ok(Persisted {
         filepath,
-        original_size: body.len(),
+        original_size: body.encode_utf16().count(),
         is_json,
-        preview: pv.to_string(),
+        preview: String::from_utf16_lossy(&preview_utf16),
+        preview_utf16,
         has_more,
     })
 }
@@ -251,6 +349,8 @@ mod tests {
         assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2GB");
         // `.toFixed(1).replace(/\.0$/,"")` — the trailing `.0` is dropped.
         assert_eq!(format_bytes(1024), "1KB");
+        assert_eq!(format_bytes(1280), "1.3KB");
+        assert_eq!(format_bytes(2304), "2.3KB");
     }
 
     // T2 — `xKr`.
@@ -290,15 +390,16 @@ mod tests {
     }
 
     #[test]
-    fn preview_never_splits_a_utf8_codepoint() {
-        // 700 THREE-byte chars = 2100 bytes, no newline anywhere. 2000 is not
-        // a multiple of 3, so the hard cut must walk back to 1998.
+    fn preview_uses_utf16_units_and_keeps_valid_unicode() {
         let s = "→".repeat(700);
-        assert_eq!(s.len(), 2_100);
-        let (p, more) = preview(&s, PREVIEW_CHARS);
-        assert!(more);
-        assert_eq!(p.len(), 1_998);
-        assert!(s.starts_with(p));
+        assert_eq!(preview(&s, PREVIEW_CHARS), (s.clone(), false));
+        assert_eq!(preview("😀ab", 2), ("😀".to_string(), true));
+        assert_eq!(preview("😀ab", 1), ("\u{fffd}".to_string(), true));
+        assert_eq!(preview_utf16("😀ab", 1), (vec![0xd83d], true));
+        assert_eq!(preview("→→→\nabcd", 6), ("→→→\nab".to_string(), true));
+        assert_eq!(preview("→→→→\nabcd", 6), ("→→→→".to_string(), true));
+        assert_eq!(preview("", 0), ("".to_string(), false));
+        assert_eq!(preview("a", 0), ("".to_string(), true));
     }
 
     // T3 — `Alt`, byte-exact.
@@ -328,7 +429,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join("sess").join(TOOL_RESULTS_DIR);
         let body = "hello world";
-        let p = persist(&dir, "toolu_abc", body, false)
+        let p = persist(tmp.path(), &dir, "toolu_abc", body, false)
             .await
             .expect("persist ok");
         assert_eq!(p.filepath, dir.join("toolu_abc.txt"));
@@ -346,7 +447,7 @@ mod tests {
     async fn persist_uses_a_json_extension_for_array_bodies() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join(TOOL_RESULTS_DIR);
-        let p = persist(&dir, "id1", "[\n  1\n]", true)
+        let p = persist(tmp.path(), &dir, "id1", "[\n  1\n]", true)
             .await
             .expect("persist ok");
         assert_eq!(p.filepath, dir.join("id1.json"));
@@ -359,7 +460,7 @@ mod tests {
         let dir = tmp.path().join(TOOL_RESULTS_DIR);
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join("id1.txt"), "OLD").expect("seed");
-        let p = persist(&dir, "id1", "NEW-BODY", false)
+        let p = persist(tmp.path(), &dir, "id1", "NEW-BODY", false)
             .await
             .expect("EEXIST is success");
         assert_eq!(p.filepath, dir.join("id1.txt"));
@@ -371,6 +472,124 @@ mod tests {
         );
         // …but the envelope still describes the NEW body (`o.length`).
         assert_eq!(p.original_size, "NEW-BODY".len());
+    }
+
+    #[tokio::test]
+    async fn persisted_size_counts_utf16_units() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join(TOOL_RESULTS_DIR);
+        let result = persist(tmp.path(), &dir, "unicode", "中😀", false)
+            .await
+            .unwrap();
+        assert_eq!(result.original_size, 3);
+        assert_eq!(std::fs::read_to_string(result.filepath).unwrap(), "中😀");
+    }
+
+    #[tokio::test]
+    async fn persist_rejects_existing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(TOOL_RESULTS_DIR);
+        std::fs::create_dir_all(dir.join("id.txt")).unwrap();
+        assert_eq!(
+            persist(tmp.path(), &dir, "id", "new", false)
+                .await
+                .unwrap_err(),
+            "tool result path is not a regular file; not persisted"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn persist_replaces_leaf_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(TOOL_RESULTS_DIR);
+        std::fs::create_dir(&dir).unwrap();
+        let target = tmp.path().join("target");
+        std::fs::write(&target, "old").unwrap();
+        symlink(&target, dir.join("id.txt")).unwrap();
+        let result = persist(tmp.path(), &dir, "id", "new", false).await.unwrap();
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(result.filepath).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn persist_allows_config_root_symlink_but_rejects_collision_symlink() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let root = tmp.path().join("config");
+        symlink(&real, &root).unwrap();
+        let dir = root.join(TOOL_RESULTS_DIR);
+        persist(&root, &dir, "id", "new", false).await.unwrap();
+        let link = dir.join("collision.txt");
+        symlink(dir.join("id.txt"), &link).unwrap();
+        // `OIn` removes preexisting symlinks. A symlink appearing at the
+        // subsequent EEXIST check must instead be rejected.
+        assert_eq!(
+            check_existing_file(&std::fs::symlink_metadata(link).unwrap()).unwrap_err(),
+            "tool result path is a link; not persisted"
+        );
+    }
+
+    #[test]
+    fn existing_file_link_count_rejects_additional_names() {
+        assert!(check_link_count(1).is_ok());
+        assert_eq!(
+            check_link_count(2).unwrap_err(),
+            "tool result path has another name; not persisted"
+        );
+        assert!(check_link_count(u64::MAX).is_err());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn persist_windows_checks_existing_file_handle_link_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(TOOL_RESULTS_DIR);
+        std::fs::create_dir(&dir).unwrap();
+        let target = tmp.path().join("target");
+        std::fs::write(&target, "old").unwrap();
+        let collision = dir.join("id.txt");
+        std::fs::hard_link(&target, &collision).unwrap();
+        assert_eq!(
+            persist(tmp.path(), &dir, "id", "new", false)
+                .await
+                .unwrap_err(),
+            "tool result path has another name; not persisted"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
+        std::fs::remove_file(target).unwrap();
+        persist(tmp.path(), &dir, "id", "new", false).await.unwrap();
+        assert_eq!(std::fs::read_to_string(collision).unwrap(), "old");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn persist_rejects_hardlink_and_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(TOOL_RESULTS_DIR);
+        std::fs::create_dir(&dir).unwrap();
+        let target = tmp.path().join("target");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::hard_link(&target, dir.join("id.txt")).unwrap();
+        assert_eq!(
+            persist(tmp.path(), &dir, "id", "new", false)
+                .await
+                .unwrap_err(),
+            "tool result path has another name; not persisted"
+        );
+        let link = tmp.path().join("linked");
+        symlink(&dir, &link).unwrap();
+        let err = persist(tmp.path(), &link.join("nested"), "other", "new", false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("is a link or not a directory"));
+        assert!(!dir.join("nested").exists());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "old");
     }
 
     /// `M0u`'s fold, and the two constants it is built from.

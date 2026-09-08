@@ -2144,7 +2144,45 @@ pub fn build_conversation_chain(
     // orphaned (parallel-tool-call DAG). Additive post-pass; never reorders the
     // main chain. `seen` is exactly the set of on-chain uuids (the cycle guard
     // breaks BEFORE pushing, so no extra entries).
-    let chain = recover_orphaned_parallel_tool_results(by_uuid, chain, &mut seen, arg);
+    let mut chain = recover_orphaned_parallel_tool_results(by_uuid, chain, &mut seen, arg);
+
+    // A recovery marker can be the final persisted row when the retry was
+    // interrupted. find_tip deliberately chooses user/assistant messages, so
+    // retain attached thinking markers even without a later assistant leaf.
+    let positions: HashMap<&str, usize> = loaded
+        .messages_in_order
+        .iter()
+        .enumerate()
+        .map(|(index, message)| (message.uuid.as_str(), index))
+        .collect();
+    for (position, marker) in loaded.messages_in_order.iter().enumerate() {
+        if marker.message_type != "attachment"
+            || marker
+                .extra
+                .get("attachment")
+                .and_then(|value| value.get("type"))
+                .and_then(Value::as_str)
+                != Some("thinking_stripped")
+            || marker.is_sidechain
+            || seen.contains(&marker.uuid)
+            || !marker
+                .parent_uuid
+                .as_ref()
+                .is_some_and(|parent| seen.contains(parent))
+        {
+            continue;
+        }
+        let at = chain
+            .iter()
+            .position(|message| {
+                positions
+                    .get(message.uuid.as_str())
+                    .is_some_and(|index| *index > position)
+            })
+            .unwrap_or(chain.len());
+        chain.insert(at, marker.clone());
+        seen.insert(marker.uuid.clone());
+    }
 
     (chain, tip_session_id)
 }

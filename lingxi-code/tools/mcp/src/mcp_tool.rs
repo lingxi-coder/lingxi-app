@@ -425,14 +425,6 @@ fn inspect_missing_required_input(
     })
 }
 
-fn missing_required_message(missing_keys: &[String]) -> String {
-    if missing_keys.len() == 1 {
-        format!("MCPTool: missing required property {:?}", missing_keys[0])
-    } else {
-        format!("MCPTool: missing required properties {:?}", missing_keys)
-    }
-}
-
 /// Build the model-facing `mcp_progress` / `progress` event payload for one
 /// forwarded MCP `notifications/progress` (MCP.4). Mirrors
 /// `services/mcp/client.ts:3104-3112`:
@@ -1010,6 +1002,9 @@ impl ReadMcpResourceTool {
 
 // -- Schemas -----------------------------------------------------------------
 
+// H4.inputSchema = c({}).passthrough(); inputJSONSchema is wire-only.
+static MCP_RUNTIME_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| json!({"type":"object"}));
+
 static MCP_TOOL_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
@@ -1366,6 +1361,13 @@ impl Tool for MCPTool {
         // dispatcher → the `{full_name, arguments}` envelope schema.
         self.bound_schema.as_ref().unwrap_or(&MCP_TOOL_SCHEMA)
     }
+    fn input_validation_schema(&self) -> &Value {
+        if self.full_name.is_some() {
+            &MCP_RUNTIME_INPUT_SCHEMA
+        } else {
+            &MCP_TOOL_SCHEMA
+        }
+    }
     fn output_schema(&self) -> Option<&Value> {
         self.bound_output_schema.as_ref()
     }
@@ -1632,22 +1634,17 @@ impl Tool for MCPTool {
             self.bound_schema.as_ref().or(generic_input_schema.as_ref()),
         ) {
             let tool_use_id = ctx.tool_use_id.as_ref().map(|id| id.to_string());
-            let Some(message_id) = ctx.assistant_message_id.as_ref() else {
-                return Err(ToolError::InvalidInput(missing_required_message(
-                    &preflight.missing_keys,
-                )));
-            };
-            emit_mcp_input_missing_required(
-                self.bus(),
-                tool_use_id.as_deref(),
-                message_id,
-                tool_input_size_bytes,
-                &preflight,
-            )
-            .await;
-            return Err(ToolError::InvalidInput(missing_required_message(
-                &preflight.missing_keys,
-            )));
+            // P6n is telemetry only; the MCP server owns its advertised schema.
+            if let Some(message_id) = ctx.assistant_message_id.as_ref() {
+                emit_mcp_input_missing_required(
+                    self.bus(),
+                    tool_use_id.as_deref(),
+                    message_id,
+                    tool_input_size_bytes,
+                    &preflight,
+                )
+                .await;
+            }
         }
 
         // STARTED.
@@ -4519,8 +4516,8 @@ mod input_missing_required_preflight_tests {
     }
 
     #[tokio::test]
-    async fn missing_required_preflight_emits_event_and_skips_transport() {
-        let (conn, _peer_tx, mut peer_rx) = paired();
+    async fn missing_required_preflight_emits_event_and_preserves_transport() {
+        let (conn, peer_tx, mut peer_rx) = paired();
         let client =
             Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
         let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
@@ -4558,21 +4555,26 @@ mod input_missing_required_preflight_tests {
         let assistant_message_id = protocol::MessageId::new();
         use_ctx.assistant_message_id = Some(assistant_message_id);
 
-        let err = tool
-            .call(
-                json!({ "note": "leftover </token>" }),
-                use_ctx,
-                tool_api::test_support::fresh_tx(),
-            )
-            .await
-            .expect_err("missing required must fail before transport");
-        assert!(format!("{err}").contains("missing required property"));
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(25), peer_rx.recv())
-                .await
-                .is_err(),
-            "preflight must stop before any MCP request frame is sent"
-        );
+        let responder = tokio::spawn(async move {
+            let frame = peer_rx.recv().await.expect("request reaches MCP server");
+            let request: Value = serde_json::from_slice(&frame).unwrap();
+            assert_eq!(
+                request["params"]["arguments"],
+                json!({"note":"leftover </token>"})
+            );
+            let response = json!({"jsonrpc":"2.0","id":request["id"],"result":{"content":[{"type":"text","text":"accepted"}],"isError":false}});
+            let mut bytes = serde_json::to_vec(&response).unwrap();
+            bytes.push(b'\n');
+            peer_tx.send(Bytes::from(bytes)).await.unwrap();
+        });
+        tool.call(
+            json!({"note":"leftover </token>"}),
+            use_ctx,
+            tool_api::test_support::fresh_tx(),
+        )
+        .await
+        .expect("server accepts foreign-schema input");
+        responder.await.unwrap();
 
         let events = sink.events().await;
         let event = events
@@ -4618,9 +4620,32 @@ mod input_missing_required_preflight_tests {
         assert!(!event.metadata.contains_key("_PROTO_server_name"));
         assert!(!event.metadata.contains_key("_PROTO_tool_name"));
         assert!(
-            !events.iter().any(|event| event.name == MCP_STARTED),
-            "preflight rejection must happen before MCP_STARTED"
+            events.iter().any(|event| event.name == MCP_STARTED),
+            "missing-required telemetry must not prevent MCP_STARTED"
         );
+    }
+
+    #[test]
+    fn foreign_ref_allof_and_conditional_schemas_are_advertisement_only() {
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![std::env::temp_dir()],
+        );
+        let schema = json!({"type":"object","$defs":{"token":{"type":"string"}},"allOf":[{"properties":{"token":{"$ref":"#/$defs/token"}},"required":["token"]}],"if":{"required":["flag"]},"then":{"required":["other"]}});
+        let tool = MCPTool::new_for_tool(
+            ctx,
+            "mcp__local__tool".into(),
+            "local tool".into(),
+            schema.clone(),
+            None,
+            None,
+            None,
+            false,
+            false,
+        );
+        assert_eq!(tool.input_schema(), &schema);
+        assert_eq!(tool.input_validation_schema(), &json!({"type":"object"}));
     }
 
     #[tokio::test]

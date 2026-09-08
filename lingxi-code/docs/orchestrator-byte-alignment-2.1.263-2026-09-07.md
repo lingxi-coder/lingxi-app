@@ -150,14 +150,17 @@ Also mapped this pass:
   available to you as the coordinator — run it from a worker via the Agent
   tool instead.` Desktop/CLI `engine_desktop::build` wires the same
   `CoordinatorMode` Arc used by `BuiltinToolContext`. The main-loop
-  advertise/dispatch set uses the coordinator prompt pool (`Agent`,
-  `SendMessage`, `TaskStop`, PR subscription/unsubscription) plus enabled
-  `AskUserQuestion`, `EnterPlanMode`, and `ExitPlanMode` controls. `qbt` only
-  excludes names from the redirect suffix; it does not enable `Skill`,
-  `ListAgents`, `Workflow`, or `ReadNotifications`. Workers still resolve
-  from the full registry `available_tools`. Reminder availability gates use
-  the same dispatch lookup. Coordinator tests inject simple mode per instance
-  instead of mutating process-global environment variables.
+  advertise/dispatch set follows the actual `Idr` assembler: `qbt` base
+  (`Agent`, `TaskStop`, `SendMessage`, `StructuredOutput`, `Skill`,
+  `ReadNotifications`, `ListAgents`, `Workflow`), PR subscription suffixes,
+  MCP `comms`, brief tools, and configured extra names/V1/family names.
+  Simple mode suppresses the redirect suffix, not pool filtering. User and
+  plan controls require explicit extras; neither real outer assembler
+  appends them afterward. The earlier prompt-derived allowlist was incorrect;
+  see the 2026-09-08 re-audit. Worker redirects also require an enabled
+  external-worker tool and no tool-wide deny, with Agent in the current pool.
+  Workers retain the full registry. Reminder gates use dispatch lookup, and
+  coordinator tests inject mode options without changing process environment.
 - Full-catalog disabled: unfiltered `find_registered` hits a hidden builtin
   → `… is disabled for this session, in subagents as well as here.`
   (this arm precedes Glob/Grep-via-shell, matching `Ldt`).
@@ -242,7 +245,7 @@ Passed:
 - `streaming_partial_finalize_test` (7/7, including idle + suspend)
 - `production_prompt_bodies_match_normalized_2_1_238_manifests` after
   re-blessing Fable/Mythos lengths `10_445` / `10_447`
-- `unknown_tool_suffix_*` + coordinator dispatch/advertise tests (`add_tool_coordinator_hidden_worker_tool_gets_y7e`, `build_wire_tools_coordinator_uses_pool_not_qbt`)
+- `unknown_tool_suffix_*` + coordinator dispatch/advertise tests (`add_tool_coordinator_hidden_worker_tool_gets_y7e`, `build_wire_tools_coordinator_matches_idr_assembly`)
 - `truncated_response_recovery_nudge_matches_2_1_263`
 - `delivering_work_and_corrections_are_opus_5_only`
 - `synthetic_api_error_envelope_stamps_top_level_fields`

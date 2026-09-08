@@ -295,6 +295,9 @@ pub struct RemoteAgentTaskState {
 /// State specific to an in-process teammate task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InProcessTeammateTaskState {
+    /// The persistent runner has finished its turn-set and is awaiting work.
+    #[serde(default)]
+    pub is_idle: bool,
     /// Waiting for the lead to review a submitted plan; independent of idle.
     #[serde(default)]
     pub awaiting_plan_approval: bool,

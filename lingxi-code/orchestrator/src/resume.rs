@@ -280,6 +280,7 @@ struct PendingAssistant {
     /// top-level `uuid` — which degrades to "one row, one group", matching
     /// pre-grouping behavior).
     inner_key: String,
+    hook_grouping: (bool, bool),
     /// The turn's logical id, restored from `inner_key` when it parses as a
     /// UUID (the common case); falls back to the first row's own uuid.
     message_id: Uuid,
@@ -304,6 +305,11 @@ struct PendingAssistant {
 fn flush_pending_assistant(state: &mut SessionState, pending: Option<PendingAssistant>) {
     if let Some(pending) = pending {
         let message_id = MessageId::from_uuid(pending.message_id);
+        if pending.hook_grouping != (false, false) {
+            state
+                .hook_message_grouping
+                .insert(message_id, pending.hook_grouping);
+        }
         if pending.model_context_excluded {
             state.model_context_excluded_messages.insert(message_id);
         }
@@ -456,6 +462,16 @@ fn build_state_from_jsonl(
                         flush_pending_assistant(&mut state, pending_assistant.take());
                         let message_id = Uuid::parse_str(&inner_key).unwrap_or(msg_uuid);
                         pending_assistant = Some(PendingAssistant {
+                            hook_grouping: (
+                                m.extra
+                                    .get("isVirtual")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false),
+                                m.extra
+                                    .get("resumedFromIncompleteThinking")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false),
+                            ),
                             inner_key,
                             message_id,
                             content: content_blocks,
@@ -484,7 +500,6 @@ fn build_state_from_jsonl(
             }
             _ => {
                 flush_pending_assistant(&mut state, pending_assistant.take());
-                restore_thinking_stripped_latch(&mut state, m);
                 if let Some(message) = hook_attachment_message_for_api(m, msg_uuid) {
                     state.history.push(message);
                 }
@@ -527,6 +542,7 @@ fn build_state_from_jsonl(
         }
     }
     flush_pending_assistant(&mut state, pending_assistant.take());
+    restore_thinking_stripped_ranges(&mut state, messages);
     let runtime_metadata = resume_runtime_metadata(messages);
     if transcript_has_open_plan_segment(messages) {
         state.plan_mode = true;
@@ -535,15 +551,110 @@ fn build_state_from_jsonl(
     (state, last_uuid, runtime_metadata)
 }
 
-fn restore_thinking_stripped_latch(state: &mut SessionState, message: &JsonlMessage) {
-    if message.message_type != "attachment" {
-        return;
+/// Claude 2.1.263 mce/uhr/wys: markers only affect preceding assistant
+/// blocks, with partial offsets counted across per-block rows sharing an ID.
+fn restore_thinking_stripped_ranges(state: &mut SessionState, messages: &[JsonlMessage]) {
+    struct Row {
+        key: String,
+        id: MessageId,
+        thinking_before: usize,
+        thinking_count: usize,
     }
-    let Some(attachment) = message.extra.get("attachment") else {
-        return;
-    };
-    if attachment.get("type").and_then(Value::as_str) == Some("thinking_stripped") {
+    let mut rows: Vec<Row> = Vec::new();
+    let mut totals = std::collections::HashMap::<String, usize>::new();
+    let mut pending: Option<(String, MessageId)> = None;
+    let mut group_offsets = std::collections::HashMap::<MessageId, usize>::new();
+    for message in messages {
+        let Ok(uuid) = Uuid::parse_str(&message.uuid) else {
+            continue;
+        };
+        if message.message_type == "assistant" {
+            let key = message
+                .message
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or(&message.uuid)
+                .to_string();
+            let id = match &pending {
+                Some((previous, id)) if previous == &key => *id,
+                _ => MessageId::from_uuid(Uuid::parse_str(&key).unwrap_or(uuid)),
+            };
+            pending = Some((key.clone(), id));
+            let thinking_count = extract_content_blocks(&message.message)
+                .iter()
+                .filter(|block| {
+                    matches!(
+                        block,
+                        ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+                    )
+                })
+                .count();
+            let total = totals.entry(key.clone()).or_default();
+            group_offsets.entry(id).or_insert(*total);
+            rows.push(Row {
+                key,
+                id,
+                thinking_before: *total,
+                thinking_count,
+            });
+            *total += thinking_count;
+            continue;
+        }
+        pending = None;
+        let Some(attachment) = message
+            .extra
+            .get("attachment")
+            .filter(|_| message.message_type == "attachment")
+        else {
+            continue;
+        };
+        if attachment.get("type").and_then(Value::as_str) != Some("thinking_stripped") {
+            continue;
+        }
         state.thinking_signature_stripped = true;
+        let partial = if attachment.get("scope").and_then(Value::as_str) == Some("partial") {
+            attachment.get("from").and_then(|from| {
+                Some((
+                    from.get("messageId")?.as_str()?,
+                    usize::try_from(from.get("thinkingIndex")?.as_u64()?).ok()?,
+                ))
+            })
+        } else {
+            None
+        };
+        let start = partial.and_then(|(key, from)| {
+            rows.iter()
+                .position(|row| row.key == key && row.thinking_before + row.thinking_count > from)
+        });
+        for row in &rows[start.unwrap_or(0)..] {
+            let from = if let (Some(_), Some((key, from))) = (start, partial) {
+                if row.key == key {
+                    from.saturating_sub(row.thinking_before)
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            // Several JSONL rows can coalesce into the same history message.
+            // Preserve the group's earlier thinking when the marker starts
+            // inside a later row belonging to that same group.
+            let group_start = group_offsets.get(&row.id).copied().unwrap_or(0);
+            let from = if let (Some(_), Some((key, index))) = (start, partial) {
+                if row.key == key {
+                    index.saturating_sub(group_start)
+                } else {
+                    from
+                }
+            } else {
+                from
+            };
+            state
+                .thinking_stripped_messages
+                .entry(row.id)
+                .and_modify(|current| *current = (*current).min(from))
+                .or_insert(from);
+        }
     }
 }
 
@@ -572,10 +683,12 @@ fn hook_attachment_message_for_api(
             if content.is_empty() {
                 return None;
             }
+            // Claude 2.1.263 JDo/Eht rejects the entire malformed attachment;
+            // filtering individual values would replay a different hook body.
             let body = content
                 .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()?
                 .join("\n");
             Some(ConversationMessage::user_meta(
                 MessageId::from_uuid(message_uuid),
@@ -810,9 +923,9 @@ fn goal_state_from_message(message: &JsonlMessage) -> Option<Option<ActiveGoalSt
                         tokens_at_start: goal.tokens_at_start,
                     })
                 }),
-                platform_api::GoalStatusKind::Cleared | platform_api::GoalStatusKind::Achieved => {
-                    Some(None)
-                }
+                platform_api::GoalStatusKind::Cleared
+                | platform_api::GoalStatusKind::Achieved
+                | platform_api::GoalStatusKind::Failed => Some(None),
             };
         }
     }
@@ -1095,7 +1208,7 @@ fn transcript_has_open_plan_segment(messages: &[JsonlMessage]) -> bool {
 /// - an array of content blocks.
 ///
 /// We accept both: a string becomes a single `ContentBlock::Text`; an array
-/// is deserialized as `Vec<ContentBlock>` directly. If neither shape
+/// is deserialized after removing malformed text blocks. If neither shape
 /// matches, the result is an empty `Vec` — the message is still appended
 /// so the chain is preserved, but the inner content is empty.
 fn extract_content_blocks(message: &serde_json::Value) -> Vec<ContentBlock> {
@@ -1107,8 +1220,19 @@ fn extract_content_blocks(message: &serde_json::Value) -> Vec<ContentBlock> {
             text: s.to_string(),
         }];
     }
-    if content.is_array() {
-        if let Ok(blocks) = serde_json::from_value::<Vec<ContentBlock>>(content.clone()) {
+    if let Some(content) = content.as_array() {
+        // Claude 2.1.263 nNo drops malformed text blocks on resume before
+        // normalizing history. One damaged text block must not erase its
+        // otherwise valid siblings (including tool calls and tool results).
+        let content = content
+            .iter()
+            .filter(|block| {
+                block.get("type").and_then(Value::as_str) != Some("text")
+                    || block.get("text").is_some_and(Value::is_string)
+            })
+            .cloned()
+            .collect();
+        if let Ok(blocks) = serde_json::from_value::<Vec<ContentBlock>>(Value::Array(content)) {
             return blocks;
         }
     }

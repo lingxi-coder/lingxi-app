@@ -88,6 +88,18 @@ pub trait OrchestratorApiClient: Send + Sync {
             .await
     }
 
+    /// Isolated prompt-hook evaluation. Production disables thinking and requests
+    /// the evaluator JSON schema without modifying the conversation settings.
+    async fn messages_create_hook_prompt(
+        &self,
+        model: &str,
+        system: &str,
+        msgs: Vec<ConversationMessage>,
+    ) -> Result<LlmResponse, LlmError> {
+        self.messages_create(model, None, Some(system), msgs, Vec::new())
+            .await
+    }
+
     /// Non-streaming `messages.create` with an explicit `max_tokens` override
     /// (REC.A1 8k→64k escalation, TS `query.ts:1199-1221`). The turn loop calls
     /// this ONLY when a prior `max_tokens` recovery armed
@@ -302,6 +314,17 @@ pub trait OrchestratorApiClient: Send + Sync {
     /// turns. No-op on mocks.
     fn set_thinking_signature_stripped(&self, _stripped: bool) {}
 
+    /// Rejected historical thinking ranges; newly generated blocks are unmarked.
+    fn thinking_stripped_messages(&self) -> std::collections::HashMap<MessageId, usize> {
+        std::collections::HashMap::new()
+    }
+
+    fn set_thinking_stripped_messages(
+        &self,
+        _messages: std::collections::HashMap<MessageId, usize>,
+    ) {
+    }
+
     /// Return the FULL most recently observed rate-limit header snapshot.
     ///
     /// Task 8 (llm-client future-work batch 3): unlike
@@ -447,6 +470,17 @@ pub trait StreamingApiClient: Send + Sync {
 
     /// Restore or arm the thinking-signature strip latch. No-op on mocks.
     fn set_thinking_signature_stripped(&self, _stripped: bool) {}
+
+    /// Rejected historical thinking ranges; newly generated blocks are unmarked.
+    fn thinking_stripped_messages(&self) -> std::collections::HashMap<MessageId, usize> {
+        std::collections::HashMap::new()
+    }
+
+    fn set_thinking_stripped_messages(
+        &self,
+        _messages: std::collections::HashMap<MessageId, usize>,
+    ) {
+    }
 }
 
 /// Outcome of a single REPL turn driven by
@@ -1370,6 +1404,12 @@ pub struct ConversationOrchestrator {
     /// Per-instance test seam avoids mutating process-global simple-mode flags.
     #[cfg(test)]
     pub(crate) coordinator_simple_mode_override: Option<bool>,
+    #[cfg(test)]
+    pub(crate) coordinator_pool_override: Option<(bool, Vec<String>)>,
+    /// Tool-wide denial snapshot captured when assembling the current wire pool.
+    pub(crate) tool_pool_denied_names: std::sync::RwLock<Vec<String>>,
+    /// Main-agent policy names from the current tool assembly, before coordinator filtering.
+    pub(crate) main_agent_tool_names: std::sync::RwLock<Option<std::collections::HashSet<String>>>,
     /// Live coordinator-mode flag (`Ci()`). `None` is an ordinary session, so
     /// unknown-tool `Ldt` never takes the coordinator `Y7e` arm.
     pub(crate) coordinator_mode:

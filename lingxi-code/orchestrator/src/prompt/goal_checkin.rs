@@ -70,8 +70,9 @@ pub const TASK_LINE_CHAR_CAP: usize = 120;
 /// emits (claude-code `O1o`), i.e. already mapped from the wire task types:
 /// `local_agent`→`subagent`, `local_workflow`→`workflow`, `local_bash`→`shell`,
 /// `in_process_teammate`→`teammate`, `remote_agent`→`cloud session`.
-/// Deliberately EXCLUDED: `monitor`, `MCP task` and `dream`, none of which are
-/// in `j2b` and none of which are `local_bash`.
+/// The snapshot's `monitor` label means `monitor_mcp` / `monitor_ws`, which
+/// 2.1.263 `n3t` / `r3t` excludes. A `local_bash` monitor is projected as
+/// `shell` and already participates. `MCP task` and `dream` are excluded too.
 pub const DEFERRING_TASK_LABELS: &[&str] =
     &["subagent", "workflow", "shell", "teammate", "cloud session"];
 
@@ -243,7 +244,6 @@ impl GoalDeferralState {
         if interval_ms == 0 {
             return None;
         }
-        let current_interval_ms = next_checkin_interval_ms(interval_ms, self.checkin_count);
         // --- Tzf ---
         let deferred_since = match self.deferred_since {
             None => {
@@ -257,7 +257,7 @@ impl GoalDeferralState {
                     .iter()
                     .all(|t| !self.last_deferring_ids.contains(&t.id));
                 let is_new_run = self.last_deferral_pass_at.is_some_and(|last| {
-                    all_tasks_are_new && now_ms.saturating_sub(last) > current_interval_ms
+                    all_tasks_are_new && now_ms.saturating_sub(last) > interval_ms
                 });
                 if is_new_run {
                     self.deferred_since = Some(now_ms);
@@ -272,7 +272,9 @@ impl GoalDeferralState {
         self.last_deferral_pass_at = Some(now_ms);
         self.last_deferring_ids = tasks.iter().map(|t| t.id.clone()).collect();
         let deferred_for = now_ms.saturating_sub(deferred_since);
-        if deferred_for < current_interval_ms {
+        // 2.1.263 `aJn`: new-run detection uses the base interval; backoff
+        // uses the count AFTER `iJn` has reset it for a new batch.
+        if deferred_for < next_checkin_interval_ms(interval_ms, self.checkin_count) {
             return None;
         }
         self.checkin_count = self.checkin_count.saturating_add(1);
@@ -440,6 +442,30 @@ mod tests {
         );
         assert_eq!(state.deferred_since, Some(3 * interval));
         assert_eq!(state.checkin_count, 0);
+    }
+
+    #[test]
+    fn a_new_batch_resets_backoff_after_the_base_interval() {
+        let interval = 30 * 60_000;
+        let mut state = GoalDeferralState::default();
+        let first = vec![task("b1", "shell", "one")];
+        assert!(state.advance("g", &first, 0, interval).is_none());
+        assert!(state.advance("g", &first, interval, interval).is_some());
+        assert_eq!(state.checkin_count, 1);
+
+        // 45 minutes after the last pass is greater than the base interval,
+        // but less than the old batch's 60-minute backed-off interval.
+        let second = vec![task("b2", "shell", "two")];
+        let restart = interval + interval * 3 / 2;
+        assert!(state.advance("g", &second, restart, interval).is_none());
+        assert_eq!(state.deferred_since, Some(restart));
+        assert_eq!(state.checkin_count, 0);
+        assert!(state
+            .advance("g", &second, restart + interval - 1, interval)
+            .is_none());
+        assert!(state
+            .advance("g", &second, restart + interval, interval)
+            .is_some());
     }
 
     /// The SAME task still running across a long gap is NOT a new run — that is

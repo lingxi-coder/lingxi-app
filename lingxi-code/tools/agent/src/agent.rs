@@ -2935,6 +2935,28 @@ impl Tool for AgentTool {
             &AGENT_INPUT_SCHEMA_MODEL_NO_BACKGROUND
         }
     }
+    fn input_validation_issues(&self, input: &Value) -> Vec<Value> {
+        let Some(name) = input.get("name").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let mut issues = Vec::new();
+        if !matches_agent_name_pattern(name) {
+            issues.push(serde_json::json!({"origin":"string","code":"invalid_format","format":"regex","pattern":format!("/{AGENT_NAME_PATTERN}/"),"path":["name"],"message":AGENT_NAME_REGEX_MESSAGE}));
+        }
+        if name == RESERVED_AGENT_NAME {
+            issues.push(serde_json::json!({"code":"custom","path":["name"],"message":reserved_agent_name_message()}));
+        }
+        // TGo has a second .refine(!l0); Zod reports both for "main".
+        let normalized = self.ctx.subagent_spawner.as_ref().map_or_else(
+            || platform_api::live_sessions::normalize_name(name),
+            |spawner| spawner.normalize_teammate_recipient(name),
+        );
+        if normalized == "main" || normalized == "team-lead" || reserved_agent_id_shape(&normalized)
+        {
+            issues.push(serde_json::json!({"code":"custom","path":["name"],"message":"name must not be a reserved recipient (\"main\" or \"team-lead\", in any spelling) or have the shape of an agent id — those already address an agent directly"}));
+        }
+        issues
+    }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
     }

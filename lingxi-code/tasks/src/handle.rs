@@ -154,6 +154,7 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
         _ => None,
     };
     TaskRecord {
+        is_idle: matches!(s, TaskState::InProcessTeammate(teammate) if teammate.is_idle),
         awaiting_plan_approval: matches!(s, TaskState::InProcessTeammate(teammate) if teammate.awaiting_plan_approval && !b.status.is_terminal()),
         task_id: b.id.clone(),
         task_type: task_type_to_wire(b.task_type).to_string(),

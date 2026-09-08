@@ -200,7 +200,11 @@ pub trait BuiltinHookHandler: Send + Sync {
 ///
 /// The `http` transport is shared with the rest of the engine so requests
 /// flow through the same retry / telemetry plumbing.
+type AgentPromptTranscripts =
+    HashMap<(protocol::SessionId, protocol::AgentId), crate::PromptHookTranscript>;
+
 pub struct HookExecutorImpl {
+    agent_prompt_transcripts: std::sync::Mutex<AgentPromptTranscripts>,
     registry: Arc<RwLock<HookRegistry>>,
     http: Arc<dyn HttpTransport>,
     /// Background spawner. The Command arm's child runs on the `ProcessRunner`;
@@ -282,6 +286,7 @@ impl HookExecutorImpl {
         runtime: Arc<dyn RuntimeSpawner>,
     ) -> Self {
         Self {
+            agent_prompt_transcripts: std::sync::Mutex::new(HashMap::new()),
             registry,
             http,
             runtime,
@@ -564,8 +569,37 @@ impl HookExecutorImpl {
             .remove_session_named_hook(session_id, name)
     }
 
+    /// Publish before the child's terminal event, so parent stop hooks never
+    /// race the transcript writer or accidentally evaluate the parent history.
+    pub fn publish_agent_prompt_transcript(
+        &self,
+        session_id: protocol::SessionId,
+        agent_id: protocol::AgentId,
+        transcript: crate::PromptHookTranscript,
+    ) {
+        self.agent_prompt_transcripts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert((session_id, agent_id), transcript);
+    }
+
+    pub fn take_agent_prompt_transcript(
+        &self,
+        session_id: protocol::SessionId,
+        agent_id: protocol::AgentId,
+    ) -> Option<crate::PromptHookTranscript> {
+        self.agent_prompt_transcripts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(session_id, agent_id))
+    }
+
     /// Remove every named runtime hook scoped to `session_id`.
     pub async fn clear_session_hooks(&self, session_id: protocol::SessionId) -> usize {
+        self.agent_prompt_transcripts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(session, _), _| *session != session_id);
         self.registry.write().await.clear_session_hooks(session_id)
     }
 
@@ -977,9 +1011,15 @@ impl HookExecutorImpl {
     pub async fn execute_excluding_agent(
         &self,
         event: HookEvent,
-        ctx: HookContext,
+        mut ctx: HookContext,
         exclude_agent_id: protocol::AgentId,
     ) -> AggregateHookResult {
+        if matches!(&event, HookEvent::SubagentStop { agent_id, .. } if *agent_id == exclude_agent_id)
+        {
+            // Consume even if hooks are disabled or none match.
+            ctx.prompt_transcript =
+                self.take_agent_prompt_transcript(ctx.session_id, exclude_agent_id);
+        }
         // #41 runner-head gate (`h$`).
         if let Some(skipped) = self.policy_disable_gate(&event) {
             return skipped;
@@ -1794,6 +1834,7 @@ impl Dispatcher {
                     _ => Duration::from_millis(HOOK_PROMPT_TIMEOUT_MS),
                 };
                 let exec = PromptExecutor {
+                    transcript: ctx.prompt_transcript.clone(),
                     runner: self.prompt_runner.clone(),
                     timeout: effective_timeout,
                 };

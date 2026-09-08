@@ -663,10 +663,8 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     /// capability/env gate is on. `CDt()` is the focus/brief-transcript view
     /// mode, which LingXi does not have ⇒ always `false` ⇒ never suppresses.
     ///
-    /// `u3m` (@296477528) consults `CLAUDE_CODE_SILENT_TURN_REMINDER` and then
-    /// the model capability table; the port has no capability table, so the
-    /// DEFAULT IS OFF and this method is a strict no-op for stock sessions —
-    /// the locked streaming fixtures stay byte-identical.
+    /// 2.1.263 `jfr` consults the explicit env override, then the current
+    /// model's Fable 5.1 prompt bundle / silent-turn reminder capability.
     ///
     /// On fire the body is wrapped in the usual `<system-reminder>` envelope
     /// (renderer @296738727: `[kn({content:NT(e.text),isMeta:!0})]`) and the
@@ -674,11 +672,11 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     /// reconstructed on later turns. Appended to THIS turn's OUTGOING snapshot
     /// only — never `session.history` / JSONL.
     pub(crate) async fn silent_turn_reminder_message(&self) -> Option<ConversationMessage> {
-        if !crate::prompt::silent_turn::is_enabled() {
-            return None;
-        }
         let history = {
             let s = self.session.lock().await;
+            if !crate::prompt::silent_turn::is_enabled(&s.model) {
+                return None;
+            }
             s.history.clone()
         };
         if !Self::step_follows_tool_results(&history) {

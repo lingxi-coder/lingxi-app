@@ -72,7 +72,8 @@ pub use loader::{
 pub use matcher::{get_legacy_tool_names, matches_pattern, normalize_legacy_tool_name};
 pub use mcp_invoker::{HookMcpInvocation, HookMcpInvocationResult, HookMcpInvoker};
 pub use prompt_executor::{
-    HookPromptRunner, PromptHookError, PromptHookRequest, HOOK_PROMPT_TIMEOUT_MS,
+    HookPromptRunner, PromptHookError, PromptHookRequest, PromptHookTranscript,
+    HOOK_PROMPT_TIMEOUT_MS,
 };
 pub use registry::{HookContext, HookRegistry, HookSourceReplaceResult};
 pub use response::{

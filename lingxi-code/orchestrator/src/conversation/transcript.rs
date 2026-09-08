@@ -989,6 +989,85 @@ impl ConversationOrchestrator {
         }
     }
 
+    /// Persist before retry, while the rejected snapshot is still the transcript
+    /// tail. The scope owns these handles so lazy streams can await durability
+    /// after the caller's task-local scope has ended.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn persist_thinking_recovery_snapshot(
+        writer: Arc<JsonlWriter>,
+        last_uuid: Arc<Mutex<Option<String>>>,
+        session: Arc<Mutex<SessionState>>,
+        expected_session: protocol::SessionId,
+        cwd: std::path::PathBuf,
+        git_branch: Option<String>,
+        mut ranges: std::collections::HashMap<MessageId, usize>,
+    ) {
+        let mut state = session.lock().await;
+        // An in-place resume may replace the owning session while an older
+        // stream is being cancelled. Its recovery cannot extend the new chain.
+        if state.session_id != expected_session {
+            return;
+        }
+        ranges.retain(|id, _| state.history.iter().any(|message| message.id() == *id));
+        if !ranges.iter().any(|(id, from)| {
+            state
+                .thinking_stripped_messages
+                .get(id)
+                .is_none_or(|current| from < current)
+        }) {
+            return;
+        }
+        let mut parent = last_uuid.lock().await;
+        let session_id = expected_session.to_string();
+        let row = session::JsonlMessage {
+            message_type: "attachment".into(),
+            uuid: uuid::Uuid::new_v4().to_string(),
+            parent_uuid: parent.clone(),
+            session_id: session_id.clone(),
+            timestamp: chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            message: serde_json::Value::Null,
+            is_sidechain: false,
+            user_type: Some("external".into()),
+            git_branch,
+            entrypoint: Some(entrypoint_value()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra: [(
+                "attachment".into(),
+                serde_json::json!({
+                    "type": "thinking_stripped", "scope": "all"
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        match writer.append(&row).await {
+            Ok(()) => {
+                *parent = Some(row.uuid.clone());
+                // Updating the session only after durable append also prevents
+                // the normal post-call synchronization from writing a duplicate.
+                state.thinking_signature_stripped = true;
+                for (id, from) in ranges {
+                    state
+                        .thinking_stripped_messages
+                        .entry(id)
+                        .and_modify(|current| *current = (*current).min(from))
+                        .or_insert(from);
+                }
+                telemetry::emit_session_appended(&session_id, &row.uuid);
+            }
+            Err(error) => {
+                tracing::error!(%error, "thinking recovery transcript append failed");
+                telemetry::emit_session_persistence_failed();
+            }
+        }
+    }
+
     /// Atomically persist oversized hook output below this session's
     /// root-confined `tool-results` directory and return the attachment copy.
     pub(crate) async fn persist_large_hook_output(&self, text: &str) -> Option<String> {
@@ -1028,6 +1107,25 @@ impl ConversationOrchestrator {
             Err(error) => {
                 tracing::warn!(error = %error, "oversized hook output writer task failed");
                 None
+            }
+        }
+    }
+
+    /// Retract a rejected attempt from live display, active history and disk.
+    pub(crate) async fn discard_retry_attempt(&self, assistant_id: MessageId) {
+        self.session
+            .lock()
+            .await
+            .history
+            .retain(|message| message.id() != assistant_id);
+        self.output.emit_message_retracted(&assistant_id).await;
+        if let Some(writer) = self.transcript.jsonl_writer.as_ref() {
+            match writer
+                .remove_retry_attempt(&assistant_id.as_uuid().to_string())
+                .await
+            {
+                Ok(tail) => *self.transcript.last_jsonl_uuid.lock().await = tail,
+                Err(error) => tracing::warn!(%error, "failed to remove rejected retry attempt"),
             }
         }
     }

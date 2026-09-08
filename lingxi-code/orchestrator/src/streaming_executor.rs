@@ -331,11 +331,8 @@ impl<'a> StreamingToolExecutor<'a> {
                 });
             }
             Some(tool) => {
-                let safe = crate::schema_validation::validate_tool_input_schema(
-                    tool.input_schema(),
-                    &input,
-                )
-                .is_ok()
+                let safe = crate::schema_validation::validate_tool_schema(tool.as_ref(), &input)
+                    .is_ok()
                     && tool.is_concurrency_safe(&input);
                 self.tools.push(TrackedTool {
                     id,
@@ -911,11 +908,12 @@ const SUBAGENT_RESTRICTED_TOOLS: &[&str] = &[
     "EndConversation",
 ];
 
-/// `qbt` excludes names from the worker-redirect suffix; it is not a tool pool.
+/// 2.1.263 `qbt`: base coordinator tools AND worker-redirect exclusions.
 const COORDINATOR_REDIRECT_EXCLUSIONS: &[&str] = &[
     "Agent",
     "TaskStop",
     "SendMessage",
+    "StructuredOutput",
     "Skill",
     "ReadNotifications",
     "ListAgents",
@@ -931,12 +929,13 @@ pub(crate) fn is_coordinator_redirect_excluded(name: &str) -> bool {
 pub(crate) fn unknown_tool_suffix_for(name: &str, orch: &ConversationOrchestrator) -> String {
     let src = crate::config::sanitize_query_source(&orch.config.query_source);
     let is_subagent = src.starts_with("agent") || src == "subagent";
-    unknown_tool_suffix(
-        name,
-        &orch.tools,
-        is_subagent,
-        orch.is_coordinator_session(),
-    )
+    let may_redirect = orch.is_coordinator_session()
+        && orch.find_dispatchable_tool("Agent").is_some()
+        && orch
+            .tools
+            .find_registered(name)
+            .is_some_and(|tool| !orch.is_tool_pool_denied(tool.as_ref()));
+    unknown_tool_suffix(name, &orch.tools, is_subagent, may_redirect)
 }
 
 #[must_use]
@@ -946,19 +945,62 @@ pub(crate) fn unknown_tool_suffix(
     is_subagent: bool,
     is_coordinator: bool,
 ) -> String {
-    if is_subagent && SUBAGENT_RESTRICTED_TOOLS.iter().any(|n| *n == name) {
+    let registered = tools.find_registered(name);
+    let canonical = registered.as_ref().map(|tool| tool.name()).unwrap_or(name);
+    if is_subagent && SUBAGENT_RESTRICTED_TOOLS.contains(&canonical) {
         return format!(
             ". {name} is not available inside subagents. Complete the task with the tools provided and return findings to the orchestrator."
         );
     }
-    let registered = tools.find_registered(name);
-    let canonical = registered.as_ref().map(|tool| tool.name()).unwrap_or(name);
+    if registered.is_some() && canonical == "SendUserMessage" {
+        return format!(". {name} is not enabled in this session \u{2014} write your message as normal assistant text instead.");
+    }
     let in_catalog = registered.is_some();
+    // 2.1.263 `dt("external")` / Y7e. A catalog entry is not necessarily
+    // available to a worker (notably AskUserQuestion and ExitPlanMode).
+    const WORKER_TOOLS: &[&str] = &[
+        "Read",
+        "WebSearch",
+        "TodoWrite",
+        "Grep",
+        "WebFetch",
+        "Glob",
+        "Bash",
+        "PowerShell",
+        "Edit",
+        "Write",
+        "NotebookEdit",
+        "Skill",
+        "StructuredOutput",
+        "ToolSearch",
+        "EnterWorktree",
+        "ExitWorktree",
+        "REPL",
+        "Monitor",
+        "TaskStop",
+        "GetTask",
+        "SendMessage",
+        "Artifact",
+        "SearchPlugins",
+        "SearchSkills",
+        "ListPlugins",
+        "ListSkills",
+    ];
+    let worker_available = tools.find_by_name(name).is_some_and(|tool| {
+        tool.is_enabled(&tool_api::tool_trait::ToolStaticContext {
+            main_loop_model: tools.main_loop_model(),
+            ..Default::default()
+        }) && std::iter::once(tool.name())
+            .chain(tool.underlying_v1_tool_name())
+            .chain(tool.family_parent_tool_name())
+            .any(|name| WORKER_TOOLS.contains(&name))
+    });
     if is_coordinator
         && !is_subagent
         && in_catalog
         && tools.find_by_name("Agent").is_some()
         && !is_coordinator_redirect_excluded(canonical)
+        && worker_available
     {
         return format!(
             ". {name} is not available to you as the coordinator \u{2014} run it from a worker via the Agent tool instead."

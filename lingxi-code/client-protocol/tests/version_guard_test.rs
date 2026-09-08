@@ -249,6 +249,10 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::Error.kind", "ErrorKindDto");
     put("ClientEvent::Error.message", "String");
 
+    put("ClientEvent::MessageIdentity", "message_identity");
+    put("ClientEvent::MessageIdentity.message_id", "String");
+    put("ClientEvent::MessageRetracted", "message_retracted");
+    put("ClientEvent::MessageRetracted.message_id", "String");
     put("ClientEvent::SystemNotice", "system_notice");
     put("ClientEvent::SystemNotice.message", "String");
     put("ClientEvent::SystemNotice.is_error", "bool");

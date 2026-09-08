@@ -171,6 +171,9 @@ impl EffortLevel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct HookBackgroundTask {
+    /// Internal goal-deferral metadata; never part of the hook payload wire.
+    #[serde(skip)]
+    pub is_idle: bool,
     pub id: String,
     #[serde(rename = "type")]
     pub r#type: String,
@@ -1679,7 +1682,9 @@ pub fn validation_hint(raw: &serde_json::Value) -> Option<String> {
             );
         }
         if hso.get("hookEventName").and_then(|v| v.as_str()) == Some("PermissionRequest")
-            && !hso.get("decision").is_some_and(serde_json::Value::is_object)
+            && !hso
+                .get("decision")
+                .is_some_and(serde_json::Value::is_object)
         {
             return Some(
                 " (PermissionRequest decision must be {\"behavior\": \"allow\"} or {\"behavior\": \"deny\", \"message\": \"...\"})"
@@ -1700,7 +1705,6 @@ pub fn validation_hint(raw: &serde_json::Value) -> Option<String> {
         _ => None,
     }
 }
-
 
 /// Parse a hook's JSON reply into a [`HookResponse`].
 ///

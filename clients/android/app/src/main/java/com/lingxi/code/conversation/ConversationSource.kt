@@ -1138,6 +1138,8 @@ sealed interface ReplyEvent {
 
     /** One assistant API-response boundary; the enclosing turn can continue. */
     data class MessageComplete(val message: Message?) : ReplyEvent
+    data class MessageIdentity(val messageId: String) : ReplyEvent
+    data class MessageRetracted(val messageId: String) : ReplyEvent
 
     /** The final assistant message used by sources without engine boundaries. */
     data class Completed(val message: Message) : ReplyEvent
@@ -1259,6 +1261,8 @@ fun clientEventToReply(
         ReplyEvent.Coordinator(event.activeWorkers.toInt(), event.team)
     is ClientEvent.MessageComplete ->
         ReplyEvent.MessageComplete(event.message?.let { messageDtoToMessage(it, strings) })
+    is ClientEvent.MessageIdentity -> ReplyEvent.MessageIdentity(event.messageId)
+    is ClientEvent.MessageRetracted -> ReplyEvent.MessageRetracted(event.messageId)
     is ClientEvent.TurnEnded -> ReplyEvent.End
     is ClientEvent.Error -> ReplyEvent.Error(
         userFacingEngineError(event.kind, event.message, strings),

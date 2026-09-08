@@ -4,6 +4,9 @@ use super::*;
 
 /// Transcript persistence and the side tables consumed while serializing a turn.
 pub(crate) struct TranscriptStore {
+    /// Per-session provider recovery ownership, replaced when switching sessions.
+    pub(crate) thinking_recovery:
+        std::sync::RwLock<llm_client::thinking_scope::ThinkingRecoveryScope>,
     /// Optional on-disk JSONL persistence (M5-07). `None` for in-memory
     /// tests; `Some` when the CLI binary wires `~/.lingxi/projects/.../<uuid>.jsonl`.
     pub(crate) jsonl_writer: Option<Arc<JsonlWriter>>,
@@ -113,6 +116,7 @@ pub(crate) struct TranscriptStore {
 impl TranscriptStore {
     pub(crate) fn new() -> Self {
         Self {
+            thinking_recovery: std::sync::RwLock::new(Default::default()),
             jsonl_writer: None,
             last_jsonl_uuid: Arc::new(Mutex::new(None)),
             tool_denial_kinds: Mutex::new(std::collections::HashMap::new()),
@@ -128,6 +132,10 @@ impl TranscriptStore {
     }
 
     pub(crate) async fn reset_session_scoped(&self) {
+        *self
+            .thinking_recovery
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Default::default();
         self.tool_denial_kinds.lock().await.clear();
         *self.tool_frames.lock().await = None;
         self.tool_use_results.lock().await.clear();

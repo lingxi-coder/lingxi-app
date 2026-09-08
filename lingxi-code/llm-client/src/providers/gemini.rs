@@ -561,6 +561,8 @@ fn encode_messages(
                     }
                 })),
                 ContentBlock::ToolResult { tool_call_id, output, is_error, .. } => {
+                    let display = protocol::js_utf16::tool_result_display(output).map(Value::String);
+                    let output = display.as_ref().unwrap_or(output);
                     let Some(name) = tool_call_names.get(tool_call_id) else {
                         return Err(LlmError::InvalidRequest {
                             message: format!("tool result references unknown tool call id: {tool_call_id}"),

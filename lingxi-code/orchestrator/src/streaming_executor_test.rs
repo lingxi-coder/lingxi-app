@@ -360,7 +360,6 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register_builtin(Arc::new(SafeToolNamed::new("Agent")) as Arc<dyn Tool>);
         tools.register_builtin(Arc::new(SafeToolNamed::new("Read")) as Arc<dyn Tool>);
-        tools.set_session_tool_allowlist(&["Agent".to_string()]);
         assert_eq!(
             unknown_tool_suffix("Read", &tools, false, true),
             ". Read is not available to you as the coordinator \u{2014} run it from a worker via the Agent tool instead."
@@ -393,7 +392,6 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register_builtin(Arc::new(SafeToolNamed::new("WebFetch")) as Arc<dyn Tool>);
         tools.register_builtin(Arc::new(SafeToolNamed::new("Agent")) as Arc<dyn Tool>);
-        tools.set_session_tool_allowlist(&["Agent".to_string()]);
         assert_eq!(
             unknown_tool_suffix("WebFetch", &tools, false, false),
             ". WebFetch is disabled for this session, in subagents as well as here."
@@ -411,6 +409,7 @@ mod tests {
         tools.register_builtin(Arc::new(SafeToolNamed {
             name: "ListAgents",
             aliases: &["ListPeers"],
+            ..SafeToolNamed::new("ListAgents")
         }) as Arc<dyn Tool>);
         tools.set_session_tool_allowlist(&["Agent".to_string()]);
         assert_eq!(
@@ -445,6 +444,7 @@ mod tests {
             PathBuf::from("/tmp"),
         )
         .with_coordinator_simple_mode_for_test(false)
+        .with_coordinator_pool_for_test(false, &[])
     }
 
     #[test]
@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_tool_simple_mode_dispatches_worker_tool() {
+    async fn add_tool_simple_mode_keeps_pool_but_suppresses_worker_redirect() {
         let orch = orch_with_named_tools(&["Agent", "Read"])
             .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }))
             .with_coordinator_simple_mode_for_test(true);
@@ -485,7 +485,13 @@ mod tests {
             None,
             MessageId::new(),
         );
-        assert_eq!(exec.tools[0].status, ToolStatus::Queued);
+        assert_eq!(exec.tools[0].status, ToolStatus::Completed);
+        let ContentBlock::ToolResult { content, .. } = exec.tools[0].result.as_ref().unwrap()
+        else {
+            panic!("expected error")
+        };
+        assert!(content.contains("disabled for this session"));
+        assert!(!content.contains("run it from a worker"));
     }
 
     #[tokio::test]
@@ -528,7 +534,11 @@ mod tests {
             "unsubscribe_pr_activity",
         ];
         let orch = orch_with_named_tools(&names)
-            .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }));
+            .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }))
+            .with_coordinator_pool_for_test(
+                false,
+                &["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"],
+            );
         let mut exec = StreamingToolExecutor::new(&orch);
         for name in names {
             exec.add_tool(
@@ -547,16 +557,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_tool_coordinator_hidden_qbt_tools_are_disabled() {
-        let names = ["Skill", "ListAgents", "Workflow", "ReadNotifications"];
-        let orch = orch_with_named_tools(&[
-            "Agent",
+    async fn add_tool_coordinator_qbt_tools_remain_available() {
+        let names = [
             "Skill",
             "ListAgents",
             "Workflow",
             "ReadNotifications",
-        ])
-        .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }));
+            "StructuredOutput",
+        ];
+        let orch = orch_with_named_tools(&names)
+            .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }));
         let mut exec = StreamingToolExecutor::new(&orch);
         for name in names {
             exec.add_tool(
@@ -566,28 +576,104 @@ mod tests {
                 None,
                 MessageId::new(),
             );
-            let result = exec.tools.last().unwrap();
-            assert_eq!(result.status, ToolStatus::Completed);
-            let ContentBlock::ToolResult {
-                content, is_error, ..
-            } = result.result.as_ref().unwrap()
-            else {
-                panic!("expected tool error");
-            };
-            assert!(*is_error);
-            assert!(content.contains("disabled for this session"), "{content}");
-            assert!(!content.contains("run it from a worker"), "{content}");
+            assert_eq!(exec.tools.last().unwrap().status, ToolStatus::Queued);
         }
+    }
+
+    #[test]
+    fn coordinator_pool_metadata_and_extras_follow_idr() {
+        let orch = orch_with_named_tools(&[]);
+        assert!(orch
+            .is_coordinator_pool_tool(&SafeToolNamed::new("mcp__github__subscribe_pr_activity")));
+        let comms = SafeToolNamed {
+            role: Some("comms"),
+            ..SafeToolNamed::new("mcp__chat__send")
+        };
+        assert!(orch.is_coordinator_pool_tool(&comms));
+        for name in [
+            "AskUserQuestion",
+            "ExitPlanMode",
+            "SendUserMessage",
+            "SendUserFile",
+            "Bash",
+        ] {
+            assert!(
+                !orch.is_coordinator_pool_tool(&SafeToolNamed::new(name)),
+                "{name}"
+            );
+        }
+        let orch = orch.with_coordinator_pool_for_test(true, &["AskUserQuestion", "V1", "Parent"]);
+        for name in ["AskUserQuestion", "SendUserMessage", "SendUserFile"] {
+            assert!(
+                orch.is_coordinator_pool_tool(&SafeToolNamed::new(name)),
+                "{name}"
+            );
+        }
+        assert!(orch.is_coordinator_pool_tool(&SafeToolNamed {
+            v1: Some("V1"),
+            ..SafeToolNamed::new("split")
+        }));
+        assert!(orch.is_coordinator_pool_tool(&SafeToolNamed {
+            parent: Some("Parent"),
+            ..SafeToolNamed::new("split")
+        }));
+        assert!(!orch.is_coordinator_pool_tool(&SafeToolNamed {
+            aliases: &["V1"],
+            ..SafeToolNamed::new("split")
+        }));
+    }
+
+    #[test]
+    fn coordinator_redirect_requires_enabled_worker_and_agent_tools() {
+        let mut orch =
+            orch_with_named_tools(&["Agent", "Read", "AskUserQuestion", "ExitPlanMode", "Custom"])
+                .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }));
+        for name in ["AskUserQuestion", "ExitPlanMode", "Custom"] {
+            assert!(unknown_tool_suffix_for(name, &orch).contains("disabled for this session"));
+        }
+        for denied in ["Read", "Agent"] {
+            *orch.tool_pool_denied_names.write().unwrap() = vec![denied.into()];
+            assert!(unknown_tool_suffix_for("Read", &orch).contains("disabled for this session"));
+        }
+        orch.tool_pool_denied_names.write().unwrap().clear();
+        *orch.main_agent_tool_names.write().unwrap() = Some(["Read".into()].into_iter().collect());
+        assert!(unknown_tool_suffix_for("Read", &orch).contains("disabled for this session"));
+        *orch.main_agent_tool_names.write().unwrap() = None;
+        assert!(unknown_tool_suffix_for("Read", &orch).contains("run it from a worker"));
+        Arc::get_mut(&mut orch.tools)
+            .unwrap()
+            .set_session_tool_allowlist(&["Agent".into()]);
+        assert!(unknown_tool_suffix_for("Read", &orch).contains("disabled for this session"));
+    }
+
+    #[test]
+    fn disabled_brief_uses_canonical_message_fallback() {
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(SafeToolNamed {
+            aliases: &["Brief"],
+            ..SafeToolNamed::new("SendUserMessage")
+        }));
+        assert_eq!(unknown_tool_suffix("Brief", &tools, false, true),
+            ". Brief is not enabled in this session \u{2014} write your message as normal assistant text instead.");
     }
 
     struct SafeToolNamed {
         name: &'static str,
         aliases: &'static [&'static str],
+        role: Option<&'static str>,
+        v1: Option<&'static str>,
+        parent: Option<&'static str>,
     }
 
     impl SafeToolNamed {
         fn new(name: &'static str) -> Self {
-            Self { name, aliases: &[] }
+            Self {
+                name,
+                aliases: &[],
+                role: None,
+                v1: None,
+                parent: None,
+            }
         }
     }
 
@@ -598,6 +684,15 @@ mod tests {
         }
         fn aliases(&self) -> &[&str] {
             self.aliases
+        }
+        fn mcp_role(&self) -> Option<&str> {
+            self.role
+        }
+        fn underlying_v1_tool_name(&self) -> Option<&str> {
+            self.v1
+        }
+        fn family_parent_tool_name(&self) -> Option<&str> {
+            self.parent
         }
         fn input_schema(&self) -> &serde_json::Value {
             static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =

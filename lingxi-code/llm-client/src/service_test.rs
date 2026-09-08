@@ -4093,6 +4093,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thinking_recovery_uses_captured_request_scope_after_stream_handoff() {
+        use crate::thinking_scope::{scope_thinking_recovery, ThinkingRecoveryScope};
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        let old = assistant_with_thinking();
+        let owner = ThinkingRecoveryScope::default();
+        let other = ThinkingRecoveryScope::default();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let captured = recorded.clone();
+        owner.set_recorder(Arc::new(move |messages| {
+            let captured = captured.clone();
+            Box::pin(async move {
+                captured.lock().unwrap().push(messages);
+            })
+        }));
+        let mut req = scope_thinking_recovery(owner.clone(), async {
+            adapter
+                .build_request(
+                    "claude-sonnet-4-20250514",
+                    None,
+                    None,
+                    vec![old.clone()],
+                    vec![],
+                    true,
+                    None,
+                )
+                .unwrap()
+        })
+        .await;
+        // Lazy streaming retries may be polled on another task, under another
+        // context, or after the caller's assembly scope has already ended.
+        scope_thinking_recovery(other.clone(), async {
+            assert!(adapter.handle_thinking_signature_strip(&mut req).await);
+            assert!(adapter.thinking_stripped_messages().is_empty());
+        })
+        .await;
+        assert_eq!(owner.messages().get(&old.id()), Some(&0));
+        assert_eq!(recorded.lock().unwrap()[0].get(&old.id()), Some(&0));
+        assert!(other.messages().is_empty());
+        assert!(adapter.thinking_stripped_messages().is_empty());
+        assert!(serde_json::to_value(&req)
+            .unwrap()
+            .get("thinking_recovery_scope")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn side_query_thinking_recovery_forks_parent_ranges_without_mutating_them() {
+        use crate::thinking_scope::{scope_thinking_recovery, ThinkingRecoveryScope};
+        let adapter = make_adapter(FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(
+                400,
+                serde_json::json!({
+                    "type":"error", "error":{"type":"invalid_request_error",
+                    "message":"Invalid signature in thinking block"}
+                }),
+            )),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]));
+        let parent = ThinkingRecoveryScope::default();
+        let old = assistant_with_thinking();
+        scope_thinking_recovery(parent.clone(), async {
+            adapter
+                .messages_create_side_query(
+                    "claude-sonnet-4-20250514",
+                    None,
+                    None,
+                    vec![old.clone()],
+                    vec![],
+                    None,
+                    None,
+                    vec![],
+                    None,
+                    Some("summary"),
+                )
+                .await
+                .unwrap();
+            assert!(adapter.thinking_stripped_messages().is_empty());
+        })
+        .await;
+        assert!(parent.messages().is_empty());
+        assert!(adapter.thinking_stripped_messages().is_empty());
+    }
+
+    #[tokio::test]
+    async fn thinking_signature_recovery_preserves_fresh_identical_thinking() {
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(
+                400,
+                serde_json::json!({
+                    "type":"error", "error":{"type":"invalid_request_error","message":"Invalid signature in thinking block"}
+                }),
+            )),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let adapter = make_adapter(transport);
+        let old = assistant_with_thinking();
+        adapter
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                vec![old.clone()],
+                vec![],
+            )
+            .await
+            .unwrap();
+        let fresh = assistant_with_thinking();
+        let request = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                vec![
+                    old,
+                    protocol::ConversationMessage::user(
+                        protocol::MessageId::new(),
+                        "continue".into(),
+                    ),
+                    fresh.clone(),
+                ],
+                vec![],
+                false,
+                None,
+            )
+            .unwrap();
+        let assistants: Vec<_> = request
+            .messages
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .collect();
+        assert_eq!(assistants.len(), 2);
+        assert!(!assistants[0]
+            .content
+            .iter()
+            .any(|block| matches!(block, crate::ContentBlock::Reasoning { .. })));
+        assert!(assistants[1]
+            .content
+            .iter()
+            .any(|block| matches!(block, crate::ContentBlock::Reasoning { .. })));
+        assert!(!adapter
+            .thinking_stripped_messages()
+            .contains_key(&fresh.id()));
+        assert!(serde_json::to_value(&request)
+            .unwrap()
+            .get("thinking_source_message_ids")
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn thinking_signature_400_strips_and_retries_on_anthropic() {
         let err = serde_json::json!({
             "type": "error",

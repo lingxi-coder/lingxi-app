@@ -841,6 +841,13 @@ pub fn max_subagent_spawn_depth() -> u32 {
 /// Spawn-a-subagent seam used by `AgentTool`.
 #[async_trait]
 pub trait SubagentSpawner: Send + Sync {
+    /// Normalize a recipient for the Agent schema's reserved-name refinement.
+    /// Hosts with a Unicode-aware catalog override this with the same canonical
+    /// normalizer used by live name resolution, avoiding a second name policy.
+    fn normalize_teammate_recipient(&self, name: &str) -> String {
+        crate::live_sessions::normalize_name(name)
+    }
+
     /// Whether this session exposes its implicit teammate team.
     fn teammate_enabled(&self) -> bool {
         false

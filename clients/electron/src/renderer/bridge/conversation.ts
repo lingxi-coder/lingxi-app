@@ -85,6 +85,10 @@ export interface ContextSummarySnapshot {
  * without re-scanning `items`.
  */
 export interface ConversationState {
+  /** Items emitted by the last completed attempt, available for retry retraction. */
+  readonly pendingAssistantItems?: readonly string[];
+  readonly assistantAttemptItems?: Readonly<Record<string, readonly string[]>>;
+  readonly retractedAttemptId?: string;
   /** The ordered view-model the Stage renders. */
   readonly items: RunItem[];
   /** True while a turn is in flight (between `turn_started` and `turn_ended`). */
@@ -380,7 +384,9 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         const prev = items[idx] as Extract<RunItem, { type: 'narration' }>;
         items[idx] = { ...prev, text: prev.text + event.text };
       }
-      return { ...state, items, openAssistantIndex: idx, openThinkingIndex: -1, nextId };
+      return { ...state, items, openAssistantIndex: idx, openThinkingIndex: -1, nextId,
+        pendingAssistantItems: [...new Set([...(state.pendingAssistantItems ?? []), items[idx]!.id])],
+      };
     }
 
     case 'thinking_delta': {
@@ -395,7 +401,9 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         const prev = items[idx] as Extract<RunItem, { type: 'thinking' }>;
         items[idx] = { ...prev, text: prev.text + event.thinking };
       }
-      return { ...state, items, openThinkingIndex: idx, nextId };
+      return { ...state, items, openThinkingIndex: idx, nextId,
+        pendingAssistantItems: [...new Set([...(state.pendingAssistantItems ?? []), items[idx]!.id])],
+      };
     }
 
     case 'tool_use_started': {
@@ -492,12 +500,32 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       return { ...state, plan: event.tasks };
     }
 
+    case 'message_identity': {
+      const ids = state.pendingAssistantItems ?? [];
+      return { ...state, assistantAttemptItems: { ...state.assistantAttemptItems, [event.message_id]: ids } };
+    }
+
+    case 'message_retracted': {
+      if (state.retractedAttemptId === event.message_id) return state;
+      const ids = new Set(state.assistantAttemptItems?.[event.message_id] ?? []);
+      const items = state.items.filter((item) => !ids.has(item.id));
+      const toolIndex: Record<string, number> = {};
+      for (const [toolId, index] of Object.entries(state.toolIndex)) {
+        const next = items.findIndex((item) => item.id === state.items[index]?.id);
+        if (next >= 0) toolIndex[toolId] = next;
+      }
+      const remap = (index: number) => index < 0 ? -1 : items.findIndex((item) => item.id === state.items[index]?.id);
+      return { ...state, items, toolIndex, openAssistantIndex: remap(state.openAssistantIndex), openThinkingIndex: remap(state.openThinkingIndex),
+        retractedAttemptId: event.message_id };
+    }
+
     case 'message_complete': {
       // The streamed assistant text is final; stop appending to it and seal
       // any open reasoning block.
       const items = state.items.slice();
       closeThinking(items, state.openThinkingIndex);
-      return { ...state, items, openAssistantIndex: -1, openThinkingIndex: -1 };
+      return { ...state, items, openAssistantIndex: -1, openThinkingIndex: -1, pendingAssistantItems: [],
+      };
     }
 
     case 'usage_update':

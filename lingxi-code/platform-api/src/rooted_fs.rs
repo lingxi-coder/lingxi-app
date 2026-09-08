@@ -191,6 +191,17 @@ fn verify_leaf_not_symlink(requested: &Path) -> Result<(), RootedFsError> {
     }
 }
 
+/// Number of directory entries naming the file represented by an open handle.
+/// The caller can open with `FILE_FLAG_OPEN_REPARSE_POINT` to avoid following
+/// leaf links; querying the handle keeps this count tied to that same file.
+///
+/// # Errors
+/// Returns the Windows error if handle information cannot be queried.
+#[cfg(windows)]
+pub fn file_link_count(file: &std::fs::File) -> std::io::Result<u32> {
+    imp::file_link_count(file)
+}
+
 #[cfg(windows)]
 mod imp {
     #[allow(clippy::wildcard_imports)]
@@ -489,17 +500,25 @@ mod imp {
         }
     }
 
-    fn root_identity_from_file(file: &std::fs::File, path: &Path) -> Result<RootIdentity, FsError> {
+    fn file_information(file: &std::fs::File) -> std::io::Result<ByHandleFileInformation> {
         let mut information = std::mem::MaybeUninit::<ByHandleFileInformation>::uninit();
         // SAFETY: `file` owns a live handle and the API initializes the output
         // structure before returning success.
         let ok =
             unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
         if ok == 0 {
-            return Err(map_io(path, std::io::Error::last_os_error()));
+            return Err(std::io::Error::last_os_error());
         }
         // SAFETY: success above guarantees complete initialization.
-        let information = unsafe { information.assume_init() };
+        Ok(unsafe { information.assume_init() })
+    }
+
+    pub(super) fn file_link_count(file: &std::fs::File) -> std::io::Result<u32> {
+        Ok(file_information(file)?.number_of_links)
+    }
+
+    fn root_identity_from_file(file: &std::fs::File, path: &Path) -> Result<RootIdentity, FsError> {
+        let information = file_information(file).map_err(|error| map_io(path, error))?;
         Ok(RootIdentity {
             volume: u64::from(information.volume_serial_number),
             file: (u64::from(information.file_index_high) << 32)

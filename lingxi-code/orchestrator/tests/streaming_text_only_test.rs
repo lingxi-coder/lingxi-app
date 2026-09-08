@@ -65,11 +65,18 @@ async fn streaming_text_only_three_deltas() {
     let events = output.snapshot().await;
     // The §0.7 "light up thinking/usage" follow-up adds additive `Usage`
     // emits (from `message_start` / `message_delta`); filter them (and
-    // `Thinking`) out so this test keeps asserting the text/end-turn
+    // `Thinking` and message identity metadata) out so this test keeps asserting the text/end-turn
     // sequence it cares about.
     let events: Vec<&OutputEvent> = events
         .iter()
-        .filter(|e| !matches!(e, OutputEvent::Usage { .. } | OutputEvent::Thinking { .. }))
+        .filter(|e| {
+            !matches!(
+                e,
+                OutputEvent::Usage { .. }
+                    | OutputEvent::Thinking { .. }
+                    | OutputEvent::MessageIdentity { .. }
+            )
+        })
         .collect();
     // Expect: Text("hel"), Text("lo wor"), Text("ld"), EndTurn { stop_reason: "end_turn" }
     assert_eq!(events.len(), 4, "got {events:?}");

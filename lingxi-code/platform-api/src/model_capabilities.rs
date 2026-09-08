@@ -150,6 +150,8 @@ pub fn capabilities_for(model_id: &str) -> &'static [&'static str] {
             "context_management",
             "lean_prompt",
             "fable_5_mitigations",
+            // 2.1.263 baked-in catalog: enables the default silent-turn nudge.
+            "fable_5_1_prompt_bundle",
             "refusal_fallback",
         ],
         _ => &[],

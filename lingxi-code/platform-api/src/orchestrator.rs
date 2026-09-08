@@ -302,6 +302,8 @@ pub enum GoalStatusKind {
     Cleared,
     /// The Stop evaluator accepted the goal.
     Achieved,
+    /// The Stop evaluator established that the goal is impossible.
+    Failed,
 }
 
 /// Typed, resumable `/goal` transcript attachment.
@@ -2694,6 +2696,16 @@ pub trait OrchestratorHandle: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum OutputEvent {
+    /// Correlate the current assistant response with its conversation identity.
+    MessageIdentity {
+        /// Stable conversation message identifier.
+        message_id: protocol::MessageId,
+    },
+    /// Retract a failed assistant attempt from the live transcript.
+    MessageRetracted {
+        /// The rejected assistant message identifier.
+        message_id: protocol::MessageId,
+    },
     /// Plain text from the assistant.
     Text {
         /// The text payload emitted.
@@ -2886,6 +2898,12 @@ pub struct ContextPressureBanner {
 /// for unit tests.
 #[async_trait]
 pub trait OutputStream: Send + Sync {
+    /// Identify the assistant response immediately before its completion boundary.
+    async fn emit_assistant_message_identity(&self, _message_id: &protocol::MessageId) {}
+
+    /// Retract an assistant attempt that is being retried.
+    async fn emit_message_retracted(&self, _message_id: &protocol::MessageId) {}
+
     /// Signal a model turn that did not originate from a direct UI submit,
     /// such as an `asyncRewake` hook completion.
     async fn emit_turn_started(&self) {}

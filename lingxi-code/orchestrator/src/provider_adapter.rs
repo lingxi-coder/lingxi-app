@@ -177,6 +177,22 @@ impl OrchestratorApiClient for ProviderApiAdapter {
             .await
     }
 
+    async fn messages_create_hook_prompt(
+        &self,
+        model: &str,
+        system: &str,
+        msgs: Vec<ConversationMessage>,
+    ) -> Result<LlmResponse, LlmError> {
+        let stream = self.service.stream_json_schema_with_thinking(
+            model, None, Some(system), msgs,
+            serde_json::json!({"type":"object","properties":{"ok":{"type":"boolean"},"reason":{"type":"string"},"impossible":{"type":"boolean"}},"required":["ok","reason"],"additionalProperties":false}),
+            None, None, Some(llm_client::model::thinking::ThinkingConfig::Disabled), None, Some("hook_prompt"),
+        ).await?;
+        llm_client::stream_accumulator::accumulate_stream_salvaging(stream)
+            .await
+            .map_err(|(_, error)| error)
+    }
+
     async fn count_tokens(
         &self,
         model: &str,
@@ -368,6 +384,17 @@ impl OrchestratorApiClient for ProviderApiAdapter {
 
     fn set_thinking_signature_stripped(&self, stripped: bool) {
         self.service.set_thinking_signature_stripped(stripped);
+    }
+
+    fn thinking_stripped_messages(&self) -> std::collections::HashMap<protocol::MessageId, usize> {
+        self.service.thinking_stripped_messages()
+    }
+
+    fn set_thinking_stripped_messages(
+        &self,
+        messages: std::collections::HashMap<protocol::MessageId, usize>,
+    ) {
+        self.service.set_thinking_stripped_messages(messages);
     }
 
     /// Task 8 (llm-client future-work batch 3): expose the FULL internal
@@ -921,6 +948,17 @@ impl StreamingApiClient for ProviderApiAdapter {
     fn set_thinking_signature_stripped(&self, stripped: bool) {
         self.service.set_thinking_signature_stripped(stripped);
     }
+
+    fn thinking_stripped_messages(&self) -> std::collections::HashMap<protocol::MessageId, usize> {
+        self.service.thinking_stripped_messages()
+    }
+
+    fn set_thinking_stripped_messages(
+        &self,
+        messages: std::collections::HashMap<protocol::MessageId, usize>,
+    ) {
+        self.service.set_thinking_stripped_messages(messages);
+    }
 }
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -1103,6 +1141,301 @@ mod tests {
             None,
             None,
         )))
+    }
+
+    #[tokio::test]
+    async fn cancelled_thinking_retry_is_durable_before_cold_resume_without_duplicate_marker() {
+        use crate::test_support::{
+            noop_hook_executor, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+        };
+        struct RetryTransport(tokio::sync::Notify);
+        impl Transport for RetryTransport {
+            fn execute<'a>(
+                &'a self,
+                request: &'a ProviderRequest,
+            ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+                Box::pin(async move {
+                    let thinking = request.body_json["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .flat_map(|m| m["content"].as_array().unwrap())
+                        .any(|b| b["type"] == "thinking");
+                    if thinking {
+                        Ok(ProviderResponse::json(
+                            400,
+                            serde_json::json!({
+                                "type":"error", "error":{"type":"invalid_request_error", "message":"Invalid signature in thinking block"}
+                            }),
+                        ))
+                    } else {
+                        self.0.notify_one();
+                        std::future::pending().await
+                    }
+                })
+            }
+            fn open_stream<'a>(
+                &'a self,
+                _: &'a ProviderRequest,
+            ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+                Box::pin(async {
+                    Err(LlmError::Transport {
+                        message: "unused".into(),
+                    })
+                })
+            }
+        }
+        let transport = Arc::new(RetryTransport(tokio::sync::Notify::new()));
+        let adapter = Arc::new(make_adapter(transport.clone()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+            path.clone(),
+            Arc::new(platform_posix::fs::PosixFileSystem::new(
+                dir.path().to_path_buf(),
+            )),
+        ));
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            adapter.clone(),
+            Arc::new(tool_api::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_jsonl_writer(writer);
+        let old = ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![
+                protocol::ContentBlock::Thinking {
+                    thinking: "rejected".into(),
+                    signature: Some("sig".into()),
+                },
+                protocol::ContentBlock::Text {
+                    text: "old answer".into(),
+                },
+            ],
+            stop_reason: Some("end_turn".into()),
+        };
+        orch.session.lock().await.history.push(old.clone());
+        orch.persist_message_to_jsonl(&old).await;
+        {
+            let call = orch.scope_api_session(
+                false,
+                OrchestratorApiClient::messages_create(
+                    adapter.as_ref(),
+                    "claude-sonnet-4-20250514",
+                    None,
+                    None,
+                    vec![old.clone()],
+                    vec![],
+                ),
+            );
+            tokio::pin!(call);
+            tokio::select! {
+                _ = transport.0.notified() => {},
+                result = &mut call => panic!("retry should remain pending: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("retry did not start"),
+            }
+            // Dropping the in-flight retry skips every post-call persistence seam.
+        }
+        let body = tokio::fs::read_to_string(&path).await.unwrap();
+        let rows: Vec<session::JsonlMessage> = body
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            rows.len(),
+            2,
+            "one assistant and its recovery attachment: {body}"
+        );
+        assert_eq!(rows[1].parent_uuid.as_deref(), Some(rows[0].uuid.as_str()));
+        let resumed = crate::resume::state_from_messages(
+            orch.session.lock().await.session_id.as_uuid(),
+            &rows,
+        );
+        assert!(resumed.thinking_signature_stripped);
+        assert!(!resumed.thinking_stripped_messages.is_empty());
+        let mut resumed_history = resumed.history.clone();
+        llm_client::model::thinking_signature::strip_marked_conversation_thinking(
+            &mut resumed_history,
+            &resumed.thinking_stripped_messages,
+        );
+        assert!(resumed_history.iter().all(|m| match m {
+            ConversationMessage::Assistant { content, .. } => !content
+                .iter()
+                .any(|b| matches!(b, protocol::ContentBlock::Thinking { .. })),
+            _ => true,
+        }));
+        orch.persist_thinking_signature_strip_latch().await;
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            body,
+            "post-call synchronization cannot duplicate a durable recovery marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_adapter_isolates_thinking_recovery_for_identical_parent_ids() {
+        use llm_client::thinking_scope::{scope_thinking_recovery, ThinkingRecoveryScope};
+        struct ScopedTransport {
+            seen: Mutex<Vec<ProviderRequest>>,
+        }
+        impl Transport for ScopedTransport {
+            fn execute<'a>(
+                &'a self,
+                request: &'a ProviderRequest,
+            ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+                Box::pin(async move {
+                    // Both sessions enter the transport before either resumes.
+                    tokio::task::yield_now().await;
+                    self.seen.lock().unwrap().push(request.clone());
+                    let body = &request.body_json;
+                    let rejecting = body["system"].to_string().contains("reject-session");
+                    let has_thinking = body["messages"].as_array().unwrap().iter().any(|m| {
+                        m["content"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|b| b["type"] == "thinking")
+                    });
+                    Ok(if rejecting && has_thinking {
+                        ProviderResponse::json(
+                            400,
+                            serde_json::json!({
+                                "type":"error", "error":{"type":"invalid_request_error",
+                                "message":"Invalid signature in thinking block"}
+                            }),
+                        )
+                    } else {
+                        ProviderResponse::json(200, ok_response_json())
+                    })
+                })
+            }
+            fn open_stream<'a>(
+                &'a self,
+                _: &'a ProviderRequest,
+            ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+                Box::pin(async {
+                    Err(LlmError::Transport {
+                        message: "unused".into(),
+                    })
+                })
+            }
+        }
+        // Use the same production adapter and service for both query owners.
+        let transport = Arc::new(ScopedTransport {
+            seen: Mutex::new(Vec::new()),
+        });
+        let adapter = make_adapter(transport.clone());
+        let old = ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![
+                protocol::ContentBlock::Thinking {
+                    thinking: "parent".into(),
+                    signature: Some("sig".into()),
+                },
+                protocol::ContentBlock::Text {
+                    text: "answer".into(),
+                },
+            ],
+            stop_reason: Some("end_turn".into()),
+        };
+        let a = ThinkingRecoveryScope::default();
+        let b = ThinkingRecoveryScope::default();
+        let (ra, rb) = tokio::join!(
+            scope_thinking_recovery(
+                a.clone(),
+                OrchestratorApiClient::messages_create(
+                    &adapter,
+                    "claude-sonnet-4-20250514",
+                    None,
+                    Some("reject-session"),
+                    vec![old.clone()],
+                    vec![]
+                )
+            ),
+            scope_thinking_recovery(
+                b.clone(),
+                OrchestratorApiClient::messages_create(
+                    &adapter,
+                    "claude-sonnet-4-20250514",
+                    None,
+                    Some("healthy-session"),
+                    vec![old.clone()],
+                    vec![]
+                )
+            ),
+        );
+        ra.unwrap();
+        rb.unwrap();
+        assert_eq!(a.messages().get(&old.id()), Some(&0));
+        assert!(b.messages().is_empty());
+        let fresh = ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![
+                protocol::ContentBlock::Thinking {
+                    thinking: "fresh".into(),
+                    signature: Some("fresh-sig".into()),
+                },
+                protocol::ContentBlock::Text {
+                    text: "fresh answer".into(),
+                },
+            ],
+            stop_reason: Some("end_turn".into()),
+        };
+        let history = vec![
+            old.clone(),
+            ConversationMessage::user(protocol::MessageId::new(), "continue".into()),
+            fresh.clone(),
+        ];
+        let (ra, rb) = tokio::join!(
+            scope_thinking_recovery(
+                a.clone(),
+                OrchestratorApiClient::messages_create(
+                    &adapter,
+                    "claude-sonnet-4-20250514",
+                    None,
+                    Some("next-a"),
+                    history.clone(),
+                    vec![]
+                )
+            ),
+            scope_thinking_recovery(
+                b.clone(),
+                OrchestratorApiClient::messages_create(
+                    &adapter,
+                    "claude-sonnet-4-20250514",
+                    None,
+                    Some("next-b"),
+                    history,
+                    vec![]
+                )
+            ),
+        );
+        ra.unwrap();
+        rb.unwrap();
+        for (label, expected) in [("next-a", 1), ("next-b", 2)] {
+            let seen = transport.seen.lock().unwrap();
+            let body = &seen
+                .iter()
+                .find(|r| r.body_json["system"].to_string().contains(label))
+                .unwrap()
+                .body_json;
+            let thinking = body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|m| m["content"].as_array().unwrap())
+                .filter(|b| b["type"] == "thinking")
+                .count();
+            assert_eq!(thinking, expected, "{label}: {body}");
+        }
+        assert!(!a.messages().contains_key(&fresh.id()));
+        assert!(b.messages().is_empty());
+        assert!(OrchestratorApiClient::thinking_stripped_messages(&adapter).is_empty());
     }
 
     #[test]

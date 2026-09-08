@@ -123,10 +123,96 @@ pub fn strip_thinking_blocks_for_signature_recovery(messages: &mut [Message]) ->
     changed
 }
 
+/// Apply Claude's CCt to identity-scoped historical blocks before normalization.
+/// Partial markers preserve the prefix before the selected thinking block.
+pub fn strip_marked_conversation_thinking(
+    messages: &mut [protocol::ConversationMessage],
+    marked: &std::collections::HashMap<protocol::MessageId, usize>,
+) {
+    use protocol::{ContentBlock as Block, ConversationMessage};
+    for message in messages {
+        let ConversationMessage::Assistant { id, content, .. } = message else {
+            continue;
+        };
+        let Some(&from) = marked.get(id) else {
+            continue;
+        };
+        let is_thinking = |block: &Block| {
+            matches!(
+                block,
+                Block::Thinking { .. } | Block::RedactedThinking { .. }
+            )
+        };
+        let Some(start) = content
+            .iter()
+            .enumerate()
+            .filter(|(_, block)| is_thinking(block))
+            .nth(from)
+            .map(|(index, _)| index)
+        else {
+            continue;
+        };
+        let mut index = 0;
+        content.retain(|block| {
+            let preserve_prefix = from > 0 && index < start;
+            index += 1;
+            preserve_prefix
+                || (!is_thinking(block)
+                    && !matches!(block, Block::Text { text } if text.trim().is_empty()))
+        });
+        if content.is_empty() {
+            content.push(Block::Text {
+                text: "[Thinking removed]".into(),
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ContentBlock;
+
+    #[test]
+    fn partial_marker_preserves_prefix_and_fresh_assistant_thinking() {
+        use protocol::{ContentBlock as Block, ConversationMessage, MessageId};
+        let old = MessageId::new();
+        let fresh = MessageId::new();
+        let thinking = || Block::Thinking {
+            thinking: "same".into(),
+            signature: Some("sig".into()),
+        };
+        let mut messages = vec![
+            ConversationMessage::Assistant {
+                id: old,
+                content: vec![
+                    thinking(),
+                    Block::Text { text: " ".into() },
+                    thinking(),
+                    Block::Text { text: "\n".into() },
+                ],
+                stop_reason: None,
+            },
+            ConversationMessage::Assistant {
+                id: fresh,
+                content: vec![thinking()],
+                stop_reason: None,
+            },
+        ];
+        strip_marked_conversation_thinking(&mut messages, &[(old, 1)].into_iter().collect());
+        match &messages[0] {
+            ConversationMessage::Assistant { content, .. } => {
+                assert_eq!(content, &vec![thinking(), Block::Text { text: " ".into() }])
+            }
+            _ => unreachable!(),
+        }
+        match &messages[1] {
+            ConversationMessage::Assistant { content, .. } => {
+                assert_eq!(content, &vec![thinking()])
+            }
+            _ => unreachable!(),
+        }
+    }
 
     fn assistant(content: Vec<ContentBlock>) -> Message {
         Message {

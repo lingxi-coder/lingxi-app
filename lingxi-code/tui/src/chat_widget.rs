@@ -298,6 +298,8 @@ fn is_live_turn_event(event: &TurnEvent) -> bool {
     matches!(
         event,
         TurnEvent::TextDelta(_)
+            | TurnEvent::MessageIdentity(_)
+            | TurnEvent::MessageRetracted(_)
             | TurnEvent::ThinkingDelta(_)
             | TurnEvent::ToolUseStart { .. }
             | TurnEvent::ToolHeartbeat { .. }
@@ -328,6 +330,8 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         | TurnEvent::SystemNotice { .. }
         | TurnEvent::BashOutput { .. }
         | TurnEvent::CompactionCompleted { .. }
+        | TurnEvent::MessageIdentity(_)
+        | TurnEvent::MessageRetracted(_)
         | TurnEvent::TurnEnded(_) => FocusRefreshKind::Full,
         TurnEvent::TurnStarted
         | TurnEvent::TurnStartedWithCancel(_)
@@ -1057,6 +1061,10 @@ impl ChatWidget {
         self.transcript.reset_terminal_commit();
     }
 
+    pub(crate) fn take_terminal_replay_required(&mut self) -> bool {
+        self.transcript.take_terminal_replay_required()
+    }
+
     /// Tick hook: flush a DUE non-bracketed paste burst (held first char or
     /// completed burst). The app calls this once per UI tick; a burst-pasted
     /// image path routes through the normal pane-outcome mapping (it becomes
@@ -1267,8 +1275,17 @@ impl ChatWidget {
                 // discarded if it's the empty placeholder) before the new
                 // streaming reply opens.
                 self.flush_or_discard_active();
+                self.transcript.start_assistant_response();
                 self.transcript
                     .set_active(Box::new(AssistantTextCell::new(String::new())));
+            }
+            TurnEvent::MessageIdentity(id) => {
+                self.flush_or_discard_active();
+                self.transcript.identify_assistant_response(id);
+            }
+            TurnEvent::MessageRetracted(id) => {
+                self.transcript.retract_assistant_response(id);
+                self.partial_assistant_text = self.transcript.current_turn_assistant_text();
             }
             TurnEvent::TextDelta(delta) => {
                 self.finalize_collapse_group();

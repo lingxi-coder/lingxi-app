@@ -3865,6 +3865,14 @@ impl hooks::executor::BuiltinHookHandler for RecordingStopContextHook {
         ctx: &hooks::registry::HookContext,
     ) -> hooks::response::HookResult {
         if matches!(event, hooks::events::HookEvent::SubagentStop { .. }) {
+            let live = ctx
+                .prompt_transcript
+                .as_ref()
+                .expect("worker Stop must carry live history");
+            assert!(live.messages.iter().any(|message| matches!(message,
+                ConversationMessage::User { content, .. } if content.iter().any(|block| matches!(block, protocol::ContentBlock::Text { text } if text == "go")))));
+            assert!(live.messages.iter().any(|message| matches!(message,
+                ConversationMessage::Assistant { content, .. } if content.iter().any(|block| matches!(block, protocol::ContentBlock::Text { text } if text == "done")))));
             self.seen
                 .lock()
                 .unwrap()

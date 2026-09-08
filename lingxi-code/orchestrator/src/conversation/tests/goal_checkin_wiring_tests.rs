@@ -22,6 +22,7 @@ fn orch() -> ConversationOrchestrator {
 
 fn task(id: &str, kind: &str, agent_type: Option<&str>) -> hooks::HookBackgroundTask {
     hooks::HookBackgroundTask {
+        is_idle: false,
         id: id.into(),
         r#type: kind.into(),
         status: "running".into(),
@@ -273,4 +274,15 @@ async fn idle_loop_exit_allows_a_new_deferral_stretch_to_rearm() {
             > second_generation,
         "a new stretch should arm a fresh idle loop"
     );
+}
+
+#[tokio::test]
+async fn an_idle_teammate_does_not_defer_but_a_working_teammate_does() {
+    let orch = orch();
+    set_goal(&orch, "ship it").await;
+    let mut teammate = task("t1", "teammate", None);
+    teammate.is_idle = true;
+    assert!(!orch.goal_checkin_pass(&[teammate.clone()]).await);
+    teammate.is_idle = false;
+    assert!(orch.goal_checkin_pass(&[teammate]).await);
 }

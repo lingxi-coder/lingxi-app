@@ -327,8 +327,8 @@ mod tests {
                 response_char_count: 0,
                 last_request_id: None,
                 cumulative_usage: SubagentUsage::default(),
-                        usage_complete: true,
-}))),
+                usage_complete: true,
+            }))),
         });
         let exec = AgentExecutor::new(Some(spawner.clone()), Duration::from_secs(5));
         let hook = make_agent_hook();

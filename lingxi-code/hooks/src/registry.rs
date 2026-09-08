@@ -20,6 +20,8 @@ use telemetry::otel::SerializedTraceContext;
 /// having to populate everything.
 #[derive(Clone, Default)]
 pub struct HookContext {
+    /// Live history for prompt evaluation; never serialized into command/HTTP input.
+    pub prompt_transcript: Option<crate::PromptHookTranscript>,
     /// Session this event belongs to.
     pub session_id: SessionId,
     /// Active agent at the moment of dispatch (`None` for engine-global

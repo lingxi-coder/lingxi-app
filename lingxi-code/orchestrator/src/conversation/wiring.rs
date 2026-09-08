@@ -116,6 +116,10 @@ impl ConversationOrchestrator {
             coordinator_mode: None,
             #[cfg(test)]
             coordinator_simple_mode_override: None,
+            #[cfg(test)]
+            coordinator_pool_override: None,
+            tool_pool_denied_names: std::sync::RwLock::new(Vec::new()),
+            main_agent_tool_names: std::sync::RwLock::new(None),
         }
     }
 
@@ -505,10 +509,13 @@ impl ConversationOrchestrator {
             .unwrap_or_else(Self::coordinator_simple_mode);
         #[cfg(not(test))]
         let simple_mode = Self::coordinator_simple_mode();
+        self.is_coordinator_mode_enabled() && !simple_mode
+    }
+
+    pub(crate) fn is_coordinator_mode_enabled(&self) -> bool {
         self.coordinator_mode
             .as_ref()
             .is_some_and(|mode| mode.is_enabled())
-            && !simple_mode
     }
 
     fn coordinator_simple_mode() -> bool {
@@ -526,20 +533,69 @@ impl ConversationOrchestrator {
         self
     }
 
-    /// Coordinator prompt's "Your Tools", plus host user/plan controls.
-    /// Registry enablement still applies; this never registers or enables tools.
-    pub(crate) fn is_coordinator_pool_tool(name: &str) -> bool {
-        matches!(
-            name,
-            "Agent"
-                | "SendMessage"
-                | "TaskStop"
-                | "AskUserQuestion"
-                | "EnterPlanMode"
-                | "ExitPlanMode"
-                | "subscribe_pr_activity"
-                | "unsubscribe_pr_activity"
+    #[cfg(test)]
+    pub(crate) fn with_coordinator_pool_for_test(mut self, brief: bool, extra: &[&str]) -> Self {
+        self.coordinator_pool_override = Some((brief, extra.iter().map(|s| (*s).into()).collect()));
+        self
+    }
+
+    /// 2.1.263 `Idr`: qbt base, PR subscriptions, MCP comms, brief and extra tools.
+    /// Unlike the Ldt suffix, pool assembly does not bypass filtering in simple mode.
+    pub(crate) fn is_coordinator_pool_tool(&self, tool: &dyn tool_api::Tool) -> bool {
+        let name = tool.name();
+        if crate::streaming_executor::is_coordinator_redirect_excluded(name)
+            || name.ends_with("subscribe_pr_activity")
+            || name.ends_with("unsubscribe_pr_activity")
+            || tool.mcp_role() == Some("comms")
+        {
+            return true;
+        }
+        #[cfg(test)]
+        if let Some((brief, extra)) = &self.coordinator_pool_override {
+            return Self::coordinator_optional_tool(tool, *brief, extra.iter().map(String::as_str));
+        }
+        let extra = std::env::var("LINGXI_COORDINATOR_EXTRA_TOOLS")
+            .or_else(|_| std::env::var("CLAUDE_CODE_COORDINATOR_EXTRA_TOOLS"))
+            .unwrap_or_default();
+        Self::coordinator_optional_tool(
+            tool,
+            platform_api::session_flags::brief_mode_enabled(),
+            extra.split(',').map(str::trim).filter(|s| !s.is_empty()),
         )
+    }
+
+    fn coordinator_optional_tool<'a>(
+        tool: &dyn tool_api::Tool,
+        brief: bool,
+        extra: impl Iterator<Item = &'a str>,
+    ) -> bool {
+        (brief && matches!(tool.name(), "SendUserMessage" | "SendUserFile"))
+            || extra.into_iter().any(|name| {
+                name == tool.name()
+                    || Some(name) == tool.underlying_v1_tool_name()
+                    || Some(name) == tool.family_parent_tool_name()
+            })
+    }
+
+    pub(crate) fn is_tool_pool_denied(&self, tool: &dyn tool_api::Tool) -> bool {
+        let denied = self
+            .tool_pool_denied_names
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        denied.iter().any(|rule| {
+            std::iter::once(tool.name())
+                .chain(tool.underlying_v1_tool_name())
+                .chain(tool.family_parent_tool_name().filter(|name| {
+                    self.tools.find_registered(name).is_some_and(|parent| {
+                        parent.is_enabled(&tool_api::tool_trait::ToolStaticContext {
+                            main_loop_model: self.tools.main_loop_model(),
+                            ..Default::default()
+                        })
+                    })
+                }))
+                .chain(tool.aliases().iter().copied())
+                .any(|name| permission::tool_wide_name_matches(rule, name))
+        })
     }
 
     /// Look up a tool the main loop may actually dispatch.
@@ -554,7 +610,23 @@ impl ConversationOrchestrator {
         name: &str,
     ) -> Option<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
         let tool = self.tools.find_by_name(name)?;
-        if self.is_coordinator_session() && !Self::is_coordinator_pool_tool(tool.name()) {
+        if self
+            .main_agent_tool_names
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|names| !names.contains(tool.name()))
+        {
+            return None;
+        }
+        let ctx = tool_api::tool_trait::ToolStaticContext {
+            main_loop_model: self.tools.main_loop_model(),
+            ..Default::default()
+        };
+        if !tool.is_enabled(&ctx)
+            || self.is_tool_pool_denied(tool.as_ref())
+            || (self.is_coordinator_mode_enabled() && !self.is_coordinator_pool_tool(tool.as_ref()))
+        {
             return None;
         }
         Some(tool)

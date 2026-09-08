@@ -1606,6 +1606,20 @@ fn match_null_redirect(b: &[u8], p: usize) -> Option<usize> {
     Some(nul_start)
 }
 
+/// Whether the FIRST word of the FIRST statement is `sleep`.
+///
+/// Port of claude-code `$es` (2.1.263 `src_160988549.js` @4326943) over
+/// `Des = ["sleep"]`: an empty command, or one whose first segment has no first
+/// word, is auto-backgroundable (both of `$es`'s early `return !0`s). This is
+/// deliberately NOT the sleep-block predicate, which additionally requires a
+/// standalone `sleep N` with N above a threshold.
+fn first_statement_is_sleep(command: &str) -> bool {
+    permission::shell_command::split_command(command)
+        .first()
+        .and_then(|segment| segment.trim().split_whitespace().next().map(str::to_string))
+        .is_some_and(|word| word == "sleep")
+}
+
 /// Settles a background shell's task record when its child is reaped.
 ///
 /// Port of claude-code `Ger` (2.1.263 `src_160988549.js` @4284565): the shell's
@@ -2424,10 +2438,21 @@ impl Tool for BashTool {
         // it with the faithful `VF` (numeric-string coercion) + `H5a` (use iff a
         // finite number > 0, else default) logic — no upper clamp/rejection (#4/#5).
         let timeout_ms = resolve_timeout_ms(&input);
+        // claude-code gates the explicit-background branch on the same
+        // background-tasks-disabled flag that removes the parameter from the
+        // schema (`if (Oe === !0 && !It)`), so a call that carries the
+        // parameter anyway still runs in the foreground.
         let run_bg = input
             .get("run_in_background")
             .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            && !crate::prompt::background_tasks_disabled();
+        // Whether exceeding the timeout may move this command to the background
+        // rather than kill it (claude-code `dn = !Dl() && $es(command)`). A
+        // command whose first statement starts with `sleep` is excluded: the
+        // point of a sleep is to finish, so backgrounding it just hides it.
+        let can_auto_background =
+            !crate::prompt::background_tasks_disabled() && !first_statement_is_sleep(&cmd_str);
         // BASH.5: optional `dangerouslyDisableSandbox` override.
         let dangerously_disable_sandbox = input
             .get("dangerouslyDisableSandbox")
@@ -2736,7 +2761,11 @@ impl Tool for BashTool {
             timeout: Some(Duration::from_millis(timeout_ms)),
             stdin: None,
         };
-        let sandboxed = self.ctx.sandbox.bypass_with_audit(pcmd, "bash_tool_call");
+        let sandboxed = self
+            .ctx
+            .sandbox
+            .bypass_with_audit(pcmd, "bash_tool_call")
+            .with_auto_background_on_timeout(can_auto_background);
         // A foreground command can still be moved to the background when it
         // exceeds its timeout (claude-code 2.1.210 `timedOutAfterMs`), and the
         // id it is then given must be a registry id for the same reason the
@@ -5414,6 +5443,93 @@ mod tests {
             registry.discarded.lock().unwrap().as_slice(),
             ["b1a2b3c4d"],
             "the unused output file must be discarded, not left behind",
+        );
+    }
+
+    #[test]
+    fn first_statement_is_sleep_matches_the_oracle_predicate() {
+        // `$es`: only the FIRST word of the FIRST statement counts.
+        assert!(first_statement_is_sleep("sleep 30"));
+        assert!(first_statement_is_sleep("  sleep 5 && echo done"));
+        assert!(first_statement_is_sleep("sleep 0.5"));
+        // A sleep that is not the leading statement does not disqualify.
+        assert!(!first_statement_is_sleep("echo hi && sleep 30"));
+        assert!(!first_statement_is_sleep("cargo build"));
+        // Unlike the sleep-BLOCK predicate there is no duration threshold and no
+        // standalone requirement, so a short or trailing-argument sleep counts.
+        assert!(first_statement_is_sleep("sleep 1"));
+        // Both of `$es`'s early returns: nothing to inspect means eligible.
+        assert!(!first_statement_is_sleep(""));
+        assert!(!first_statement_is_sleep("   "));
+    }
+
+    #[tokio::test]
+    async fn a_sleep_command_is_not_eligible_for_auto_background() {
+        // claude-code computes `dn = !Dl() && $es(command)` and hands it to the
+        // shell as `shouldAutoBackground`; with it false the deadline kills the
+        // child instead of backgrounding it.
+        let ctx = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+
+        struct FlagRecorder {
+            seen: Arc<std::sync::Mutex<Vec<bool>>>,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for FlagRecorder {
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                cmd: &SandboxedCommand,
+                _max: Option<usize>,
+            ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+                self.seen.lock().unwrap().push(cmd.auto_background_on_timeout());
+                Ok(platform_api::ForegroundRunResult {
+                    outcome: platform_api::ForegroundOutcome::Completed(ProcessOutput {
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                        timed_out: false,
+                    }),
+                    output_file: None,
+                })
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let mut sleep_ctx = ctx;
+        sleep_ctx.process = Arc::new(FlagRecorder {
+            seen: recorded.clone(),
+        });
+        let tool = BashTool::new(sleep_ctx.clone());
+        tool.call(json!({"command": "sleep 30"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        tool.call(json!({"command": "cargo build"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+
+        assert_eq!(
+            recorded.lock().unwrap().as_slice(),
+            [false, true],
+            "a sleep-led command must not be auto-backgroundable; an ordinary one must be",
         );
     }
 

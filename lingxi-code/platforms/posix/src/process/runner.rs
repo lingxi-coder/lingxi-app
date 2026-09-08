@@ -192,6 +192,11 @@ impl Drop for StreamingProcessGroupGuard {
 }
 
 const STDERR_FILE_PREFIX: &[u8] = b"[stderr] ";
+/// Exit code reported for a command killed at its deadline because it was not
+/// eligible to be moved to the background (claude-code `fAt = 143`, the shell's
+/// SIGTERM code).
+const TIMEOUT_KILL_EXIT_CODE: i32 = 143;
+
 const TASK_OUTPUT_COLLISION_RETRIES: usize = 16;
 
 /// Mirror the oracle's `TaskOutput` transition: stdout/stderr remain separate
@@ -1008,6 +1013,25 @@ impl ProcessRunner for PosixProcess {
                 status,
                 framed_output.and_then(FramedOutputCapture::into_spilled),
             );
+        }
+
+        // A command the caller marked non-auto-backgroundable is KILLED at its
+        // deadline instead (claude-code `Jje::#T`: with `shouldAutoBackground`
+        // off the timer runs `#b(143)` rather than `background()`). The partial
+        // output collected so far still comes back, with `timed_out` set, which
+        // is the interrupted-result shape the tool layer already renders.
+        if !cmd.auto_background_on_timeout() {
+            let _ = kill_tree_force(spawned_pid);
+            let _ = child.wait().await;
+            return Ok(platform_api::ForegroundRunResult {
+                outcome: platform_api::ForegroundOutcome::Completed(ProcessOutput {
+                    stdout: String::from_utf8_lossy(&out_buf).into_owned(),
+                    stderr: String::from_utf8_lossy(&err_buf).into_owned(),
+                    exit_code: TIMEOUT_KILL_EXIT_CODE,
+                    timed_out: true,
+                }),
+                output_file: None,
+            });
         }
 
         // ===== Timeout → move to background =====

@@ -232,6 +232,7 @@ pub struct SandboxedCommand {
     tag: SandboxedTag,
     plan: Option<BackendPlanHandle>,
     background: Option<crate::process::BackgroundTaskBinding>,
+    auto_background_on_timeout: bool,
 }
 
 /// Provenance of a [`SandboxedCommand`].
@@ -265,6 +266,7 @@ impl SandboxedCommand {
             tag,
             plan: None,
             background: None,
+            auto_background_on_timeout: true,
         }
     }
 
@@ -283,6 +285,7 @@ impl SandboxedCommand {
             tag,
             plan: Some(plan),
             background: None,
+            auto_background_on_timeout: true,
         }
     }
 
@@ -306,6 +309,27 @@ impl SandboxedCommand {
     #[must_use]
     pub fn background_task(&self) -> Option<&crate::process::BackgroundTaskBinding> {
         self.background.as_ref()
+    }
+
+    /// Declare whether exceeding the timeout may move this command to the
+    /// background instead of killing it.
+    ///
+    /// claude-code decides this per command before spawning
+    /// (`dn = !Dl() && $es(command)`) and hands it to the shell as
+    /// `shouldAutoBackground`; with it false the timeout kills the child
+    /// (`Jje`'s `static #T`: `if (#h && #d) #d(background) else #b(143)`).
+    /// Defaults to `true`, which is the behaviour every caller had before this
+    /// existed.
+    #[must_use]
+    pub fn with_auto_background_on_timeout(mut self, allowed: bool) -> Self {
+        self.auto_background_on_timeout = allowed;
+        self
+    }
+
+    /// Whether a timeout may background this command rather than kill it.
+    #[must_use]
+    pub fn auto_background_on_timeout(&self) -> bool {
+        self.auto_background_on_timeout
     }
 
     /// Access the underlying [`ProcessCommand`] (for the runner to actually

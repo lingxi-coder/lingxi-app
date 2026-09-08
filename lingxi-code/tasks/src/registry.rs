@@ -2444,6 +2444,14 @@ impl TeamSpawnSeam for TaskRegistry {
     /// the pump's "stop" signal. A handler that does not support messages maps
     /// to [`TeamSpawnError::Unsupported`]; anything else is `Internal`.
     async fn send_message(&self, task_id: &str, message: String) -> Result<(), TeamSpawnError> {
+        // Addressing parity with the other task surfaces: an agent is
+        // registered under its task id AND its aliases (the agent id, its name,
+        // and `name@team`), and `get` / `kill` / `output` all resolve those
+        // aliases first. This one did not, so an id the model was handed — the
+        // `<task-id>` of a completion notification, or a name from `TaskList` —
+        // resolved for `TaskStop` and `TaskOutput` but came back `Terminated`
+        // here, which reads to the model as "that agent is gone".
+        let task_id = &self.canonical_or_raw(task_id).await;
         // Resolve the owning handler via the spawned-id index (mirrors `kill`'s
         // dispatch). An unknown id ⇒ the teammate is gone ⇒ `Terminated`.
         let task_type = self

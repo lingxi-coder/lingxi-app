@@ -999,6 +999,53 @@ async fn seam_send_message_routes_to_recording_handler() {
 }
 
 #[tokio::test]
+async fn seam_send_message_accepts_the_same_aliases_as_stop_and_output() {
+    // A spawned agent is addressable by its task id AND its aliases: the agent
+    // id, its name, and `name@team`. `get`/`kill`/`output` all resolve those,
+    // so the model can stop or read an agent by any of them — but SendMessage
+    // looked the raw string up in the spawned-id index and answered
+    // `Terminated`, which reads as "that agent is gone" for an agent that is
+    // very much alive.
+    use platform_api::team_spawn::TeamSpawnSeam;
+
+    let (_d, mut registry) = make_registry();
+    let handler = MsgRecordingHandler::new(TaskType::InProcessTeammate, "tmsgid2");
+    registry.register_handler(TaskType::InProcessTeammate, handler.clone());
+
+    let agent_id = protocol::AgentId::new();
+    let seam: &dyn TeamSpawnSeam = &registry;
+    let task_id = seam
+        .spawn_teammate(agent_id, "buddy".into(), "alpha".into(), "a teammate".into())
+        .await
+        .unwrap();
+
+    for alias in [
+        task_id.clone(),
+        agent_id.to_string(),
+        "buddy".to_string(),
+        "buddy@alpha".to_string(),
+    ] {
+        seam.send_message(&alias, format!("msg via {alias}"))
+            .await
+            .unwrap_or_else(|e| panic!("SendMessage must accept the alias {alias}: {e:?}"));
+    }
+
+    // Every delivery reached the handler under the CANONICAL task id.
+    let received = handler.received();
+    assert_eq!(received.len(), 4, "one delivery per alias, got {received:?}");
+    assert!(
+        received.iter().all(|(id, _)| id == &task_id),
+        "the handler must always see the canonical id, got {received:?}",
+    );
+
+    // An id that is neither the task nor any alias still reports Terminated.
+    assert!(
+        seam.send_message("nope", "x".into()).await.is_err(),
+        "an unknown id must still be Terminated",
+    );
+}
+
+#[tokio::test]
 async fn seam_send_message_unknown_task_is_terminated() {
     use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 

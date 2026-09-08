@@ -113,6 +113,7 @@ impl ConversationOrchestrator {
             cancel_reason: std::sync::OnceLock::new(),
             end_conversation_slot: None,
             loop_wakeup_armed_slot: None,
+            coordinator_mode: None,
         }
     }
 
@@ -479,6 +480,32 @@ impl ConversationOrchestrator {
     ) -> Self {
         self.loop_wakeup_armed_slot = Some(slot);
         self
+    }
+
+    /// Wire the live coordinator-mode flag (`Ci()`). Unwired sessions never
+    /// take the unknown-tool coordinator suffix.
+    #[must_use]
+    pub fn with_coordinator_mode(
+        mut self,
+        mode: std::sync::Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>,
+    ) -> Self {
+        self.coordinator_mode = Some(mode);
+        self
+    }
+
+    /// Whether this session is currently in coordinator mode and not simple
+    /// mode (`Ci() && !CLAUDE_CODE_SIMPLE`).
+    #[must_use]
+    pub(crate) fn is_coordinator_session(&self) -> bool {
+        self.coordinator_mode
+            .as_ref()
+            .is_some_and(|mode| mode.is_enabled())
+            && !platform_api::env::is_env_truthy(
+                std::env::var("LINGXI_SIMPLE")
+                    .or_else(|_| std::env::var("CLAUDE_CODE_SIMPLE"))
+                    .ok()
+                    .as_deref(),
+            )
     }
 
     /// Whether a memory prefetcher has been wired via

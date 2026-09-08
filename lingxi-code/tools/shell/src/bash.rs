@@ -722,12 +722,12 @@ fn bash_model_content(
     parts.join("\n")
 }
 
-/// Build the BashTool result `data` — claude-code 2.1.191 `BashTool` outputSchema
+/// Build the BashTool result `data` — claude-code 2.1.263 `BashTool` outputSchema
 /// (pure metadata; the model-facing render rides on `ToolCallResult.model_content`,
 /// NOT inside `data`). Field order mirrors the binary's `return{data:{…}}`
 /// construction (`preserve_order` is on): `stdout, stderr, interrupted, isImage,
 /// returnCodeInterpretation?, noOutputExpected, backgroundTaskId?,
-/// outputTaskId?, outputFilePath?, outputFileSize?`. Every `?`-field is
+/// persistedOutputPath?, persistedOutputSize?`. Every `?`-field is
 /// omitted when absent, matching the binary's `undefined` values that
 /// `JSON.stringify` drops. The
 /// telemetry-only fields LingXi used to carry here (`exit_code`, `is_error`,
@@ -735,9 +735,12 @@ fn bash_model_content(
 /// `tengu`/`BASH_COMPLETED` analytics payload only.
 ///
 /// `output_file` is set only when a completed foreground process spilled to its
-/// rooted task-output file. Its three fields are emitted together, immediately
-/// after `backgroundTaskId` (when present), so a completed auto-backgrounded
-/// task can clear `backgroundTaskId` while retaining the output identity.
+/// rooted task-output file. 2.1.263 maps that identity onto
+/// `persistedOutputPath` / `persistedOutputSize` (the 2.1.191
+/// `outputTaskId`/`outputFilePath`/`outputFileSize` trio is gone from the
+/// schema). The two fields are emitted together, immediately after
+/// `backgroundTaskId` (when present), so a completed auto-backgrounded task
+/// can clear `backgroundTaskId` while retaining the output identity.
 /// `timed_out_after_ms` is set only when the command hit its timeout and was
 /// auto-moved to the background (claude-code 2.1.210+ `timedOutAfterMs`); it
 /// carries the exceeded timeout in ms and follows the output identity fields.
@@ -782,15 +785,11 @@ fn bash_result_data(
     }
     if let Some(output_file) = output_file {
         m.insert(
-            "outputTaskId".into(),
-            serde_json::Value::String(output_file.task_id.clone()),
-        );
-        m.insert(
-            "outputFilePath".into(),
+            "persistedOutputPath".into(),
             serde_json::Value::String(output_file.path.clone()),
         );
         m.insert(
-            "outputFileSize".into(),
+            "persistedOutputSize".into(),
             serde_json::Value::Number(output_file.size.into()),
         );
     }
@@ -5180,11 +5179,13 @@ mod tests {
             "stdout must reach the result mapper verbatim"
         );
         assert!(res.data.get("outputTaskId").is_none());
+        assert!(res.data.get("outputFilePath").is_none());
+        assert!(res.data.get("persistedOutputPath").is_none());
     }
 
     /// A completed task that was auto-backgrounded briefly retains its rooted
     /// output identity after the background id is cleared. The result map keeps
-    /// the three optional fields together and in stable insertion order.
+    /// the 2.1.263 persist fields together and in stable insertion order.
     #[tokio::test]
     async fn completed_auto_background_keeps_output_identity_without_background_id() {
         struct SpilledStub;
@@ -5242,12 +5243,13 @@ mod tests {
             .expect("spilled completion");
 
         assert!(result.data.get("backgroundTaskId").is_none());
-        assert_eq!(result.data["outputTaskId"], "local_bash_spilled");
+        assert!(result.data.get("outputTaskId").is_none());
+        assert!(result.data.get("outputFilePath").is_none());
         assert_eq!(
-            result.data["outputFilePath"],
+            result.data["persistedOutputPath"],
             "/tmp/lingxi-task-output/local_bash_spilled.out"
         );
-        assert_eq!(result.data["outputFileSize"], 30_001);
+        assert_eq!(result.data["persistedOutputSize"], 30_001);
         let keys = result
             .data
             .as_object()
@@ -5263,9 +5265,8 @@ mod tests {
                 "interrupted",
                 "isImage",
                 "noOutputExpected",
-                "outputTaskId",
-                "outputFilePath",
-                "outputFileSize",
+                "persistedOutputPath",
+                "persistedOutputSize",
             ]
         );
     }

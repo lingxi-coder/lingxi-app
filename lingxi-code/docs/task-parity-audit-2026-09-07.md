@@ -69,7 +69,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | `bg-04` | confirmed | P1 | high | No foreground arming (U6t after 2 s) ⇒ Ctrl+B, end-of-turn background-all, turn-abort and deliver-message backgrounding are all absent; ctrl+b keybinding is declared but inert |
 | `bg-05` | confirmed **[fixed]** | P1 | medium | Timeout→background is unconditional in the port; oracle gates it on background-tasks-enabled, first-segment ≠ `sleep`, and CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS |
 | `bg-06` | confirmed | P2 | medium | Explicit-background spawn runs in the workspace root instead of the persistent shell cwd |
-| `bg-07` | confirmed | P2 | medium | Result data carries 2.1.191-era `outputTaskId/outputFilePath/outputFileSize`; 2.1.263 has `persistedOutputPath/persistedOutputSize` (+ `backgroundCwdHint`) and rewrites stdout via Vpe |
+| `bg-07` | confirmed **[fixed]** | P2 | medium | Result data carries 2.1.191-era `outputTaskId/outputFilePath/outputFileSize`; 2.1.263 has `persistedOutputPath/persistedOutputSize` (+ `backgroundCwdHint`) and rewrites stdout via Vpe |
 | `bg-09` | confirmed | P2 | medium | Stall watchdog (`Her`: 45 s no-growth + interactive-prompt regex → task-notification) and memory-pressure reap (`jer`) are not ported |
 | `bg-08` | confirmed | P3 | medium | Background telemetry events are renamed/missing: port emits `tengu_tool_bash_timeout`; oracle emits explicit/timeout/turn-abort `_backgrounded` events and `was_backgrounded` |
 | `bg-10` | keep | P3 | high | Mobile ShellMobileTool has no run_in_background surface (accepted mobile divergence) — keep, but route any future mobile background path through the registry |

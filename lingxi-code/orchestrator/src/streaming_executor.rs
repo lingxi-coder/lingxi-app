@@ -8,7 +8,7 @@
 use crate::conversation::ConversationOrchestrator;
 use futures::{stream::FuturesUnordered, StreamExt};
 use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
-use tool_api::tool_trait::{Tool as _, ToolStaticContext};
+use tool_api::tool_trait::ToolStaticContext;
 use tool_api::ContextModifier;
 
 /// claude-code `REJECT_MESSAGE` (utils/messages.ts:212). The user-interrupted
@@ -311,11 +311,7 @@ impl<'a> StreamingToolExecutor<'a> {
     ) {
         match self.orch.tools.find_by_name(&name) {
             None => {
-                let is_subagent = {
-                    let src = crate::config::sanitize_query_source(&self.orch.config.query_source);
-                    src.starts_with("agent") || src == "subagent"
-                };
-                let suffix = unknown_tool_suffix(&name, &self.orch.tools, is_subagent);
+                let suffix = unknown_tool_suffix_for(&name, self.orch);
                 let block = synthetic_unknown_tool(id.clone(), &name, provider_id.clone(), &suffix);
                 let post_tool_batch_calls =
                     vec![post_tool_batch_call_for_result(&id, &name, &input, &block)];
@@ -886,9 +882,13 @@ pub(crate) fn synthetic_unknown_tool(
 
 /// Claude Code 2.1.263 `Ldt` suffix after `No such tool available: ${name}`.
 /// Genuinely-unknown tools stay empty. Mapped arms that have substrate here:
-/// subagent-restricted `d1e`/`ct("external")`, Glob/Grep-via-shell (`Nte` +
-/// `qe`), pending-MCP `l5o`, MCP disconnected (`a5o` `disconnected`).
-/// Not ported: coordinator/`Y7e`, WebFetch/artifact, full-catalog disabled.
+/// subagent-restricted `d1e`/`ct("external")`, coordinator `Y7e`, catalog
+/// disabled, Glob/Grep-via-shell (`Nte` + `qe`), pending-MCP `l5o`, MCP
+/// disconnected (`a5o` `disconnected`).
+///
+/// WebFetch→Artifact is a carve-out. The WebFetch→`web-fetch` agent redirect
+/// needs the live roster (`pq`); that agent is gated off by default (`xgi()`),
+/// so a catalog-hidden WebFetch falls through to the disabled arm.
 ///
 /// `d1e` names resolved from 2.1.263 `src_160256736.js` `ct("external")`.
 /// `ltr` (spread into `ct`) is not fully named here; the listed tools are
@@ -911,16 +911,55 @@ const SUBAGENT_RESTRICTED_TOOLS: &[&str] = &[
     "EndConversation",
 ];
 
+/// Coordinator-owned tools (`qbt`). These stay on the coordinator and must
+/// not get the "run it from a worker" suffix.
+const COORDINATOR_OWN_TOOLS: &[&str] = &[
+    "Agent",
+    "TaskStop",
+    "SendMessage",
+    "Skill",
+    "ReadNotifications",
+    "ListAgents",
+    "Workflow",
+];
+
+#[must_use]
+pub(crate) fn unknown_tool_suffix_for(name: &str, orch: &ConversationOrchestrator) -> String {
+    let src = crate::config::sanitize_query_source(&orch.config.query_source);
+    let is_subagent = src.starts_with("agent") || src == "subagent";
+    unknown_tool_suffix(
+        name,
+        &orch.tools,
+        is_subagent,
+        orch.is_coordinator_session(),
+    )
+}
+
 #[must_use]
 pub(crate) fn unknown_tool_suffix(
     name: &str,
     tools: &tool_api::registry::ToolRegistry,
     is_subagent: bool,
+    is_coordinator: bool,
 ) -> String {
     if is_subagent && SUBAGENT_RESTRICTED_TOOLS.iter().any(|n| *n == name) {
         return format!(
             ". {name} is not available inside subagents. Complete the task with the tools provided and return findings to the orchestrator."
         );
+    }
+    let in_catalog = tools.find_registered(name).is_some();
+    if is_coordinator
+        && !is_subagent
+        && in_catalog
+        && tools.find_by_name("Agent").is_some()
+        && !COORDINATOR_OWN_TOOLS.iter().any(|n| *n == name)
+    {
+        return format!(
+            ". {name} is not available to you as the coordinator \u{2014} run it from a worker via the Agent tool instead."
+        );
+    }
+    if in_catalog {
+        return format!(". {name} is disabled for this session, in subagents as well as here.");
     }
     let shell = if tools.find_by_name("Bash").is_some() {
         "Bash"

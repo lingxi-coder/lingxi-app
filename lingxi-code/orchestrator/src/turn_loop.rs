@@ -2595,18 +2595,14 @@ const SCHEDULE_WAKEUP_TOOL_NAME: &str = "ScheduleWakeup";
 /// model-generation mitigation, so most models never take the branch and keep
 /// feeding the tool result back, exactly as before.
 fn lone_wakeup_ends_turn_model(model_id: &str) -> bool {
-    use platform_api::model_capabilities::{
-        has_capability, normalize_model_id, ModelCapability,
-    };
+    use platform_api::model_capabilities::{has_capability, normalize_model_id, ModelCapability};
     has_capability(model_id, ModelCapability::Fable5Mitigations)
         || normalize_model_id(model_id) == "claude-mythos-5"
 }
 
 /// PARITY the turn-loop branch that ends a turn on a lone `ScheduleWakeup`:
 /// `i("tengu_loop_dynamic_wakeup_ends_turn", {queryChainId, queryDepth})`.
-pub(crate) async fn emit_loop_dynamic_wakeup_ends_turn_telemetry(
-    orch: &ConversationOrchestrator,
-) {
+pub(crate) async fn emit_loop_dynamic_wakeup_ends_turn_telemetry(orch: &ConversationOrchestrator) {
     telemetry::emit_loop_dynamic_wakeup_ends_turn(&orch.query_chain_id, 0);
     let Some(bus) = orch.model_runtime.analytics_bus.as_ref() else {
         return;
@@ -3378,22 +3374,39 @@ struct PersistenceOutcome {
     replaced: bool,
 }
 
-/// Read the process-output spill identity emitted by the Bash tool. The three
-/// fields are an all-or-nothing contract: accepting a partial object would
-/// make the persistence layer fall back to a path that cannot be tied to the
-/// task registry's stable identity.
+/// Read the process-output spill identity emitted by the Bash tool.
+///
+/// 2.1.263 result data carries `persistedOutputPath` / `persistedOutputSize`.
+/// Older in-flight results still used `outputTaskId` / `outputFilePath` /
+/// `outputFileSize`; both shapes are accepted so a mid-upgrade transcript
+/// keeps the same file. A partial object is rejected so the persistence
+/// layer cannot fall back to a path that cannot be tied to the spill.
 fn process_output_file_from_data(
     data: &serde_json::Value,
 ) -> Option<platform_api::ProcessOutputFile> {
     let object = data.as_object()?;
-    let task_id = object.get("outputTaskId")?.as_str()?;
-    let path = object.get("outputFilePath")?.as_str()?;
-    let size = object.get("outputFileSize")?.as_u64()?;
+    let path = object
+        .get("persistedOutputPath")
+        .or_else(|| object.get("outputFilePath"))?
+        .as_str()?;
+    let size = object
+        .get("persistedOutputSize")
+        .or_else(|| object.get("outputFileSize"))?
+        .as_u64()?;
+    let task_id = object
+        .get("outputTaskId")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            std::path::Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+        })?;
     if task_id.is_empty() || path.is_empty() {
         return None;
     }
     Some(platform_api::ProcessOutputFile {
-        task_id: task_id.to_string(),
+        task_id,
         path: path.to_string(),
         size,
     })
@@ -3694,12 +3707,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         let Some(tool_handle) = orch.tools.find_by_name(name) else {
             // Shared builder so this parity-critical string lives in one place
             // (also used by the streaming executor's add_tool).
-            let is_subagent = {
-                let src = crate::config::sanitize_query_source(&orch.config.query_source);
-                src.starts_with("agent") || src == "subagent"
-            };
-            let suffix =
-                crate::streaming_executor::unknown_tool_suffix(name, &orch.tools, is_subagent);
+            let suffix = crate::streaming_executor::unknown_tool_suffix_for(name, orch);
             let result_block = crate::streaming_executor::synthetic_unknown_tool(
                 tool_use_id.clone(),
                 name,
@@ -8374,11 +8382,11 @@ mod tool_result_persistence_wiring_tests {
         std::fs::create_dir_all(output_path.parent().expect("task dir")).expect("task dir");
         std::fs::write(&output_path, "x".repeat(5_000)).expect("task output");
         let data = json!({
-            "outputTaskId": "local_bash_spilled",
-            "outputFilePath": output_path,
-            "outputFileSize": 5_000,
+            "persistedOutputPath": output_path,
+            "persistedOutputSize": 5_000,
         });
         let output_file = super::process_output_file_from_data(&data).expect("all metadata");
+        assert_eq!(output_file.task_id, "local_bash_spilled");
         let id = ToolUseId::new();
         let outcome = super::apply_tool_result_persistence_with_process_output(
             &orch,
@@ -8399,6 +8407,28 @@ mod tool_result_persistence_wiring_tests {
             !tmp.path().join("projects").exists(),
             "the generic tool-use persistence path must not receive a duplicate"
         );
+    }
+
+    #[test]
+    fn process_output_file_from_data_accepts_legacy_and_2_1_263_names() {
+        let legacy = json!({
+            "outputTaskId": "legacy-id",
+            "outputFilePath": "/tmp/legacy.out",
+            "outputFileSize": 12,
+        });
+        let file = super::process_output_file_from_data(&legacy).expect("legacy");
+        assert_eq!(file.task_id, "legacy-id");
+        assert_eq!(file.path, "/tmp/legacy.out");
+        assert_eq!(file.size, 12);
+
+        let current = json!({
+            "persistedOutputPath": "/tmp/current.out",
+            "persistedOutputSize": 34,
+        });
+        let file = super::process_output_file_from_data(&current).expect("current");
+        assert_eq!(file.task_id, "current");
+        assert_eq!(file.path, "/tmp/current.out");
+        assert_eq!(file.size, 34);
     }
 
     /// T6 — `U0u`: a block array containing an image (or document) is NEVER

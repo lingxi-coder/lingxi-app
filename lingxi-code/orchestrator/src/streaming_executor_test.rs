@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn unknown_tool_suffix_is_empty_for_genuinely_unknown() {
         let tools = ToolRegistry::new();
-        assert_eq!(unknown_tool_suffix("Nope", &tools, false), "");
+        assert_eq!(unknown_tool_suffix("Nope", &tools, false, false), "");
     }
 
     #[test]
@@ -292,11 +292,11 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register_builtin(Arc::new(SafeToolNamed("Bash")) as Arc<dyn Tool>);
         assert_eq!(
-            unknown_tool_suffix("Glob", &tools, false),
+            unknown_tool_suffix("Glob", &tools, false, false),
             ". Glob is not available in this session \u{2014} find files with `find` via the Bash tool instead."
         );
         assert_eq!(
-            unknown_tool_suffix("Grep", &tools, false),
+            unknown_tool_suffix("Grep", &tools, false, false),
             ". Grep is not available in this session \u{2014} search file contents with `grep` via the Bash tool instead."
         );
     }
@@ -305,7 +305,7 @@ mod tests {
     fn unknown_tool_suffix_glob_without_shell_is_disabled() {
         let tools = ToolRegistry::new();
         assert_eq!(
-            unknown_tool_suffix("Glob", &tools, false),
+            unknown_tool_suffix("Glob", &tools, false, false),
             ". Glob is disabled for this session."
         );
     }
@@ -314,11 +314,11 @@ mod tests {
     fn unknown_tool_suffix_names_disconnected_mcp_server() {
         let tools = ToolRegistry::new();
         assert_eq!(
-            unknown_tool_suffix("mcp__github__issue", &tools, false),
+            unknown_tool_suffix("mcp__github__issue", &tools, false, false),
             ". Its MCP server 'github' has disconnected. Continue without this tool; it becomes callable again only if the server reconnects."
         );
         assert_eq!(
-            unknown_tool_suffix("mcp__github__issue", &tools, true),
+            unknown_tool_suffix("mcp__github__issue", &tools, true, false),
             ". Its MCP server 'github' is not available in this context. Continue without this tool."
         );
     }
@@ -327,14 +327,17 @@ mod tests {
     fn unknown_tool_suffix_subagent_restricted_catalog() {
         let tools = ToolRegistry::new();
         assert_eq!(
-            unknown_tool_suffix("EnterPlanMode", &tools, true),
+            unknown_tool_suffix("EnterPlanMode", &tools, true, false),
             ". EnterPlanMode is not available inside subagents. Complete the task with the tools provided and return findings to the orchestrator."
         );
         assert_eq!(
-            unknown_tool_suffix("WaitForMcpServers", &tools, true),
+            unknown_tool_suffix("WaitForMcpServers", &tools, true, false),
             ". WaitForMcpServers is not available inside subagents. Complete the task with the tools provided and return findings to the orchestrator."
         );
-        assert_eq!(unknown_tool_suffix("EnterPlanMode", &tools, false), "");
+        assert_eq!(
+            unknown_tool_suffix("EnterPlanMode", &tools, false, false),
+            ""
+        );
     }
 
     #[test]
@@ -342,13 +345,62 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register_builtin(Arc::new(SafeToolNamed("WaitForMcpServers")) as Arc<dyn Tool>);
         assert_eq!(
-            unknown_tool_suffix("mcp__github__issue", &tools, false),
+            unknown_tool_suffix("mcp__github__issue", &tools, false, false),
             ". The MCP server 'github' is still connecting. Call WaitForMcpServers to wait for it, then try again."
         );
         // Subagent skips `l5o` (`r?"":l5o`) and uses the disconnected arm.
         assert_eq!(
-            unknown_tool_suffix("mcp__github__issue", &tools, true),
+            unknown_tool_suffix("mcp__github__issue", &tools, true, false),
             ". Its MCP server 'github' is not available in this context. Continue without this tool."
+        );
+    }
+
+    #[test]
+    fn unknown_tool_suffix_coordinator_points_at_agent() {
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(SafeToolNamed("Agent")) as Arc<dyn Tool>);
+        tools.register_builtin(Arc::new(SafeToolNamed("Read")) as Arc<dyn Tool>);
+        tools.set_session_tool_allowlist(&["Agent".to_string()]);
+        assert_eq!(
+            unknown_tool_suffix("Read", &tools, false, true),
+            ". Read is not available to you as the coordinator \u{2014} run it from a worker via the Agent tool instead."
+        );
+        assert_eq!(
+            unknown_tool_suffix("Read", &tools, false, false),
+            ". Read is disabled for this session, in subagents as well as here."
+        );
+        tools.register_builtin(Arc::new(SafeToolNamed("Skill")) as Arc<dyn Tool>);
+        assert_eq!(
+            unknown_tool_suffix("Skill", &tools, false, true),
+            ". Skill is disabled for this session, in subagents as well as here."
+        );
+    }
+
+    #[test]
+    fn unknown_tool_suffix_catalog_disabled_hides_glob_via_shell() {
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(SafeToolNamed("Bash")) as Arc<dyn Tool>);
+        tools.register_builtin(Arc::new(SafeToolNamed("Glob")) as Arc<dyn Tool>);
+        tools.set_session_tool_allowlist(&["Bash".to_string()]);
+        assert_eq!(
+            unknown_tool_suffix("Glob", &tools, false, false),
+            ". Glob is disabled for this session, in subagents as well as here."
+        );
+    }
+
+    #[test]
+    fn unknown_tool_suffix_webfetch_in_catalog_is_disabled_not_artifact() {
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(SafeToolNamed("WebFetch")) as Arc<dyn Tool>);
+        tools.register_builtin(Arc::new(SafeToolNamed("Agent")) as Arc<dyn Tool>);
+        tools.set_session_tool_allowlist(&["Agent".to_string()]);
+        assert_eq!(
+            unknown_tool_suffix("WebFetch", &tools, false, false),
+            ". WebFetch is disabled for this session, in subagents as well as here."
+        );
+        assert_eq!(
+            unknown_tool_suffix("WebFetch", &tools, false, true),
+            ". WebFetch is not available to you as the coordinator \u{2014} run it from a worker via the Agent tool instead."
         );
     }
 

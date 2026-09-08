@@ -143,9 +143,18 @@ Also mapped this pass:
   provided and return findings to the orchestrator.`
 - Pending MCP `l5o` (non-subagent, `WaitForMcpServers` enabled):
   `The MCP server '${name}' is still connecting. Call WaitForMcpServers…`
+- Coordinator `Y7e`: session `CoordinatorModeHandle` is on (`Ci()`), `Agent`
+  is in the current tools, and the name is in the unfiltered catalog but not
+  `qbt` → `… is not available to you as the coordinator — run it from a
+  worker via the Agent tool instead.`
+- Full-catalog disabled: unfiltered `find_registered` hits a hidden builtin
+  → `… is disabled for this session, in subagents as well as here.`
+  (this arm precedes Glob/Grep-via-shell, matching `Ldt`).
 
-Not ported (no substrate / carve-out): coordinator/`Y7e`, WebFetch/artifact,
-full-catalog disabled. `ltr` spread into `ct` is not fully named.
+WebFetch→Artifact remains a carve-out. The WebFetch→`web-fetch` agent
+redirect needs the live roster (`pq`); that agent is gated off by default
+(`xgi()`), so a catalog-hidden WebFetch takes the disabled / coordinator
+arm. `ltr` spread into `ct` is not fully named.
 
 ### Truncated-response recovery (`trunc-recov`, 2.1.263 `tZo`)
 
@@ -190,9 +199,10 @@ override warning still says `Set LINGXI_STOP_HOOK_BLOCK_CAP`.
 - Bumping `CLAUDE_CODE_VERSION`.
 - Workshop/Artifact plan-mode.
 - Dead `tengu_thinking_block_resumption` (GB default false).
-- Remaining `Ldt` arms without substrate (coordinator/`Y7e`, WebFetch/artifact,
-  full-catalog disabled). `CLAUDE_CODE_VERSION` stays `2.1.252` until the
-  rest of the port (permission 2.1.263 delta, etc.) matches — the bump is last.
+- Remaining `Ldt` arms: WebFetch→Artifact (carve-out) and WebFetch→`web-fetch`
+  agent (`pq` roster; agent gated off by default). `CLAUDE_CODE_VERSION` stays
+  `2.1.252` until the rest of the port (permission 2.1.263 delta, etc.)
+  matches — the bump is last.
 
 Fusion is LingXi-specific and is not aligned to Claude Code.
 

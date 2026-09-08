@@ -358,6 +358,39 @@ impl ToolRegistry {
         out
     }
 
+    /// Find a tool by name or alias across all partitions, ignoring the
+    /// session allowlist and builtin filter. This is the full registered
+    /// catalog (`Pk()`), used when an unknown-tool suffix needs to know
+    /// whether a name is a real product tool that is merely hidden here.
+    #[must_use]
+    pub fn find_registered(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        if let Some(tool) = self
+            .builtin
+            .iter()
+            .find(|t| t.name() == name || t.aliases().contains(&name))
+        {
+            return Some(tool.clone());
+        }
+        {
+            let mcp_tools = self
+                .mcp_tools
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(tool) = mcp_tools
+                .iter()
+                .flat_map(|(_id, tools)| tools.iter())
+                .find(|t| t.name() == name || t.aliases().contains(&name))
+            {
+                return Some(tool.clone());
+            }
+        }
+        self.lsp_tools
+            .iter()
+            .chain(self.plugin_tools.iter().flat_map(|(_id, ts)| ts.iter()))
+            .find(|t| t.name() == name || t.aliases().contains(&name))
+            .cloned()
+    }
+
     /// Find a tool by name or alias across all partitions. Returns the first
     /// matching tool in iteration order (builtin first).
     #[must_use]
@@ -580,6 +613,16 @@ mod tests {
         r.register_builtin(Arc::new(DummyTool));
         assert!(r.find_by_name("Dummy").is_some());
         assert!(r.find_by_name("Nonexistent").is_none());
+    }
+
+    #[test]
+    fn find_registered_sees_allowlisted_hidden_builtins() {
+        let mut r = ToolRegistry::new();
+        r.register_builtin(Arc::new(DummyTool));
+        r.set_session_tool_allowlist(&["Bash".to_string()]);
+        assert!(r.find_by_name("Dummy").is_none());
+        assert!(r.find_registered("Dummy").is_some());
+        assert!(r.find_registered("Nonexistent").is_none());
     }
 
     /// A stub tool with a configurable name (for ordering tests).

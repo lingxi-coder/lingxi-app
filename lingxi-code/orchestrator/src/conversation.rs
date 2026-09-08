@@ -1367,6 +1367,10 @@ pub struct ConversationOrchestrator {
     /// `None` on hosts that wire no `ScheduleWakeup` seam → the branch never
     /// fires → byte-identical.
     pub(crate) loop_wakeup_armed_slot: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Live coordinator-mode flag (`Ci()`). `None` is an ordinary session, so
+    /// unknown-tool `Ldt` never takes the coordinator `Y7e` arm.
+    pub(crate) coordinator_mode:
+        Option<std::sync::Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>>,
 }
 
 // Responsibility-focused implementation modules. `conversation.rs` owns the

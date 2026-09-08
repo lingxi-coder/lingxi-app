@@ -32,6 +32,15 @@ impl ConversationOrchestrator {
         // transport, so TUI/REPL sessions can carry interactive guidance even
         // when `interactive_permissions` remains on the headless default.
         platform_api::session_flags::set_non_interactive_session(!config.interactive_session);
+        // claude-code `Dx(()=>HR(rt()))` — publish the session main-loop model
+        // the `OO()` todo/task tool gate reads back through `J$e()`. This init
+        // value is the launch model; `build_wire_tools` republishes it from the
+        // live session each turn, so `/model` switches and resumes move the
+        // gate. Seeding it here matters because the reminder producer can run
+        // before the first wire-tools assembly.
+        tools.set_main_loop_model(
+            crate::conversation::tooling_impl::canonical_main_loop_model(&config.model),
+        );
         // Publish the session-scoped tool-search gate (Claude Code `$U()`) so the
         // request builder branches `tool_reference` normalization on the SESSION
         // decision, not on whether a given request's toolset carries a

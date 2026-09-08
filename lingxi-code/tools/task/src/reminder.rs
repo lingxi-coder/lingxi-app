@@ -114,13 +114,39 @@ fn is_explicitly_disabled(val: Option<&str>) -> bool {
 /// `TE()` (`is_todo_v2_enabled`) → the active [`ReminderMode`]. Returns
 /// [`ReminderMode::V2Task`] by default, [`ReminderMode::V1Todo`] only when
 /// `LINGXI_ENABLE_TASKS` is explicitly disabled.
+///
+/// Ungated on purpose: the oracle's turn counters advance whether or not the
+/// reminder can render, so bookkeeping callers use this and only the renderer
+/// goes through [`select_mode`].
 #[must_use]
-pub fn select_mode() -> ReminderMode {
+pub fn select_mode_raw() -> ReminderMode {
     if is_explicitly_disabled(std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref()) {
         ReminderMode::V1Todo
     } else {
         ReminderMode::V2Task
     }
+}
+
+/// The renderable [`ReminderMode`], or `None` when the `OO()` model gate has
+/// withdrawn the todo/task tools.
+///
+/// This is the port of BOTH oracle reminder guards at once, because LingXi
+/// never persists attachments and so fuses the producer and the renderer into
+/// one function:
+///
+/// ```js
+/// case"todo_reminder":{if(X_()||!OO())return[];   // V1 renders iff !X_() && OO()
+/// case"task_reminder":{if(!h3())return[];         // V2 renders iff  X_() && OO()
+/// ```
+///
+/// `main_loop_model` must be the canonical session model — see
+/// [`tool_api::todo_tools_gate`].
+#[must_use]
+pub fn select_mode(main_loop_model: Option<&str>) -> Option<ReminderMode> {
+    if !tool_api::todo_tools_gate::todo_tools_enabled_for_model(main_loop_model) {
+        return None;
+    }
+    Some(select_mode_raw())
 }
 
 /// Render the V1 (`todo_reminder`) body. `items` = `(status, content)` pairs in
@@ -163,6 +189,23 @@ pub fn render_v2(items: &[(String, TodoState, String)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both oracle reminder guards at once: an at-threshold model withdraws the
+    /// tools, and a reminder that describes tools the model was never offered
+    /// must not render.
+    #[test]
+    fn the_model_gate_suppresses_both_reminder_variants() {
+        if !tool_api::todo_tools_gate::todo_tools_enabled_for_model(Some("claude-opus-4-8")) {
+            assert_eq!(select_mode(Some("claude-opus-4-8")), None);
+        }
+        // Below threshold and unknown-model both keep rendering, and pick the
+        // same variant the ungated selector would.
+        assert_eq!(
+            select_mode(Some("claude-sonnet-4-5")),
+            Some(select_mode_raw())
+        );
+        assert_eq!(select_mode(None), Some(select_mode_raw()));
+    }
 
     #[test]
     fn v1_base_is_byte_exact_with_no_items() {

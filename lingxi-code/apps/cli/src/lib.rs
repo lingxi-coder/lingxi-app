@@ -703,6 +703,12 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // later without relying on a stale process-environment snapshot.
     platform_api::session_flags::set_brief_mode_enabled(parsed.brief);
 
+    // claude-code `ZDn(ERe.some(ue))` (2.1.263) — naming any of the five
+    // todo/task tools in `--tools`/`--allowedTools` opts the session past the
+    // `OO()` model gate. Launch-time immutable, so publish it once here beside
+    // the other argv-derived session flags.
+    platform_api::session_flags::set_todo_tools_opt_in(parsed.todo_tools_opt_in());
+
     // (CLI-12, cc2.1.238) `--messaging-socket-path <path>` (@307414302) pins
     // the cross-session messaging socket instead of the auto-generated path.
     // Recorded here, before ANY code path can bind the inbox

@@ -1217,6 +1217,38 @@ impl Argv {
             || std::env::var("LINGXI_RESTRICTED").ok().as_deref() == Some("1")
     }
 
+    /// claude-code `QDn()` / `todoToolsOptIn` — whether the user explicitly
+    /// named one of the five todo/task tools on the command line, which
+    /// force-enables them past the `OO()` model gate.
+    ///
+    /// The oracle's matcher is `ue=(un)=>re.includes(un)||F.some((kn)=>Fr(kn).toolName===un)`
+    /// applied to `ERe`, and the asymmetry is deliberate: `--tools` (`re`) is
+    /// matched BARE, while `--allowedTools` (`F`) is rule-parsed first, so
+    /// `--tools "TaskCreate(x)"` does NOT trip the opt-in but
+    /// `--allowedTools "TaskCreate(x)"` does.
+    #[must_use]
+    pub fn todo_tools_opt_in(&self) -> bool {
+        fn entries(list: Option<&Vec<String>>) -> impl Iterator<Item = &str> {
+            list.map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                // Clap already tokenizes space-separated values; only the
+                // comma-separated form is split here, matching the registry's
+                // own `--tools` normalizer.
+                .flat_map(|value| value.split(','))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        }
+        let named = |name: &str| {
+            platform_api::session_flags::TODO_TOOL_NAMES.contains(&name)
+        };
+        // `re.includes(un)` — bare names only.
+        entries(self.tools.as_ref()).any(named)
+            // `Fr(kn).toolName === un` — rule-parsed.
+            || entries(self.allowed_tools.as_ref())
+                .any(|value| named(&permission::PermissionRuleValue::from_rule_string(value).tool_name))
+    }
+
     /// True iff the binary should start a FRESH REPL.
     ///
     /// Rules: prompt is None or trimmed-empty, AND neither `--resume` nor

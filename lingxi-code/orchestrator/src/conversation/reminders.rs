@@ -510,7 +510,16 @@ impl ConversationOrchestrator {
             return None;
         }
 
-        let mode = tool_task::reminder::select_mode();
+        // (2b) the `OO()` model gate. `select_mode` returns `None` when the
+        // todo/task tools have been withdrawn, porting BOTH oracle guards
+        // (`if(X_()||!OO())return[]` for V1, `if(!h3())return[]` for V2) — the
+        // reminder must not describe tools the model was never offered. The
+        // canonical main-loop model is the one the registry publishes, so this
+        // and `available_tools` cannot disagree.
+        let Some(mode) = tool_task::reminder::select_mode(self.tools.main_loop_model().as_deref())
+        else {
+            return None;
+        };
 
         // (3) tool-presence gate + (4) non-empty history + (5) counters, all
         // read under one session lock so the snapshot is consistent. We reset
@@ -832,7 +841,10 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     /// last such tool_use in the message log (which zeroes their `r` counter).
     /// `tool_names` is the set of tool names invoked in the assistant turn.
     pub(crate) async fn note_todo_reminder_tool_call(&self, tool_names: &[String]) {
-        let resets = match tool_task::reminder::select_mode() {
+        // Ungated (`select_mode_raw`): the oracle's counters advance and reset
+        // regardless of whether the reminder can currently render, so a session
+        // that re-enables the tools mid-flight does not inherit a stale count.
+        let resets = match tool_task::reminder::select_mode_raw() {
             tool_task::reminder::ReminderMode::V1Todo => {
                 tool_names.iter().any(|n| n == "TodoWrite")
             }

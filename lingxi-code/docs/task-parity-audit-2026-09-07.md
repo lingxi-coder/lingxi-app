@@ -187,13 +187,13 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
-| `tools-01` | confirmed | P1 | medium |  |
-| `tools-02` | confirmed | P2 | low |  **[fixed]** |
-| `tools-03` | confirmed | P2 | low |  |
-| `tools-04` | confirmed | P2 | medium |  |
-| `tools-07` | confirmed | P2 | high |  |
-| `tools-06` | confirmed | P3 | low |  |
-| `tools-05` | refuted | P? | medium |  |
+| `tools-01` | confirmed | P1 | medium | 2.1.263 model/opt-in gate OO() (todo tools OFF on Opus 4.8 / Sonnet 5 / Fable 5 / Mythos 5 unless opted in) is missing from Task*/TodoWrite isEnabled and both reminder gates **[fixed]** |
+| `tools-02` | confirmed | P2 | low | TaskUpdate TaskCompleted hook block returns the bare reason instead of `TaskCompleted hook feedback:\n<reason>` **[fixed]** |
+| `tools-03` | confirmed | P2 | low | TaskCreate coerceInput (POe) / validationErrorSteer (yDn) and TaskUpdate coerceInput (Cce) are not ported — malformed model calls hard-fail instead of being repaired/steered |
+| `tools-04` | confirmed | P2 | medium | TodoWrite tool metadata drift: shouldDefer:true, strict:true, userFacingName "", maxResultSizeChars 1e5 not mirrored |
+| `tools-07` | confirmed | P2 | high | Port comments pin the gate/claim cluster to 2.1.183 `TE()` and 2.1.223 `QOd/uTy/RSr`, contradicting 2.1.263 (`h3()=X_()&&OO()`, `RZn/$t/dCe`) |
+| `tools-06` | confirmed | P3 | low | is_agent_swarms_enabled() second term is USER_TYPE=ant; 2.1.263 zr() uses the `--agent-teams` argv flag |
+| `tools-05` | refuted | P? | medium | Task JSON on disk: key order (status before owner), empty `metadata:{}` dropped, and `blocks`/`blockedBy` tolerated when absent — all differ from the oracle's createTask/TaskSchema |
 
 ### Session lifecycle
 
@@ -211,7 +211,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 
 ## What was fixed
 
-Two commits:
+Commits, oldest first:
 
 - `2c45dc6c6` closes the P0. `SandboxedCommand` can carry a `BackgroundTaskBinding`
   (task id, output path, exit sink); the posix runner uses it on both the explicit-background and
@@ -221,8 +221,39 @@ Two commits:
   before spawning, registers it only when the command is actually backgrounded, binds a killer so
   `TaskStop` reaches the child, and discards the file when the command finished in the foreground.
 - `50696c859` closes `TO-01`, `tools-02`, `TOF-06` and `TOF-03`.
+- The `OO()` todo/task-tool model gate (`tools-01`). 2.1.263 withdraws
+  `TodoWrite`/`TaskCreate`/`TaskGet`/`TaskUpdate`/`TaskList` on Opus 4.8, Sonnet 5, Fable 5,
+  Mythos 5 and newer. `tool_api::todo_tools_gate` ports `OO()` term for term, including `s$e`'s
+  literal `^claude-([a-z]+)-(\d+(?:-\d+)*)$` — an id that fails that regex is NOT gated, which is
+  what keeps every non-Anthropic provider id on the tools. All four escape hatches ship: a
+  background session (`LINGXI_SESSION_KIND=bg`), naming one of the five tools in
+  `--tools`/`--allowedTools`, `LINGXI_ENABLE_TODO_TOOLS`, and the `tengu_rosy_wren` gate.
 
-Two guards worth keeping in mind for follow-up work:
+  `OO()` is a separate conjunct on BOTH sides of the V1/V2 mutex
+  (`h3()=X_()&&OO()` for the Task tools, `!X_()&&OO()` for TodoWrite), never folded into `X_()` —
+  folding it would hide the four Task tools and resurrect TodoWrite in one move. A test pins that.
+
+  The model reaches `is_enabled` through the registry rather than through each call site:
+  `ToolRegistry::set_main_loop_model` holds the session's canonical id and `available_tools` fills
+  it into `ToolStaticContext`, so the main loop, the subagent pool and the Tool Search view all
+  read the same answer. It is deliberately the SESSION model, never the caller's — a subagent on an
+  older model does not get the tools back. The orchestrator republishes it each turn from the live
+  session, which is how `/model` and resume move the gate. Canonicalisation is the `HR()` port
+  (alias-resolve, then strip `[1m]`) and deliberately not `normalize_model_id`, which also strips
+  `-eap` and would gate ids the oracle leaves alone.
+
+  Both reminder guards travel with it: `select_mode` returns `None` when the gate is closed, so the
+  reminder cannot describe tools the model was never offered. `select_mode_raw` stays ungated for
+  the turn counters, which the oracle advances unconditionally.
+
+  Two things deliberately NOT changed. The git-commit prompt's `TaskCreate`-vs-`TodoWrite` pick
+  (`tools/shell/src/prompt.rs`) stays on `X_()` alone — verified at the oracle, whose
+  `fes()` reads `let r=X_()?UE:XS` with no `OO()` term. And the unwired `hasTaskListTools` fallback
+  in `tasks/src/handlers/in_process_teammate.rs` still defaults to `true` where the oracle spells
+  `?? h3()`; reproducing that needs `X_()` from `tool-task`, which `tasks` does not depend on, for a
+  standalone/test-only path. Both are commented in place.
+
+Guards worth keeping in mind for follow-up work:
 
 - A foreground command still creates no task record. Registering one per shell call would put a
   completed row in `TaskList` and a `<task-notification>` in the transcript for every command.
@@ -230,6 +261,13 @@ Two guards worth keeping in mind for follow-up work:
   (`take_honoured_identity`). A runner that mints its own id writes to its own file, so advertising
   the registry path would name a file nothing writes to. The mobile runners are in exactly that
   position today.
+- The `OO()` opt-in (`QDn()`) is published only from `run_cli`, so a bridge-server/SDK or mobile
+  session can never opt in through `--tools`. That matches how `--brief` is wired and how those
+  hosts expose no such flag, but it means the env var is their only hatch.
+- `Ja()`'s bg-TAKEOVER disjunct has no substrate to port onto — nothing in the workspace can set a
+  takeover state, so the missing term is vacuously false rather than approximated. It stops being
+  vacuous the moment `apps/cli/src/bg_attach.rs` or `resume_to_background` grows session state, and
+  no test will go red; the comment on `platform_api::env::is_bg_session` names both files.
 
 ## Preserved LingXi divergences
 

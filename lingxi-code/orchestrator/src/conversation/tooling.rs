@@ -521,7 +521,6 @@ impl ConversationOrchestrator {
     /// [`execute_one_turn`]: crate::turn_loop::execute_one_turn
     pub(crate) async fn build_wire_tools(&self) -> Vec<serde_json::Value> {
         use tool_api::tool_trait::PromptOptions;
-        let tools = self.filtered_available_tools().await;
         // claude-code builds the wire `tools` array with `prompt({model})`; the
         // session model gates model-dependent tool prompts (TodoWrite's
         // `Xla(model)=Dh(model)?FWd:UWd`). Snapshot it from the live session.
@@ -529,6 +528,16 @@ impl ConversationOrchestrator {
             let s = self.session.lock().await;
             (s.model.clone(), s.model_profile.clone())
         };
+        // Same snapshot, one turn earlier than it used to be taken: claude-code
+        // registers the main-loop model as a LIVE accessor (`Dx(()=>HR(rt()))`,
+        // read back by `J$e()`), so the `OO()` todo/task tool gate must see the
+        // current `/model`. Republishing from THIS snapshot — rather than from
+        // inside `filtered_available_tools` — keeps the advertise path free of a
+        // second `session` lock, which would deadlock the callers that already
+        // hold one.
+        self.tools
+            .set_main_loop_model(canonical_main_loop_model(&model));
+        let tools = self.filtered_available_tools().await;
         let cache_key = WireToolSchemaCacheKey {
             tool_names: tools.iter().map(|t| t.name().to_string()).collect(),
             model: model.clone(),
@@ -934,4 +943,29 @@ impl ConversationOrchestrator {
         let _ = self.take_queued_hook_attachments(&tool_uses[0].0).await;
         Ok(results.pop())
     }
+}
+
+/// Port of claude-code `HR(e) = Xt(Ue(e,{identity:!0}))` — the canonicalisation
+/// applied to the model setting before it becomes `mainLoopCanonical`.
+///
+/// `Ue(_,{identity:true})` resolves the setting to a concrete model id (the
+/// port's `resolve_user_specified_model`, which also turns a bare `opus` /
+/// `opusplan` / `sonnet` alias into a wire id), and `Xt(e)` strips a trailing
+/// `[1m]` long-context suffix.
+///
+/// Deliberately NOT `platform_api::model_capabilities::normalize_model_id`:
+/// that additionally strips `-eap` and dated/Bedrock/Vertex wrappers, which
+/// `HR` does not. Feeding it to the gate would gate `claude-opus-5-eap`, an id
+/// the oracle's `^claude-([a-z]+)-(\d+(?:-\d+)*)$` rejects and therefore
+/// leaves enabled.
+pub(crate) fn canonical_main_loop_model(raw: &str) -> Option<String> {
+    let resolved = agent::model_resolution::resolve_user_specified_model(raw);
+    let trimmed = resolved.trim();
+    // `replace(/\[1m\]$/i, "")`.
+    let base = if trimmed.to_lowercase().ends_with("[1m]") {
+        trimmed[..trimmed.len() - "[1m]".len()].trim_end()
+    } else {
+        trimmed
+    };
+    (!base.is_empty()).then(|| base.to_string())
 }

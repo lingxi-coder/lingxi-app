@@ -1050,6 +1050,20 @@ impl Task for InProcessTeammateHandler {
         // unwired standalone/test handler keeps the legacy assumption that the
         // suite exists; production always has the registry and checks the
         // actual resolved allow-list.
+        //
+        // The wired branch inherits the 2.1.263 `OO()` model gate for free: the
+        // four Task tools reach `allowed_tools` only through
+        // `augment_teammate_tool_policy` -> `available_tools`, which applies
+        // `is_enabled`. Once the gate closes they are absent here and auto-claim
+        // switches off, matching the oracle.
+        //
+        // The UNWIRED branch is a documented residual. The oracle spells it
+        // `e.hasTaskListTools ?? h3()`, i.e. it falls back to the gate rather
+        // than to `true`. Reproducing that needs `X_()`, which lives in
+        // `tool-task`, and `tasks` does not depend on that crate — a dependency
+        // added for a standalone/test-only path. With no registry there is no
+        // main-loop model either, so `OO()` is open and the two answers differ
+        // only when `LINGXI_ENABLE_TASKS` is explicitly disabled.
         const TASK_LIST_TOOLS: [&str; 4] = ["TaskCreate", "TaskGet", "TaskUpdate", "TaskList"];
         let has_task_list_tools = self.tool_registry.get().is_none()
             || TASK_LIST_TOOLS

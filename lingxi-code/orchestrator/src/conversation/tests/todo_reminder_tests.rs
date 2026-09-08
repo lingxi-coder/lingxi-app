@@ -94,9 +94,20 @@ impl TodoReminderTaskProvider for StaticTasks {
     }
 }
 
+/// A main-loop model BELOW the `OO()` gate's thresholds
+/// (`[("opus",[4,8]),("sonnet",[5]),("fable",[5]),("mythos",[5])]`).
+///
+/// `OrchestratorConfig::default()` uses `claude-opus-4-8`, which sits exactly AT
+/// the opus threshold, so on the default config 2.1.263 withdraws the five
+/// todo/task tools and both reminder variants with them. That is correct
+/// behaviour, and [`the_model_gate_suppresses_the_reminder`] pins it — but it is
+/// not what the rest of this file is about, so every other test here runs on an
+/// ungated model and keeps exercising the reminder's own counters and text.
+const UNGATED_MODEL: &str = "claude-sonnet-4-5";
+
 fn orch_with(tools: ToolRegistry) -> ConversationOrchestrator {
     let api = Arc::new(MockApiClient::new(vec![]));
-    ConversationOrchestrator::new(
+    let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         api,
         Arc::new(tools),
@@ -105,7 +116,58 @@ fn orch_with(tools: ToolRegistry) -> ConversationOrchestrator {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    )
+    );
+    orch.tools
+        .set_main_loop_model(Some(UNGATED_MODEL.to_string()));
+    orch
+}
+
+/// claude-code 2.1.263 `case"todo_reminder":{if(X_()||!OO())return[]` and
+/// `case"task_reminder":{if(!h3())return[]` — a reminder must never describe
+/// tools the model was not offered. Both variants, at both counter thresholds.
+#[tokio::test]
+async fn the_model_gate_suppresses_the_reminder() {
+    let _g = ENV_LOCK.lock().await;
+    std::env::remove_var("LINGXI_TODO_REMINDER_MODE");
+
+    // Only meaningful while no `OO()` escape hatch is live in this process.
+    if tool_task::reminder::select_mode(Some(orchestrator_default_model())).is_some() {
+        return;
+    }
+
+    // The tool-presence gate wants the variant's own "recent use" tool:
+    // `TodoWrite` for V1, `TaskUpdate` for V2.
+    for (tasks_env, tool) in [(Some("off"), "TodoWrite"), (None, "TaskUpdate")] {
+        match tasks_env {
+            Some(v) => std::env::set_var("LINGXI_ENABLE_TASKS", v),
+            None => std::env::remove_var("LINGXI_ENABLE_TASKS"),
+        }
+        let orch = orch_with(reg_with(&[tool]));
+        // The gated model is what `OrchestratorConfig::default()` already
+        // carries; `orch_with` overrides it, so put it back for this test.
+        orch.tools
+            .set_main_loop_model(Some(orchestrator_default_model().to_string()));
+        prime_session(&orch, 10, 10).await;
+        assert!(
+            orch.todo_reminder_message().await.is_none(),
+            "{tool} reminder must be suppressed on {}",
+            orchestrator_default_model()
+        );
+        // Same session, same counters, ungated model ⇒ it fires again, which is
+        // what proves the suppression came from the gate and not from the
+        // counters or an empty history.
+        orch.tools
+            .set_main_loop_model(Some(UNGATED_MODEL.to_string()));
+        assert!(
+            orch.todo_reminder_message().await.is_some(),
+            "{tool} reminder must fire once the gate opens"
+        );
+    }
+    std::env::remove_var("LINGXI_ENABLE_TASKS");
+}
+
+fn orchestrator_default_model() -> &'static str {
+    crate::config::DEFAULT_MODEL
 }
 
 fn reg_with(names: &[&'static str]) -> ToolRegistry {

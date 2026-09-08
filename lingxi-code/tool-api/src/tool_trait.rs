@@ -301,6 +301,21 @@ pub trait Tool: Send + Sync {
 pub struct ToolStaticContext {
     /// Boolean feature flags keyed by name.
     pub feature_flags: std::collections::HashMap<String, bool>,
+    /// The session's canonical main-loop model id (claude-code `J$e()` =
+    /// `mainLoopCanonical()`), or `None` when it is not known.
+    ///
+    /// Callers do not normally fill this: [`crate::ToolRegistry::available_tools`]
+    /// supplies it from the registry's session-scoped model
+    /// ([`crate::ToolRegistry::set_main_loop_model`]) whenever the incoming
+    /// context leaves it empty, so every advertise path — main loop, subagent
+    /// pool, Tool Search view — sees the same answer. That is deliberately the
+    /// **session** model and never the calling agent's, matching the oracle.
+    ///
+    /// It must already be canonical (alias-resolved, `[1m]` stripped): the
+    /// `OO()` gate in [`crate::todo_tools_gate`] matches it against the
+    /// oracle's literal `^claude-([a-z]+)-(\d+(?:-\d+)*)$`, and a bare alias
+    /// like `opus` fails that regex and silently leaves the gate open.
+    pub main_loop_model: Option<String>,
 }
 
 /// Options controlling [`Tool::description`] output.

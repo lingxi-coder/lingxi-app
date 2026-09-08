@@ -43,6 +43,14 @@ static BRIEF_MODE_ENABLED: AtomicBool = AtomicBool::new(false);
 /// fabricating a command-toggle reminder.
 static BRIEF_MODE_REMINDER: AtomicU8 = AtomicU8::new(0);
 
+/// Oracle `QDn()` (`src_156627426.js` @78682:
+/// `n().host.launchOptions.todoToolsOptIn()`) — the user explicitly named one
+/// of the five todo/task tools on the command line, which force-enables them
+/// regardless of the model gate. Set once at launch from `--tools` /
+/// `--allowedTools` (oracle `ZDn(ERe.some(ue))`, `src_160988549.js` @3434970)
+/// and never mutated afterwards.
+static TODO_TOOLS_OPT_IN: AtomicBool = AtomicBool::new(false);
+
 /// Model-facing reminder emitted after `/brief` enables Brief-only mode.
 pub const BRIEF_MODE_ENABLED_REMINDER: &str = "<system-reminder>\nBrief mode is now enabled. Use the SendUserMessage tool for all user-facing output — plain text outside it is hidden from the user's view.\n</system-reminder>";
 
@@ -342,6 +350,30 @@ pub fn set_brief_mode_enabled(enabled: bool) {
 #[must_use]
 pub fn brief_mode_enabled() -> bool {
     BRIEF_MODE_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Oracle `ERe` — the five tool names whose presence in `--tools` /
+/// `--allowedTools` trips [`todo_tools_opt_in`]. Spelled here rather than in
+/// `tool-task` because the CLI, which computes the flag, does not depend on
+/// that crate.
+pub const TODO_TOOL_NAMES: [&str; 5] = [
+    "TodoWrite",
+    "TaskCreate",
+    "TaskGet",
+    "TaskUpdate",
+    "TaskList",
+];
+
+/// Publish the launch-time todo/task tool opt-in (oracle `ZDn`).
+pub fn set_todo_tools_opt_in(opted_in: bool) {
+    TODO_TOOLS_OPT_IN.store(opted_in, Ordering::Relaxed);
+}
+
+/// Oracle `QDn()` — whether the user named one of [`TODO_TOOL_NAMES`] on the
+/// command line. Read by the `OO()` gate in `tool_api::todo_tools_gate`.
+#[must_use]
+pub fn todo_tools_opt_in() -> bool {
+    TODO_TOOLS_OPT_IN.load(Ordering::Relaxed)
 }
 
 /// Flip the current session's Brief-only mode and return the new value.

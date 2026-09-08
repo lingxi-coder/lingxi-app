@@ -7,6 +7,44 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
+    /// claude-code 2.1.263 `ZDn(ERe.some(ue))` where
+    /// `ue=(un)=>re.includes(un)||F.some((kn)=>Fr(kn).toolName===un)`. The two
+    /// arms are NOT symmetric: `--tools` (`re`) is matched BARE, while
+    /// `--allowedTools` (`F`) is rule-parsed first.
+    #[test]
+    fn todo_tools_opt_in_matches_tools_bare_and_allowed_tools_parsed() {
+        fn opt_in(args: &[&str]) -> bool {
+            let mut argv = vec!["lingxi-cli"];
+            argv.extend_from_slice(args);
+            Argv::from_iter(argv).unwrap().todo_tools_opt_in()
+        }
+
+        // Nothing named ⇒ no opt-in.
+        assert!(!opt_in(&[]));
+        assert!(!opt_in(&["--tools", "Bash", "Edit"]));
+        assert!(!opt_in(&["--allowedTools", "Read", "Bash(git *)"]));
+
+        // Each of the five bare names trips either list.
+        for name in platform_api::session_flags::TODO_TOOL_NAMES {
+            assert!(opt_in(&["--tools", name]), "--tools {name}");
+            assert!(opt_in(&["--allowedTools", name]), "--allowedTools {name}");
+        }
+
+        // Comma-separated entries are split, matching the registry's own
+        // `--tools` normalizer.
+        assert!(opt_in(&["--tools", "Bash,TaskCreate"]));
+        assert!(opt_in(&["--allowedTools", "Read,TaskList"]));
+
+        // THE ASYMMETRY. A rule-shaped entry is parsed down to its tool name for
+        // `--allowedTools` only; `--tools` compares the raw token.
+        assert!(opt_in(&["--allowedTools", "TaskCreate(x)"]));
+        assert!(!opt_in(&["--tools", "TaskCreate(x)"]));
+
+        // A near-miss name must not trip it.
+        assert!(!opt_in(&["--tools", "TaskStop"]));
+        assert!(!opt_in(&["--tools", "TaskOutput"]));
+    }
+
     // parity 2.1.207: `--permission-mode manual` is ACCEPTED (was hard-rejected
     // by the old fixed value_parser list). `manual` is the CLI alias for
     // `default`; both spellings parse.

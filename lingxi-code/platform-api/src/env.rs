@@ -51,6 +51,32 @@ pub fn is_env_defined_falsy(value: Option<&str>) -> bool {
     }
 }
 
+/// Oracle `_t()` (`src_158095655.js` @674824): `E6() === "bg"`, where
+/// `E6()` reads `CLAUDE_CODE_SESSION_KIND` and admits `bg`, `daemon` and
+/// `daemon-worker` — only the `bg` value answers this predicate. The port
+/// spells the variable `LINGXI_SESSION_KIND`; the daemon injects it into the
+/// worker it spawns (`apps/cli/src/commands/daemon.rs`, `bg_worker_env`).
+///
+/// This is the whole of the oracle's `Ja()` that the port can express.
+/// `Ja(){return _t()||Jh()!==null}` also disjoins a **bg takeover** state
+/// (`Kt().bgTakeover`), and nothing in this workspace can set one: there is no
+/// takeover record, and `resume_to_background` spawns a *new* worker (which
+/// gets `LINGXI_SESSION_KIND=bg`) rather than marking the calling session. The
+/// missing disjunct is therefore vacuously false today, so this is an
+/// equivalence rather than an approximation. It stops being one the moment a
+/// takeover grows session state — the likely homes are
+/// `apps/cli/src/bg_attach.rs` and `background_dispatch.rs`'s
+/// `resume_to_background`, named here so that change has a way back.
+///
+/// Deliberately NOT `session::jsonl::schema::session_kind()` (whose whitelist
+/// also admits `daemon`/`daemon-worker`, strictly wider than `_t()`) and NOT
+/// [`crate::session_flags::is_non_interactive_session`] (a `-p`/print run sets
+/// that without being a background session).
+#[must_use]
+pub fn is_bg_session() -> bool {
+    std::env::var("LINGXI_SESSION_KIND").ok().as_deref() == Some("bg")
+}
+
 /// Group-digit separator characters accepted by claude-code's `BZa`/`$Za`
 /// regexes: ASCII underscore/comma/space plus U+00A0 NO-BREAK SPACE and
 /// U+202F NARROW NO-BREAK SPACE (`/[_,   ]/`).

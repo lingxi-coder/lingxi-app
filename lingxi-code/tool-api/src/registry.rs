@@ -71,6 +71,11 @@ pub struct ToolRegistry {
     /// MCP/LSP/plugin refresh cannot re-introduce a tool hidden by the session
     /// profile.
     session_allowlist: Option<std::collections::HashSet<String>>,
+    /// The session's canonical main-loop model id (claude-code `J$e()`).
+    /// Behind a lock because `/model` moves it mid-session while the registry
+    /// is already shared as an `Arc`, and because the Tool Search refreshers
+    /// take `&self`.
+    main_loop_model: RwLock<Option<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +107,7 @@ impl ToolRegistry {
             tool_search_view: Arc::new(SharedToolSearchView::new()),
             builtin_filter: None,
             session_allowlist: None,
+            main_loop_model: RwLock::new(None),
         }
     }
 
@@ -245,6 +251,48 @@ impl ToolRegistry {
         self.builtin.push(tool);
     }
 
+    /// Publish the session's main-loop model, the port of claude-code's
+    /// `Dx(()=>HR(rt()))` registration of `mainLoopCanonical`.
+    ///
+    /// The value must already be canonical — alias-resolved and `[1m]`-stripped,
+    /// i.e. what `HR()` returns — because [`crate::todo_tools_gate`] matches it
+    /// against the oracle's literal model regex. The orchestrator republishes it
+    /// each turn from the live session, so `/model` switches and resumes are
+    /// picked up without a second wiring point.
+    ///
+    /// Takes `&self`: the registry is shared as an `Arc` by the time a session
+    /// is running.
+    pub fn set_main_loop_model(&self, model: Option<String>) {
+        *self
+            .main_loop_model
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = model;
+    }
+
+    /// The session's main-loop model, if one has been published.
+    #[must_use]
+    pub fn main_loop_model(&self) -> Option<String> {
+        self.main_loop_model
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Fill [`ToolStaticContext::main_loop_model`] from the registry when the
+    /// caller left it empty, so every advertise path evaluates the same gate
+    /// without each call site having to reach for the session. An explicit
+    /// value on the incoming context wins, which is what lets a test pin a
+    /// model without touching registry state.
+    fn effective_static_ctx(&self, ctx: &ToolStaticContext) -> ToolStaticContext {
+        if ctx.main_loop_model.is_some() {
+            return ctx.clone();
+        }
+        ToolStaticContext {
+            main_loop_model: self.main_loop_model(),
+            ..ctx.clone()
+        }
+    }
+
     /// Return all tools enabled for the given static context, in claude-code's
     /// wire order: builtins (gated on [`Tool::is_enabled`]) sorted by
     /// [`locale_cmp`] as a contiguous prefix, then the MCP + LSP + plugin tools
@@ -259,6 +307,7 @@ impl ToolRegistry {
     /// allowlist in addition to their owning subsystem's lifecycle policy.
     #[must_use]
     pub fn available_tools(&self, ctx: &ToolStaticContext) -> Vec<Arc<dyn Tool>> {
+        let ctx = &self.effective_static_ctx(ctx);
         // Builtin prefix: enabled builtins, locale-sorted by name.
         let mut builtins: Vec<Arc<dyn Tool>> = self
             .builtin

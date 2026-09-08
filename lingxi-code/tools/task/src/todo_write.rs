@@ -343,9 +343,12 @@ impl Tool for TodoWriteTool {
         &INPUT_SCHEMA
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
-        // V1/V2 mutex: TodoWrite (V1) is advertised only when the V2 Task tools
-        // are NOT (claude-code `isEnabled: () => !isTodoV2Enabled()`).
-        !crate::task::is_todo_v2_enabled(ctx)
+        // claude-code 2.1.263 `isEnabled(){return!X_()&&OO()}`: the V1/V2 mutex
+        // (TodoWrite is advertised only when the V2 Task tools are NOT), AND the
+        // model gate that withdraws the whole family on the current model
+        // generation. Both polarities of the mutex carry `OO()`, so the gate
+        // hides TodoWrite rather than revealing it.
+        crate::task::todo_write_enabled(ctx)
     }
     fn max_result_size_chars(&self) -> usize {
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH

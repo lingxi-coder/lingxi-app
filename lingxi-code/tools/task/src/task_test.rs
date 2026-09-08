@@ -141,6 +141,139 @@ mod tests {
         assert!(!todo_v2_enabled_inner(true)); // env defined-falsy (0/false/no/off) → off
     }
 
+    /// The regression this whole gate hinges on. The oracle spells the five
+    /// tools `h3()=X_()&&OO()` (four Task tools) and `!X_()&&OO()`
+    /// (TodoWrite) — `OO()` multiplies BOTH polarities. Folding it into `X_()`
+    /// instead would hide the four Task tools and RESURRECT TodoWrite.
+    ///
+    /// **This test must run with V1 live.** The resurrection is observable ONLY
+    /// while `LINGXI_ENABLE_TASKS` is defined-falsy: with V2 on, `!X_()` is
+    /// already `false`, so a missing `&& OO()` changes nothing and the whole
+    /// assertion passes against the bug. An earlier version of this test omitted
+    /// the env and was a false green — planting the fold left it passing.
+    #[test]
+    fn the_model_gate_hides_todo_write_instead_of_resurrecting_it() {
+        let _env_lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var("LINGXI_ENABLE_TASKS").ok();
+        std::env::set_var("LINGXI_ENABLE_TASKS", "off");
+
+        let gated = ToolStaticContext {
+            main_loop_model: Some("claude-opus-4-8".to_string()),
+            ..Default::default()
+        };
+        let ungated = ToolStaticContext {
+            main_loop_model: Some("claude-sonnet-4-5".to_string()),
+            ..Default::default()
+        };
+        // Only meaningful while no escape hatch is active in this process.
+        if !tool_api::todo_tools_enabled(&gated) {
+            // The premise: V1 is the live side, so `todo_write_enabled` is the
+            // term that can wrongly flip to true. Without this the test would
+            // pass vacuously.
+            assert!(!is_todo_v2_enabled(&gated), "V1 must be the live side here");
+            assert!(
+                todo_write_enabled(&ungated),
+                "and TodoWrite must really be ON below the threshold"
+            );
+
+            assert!(!task_tools_enabled(&gated), "the four Task tools go away");
+            assert!(
+                !todo_write_enabled(&gated),
+                "TodoWrite goes away WITH them — it must not come back"
+            );
+        }
+
+        match previous {
+            Some(v) => std::env::set_var("LINGXI_ENABLE_TASKS", v),
+            None => std::env::remove_var("LINGXI_ENABLE_TASKS"),
+        }
+    }
+
+    /// Below threshold, the mutex is untouched: exactly one side is advertised.
+    #[test]
+    fn an_ungated_model_keeps_the_v1_v2_mutex_intact() {
+        let ungated = ToolStaticContext {
+            main_loop_model: Some("claude-sonnet-4-5".to_string()),
+            ..Default::default()
+        };
+        assert!(tool_api::todo_tools_enabled(&ungated));
+        assert_ne!(
+            task_tools_enabled(&ungated),
+            todo_write_enabled(&ungated),
+            "V1 and V2 are mutually exclusive, and exactly one is on"
+        );
+        assert_eq!(task_tools_enabled(&ungated), is_todo_v2_enabled(&ungated));
+    }
+
+    /// `J$e() === void 0` is an ENABLE: a session with no known model keeps the
+    /// tools. This is also the state every existing `ToolStaticContext::default()`
+    /// caller lands in, which is why adding the gate changed no existing test.
+    #[test]
+    fn an_unknown_model_leaves_both_sides_as_they_were() {
+        let ctx = ToolStaticContext::default();
+        assert!(tool_api::todo_tools_enabled(&ctx));
+        assert_eq!(task_tools_enabled(&ctx), is_todo_v2_enabled(&ctx));
+        assert_eq!(todo_write_enabled(&ctx), !is_todo_v2_enabled(&ctx));
+    }
+
+    /// End-to-end through the real registry: publishing an at-threshold
+    /// main-loop model withdraws all FIVE tools from `available_tools` at once,
+    /// and the two that are NOT in the oracle's `ERe` set — `TaskStop` and
+    /// `TaskOutput` — stay.
+    #[test]
+    fn a_gated_model_withdraws_exactly_the_five_tools_from_the_registry() {
+        use std::sync::Arc;
+        use telemetry::AnalyticsBus;
+        use tool_api::test_support::{ctx_for_file_tools, make_dummy_fs};
+
+        fn names(reg: &tool_api::ToolRegistry) -> Vec<String> {
+            reg.available_tools(&ToolStaticContext::default())
+                .iter()
+                .map(|t| t.name().to_string())
+                .collect()
+        }
+
+        let bus = Arc::new(AnalyticsBus::new());
+        let ctx = ctx_for_file_tools(make_dummy_fs(), bus, vec![std::env::temp_dir()]);
+        let mut reg = tool_api::ToolRegistry::new();
+        crate::register_all(&mut reg, ctx);
+
+        // Below threshold: the V1/V2 mutex decides, but the family is present.
+        reg.set_main_loop_model(Some("claude-sonnet-4-5".to_string()));
+        let ungated = names(&reg);
+        let v2_on = is_todo_v2_enabled(&ToolStaticContext::default());
+        assert_eq!(
+            ungated.iter().any(|n| n == TASK_CREATE_TOOL_NAME),
+            v2_on,
+            "the V2 side follows LINGXI_ENABLE_TASKS, ungated"
+        );
+        assert_eq!(
+            ungated.iter().any(|n| n == crate::todo_write::TOOL_NAME),
+            !v2_on,
+            "the V1 side is its mirror, ungated"
+        );
+
+        // At threshold: every one of the five goes, whichever side of the mutex
+        // it was on. Skipped when an escape hatch is live in this process.
+        reg.set_main_loop_model(Some("claude-opus-4-8".to_string()));
+        if !tool_api::todo_tools_enabled(&ToolStaticContext {
+            main_loop_model: Some("claude-opus-4-8".to_string()),
+            ..Default::default()
+        }) {
+            let gated = names(&reg);
+            for name in platform_api::session_flags::TODO_TOOL_NAMES {
+                assert!(!gated.iter().any(|n| n == name), "{name} must be withdrawn");
+            }
+            // `ERe` has exactly five members; TaskStop/TaskOutput are not among
+            // them and must survive.
+            for name in [TASK_STOP_TOOL_NAME, TASK_OUTPUT_TOOL_NAME] {
+                assert!(gated.iter().any(|n| n == name), "{name} must survive");
+            }
+        }
+    }
+
     #[test]
     fn is_todo_v2_enabled_matches_te_defined_falsy() {
         // The ctx is unused by TE(); the gate is purely the LINGXI_ENABLE_TASKS

@@ -208,6 +208,27 @@ pub fn is_todo_v2_enabled(_ctx: &ToolStaticContext) -> bool {
     ))
 }
 
+/// claude-code `h3(){return X_()&&OO()}` — whether the four tasks-dir Task
+/// tools are advertised.
+///
+/// `OO()` (`tool_api::todo_tools_gate`) is a SEPARATE conjunct, not something
+/// folded into [`is_todo_v2_enabled`]: the oracle spells TodoWrite
+/// `isEnabled(){return!X_()&&OO()}`, so `OO()` multiplies BOTH polarities of the
+/// V1/V2 mutex. Folding it into `X_()` would hide the four Task tools and
+/// resurrect TodoWrite in the same move — the exact opposite of the CHANGELOG's
+/// "no longer available … TodoWrite".
+#[must_use]
+pub fn task_tools_enabled(ctx: &ToolStaticContext) -> bool {
+    is_todo_v2_enabled(ctx) && tool_api::todo_tools_enabled(ctx)
+}
+
+/// claude-code TodoWrite `isEnabled(){return!X_()&&OO()}` — the V1 side of the
+/// mutex, gated by the same `OO()` term as [`task_tools_enabled`].
+#[must_use]
+pub fn todo_write_enabled(ctx: &ToolStaticContext) -> bool {
+    !is_todo_v2_enabled(ctx) && tool_api::todo_tools_enabled(ctx)
+}
+
 /// Whether the agent-swarms/teammate surface is live at call time
 /// (`isAgentSwarmsEnabled()` / oracle `Jc()`). Gates the `TaskUpdate`
 /// auto-owner + owner-change mailbox notification side-effects and the
@@ -742,7 +763,7 @@ impl Tool for TaskCreateTool {
         &TASK_CREATE_SCHEMA
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
-        is_todo_v2_enabled(ctx)
+        task_tools_enabled(ctx)
     }
     fn should_defer(&self) -> bool {
         true
@@ -986,7 +1007,7 @@ impl Tool for TaskGetTool {
         &TASK_GET_SCHEMA
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
-        is_todo_v2_enabled(ctx)
+        task_tools_enabled(ctx)
     }
     fn should_defer(&self) -> bool {
         true
@@ -1134,7 +1155,7 @@ impl Tool for TaskListTool {
         &TASK_LIST_SCHEMA
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
-        is_todo_v2_enabled(ctx)
+        task_tools_enabled(ctx)
     }
     fn should_defer(&self) -> bool {
         true
@@ -1336,7 +1357,7 @@ impl Tool for TaskUpdateTool {
         &TASK_UPDATE_SCHEMA
     }
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
-        is_todo_v2_enabled(ctx)
+        task_tools_enabled(ctx)
     }
     fn should_defer(&self) -> bool {
         true

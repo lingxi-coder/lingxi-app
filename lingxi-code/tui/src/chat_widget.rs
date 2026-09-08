@@ -61,6 +61,31 @@ const FOCUS_VIEW_FULLSCREEN_REQUIRED_NOTICE: &str = "Focus view needs the fullsc
 const FOCUS_VIEW_SETTINGS_ENFORCED_NOTICE: &str = "Focus view is enabled by settings (viewMode: focus). Focus view needs the fullscreen renderer.";
 const AGENTS_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_millis(750);
 
+/// Independent lifetime for an off-loop command; completion is not cancellation.
+#[derive(Clone, Debug)]
+pub struct PendingSlashDispatch {
+    pub cancellation: CancellationToken,
+    pub completed: CancellationToken,
+}
+
+impl PendingSlashDispatch {
+    fn new() -> Self {
+        Self {
+            cancellation: CancellationToken::new(),
+            completed: CancellationToken::new(),
+        }
+    }
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+    fn is_pending(&self) -> bool {
+        !self.is_cancelled() && !self.completed.is_cancelled()
+    }
+}
+
 /// What one routed key press or paste means to the owning event loop.
 pub enum ChatOutcome {
     /// Keep looping.
@@ -83,7 +108,7 @@ pub enum ChatOutcome {
     /// A prompt submitted while the current turn is active. The embedding host
     /// places it in Rust's canonical `Next` queue instead of starting another
     /// turn or replacing the current cancellation owner.
-    QueuePrompt(String, Vec<std::path::PathBuf>),
+    QueuePrompt(String, Vec<std::path::PathBuf>, CancellationToken),
     /// Ctrl+V/Alt+V: read an IMAGE from the system clipboard. The read + PNG
     /// encode can take hundreds of ms, so the caller runs it OFF the render
     /// thread and feeds the result back via
@@ -211,12 +236,10 @@ pub enum ChatOutcome {
     /// neither of which may run on the render thread. Mirrors the `-p` one-shot
     /// path's `run_slash_command`, so a typed `/loop …` actually schedules.
     ///
-    /// The [`CancellationToken`] is the widget's active-turn token (also stored
-    /// as `current_turn`), so Ctrl-C cancels a dispatched `RunAsTurn` turn just
-    /// like a normal submit. The caller passes it to `run_turn` for a prompt
-    /// command and emits `TurnEnded` for a non-turn result so the widget clears
-    /// its running state.
-    DispatchSlash(String, CancellationToken),
+    /// The caller installs the token with `TurnStartedWithCancel` once a
+    /// dispatched model prompt owns the turn. Local results only emit a notice
+    /// and leave any active model turn untouched.
+    DispatchSlash(String, PendingSlashDispatch),
     /// A held cross-session message was delivered. The caller should drive
     /// `OrchestratorHandle::run_async_hook_rewake` so the released body is
     /// injected without appending a synthetic user prompt.
@@ -360,6 +383,8 @@ pub struct ChatWidget {
     theme_name: ThemeName,
     /// Cancellation token for the in-flight turn, if any.
     current_turn: Option<CancellationToken>,
+    pending_slash_dispatches: Vec<PendingSlashDispatch>,
+    queued_prompt_owners: Vec<CancellationToken>,
     /// Whether turn-scoped bridge events still have a live owner. This remains
     /// true while cancellation is waiting for Block tools, and flips only at
     /// the terminal event so late tool events cannot resurrect idle UI state.
@@ -631,6 +656,8 @@ impl ChatWidget {
             theme_setting: ThemeSetting::Named(ThemeName::Dark),
             theme_name: ThemeName::Dark,
             current_turn: None,
+            pending_slash_dispatches: Vec::new(),
+            queued_prompt_owners: Vec::new(),
             accepts_turn_events: false,
             has_seen_turn: false,
             current_compaction: None,
@@ -946,7 +973,12 @@ impl ChatWidget {
         if key.kind == crossterm::event::KeyEventKind::Press
             && key.modifiers == crossterm::event::KeyModifiers::CONTROL
             && matches!(key.code, crossterm::event::KeyCode::Char('c' | 'C'))
-            && (self.current_turn.is_some() || self.current_compaction.is_some())
+            && (self.current_turn.is_some()
+                || self.current_compaction.is_some()
+                || self
+                    .pending_slash_dispatches
+                    .iter()
+                    .any(PendingSlashDispatch::is_pending))
         {
             return self.on_pane_outcome(BottomPaneOutcome::Interrupt);
         }
@@ -2049,6 +2081,12 @@ impl ChatWidget {
     /// the `[Request interrupted by user]` row — the outgoing session is being
     /// torn down, not returned to.
     pub fn cancel_active_turn(&mut self) {
+        for owner in self.queued_prompt_owners.drain(..) {
+            owner.cancel();
+        }
+        for token in self.pending_slash_dispatches.drain(..) {
+            token.cancel();
+        }
         if let Some(token) = self.current_turn.take() {
             token.cancel();
         }
@@ -2305,11 +2343,12 @@ impl ChatWidget {
             body: input.to_string(),
             timestamp: 0,
         });
-        // A fresh per-turn token stored as `current_turn` so Ctrl-C cancels a
-        // dispatched prompt turn (the caller passes it to `run_turn`).
-        let token = CancellationToken::new();
-        self.current_turn = Some(token.clone());
-        self.accepts_turn_events = true;
+        // Dispatch may resolve to a local control while another turn runs.
+        // Only the host's eventual start event may install this pending token.
+        self.pending_slash_dispatches
+            .retain(PendingSlashDispatch::is_pending);
+        let token = PendingSlashDispatch::new();
+        self.pending_slash_dispatches.push(token.clone());
         ChatOutcome::DispatchSlash(input.to_string(), token)
     }
 
@@ -5095,6 +5134,16 @@ impl ChatWidget {
             BottomPaneOutcome::Detach => ChatOutcome::Detach,
             BottomPaneOutcome::Quit => ChatOutcome::Quit,
             BottomPaneOutcome::Interrupt => {
+                let turn_was_cancelled = self
+                    .current_turn
+                    .as_ref()
+                    .is_some_and(|token| token.is_cancelled());
+                for owner in self.queued_prompt_owners.drain(..) {
+                    owner.cancel();
+                }
+                for token in self.pending_slash_dispatches.drain(..) {
+                    token.cancel();
+                }
                 if let Some(token) = self.current_compaction.as_ref() {
                     // Cancel the compact task and hide the progress bar, but
                     // KEEP `current_compaction` (the submit block + re-/compact
@@ -5111,7 +5160,7 @@ impl ChatWidget {
                     return ChatOutcome::Continue;
                 }
                 if let Some(token) = self.current_turn.as_ref() {
-                    if token.is_cancelled() {
+                    if turn_was_cancelled {
                         return ChatOutcome::Continue;
                     }
                     token.cancel();
@@ -5273,8 +5322,21 @@ impl ChatWidget {
             timestamp: 0,
         });
         self.sync_focus_projection();
-        if self.current_turn.is_some() {
-            return ChatOutcome::QueuePrompt(text, self.take_pending_images());
+        self.pending_slash_dispatches
+            .retain(PendingSlashDispatch::is_pending);
+        if self.current_turn.is_some() || !self.pending_slash_dispatches.is_empty() {
+            let owner = self
+                .pending_slash_dispatches
+                .last()
+                .map(|pending| pending.cancellation.clone())
+                .or_else(|| self.current_turn.clone())
+                .expect("queued prompt has an owner");
+            // Retain the owner across dequeue -> host start delivery. Session
+            // switching must still cancel a followup whose start is in transit.
+            self.queued_prompt_owners
+                .retain(|owner| !owner.is_cancelled());
+            self.queued_prompt_owners.push(owner.clone());
+            return ChatOutcome::QueuePrompt(text, self.take_pending_images(), owner);
         }
         let token = CancellationToken::new();
         self.current_turn = Some(token.clone());
@@ -8371,14 +8433,100 @@ mod tests {
             panic!("a registry-backed command must route to DispatchSlash");
         };
         assert_eq!(input, "/loop 5m go");
-        // The token is registered as the active turn so Ctrl-C can cancel it.
-        assert!(widget.turn_running());
+        // Dispatch alone does not start a model turn.
+        assert!(!widget.turn_running());
         // The raw invocation is echoed as the user's turn message.
         let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
         assert_eq!(shown, "/loop 5m go");
 
         // An unregistered slash command still falls through as a normal prompt.
         assert!(widget.handle_slash("/totally-unknown").is_none());
+    }
+
+    #[test]
+    fn dispatch_local_stop_preserves_active_teammate_token() {
+        let mut widget = widget();
+        let active = CancellationToken::new();
+        widget.apply_turn_event(TurnEvent::TurnStartedWithCancel(active.clone()));
+        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/stop") else {
+            panic!("local command must be dispatched");
+        };
+        widget.apply_turn_event(TurnEvent::SystemNotice {
+            body: "Stopped".into(),
+            is_error: false,
+        });
+        assert!(widget.turn_running());
+        assert!(widget.accepts_turn_events);
+        widget.current_turn.as_ref().unwrap().cancel();
+        assert!(active.is_cancelled());
+        assert!(!pending.is_cancelled());
+    }
+
+    #[test]
+    fn pending_slash_queues_followup_and_session_switch_cancels_dispatch() {
+        let mut widget = widget();
+        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/slow-skill")
+        else {
+            panic!("dispatch")
+        };
+        assert!(matches!(
+            widget.submit_prompt("followup".into()),
+            ChatOutcome::QueuePrompt(..)
+        ));
+        assert!(widget.current_turn.is_none());
+        widget.cancel_active_turn();
+        assert!(pending.is_cancelled());
+        assert!(widget.pending_slash_dispatches.is_empty());
+    }
+
+    #[test]
+    fn interrupt_cancels_pending_slash_without_losing_active_teammate_owner() {
+        let mut widget = widget();
+        let active = CancellationToken::new();
+        widget.apply_turn_event(TurnEvent::TurnStartedWithCancel(active.clone()));
+        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/slow-skill")
+        else {
+            panic!("dispatch")
+        };
+        widget.on_pane_outcome(BottomPaneOutcome::Interrupt);
+        assert!(active.is_cancelled());
+        assert!(pending.is_cancelled());
+        assert!(
+            widget.current_turn.is_some(),
+            "active turn owns its end event"
+        );
+    }
+
+    #[test]
+    fn cancelling_pending_slash_does_not_cancel_later_new_input() {
+        let mut widget = widget();
+        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/slow") else {
+            panic!("dispatch")
+        };
+        let ChatOutcome::QueuePrompt(_, _, old_owner) = widget.submit_prompt("old".into()) else {
+            panic!("queue")
+        };
+        widget.on_pane_outcome(BottomPaneOutcome::Interrupt);
+        assert!(pending.is_cancelled());
+        assert!(old_owner.is_cancelled());
+        let ChatOutcome::Submit(_, _, new_owner) = widget.submit_prompt("new".into()) else {
+            panic!("new turn")
+        };
+        assert!(!new_owner.is_cancelled());
+    }
+
+    #[test]
+    fn completed_local_dispatch_does_not_leave_followup_queued() {
+        let mut widget = widget();
+        let ChatOutcome::DispatchSlash(_, completed) = widget.dispatch_registry_slash("/local")
+        else {
+            panic!("dispatch")
+        };
+        completed.completed.cancel(); // host completion guard
+        assert!(matches!(
+            widget.submit_prompt("next".into()),
+            ChatOutcome::Submit(..)
+        ));
     }
 
     /// The static `/worktree` palette row must still execute through the live
@@ -8393,7 +8541,7 @@ mod tests {
             panic!("/worktree must route to DispatchSlash");
         };
         assert_eq!(input, "/worktree remove --discard");
-        assert!(widget.turn_running());
+        assert!(!widget.turn_running());
         let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
         assert_eq!(shown, "/worktree remove --discard");
     }
@@ -8410,7 +8558,7 @@ mod tests {
             panic!("/fusion must route to DispatchSlash");
         };
         assert_eq!(input, "/fusion --fast review locking");
-        assert!(widget.turn_running());
+        assert!(!widget.turn_running());
         let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
         assert_eq!(shown, "/fusion --fast review locking");
     }

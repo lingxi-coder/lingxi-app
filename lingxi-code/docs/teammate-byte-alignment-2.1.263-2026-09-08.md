@@ -119,3 +119,88 @@ Follow-up validation in the selected checkout:
 - All-target `cargo check` passed for Desktop, Mobile, CLI, Bridge, client-adapter, TUI and TUI-core in the selected checkout.
 - The selected CLI binary passed 14 worker tests and the strict external smoke driver: authenticated startup, message RPC/permission/result replay, idle/wake/completion, shutdown exit 0 and consumed manifest. Evidence: `/tmp/lingxi-worker-engine-smoke-candidate-final/` (three local model requests, no external HTTP attempts).
 - Evidence logs use the `review-fix-` prefix under `/tmp/lingxi-teammate-263/`.
+
+## Second review follow-up
+
+The second review fixes cover eight runtime and presentation failures:
+
+1. TUI model-turn start events and cancellation-token registration now occur after acquiring the shared host turn gate. Local slash commands execute without that gate and preserve the active model turn and its cancellation token.
+2. External pane tasks route public TaskStop through their owning backend. Failed or timed-out termination preserves task ownership and a retryable status; successful termination marks the teammate killed. Failed startup cleanup also exposes a stoppable task instead of losing the pane.
+3. An incomplete parent JSONL write poisons the connection, including cancellation during a write. Subsequent frames cannot reuse a partially written stream; teardown remains bounded and retryable.
+4. The team registry captures the owning runtime's configuration home. Shutdown task unassignment and team-member removal use that same root instead of re-reading ambient environment variables.
+5. Team-file read/modify/write operations share the existing cross-process lock and publish through atomic rename. Member and metadata updates preserve concurrent changes and unknown JSON fields.
+6. Pane workers resolve project settings, MCP, providers and plan paths from the manifest working directory before constructing the engine. Project-scoped boot settings do not change the process working directory.
+7. Child output and RPC writes have bounded, cancellation-aware lock acquisition and writes. The RPC deadline includes writing, partial frames poison the connection, and dropped requests release their pending reply entries.
+8. Desktop reconnect and matching session-resume events clear stale coordinator overlays before rebuilding the live roster, while retaining transcript tabs.
+
+No dependencies or legacy compatibility paths were added. The earlier byte-parity and live-backend verification limits still apply.
+
+Files changed for this follow-up (other pending worktree changes are outside this fix):
+
+- `clients/electron/src/renderer/bridge/runtimeCenterState.ts`, `clients/electron/test/runtime-center-state.test.ts`.
+- `lingxi-code/apps/cli/src/init.rs`, `mode.rs`, `teammate_worker.rs`.
+- `lingxi-code/apps/engine-desktop/src/lib.rs`, `pane_teammate.rs`, `lingxi-code/apps/engine-desktop/tests/coordinator_activation.rs`.
+- `lingxi-code/coordinator/src/implicit_team.rs`, `team_file.rs`, `team_registry.rs`, `tool_send_message.rs`.
+- `lingxi-code/tasks/src/registry.rs`, `registry_test.rs`, `lingxi-code/tui/src/chat_widget.rs`, and this report.
+
+Second follow-up validation used the current worktree, including preserved unrelated edits; it is not a selected-commit checkout:
+
+- Coordinator: 119 passed; tasks: 389 passed after correcting the teammate killed-state transition.
+- CLI worker: 19 passed, one external-driver test ignored by default; explicit project-directory and TUI host-turn regressions: three passed.
+- Pane backend/transport: nine passed, including failed startup cleanup and public TaskStop retry. Coordinator activation integration: six passed.
+- TUI chat widget: 152 passed. Desktop Runtime Center state/render: 28 passed, including reconnect/resume reset tests; Electron web TypeScript check passed.
+- The strict worker-engine smoke driver passed authenticated startup, message RPC, idle/wake/completion and shutdown exit 0. It made three local model requests and no external HTTP attempts; evidence is `/tmp/lingxi-worker-engine-smoke-second-fix/`.
+- Rust evidence logs use the `second-fix-` prefix under `/tmp/lingxi-teammate-263/`. The initial tasks run found one failed regression assertion; the subsequent complete 389-test run passed. The Desktop commands were captured in the agent tool transcript, not those log files.
+- All-target `cargo check` passed for coordinator, tasks, Desktop, Mobile, CLI, Bridge and TUI. All-target Clippy passed for coordinator, tasks, Desktop, CLI and TUI; warnings remain. Scoped Rust formatting and `git diff --check` passed.
+
+## Third review follow-up
+
+- Shutdown approval no longer treats a failed backend stop as confirmed departure. The tool reports the stop error while preserving team membership and shared-task ownership; a successful retry performs departure cleanup. The approval frame still records acceptance independently of termination.
+- Pane task/output allocation occurs before external pane creation. An allocation error therefore leaves no pane to recover; later launch failures reuse the reserved task for retryable cleanup.
+- A child's terminal report is published only after confirmed pane cleanup. Failed cleanup leaves a running task accepted by the public TaskStop guard. Status publication uses the registry's authoritative terminal result when completion races with a user stop.
+- Pending slash dispatch has its own cancellation and completion ownership, separate from an active teammate turn. Follow-up prompts remain ordered behind expansion, and session switching cancels pending work.
+- Normal submissions and slash prompts share a synchronous submission sequence. Delayed enqueue publication cannot hide an earlier input, and a queued turn inherits its owner's cancellation. Both between-turn draining and the actual mid-turn input consumer apply the same ordering rules and retire consumed sequence metadata; local control commands remain immediately responsive.
+
+This follow-up changes `coordinator/src/tool_send_message.rs`, `apps/engine-desktop/src/pane_teammate.rs`, the CLI/TUI slash dispatch path, their regression tests and this report. No dependencies or legacy behavior branches were added. Existing unrelated changes remain in the worktree.
+
+Third follow-up validation used the current worktree:
+
+- 370 targeted tests passed: coordinator 120, pane lifecycle/transport 11, TUI widget 156, CLI mode 57, worker/config 20, and coordinator activation integration six.
+- The shutdown regression was first run against the broken implementation and failed because the tool returned success after failed termination; the final coordinator suite passes.
+- Independent review caught mixed-input ordering and a second mid-turn queue consumer. Both have production-path regression tests in the final CLI suite; the final bounded recheck found no further confirmed blocker in those paths.
+- Strict worker-engine smoke passed authentication, Ready, message RPC, idle/wake/completion and shutdown exit 0, with three local model requests and no external HTTP attempts. Evidence: `/tmp/lingxi-worker-engine-smoke-third-fix/`.
+- Scoped Rust formatting and `git diff --check` passed. Evidence logs use the `third-fix-` prefix under `/tmp/lingxi-teammate-263/`; an initial test-mock compile error was corrected before the final CLI suite.
+- All-target `cargo check` passed for coordinator, Desktop, CLI, TUI, Mobile and Bridge. All-target Clippy passed for coordinator, Desktop, CLI and TUI; warnings remain.
+
+These tests do not add live iTerm2, signed production CLI, or upstream visual-reference coverage; the earlier stated verification limits remain.
+
+## Fourth review follow-up
+
+- CLI queued-input ownership is now immutable for the host session. Cancellation cleanup and both consumers retire ordering metadata without deleting the cancellation token, so an in-flight snapshot or dequeue cannot reinterpret canceled user input as a fresh unowned teammate message. These records are released with the session queue state.
+- Approved departure data is recorded after approval delivery and before attempting termination. A later confirmed pane stop completes the stored team-file removal, task unassignment and termination notification. The original response path and retry paths share an owned, once-only completion operation; completed entries remain in the session registry for idempotency. No callback or registry reference cycle was introduced.
+- Changes are in `apps/cli/src/mode.rs`, `coordinator/src/team_registry.rs`, `coordinator/src/tool_send_message.rs`, `apps/engine-desktop/src/pane_teammate.rs`, their tests and this report. No dependency or legacy compatibility path was added.
+
+Fourth follow-up verification uses the current worktree:
+
+- 218 targeted tests passed: coordinator 121, CLI mode 59, pane lifecycle/transport 12, worker/config 20, and coordinator activation six.
+- Two deterministic queue tests suspend the real mid-turn consumer or dequeue while cancellation cleanup runs. They verify that canceled input cannot return and genuinely unowned teammate input still works.
+- The pane integration test delivers a real socket Shutdown frame, disconnects the simulated child, observes failed teardown without file/task mutation, then retries through the public task-registry handle. It verifies successful departure cleanup and no duplicate notification after concurrent/repeated completion.
+- Previously verified CLI/coordinator binaries also passed their 57/120-test baseline suites; these are prior-build baselines rather than freshly compiled pre-edit worktree tests.
+- Strict worker-engine smoke passed startup, RPC, idle/wake/completion, manifest consumption and shutdown exit 0, with three local model requests and no external HTTP attempts. Evidence: `/tmp/lingxi-worker-engine-smoke-fourth-fix/`.
+- Logs use the `fourth-fix-` prefix under `/tmp/lingxi-teammate-263/`. The existing live-backend, signed-production and upstream-visual verification limits remain.
+- All-target `cargo check` passed for coordinator, Desktop, CLI, TUI, Mobile and Bridge. All-target Clippy passed for coordinator, Desktop and CLI; warnings remain. Scoped Rust formatting and `git diff --check` passed.
+
+## Final retry correction and commit verification
+
+Departure completion now retains per-step progress instead of caching the first attempt in `OnceCell<()>`. Team-file, task-list, lock, read, write and notification errors propagate. Successful task updates survive retries in an accumulated result; a single accurate termination notification is sent only after the required steps succeed.
+
+The strict task-store departure API acquires each file lock before rechecking ownership and completion. It returns committed partial progress on failure and atomically replaces task files, so failed writes cannot truncate the remaining ownership record. Existing general task CRUD behavior is outside this change. Pane teardown retains its public TaskStop route and running status through departure I/O failures; a confirmed backend termination is not repeated on retry.
+
+The selected commit contains 19 teammate-related files from these review follow-ups. It excludes concurrent cron, permission, coordinator-mode dispatch, unrelated orchestrator and formatting changes. Verification ran in `/tmp/lingxi-teammate-final-check`, assembled from the selected Git index rather than the full working tree:
+
+- 825 tests passed: coordinator 123, task-store 32, task registry/handlers 389, CLI mode 59, worker/config 20, pane transport/lifecycle 12, coordinator activation six, TUI widget 156 and Desktop state/render 28.
+- Regression cases include team-file lock recovery, partial task-unassignment recovery with accurate accumulated notification, ownership changes while waiting for a task lock, atomic-write failure, and public TaskStop retry after the backend is already terminated but departure I/O failed.
+- Electron web TypeScript checking passed. Strict worker-engine smoke passed startup, RPC, idle/wake/completion, manifest consumption and shutdown exit 0, with three local model requests and no external HTTP attempts; evidence: `/tmp/lingxi-worker-engine-smoke-commit-final/`.
+- Selected-source formatting checks report only three inherited `tasks/src/registry_test.rs` differences deliberately excluded from this commit. `git diff --check` passes. Initial test-fixture and test-only import issues were corrected before the final selected-source suites passed.
+- Evidence logs use the `commit-candidate-` prefix under `/tmp/lingxi-teammate-263/`. Live iTerm2, signed production CLI and upstream visual-reference coverage remain unverified as described above.
+- All-target `cargo check` passed for coordinator, task-store, tasks, Desktop, CLI, TUI, Mobile and Bridge. All-target Clippy passed for coordinator, task-store, tasks, Desktop, CLI and TUI, with warnings. Its first attempt exhausted disk space; clearing only this task's temporary build cache and rerunning without incremental compilation completed successfully.

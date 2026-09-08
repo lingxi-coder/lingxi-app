@@ -56,6 +56,10 @@ pub struct TaskRegistry {
     /// and must be torn down through the handler, not by cancelling a
     /// `BackgroundTaskHandle` the registry never holds.
     spawned: Arc<RwLock<HashMap<String, TaskType>>>,
+    /// External pane tasks must confirm process teardown before task tools
+    /// publish a terminal status. Weak ownership avoids a registry/controller cycle.
+    external_teammate_controller: RwLock<Option<std::sync::Weak<dyn TeamSpawnSeam>>>,
+    external_teammate_tasks: RwLock<HashSet<String>>,
     runtime: Arc<dyn RuntimeSpawner>,
     fs: Arc<dyn FileSystem>,
     /// Owner of task spool files.
@@ -272,6 +276,8 @@ impl TaskRegistry {
             cleanups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             backgrounders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             spawned: Arc::new(RwLock::new(HashMap::new())),
+            external_teammate_controller: RwLock::new(None),
+            external_teammate_tasks: RwLock::new(HashSet::new()),
             runtime,
             fs,
             output_manager,
@@ -284,6 +290,27 @@ impl TaskRegistry {
             total_agent_spawns: AtomicU64::new(0),
             web_search_calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
+    }
+
+    /// Bind the host's external teammate teardown owner without retaining it.
+    pub async fn set_external_teammate_controller(
+        &self,
+        controller: std::sync::Weak<dyn TeamSpawnSeam>,
+    ) {
+        *self.external_teammate_controller.write().await = Some(controller);
+    }
+
+    /// Mark a published pane task before making it visible as running.
+    pub async fn register_external_teammate_task(&self, task_id: &str) {
+        self.external_teammate_tasks
+            .write()
+            .await
+            .insert(task_id.into());
+    }
+
+    /// Forget external routing only after the backend confirms termination.
+    pub async fn unregister_external_teammate_task(&self, task_id: &str) {
+        self.external_teammate_tasks.write().await.remove(task_id);
     }
 
     /// Session running total of `Agent`-tool subagent spawns (claude 2.1.212
@@ -2759,6 +2786,30 @@ impl TaskRegistry {
     pub async fn kill(&self, task_id: &str) -> Result<(), TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
         let task_id_ref = task_id.as_str();
+        if self
+            .external_teammate_tasks
+            .read()
+            .await
+            .contains(task_id_ref)
+        {
+            let controller = self
+                .external_teammate_controller
+                .read()
+                .await
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .ok_or_else(|| {
+                    TaskError::Internal("External teammate teardown owner is unavailable".into())
+                })?;
+            controller
+                .kill(task_id_ref)
+                .await
+                .map_err(|error| TaskError::Internal(error.to_string()))?;
+            self.unregister_external_teammate_task(task_id_ref).await;
+            let output = self.mark_killed(task_id_ref).await;
+            self.append_killed_trailer(output).await;
+            return Ok(());
+        }
         // Preserve the handler's explicit kill path as the primary cancellation
         // mechanism. The cleanup hook is a fallback/drop-owner hook; running it
         // first can remove the handler's worker record before `Task::kill` gets a
@@ -2836,6 +2887,7 @@ impl TaskRegistry {
                 killed_bash_output = Some(bash.base.output_file.clone());
             }
             TaskState::LocalAgent(agent) => agent.base.status = TaskStatus::Killed,
+            TaskState::InProcessTeammate(teammate) => teammate.base.status = TaskStatus::Killed,
             TaskState::Monitor(monitor) => monitor.base.status = TaskStatus::Killed,
             // A backgrounded MCP call: mark killed + `mcpStatus:"cancelled"`
             // (the poll loop's `status==="killed"` → `cancelTask` branch).

@@ -466,6 +466,10 @@ export function reduceRuntimeCenterEvent(
       return addRuntimeResources(state, [resourceFromAttachment(event.attachment)]);
     case 'plan_updated':
       return { ...state, plan: event.tasks };
+    case 'session_resumed':
+      return event.session_id === sessionId
+        ? { ...state, agents: {}, coordinatorWorkers: {} }
+        : state;
     case 'session_started':
       return event.session_id === sessionId ? resetRuntimeCenterData(state) : state;
     case 'session_ended':
@@ -488,7 +492,7 @@ export function reduceRuntimeCenterPermission(
   };
 }
 
-/** A respawn creates a fresh permission gate whose request IDs restart. */
+/** A respawn replaces live workers and the permission gate; history remains inspectable. */
 export function resetRuntimeCenterConnection(state: RuntimeCenterState): RuntimeCenterState {
   const submittedPlanState: SubmittedPlanState = {
     ...emptySubmittedPlanState(),
@@ -502,6 +506,8 @@ export function resetRuntimeCenterConnection(state: RuntimeCenterState): Runtime
   return {
     ...state,
     overviewOpen: false,
+    agents: {},
+    coordinatorWorkers: {},
     submittedPlanState,
     submittedPlan: latestSubmittedPlan(submittedPlanState),
   };

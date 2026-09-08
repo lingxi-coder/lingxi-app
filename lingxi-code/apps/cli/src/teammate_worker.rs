@@ -35,14 +35,17 @@ mod unix {
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     };
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::unix::OwnedWriteHalf;
     use tokio::sync::{mpsc, oneshot, Mutex};
 
-    type Replies = Arc<Mutex<HashMap<u64, oneshot::Sender<PaneMessageResult>>>>;
+    type Replies = Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<PaneMessageResult>>>>;
+    const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+    const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
     #[derive(Debug)]
     enum TaskCommand {
@@ -67,17 +70,80 @@ mod unix {
         writer: Mutex<OwnedWriteHalf>,
         replies: Replies,
         next_id: AtomicU64,
+        poisoned: AtomicBool,
+        cancelled: tokio_util::sync::CancellationToken,
+    }
+    struct WriteAttempt<'a> {
+        connection: &'a Connection,
+        complete: bool,
+    }
+    impl Drop for WriteAttempt<'_> {
+        fn drop(&mut self) {
+            if !self.complete {
+                self.connection.poisoned.store(true, Ordering::Release);
+                self.connection.cancelled.cancel();
+            }
+        }
+    }
+    struct PendingReply<'a> {
+        replies: &'a Replies,
+        id: u64,
+    }
+    impl Drop for PendingReply<'_> {
+        fn drop(&mut self) {
+            self.replies
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&self.id);
+        }
     }
     impl Connection {
+        fn new(writer: OwnedWriteHalf, cancelled: tokio_util::sync::CancellationToken) -> Self {
+            Self {
+                writer: Mutex::new(writer),
+                replies: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                next_id: AtomicU64::new(1),
+                poisoned: AtomicBool::new(false),
+                cancelled,
+            }
+        }
         async fn write(&self, frame: &WorkerToParent) -> Result<(), String> {
+            if self.poisoned.load(Ordering::Acquire) || self.cancelled.is_cancelled() {
+                return Err("Parent teammate connection closed".into());
+            }
             let mut bytes = serde_json::to_vec(frame).map_err(|e| e.to_string())?;
             bytes.push(b'\n');
-            self.writer
-                .lock()
-                .await
-                .write_all(&bytes)
-                .await
-                .map_err(|e| e.to_string())
+            if bytes.len() > MAX_FRAME_BYTES {
+                return Err("Teammate frame exceeds 1 MiB".into());
+            }
+            let deadline = tokio::time::Instant::now() + WRITE_TIMEOUT;
+            let mut writer = tokio::select! {
+                biased;
+                _ = self.cancelled.cancelled() => return Err("Parent teammate connection closed".into()),
+                writer = tokio::time::timeout_at(deadline, self.writer.lock()) => writer.map_err(|_| "Parent teammate writer lock timed out".to_owned())?,
+            };
+            if self.poisoned.load(Ordering::Acquire) {
+                return Err("Parent teammate connection closed".into());
+            }
+            // Dropping this future after a partial write closes the logical
+            // connection; no subsequent frame may reuse its truncated JSON.
+            let mut attempt = WriteAttempt {
+                connection: self,
+                complete: false,
+            };
+            let result = tokio::select! {
+                biased;
+                _ = self.cancelled.cancelled() => Err("Parent teammate connection closed".into()),
+                result = tokio::time::timeout_at(deadline, writer.write_all(&bytes)) => match result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(_) => Err("Parent teammate write timed out".into()),
+                },
+            };
+            if result.is_ok() {
+                attempt.complete = true;
+            }
+            result
         }
     }
     #[async_trait]
@@ -86,18 +152,25 @@ mod unix {
             &self,
             input: serde_json::Value,
         ) -> Result<PaneMessageResult, String> {
+            let deadline = tokio::time::Instant::now() + RPC_TIMEOUT;
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             let (tx, rx) = oneshot::channel();
-            self.replies.lock().await.insert(id, tx);
-            if let Err(error) = self.write(&WorkerToParent::SendMessage { id, input }).await {
-                self.replies.lock().await.remove(&id);
-                return Err(error);
+            self.replies
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(id, tx);
+            let _pending = PendingReply {
+                replies: &self.replies,
+                id,
+            };
+            tokio::select! {
+                biased;
+                _ = self.cancelled.cancelled() => Err("Parent teammate connection closed".into()),
+                result = tokio::time::timeout_at(deadline, async {
+                    self.write(&WorkerToParent::SendMessage { id, input }).await?;
+                    rx.await.map_err(|_| "Parent teammate connection closed".to_string())
+                }) => result.map_err(|_| "Parent SendMessage timed out".to_owned())?,
             }
-            let reply = tokio::time::timeout(std::time::Duration::from_secs(120), rx).await;
-            self.replies.lock().await.remove(&id);
-            reply
-                .map_err(|_| "Parent SendMessage timed out".to_string())?
-                .map_err(|_| "Parent teammate connection closed".to_string())
         }
     }
 
@@ -285,11 +358,8 @@ mod unix {
             .await
             .map_err(|e| e.to_string())?;
         let (read, write) = socket.into_split();
-        let connection = Arc::new(Connection {
-            writer: Mutex::new(write),
-            replies: Arc::new(Mutex::new(HashMap::new())),
-            next_id: AtomicU64::new(1),
-        });
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        let connection = Arc::new(Connection::new(write, cancelled.clone()));
         connection
             .write(&WorkerToParent::Hello {
                 token: manifest.token.clone(),
@@ -297,7 +367,6 @@ mod unix {
             .await?;
         let (input_tx, mut input_rx) = mpsc::channel(64);
         let replies = connection.replies.clone();
-        let cancelled = tokio_util::sync::CancellationToken::new();
         let reader_cancel = cancelled.clone();
         // Replies are consumed independently of task message delivery: a busy
         // teammate may itself be awaiting a SendMessage reply from its parent.
@@ -313,7 +382,11 @@ mod unix {
                         result,
                         is_error,
                     } => {
-                        if let Some(reply) = replies.lock().await.remove(&id) {
+                        if let Some(reply) = replies
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .remove(&id)
+                        {
                             let _ = reply.send(PaneMessageResult { result, is_error });
                         }
                     }
@@ -335,7 +408,10 @@ mod unix {
                     ParentToWorker::Shutdown => break,
                 }
             }
-            replies.lock().await.clear();
+            replies
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
             reader_cancel.cancel();
         });
 
@@ -371,7 +447,13 @@ mod unix {
         cancelled: tokio_util::sync::CancellationToken,
         config: Option<engine_desktop::DesktopConfig>,
     ) -> Result<(), String> {
-        let mut cfg = config.unwrap_or_else(|| crate::init::resolve_desktop_config(argv, mode));
+        let mut cfg = match config {
+            Some(config) => config,
+            None => match &manifest.request.cwd {
+                Some(cwd) => crate::init::resolve_desktop_config_at(argv, mode, cwd.into()),
+                None => crate::init::resolve_desktop_config(argv, mode),
+            },
+        };
         cfg.initial_teammate_team_name = Some(manifest.team_name.clone());
         cfg.injected_permission_gate =
             Some(Arc::new(PanePermissionGate::terminal(cancelled.clone())?));
@@ -384,9 +466,6 @@ mod unix {
         }
         if let Some(model) = &manifest.request.model {
             cfg.default_model = model.clone();
-        }
-        if let Some(cwd) = &manifest.request.cwd {
-            cfg.cwd = cwd.into();
         }
         let output = Arc::new(crate::output_adapter::SinkAdapter::new(Arc::new(
             crate::output::PlainSink::new(),
@@ -578,8 +657,20 @@ mod unix {
                 path,
             ])
             .unwrap();
-            let mut config =
-                crate::init::resolve_desktop_config(&argv, permission::PermissionMode::Default);
+            let launch: PaneTeammateManifest = serde_json::from_slice(
+                &std::fs::read(argv.teammate_launch_file.as_ref().unwrap()).unwrap(),
+            )
+            .unwrap();
+            let mut config = match launch.request.cwd {
+                Some(cwd) => crate::init::resolve_desktop_config_at(
+                    &argv,
+                    permission::PermissionMode::Default,
+                    cwd.into(),
+                ),
+                None => {
+                    crate::init::resolve_desktop_config(&argv, permission::PermissionMode::Default)
+                }
+            };
             config.isolated_credential_storage = true;
             run_with_config(&argv, permission::PermissionMode::Default, Some(config))
                 .await
@@ -820,14 +911,127 @@ mod unix {
         }
 
         #[tokio::test]
+        async fn rpc_write_lock_wait_is_bounded_before_reply_timeout() {
+            let (child, _parent_not_reading) = tokio::net::UnixStream::pair().unwrap();
+            let (_, writer) = child.into_split();
+            let connection = Connection::new(writer, tokio_util::sync::CancellationToken::new());
+            let _held = connection.writer.lock().await;
+            let error = tokio::time::timeout(
+                WRITE_TIMEOUT + std::time::Duration::from_secs(1),
+                connection.send_message(serde_json::json!({"to":"main","message":"hello"})),
+            )
+            .await
+            .expect("write lock wait must not consume the 120s reply deadline")
+            .unwrap_err();
+            assert!(error.contains("writer lock timed out"));
+            assert!(connection.replies.lock().unwrap().is_empty());
+            assert!(!connection.poisoned.load(Ordering::Acquire));
+        }
+
+        #[tokio::test]
+        async fn cancellation_interrupts_child_writer_lock_and_releases_pending_rpc() {
+            let (child, _parent) = tokio::net::UnixStream::pair().unwrap();
+            let (_, writer) = child.into_split();
+            let cancellation = tokio_util::sync::CancellationToken::new();
+            let connection = Arc::new(Connection::new(writer, cancellation.clone()));
+            let _held = connection.writer.lock().await;
+            let caller = connection.clone();
+            let pending = tokio::spawn(async move {
+                caller
+                    .send_message(serde_json::json!({"to":"main","message":"hello"}))
+                    .await
+            });
+            tokio::task::yield_now().await;
+            cancellation.cancel();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_err()
+            );
+            assert!(connection.replies.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn child_partial_write_timeout_closes_transport_and_releases_rpc() {
+            let (child, _parent_not_reading) = tokio::net::UnixStream::pair().unwrap();
+            let (_, writer) = child.into_split();
+            let connection = Connection::new(writer, tokio_util::sync::CancellationToken::new());
+            let error = tokio::time::timeout(
+                WRITE_TIMEOUT + std::time::Duration::from_secs(1),
+                connection
+                    .send_message(serde_json::json!({"to":"main","message":"x".repeat(900_000)})),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(error.contains("write timed out"));
+            assert!(connection.poisoned.load(Ordering::Acquire));
+            assert!(connection.cancelled.is_cancelled());
+            assert!(connection.replies.lock().unwrap().is_empty());
+            assert!(connection
+                .write(&WorkerToParent::Hello {
+                    token: "never append another frame".into()
+                })
+                .await
+                .is_err());
+        }
+
+        #[tokio::test]
+        async fn aborted_partial_child_frame_poisoning_is_cancellation_safe() {
+            let (child, mut parent) = tokio::net::UnixStream::pair().unwrap();
+            let (_, writer) = child.into_split();
+            let connection = Arc::new(Connection::new(
+                writer,
+                tokio_util::sync::CancellationToken::new(),
+            ));
+            let writing = connection.clone();
+            let pending = tokio::spawn(async move {
+                writing
+                    .write(&WorkerToParent::Output {
+                        text: "x".repeat(900_000),
+                    })
+                    .await
+            });
+            let mut bytes = [0_u8; 16];
+            parent.read_exact(&mut bytes).await.unwrap();
+            pending.abort();
+            let _ = pending.await;
+            assert!(connection.poisoned.load(Ordering::Acquire));
+            assert!(connection.cancelled.is_cancelled());
+        }
+
+        #[tokio::test]
+        async fn cancelling_a_waiting_rpc_removes_its_reply_without_poisoning_complete_frame() {
+            let (child, parent) = tokio::net::UnixStream::pair().unwrap();
+            let (_, writer) = child.into_split();
+            let connection = Arc::new(Connection::new(
+                writer,
+                tokio_util::sync::CancellationToken::new(),
+            ));
+            let caller = connection.clone();
+            let pending = tokio::spawn(async move {
+                caller
+                    .send_message(serde_json::json!({"to":"main","message":"hello"}))
+                    .await
+            });
+            let mut lines = BufReader::new(parent).lines();
+            assert!(lines.next_line().await.unwrap().is_some());
+            pending.abort();
+            let _ = pending.await;
+            assert!(connection.replies.lock().unwrap().is_empty());
+            assert!(!connection.poisoned.load(Ordering::Acquire));
+        }
+
+        #[tokio::test]
         async fn message_rpc_preserves_structured_result_and_error_flag() {
             let (child, parent) = tokio::net::UnixStream::pair().unwrap();
             let (_, writer) = child.into_split();
-            let connection = Arc::new(Connection {
-                writer: Mutex::new(writer),
-                replies: Arc::new(Mutex::new(HashMap::new())),
-                next_id: AtomicU64::new(1),
-            });
+            let connection = Arc::new(Connection::new(
+                writer,
+                tokio_util::sync::CancellationToken::new(),
+            ));
             let caller = connection.clone();
             let expected =
                 serde_json::json!({"to":"peer", "message":"hello", "summary":"greeting"});
@@ -843,7 +1047,7 @@ mod unix {
             connection
                 .replies
                 .lock()
-                .await
+                .unwrap()
                 .remove(&id)
                 .unwrap()
                 .send(PaneMessageResult {
@@ -854,7 +1058,7 @@ mod unix {
             let reply = pending.await.unwrap().unwrap();
             assert!(reply.is_error);
             assert_eq!(reply.result["message"], "recipient unavailable");
-            assert!(connection.replies.lock().await.is_empty());
+            assert!(connection.replies.lock().unwrap().is_empty());
         }
 
         #[test]
@@ -903,11 +1107,7 @@ mod unix {
             tokio::fs::write(&path, &expected).await.unwrap();
             let (child, parent) = tokio::net::UnixStream::pair().unwrap();
             let (_, writer) = child.into_split();
-            let connection = Connection {
-                writer: Mutex::new(writer),
-                replies: Arc::new(Mutex::new(HashMap::new())),
-                next_id: AtomicU64::new(1),
-            };
+            let connection = Connection::new(writer, tokio_util::sync::CancellationToken::new());
             let drain = tokio::spawn(async move {
                 let mut file = tokio::fs::File::open(path).await.unwrap();
                 let mut pending = Vec::new();

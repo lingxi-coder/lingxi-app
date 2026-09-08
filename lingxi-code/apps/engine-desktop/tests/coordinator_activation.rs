@@ -103,7 +103,9 @@ fn make_coordinator_fixture(api: &Arc<ScriptedApiClient>) -> CoordinatorFixture 
 
     // The per-session coordinator team registry + mode (mode ENABLED — a
     // coordinator session enters it at build time).
-    let team = Arc::new(coordinator::TeamRegistry::new(AgentId::new()));
+    let team = Arc::new(
+        coordinator::TeamRegistry::new(AgentId::new()).with_config_home(tmp.path().to_path_buf()),
+    );
     let mode = Arc::new(coordinator::CoordinatorMode::new());
     mode.enter();
 
@@ -237,8 +239,7 @@ async fn implicit_agent_spawn_flows_active_workers_to_client_event() {
         Arc::new(PosixRuntime::new()),
         fixture.output.clone(),
         "12345678-0000-0000-0000-000000000000".into(),
-    )
-    .with_home(fixture._tmp.path().to_path_buf());
+    );
     spawner.initialize().await;
     let result = spawner
         .spawn(

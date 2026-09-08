@@ -430,12 +430,25 @@ fn load_scoped_settings(
     include_project: bool,
 ) -> Option<lingxi_core::settings::EffectiveSettings> {
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    load_scoped_settings_at(&project_dir, include_user, include_project)
+}
+
+fn load_scoped_settings_at(
+    project_dir: &std::path::Path,
+    include_user: bool,
+    include_project: bool,
+) -> Option<lingxi_core::settings::EffectiveSettings> {
     type Key = (std::path::PathBuf, bool, bool, u64);
     static CACHE: std::sync::Mutex<Option<(Key, lingxi_core::settings::EffectiveSettings)>> =
         std::sync::Mutex::new(None);
     let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let revision = settings_revision(&project_dir, include_user, include_project, &env);
-    let key = (project_dir.clone(), include_user, include_project, revision);
+    let revision = settings_revision(project_dir, include_user, include_project, &env);
+    let key = (
+        project_dir.to_path_buf(),
+        include_user,
+        include_project,
+        revision,
+    );
     {
         let guard = CACHE
             .lock()
@@ -448,7 +461,7 @@ fn load_scoped_settings(
     }
     let inputs = lingxi_core::settings::LoadInputs {
         env: &env,
-        project_dir: &project_dir,
+        project_dir,
         defaults: lingxi_core::settings::schema::SettingsJson::default(),
     };
     let loaded =
@@ -513,16 +526,17 @@ fn settings_file_revision(path: Option<&std::path::Path>, hasher: &mut DefaultHa
 
 /// Load the merged settings `providers` object, honoring `--setting-sources`.
 ///
-/// Resolves the project dir from the *current* working directory — the process
-/// has already `chdir`'d into any `--cwd` before `build_runtime` runs, so this
-/// reads the same dir as the hook loader. Returns `None` on any load failure or
+/// Uses the resolved session project directory, matching the hook loader even
+/// when a pane worker's inherited process directory differs. Returns `None` on any load failure or
 /// when no `providers` block is set; callers then fall back to built-in
 /// profiles only.
 fn load_provider_profiles(
+    project_dir: &std::path::Path,
     include_user: bool,
     include_project: bool,
 ) -> Option<std::collections::BTreeMap<String, serde_json::Value>> {
-    load_scoped_settings(include_user, include_project).and_then(|eff| eff.settings.providers)
+    load_scoped_settings_at(project_dir, include_user, include_project)
+        .and_then(|eff| eff.settings.providers)
 }
 
 /// Load the merged `settings.axScreenReader` (project + user + env layers,
@@ -546,8 +560,12 @@ pub(crate) fn load_settings_ax_screen_reader(argv: &Argv) -> Option<bool> {
 /// [`llm_client::model::thinking::session_thinking_from_env`] (a `MAX_THINKING_TOKENS`
 /// env var / `--max-thinking-tokens` flag budget pre-empts it). `None` when
 /// unset / on any load failure → the resolver keeps thinking on (adaptive).
-fn load_always_thinking_enabled(include_user: bool, include_project: bool) -> Option<bool> {
-    load_scoped_settings(include_user, include_project)
+fn load_always_thinking_enabled(
+    project_dir: &std::path::Path,
+    include_user: bool,
+    include_project: bool,
+) -> Option<bool> {
+    load_scoped_settings_at(project_dir, include_user, include_project)
         .and_then(|eff| eff.settings.always_thinking_enabled)
 }
 
@@ -556,8 +574,12 @@ fn load_always_thinking_enabled(include_user: bool, include_project: bool) -> Op
 /// `on_switch_model`). Used as the default model when
 /// `--model` is absent, so the picker choice survives a restart. `None` when
 /// unset / on any load failure → the caller keeps the built-in default.
-fn load_settings_model(include_user: bool, include_project: bool) -> Option<String> {
-    load_scoped_settings(include_user, include_project)
+fn load_settings_model(
+    project_dir: &std::path::Path,
+    include_user: bool,
+    include_project: bool,
+) -> Option<String> {
+    load_scoped_settings_at(project_dir, include_user, include_project)
         .and_then(|eff| eff.settings.model)
         .filter(|m| !m.trim().is_empty())
 }
@@ -565,8 +587,12 @@ fn load_settings_model(include_user: bool, include_project: bool) -> Option<Stri
 /// Load the merged `settings.plansDirectory` (project + user + env layers) —
 /// the custom plan-file directory (206 `iT`). `None` when unset/blank; the
 /// orchestrator resolves + containment-checks it against the project root.
-fn load_settings_plans_directory(include_user: bool, include_project: bool) -> Option<String> {
-    load_scoped_settings(include_user, include_project)
+fn load_settings_plans_directory(
+    project_dir: &std::path::Path,
+    include_user: bool,
+    include_project: bool,
+) -> Option<String> {
+    load_scoped_settings_at(project_dir, include_user, include_project)
         .and_then(|eff| eff.settings.plans_directory)
         .filter(|d| !d.trim().is_empty())
 }
@@ -574,8 +600,12 @@ fn load_settings_plans_directory(include_user: bool, include_project: bool) -> O
 /// Load merged `settings.apiKeyHelper` (project + user + env layers), blank
 /// filtered. The live credential provider invokes the helper only when no
 /// higher-priority Anthropic credential was configured.
-fn load_settings_api_key_helper(include_user: bool, include_project: bool) -> Option<String> {
-    load_scoped_settings(include_user, include_project)
+fn load_settings_api_key_helper(
+    project_dir: &std::path::Path,
+    include_user: bool,
+    include_project: bool,
+) -> Option<String> {
+    load_scoped_settings_at(project_dir, include_user, include_project)
         .and_then(|eff| eff.settings.api_key_helper)
         .filter(|d| !d.trim().is_empty())
 }
@@ -622,8 +652,13 @@ pub(crate) fn load_lingxi_md_excludes(include_user: bool, include_project: bool)
 /// Mirrors [`load_provider_profiles`] but reads the `routing` field. Returns
 /// `None` on any load failure or when no `routing` block is set; callers then
 /// fall back to the default (empty) routing config.
-fn load_routing(include_user: bool, include_project: bool) -> Option<serde_json::Value> {
-    load_scoped_settings(include_user, include_project).and_then(|eff| eff.settings.routing)
+fn load_routing(
+    project_dir: &std::path::Path,
+    include_user: bool,
+    include_project: bool,
+) -> Option<serde_json::Value> {
+    load_scoped_settings_at(project_dir, include_user, include_project)
+        .and_then(|eff| eff.settings.routing)
 }
 
 /// Resolve a deterministic [`DesktopConfig`] from `Argv` + `std::env`.
@@ -660,6 +695,16 @@ pub(crate) fn resolve_desktop_config(
     permission_mode: permission::PermissionMode,
 ) -> DesktopConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    resolve_desktop_config_at(argv, permission_mode, cwd)
+}
+
+/// Resolve project-scoped configuration against an explicit session directory.
+/// Pane children use their authenticated launch cwd without mutating process cwd.
+pub(crate) fn resolve_desktop_config_at(
+    argv: &Argv,
+    permission_mode: permission::PermissionMode,
+    cwd: std::path::PathBuf,
+) -> DesktopConfig {
     let lingxi_home = crate::run::lingxi_home_dir();
     let restricted = argv.restricted_enabled();
     if let Some(settings) = argv.settings.as_deref() {
@@ -731,7 +776,7 @@ pub(crate) fn resolve_desktop_config(
     // (kept — deliberate lingxi design); the literal `ANTHROPIC_MODEL` name is
     // added here because this repo keeps `ANTHROPIC_*` env names verbatim
     // (ANTHROPIC_API_KEY, ANTHROPIC_DEFAULT_*_MODEL) and CC honors it directly.
-    if let Some(persisted) = load_settings_model(incl_user, incl_project) {
+    if let Some(persisted) = load_settings_model(&cwd, incl_user, incl_project) {
         default_model = persisted;
     }
     if let Some(flag_model) = flag_settings
@@ -801,7 +846,7 @@ pub(crate) fn resolve_desktop_config(
                 .and_then(|settings| settings.api_key_helper.clone())
                 .filter(|helper| !helper.trim().is_empty())
         } else {
-            load_settings_api_key_helper(incl_user, incl_project)
+            load_settings_api_key_helper(&cwd, incl_user, incl_project)
         },
         // (M13) Host-launcher OAuth forcing is claude-code's `KWr()`
         // (@228931361) — a pure env predicate that `zb()` (@228933355)
@@ -816,7 +861,7 @@ pub(crate) fn resolve_desktop_config(
         // launcher contract. Env presence only; LingXi never reads the FD.
         anthropic_key_fd_present: std::env::var("CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR")
             .is_ok_and(|v| !v.trim().is_empty()),
-        cwd,
+        cwd: cwd.clone(),
         lingxi_home,
         default_model,
         // Only a `--model` flag is an EXPLICIT choice; the persisted
@@ -849,14 +894,14 @@ pub(crate) fn resolve_desktop_config(
                 .as_ref()
                 .and_then(|settings| settings.providers.clone())
         } else {
-            load_provider_profiles(incl_user, incl_project)
+            load_provider_profiles(&cwd, incl_user, incl_project)
         },
         routing: if restricted {
             flag_settings
                 .as_ref()
                 .and_then(|settings| settings.routing.clone())
         } else {
-            load_routing(incl_user, incl_project)
+            load_routing(&cwd, incl_user, incl_project)
         },
         mcp_paths: vec![project_mcp_path, global_mcp_path],
         use_noop_permission_gate: true,
@@ -897,7 +942,7 @@ pub(crate) fn resolve_desktop_config(
                 .and_then(|settings| settings.plans_directory.clone())
                 .filter(|dir| !dir.trim().is_empty())
         } else {
-            load_settings_plans_directory(incl_user, incl_project)
+            load_settings_plans_directory(&cwd, incl_user, incl_project)
         },
         max_budget_usd,
         // `--json-schema` structured output (print-gated above): `build()` forces
@@ -935,7 +980,9 @@ pub(crate) fn resolve_desktop_config(
                         .and_then(|settings| settings.lingxi_md_excludes.clone())
                         .unwrap_or_default()
                 } else {
-                    load_lingxi_md_excludes(incl_user, incl_project)
+                    load_scoped_settings_at(&cwd, incl_user, incl_project)
+                        .and_then(|settings| settings.settings.lingxi_md_excludes)
+                        .unwrap_or_default()
                 },
             ))
         },
@@ -1041,7 +1088,7 @@ pub(crate) fn resolve_desktop_config(
                     .as_ref()
                     .and_then(|settings| settings.always_thinking_enabled)
             } else {
-                load_always_thinking_enabled(incl_user, incl_project)
+                load_always_thinking_enabled(&cwd, incl_user, incl_project)
             },
         ),
         // (worktree-tmux-launch plan, Task 3) `-w`/`--worktree [name]`:
@@ -1366,6 +1413,47 @@ pub async fn build_runtime_for_tui_inner_with_parent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_project_cwd_scopes_mcp_provider_and_plan_settings_together() {
+        let process_cwd = std::env::current_dir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for (project, label) in [(first.path(), "first"), (second.path(), "second")] {
+            std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+            std::fs::write(project.join(branding::DOT_DIR).join("settings.json"),
+                serde_json::json!({
+                    "providers": {"cwd-scoped-provider": {"type":"openai", "baseUrl":format!("https://{label}.invalid/v1"), "apiKeyEnv":"UNUSED_TEST_KEY"}},
+                    "routing": {"projectMarker":label},
+                    "plansDirectory":format!("{label}-plans")
+                }).to_string()).unwrap();
+            std::fs::write(project.join(".mcp.json"), "{\"mcpServers\":{}}").unwrap();
+        }
+        let argv = Argv::from_iter(["lingxi", "--setting-sources", "project"]).unwrap();
+        // Re-enter the first project to verify the settings cache also keys on
+        // the explicit project rather than the inherited process directory.
+        for (project, label) in [
+            (first.path(), "first"),
+            (second.path(), "second"),
+            (first.path(), "first"),
+        ] {
+            assert_ne!(project, process_cwd.as_path());
+            let config = resolve_desktop_config_at(
+                &argv,
+                permission::PermissionMode::Default,
+                project.to_owned(),
+            );
+            assert_eq!(config.cwd, project);
+            assert_eq!(config.mcp_paths[0], project.join(".mcp.json"));
+            assert_eq!(
+                config.provider_profiles.unwrap()["cwd-scoped-provider"]["baseUrl"],
+                format!("https://{label}.invalid/v1")
+            );
+            assert_eq!(config.routing.unwrap()["projectMarker"], label);
+            assert_eq!(config.plans_directory, Some(format!("{label}-plans")));
+            assert_eq!(std::env::current_dir().unwrap(), process_cwd);
+        }
+    }
 
     #[test]
     fn setting_source_flags_default_and_scoped() {

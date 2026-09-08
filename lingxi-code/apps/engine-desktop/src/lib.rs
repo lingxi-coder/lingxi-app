@@ -12292,7 +12292,9 @@ pub async fn build(
     //        tool selection must be decided here); a default session leaves it
     //        DISABLED so the build is byte-identical to the pre-M10 build.
     let coordinator_id = protocol::AgentId::new();
-    let coordinator = Arc::new(coordinator::TeamRegistry::new(coordinator_id));
+    let coordinator = Arc::new(
+        coordinator::TeamRegistry::new(coordinator_id).with_config_home(cfg.lingxi_home.clone()),
+    );
     coordinator.set_permission_gate(perms.clone()).await;
     // Named background agents can address main even without experimental teams.
     coordinator
@@ -12783,6 +12785,12 @@ pub async fn build(
             task_registry.clone()
         };
 
+    if platform_api::env::agent_swarms_enabled() {
+        task_registry
+            .set_external_teammate_controller(Arc::downgrade(&spawn_seam))
+            .await;
+    }
+
     // (5.5) Assemble the desktop tool registry through the composition root.
     //       A coordinator session shares the team's `MailboxRouter` with the
     //       builtin `SendMessage` tool by casting it onto `tool_ctx.mailbox_router`
@@ -12979,16 +12987,13 @@ pub async fn build(
     // one-shot / teammate / workflow handlers keep the raw spawner captured
     // earlier (they only use the sync `spawn`, which the decorator delegates).
     let teammate_spawner = if platform_api::env::agent_swarms_enabled() {
-        let spawner = Arc::new(
-            coordinator::ImplicitTeammateSpawner::new(
-                coordinator.clone(),
-                spawn_seam.clone(),
-                Arc::new(PosixRuntime::new()),
-                output.clone(),
-                main_session_id.to_string(),
-            )
-            .with_home(cfg.lingxi_home.clone()),
-        );
+        let spawner = Arc::new(coordinator::ImplicitTeammateSpawner::new(
+            coordinator.clone(),
+            spawn_seam.clone(),
+            Arc::new(PosixRuntime::new()),
+            output.clone(),
+            main_session_id.to_string(),
+        ));
         spawner.initialize().await;
         Some(spawner)
     } else {

@@ -30,6 +30,7 @@ impl ImplicitTeammateSpawner {
         output: Arc<dyn OutputStream>,
         session_id: String,
     ) -> Self {
+        let home = team.config_home().map(std::path::Path::to_path_buf);
         Self {
             team,
             seam,
@@ -37,15 +38,9 @@ impl ImplicitTeammateSpawner {
             output,
             session_id,
             reservation: Arc::new(tokio::sync::Mutex::new(())),
-            home: crate::team_file::lingxi_home(),
+            home,
         }
     }
-    /// Override storage for isolated hosts and tests.
-    pub fn with_home(mut self, home: std::path::PathBuf) -> Self {
-        self.home = Some(home);
-        self
-    }
-
     /// Initialize once at session startup, before any Agent or task operation.
     pub async fn initialize(&self) {
         let team_name = self.team.team_name().await.unwrap_or_else(|| {
@@ -64,14 +59,16 @@ impl ImplicitTeammateSpawner {
             if let Err(error) = std::fs::create_dir_all(home.join("plans")) {
                 tracing::warn!(%error, "failed to initialize teammate plans directory");
             }
-            let path = crate::team_file::team_file_path(home, &team_name);
-            if !path.exists() {
-                let lead = format!("team-lead@{team_name}");
-                let now = crate::team_file::now_unix_millis();
-                let value = serde_json::json!({"name":team_name,"createdAt":now,"leadAgentId":lead,"leadSessionId":self.session_id,"members":[{"agentId":lead,"name":"team-lead","agentType":"team-lead","joinedAt":now,"tmuxPaneId":"leader","cwd":std::env::current_dir().unwrap_or_default(),"subscriptions":[],"backendType":"in-process"}]});
-                if let Err(e) = write_config(&path, &value) {
-                    tracing::warn!(error=%e,"failed to initialize session team file");
-                }
+            let lead = format!("team-lead@{team_name}");
+            let now = crate::team_file::now_unix_millis();
+            let value = serde_json::json!({"name":team_name,"createdAt":now,"leadAgentId":lead,"leadSessionId":self.session_id,"members":[{"agentId":lead,"name":"team-lead","agentType":"team-lead","joinedAt":now,"tmuxPaneId":"leader","cwd":std::env::current_dir().unwrap_or_default(),"subscriptions":[],"backendType":"in-process"}]});
+            if let Err(error) = crate::team_file::update_team_file(home, &team_name, |current| {
+                current.get_or_insert(value);
+                Ok(())
+            })
+            .await
+            {
+                tracing::warn!(%error, "failed to initialize session team file");
             }
             if team_name != self.session_id {
                 let _ = std::fs::rename(
@@ -123,7 +120,8 @@ impl ImplicitTeammateSpawner {
                 team_name,
                 &format!("{name}@{team_name}"),
                 name,
-            );
+            )
+            .await;
         }
     }
     /// Run the transaction independently of the caller's cancellation lifetime.
@@ -216,30 +214,24 @@ impl ImplicitTeammateSpawner {
         self.team.mailbox_router.set_color(&name, color).await;
         request.teammate_color = Some(color.into());
         if let Some(home) = &self.home {
-            let path = crate::team_file::team_file_path(home, &team_name);
-            let mut value: serde_json::Value = match std::fs::read(&path)
-                .and_then(|bytes| serde_json::from_slice(&bytes).map_err(std::io::Error::other))
-            {
-                Ok(value) => value,
-                Err(e) => {
-                    self.team.delete_worker(&agent_id).await;
-                    return Err(error(&e.to_string()));
-                }
-            };
-            if let Some(members) = value
-                .get_mut("members")
-                .and_then(serde_json::Value::as_array_mut)
-            {
-                members.push(serde_json::json!({"agentId":advertised_id,"name":name,"agentType":request.subagent_type,"joinedAt":crate::team_file::now_unix_millis(),"tmuxPaneId":"in-process","cwd":request.cwd.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default().display().to_string()),"subscriptions":[],"backendType":"in-process","model":request.model,"color":color,"prompt":request.prompt,"planModeRequired":request.mode.as_deref()==Some("plan")}));
-                if let Err(e) = write_config(&path, &value) {
-                    self.team.delete_worker(&agent_id).await;
-                    return Err(error(&e.to_string()));
-                }
-            } else {
+            let member = serde_json::json!({"agentId":advertised_id,"name":name,"agentType":request.subagent_type,"joinedAt":crate::team_file::now_unix_millis(),"tmuxPaneId":"in-process","cwd":request.cwd.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default().display().to_string()),"subscriptions":[],"backendType":"in-process","model":request.model,"color":color,"prompt":request.prompt,"planModeRequired":request.mode.as_deref()==Some("plan")});
+            let result = crate::team_file::update_team_file(home, &team_name, |current| {
+                let members = current
+                    .as_mut()
+                    .and_then(|value| value.get_mut("members"))
+                    .and_then(serde_json::Value::as_array_mut)
+                    .ok_or_else(|| {
+                        std::io::Error::other(
+                            "reserveTeammateIdentity: updateTeamFile returned undefined",
+                        )
+                    })?;
+                members.push(member);
+                Ok(())
+            })
+            .await;
+            if let Err(error) = result {
                 self.team.delete_worker(&agent_id).await;
-                return Err(error(
-                    "reserveTeammateIdentity: updateTeamFile returned undefined",
-                ));
+                return Err(SubagentSpawnError::Runtime(error.to_string()));
             }
         }
         let task_id = match self
@@ -319,25 +311,25 @@ impl ImplicitTeammateSpawner {
             .await;
         let pane = self.seam.pane_metadata(&task_id).await;
         if let (Some(pane), Some(home)) = (&pane, &self.home) {
-            let path = crate::team_file::team_file_path(home, &team_name);
-            if let Ok(bytes) = std::fs::read(&path) {
-                if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                    if let Some(members) = value
-                        .get_mut("members")
-                        .and_then(serde_json::Value::as_array_mut)
-                    {
-                        if let Some(member) = members
+            if let Err(error) = crate::team_file::update_team_file(home, &team_name, |current| {
+                if let Some(member) = current
+                    .as_mut()
+                    .and_then(|value| value.get_mut("members"))
+                    .and_then(serde_json::Value::as_array_mut)
+                    .and_then(|members| {
+                        members
                             .iter_mut()
-                            .find(|m| m["agentId"].as_str() == Some(&advertised_id))
-                        {
-                            member["tmuxPaneId"] = pane.pane_id.clone().into();
-                            member["backendType"] = pane.backend_type.clone().into();
-                        }
-                    }
-                    if let Err(e) = write_config(&path, &value) {
-                        tracing::warn!(error=%e,"failed to update running teammate pane metadata");
-                    }
+                            .find(|member| member["agentId"].as_str() == Some(&advertised_id))
+                    })
+                {
+                    member["tmuxPaneId"] = pane.pane_id.clone().into();
+                    member["backendType"] = pane.backend_type.clone().into();
                 }
+                Ok(())
+            })
+            .await
+            {
+                tracing::warn!(%error, "failed to update running teammate pane metadata");
             }
         }
         Ok(StartedTeammate {
@@ -412,16 +404,6 @@ fn is_reserved_agent_id(name: &str) -> bool {
                     && p.bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
             }))
-}
-
-fn write_config(path: &std::path::Path, value: &serde_json::Value) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(
-        path,
-        serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?,
-    )
 }
 
 #[cfg(test)]
@@ -594,17 +576,16 @@ mod tests {
         Arc<Harness>,
         tempfile::TempDir,
     ) {
-        let team = Arc::new(TeamRegistry::new(AgentId::new()));
-        let h = Arc::new(Harness::new());
         let tmp = tempfile::tempdir().unwrap();
+        let team = Arc::new(TeamRegistry::new(AgentId::new()).with_config_home(tmp.path().into()));
+        let h = Arc::new(Harness::new());
         let spawner = ImplicitTeammateSpawner::new(
             team.clone(),
             h.clone(),
             h.clone(),
             h.clone(),
             "12345678-abcd".into(),
-        )
-        .with_home(tmp.path().into());
+        );
         (spawner, team, h, tmp)
     }
     #[test]

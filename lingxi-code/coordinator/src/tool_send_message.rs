@@ -517,61 +517,54 @@ impl SendMessageTool {
         if approve {
             if let Some(agent_id) = ctx.agent_id {
                 let worker = self.team.find_by_agent_id(&agent_id).await;
-                if let (Some(seam), Some(worker)) = (&self.spawn_seam, &worker) {
-                    if !worker.task_id.is_empty() {
-                        // Best-effort: a kill failure does not fail the response send.
-                        let _ = seam.kill(&worker.task_id).await;
+                if let Some(worker) = &worker {
+                    let departure_key = if worker.task_id.is_empty() {
+                        agent_id.to_string()
+                    } else {
+                        worker.task_id.clone()
+                    };
+                    if let Some(team_name) = self.team.team_name().await {
+                        let list_id = std::env::var("LINGXI_TASK_LIST_ID")
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or_else(|| team_name.clone());
+                        self.team
+                            .register_approved_departure(
+                                &departure_key,
+                                crate::team_registry::PendingApprovedDeparture {
+                                    home: self.team.config_home().map(std::path::Path::to_owned),
+                                    team_name,
+                                    list_id,
+                                    agent_id,
+                                    worker_name: worker.name.clone(),
+                                    leader,
+                                    from: Self::sender_from(ctx),
+                                    from_name: self.sender_name(ctx).await,
+                                    request_id: request_id.clone(),
+                                    progress: tokio::sync::Mutex::new(
+                                        crate::team_registry::ApprovedDepartureProgress::default(),
+                                    ),
+                                },
+                            )
+                            .await;
                     }
-                }
-                if let (Some(team_name), Some(worker)) = (self.team.team_name().await, &worker) {
-                    let agent_id_str = agent_id.to_string();
-                    // jqt: drop the member from config.json first (oracle order:
-                    // team file → RSr → lead notification). Best-effort — a
-                    // missing/corrupt team file must not fail the response.
-                    if let Some(home) = crate::team_file::lingxi_home() {
-                        let _ = crate::team_file::remove_team_member(
-                            &home,
-                            &team_name,
-                            &agent_id_str,
-                            &worker.name,
-                        );
+                    if let Some(seam) = &self.spawn_seam {
+                        if !worker.task_id.is_empty() {
+                            seam.kill(&worker.task_id).await.map_err(|error| {
+                                ToolError::Internal(format!(
+                                    "SendMessage: shutdown approved, but task {} could not be stopped: {error}. Stop the task again to finish shutdown.", worker.task_id
+                                ))
+                            })?;
+                        }
                     }
-                    // RSr over the shared task list. List-id resolution matches
-                    // the teammate auto-claim: env override, else the team name
-                    // (the tools' resolve_task_list_id first two levels).
-                    let list_id = std::env::var("LINGXI_TASK_LIST_ID")
-                        .ok()
-                        .filter(|s| !s.trim().is_empty())
-                        .unwrap_or_else(|| team_name.clone());
-                    let outcome = task_store::TodoStore::for_list(&list_id)
-                        .unassign_tasks_for_teammate(
-                            &agent_id_str,
-                            &worker.name,
-                            task_store::TeammateEndReason::Shutdown,
-                        )
-                        .await;
-                    // Lead notification frame (Qyt): `{type:"teammate_terminated",
-                    // message}` routed into the leader's mailbox like any other
-                    // inter-agent frame. Best-effort.
-                    let frame = serde_json::to_string(&json!({
-                        "type": "teammate_terminated",
-                        "message": outcome.notification_message,
-                    }))
-                    .unwrap_or_default();
-                    let _ = self
-                        .route(
-                            &leader,
-                            TeammateMessage {
-                                from: Self::sender_from(ctx),
-                                from_name: self.sender_name(ctx).await,
-                                content: frame,
-                                summary: None,
-                                message_id: tool_api::util::ids::ulid_or_uuid(),
-                                timestamp: SystemTime::now(),
-                                request_id: Some(request_id.clone()),
-                            },
-                        )
-                        .await;
+                    self.team
+                        .complete_approved_departure(&departure_key)
+                        .await
+                        .map_err(|error| {
+                            ToolError::Internal(format!(
+                                "SendMessage: departure cleanup remains pending: {error}"
+                            ))
+                        })?;
                 }
             }
         }
@@ -1799,15 +1792,25 @@ mod tests {
     /// frame (Qyt @248040794) carrying RSr's byte-exact notification.
     #[tokio::test]
     async fn approved_shutdown_removes_member_unassigns_tasks_and_notifies_lead() {
-        assert_approved_departure(false).await;
+        assert_approved_departure(false, false, false).await;
     }
 
     #[tokio::test]
     async fn approved_shutdown_finishes_departure_after_caller_is_aborted() {
-        assert_approved_departure(true).await;
+        assert_approved_departure(true, false, false).await;
     }
 
-    async fn assert_approved_departure(cancel_caller: bool) {
+    #[tokio::test]
+    async fn shutdown_uses_owning_home_without_touching_environment_home() {
+        assert_approved_departure(false, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn failed_shutdown_preserves_membership_and_task_ownership_until_retry_succeeds() {
+        assert_approved_departure(false, true, true).await;
+    }
+
+    async fn assert_approved_departure(cancel_caller: bool, custom_home: bool, fail_first: bool) {
         let _lock = DEPART_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1833,7 +1836,12 @@ mod tests {
 
         let team_name = "depart-team";
         let coordinator = AgentId::new();
-        let registry = Arc::new(TeamRegistry::new(coordinator));
+        let home = if custom_home {
+            tmp.path().join("owning-home")
+        } else {
+            tmp.path().to_path_buf()
+        };
+        let registry = Arc::new(TeamRegistry::new(coordinator).with_config_home(home.clone()));
         registry.set_team_name(Some(team_name.to_string())).await;
         let lead_mailbox = observable_mailbox(&registry, coordinator).await;
         let worker = registry
@@ -1842,7 +1850,6 @@ mod tests {
             .unwrap();
 
         // Team file with the lead + the departing member.
-        let home = crate::team_file::lingxi_home().unwrap();
         crate::team_file::write_team_file(
             &home,
             team_name,
@@ -1876,10 +1883,11 @@ mod tests {
                 ],
             },
         )
+        .await
         .unwrap();
 
         // The departing teammate owns one open task on the shared list.
-        let store = task_store::TodoStore::for_list(team_name);
+        let store = task_store::TodoStore::for_list_at(&home, team_name);
         let mut owned = task_store::TodoTask::new(
             "Fix parser".into(),
             "d".into(),
@@ -1889,12 +1897,83 @@ mod tests {
         owned.status = lingxi_core::TodoState::InProgress;
         owned.owner = Some("nova".into());
         let tid = store.create(owned).await.unwrap();
+        let environment_before = if custom_home {
+            let file = crate::team_file::read_team_file(&home, team_name).unwrap();
+            crate::team_file::write_team_file(tmp.path(), team_name, &file)
+                .await
+                .unwrap();
+            let other = task_store::TodoStore::for_list_at(tmp.path(), team_name);
+            let other_id = other.create(store.get(&tid).await.unwrap()).await.unwrap();
+            Some((
+                std::fs::read(crate::team_file::team_file_path(tmp.path(), team_name)).unwrap(),
+                other_id,
+            ))
+        } else {
+            None
+        };
 
         let tool = SendMessageTool::new(registry, preview_ascii);
         let input = json!({
             "to": "team-lead",
             "message": { "type": "shutdown_response", "request_id": "r9", "approve": true }
         });
+        let tool = if fail_first {
+            struct RetryStop(std::sync::atomic::AtomicBool);
+            #[async_trait]
+            impl TeamSpawnSeam for RetryStop {
+                async fn spawn_teammate(
+                    &self,
+                    _: AgentId,
+                    _: String,
+                    _: String,
+                    _: String,
+                ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
+                    unreachable!("shutdown-only seam")
+                }
+                async fn kill(
+                    &self,
+                    _: &str,
+                ) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
+                    if self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        Err(platform_api::team_spawn::TeamSpawnError::Internal(
+                            "backend termination not confirmed".into(),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+            let tool = tool.with_spawn_seam(Arc::new(RetryStop(
+                std::sync::atomic::AtomicBool::new(true),
+            )));
+            let config_before =
+                std::fs::read(crate::team_file::team_file_path(&home, team_name)).unwrap();
+            let error = tool
+                .call(input.clone(), ctx_as(worker), fresh_tx())
+                .await
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("backend termination not confirmed"));
+            assert_eq!(
+                std::fs::read(crate::team_file::team_file_path(&home, team_name)).unwrap(),
+                config_before
+            );
+            let task = store.get(&tid).await.unwrap();
+            assert_eq!(task.owner.as_deref(), Some("nova"));
+            assert_eq!(task.status, lingxi_core::TodoState::InProgress);
+            let frames = lead_mailbox.drain();
+            assert_eq!(
+                frames.len(),
+                1,
+                "approval delivery must not announce termination"
+            );
+            let approval: Value = serde_json::from_str(&frames[0].content).unwrap();
+            assert_eq!(approval["type"], "shutdown_approved");
+            tool
+        } else {
+            tool
+        };
         let frames = if cancel_caller {
             struct AbortCaller(std::sync::Mutex<Option<tokio::task::AbortHandle>>);
             #[async_trait]
@@ -1957,6 +2036,18 @@ mod tests {
         let t = store.get(&tid).await.unwrap();
         assert_eq!(t.owner, None);
         assert_eq!(t.status, lingxi_core::TodoState::Pending);
+        if let Some((config_before, other_id)) = environment_before {
+            assert_eq!(
+                std::fs::read(crate::team_file::team_file_path(tmp.path(), team_name)).unwrap(),
+                config_before
+            );
+            let other = task_store::TodoStore::for_list_at(tmp.path(), team_name)
+                .get(&other_id)
+                .await
+                .unwrap();
+            assert_eq!(other.owner.as_deref(), Some("nova"));
+            assert_eq!(other.status, lingxi_core::TodoState::InProgress);
+        }
 
         // Qyt frame in the lead's inbox, after the shutdown_approved frame.
         let terminated = frames

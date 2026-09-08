@@ -66,12 +66,55 @@ use tokio_util::sync::CancellationToken;
 
 struct TuiMsgQueueInput {
     queue: Arc<msgqueue::MessageQueueManager>,
+    state: Arc<HostPromptQueueState>,
 }
 
 #[async_trait::async_trait]
 impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInput {
     async fn take_mid_turn_input(&self) -> Option<String> {
-        self.queue.take_mid_turn_prompt().await
+        discard_cancelled_queued_prompts(&self.queue, &self.state).await;
+        let candidates = self
+            .queue
+            .get_by_max_priority(msgqueue::QueuePriority::Next, |command| {
+                command.is_main_thread()
+                    && !command.is_slash_command()
+                    && command.priority == msgqueue::QueuePriority::Next
+            })
+            .await;
+        #[cfg(test)]
+        self.state.pause_consumer().await;
+        let mut batch = Vec::new();
+        let mut selected = std::collections::HashSet::new();
+        loop {
+            let Some(command) = candidates.iter().find(|command| {
+                !selected.contains(&command.uuid) && self.state.command_ready(command, &selected)
+            }) else {
+                break;
+            };
+            if command.text().is_none() {
+                break;
+            }
+            selected.insert(command.uuid.clone());
+            batch.push(command.clone());
+        }
+        let consumed: Vec<String> = batch.iter().map(|command| command.uuid.clone()).collect();
+        batch.retain(|command| {
+            !self
+                .state
+                .owners
+                .lock()
+                .unwrap()
+                .get(&command.uuid)
+                .is_some_and(|owner| owner.is_cancelled())
+        });
+        let joined = msgqueue::join_prompt_values(&batch).map(|(joined, _)| joined);
+        self.queue
+            .consume(&consumed, "drained mid-turn into running turn")
+            .await;
+        for id in consumed {
+            self.state.order.lock().unwrap().queued.remove(&id);
+        }
+        joined
     }
 }
 
@@ -92,16 +135,280 @@ fn tui_prompt_command(text: String) -> msgqueue::QueuedCommand {
     }
 }
 
+// Publish the token only once this turn owns the host gate. A preceding
+// teammate turn can otherwise end after this event and clear the widget token.
+#[cfg(test)]
+async fn begin_host_turn<'a>(
+    gate: &'a tokio::sync::Mutex<()>,
+    queue: &msgqueue::MessageQueueManager,
+    tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+    cancel: &CancellationToken,
+) -> tokio::sync::MutexGuard<'a, ()> {
+    let guard = gate.lock().await;
+    start_host_turn(queue, tx, cancel).await;
+    guard
+}
+
+async fn start_host_turn(
+    queue: &msgqueue::MessageQueueManager,
+    tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+    cancel: &CancellationToken,
+) {
+    queue.register_active_turn(cancel.clone()).await;
+    let _ = tx.send(tui::TurnEvent::TurnStartedWithCancel(cancel.clone()));
+}
+
+fn slash_model_prompt(
+    result: platform_api::SlashDispatchResult,
+    tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+) -> Option<String> {
+    use platform_api::SlashDispatchResult;
+    match result {
+        SlashDispatchResult::RunAsTurn { prompt } => Some(prompt),
+        SlashDispatchResult::Handled { display } | SlashDispatchResult::Unknown { display, .. } => {
+            let _ = tx.send(tui::TurnEvent::SystemNotice {
+                body: display,
+                is_error: false,
+            });
+            None
+        }
+        SlashDispatchResult::NotASlashCommand => None,
+    }
+}
+
+async fn unless_cancelled<T>(
+    cancel: &CancellationToken,
+    work: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => None,
+        result = work => Some(result),
+    }
+}
+
+#[derive(Default)]
+struct HostSubmissionOrder {
+    next: u64,
+    slashes: std::collections::BTreeSet<u64>,
+    enqueuing: std::collections::BTreeSet<u64>,
+    queued: std::collections::HashMap<String, u64>,
+}
+
+#[derive(Default)]
+struct HostPromptQueueState {
+    // Immutable ownership lasts for this host session, including canceled
+    // tombstones: a consumer may hold a queue snapshot while cleanup retires
+    // its ordering entry. Missing ownership still means a real unowned input.
+    // This map is never persisted and drops with the host queue state.
+    owners: std::sync::Mutex<std::collections::HashMap<String, CancellationToken>>,
+    order: std::sync::Mutex<HostSubmissionOrder>,
+    published: tokio::sync::Notify,
+    #[cfg(test)]
+    consumption_checkpoint: std::sync::Mutex<Option<ConsumptionCheckpoint>>,
+}
+
+#[cfg(test)]
+struct ConsumptionCheckpoint {
+    reached: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
+}
+
+impl HostPromptQueueState {
+    #[cfg(test)]
+    async fn pause_consumer(&self) {
+        let checkpoint = self.consumption_checkpoint.lock().unwrap().take();
+        if let Some(checkpoint) = checkpoint {
+            checkpoint.reached.notify_one();
+            checkpoint.resume.notified().await;
+        }
+    }
+
+    fn command_ready(
+        &self,
+        command: &msgqueue::QueuedCommand,
+        selected: &std::collections::HashSet<String>,
+    ) -> bool {
+        if !command.is_main_thread() {
+            return false;
+        }
+        let order = self.order.lock().unwrap();
+        let next_slash = order.slashes.first().copied().unwrap_or(u64::MAX);
+        match order.queued.get(&command.uuid) {
+            Some(sequence) => {
+                *sequence < next_slash
+                    && !order
+                        .queued
+                        .iter()
+                        .any(|(id, earlier)| !selected.contains(id) && earlier < sequence)
+            }
+            None => order.slashes.is_empty(),
+        }
+    }
+}
+
+struct PendingSlashReservation {
+    state: Arc<HostPromptQueueState>,
+    sequence: u64,
+}
+
+impl PendingSlashReservation {
+    fn new(state: &Arc<HostPromptQueueState>) -> Self {
+        let mut order = state.order.lock().unwrap();
+        let sequence = order.next;
+        order.next += 1;
+        order.slashes.insert(sequence);
+        Self {
+            state: state.clone(),
+            sequence,
+        }
+    }
+}
+
+impl Drop for PendingSlashReservation {
+    fn drop(&mut self) {
+        self.state
+            .order
+            .lock()
+            .unwrap()
+            .slashes
+            .remove(&self.sequence);
+        self.state.published.notify_waiters();
+    }
+}
+
+struct PendingPromptEnqueue {
+    state: Arc<HostPromptQueueState>,
+    sequence: u64,
+}
+
+impl PendingPromptEnqueue {
+    // Called on the submission callback, before its enqueue task is spawned.
+    fn new(state: &Arc<HostPromptQueueState>, id: &str, owner: CancellationToken) -> Self {
+        let mut order = state.order.lock().unwrap();
+        let sequence = order.next;
+        order.next += 1;
+        order.enqueuing.insert(sequence);
+        order.queued.insert(id.to_string(), sequence);
+        state.owners.lock().unwrap().insert(id.to_string(), owner);
+        Self {
+            state: state.clone(),
+            sequence,
+        }
+    }
+}
+
+impl Drop for PendingPromptEnqueue {
+    fn drop(&mut self) {
+        self.state
+            .order
+            .lock()
+            .unwrap()
+            .enqueuing
+            .remove(&self.sequence);
+        self.state.published.notify_waiters();
+    }
+}
+
+async fn wait_for_submission_turn(state: &HostPromptQueueState, sequence: u64) {
+    loop {
+        let notified = state.published.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if state.order.lock().unwrap().slashes.first() == Some(&sequence) {
+            return;
+        }
+        notified.await;
+    }
+}
+
+async fn wait_for_earlier_enqueues(state: &HostPromptQueueState) {
+    loop {
+        let notified = state.published.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let waiting = {
+            let order = state.order.lock().unwrap();
+            let next_slash = order.slashes.first().copied().unwrap_or(u64::MAX);
+            order
+                .enqueuing
+                .first()
+                .is_some_and(|sequence| *sequence < next_slash)
+        };
+        if !waiting {
+            return;
+        }
+        notified.await;
+    }
+}
+
+async fn discard_cancelled_queued_prompts(
+    queue: &msgqueue::MessageQueueManager,
+    state: &HostPromptQueueState,
+) {
+    let cancelled: Vec<String> = queue
+        .get_by_max_priority(msgqueue::QueuePriority::Later, |command| {
+            state
+                .owners
+                .lock()
+                .unwrap()
+                .get(&command.uuid)
+                .is_some_and(|owner| owner.is_cancelled())
+        })
+        .await
+        .into_iter()
+        .map(|command| command.uuid)
+        .collect();
+    retire_cancelled_prompt_ids(queue, state, cancelled).await;
+}
+
+async fn retire_cancelled_prompt_ids(
+    queue: &msgqueue::MessageQueueManager,
+    state: &HostPromptQueueState,
+    cancelled: Vec<String>,
+) {
+    queue.remove(&cancelled, "cancelled prompt owner").await;
+    for id in cancelled {
+        state.order.lock().unwrap().queued.remove(&id);
+    }
+}
+
+async fn dequeue_after_slash_dispatch(
+    queue: &msgqueue::MessageQueueManager,
+    state: &HostPromptQueueState,
+) -> Option<(msgqueue::QueuedCommand, CancellationToken)> {
+    loop {
+        wait_for_earlier_enqueues(state).await;
+        let command = queue
+            .dequeue_filtered(|command| {
+                state.command_ready(command, &std::collections::HashSet::new())
+            })
+            .await?;
+        #[cfg(test)]
+        state.pause_consumer().await;
+        state.order.lock().unwrap().queued.remove(&command.uuid);
+        let owner = state.owners.lock().unwrap().get(&command.uuid).cloned();
+        let cancel = owner.map_or_else(CancellationToken::new, |owner| owner.child_token());
+        if cancel.is_cancelled() {
+            continue;
+        }
+        return Some((command, cancel));
+    }
+}
+
 async fn drain_teammate_prompts(
     queue: &msgqueue::MessageQueueManager,
     orchestrator: &dyn OrchestratorHandle,
     turn_tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+    pending_slashes: &HostPromptQueueState,
 ) {
-    while let Some(command) = queue.dequeue_main_thread().await {
+    while let Some((command, cancel)) = dequeue_after_slash_dispatch(queue, pending_slashes).await {
         let Some(text) = command.text() else {
             continue;
         };
-        let cancel = CancellationToken::new();
+        if cancel.is_cancelled() {
+            continue;
+        }
         let _ = turn_tx.send(tui::TurnEvent::TurnStartedWithCancel(cancel.clone()));
         queue.register_active_turn(cancel.clone()).await;
         if let Err(error) = orchestrator
@@ -115,6 +422,30 @@ async fn drain_teammate_prompts(
         }
         queue.clear_active_turn().await;
     }
+}
+
+async fn acquire_ordered_host_turn<'a>(
+    gate: &'a tokio::sync::Mutex<()>,
+    queue: &msgqueue::MessageQueueManager,
+    orchestrator: &dyn OrchestratorHandle,
+    tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+    state: &HostPromptQueueState,
+    reservation: PendingSlashReservation,
+    cancel: &CancellationToken,
+) -> Option<tokio::sync::MutexGuard<'a, ()>> {
+    unless_cancelled(
+        cancel,
+        wait_for_submission_turn(state, reservation.sequence),
+    )
+    .await?;
+    let guard = unless_cancelled(cancel, gate.lock()).await?;
+    drain_teammate_prompts(queue, orchestrator, tx, state).await;
+    if cancel.is_cancelled() {
+        return None;
+    }
+    drop(reservation);
+    start_host_turn(queue, tx, cancel).await;
+    Some(guard)
 }
 
 fn trim_decimal(mut rendered: String) -> String {
@@ -653,6 +984,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
 ) -> RunOutcome {
     let prompt_queue = Arc::new(msgqueue::MessageQueueManager::new());
     let teammate_turn_gate = Arc::new(tokio::sync::Mutex::new(()));
+    let pending_slashes = Arc::new(HostPromptQueueState::default());
     let leader_mailbox = tui_build
         .runtime
         .coordinator
@@ -664,6 +996,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         .orchestrator
         .set_mid_turn_input(Arc::new(TuiMsgQueueInput {
             queue: prompt_queue.clone(),
+            state: pending_slashes.clone(),
         }));
     let queue_cancel_reason = orchestrator::prompt::mid_turn_input::CancelReasonFlag::new();
     tui_build
@@ -1017,21 +1350,34 @@ pub(crate) async fn run_ratatui_with_initial_state(
     if initial_cost > 0.0 {
         let _ = turn_tx.send(tui::TurnEvent::CostUpdated(format!("${initial_cost:.4}")));
     }
+    let submit_pending_slashes = pending_slashes.clone();
     let submit_queue = prompt_queue.clone();
     let submit_turn_gate = teammate_turn_gate.clone();
     let submit_cancel_reason = queue_cancel_reason.clone();
     let on_submit =
         move |prompt: String, images: Vec<std::path::PathBuf>, cancel: CancellationToken| {
-            let _ = turn_tx.send(tui::TurnEvent::TurnStarted);
             let orch = orchestrator.clone();
             let tx = turn_tx.clone();
             let queue = submit_queue.clone();
+            let pending_slashes = submit_pending_slashes.clone();
+            let reservation = PendingSlashReservation::new(&pending_slashes);
             let turn_gate = submit_turn_gate.clone();
             let cancel_reason = submit_cancel_reason.clone();
             handle.spawn(async move {
-                let _turn_guard = turn_gate.lock().await;
+                let Some(_turn_guard) = acquire_ordered_host_turn(
+                    &turn_gate,
+                    &queue,
+                    orch.as_ref(),
+                    &tx,
+                    &pending_slashes,
+                    reservation,
+                    &cancel,
+                )
+                .await
+                else {
+                    return;
+                };
                 cancel_reason.reset();
-                queue.register_active_turn(cancel.clone()).await;
                 // Image-aware entry: with no images this is byte-identical to
                 // `run_turn_streaming_with_cancel`; with pasted/attached images
                 // they become `ContentBlock::Image` on the user message.
@@ -1053,26 +1399,42 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     ));
                 }
                 queue.clear_active_turn().await;
-                drain_teammate_prompts(&queue, orch.as_ref(), &tx).await;
+                drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
             });
         };
+    let queued_prompt_orch = concrete_orchestrator.clone();
+    let queued_prompt_gate = teammate_turn_gate.clone();
+    let queued_pending_slashes = pending_slashes.clone();
     let queued_prompt_queue = prompt_queue.clone();
     let queued_prompt_handle = tokio::runtime::Handle::current();
     let queued_prompt_tx = web_turn_tx.clone();
-    let on_queue_prompt = move |prompt: String, images: Vec<std::path::PathBuf>| {
-        let queue = queued_prompt_queue.clone();
-        let tx = queued_prompt_tx.clone();
-        queued_prompt_handle.spawn(async move {
-            queue.enqueue(tui_prompt_command(prompt)).await;
-            if !images.is_empty() {
-                let _ = tx.send(tui::TurnEvent::SystemNotice {
-                    body: "Queued text; pending image attachments are not supported yet."
-                        .to_string(),
-                    is_error: true,
-                });
-            }
-        });
-    };
+    let on_queue_prompt =
+        move |prompt: String, images: Vec<std::path::PathBuf>, owner: CancellationToken| {
+            let queue = queued_prompt_queue.clone();
+            let orch = queued_prompt_orch.clone();
+            let gate = queued_prompt_gate.clone();
+            let pending_slashes = queued_pending_slashes.clone();
+            let tx = queued_prompt_tx.clone();
+            let command = tui_prompt_command(prompt);
+            let publication = PendingPromptEnqueue::new(&pending_slashes, &command.uuid, owner);
+            queued_prompt_handle.spawn(async move {
+                queue.enqueue(command).await;
+                drop(publication);
+                discard_cancelled_queued_prompts(&queue, &pending_slashes).await;
+                if !images.is_empty() {
+                    let _ = tx.send(tui::TurnEvent::SystemNotice {
+                        body: "Queued text; pending image attachments are not supported yet."
+                            .to_string(),
+                        is_error: true,
+                    });
+                }
+                // A local slash may finish before this enqueue task is polled.
+                // The same gate/barrier makes either ordering drain exactly once.
+                if let Ok(_guard) = gate.try_lock() {
+                    drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
+                }
+            });
+        };
     let on_switch_model = move |model: String, profile: Option<String>| {
         let orch = switch_orch.clone();
         switch_handle.spawn(async move {
@@ -1436,49 +1798,73 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // `run_slash_command`. A `type:"prompt"` command's expanded prompt runs as a
     // turn; a local command's output / the unknown-command literal surfaces via
     // `TurnEvent::SystemNotice`.
-    let on_dispatch_slash = move |input: String, token: CancellationToken| {
-        let dispatcher = dispatch_dispatcher.clone();
-        let orch = dispatch_orch.clone();
-        let tx = dispatch_turn_tx.clone();
-        dispatch_handle.spawn(async move {
-            use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
-            match dispatcher.dispatch(&input).await {
-                SlashDispatchResult::RunAsTurn { prompt } => {
-                    // The widget already set this token as `current_turn`; pass it
-                    // through so Ctrl-C cancels the dispatched turn. On success the
-                    // orchestrator emits `TurnEnded`; on a hard error we do.
-                    let _ = tx.send(tui::TurnEvent::TurnStarted);
-                    if let Err(e) = orch
-                        .run_turn_streaming_with_images(&prompt, &[], token)
-                        .await
-                    {
-                        let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
-                        let _ = tx.send(tui::TurnEvent::TurnEnded(
-                            platform_api::TurnOutcome::EndTurn,
-                        ));
+    let dispatch_pending_slashes = pending_slashes.clone();
+    let dispatch_queue = prompt_queue.clone();
+    let dispatch_turn_gate = teammate_turn_gate.clone();
+    let dispatch_cancel_reason = queue_cancel_reason.clone();
+    let on_dispatch_slash =
+        move |input: String, control: tui::chat_widget::PendingSlashDispatch| {
+            let token = control.cancellation.clone();
+            let pending_slashes = dispatch_pending_slashes.clone();
+            let reservation = PendingSlashReservation::new(&pending_slashes);
+            let dispatcher = dispatch_dispatcher.clone();
+            let orch = dispatch_orch.clone();
+            let tx = dispatch_turn_tx.clone();
+            let queue = dispatch_queue.clone();
+            let turn_gate = dispatch_turn_gate.clone();
+            let cancel_reason = dispatch_cancel_reason.clone();
+            dispatch_handle.spawn(async move {
+                use platform_api::SlashCommandDispatcher;
+                // Keep dispatch cancellation independent from the active turn. A
+                // completed token also lets the widget discard its pending slot.
+                let completion = control.completed.drop_guard();
+                let Some(result) = unless_cancelled(&token, dispatcher.dispatch(&input)).await
+                else {
+                    discard_cancelled_queued_prompts(&queue, &pending_slashes).await;
+                    return;
+                };
+                let prompt = slash_model_prompt(result, &tx);
+                if prompt.is_none() {
+                    drop(completion);
+                    drop(reservation);
+                    // Local results are responsive and own no model lifecycle.
+                    // Ordered reservations still protect any earlier prompts.
+                    if let Ok(_guard) = turn_gate.try_lock() {
+                        drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
                     }
+                    discard_cancelled_queued_prompts(&queue, &pending_slashes).await;
+                    return;
                 }
-                // A local / unknown result runs no turn: surface the text and
-                // emit `TurnEnded` so the widget clears the `current_turn` it set
-                // when it echoed the invocation.
-                SlashDispatchResult::Handled { display }
-                | SlashDispatchResult::Unknown { display, .. } => {
-                    let _ = tx.send(tui::TurnEvent::SystemNotice {
-                        body: display,
-                        is_error: false,
-                    });
+                let Some(_turn_guard) = acquire_ordered_host_turn(
+                    &turn_gate,
+                    &queue,
+                    orch.as_ref(),
+                    &tx,
+                    &pending_slashes,
+                    reservation,
+                    &token,
+                )
+                .await
+                else {
+                    discard_cancelled_queued_prompts(&queue, &pending_slashes).await;
+                    return;
+                };
+                let prompt = prompt.unwrap();
+                cancel_reason.reset();
+                if let Err(e) = orch
+                    .run_turn_streaming_with_images(&prompt, &[], token)
+                    .await
+                {
+                    let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
                     let _ = tx.send(tui::TurnEvent::TurnEnded(
                         platform_api::TurnOutcome::EndTurn,
                     ));
                 }
-                SlashDispatchResult::NotASlashCommand => {
-                    let _ = tx.send(tui::TurnEvent::TurnEnded(
-                        platform_api::TurnOutcome::EndTurn,
-                    ));
-                }
-            }
-        });
-    };
+                queue.clear_active_turn().await;
+                drop(completion);
+                drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
+            });
+        };
     let on_rewake_peer = move || {
         let orch = rewake_orch.clone();
         let tx = rewake_turn_tx.clone();
@@ -1777,7 +2163,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 if let Ok(_guard) = teammate_turn_gate.try_lock() {
-                    drain_teammate_prompts(&queue, orch.as_ref(), &teammate_turn_tx).await;
+                    drain_teammate_prompts(&queue, orch.as_ref(), &teammate_turn_tx, &pending_slashes).await;
                 }
             }
         });
@@ -3888,6 +4274,525 @@ async fn trust_gate() -> TrustGateOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingHostTurns(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl OrchestratorHandle for RecordingHostTurns {
+        async fn current_session_id(&self) -> protocol::SessionId {
+            unreachable!("unused recording handle method")
+        }
+        async fn clear_session(&self) -> Result<(), platform_api::HandleError> {
+            unreachable!("unused recording handle method")
+        }
+        async fn force_compact(
+            &self,
+        ) -> Result<platform_api::CompactionSummary, platform_api::HandleError> {
+            unreachable!("unused recording handle method")
+        }
+        async fn snapshot_cost(&self) -> platform_api::CostSnapshot {
+            unreachable!("unused recording handle method")
+        }
+        async fn switch_model(
+            &self,
+            _model: &str,
+            _profile: Option<&str>,
+        ) -> Result<(), platform_api::HandleError> {
+            unreachable!("unused recording handle method")
+        }
+        async fn request_exit(&self) {
+            unreachable!("unused recording handle method")
+        }
+        async fn current_should_exit(&self) -> bool {
+            unreachable!("unused recording handle method")
+        }
+        async fn open_memory_editor(
+            &self,
+        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
+            unreachable!("unused recording handle method")
+        }
+        async fn list_mcp_servers(&self) -> Vec<platform_api::McpServerInfo> {
+            unreachable!("unused recording handle method")
+        }
+        async fn list_skills(&self) -> Vec<platform_api::SkillInfo> {
+            unreachable!("unused recording handle method")
+        }
+        async fn list_hooks(&self) -> Vec<platform_api::HookInfo> {
+            unreachable!("unused recording handle method")
+        }
+        async fn list_agents(&self) -> Vec<platform_api::AgentInfo> {
+            unreachable!("unused recording handle method")
+        }
+        async fn run_doctor_checks(&self) -> platform_api::DoctorReport {
+            unreachable!("unused recording handle method")
+        }
+        async fn get_status_snapshot(&self) -> platform_api::StatusSnapshot {
+            unreachable!("unused recording handle method")
+        }
+        async fn edit_config_file(
+            &self,
+        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
+            unreachable!("unused recording handle method")
+        }
+        async fn edit_permissions_file(
+            &self,
+        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
+            unreachable!("unused recording handle method")
+        }
+        async fn list_available_models(&self) -> Vec<String> {
+            unreachable!("unused recording handle method")
+        }
+        async fn run_turn_streaming_with_cancel(
+            &self,
+            prompt: &str,
+            _cancel: CancellationToken,
+        ) -> Result<platform_api::TurnOutcome, platform_api::HandleError> {
+            self.0.lock().unwrap().push(prompt.to_string());
+            Ok(platform_api::TurnOutcome::EndTurn)
+        }
+    }
+
+    fn pause_next_queue_consumer(
+        state: &HostPromptQueueState,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        *state.consumption_checkpoint.lock().unwrap() = Some(ConsumptionCheckpoint {
+            reached: reached.clone(),
+            resume: resume.clone(),
+        });
+        (reached, resume)
+    }
+
+    #[tokio::test]
+    async fn mid_turn_snapshot_keeps_cancelled_owner_when_cleanup_retires_queued_entry() {
+        use orchestrator::prompt::mid_turn_input::MidTurnInputSource;
+        let state = Arc::new(HostPromptQueueState::default());
+        let queue = Arc::new(msgqueue::MessageQueueManager::new());
+        let owner = CancellationToken::new();
+        let command = tui_prompt_command("must not run".into());
+        let id = command.uuid.clone();
+        let publication = PendingPromptEnqueue::new(&state, &id, owner.clone());
+        queue.enqueue(command).await;
+        drop(publication);
+        let (reached, resume) = pause_next_queue_consumer(&state);
+        let input = TuiMsgQueueInput {
+            queue: queue.clone(),
+            state: state.clone(),
+        };
+        let consumer = tokio::spawn(async move { input.take_mid_turn_input().await });
+        reached.notified().await; // actual consumer owns a pre-cancellation snapshot
+        owner.cancel();
+        discard_cancelled_queued_prompts(&queue, &state).await;
+        assert!(!state.order.lock().unwrap().queued.contains_key(&id));
+        resume.notify_one();
+        assert!(consumer.await.unwrap().is_none());
+        assert!(state
+            .owners
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .is_cancelled());
+        let mut teammate = tui_prompt_command("unowned teammate".into());
+        teammate.source = msgqueue::QueueSource::AgentSendMessage;
+        queue.enqueue(teammate).await;
+        let input = TuiMsgQueueInput { queue, state };
+        assert_eq!(
+            input.take_mid_turn_input().await.as_deref(),
+            Some("unowned teammate")
+        );
+    }
+
+    #[tokio::test]
+    async fn dequeued_prompt_keeps_cancelled_owner_when_older_cleanup_finishes() {
+        let state = Arc::new(HostPromptQueueState::default());
+        let queue = Arc::new(msgqueue::MessageQueueManager::new());
+        let owner = CancellationToken::new();
+        let command = tui_prompt_command("must not run".into());
+        let publication = PendingPromptEnqueue::new(&state, &command.uuid, owner.clone());
+        queue.enqueue(command).await;
+        drop(publication);
+        owner.cancel();
+        // Capture the same cancellation snapshot used by production cleanup,
+        // then let the actual consumer dequeue before cleanup retires metadata.
+        let cancelled = queue
+            .get_by_max_priority(msgqueue::QueuePriority::Later, |command| {
+                state
+                    .owners
+                    .lock()
+                    .unwrap()
+                    .get(&command.uuid)
+                    .is_some_and(|owner| owner.is_cancelled())
+            })
+            .await
+            .into_iter()
+            .map(|command| command.uuid)
+            .collect();
+        let (reached, resume) = pause_next_queue_consumer(&state);
+        let consumer_queue = queue.clone();
+        let consumer_state = state.clone();
+        let consumer = tokio::spawn(async move {
+            dequeue_after_slash_dispatch(&consumer_queue, &consumer_state).await
+        });
+        reached.notified().await;
+        retire_cancelled_prompt_ids(&queue, &state, cancelled).await;
+        resume.notify_one();
+        assert!(consumer.await.unwrap().is_none());
+        let mut teammate = tui_prompt_command("unowned teammate".into());
+        teammate.source = msgqueue::QueueSource::AgentSendMessage;
+        queue.enqueue(teammate).await;
+        let (command, cancel) = dequeue_after_slash_dispatch(&queue, &state).await.unwrap();
+        assert_eq!(command.text(), Some("unowned teammate"));
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn mid_turn_input_retires_order_metadata_before_later_normal_drain() {
+        use orchestrator::prompt::mid_turn_input::MidTurnInputSource;
+        let state = Arc::new(HostPromptQueueState::default());
+        let queue = Arc::new(msgqueue::MessageQueueManager::new());
+        let input = TuiMsgQueueInput {
+            queue: queue.clone(),
+            state: state.clone(),
+        };
+        let owner = CancellationToken::new();
+        for text in ["A", "A2"] {
+            let command = tui_prompt_command(text.into());
+            let publication = PendingPromptEnqueue::new(&state, &command.uuid, owner.clone());
+            queue.enqueue(command).await;
+            drop(publication);
+        }
+        assert_eq!(input.take_mid_turn_input().await.as_deref(), Some("A\nA2"));
+        assert!(state.order.lock().unwrap().queued.is_empty());
+        assert_eq!(
+            state.owners.lock().unwrap().len(),
+            2,
+            "ownership outlives queue snapshots"
+        );
+        let command = tui_prompt_command("B".into());
+        let publication = PendingPromptEnqueue::new(&state, &command.uuid, owner);
+        queue.enqueue(command).await;
+        drop(publication);
+        let orch = RecordingHostTurns::default();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        drain_teammate_prompts(&queue, &orch, &tx, &state).await;
+        assert_eq!(*orch.0.lock().unwrap(), ["B"]);
+    }
+
+    #[tokio::test]
+    async fn mid_turn_input_does_not_bypass_pending_slash_or_unpublished_prompt() {
+        use orchestrator::prompt::mid_turn_input::MidTurnInputSource;
+        let state = Arc::new(HostPromptQueueState::default());
+        let queue = Arc::new(msgqueue::MessageQueueManager::new());
+        let input = TuiMsgQueueInput {
+            queue: queue.clone(),
+            state: state.clone(),
+        };
+        let owner = CancellationToken::new();
+        let slash = PendingSlashReservation::new(&state);
+        let first = tui_prompt_command("A".into());
+        let first_publication = PendingPromptEnqueue::new(&state, &first.uuid, owner.clone());
+        let second = tui_prompt_command("B".into());
+        let second_publication = PendingPromptEnqueue::new(&state, &second.uuid, owner.clone());
+        queue.enqueue(second).await;
+        drop(second_publication);
+        assert!(input.take_mid_turn_input().await.is_none());
+        drop(slash);
+        assert!(
+            input.take_mid_turn_input().await.is_none(),
+            "never await the earlier enqueue from inside a running turn"
+        );
+        queue.enqueue(first).await;
+        drop(first_publication);
+        assert_eq!(input.take_mid_turn_input().await.as_deref(), Some("A\nB"));
+    }
+
+    #[tokio::test]
+    async fn mid_turn_input_skips_cancelled_owner_without_blocking_new_input() {
+        use orchestrator::prompt::mid_turn_input::MidTurnInputSource;
+        let state = Arc::new(HostPromptQueueState::default());
+        let queue = Arc::new(msgqueue::MessageQueueManager::new());
+        let input = TuiMsgQueueInput {
+            queue: queue.clone(),
+            state: state.clone(),
+        };
+        let old = CancellationToken::new();
+        for (text, owner) in [("old", old.clone()), ("new", CancellationToken::new())] {
+            let command = tui_prompt_command(text.into());
+            let publication = PendingPromptEnqueue::new(&state, &command.uuid, owner);
+            queue.enqueue(command).await;
+            drop(publication);
+        }
+        old.cancel();
+        assert_eq!(input.take_mid_turn_input().await.as_deref(), Some("new"));
+        assert!(state.order.lock().unwrap().queued.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mixed_slash_normal_slash_runs_in_submission_order_with_late_enqueue() {
+        use std::future::Future;
+        use std::task::Poll;
+        let state = Arc::new(HostPromptQueueState::default());
+        let queue = msgqueue::MessageQueueManager::new();
+        let gate = tokio::sync::Mutex::new(());
+        let orch = RecordingHostTurns::default();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let first = PendingSlashReservation::new(&state);
+        let command = tui_prompt_command("A".into());
+        let publication = PendingPromptEnqueue::new(&state, &command.uuid, cancel.clone());
+        let second = PendingSlashReservation::new(&state);
+        let first_guard =
+            acquire_ordered_host_turn(&gate, &queue, &orch, &tx, &state, first, &cancel)
+                .await
+                .unwrap();
+        orch.run_turn_streaming_with_cancel("slash1", cancel.clone())
+            .await
+            .unwrap();
+        drop(first_guard);
+        let second_start =
+            acquire_ordered_host_turn(&gate, &queue, &orch, &tx, &state, second, &cancel);
+        tokio::pin!(second_start);
+        std::future::poll_fn(|cx| {
+            assert!(second_start.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(*orch.0.lock().unwrap(), ["slash1"]);
+        queue.enqueue(command).await;
+        drop(publication);
+        let _second_guard = second_start.await.unwrap();
+        orch.run_turn_streaming_with_cancel("slash2", cancel.clone())
+            .await
+            .unwrap();
+        assert_eq!(*orch.0.lock().unwrap(), ["slash1", "A", "slash2"]);
+    }
+
+    #[tokio::test]
+    async fn direct_submit_waits_for_prior_normal_enqueue_after_local_dispatch() {
+        use std::future::Future;
+        use std::task::Poll;
+        let state = Arc::new(HostPromptQueueState::default());
+        let queue = msgqueue::MessageQueueManager::new();
+        let gate = tokio::sync::Mutex::new(());
+        let orch = RecordingHostTurns::default();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let local = PendingSlashReservation::new(&state);
+        let command = tui_prompt_command("A".into());
+        let publication = PendingPromptEnqueue::new(&state, &command.uuid, cancel.clone());
+        drop(local);
+        let direct = PendingSlashReservation::new(&state);
+        let start = acquire_ordered_host_turn(&gate, &queue, &orch, &tx, &state, direct, &cancel);
+        tokio::pin!(start);
+        std::future::poll_fn(|cx| {
+            assert!(start.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        queue.enqueue(command).await;
+        drop(publication);
+        let _guard = start.await.unwrap();
+        orch.run_turn_streaming_with_cancel("B", cancel.clone())
+            .await
+            .unwrap();
+        assert_eq!(*orch.0.lock().unwrap(), ["A", "B"]);
+    }
+
+    #[tokio::test]
+    async fn pending_slash_reservation_prevents_followup_dequeue_until_dispatch_finishes() {
+        let pending = Arc::new(HostPromptQueueState::default());
+        let reservation = PendingSlashReservation::new(&pending);
+        let queue = msgqueue::MessageQueueManager::new();
+        queue.enqueue(tui_prompt_command("followup".into())).await;
+        assert!(dequeue_after_slash_dispatch(&queue, &pending)
+            .await
+            .is_none());
+        drop(reservation);
+        assert_eq!(
+            dequeue_after_slash_dispatch(&queue, &pending)
+                .await
+                .unwrap()
+                .0
+                .text(),
+            Some("followup")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_pending_slash_drops_dispatch_and_releases_reservation() {
+        let pending = Arc::new(HostPromptQueueState::default());
+        let cancel = CancellationToken::new();
+        let reservation = PendingSlashReservation::new(&pending);
+        let dispatch = async {
+            let _reservation = reservation;
+            let _completion = cancel.clone().drop_guard();
+            assert!(unless_cancelled(&cancel, std::future::pending::<()>())
+                .await
+                .is_none());
+        };
+        cancel.cancel();
+        dispatch.await;
+        assert!(pending.order.lock().unwrap().slashes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_old_dispatch_removes_only_its_queued_followups() {
+        let state = HostPromptQueueState::default();
+        let queue = msgqueue::MessageQueueManager::new();
+        let old = CancellationToken::new();
+        let new = CancellationToken::new();
+        for (text, owner) in [("old", old.clone()), ("new", new.clone())] {
+            let command = tui_prompt_command(text.into());
+            state
+                .owners
+                .lock()
+                .unwrap()
+                .insert(command.uuid.clone(), owner);
+            queue.enqueue(command).await;
+        }
+        old.cancel();
+        discard_cancelled_queued_prompts(&queue, &state).await;
+        assert_eq!(queue.len().await, 1);
+        assert_eq!(
+            dequeue_after_slash_dispatch(&queue, &state)
+                .await
+                .unwrap()
+                .0
+                .text(),
+            Some("new")
+        );
+        assert!(!new.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn dequeued_followup_retains_cancellation_from_its_dispatch_owner() {
+        let state = HostPromptQueueState::default();
+        let queue = msgqueue::MessageQueueManager::new();
+        let owner = CancellationToken::new();
+        let command = tui_prompt_command("followup".into());
+        state
+            .owners
+            .lock()
+            .unwrap()
+            .insert(command.uuid.clone(), owner.clone());
+        queue.enqueue(command).await;
+        let (_, turn_cancel) = dequeue_after_slash_dispatch(&queue, &state).await.unwrap();
+        owner.cancel(); // switch after dequeue, before the widget sees start
+        assert!(turn_cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn later_slash_waits_for_predecessor_even_after_expansion_finishes() {
+        use std::future::Future;
+        use std::task::Poll;
+        let state = Arc::new(HostPromptQueueState::default());
+        let predecessor = PendingSlashReservation::new(&state);
+        let later = PendingSlashReservation::new(&state);
+        let cancel = CancellationToken::new();
+        let wait = unless_cancelled(&cancel, wait_for_submission_turn(&state, later.sequence));
+        tokio::pin!(wait);
+        std::future::poll_fn(|cx| {
+            assert!(wait.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(predecessor);
+        assert!(wait.await.is_some());
+    }
+
+    #[tokio::test]
+    async fn cancelled_pending_slash_cannot_start_after_gate_release() {
+        use std::future::Future;
+        use std::task::Poll;
+        let gate = tokio::sync::Mutex::new(());
+        let held = gate.lock().await;
+        let queue = msgqueue::MessageQueueManager::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let wait = unless_cancelled(&cancel, begin_host_turn(&gate, &queue, &tx, &cancel));
+        tokio::pin!(wait);
+        std::future::poll_fn(|cx| {
+            assert!(wait.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        cancel.cancel();
+        drop(held);
+        assert!(wait.await.is_none());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn local_slash_result_does_not_end_the_active_model_turn() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(slash_model_prompt(
+            platform_api::SlashDispatchResult::Handled {
+                display: "Stopped".into()
+            },
+            &tx,
+        )
+        .is_none());
+        assert!(
+            matches!(rx.try_recv().unwrap(), tui::TurnEvent::SystemNotice { body, .. } if body == "Stopped")
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(
+            slash_model_prompt(platform_api::SlashDispatchResult::NotASlashCommand, &tx).is_none()
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            slash_model_prompt(
+                platform_api::SlashDispatchResult::RunAsTurn {
+                    prompt: "queued".into()
+                },
+                &tx
+            )
+            .as_deref(),
+            Some("queued")
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn host_turn_start_waits_for_gate_and_restores_its_cancel_token() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let gate = tokio::sync::Mutex::new(());
+        let previous_turn = gate.lock().await;
+        let queue = msgqueue::MessageQueueManager::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let next = begin_host_turn(&gate, &queue, &tx, &cancel);
+        tokio::pin!(next);
+        // Poll the queued turn while the teammate owns the gate: no timing or
+        // scheduler assumptions are needed to exercise the contested path.
+        std::future::poll_fn(|cx| {
+            assert!(next.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert!(rx.try_recv().is_err());
+        tx.send(tui::TurnEvent::TurnEnded(
+            platform_api::TurnOutcome::EndTurn,
+        ))
+        .unwrap();
+        drop(previous_turn);
+        let _next_guard = next.await;
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            tui::TurnEvent::TurnEnded(_)
+        ));
+        let tui::TurnEvent::TurnStartedWithCancel(widget_token) = rx.try_recv().unwrap() else {
+            panic!("queued turn must restore its cancellation token after the prior end");
+        };
+        widget_token.cancel();
+        assert!(cancel.is_cancelled());
+        assert!(rx.try_recv().is_err());
+    }
 
     static FUSION_CONNECT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

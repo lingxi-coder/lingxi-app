@@ -17,6 +17,7 @@ import {
   planRuntimeItemId,
   promptRuntimeResources,
   reduceRuntimeCenterEvent,
+  resetRuntimeCenterConnection,
   resourcesFromRestoredMessages,
   rollbackRuntimeResources,
 } from '../src/renderer/bridge/runtimeCenterState';
@@ -366,3 +367,35 @@ test('live coordinator workers survive transcript refresh without resurrecting t
   state = reduceRuntimeCenterEvent(state, { type: 'session_agent_list', session_id: 'session-b', agents: [] }, 'session-b');
   assert.deepEqual(state.agents, {});
 });
+
+for (const reset of ['connection', 'resume'] as const) {
+  test(`${reset} discards coordinator liveness without closing historical transcripts`, () => {
+    const sessionId = 'session-a';
+    const worker = { agent_id: 'pane', name: 'pane', agent_type: 'general-purpose', status: 'working' };
+    let state = openRuntimeCenterItem(emptyRuntimeCenterState(), { kind: 'agent', id: worker.agent_id });
+    state = reduceRuntimeCenterEvent(state, {
+      type: 'session_agent_transcript', session_id: sessionId, agent_id: worker.agent_id,
+      messages: [textMessage('assistant', 'saved answer')], next_message_index: 1, revision: 1,
+    }, sessionId);
+    state = reduceRuntimeCenterEvent(state, { type: 'coordinator_worker', worker }, sessionId);
+    const { tabs, activeItem, transcripts } = state;
+    const resume = { type: 'session_resumed', session_id: sessionId, mode: 'code', messages: [] } satisfies ClientEvent;
+    assert.equal(reduceRuntimeCenterEvent(state, { ...resume, session_id: 'other' }, sessionId), state);
+    state = reset === 'connection'
+      ? resetRuntimeCenterConnection(state)
+      : reduceRuntimeCenterEvent(state, resume, sessionId);
+    assert.deepEqual(state.coordinatorWorkers, {});
+    assert.deepEqual(state.agents, {});
+    assert.equal(state.tabs, tabs);
+    assert.equal(state.activeItem, activeItem);
+    assert.equal(state.transcripts, transcripts);
+    state = reduceRuntimeCenterEvent(state, {
+      type: 'session_agent_list', session_id: sessionId, agents: [],
+    }, sessionId);
+    assert.deepEqual(state.agents, {}, 'empty restarted snapshot must not resurrect the old live pane');
+    state = reduceRuntimeCenterEvent(state, {
+      type: 'session_agent_list', session_id: sessionId, agents: [{ ...worker, status: 'completed' }],
+    }, sessionId);
+    assert.equal(state.agents.pane.status, 'completed', 'restored history must not inherit a pre-restart running status');
+  });
+}

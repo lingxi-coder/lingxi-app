@@ -11,6 +11,59 @@ use std::sync::Mutex as StdMutex;
 use tempfile::tempdir;
 use test_harness::mocks::MockRuntimeSpawner;
 
+#[tokio::test]
+async fn external_teammate_stop_failure_is_retryable_through_public_task_registry() {
+    struct StopOwner(AtomicUsize);
+    #[async_trait]
+    impl TeamSpawnSeam for StopOwner {
+        async fn spawn_teammate(
+            &self,
+            _: protocol::AgentId,
+            _: String,
+            _: String,
+            _: String,
+        ) -> Result<String, TeamSpawnError> {
+            unreachable!()
+        }
+        async fn kill(&self, _: &str) -> Result<(), TeamSpawnError> {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(TeamSpawnError::Internal(
+                    "backend could not confirm termination".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let (_temp, registry) = make_registry();
+    let task_id = registry
+        .create(
+            TaskType::InProcessTeammate,
+            teammate_input(),
+            "external pane".into(),
+        )
+        .await
+        .unwrap();
+    registry
+        .set_status(&task_id, TaskStatus::Running)
+        .await
+        .unwrap();
+    let owner = Arc::new(StopOwner(AtomicUsize::new(0)));
+    let seam: Arc<dyn TeamSpawnSeam> = owner.clone();
+    registry
+        .set_external_teammate_controller(Arc::downgrade(&seam))
+        .await;
+    registry.register_external_teammate_task(&task_id).await;
+    let public: &dyn platform_api::task_registry::TaskRegistryHandle = &registry;
+    assert!(public.kill(&task_id).await.is_err());
+    assert_eq!(
+        public.get(&task_id).await.unwrap().unwrap().status,
+        "running"
+    );
+    assert_eq!(public.kill(&task_id).await.unwrap().status, "killed");
+    assert_eq!(owner.0.load(Ordering::SeqCst), 2);
+}
+
 // ---- In-memory FileSystem (mirrors the other handler/registry tests) ----
 
 struct InMemoryFs {

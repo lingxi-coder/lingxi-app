@@ -82,6 +82,97 @@ pub struct TeamRegistry {
     /// We do not multiplex concurrent teams in this pass, so a single
     /// optional name suffices.
     team_name: RwLock<Option<String>>,
+    /// Owning host's immutable storage root, independent of process env changes.
+    config_home: Option<std::path::PathBuf>,
+    approved_departures: RwLock<HashMap<String, Arc<PendingApprovedDeparture>>>,
+}
+
+/// A delivered shutdown approval whose departure waits for confirmed teardown.
+pub(crate) struct PendingApprovedDeparture {
+    pub home: Option<std::path::PathBuf>,
+    pub team_name: String,
+    pub list_id: String,
+    pub agent_id: AgentId,
+    pub worker_name: String,
+    pub leader: AgentId,
+    pub from: crate::mailbox::MessageSender,
+    pub from_name: String,
+    pub request_id: String,
+    pub progress: tokio::sync::Mutex<ApprovedDepartureProgress>,
+}
+
+#[derive(Default)]
+pub(crate) struct ApprovedDepartureProgress {
+    member_removed: bool,
+    unassigned: Vec<task_store::UnassignedTask>,
+    tasks_done: bool,
+    notified: bool,
+}
+
+impl PendingApprovedDeparture {
+    async fn complete(&self, router: &MailboxRouter) -> Result<(), String> {
+        let mut progress = self.progress.lock().await;
+        if progress.notified {
+            return Ok(());
+        }
+        let agent_id = self.agent_id.to_string();
+        if !progress.member_removed {
+            if let Some(home) = &self.home {
+                crate::team_file::remove_team_member(
+                    home,
+                    &self.team_name,
+                    &agent_id,
+                    &self.worker_name,
+                )
+                .await
+                .map_err(|error| format!("Remove teammate membership: {error}"))?;
+            }
+            progress.member_removed = true;
+        }
+        if !progress.tasks_done {
+            if let Some(home) = &self.home {
+                let result = task_store::TodoStore::for_list_at(home, &self.list_id)
+                    .try_unassign_tasks_for_teammate(
+                        &agent_id,
+                        &self.worker_name,
+                        task_store::TeammateEndReason::Shutdown,
+                    )
+                    .await;
+                let (unassigned, error) = match result {
+                    Ok(outcome) => (outcome.unassigned_tasks, None),
+                    Err(error) => (error.unassigned_tasks, Some(error.source.to_string())),
+                };
+                for task in unassigned {
+                    if !progress.unassigned.iter().any(|saved| saved.id == task.id) {
+                        progress.unassigned.push(task);
+                    }
+                }
+                progress.unassigned.sort_by(|left, right| {
+                    left.id
+                        .len()
+                        .cmp(&right.id.len())
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                if let Some(error) = error {
+                    return Err(format!("Unassign teammate tasks: {error}"));
+                }
+            }
+            progress.tasks_done = true;
+        }
+        let notification_message = task_store::format_unassignment_notification(
+            &self.worker_name,
+            task_store::TeammateEndReason::Shutdown,
+            &progress.unassigned,
+        );
+        router.route(&self.leader, crate::mailbox::TeammateMessage {
+            from: self.from.clone(), from_name: self.from_name.clone(),
+            content: serde_json::json!({"type":"teammate_terminated", "message":notification_message}).to_string(),
+            summary: None, message_id: tool_api::util::ids::ulid_or_uuid(), timestamp: SystemTime::now(),
+            request_id: Some(self.request_id.clone()),
+        }).await.map_err(|error| format!("Notify teammate departure: {error}"))?;
+        progress.notified = true;
+        Ok(())
+    }
 }
 
 impl TeamRegistry {
@@ -98,7 +189,46 @@ impl TeamRegistry {
             coordinator_id,
             mailbox_router: Arc::new(MailboxRouter::new()),
             team_name: RwLock::new(None),
+            config_home: crate::team_file::lingxi_home(),
+            approved_departures: RwLock::new(HashMap::new()),
         }
+    }
+
+    pub(crate) async fn register_approved_departure(
+        &self,
+        task_id: &str,
+        departure: PendingApprovedDeparture,
+    ) {
+        self.approved_departures
+            .write()
+            .await
+            .entry(task_id.to_owned())
+            .or_insert_with(|| Arc::new(departure));
+    }
+
+    /// Finish confirmed departure, retaining successful steps across I/O retries.
+    /// An owned operation survives caller cancellation; its progress lock also
+    /// serializes competing reader, Stop, and SendMessage completion paths.
+    pub async fn complete_approved_departure(&self, task_id: &str) -> Result<(), String> {
+        let Some(departure) = self.approved_departures.read().await.get(task_id).cloned() else {
+            return Ok(());
+        };
+        let router = self.mailbox_router.clone();
+        tokio::spawn(async move { departure.complete(&router).await })
+            .await
+            .map_err(|error| format!("Departure cleanup task failed: {error}"))?
+    }
+
+    /// Bind this registry to the owning host's storage root before sharing it.
+    #[must_use]
+    pub fn with_config_home(mut self, home: std::path::PathBuf) -> Self {
+        self.config_home = Some(home);
+        self
+    }
+
+    #[must_use]
+    pub fn config_home(&self) -> Option<&std::path::Path> {
+        self.config_home.as_deref()
     }
 
     /// Live leader gate used to derive a teammate's approved permission mode.
@@ -457,6 +587,195 @@ fn apply_handler_transition(current: &mut WorkerStatus, status: WorkerStatus) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn approved_departure_accumulates_committed_tasks_across_retries() {
+        let home = tempfile::tempdir().unwrap();
+        let leader = AgentId::new();
+        let registry = TeamRegistry::new(leader);
+        let mailbox = Arc::new(TeammateMailbox::new(leader));
+        registry
+            .mailbox_router
+            .register(leader, mailbox.clone())
+            .await;
+        let store = task_store::TodoStore::for_list_at(home.path(), "session");
+        let mut ids = Vec::new();
+        for subject in ["first", "second"] {
+            let mut task = task_store::TodoTask::new(
+                subject.into(),
+                String::new(),
+                None,
+                serde_json::Map::new(),
+            );
+            task.owner = Some("nova".into());
+            ids.push(store.create(task).await.unwrap());
+        }
+        registry
+            .register_approved_departure(
+                "pane-task",
+                PendingApprovedDeparture {
+                    home: Some(home.path().to_owned()),
+                    team_name: "session".into(),
+                    list_id: "session".into(),
+                    agent_id: AgentId::new(),
+                    worker_name: "nova".into(),
+                    leader,
+                    from: crate::mailbox::MessageSender::Teammate(AgentId::new()),
+                    from_name: "nova".into(),
+                    request_id: "approval-1".into(),
+                    progress: tokio::sync::Mutex::new(ApprovedDepartureProgress::default()),
+                },
+            )
+            .await;
+        let held = task_store::proper_lockfile::lock(
+            &home
+                .path()
+                .join("tasks/session")
+                .join(format!("{}.json", ids[1])),
+        )
+        .await
+        .unwrap();
+        assert!(registry
+            .complete_approved_departure("pane-task")
+            .await
+            .is_err());
+        assert!(mailbox.drain().is_empty());
+        assert_eq!(store.get(&ids[0]).await.unwrap().owner, None);
+        assert_eq!(
+            store.get(&ids[1]).await.unwrap().owner.as_deref(),
+            Some("nova")
+        );
+        drop(held);
+        registry
+            .complete_approved_departure("pane-task")
+            .await
+            .unwrap();
+        registry
+            .complete_approved_departure("pane-task")
+            .await
+            .unwrap();
+        let messages = mailbox.drain();
+        assert_eq!(messages.len(), 1);
+        let expected = task_store::format_unassignment_notification(
+            "nova",
+            task_store::TeammateEndReason::Shutdown,
+            &[
+                task_store::UnassignedTask {
+                    id: ids[0].clone(),
+                    subject: "first".into(),
+                },
+                task_store::UnassignedTask {
+                    id: ids[1].clone(),
+                    subject: "second".into(),
+                },
+            ],
+        );
+        let value: serde_json::Value = serde_json::from_str(&messages[0].content).unwrap();
+        assert_eq!(value["message"], expected);
+    }
+
+    #[tokio::test]
+    async fn approved_departure_retries_after_team_file_lock_recovers() {
+        let home = tempfile::tempdir().unwrap();
+        let leader = AgentId::new();
+        let registry = TeamRegistry::new(leader);
+        let mailbox = Arc::new(TeammateMailbox::new(leader));
+        registry
+            .mailbox_router
+            .register(leader, mailbox.clone())
+            .await;
+        let path = crate::team_file::team_file_path(home.path(), "session");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"members":[{"name":"nova"}]}"#).unwrap();
+        registry
+            .register_approved_departure(
+                "pane-task",
+                PendingApprovedDeparture {
+                    home: Some(home.path().to_owned()),
+                    team_name: "session".into(),
+                    list_id: "session".into(),
+                    agent_id: AgentId::new(),
+                    worker_name: "nova".into(),
+                    leader,
+                    from: crate::mailbox::MessageSender::Teammate(AgentId::new()),
+                    from_name: "nova".into(),
+                    request_id: "approval-1".into(),
+                    progress: tokio::sync::Mutex::new(ApprovedDepartureProgress::default()),
+                },
+            )
+            .await;
+        let held = task_store::proper_lockfile::lock(&path).await.unwrap();
+        assert!(registry
+            .complete_approved_departure("pane-task")
+            .await
+            .is_err());
+        assert!(mailbox.drain().is_empty());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("nova"));
+        drop(held);
+        registry
+            .complete_approved_departure("pane-task")
+            .await
+            .unwrap();
+        registry
+            .complete_approved_departure("pane-task")
+            .await
+            .unwrap();
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document["members"], serde_json::json!([]));
+        assert_eq!(mailbox.drain().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn approved_departure_completion_is_shared_and_exactly_once() {
+        let leader = AgentId::new();
+        let registry = TeamRegistry::new(leader);
+        let mailbox = Arc::new(TeammateMailbox::new(leader));
+        registry
+            .mailbox_router
+            .register(leader, mailbox.clone())
+            .await;
+        let agent_id = AgentId::new();
+        registry
+            .register_approved_departure(
+                "pane-task",
+                PendingApprovedDeparture {
+                    home: None,
+                    team_name: "session".into(),
+                    list_id: "session".into(),
+                    agent_id,
+                    worker_name: "nova".into(),
+                    leader,
+                    from: crate::mailbox::MessageSender::Teammate(agent_id),
+                    from_name: "nova".into(),
+                    request_id: "approval-1".into(),
+                    progress: tokio::sync::Mutex::new(ApprovedDepartureProgress::default()),
+                },
+            )
+            .await;
+        assert!(
+            mailbox.drain().is_empty(),
+            "registration must not announce departure before teardown"
+        );
+        let (first, second) = tokio::join!(
+            registry.complete_approved_departure("pane-task"),
+            registry.complete_approved_departure("pane-task")
+        );
+        first.unwrap();
+        second.unwrap();
+        registry
+            .complete_approved_departure("pane-task")
+            .await
+            .unwrap();
+        let messages = mailbox.drain();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].request_id.as_deref(), Some("approval-1"));
+        assert_eq!(messages[0].from_name, "nova");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&messages[0].content).unwrap(),
+            serde_json::json!({"type":"teammate_terminated", "message":"nova has shut down."})
+        );
+    }
 
     #[tokio::test]
     async fn spawn_then_update_status_transitions() {

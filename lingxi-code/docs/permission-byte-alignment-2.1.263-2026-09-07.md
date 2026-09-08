@@ -620,6 +620,58 @@ green; restored byte-identically.
 | glob-containing paths → `ymo`'s `_tt` upward-escape guard | ✅ |
 | env vars outside the safe list: prefix (`Eun`) + `env` command (`ymo` head), via `eO`/`sle` | ✅ |
 
+## What is left, and why each is not a permission-crate patch (2026-09-08)
+
+The curated backlog is down to three items. None is a matter of writing the
+missing code in this crate; each has a structural reason recorded here so the
+next person does not re-derive it.
+
+1. **`Sandbox: ignoring permission rules and sandbox.filesystem entries from
+   disabled setting source ${source}`.** Found at `c_160988549.js@1052262`,
+   inside the sandbox-profile fold:
+
+   ```js
+   for (let Rn of yi) { let Ar = ye(Rn);
+     if (!Nr(Rn)) {                                     // source disabled
+       if (Ar?.permissions || Ar?.sandbox?.filesystem)
+         n(`Sandbox: ignoring permission rules and sandbox.filesystem entries from disabled setting source ${Rn}`, {level:"info"});
+       continue; } … }
+   ```
+
+   🚨 **Two blockers, both structural.** (a) The oracle loads every source and
+   filters at the fold; the port filters at LOAD — `setting_source_flags`
+   (`apps/cli/src/init.rs:352`) decides which files `read_cli_mode_settings`
+   even opens, so by the time anything permission-shaped exists, the disabled
+   source is not merely ignored, it was never read. Emitting this line means
+   reading a file the port deliberately skipped, purely for a diagnostic.
+   (b) `n(…,{level:"info"})` is a DEBUG-LOG sink, not user-facing.
+   `apps/cli/src/lib.rs` has no structured logger at that seam — 44 `eprintln!`
+   and no `tracing` import — so the only available spelling would print, on
+   every `--setting-sources` startup, a line the binary never shows anyone.
+   That is a user-visible divergence in the wrong direction, so it is left
+   undone deliberately rather than approximated.
+
+   The port's source vocabulary is NOT a blocker: `PermissionRuleSource` already
+   spells `UserSettings` / `ProjectSettings` / `LocalSettings` / `FlagSettings` /
+   `PolicySettings` the way the oracle's keys do.
+
+2. **Plan-mode approval / consent floor** (28 strings) — unchanged from the
+   2026-09-08 scoping. Zero substrate, and it spans plan mode × artifacts ×
+   teammates × the auto-mode classifier, three of which this crate does not own.
+
+3. **Session-scoped `BK` allowances** (plan files, tool-result files,
+   scratchpad, job `tmp/`, project temp, `Rzt()` bundled skill references) — the
+   crate has no session-directory plumbing to reach them. Their absence makes
+   the read block STRICTER than the oracle, never looser.
+
+Separately, and outside this doc's subsystem: the `PermissionRequest` hook
+decision shape (11) is now present in the tree — `PermissionRequest decision
+must be`, `permissionDecision` and `PermissionRequest allow ignored` all have
+hits — landed partly by the `H_n` work here and partly by concurrent work in
+`hooks`, which held six of that crate's files uncommitted while this was
+written.
+
+
 ### 🚨 `CLAUDE_CODE_EVAL_CONFINED` was a flaky process global — fixed 2026-09-08
 
 The `OG` gate landed in `19deb0373` reading the variable inside

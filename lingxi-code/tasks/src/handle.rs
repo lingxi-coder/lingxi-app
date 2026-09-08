@@ -488,6 +488,10 @@ impl TaskRegistryHandle for TaskRegistry {
         TaskRegistry::set_workflow_outcome(self, id, outcome).await;
     }
 
+    async fn has_pending_teammate_departure(&self, id: &str) -> bool {
+        TaskRegistry::has_pending_teammate_departure(self, id).await
+    }
+
     async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {
         self.kill(id).await.map_err(task_err_to_registry_err)?;
         // After kill, fetch the (now-killed) state for the record.

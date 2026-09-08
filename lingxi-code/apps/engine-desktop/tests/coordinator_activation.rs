@@ -81,6 +81,7 @@ struct CoordinatorFixture {
     _tmp: tempfile::TempDir,
     team: Arc<coordinator::TeamRegistry>,
     spawn_seam: Arc<dyn TeamSpawnSeam>,
+    registry: Arc<TaskRegistry>,
     sink: Arc<MockSink>,
     /// The SINGLE orchestrator-facing output stream — the real
     /// `AdapterOutputStream` behind the `MockSink`. Shared by the
@@ -145,6 +146,7 @@ fn make_coordinator_fixture(api: &Arc<ScriptedApiClient>) -> CoordinatorFixture 
         _tmp: tmp,
         team,
         spawn_seam,
+        registry,
         sink: mock_sink,
         output,
     }
@@ -488,4 +490,187 @@ fn coordinator_session_tool_list_has_no_duplicate_names() {
         names, deduped,
         "no tool name may appear twice in a coordinator-session registry"
     );
+}
+
+/// A real persistent worker is already dead when departure I/O fails. The
+/// public TaskStop tool must still accept its terminal record for cleanup retry.
+#[tokio::test]
+async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed() {
+    use tool_api::Tool;
+    let api = ScriptedApiClient::new();
+    let fixture = make_coordinator_fixture(&api);
+    let cleanup: Arc<dyn platform_api::team_spawn::TeammateDepartureCleanup> = fixture.team.clone();
+    fixture
+        .registry
+        .set_teammate_departure_cleanup(Arc::downgrade(&cleanup))
+        .await;
+    let spawner = coordinator::ImplicitTeammateSpawner::new(
+        fixture.team.clone(),
+        fixture.spawn_seam.clone(),
+        Arc::new(PosixRuntime::new()),
+        fixture.output.clone(),
+        "12345678-0000-0000-0000-000000000000".into(),
+    );
+    spawner.initialize().await;
+    spawner
+        .spawn(
+            platform_api::subagent_spawn::SubagentSpawnRequest {
+                name: Some("alpha".into()),
+                subagent_type: "general-purpose".into(),
+                prompt: "park until shutdown".into(),
+                ..Default::default()
+            },
+            platform_api::subagent_spawn::SubagentInheritance {
+                tool_invoker: Arc::new(MockInvoker),
+                budget: Arc::new(MockBudget),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(await_round_trip(&api).await);
+    assert!(await_worker_idle(&fixture.team).await);
+    let worker = fixture.team.list().await.remove(0);
+    let team_name = fixture.team.team_name().await.unwrap();
+    let mailbox = Arc::new(coordinator::mailbox::TeammateMailbox::new(
+        fixture.team.coordinator_id,
+    ));
+    fixture
+        .team
+        .mailbox_router
+        .register(fixture.team.coordinator_id, mailbox.clone())
+        .await;
+    let config_path = coordinator::team_file::team_file_path(fixture._tmp.path(), &team_name);
+    let config_before = std::fs::read(&config_path).unwrap();
+    let list_id = std::env::var("LINGXI_TASK_LIST_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| team_name.clone());
+    let component: String = list_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let task_path = fixture
+        ._tmp
+        .path()
+        .join("tasks")
+        .join(component)
+        .join("1.json");
+    std::fs::create_dir_all(task_path.parent().unwrap()).unwrap();
+    let task = serde_json::json!({"id":"1", "subject":"Fix parser", "description":"work",
+        "status":"in_progress", "owner":"alpha", "blocks":[], "blockedBy":[]});
+    std::fs::write(&task_path, serde_json::to_vec(&task).unwrap()).unwrap();
+    let task_before = std::fs::read(&task_path).unwrap();
+    // Deterministic failure even when the test user can bypass file permissions.
+    std::fs::remove_file(&config_path).unwrap();
+    std::fs::create_dir(&config_path).unwrap();
+    let approval = coordinator::SendMessageTool::new(
+        fixture.team.clone(),
+        tool_ui::send_message::truncate_preview,
+    )
+    .with_spawn_seam(fixture.spawn_seam.clone());
+    let mut context = tool_api::ToolUseContext::model_seed("scripted".into());
+    context.agent_id = Some(worker.agent_id);
+    let (progress, _events) = tool_api::progress_channel();
+    let error = approval
+        .call(
+            serde_json::json!({"to":"team-lead", "message":{
+                "type":"shutdown_response", "request_id":"real-inprocess-stop", "approve":true
+            }}),
+            context,
+            progress,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Remove teammate membership"));
+    assert_eq!(
+        fixture
+            .registry
+            .get(&worker.task_id)
+            .await
+            .unwrap()
+            .base()
+            .status,
+        tasks::TaskStatus::Killed
+    );
+    assert!(
+        fixture
+            .registry
+            .has_pending_teammate_departure(&worker.task_id)
+            .await
+    );
+    assert_eq!(std::fs::read(&task_path).unwrap(), task_before);
+    let initial = mailbox.drain();
+    assert!(initial
+        .iter()
+        .any(
+            |message| serde_json::from_str::<serde_json::Value>(&message.content)
+                .is_ok_and(|value| value["type"] == "shutdown_approved")
+        ));
+    assert!(!initial
+        .iter()
+        .any(
+            |message| serde_json::from_str::<serde_json::Value>(&message.content)
+                .is_ok_and(|value| value["type"] == "teammate_terminated")
+        ));
+    std::fs::remove_dir(&config_path).unwrap();
+    std::fs::write(&config_path, config_before).unwrap();
+
+    let mut builtin = stub_ctx();
+    builtin.task_registry = Some(fixture.registry.clone());
+    let stop = tool_task::TaskStopTool::new(builtin);
+    let (progress, _events) = tool_api::progress_channel();
+    stop.call(
+        serde_json::json!({"task_id":worker.task_id}),
+        tool_api::ToolUseContext::model_seed("scripted".into()),
+        progress,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !fixture
+            .registry
+            .has_pending_teammate_departure(&worker.task_id)
+            .await
+    );
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    assert!(!config["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|member| member["name"] == "alpha"));
+    let task: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&task_path).unwrap()).unwrap();
+    assert!(task.get("owner").is_none());
+    assert_eq!(task["status"], "pending");
+    let completed = mailbox.drain();
+    assert_eq!(
+        completed
+            .iter()
+            .filter(
+                |message| serde_json::from_str::<serde_json::Value>(&message.content)
+                    .is_ok_and(|value| value["type"] == "teammate_terminated")
+            )
+            .count(),
+        1
+    );
+    let (progress, _events) = tool_api::progress_channel();
+    let error = stop
+        .call(
+            serde_json::json!({"task_id":worker.task_id}),
+            tool_api::ToolUseContext::model_seed("scripted".into()),
+            progress,
+        )
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("is not running (status: killed)"));
+    assert!(mailbox.drain().is_empty());
 }

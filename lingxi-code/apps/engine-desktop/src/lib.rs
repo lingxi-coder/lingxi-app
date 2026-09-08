@@ -12785,6 +12785,12 @@ pub async fn build(
             task_registry.clone()
         };
 
+    let departure_owner: Arc<dyn platform_api::team_spawn::TeammateDepartureCleanup> =
+        coordinator.clone();
+    task_registry
+        .set_teammate_departure_cleanup(Arc::downgrade(&departure_owner))
+        .await;
+
     if platform_api::env::agent_swarms_enabled() {
         task_registry
             .set_external_teammate_controller(Arc::downgrade(&spawn_seam))

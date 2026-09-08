@@ -12,6 +12,181 @@ use tempfile::tempdir;
 use test_harness::mocks::MockRuntimeSpawner;
 
 #[tokio::test]
+async fn concurrent_in_process_stops_wait_for_backing_exit_before_departure() {
+    struct BlockingStop {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        calls: AtomicUsize,
+        stopped: std::sync::atomic::AtomicBool,
+        departures: AtomicUsize,
+    }
+    #[async_trait]
+    impl Task for BlockingStop {
+        fn name(&self) -> &str {
+            "blocking-stop"
+        }
+        fn task_type(&self) -> TaskType {
+            TaskType::InProcessTeammate
+        }
+        async fn spawn(&self, _: TaskSpawnInput, _: TaskContext) -> Result<TaskHandle, TaskError> {
+            Ok(TaskHandle::new("istoplock", None))
+        }
+        async fn kill(&self, _: &str, _: TaskContext) -> Result<(), TaskError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) != 0 {
+                return Ok(());
+            }
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.stopped.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    #[async_trait]
+    impl platform_api::team_spawn::TeammateDepartureCleanup for BlockingStop {
+        async fn has_pending_departure(&self, _: &str) -> bool {
+            true
+        }
+        async fn complete_departure(&self, _: &str) -> Result<(), String> {
+            assert!(
+                self.stopped.load(Ordering::SeqCst),
+                "departure must wait for actual backing exit"
+            );
+            self.departures.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    for cancel_first in [false, true] {
+        let (_temp, mut registry) = make_registry();
+        let handler = Arc::new(BlockingStop {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            calls: AtomicUsize::new(0),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+            departures: AtomicUsize::new(0),
+        });
+        registry.register_handler(TaskType::InProcessTeammate, handler.clone());
+        let task_id = registry
+            .spawn(
+                TaskType::InProcessTeammate,
+                teammate_input(),
+                "worker".into(),
+            )
+            .await
+            .unwrap();
+        let owner: Arc<dyn platform_api::team_spawn::TeammateDepartureCleanup> = handler.clone();
+        registry
+            .set_teammate_departure_cleanup(Arc::downgrade(&owner))
+            .await;
+        let mut first = Box::pin(registry.kill(&task_id));
+        let mut second = Box::pin(registry.kill(&task_id));
+        tokio::select! { _ = handler.entered.notified() => {}, result = &mut first => panic!("stop completed before exit: {result:?}") }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut second)
+                .await
+                .is_err()
+        );
+        assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(handler.departures.load(Ordering::SeqCst), 0);
+        if cancel_first {
+            drop(first);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(20), &mut second)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(handler.departures.load(Ordering::SeqCst), 0);
+            handler.release.notify_one();
+            second.await.unwrap();
+            assert_eq!(handler.calls.load(Ordering::SeqCst), 2);
+        } else {
+            handler.release.notify_one();
+            let (first, second) = tokio::join!(first, second);
+            first.unwrap();
+            second.unwrap();
+            assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+        }
+        assert!(handler.departures.load(Ordering::SeqCst) > 0);
+    }
+}
+
+#[tokio::test]
+async fn approved_departure_io_failure_is_retryable_after_task_is_already_killed() {
+    struct DepartureOwner {
+        task_id: String,
+        calls: AtomicUsize,
+    }
+    #[async_trait]
+    impl platform_api::team_spawn::TeammateDepartureCleanup for DepartureOwner {
+        async fn has_pending_departure(&self, task_id: &str) -> bool {
+            task_id == self.task_id && self.calls.load(Ordering::SeqCst) < 2
+        }
+        async fn complete_departure(&self, task_id: &str) -> Result<(), String> {
+            assert_eq!(task_id, self.task_id);
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err("departure storage unavailable".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let (_temp, registry) = make_registry();
+    let task_id = registry
+        .create(
+            TaskType::InProcessTeammate,
+            teammate_input(),
+            "teammate".into(),
+        )
+        .await
+        .unwrap();
+    registry
+        .set_status(&task_id, TaskStatus::Running)
+        .await
+        .unwrap();
+    let owner = Arc::new(DepartureOwner {
+        task_id: task_id.clone(),
+        calls: AtomicUsize::new(0),
+    });
+    let cleanup: Arc<dyn platform_api::team_spawn::TeammateDepartureCleanup> = owner.clone();
+    registry
+        .set_teammate_departure_cleanup(Arc::downgrade(&cleanup))
+        .await;
+    let public: &dyn platform_api::TaskRegistryHandle = &registry;
+    assert!(public.kill(&task_id).await.is_err());
+    assert_eq!(
+        registry.get(&task_id).await.unwrap().base().status,
+        TaskStatus::Killed
+    );
+    assert!(public.has_pending_teammate_departure(&task_id).await);
+    public.kill(&task_id).await.unwrap();
+    assert_eq!(
+        registry.get(&task_id).await.unwrap().base().status,
+        TaskStatus::Killed
+    );
+    assert!(!public.has_pending_teammate_departure(&task_id).await);
+    public.kill(&task_id).await.unwrap();
+    assert_eq!(owner.calls.load(Ordering::SeqCst), 2);
+    let ordinary = registry
+        .create(
+            TaskType::InProcessTeammate,
+            teammate_input(),
+            "finished".into(),
+        )
+        .await
+        .unwrap();
+    registry
+        .set_status(&ordinary, TaskStatus::Completed)
+        .await
+        .unwrap();
+    assert!(!public.has_pending_teammate_departure(&ordinary).await);
+    public.kill(&ordinary).await.unwrap();
+    assert_eq!(
+        registry.get(&ordinary).await.unwrap().base().status,
+        TaskStatus::Completed
+    );
+    assert_eq!(owner.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn external_teammate_stop_failure_is_retryable_through_public_task_registry() {
     struct StopOwner(AtomicUsize);
     #[async_trait]

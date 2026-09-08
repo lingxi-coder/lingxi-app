@@ -600,6 +600,11 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// Kill the task (cancels any background handle, marks status `killed`).
     async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError>;
 
+    /// True only while an approved teammate departure still needs cleanup.
+    async fn has_pending_teammate_departure(&self, _id: &str) -> bool {
+        false
+    }
+
     /// Kill the task, recording WHO stopped it so a `local_agent`'s killed
     /// notification renders the right verb.
     ///

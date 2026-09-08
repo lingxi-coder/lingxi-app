@@ -2143,7 +2143,10 @@ impl Tool for TaskStopTool {
                 return Err(registry_err_to_tool_err("TaskStop", e));
             }
         };
-        if record.status != "running" {
+        if record.status != "running"
+            && !(record.task_type == "in_process_teammate"
+                && registry.has_pending_teammate_departure(&task_id).await)
+        {
             emit_failed(
                 &bus,
                 TASK_STOP_FAILED,

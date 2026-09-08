@@ -56,10 +56,14 @@ pub struct TaskRegistry {
     /// and must be torn down through the handler, not by cancelling a
     /// `BackgroundTaskHandle` the registry never holds.
     spawned: Arc<RwLock<HashMap<String, TaskType>>>,
+    /// Session-owned approved departure cleanup, weakly held to avoid cycles.
+    teammate_departure_cleanup:
+        RwLock<Option<std::sync::Weak<dyn platform_api::team_spawn::TeammateDepartureCleanup>>>,
     /// External pane tasks must confirm process teardown before task tools
     /// publish a terminal status. Weak ownership avoids a registry/controller cycle.
     external_teammate_controller: RwLock<Option<std::sync::Weak<dyn TeamSpawnSeam>>>,
     external_teammate_tasks: RwLock<HashSet<String>>,
+    in_process_stop_locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     runtime: Arc<dyn RuntimeSpawner>,
     fs: Arc<dyn FileSystem>,
     /// Owner of task spool files.
@@ -277,7 +281,9 @@ impl TaskRegistry {
             backgrounders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             spawned: Arc::new(RwLock::new(HashMap::new())),
             external_teammate_controller: RwLock::new(None),
+            teammate_departure_cleanup: RwLock::new(None),
             external_teammate_tasks: RwLock::new(HashSet::new()),
+            in_process_stop_locks: tokio::sync::Mutex::new(HashMap::new()),
             runtime,
             fs,
             output_manager,
@@ -289,6 +295,29 @@ impl TaskRegistry {
             )),
             total_agent_spawns: AtomicU64::new(0),
             web_search_calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        }
+    }
+
+    /// Bind the session's departure cleanup owner without retaining the session.
+    pub async fn set_teammate_departure_cleanup(
+        &self,
+        owner: std::sync::Weak<dyn platform_api::team_spawn::TeammateDepartureCleanup>,
+    ) {
+        *self.teammate_departure_cleanup.write().await = Some(owner);
+    }
+
+    /// Whether this task still has approved departure work available for retry.
+    pub async fn has_pending_teammate_departure(&self, task_id: &str) -> bool {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let owner = self
+            .teammate_departure_cleanup
+            .read()
+            .await
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        match owner {
+            Some(owner) => owner.has_pending_departure(&task_id).await,
+            None => false,
         }
     }
 
@@ -2784,6 +2813,26 @@ impl TaskRegistry {
     /// Note: only Bash and Agent states currently carry a writable `status`
     /// field in the M1 surface; other variants are no-ops on cancel.
     pub async fn kill(&self, task_id: &str) -> Result<(), TaskError> {
+        let canonical = self.canonical_or_raw(task_id).await;
+        self.kill_backing_task(&canonical).await?;
+        let owner = self
+            .teammate_departure_cleanup
+            .read()
+            .await
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        if let Some(owner) = owner {
+            if owner.has_pending_departure(&canonical).await {
+                owner
+                    .complete_departure(&canonical)
+                    .await
+                    .map_err(TaskError::Internal)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn kill_backing_task(&self, task_id: &str) -> Result<(), TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
         let task_id_ref = task_id.as_str();
         if self
@@ -2818,6 +2867,28 @@ impl TaskRegistry {
         // Read the routing entry without consuming it. A failed handler kill is
         // retryable; removing the route/cleanup before the awaited call would
         // strand a still-running task with no way to stop it.
+        // The in-process handler consumes its worker entry before awaiting
+        // exit/deallocation. Keep concurrent callers outside that window; the
+        // routing entry is re-read only after the first stop has finished.
+        // External pane controllers are deliberately outside this lock because
+        // their fallback may re-enter the registry.
+        let stop_lock =
+            if self.spawned.read().await.get(task_id_ref) == Some(&TaskType::InProcessTeammate) {
+                Some(
+                    self.in_process_stop_locks
+                        .lock()
+                        .await
+                        .entry(task_id_ref.to_owned())
+                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                        .clone(),
+                )
+            } else {
+                None
+            };
+        let mut stop_guard = match stop_lock {
+            Some(lock) => Some(lock.lock_owned().await),
+            None => None,
+        };
         let spawned_type = self.spawned.read().await.get(task_id_ref).copied();
         if let Some(task_type) = spawned_type {
             let handler = self
@@ -2828,7 +2899,25 @@ impl TaskRegistry {
                 fs: self.fs.clone(),
                 runtime: self.runtime.clone(),
             };
-            handler.kill(task_id_ref, ctx).await?;
+            if task_type == TaskType::InProcessTeammate {
+                let guard = stop_guard
+                    .take()
+                    .expect("in-process stop owns its task lock");
+                let handler = handler.clone();
+                let task_id = task_id_ref.to_owned();
+                // Keep both exit/deallocation and exclusion alive if the caller
+                // drops its Stop future after the handler consumes its worker.
+                let (result, guard) = tokio::spawn(async move {
+                    let result = handler.kill(&task_id, ctx).await;
+                    (result, guard)
+                })
+                .await
+                .map_err(|error| TaskError::Internal(error.to_string()))?;
+                stop_guard = Some(guard);
+                result?;
+            } else {
+                handler.kill(task_id_ref, ctx).await?;
+            }
             // Commit the routing teardown only after the owner confirms the
             // process is stopped. A concurrent terminal transition is harmless:
             // removals are idempotent and the status guard below preserves it.
@@ -2846,6 +2935,7 @@ impl TaskRegistry {
             if let Some(cleanup) = cleanup {
                 cleanup();
             }
+            drop(stop_guard);
             return Ok(());
         }
 

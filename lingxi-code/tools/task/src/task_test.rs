@@ -2207,6 +2207,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
             /// Successive `output()` results; the last entry repeats once drained.
             chunks: StdMutex<VecDeque<TaskOutputChunk>>,
             kill_calls: StdMutex<u32>,
+            pending_departure: StdMutex<bool>,
+            departure_failures: StdMutex<u32>,
             output_calls: StdMutex<u32>,
             /// Ids passed to `mark_notified`, in call order (T9).
             notified_ids: StdMutex<Vec<String>>,
@@ -2266,6 +2268,12 @@ Running background agents: a1b2c3d4e (survey the crate)"
             }
             async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {
                 *self.kill_calls.lock().unwrap() += 1;
+                let mut failures = self.departure_failures.lock().unwrap();
+                if *failures > 0 {
+                    *failures -= 1;
+                    return Err(TaskRegistryError::Internal("departure file locked".into()));
+                }
+                *self.pending_departure.lock().unwrap() = false;
                 let mut guard = self.record.lock().unwrap();
                 match guard.as_mut() {
                     Some(r) => {
@@ -2274,6 +2282,9 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     }
                     None => Err(TaskRegistryError::NotFound(id.into())),
                 }
+            }
+            async fn has_pending_teammate_departure(&self, _id: &str) -> bool {
+                *self.pending_departure.lock().unwrap()
             }
             async fn output(
                 &self,
@@ -2550,6 +2561,32 @@ Running background agents: a1b2c3d4e (survey the crate)"
             );
             // Pre-validation rejects before any kill.
             assert_eq!(*reg.kill_calls.lock().unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn task_stop_retries_terminal_teammate_departure_until_cleanup_succeeds() {
+            let mut record = agent_rec("killed");
+            record.task_type = "in_process_teammate".into();
+            let reg = MockRegistry::with_record(Some(record));
+            *reg.pending_departure.lock().unwrap() = true;
+            *reg.departure_failures.lock().unwrap() = 1;
+            let tool = TaskStopTool::new(bctx(reg.clone()));
+            let input = json!({ "task_id": "a12345678" });
+            let error = tool
+                .call(input.clone(), fresh_ctx(), fresh_tx())
+                .await
+                .unwrap_err();
+            assert!(err_msg(error).contains("departure file locked"));
+            assert!(*reg.pending_departure.lock().unwrap());
+            let result = tool
+                .call(input.clone(), fresh_ctx(), fresh_tx())
+                .await
+                .unwrap();
+            assert!(!result.is_error);
+            assert!(!*reg.pending_departure.lock().unwrap());
+            let error = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap_err();
+            assert!(err_msg(error).contains("not running (status: killed)"));
+            assert_eq!(*reg.kill_calls.lock().unwrap(), 2);
         }
 
         // ── TaskOutput ───────────────────────────────────────────────────

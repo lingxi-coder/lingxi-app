@@ -175,6 +175,21 @@ impl PendingApprovedDeparture {
     }
 }
 
+#[async_trait::async_trait]
+impl platform_api::team_spawn::TeammateDepartureCleanup for TeamRegistry {
+    async fn has_pending_departure(&self, task_id: &str) -> bool {
+        let entry = self.approved_departures.read().await.get(task_id).cloned();
+        match entry {
+            Some(entry) => !entry.progress.lock().await.notified,
+            None => false,
+        }
+    }
+
+    async fn complete_departure(&self, task_id: &str) -> Result<(), String> {
+        self.complete_approved_departure(task_id).await
+    }
+}
+
 impl TeamRegistry {
     /// Construct an empty registry owned by `coordinator_id`.
     #[must_use]

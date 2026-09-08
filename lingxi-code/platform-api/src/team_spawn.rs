@@ -4,6 +4,15 @@ use async_trait::async_trait;
 use protocol::AgentId;
 use thiserror::Error;
 
+/// Session-owned cleanup owed after an approved teammate has stopped.
+#[async_trait]
+pub trait TeammateDepartureCleanup: Send + Sync {
+    /// Whether this task has unfinished approved departure work.
+    async fn has_pending_departure(&self, task_id: &str) -> bool;
+    /// Finish departure after backing execution has stopped, retaining retry progress.
+    async fn complete_departure(&self, task_id: &str) -> Result<(), String>;
+}
+
 /// Failure modes for [`TeamSpawnSeam`] operations.
 #[derive(Debug, Error)]
 pub enum TeamSpawnError {

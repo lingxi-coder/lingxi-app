@@ -135,7 +135,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
-| `TN-02` | confirmed | P1 | medium | Notification is a transient outgoing-snapshot reminder; the oracle persists it as a durable user message (transcript + JSONL) |
+| `TN-02` | confirmed **[fixed]** | P1 | medium | Notification is a transient outgoing-snapshot reminder; the oracle persists it as a durable user message (transcript + JSONL) |
 | `TN-03` | confirmed | P1 | high | No idle wake: a task finishing while the session is idle is not delivered until the user's next prompt |
 | `TN-04` | confirmed | P2 | medium | Multiple notifications are folded into ONE <\system-reminder> with ONE header; the oracle emits one enveloped block per notification |
 | `TN-05` | keep | P2 | medium | Dream completion renders a model-facing <\task-notification> (generic <task-type>dream</task-type>) that the oracle never emits |

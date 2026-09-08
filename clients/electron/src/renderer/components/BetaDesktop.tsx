@@ -2206,7 +2206,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           : 'Do anything';
   const hasPrompt = Boolean(text.trim() || selectedFiles.length);
   return (
-    <div className="desktop-composer-dock" style={{ flexShrink: 0, padding: '10px 18px 18px', background: t.stageBg }}>
+    <div className="desktop-composer-dock" style={{ flexShrink: 0, padding: '12px var(--conversation-gutter) 20px', background: t.stageBg }}>
       {flowMode && (
         <VoiceFlowPanel
           state={flowState}
@@ -2232,7 +2232,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           setImageDragActive(false);
           void addImageFiles([...event.dataTransfer.files]);
         }}
-        style={{ position: 'relative', maxWidth: 980, margin: '0 auto', borderRadius: 26, border: `1px solid ${imageDragActive ? t.accent : ready ? t.borderStrong : t.border}`, background: imageDragActive ? t.accentBg : t.surface, boxShadow: t.dark ? '0 18px 46px rgba(0,0,0,.28), 0 2px 8px rgba(0,0,0,.18)' : '0 20px 52px rgba(47,39,78,.10), 0 3px 10px rgba(47,39,78,.055)', overflow: 'visible', transition: 'border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease' }}
+        style={{ position: 'relative', maxWidth: 'var(--conversation-width)', margin: '0 auto', borderRadius: 20, border: `1px solid ${imageDragActive ? t.accent : t.border}`, background: imageDragActive ? t.accentBg : t.surface, boxShadow: t.dark ? '0 8px 24px rgba(0,0,0,.20), 0 1px 3px rgba(0,0,0,.16)' : '0 8px 24px rgba(24,28,36,.06), 0 1px 3px rgba(24,28,36,.04)', overflow: 'visible', transition: 'border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease' }}
       >
         {imageAttachments.length > 0 && (
           <div aria-label="Image attachments" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '12px 18px 2px' }}>
@@ -2272,7 +2272,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             : fileMenuOpen && filePicker?.source === 'mention' && fileResults[fileResultIndex]
               ? `workspace-file-result-${fileResultIndex}`
               : undefined}
-          style={{ display: 'block', width: '100%', minHeight: 56, maxHeight: 160, overflowY: 'auto', border: 0, outline: 0, background: 'transparent', color: t.text, lineHeight: 1.5, fontSize: 16, padding: '14px 18px 2px', fontWeight: 400, letterSpacing: '-.01em', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', cursor: ready ? 'text' : 'default', opacity: ready ? 1 : .68 }}
+          style={{ display: 'block', width: '100%', minHeight: 56, maxHeight: 160, overflowY: 'auto', border: 0, outline: 0, background: 'transparent', color: t.text, lineHeight: 1.5, fontSize: 15, padding: '16px 18px 8px', fontWeight: 400, letterSpacing: 'normal', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', cursor: ready ? 'text' : 'default', opacity: ready ? 1 : .68 }}
         />
         {slashMenuOpen && (
           <div ref={slashControl} id="slash-command-results" role="listbox" aria-label="Slash commands" style={{ ...composerMenuStyle(t, 'left'), width: 820, maxWidth: 'min(820px, calc(100vw - 44px))', maxHeight: 'min(420px, calc(100vh - 190px))', overflowY: 'auto', padding: 7 }}>
@@ -2331,11 +2331,11 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             onFinish={() => { void finishStandardListening(); }}
           />
         ) : (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minHeight: 48, padding: '0 8px 8px 10px' }}>
+        <div className="composer-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 4, minHeight: 48, padding: '0 8px 8px' }}>
           <input ref={imageFileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple onChange={(event) => { void addImageFiles(event.target.files ? [...event.target.files] : []); event.currentTarget.value = ''; }} style={{ display: 'none' }} />
-          <button type="button" disabled={!ready} aria-label="Attach image" title="Attach image" onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 34, height: 34 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
+          <button type="button" disabled={!ready} aria-label="Attach image" title="Attach image" onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
           <div ref={fileControl}>
-            <button type="button" disabled={!ready} aria-label="Search workspace files" aria-expanded={fileMenuOpen} title="Add file context (@)" onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 34, height: 34 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
+            <button type="button" disabled={!ready} aria-label="Search workspace files" aria-expanded={fileMenuOpen} title="Add file context (@)" onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
             {fileMenuOpen && (
               <div role="dialog" aria-label="Search workspace files" style={{ ...composerMenuStyle(t, 'left'), width: 560, maxWidth: 'min(560px, calc(100vw - 44px))', padding: 7, overflow: 'hidden' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '3px 4px 7px', borderBottom: `0.5px solid ${t.border}` }}>
@@ -2470,7 +2470,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 
           <div style={{ flex: 1 }} />
 
-          <div ref={modelControl} style={{ position: 'relative' }}>
+          <div ref={modelControl} className="composer-model-control" style={{ position: 'relative', minWidth: 0 }}>
             <button
               ref={modelTrigger}
               type="button"
@@ -2480,7 +2480,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               aria-label={`${fastModeAvailable && bridge.desktop.fastMode ? 'Fast mode, ' : ''}Model: ${modelLabel(bridge.desktop.currentModel)}, reasoning ${reasoningSelectionLabel(selectedReasoning)}`}
               onMouseDown={() => { setSlashQuery(null); activeSlashRange.current = null; }}
               onClick={() => { setModelOpen((open) => !open); setModelSubmenu(null); setPermissionOpen(false); }}
-              style={{ ...composerPillStyle(t, modelOpen), maxWidth: 340, color: t.text }}
+              style={{ ...composerPillStyle(t, modelOpen), maxWidth: '100%', width: '100%', color: t.text }}
             >
               {fastModeAvailable && <Icon name="bolt" size={18} color={t.text} stroke={2.1} />}
               {fastModeAvailable && bridge.desktop.fastMode && <span style={{ color: t.accent, fontSize: 11.5, fontWeight: 700 }}>Fast</span>}
@@ -2712,7 +2712,7 @@ function composerPrimaryActionStyle(t: ReturnType<typeof useT>, enabled: boolean
 }
 
 function composerPillStyle(t: ReturnType<typeof useT>, active: boolean): CSSProperties {
-  return { display: 'inline-flex', alignItems: 'center', gap: 7, minHeight: 34, padding: '0 9px', border: 0, borderRadius: 9, background: active ? t.surfaceHover : 'transparent', cursor: 'pointer', font: 'inherit', fontSize: 13.5, fontWeight: 500 };
+  return { display: 'inline-flex', alignItems: 'center', gap: 6, minHeight: 40, padding: '0 9px', border: 0, borderRadius: 9, background: active ? t.surfaceHover : 'transparent', cursor: 'pointer', font: 'inherit', fontSize: 12.5, fontWeight: 500 };
 }
 
 function composerSendStyle(t: ReturnType<typeof useT>, enabled: boolean): CSSProperties {

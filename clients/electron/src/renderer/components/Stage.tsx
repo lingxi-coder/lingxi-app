@@ -33,12 +33,13 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
   const slashIcon = slashCommand ? commandPaletteIcon(slashCommand.name) : null;
   return (
     <div className={user ? 'user-message-bubble' : undefined} style={{
-      maxWidth: user ? images.length ? 430 : 700 : 880,
-      padding: user ? '11px 16px' : 0,
-      borderRadius: user ? 22 : 0,
+      maxWidth: user ? images.length ? 'min(430px, 100%)' : 'min(700px, 90%)' : '100%',
+      minWidth: 0,
+      padding: user ? '10px 16px' : 0,
+      borderRadius: user ? 18 : 0,
       border: 0,
       background: user ? t.surfaceHover : 'transparent',
-      fontSize: 14, lineHeight: 1.65, letterSpacing: '-.01em',
+      fontSize: 14, lineHeight: 1.65, letterSpacing: 0,
       color, fontWeight: item.strong ? 600 : 400,
     }}>
       {images.length > 0 && (
@@ -123,12 +124,12 @@ const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
 }) {
   const t = useT();
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxWidth: 880 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxWidth: '100%' }}>
       <Disclosure
         id={item.id}
         open={open}
         onToggle={() => onSetOpen(item.id, !open)}
-        buttonStyle={{ padding: '2px 6px 2px 2px', borderRadius: 6, fontSize: 12, fontWeight: 500, letterSpacing: 0 }}
+        buttonStyle={{ minHeight: 28, padding: '4px 6px 4px 0', borderRadius: 6, fontSize: 12, fontWeight: 500, letterSpacing: 0 }}
         summary={
           <span
             className={item.done ? undefined : 'running-sweep'}
@@ -143,9 +144,9 @@ const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
       >
         <div
           style={{
-            borderLeft: `2px solid ${t.border}`, paddingLeft: 12, marginLeft: 6,
-            fontSize: 13.5, lineHeight: 1.6, letterSpacing: '-.006em', color: t.text3,
-            whiteSpace: 'pre-wrap',
+            borderLeft: `1px solid ${t.border}`, paddingLeft: 16, marginLeft: 3,
+            fontSize: 13.5, lineHeight: 1.65, letterSpacing: 0, color: t.text2,
+            whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
           }}
         >
           {item.text}
@@ -215,12 +216,12 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
   }, [items.length, running]);
 
   return (
-    <div className="desktop-stage" style={{ flex: 1, overflowY: 'auto', background: t.transcriptBg, position: 'relative' }}>
+    <div className="desktop-stage" style={{ flex: 1, minWidth: 0, overflowY: 'auto', paddingInline: 'var(--conversation-gutter, 24px)', background: t.transcriptBg, position: 'relative' }}>
       <div
         className="desktop-stage-feed"
         style={{
-          width: '100%', maxWidth: 1040, margin: '0 auto',
-          padding: '24px clamp(18px, 2.2vw, 24px) 12px',
+          width: '100%', maxWidth: 'var(--conversation-width, 860px)', margin: '0 auto',
+          padding: '28px 0 16px',
           display: 'flex', flexDirection: 'column', gap: 0,
         }}
       >

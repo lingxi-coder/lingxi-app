@@ -1,5 +1,7 @@
 :root {
-  --font-sans-default: -apple-system-body, ui-sans-serif, -apple-system, BlinkMacSystemFont,
+  --conversation-width: 860px;
+  --conversation-gutter: 24px;
+  --font-sans-default: -apple-system, BlinkMacSystemFont, "SF Pro Text",
     "Segoe UI", Helvetica, "PingFang SC", "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif;
   --font-openai-sans: "OpenAI Sans", var(--font-sans-default);
   --font-mono-default: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Monaco,
@@ -744,7 +746,26 @@ body {
   transition-timing-function: cubic-bezier(.2, 0, 0, 1) !important;
 }
 .beta-composer:focus-within {
-  transform: translateY(-1px);
+  outline: 2px solid color-mix(in oklab, currentColor 14%, transparent);
+  outline-offset: 2px;
+}
+.composer-model-control { max-width: 340px; }
+.composer-toolbar > button,
+.composer-toolbar > div > button {
+  flex-shrink: 0;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+.composer-toolbar button:hover:not(:disabled) {
+  background-color: color-mix(in oklab, currentColor 6%, transparent);
+}
+.composer-toolbar button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+@media (max-width: 760px) {
+  :root { --conversation-gutter: 16px; }
+  .composer-toolbar { flex-wrap: wrap; }
+  .composer-model-control { max-width: min(280px, 100%); }
 }
 .dictation-recorder-action {
   transition-property: background-color, color, scale;
@@ -1388,7 +1409,7 @@ body {
 
 .markdown-heading { color: inherit; }
 .markdown-paragraph { margin: 0; }
-.markdown-inline-code { color: var(--syntax-string); background: color-mix(in oklab, var(--code-bg) 68%, transparent); border: 0.5px solid var(--code-border); border-radius: 6px; padding: 1px 5px; font-size: 0.95em; white-space: pre-wrap; overflow-wrap: anywhere; }
+.markdown-inline-code { color: inherit; background: color-mix(in oklab, var(--code-bg) 58%, transparent); border: 0.5px solid var(--code-border); border-radius: 6px; padding: 1px 5px; font-size: 0.88em; white-space: pre-wrap; overflow-wrap: anywhere; }
 .markdown-pre { margin: 0; overflow-x: auto; white-space: pre; }
 .markdown-pre .markdown-inline-code { padding: 0; border: 0; background: none; color: inherit; white-space: inherit; overflow-wrap: normal; }
 

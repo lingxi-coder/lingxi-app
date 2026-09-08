@@ -234,8 +234,8 @@ test('short messages render no disclosure affordance', () => {
 test('user messages use a neutral rounded Codex-style bubble', () => {
   const html = renderStage({ type: 'narration', id: 'i1', role: 'user', text: 'A user message.' });
   assert.match(html, /class="user-message-bubble"/);
-  assert.match(html, /padding:11px 16px/);
-  assert.match(html, /border-radius:22px/);
+  assert.match(html, /padding:10px 16px/);
+  assert.match(html, /border-radius:18px/);
   assert.match(html, /border:0/);
   assert.doesNotMatch(html, /accentBg/);
 });
@@ -301,7 +301,7 @@ test('tool rows use compact adjacency hooks and a Codex-like transcript type sca
   assert.match(narration, /font-size:14px/);
   assert.match(narration, /line-height:1\.65/);
 
-  assert.match(css, /--font-sans-default:\s*-apple-system-body,\s*ui-sans-serif/);
+  assert.match(css, /--font-sans-default:\s*-apple-system,\s*BlinkMacSystemFont/);
   assert.match(css, /--font-openai-sans:\s*"OpenAI Sans",\s*var\(--font-sans-default\)/);
 });
 
@@ -396,8 +396,8 @@ test('Stage omits transcript cost footer and left gutter markers', () => {
 
 test('Stage uses compact responsive message gutters', () => {
   const html = renderStage({ type: 'narration', id: 'n1', role: 'assistant', text: 'Compact gutter.' });
-  assert.match(html, /max-width:1040px/);
-  assert.match(html, /padding:24px clamp\(18px, 2\.2vw, 24px\) 12px/);
+  assert.match(html, /max-width:var\(--conversation-width, 860px\)/);
+  assert.match(html, /padding-inline:var\(--conversation-gutter, 24px\)/);
 });
 
 // ── Tool defaults and icon vocabulary ────────────────────────────────────────

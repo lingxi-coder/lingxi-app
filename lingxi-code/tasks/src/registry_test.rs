@@ -4029,6 +4029,153 @@ async fn unnamed_rested_agent_waits_for_live_non_agent_children_before_notifying
     assert_eq!(rest.usage.as_ref().map(|u| u.subagent_tokens), Some(7));
 }
 
+/// Seed a `local_agent` row with an explicit identity and parent.
+#[allow(clippy::too_many_arguments)]
+async fn seed_agent(
+    registry: &TaskRegistry,
+    id: &str,
+    agent_id: protocol::AgentId,
+    parent: Option<protocol::AgentId>,
+    status: TaskStatus,
+) {
+    use crate::state::{LocalAgentTaskState, TaskStateBase};
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            base: TaskStateBase {
+                id: id.into(),
+                task_type: TaskType::LocalAgent,
+                status,
+                description: id.into(),
+                tool_use_id: None,
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: parent,
+            },
+            agent_id,
+            subagent_type: String::new(),
+            prompt: String::new(),
+            error: None,
+            messages: vec![],
+            pending_messages: vec![],
+            is_backgrounded: true,
+            outcome: Default::default(),
+            forked_skill_name: None,
+        }))
+        .await;
+}
+
+/// claude-code's cascade block in `rY`: stopping a RESTING agent stops every
+/// live descendant with it, to any depth, and says nothing about them.
+#[tokio::test]
+async fn stopping_a_resting_parent_cascades_to_its_whole_subtree_silently() {
+    let (_d, registry) = make_registry();
+    let parent = protocol::AgentId::new();
+    let child = protocol::AgentId::new();
+    let grandchild = protocol::AgentId::new();
+    let stranger = protocol::AgentId::new();
+
+    seed_agent(&registry, "a-parent", parent, None, TaskStatus::Running).await;
+    seed_agent(&registry, "a-child", child, Some(parent), TaskStatus::Running).await;
+    // Depth 2 — the level a one-hop walk silently misses.
+    seed_agent(
+        &registry,
+        "a-grandchild",
+        grandchild,
+        Some(child),
+        TaskStatus::Running,
+    )
+    .await;
+    // Someone else's agent, same registry.
+    seed_agent(&registry, "a-stranger", stranger, None, TaskStatus::Running).await;
+
+    // Arm the parent's rest: `GS` needs BOTH a rest and a live child.
+    registry
+        .mark_task_rested(&"a-parent".to_string(), None, None, Some(parent), None, None)
+        .await;
+
+    registry
+        .kill_with_reason("a-parent", "parent")
+        .await
+        .unwrap();
+
+    for id in ["a-parent", "a-child", "a-grandchild"] {
+        assert_eq!(
+            registry.get(id).await.unwrap().base().status,
+            TaskStatus::Killed,
+            "{id} must be stopped",
+        );
+    }
+    assert_eq!(
+        registry.get("a-stranger").await.unwrap().base().status,
+        TaskStatus::Running,
+        "an unrelated agent must be left alone",
+    );
+
+    // The oracle stamps `notified` before each child kill, so a cascade is
+    // silent. Only the directly stopped task may surface.
+    let drained = registry.take_pending_task_notifications().await;
+    let ids: Vec<&str> = drained.iter().map(|n| n.task_id.as_str()).collect();
+    assert!(
+        !ids.contains(&"a-child") && !ids.contains(&"a-grandchild"),
+        "cascaded children must not narrate themselves, got: {ids:?}",
+    );
+}
+
+/// The other half of `GS`: an agent that is actively RUNNING — not resting —
+/// does not take its children with it. Cascading here would be stricter than
+/// the oracle.
+#[tokio::test]
+async fn stopping_an_actively_running_parent_does_not_cascade() {
+    let (_d, registry) = make_registry();
+    let parent = protocol::AgentId::new();
+    let child = protocol::AgentId::new();
+    seed_agent(&registry, "a-busy", parent, None, TaskStatus::Running).await;
+    seed_agent(&registry, "a-kid", child, Some(parent), TaskStatus::Running).await;
+
+    // No `mark_task_rested` — the parent never came to rest.
+    registry.kill_with_reason("a-busy", "parent").await.unwrap();
+
+    assert_eq!(
+        registry.get("a-busy").await.unwrap().base().status,
+        TaskStatus::Killed,
+    );
+    assert_eq!(
+        registry.get("a-kid").await.unwrap().base().status,
+        TaskStatus::Running,
+        "a busy parent's children survive it",
+    );
+}
+
+/// `hVe` carries a visited-set cycle guard. A parent chain that loops must not
+/// hang the stop path.
+#[tokio::test]
+async fn a_cyclic_parent_chain_terminates() {
+    let (_d, registry) = make_registry();
+    let a = protocol::AgentId::new();
+    let b = protocol::AgentId::new();
+    let target = protocol::AgentId::new();
+    seed_agent(&registry, "a-target", target, None, TaskStatus::Running).await;
+    seed_agent(&registry, "a-loop-a", a, Some(b), TaskStatus::Running).await;
+    seed_agent(&registry, "a-loop-b", b, Some(a), TaskStatus::Running).await;
+    registry
+        .mark_task_rested(&"a-target".to_string(), None, None, Some(target), None, None)
+        .await;
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        registry.kill_with_reason("a-target", "parent"),
+    )
+    .await
+    .expect("the cycle guard must stop the walk")
+    .unwrap();
+}
+
 #[tokio::test]
 async fn named_rested_agent_waits_for_live_background_children_before_notifying() {
     use crate::state::{LocalAgentTaskState, LocalBashTaskState, TaskState, TaskStateBase};

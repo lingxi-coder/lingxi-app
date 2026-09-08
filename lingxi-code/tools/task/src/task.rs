@@ -2051,7 +2051,19 @@ impl Tool for TaskStopTool {
                 started.elapsed().as_millis() as u64,
             )
             .await;
-            return Err(registry_err_to_tool_err("TaskStop", e));
+            // claude-code `rY`'s default arm: a task whose type has no stop
+            // handler reports the TYPE, not a generic registry failure. Kept
+            // local to TaskStop — `registry_err_to_tool_err` is shared with
+            // TaskCreate / TaskOutput / TeamSpawn and with the spawn path,
+            // where a `TaskStop:`-prefixed message would be wrong.
+            return Err(match &e {
+                platform_api::task_registry::TaskRegistryError::InvalidInput(reason)
+                    if reason == "unknown task type" =>
+                {
+                    ToolError::InvalidInput(format!("Unsupported task type: {task_type}"))
+                }
+                _ => registry_err_to_tool_err("TaskStop", e),
+            });
         }
         emit_completed(
             &bus,

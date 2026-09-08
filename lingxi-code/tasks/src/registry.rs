@@ -2255,7 +2255,115 @@ impl TaskRegistry {
                 agent.outcome.killed_by = Some(killed_by.to_string());
             }
         }
-        self.kill(task_id).await
+        // claude-code captures `ue = GS(I)` BEFORE the kill, because the kill
+        // clears the keepalive reasons the gate reads. Same here: resolve the
+        // cascade target while the task is still resting.
+        let cascade_from = self.resting_agent_holding_children(&canonical).await;
+        let result = self.kill(task_id).await;
+        if let Some(agent_id) = cascade_from {
+            self.cascade_stop_descendants(agent_id, killed_by).await;
+        }
+        result
+    }
+
+    /// claude-code `GS(e)` — `type==="local_agent" && status==="completed" &&
+    /// keepaliveReasons.size > 0`: an agent that already came to rest but is
+    /// held open by live background children. Returns its agent id.
+    ///
+    /// The port spells "came to rest" as an armed `pending_rest` entry rather
+    /// than a `completed` status (a resting agent stays `Running` here so it can
+    /// be resumed), and `keepaliveReasons` — whose members are `agent:<childId>`
+    /// entries for live children — as
+    /// [`Self::has_live_background_children_locked`]. The entry survives across
+    /// drains for exactly as long as the children do: the drain re-arms it
+    /// through `requeue_deferred_rest`, which is what makes it readable as a
+    /// gate here rather than a one-turn signal.
+    ///
+    /// Both halves are load-bearing. Cascading on live children ALONE would kill
+    /// the children of an agent that is still actively working, which the oracle
+    /// does not do; cascading on rest alone would fire for an agent with nothing
+    /// left to hold open.
+    async fn resting_agent_holding_children(&self, canonical: &str) -> Option<protocol::AgentId> {
+        // Lock order is tasks → pending_rest everywhere else in this file; keep
+        // it.
+        let map = self.tasks.read().await;
+        let TaskState::LocalAgent(agent) = map.get(canonical)? else {
+            return None;
+        };
+        if agent.base.status.is_terminal() {
+            return None;
+        }
+        let agent_id = agent.agent_id;
+        if !self.pending_rest.read().await.contains_key(canonical) {
+            return None;
+        }
+        Self::has_live_background_children_locked(&map, Some(agent_id), None, None)
+            .then_some(agent_id)
+    }
+
+    /// claude-code's cascade block (`rY` @3598005): every still-live
+    /// `local_agent` DESCENDANT of the stopped agent is stopped with it.
+    ///
+    /// Without this, stopping a resting parent leaves its children running with
+    /// nothing left to report to — the parent that would have collected them is
+    /// gone.
+    ///
+    /// Two things the oracle gets for free that this has to build:
+    ///
+    /// 1. **A parent index.** The oracle walks `r[p]` because a `local_agent`'s
+    ///    task id IS its agent id. Here they are independent (`generate_task_id`
+    ///    vs `LocalAgentTaskState::agent_id`), so the walk needs an explicit
+    ///    `agent_id → task_id` map or it silently stops after one level and
+    ///    grandchildren survive.
+    /// 2. **Silence.** `CI(Me.id,r)` stamps `notified` before each child kill,
+    ///    so the oracle emits nothing per cascaded child. This engine derives
+    ///    notifications from `terminal && !notified`, so without the same stamp
+    ///    a cascade would push one `Agent "…" was stopped by Claude` into the
+    ///    parent's session per descendant — the hazard already documented on
+    ///    [`Self::kill_background_shells_for_agent`].
+    ///
+    /// Children are stopped serially and their errors ignored, as the oracle
+    /// does: one dead child must not abort the rest of the cascade.
+    async fn cascade_stop_descendants(&self, stopped_agent_id: protocol::AgentId, killed_by: &str) {
+        let victims: Vec<String> = {
+            let map = self.tasks.read().await;
+            let by_agent: HashMap<protocol::AgentId, &TaskState> = map
+                .values()
+                .filter_map(|state| match state {
+                    TaskState::LocalAgent(agent) => Some((agent.agent_id, state)),
+                    _ => None,
+                })
+                .collect();
+            map.values()
+                .filter_map(|state| {
+                    let TaskState::LocalAgent(agent) = state else {
+                        return None;
+                    };
+                    if agent.agent_id == stopped_agent_id || agent.base.status.is_terminal() {
+                        return None;
+                    }
+                    // `hVe`: walk UP the parent chain, with the oracle's
+                    // visited-set cycle guard.
+                    let mut seen = std::collections::HashSet::new();
+                    let mut parent = agent.base.creator_agent_id;
+                    while let Some(pid) = parent {
+                        if pid == stopped_agent_id {
+                            return Some(agent.base.id.clone());
+                        }
+                        if !seen.insert(pid) {
+                            break;
+                        }
+                        parent = by_agent.get(&pid).and_then(|s| s.base().creator_agent_id);
+                    }
+                    None
+                })
+                .collect()
+        };
+        for id in victims {
+            // `CI` before the kill, exactly as the oracle orders it.
+            let _ = self.mark_notified(&id).await;
+            let _ = Box::pin(self.kill_with_reason(&id, killed_by)).await;
+        }
     }
 
     pub async fn take_pending_task_notifications(

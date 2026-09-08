@@ -1370,6 +1370,92 @@ body {
 .code-card .hljs-emphasis { font-style: italic; }
 .code-card .hljs-strong { font-weight: 700; }
 
+.markdown-content { color: var(--text); overflow-wrap: anywhere; }
+.markdown-content p,
+.markdown-content ul,
+.markdown-content ol,
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4,
+.markdown-content h5,
+.markdown-content h6,
+.markdown-content blockquote,
+.markdown-content table,
+.markdown-content pre,
+.markdown-content dl,
+.markdown-content details { min-width: 0; }
+
+.markdown-heading { color: inherit; }
+.markdown-paragraph { margin: 0; }
+.markdown-inline-code { color: var(--syntax-string); background: color-mix(in oklab, var(--code-bg) 68%, transparent); border: 0.5px solid var(--code-border); border-radius: 6px; padding: 1px 5px; font-size: 0.95em; white-space: pre-wrap; overflow-wrap: anywhere; }
+.markdown-pre { margin: 0; overflow-x: auto; white-space: pre; }
+.markdown-pre .markdown-inline-code { padding: 0; border: 0; background: none; color: inherit; white-space: inherit; overflow-wrap: normal; }
+
+.markdown-blockquote {
+  margin: 0;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--accent-border);
+  color: var(--text);
+  display: grid;
+  gap: 6px;
+}
+
+.markdown-ul,
+.markdown-ol {
+  margin: 0;
+  padding-left: 22px;
+  display: grid;
+  gap: 4px;
+}
+.markdown-li { padding-left: 3px; }
+
+.markdown-table-wrap { width: 100%; overflow-x: auto; }
+.markdown-table {
+  min-width: 420px;
+  border-collapse: collapse;
+  border-spacing: 0;
+  width: max-content;
+  max-width: 100%;
+  border: 1px solid var(--code-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.markdown-table th,
+.markdown-table td {
+  border-top: 1px solid var(--code-border);
+  border-left: 1px solid var(--code-border);
+  padding: 6px 8px;
+  min-width: 72px;
+  vertical-align: top;
+  white-space: pre-wrap;
+}
+.markdown-table th {
+  background: color-mix(in oklab, var(--surface) 64%, transparent);
+  font-weight: 620;
+}
+.markdown-table tr:nth-child(2n + 1) td {
+  background: color-mix(in oklab, var(--surface-hover) 34%, transparent);
+}
+.markdown-th,
+.markdown-td { text-align: left; }
+
+.markdown-link-disabled {
+  color: var(--text3);
+  opacity: 0.56;
+  text-decoration: line-through;
+  cursor: not-allowed;
+}
+.markdown-del { color: var(--text3); text-decoration: line-through; }
+.markdown-hr {
+  margin: 3px 0 5px;
+  border: 0;
+  border-top: 1px solid color-mix(in oklab, var(--text3) 32%, transparent);
+}
+
+.markdown-table .markdown-th,
+.markdown-table .markdown-td { word-break: break-word; }
+
 .sidebar-primary-action,
 .sidebar-header-action,
 .sidebar-tree-row > button:first-child,

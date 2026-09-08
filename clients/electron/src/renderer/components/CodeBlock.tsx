@@ -8,6 +8,8 @@ export const EXPLICIT_HIGHLIGHT_MAX_CHARS = 100_000;
 export const AUTO_HIGHLIGHT_MAX_CHARS = 20_000;
 
 const LANGUAGE_ALIASES: Readonly<Record<string, string>> = {
+  'c++': 'cpp',
+  'c#': 'csharp',
   cjs: 'javascript',
   cs: 'csharp',
   html: 'xml',
@@ -88,6 +90,8 @@ export function highlightCodeForDisplay(code: string, language: string | undefin
 }
 
 export interface CodeBlockProps {
+  id?: string;
+  codeId?: string;
   code: string;
   language?: string;
   closed?: boolean;
@@ -98,6 +102,8 @@ export interface CodeBlockProps {
 type CopyState = 'idle' | 'copied' | 'error';
 
 export const CodeBlock = memo(function CodeBlock({
+  id,
+  codeId,
   code,
   language,
   closed = true,
@@ -158,7 +164,7 @@ export const CodeBlock = memo(function CodeBlock({
   const copyLabel = copyState === 'copied' ? 'Copied' : copyState === 'error' ? 'Copy failed' : 'Copy';
 
   return (
-    <div className={`code-card code-card-${variant}`} style={variables}>
+    <div id={id} className={`code-card code-card-${variant}`} style={variables}>
       <div className="code-card-toolbar">
         <span className="code-card-language mono">{highlighted.label}</span>
         <button
@@ -181,11 +187,12 @@ export const CodeBlock = memo(function CodeBlock({
           {highlighted.html !== undefined ? (
             <code
               className="hljs"
+              id={codeId}
               data-language={highlighted.language}
               dangerouslySetInnerHTML={{ __html: highlighted.html }}
             />
           ) : (
-            <code data-language={highlighted.language}>{code}</code>
+            <code id={codeId} data-language={highlighted.language}>{code}</code>
           )}
         </pre>
       </div>

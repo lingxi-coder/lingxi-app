@@ -4637,4 +4637,60 @@ mod tests {
         }
     }
 
+
+    /// PARITY 2.1.263 `OG(e)` — the other half of the confined-session gate:
+    /// a confined eval run drops every `allow`-behavior rule regardless of tier,
+    /// so `permissions.allow` from a settings file cannot grant anything. Deny
+    /// and ask are kept: the flag narrows what may be GRANTED, it does not
+    /// disarm the policy.
+    #[test]
+    fn confined_session_drops_allow_rules_from_settings() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let settings = r#"{ "permissions": { "allow": ["Bash(ls:*)"], "deny": ["Bash(curl:*)"] } }"#;
+        let build = || {
+            let rules = crate::loader::permission_rules_from_settings_json(
+                settings,
+                PermissionRuleSource::ProjectSettings,
+            )
+            .unwrap();
+            PermissionPolicy::from_rules(PermissionMode::Default, rules).with_roots(roots())
+        };
+
+        // Baseline: unconfined, the allow rule grants.
+        std::env::remove_var("CLAUDE_CODE_EVAL_CONFINED");
+        assert!(
+            matches!(
+                build().authorize("Bash", &bash("ls")),
+                PermissionResult::Allow { .. }
+            ),
+            "unconfined, an allow rule must still grant"
+        );
+
+        // Confined: the same allow rule is gone…
+        std::env::set_var("CLAUDE_CODE_EVAL_CONFINED", "true");
+        let confined = build();
+        assert!(
+            !matches!(
+                confined.authorize("Bash", &bash("ls")),
+                PermissionResult::Allow {
+                    reason: PermissionDecisionReason::MatchedRule { .. },
+                    ..
+                }
+            ),
+            "a confined session must not take a grant from a settings allow rule"
+        );
+        // …while the DENY rule from the same file still binds.
+        assert!(
+            matches!(
+                confined.authorize("Bash", &bash("curl http://x")),
+                PermissionResult::Deny { .. }
+            ),
+            "a confined session must still honour deny rules"
+        );
+        std::env::remove_var("CLAUDE_CODE_EVAL_CONFINED");
+    }
+
 }

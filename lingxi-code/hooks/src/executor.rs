@@ -4539,5 +4539,5 @@ mod attachment_wiring_tests {
 /// the port keeps that exact spelling rather than the usual truthy allowlist.
 #[must_use]
 pub fn eval_confined_session() -> bool {
-    std::env::var("CLAUDE_CODE_EVAL_CONFINED").as_deref() == Ok("true")
+    platform_api::env::is_eval_confined_session()
 }

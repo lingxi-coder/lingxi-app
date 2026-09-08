@@ -7,6 +7,21 @@
 //! Task 1). Copies with deliberately different semantics stay local and
 //! documented.
 
+/// PARITY 2.1.263 `YYe()` — `process.env.CLAUDE_CODE_EVAL_CONFINED === true`.
+///
+/// A confined eval-harness run takes its permission grants ONLY from the
+/// command line: hook allows are dropped (`hooks` `H_n`) and the rule loader
+/// drops every `allow`-behavior rule (`permission` `OG`).
+///
+/// 🚨 The binary compares against the LITERAL `true`, so `1` / `yes` / `on` /
+/// `TRUE` do NOT arm it. That is deliberately unlike [`is_env_truthy`], which
+/// almost everything else in this codebase uses — do not "fix" it into the
+/// truthy allowlist, that would silently widen the gate.
+#[must_use]
+pub fn is_eval_confined_session() -> bool {
+    std::env::var("CLAUDE_CODE_EVAL_CONFINED").as_deref() == Ok("true")
+}
+
 /// `isEnvTruthy(envVar)` — see module docs.
 #[must_use]
 pub fn is_env_truthy(value: Option<&str>) -> bool {

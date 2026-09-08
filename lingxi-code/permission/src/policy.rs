@@ -527,7 +527,20 @@ impl PermissionPolicy {
         rules: impl IntoIterator<Item = PermissionRule>,
     ) -> Self {
         let mut policy = Self::new(PermissionMode::Default);
+        // PARITY 2.1.263 `OG(e)`:
+        // `let t = Bm(e); return YYe() ? t.filter(r => r.ruleBehavior !== "allow") : t`
+        //
+        // A confined eval run takes permission grants ONLY from its command
+        // line, so every `allow`-behavior rule is dropped no matter which
+        // settings tier produced it. Deny and ask rules are kept — the flag
+        // narrows what may be granted, it does not disarm the policy. The
+        // sibling half of this lives in `hooks` (`H_n`), which drops a hook's
+        // allow the same way.
+        let confined = platform_api::env::is_eval_confined_session();
         for rule in rules {
+            if confined && rule.behavior == PermissionBehavior::Allow {
+                continue;
+            }
             let bucket = match rule.behavior {
                 PermissionBehavior::Allow => &mut policy.allow_rules,
                 PermissionBehavior::Deny => &mut policy.deny_rules,

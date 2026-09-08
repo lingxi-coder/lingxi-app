@@ -61,7 +61,7 @@ pub use executor::{
 };
 pub use file_changed_firer::{FileChangedFire, FileChangedFirer, OptionalFileChangedFirer};
 pub use hook_payload::{
-    parse_response, HookBackgroundTask, HookEventEnvelope, HookEventNamePost,
+    parse_response, validation_hint, HookBackgroundTask, HookEventEnvelope, HookEventNamePost,
     HookEventNamePostModelSwitch, HookEventNamePre, HookEventNamePreModelSwitch,
     HookResponseParseError, HookSessionCron, PostModelSwitchPayload, PostToolUsePayload,
     PreModelSwitchPayload, PreToolUsePayload,

@@ -1651,6 +1651,56 @@ fn validate_permission_request_decision(
     }
     Ok(())
 }
+/// PARITY 2.1.263 `imr(output, zodError)` — the three HINTS appended to a hook
+/// JSON validation failure. They tell a hook author which field they reached for
+/// instead of the one the event actually accepts, and they are keyed on the RAW
+/// output shape (not on the validator's internal issue list), so they port
+/// cleanly even though this crate validates with serde rather than zod.
+///
+/// ```js
+/// if (isObj(hso) && !("hookEventName" in hso))
+///   p = 'hookSpecificOutput is missing required field "hookEventName"';
+/// else if (isObj(hso) && hso.hookEventName === "PermissionRequest" && !isObj(hso.decision) && …)
+///   p += ' (PermissionRequest decision must be …)';
+/// else if (isObj(e) && d?.path.length === 1 && d.path[0] === "decision" && …)
+///   p += ' (top-level decision is the legacy approve|block field; …)';
+/// ```
+///
+/// Returned separately from [`HookResponseParseError`] so callers can append it
+/// to whichever diagnostic they surface; `None` when no hint applies.
+#[must_use]
+pub fn validation_hint(raw: &serde_json::Value) -> Option<String> {
+    let obj = raw.as_object()?;
+    if let Some(hso) = obj.get("hookSpecificOutput").and_then(|v| v.as_object()) {
+        if !hso.contains_key("hookEventName") {
+            // NB: the binary REPLACES the message here rather than appending.
+            return Some(
+                "hookSpecificOutput is missing required field \"hookEventName\"".to_string(),
+            );
+        }
+        if hso.get("hookEventName").and_then(|v| v.as_str()) == Some("PermissionRequest")
+            && !hso.get("decision").is_some_and(serde_json::Value::is_object)
+        {
+            return Some(
+                " (PermissionRequest decision must be {\"behavior\": \"allow\"} or {\"behavior\": \"deny\", \"message\": \"...\"})"
+                    .to_string(),
+            );
+        }
+        return None;
+    }
+    // A hook that put `allow`/`deny`/`ask` in the LEGACY top-level `decision`.
+    match obj.get("decision").and_then(|v| v.as_str()) {
+        Some("ask") => Some(
+            " (top-level decision is the legacy approve|block field; for \"ask\" use hookSpecificOutput.permissionDecision in a PreToolUse hook)"
+                .to_string(),
+        ),
+        Some(other @ ("allow" | "deny")) => Some(format!(
+            " (top-level decision is the legacy approve|block field; for \"{other}\" use hookSpecificOutput.permissionDecision in a PreToolUse hook, or hookSpecificOutput.decision: {{\"behavior\": \"{other}\"}} in a PermissionRequest hook)"
+        )),
+        _ => None,
+    }
+}
+
 
 /// Parse a hook's JSON reply into a [`HookResponse`].
 ///

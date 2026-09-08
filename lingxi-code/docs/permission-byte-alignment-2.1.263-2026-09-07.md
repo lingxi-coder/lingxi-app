@@ -102,11 +102,21 @@ be checked against the read block". Nothing in the port mentions it.
   470 passed, 0 failed; disabling the branch turns exactly
   `confined_session_drops_a_hook_permission_allow` red.
 
-  🚨 Sibling NOT ported: `OG(e)` — the same flag also makes the rule loader drop
-  every `allow`-behavior rule (`YYe() ? rules.filter(r => r.ruleBehavior !== "allow") : rules`).
-  Without it a confined run still honours `permissions.allow` from settings,
-  which is exactly what "takes grants only from its command line" is meant to
-  prevent. This is the next thing to do in this area.
+  ✅ Sibling `OG(e)` landed too: `PermissionPolicy::from_rules` drops every
+  `allow`-behavior rule under the same flag, so `permissions.allow` from a
+  settings file grants nothing in a confined run while deny/ask still bind. The
+  gate itself moved to `platform_api::env::is_eval_confined_session` so the two
+  halves cannot drift apart.
+
+- ✅ **Hook-output validation hints** (`imr`) — landed 2026-09-08.
+  `hooks::validation_hint(raw)` returns the 2.1.263 authoring hints, keyed on the
+  RAW output shape rather than the validator's issue list, so they port cleanly
+  even though this crate validates with serde and not zod: `hookSpecificOutput`
+  without `hookEventName` (which REPLACES the message rather than appending), a
+  `PermissionRequest` whose `decision` is not an object, and the legacy
+  top-level `decision` holding `allow`/`deny`/`ask` — with `ask` getting its own
+  shorter variant. `approve`/`block` get no hint, being the correct use of that
+  field. All three verified present in the binary.
 
 - **PermissionRequest hook decision shape** (11) — `hookSpecificOutput.permissionDecision`
   vs the legacy top-level `approve|block`; the validation copy

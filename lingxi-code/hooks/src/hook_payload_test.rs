@@ -2363,4 +2363,56 @@ mod tests {
             "Hook JSON output validation failed — hookSpecificOutput.watchPaths: expected array, received string"
         );
     }
+
+    /// PARITY 2.1.263 `imr` — the three hook-authoring hints, byte-locked. Each
+    /// is verified present in the 2.1.263 binary.
+    #[test]
+    fn validation_hints_are_byte_locked() {
+        use crate::hook_payload::validation_hint;
+        let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+
+        // hookSpecificOutput without hookEventName — the binary REPLACES the
+        // message with this one rather than appending.
+        assert_eq!(
+            validation_hint(&j(r#"{"hookSpecificOutput":{"permissionDecision":"allow"}}"#)).as_deref(),
+            Some("hookSpecificOutput is missing required field \"hookEventName\"")
+        );
+
+        // PermissionRequest with a non-object `decision`.
+        assert_eq!(
+            validation_hint(&j(
+                r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":"allow"}}"#
+            ))
+            .as_deref(),
+            Some(" (PermissionRequest decision must be {\"behavior\": \"allow\"} or {\"behavior\": \"deny\", \"message\": \"...\"})")
+        );
+        // …and none when the decision IS an object.
+        assert_eq!(
+            validation_hint(&j(
+                r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
+            )),
+            None
+        );
+
+        // The legacy top-level `decision`, with the ask variant differing.
+        assert_eq!(
+            validation_hint(&j(r#"{"decision":"ask"}"#)).as_deref(),
+            Some(" (top-level decision is the legacy approve|block field; for \"ask\" use hookSpecificOutput.permissionDecision in a PreToolUse hook)")
+        );
+        for behavior in ["allow", "deny"] {
+            assert_eq!(
+                validation_hint(&j(&format!(r#"{{"decision":"{behavior}"}}"#))).as_deref(),
+                Some(format!(
+                    " (top-level decision is the legacy approve|block field; for \"{behavior}\" use hookSpecificOutput.permissionDecision in a PreToolUse hook, or hookSpecificOutput.decision: {{\"behavior\": \"{behavior}\"}} in a PermissionRequest hook)"
+                ).as_str())
+            );
+        }
+        // The legacy approve/block spellings are the CORRECT use of that field,
+        // so they get no hint.
+        assert_eq!(validation_hint(&j(r#"{"decision":"approve"}"#)), None);
+        assert_eq!(validation_hint(&j(r#"{"decision":"block"}"#)), None);
+        assert_eq!(validation_hint(&j(r#"{}"#)), None);
+        assert_eq!(validation_hint(&j(r#"[]"#)), None);
+    }
+
 }

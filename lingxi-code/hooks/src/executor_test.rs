@@ -647,6 +647,74 @@ mod command_arm_tests {
         assert_eq!(agg.decision, Some(HookDecision::Approve));
     }
 
+    /// PARITY 2.1.263 `H_n` — under `CLAUDE_CODE_EVAL_CONFINED=true` a hook's
+    /// ALLOW is dropped before it reaches the aggregate: a confined eval run
+    /// takes permission grants only from its command line. Block and ask are
+    /// untouched, which is the point of running hooks in a confined harness at
+    /// all.
+    #[tokio::test]
+    async fn confined_session_drops_a_hook_permission_allow() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let allow_json = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#;
+
+        // Baseline: unconfined, the allow lands.
+        std::env::remove_var("CLAUDE_CODE_EVAL_CONFINED");
+        let exec = executor_with(MockRunner::ok(output(allow_json, "", 0)));
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(
+            agg.decision,
+            Some(HookDecision::Approve),
+            "unconfined, a hook allow must still approve"
+        );
+
+        // Confined: the same output yields no decision at all.
+        std::env::set_var("CLAUDE_CODE_EVAL_CONFINED", "true");
+        let exec = executor_with(MockRunner::ok(output(allow_json, "", 0)));
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(
+            agg.decision, None,
+            "a confined session must not take an allow from a hook"
+        );
+
+        // …but a BLOCK still binds.
+        let exec = executor_with(MockRunner::ok(output(
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"nope"}}"#,
+            "",
+            0,
+        )));
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(
+            agg.decision,
+            Some(HookDecision::Block),
+            "a confined session must still honour a hook block"
+        );
+        std::env::remove_var("CLAUDE_CODE_EVAL_CONFINED");
+    }
+
+    /// The binary compares against the literal `true`; the usual truthy
+    /// spellings do NOT arm it.
+    #[test]
+    fn eval_confined_matches_only_the_literal_true() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CLAUDE_CODE_EVAL_CONFINED");
+        assert!(!crate::executor::eval_confined_session());
+        for spelling in ["1", "yes", "on", "TRUE", ""] {
+            std::env::set_var("CLAUDE_CODE_EVAL_CONFINED", spelling);
+            assert!(
+                !crate::executor::eval_confined_session(),
+                "{spelling:?} must not arm the confined gate"
+            );
+        }
+        std::env::set_var("CLAUDE_CODE_EVAL_CONFINED", "true");
+        assert!(crate::executor::eval_confined_session());
+        std::env::remove_var("CLAUDE_CODE_EVAL_CONFINED");
+    }
+
     #[tokio::test]
     async fn permission_request_json_allow_carries_rewrite_and_raw_updates() {
         let runner = MockRunner::ok(output(

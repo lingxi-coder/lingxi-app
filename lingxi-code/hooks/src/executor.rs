@@ -1980,6 +1980,42 @@ impl HookExecutorImpl {
                 ..HookResponse::default()
             });
         }
+        // PARITY 2.1.263 `H_n(response, label)` — a CONFINED eval session takes
+        // permission grants only from its command line, so a hook's ALLOW is
+        // dropped before it can reach the aggregate:
+        //
+        // ```js
+        // function H_n(e,t){
+        //   if(!YYe()) return e;                       // CLAUDE_CODE_EVAL_CONFINED
+        //   if(e.permissionBehavior==="allow"){ n(`${t} permissionDecision=allow ignored: …`); e.permissionBehavior=void 0 }
+        //   if(e.permissionRequestResult?.behavior==="allow"){ n(`${t} PermissionRequest allow ignored: …`); e.permissionRequestResult=void 0 }
+        //   return e }
+        // ```
+        //
+        // Only the ALLOW channels are suppressed — a hook may still block or
+        // ask, which is the whole point of a confined harness run.
+        if eval_confined_session() {
+            if let Some(resp) = &mut r.response {
+                let label = hook_event;
+                if resp.decision == Some(HookDecision::Approve) {
+                    tracing::info!(
+                        target: "hooks",
+                        "{label} permissionDecision=allow ignored: a confined session takes grants only from its command line"
+                    );
+                    resp.decision = None;
+                }
+                if matches!(
+                    resp.permission_request_result,
+                    Some(crate::response::PermissionRequestResult::Allow { .. })
+                ) {
+                    tracing::info!(
+                        target: "hooks",
+                        "{label} PermissionRequest allow ignored: a confined session takes grants only from its command line"
+                    );
+                    resp.permission_request_result = None;
+                }
+            }
+        }
         if let Some(resp) = &r.response {
             // #45(b): claude-code's `cH` runner dispatches EVERY matched hook
             // (`c.map(async …)` + await-all, BIN off 205755512 — no break) then
@@ -4490,4 +4526,18 @@ mod attachment_wiring_tests {
             "lowercase hex uuid: {tuid}"
         );
     }
+}
+
+/// PARITY 2.1.263 `YYe()` — `process.env.CLAUDE_CODE_EVAL_CONFINED === true`.
+///
+/// A confined eval-harness run takes its permission grants ONLY from the
+/// command line: hook allows are dropped ([`run_hooks`]'s `H_n` fold) and the
+/// rule loader drops every `allow`-behavior rule (`OG(e)` — NOT yet ported; see
+/// `docs/permission-byte-alignment-2.1.263-2026-09-07.md`).
+///
+/// The binary compares against the literal `true`, so `1`/`yes` do NOT arm it;
+/// the port keeps that exact spelling rather than the usual truthy allowlist.
+#[must_use]
+pub fn eval_confined_session() -> bool {
+    std::env::var("CLAUDE_CODE_EVAL_CONFINED").as_deref() == Ok("true")
 }

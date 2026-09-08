@@ -92,6 +92,22 @@ parser cannot analyse under the read block, and another for a path that "cannot
 be checked against the read block". Nothing in the port mentions it.
 
 ### P1
+- ✅ **Confined-session hook-allow suppression** (`H_n`) — landed 2026-09-08.
+  Under `CLAUDE_CODE_EVAL_CONFINED=true` a hook's ALLOW is dropped before it
+  reaches the aggregate (both `permissionDecision: "allow"` → the port's
+  `HookDecision::Approve`, and a `PermissionRequest` `{behavior:"allow"}`);
+  block and ask are untouched. `YYe()` compares against the LITERAL `"true"`, so
+  `1`/`yes`/`on`/`TRUE` do not arm it — the port keeps that spelling instead of
+  the usual truthy allowlist, and a test pins each rejected spelling. `hooks`:
+  470 passed, 0 failed; disabling the branch turns exactly
+  `confined_session_drops_a_hook_permission_allow` red.
+
+  🚨 Sibling NOT ported: `OG(e)` — the same flag also makes the rule loader drop
+  every `allow`-behavior rule (`YYe() ? rules.filter(r => r.ruleBehavior !== "allow") : rules`).
+  Without it a confined run still honours `permissions.allow` from settings,
+  which is exactly what "takes grants only from its command line" is meant to
+  prevent. This is the next thing to do in this area.
+
 - **PermissionRequest hook decision shape** (11) — `hookSpecificOutput.permissionDecision`
   vs the legacy top-level `approve|block`; the validation copy
   `(PermissionRequest decision must be {"behavior": "allow"} or {"behavior":

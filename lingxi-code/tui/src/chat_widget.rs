@@ -949,6 +949,25 @@ impl ChatWidget {
         {
             return self.on_pane_outcome(BottomPaneOutcome::Interrupt);
         }
+        // Ctrl+B — claude-code's `task:background` chord (`mie`): move every
+        // backgroundable task to the background (`zM`).
+        //
+        // Two gates, both the oracle's. `Dl()` (background tasks disabled) skips
+        // the chord entirely, and `H_t()` — is anything backgroundable at all —
+        // decides whether the chord is consumed. With nothing to background it
+        // falls through to ordinary input rather than swallowing a keystroke.
+        // The oracle shows no text here; its `rko` only flips the persisted
+        // `hasUsedBackgroundTask` flag that governs the hint's visibility
+        // elsewhere, so nothing is printed.
+        if !self.bottom_pane.has_active_view()
+            && key.kind == crossterm::event::KeyEventKind::Press
+            && key.modifiers == crossterm::event::KeyModifiers::CONTROL
+            && matches!(key.code, crossterm::event::KeyCode::Char('b' | 'B'))
+            && !platform_api::env::background_tasks_disabled()
+            && self.background_all_tasks()
+        {
+            return ChatOutcome::Continue;
+        }
         // Ctrl+V / Alt+V: paste an IMAGE from the system clipboard (codex
         // `chatwidget/interaction.rs`). Bracketed paste only carries text —
         // a copied screenshot never arrives as `Event::Paste`, so it needs an
@@ -3448,6 +3467,29 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
+    /// claude-code `H_t` then `zM`: move everything backgroundable to the
+    /// background, and report whether the chord did anything.
+    ///
+    /// `false` (nothing to background, or no engine handle) leaves the key
+    /// unconsumed.
+    fn background_all_tasks(&self) -> bool {
+        let Some(registry) = self.task_registry.clone() else {
+            return false;
+        };
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return false;
+        };
+        runtime.block_on(async move {
+            if !registry.has_backgroundable_tasks().await {
+                return false;
+            }
+            registry.background_all_tasks().await > 0
+        })
+    }
+
     /// A live snapshot of the background-task registry, or the system-line text
     /// for a missing handle / un-buildable runtime. Shared by [`Self::cmd_tasks`]
     /// and [`Self::open_agents_view`].
@@ -5802,6 +5844,138 @@ mod tests {
 
     fn ctrl(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    /// A registry whose only interesting behaviour is whether anything is
+    /// backgroundable, so the Ctrl+B chord can be tested on both sides of
+    /// claude-code's `H_t` gate.
+    struct BackgroundStubRegistry {
+        backgroundable: bool,
+        background_all_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::task_registry::TaskRegistryHandle for BackgroundStubRegistry {
+        async fn create(
+            &self,
+            _i: platform_api::task_registry::TaskCreateInput,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn get(
+            &self,
+            _id: &str,
+        ) -> Result<
+            Option<platform_api::task_registry::TaskRecord>,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn list(
+            &self,
+            _f: platform_api::task_registry::TaskListFilter,
+        ) -> Result<
+            Vec<platform_api::task_registry::TaskRecord>,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            Ok(Vec::new())
+        }
+        async fn update(
+            &self,
+            _id: &str,
+            _p: platform_api::task_registry::TaskUpdatePatch,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn set_status(
+            &self,
+            _id: &str,
+            _s: &str,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn kill(
+            &self,
+            _id: &str,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn output(
+            &self,
+            _id: &str,
+            _offset: Option<u64>,
+        ) -> Result<
+            platform_api::task_registry::TaskOutputChunk,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn has_backgroundable_tasks(&self) -> bool {
+            self.backgroundable
+        }
+        async fn background_all_tasks(&self) -> usize {
+            self.background_all_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            usize::from(self.backgroundable)
+        }
+    }
+
+    /// claude-code `mie`: Ctrl+B runs `zM` only when `H_t` says there is
+    /// something to background; otherwise the chord is NOT consumed, so it
+    /// still reaches the composer.
+    #[test]
+    fn ctrl_b_backgrounds_running_work_and_is_otherwise_not_consumed() {
+        for backgroundable in [true, false] {
+            let registry = std::sync::Arc::new(BackgroundStubRegistry {
+                backgroundable,
+                background_all_calls: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let mut w = widget();
+            w.set_task_registry(registry.clone());
+            let outcome = w.handle_key(ctrl(KeyCode::Char('b')));
+
+            if backgroundable {
+                assert!(
+                    matches!(outcome, ChatOutcome::Continue),
+                    "the chord must be consumed when work moved",
+                );
+                assert_eq!(
+                    registry
+                        .background_all_calls
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    1,
+                    "and it must actually run `zM`",
+                );
+            } else {
+                assert_eq!(
+                    registry
+                        .background_all_calls
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    0,
+                    "`H_t` gates the call: nothing running means nothing to do",
+                );
+            }
+        }
+    }
+
+    /// With no engine handle the chord must not be swallowed either.
+    #[test]
+    fn ctrl_b_without_a_registry_falls_through() {
+        let mut w = widget();
+        assert!(!w.background_all_tasks());
+        let _ = w.handle_key(ctrl(KeyCode::Char('b')));
     }
 
     fn widget() -> ChatWidget {
@@ -8410,8 +8584,8 @@ mod tests {
     /// included — and `true` only for an in-process teammate. A test that
     /// hand-sets `worker: Some(..)` here would pin a shape no Fusion panel
     /// ever produces.
-    fn background_owned_tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>)
-    {
+    fn background_owned_tool_exchange(
+    ) -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
         let (resp_tx, resp_rx) = oneshot::channel();
         let request = PermissionRequest::ToolUseConfirm {
             tool_name: "WebFetch".to_string(),
@@ -9397,7 +9571,10 @@ mod tests {
         widget.open_permission(unowned);
         assert!(widget.has_open_permission(), "background ask must open");
         widget.handle_key(press(KeyCode::Esc));
-        assert_eq!(unowned_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
+        assert_eq!(
+            unowned_rx.blocking_recv().unwrap(),
+            PermissionResponse::Deny
+        );
         assert!(cells(&widget).is_empty());
 
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -9494,7 +9671,10 @@ mod tests {
 
         let (late, late_rx) = tool_exchange();
         widget.open_permission(late);
-        assert!(!widget.has_open_permission(), "mid-cancel ask must not open");
+        assert!(
+            !widget.has_open_permission(),
+            "mid-cancel ask must not open"
+        );
         assert!(late_rx.blocking_recv().is_err());
     }
 

@@ -67,7 +67,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 |---|---|---|---|---|
 | `bg-03` | confirmed | P1 | medium | backgroundEndsWithFinalResponse promises termination at the sync subagent's final response, but nothing reaps the shell |
 | `bg-04` | confirmed | P1 | high | No foreground arming (U6t after 2 s) ⇒ Ctrl+B, end-of-turn background-all, turn-abort and deliver-message backgrounding are all absent; ctrl+b keybinding is declared but inert |
-| `bg-05` | confirmed | P1 | medium | Timeout→background is unconditional in the port; oracle gates it on background-tasks-enabled, first-segment ≠ `sleep`, and CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS |
+| `bg-05` | confirmed **[fixed]** | P1 | medium | Timeout→background is unconditional in the port; oracle gates it on background-tasks-enabled, first-segment ≠ `sleep`, and CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS |
 | `bg-06` | confirmed | P2 | medium | Explicit-background spawn runs in the workspace root instead of the persistent shell cwd |
 | `bg-07` | confirmed | P2 | medium | Result data carries 2.1.191-era `outputTaskId/outputFilePath/outputFileSize`; 2.1.263 has `persistedOutputPath/persistedOutputSize` (+ `backgroundCwdHint`) and rewrites stdout via Vpe |
 | `bg-09` | confirmed | P2 | medium | Stall watchdog (`Her`: 45 s no-growth + interactive-prompt regex → task-notification) and memory-pressure reap (`jer`) are not ported |
@@ -121,7 +121,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
-| `TID-08` | confirmed **[partly closed: tool_use_id, cwd and is_backgrounded now land on the record; the spawn-input variant still lacks them]** | P1 | medium | local_bash record shape: TaskSpawnInput::LocalBash carries no tool_use_id (never stamped) and LocalBashTaskState lacks isBackgrounded/isAdopted/agentId/kind/caller/cwd |
+| `TID-08` | confirmed **[substantially fixed: tool_use_id, cwd, is_backgrounded and the launching agent now land on the record. The spawn-input variant and the fields for unported features (adopted shells, incremental reads) remain]** | P1 | medium | local_bash record shape: TaskSpawnInput::LocalBash carries no tool_use_id (never stamped) and LocalBashTaskState lacks isBackgrounded/isAdopted/agentId/kind/caller/cwd |
 | `TID-04` | confirmed | P2 | medium | Notified terminal tasks are never evicted from the registry (oracle evicts them on the next attachment pass via Kan/Dlo, and exposes remove/evictTerminal) |
 | `TID-05` | confirmed | P2 | medium | `end_time` is only written on the mcp_task settle path and `total_paused_ms` is never written — every other terminal transition leaves them at None/0 although the oracle stamps `endTime:Date.now()` on each and diffs both in the update patch |
 | `TID-06` | confirmed | P2 | medium | Registry register/update do not emit the SDK `task_started` / `task_updated` system messages (oracle Mlo/Rlo via the same queue `pi` uses for task_notification) |
@@ -152,7 +152,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
-| `AGT-01` | confirmed | P1 | medium | local_agent task id and agent id are two id spaces; the notification's <task-id> is not a SendMessage address |
+| `AGT-01` | confirmed **[partly fixed: SendMessage now resolves the same aliases as stop/output. The notification still emits the task id, not an address; equating the two ids is wrong (five tests pin the correlation) so the remaining half is a mailbox alias]** | P1 | medium | local_agent task id and agent id are two id spaces; the notification's <task-id> is not a SendMessage address |
 | `AGT-05` | confirmed | P1 | high | Child-agent completion notifications are not routed to the owning agent (lLe/ownerAgentId); every completion drains at the main session |
 | `AGT-02` | confirmed | P2 | medium | TaskStop has no name/agent-id resolution: no ambiguity error, no 'Did you mean', no running-teammates / named-agents / background-agents suffixes, no observer/owner guards, no resting-agent allowance |
 | `AGT-03` | confirmed | P2 | medium | Stopping a parent agent does not cascade to its child agents (no linked abort, no resting-parent cascade, no cascadeSpared) |
@@ -199,7 +199,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
-| `SLT-03` | confirmed | P1 | medium | Timeout auto-background is unconditional; oracle gates it on Dl(), `background:"forbidden"`, `$es` (sleep-led commands) and ignores explicit run_in_background when disabled |
+| `SLT-03` | confirmed **[fixed with bg-05]** | P1 | medium | Timeout auto-background is unconditional; oracle gates it on Dl(), `background:"forbidden"`, `$es` (sleep-led commands) and ignores explicit run_in_background when disabled |
 | `SLT-02` | confirmed | P2 | medium | No Ctrl+B / background-all (zM), no 2s foreground-record arming (cnr/U6t), no background_hint progress |
 | `SLT-05` | confirmed | P2 | medium | Session exit ignores running background work (no 'Background work is running' interstitial, no print wind-down/teardown, no exit handoff) |
 | `SLT-06` | confirmed | P2 | medium | Background-shell stall watchdog (Her) and memory-pressure reaper (jer) absent |

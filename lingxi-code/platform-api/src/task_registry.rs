@@ -791,6 +791,18 @@ pub trait TaskRegistryHandle: Send + Sync {
         Ok(())
     }
 
+    /// Kill the background shells a finishing agent started, returning how many
+    /// were still running.
+    ///
+    /// The Bash tool tells a synchronous subagent that a backgrounded command
+    /// "is terminated when you give your final response"; this is what makes
+    /// that true (claude-code sweeps them in its agent-run cleanup). Defaults to
+    /// a no-op so a host without a registry behaves as before.
+    async fn kill_background_shells_for_agent(&self, agent_id: protocol::AgentId) -> usize {
+        let _ = agent_id;
+        0
+    }
+
     /// Settle a background shell task once its child has been reaped.
     ///
     /// `killed` wins over the exit code; otherwise exit code `0` completes the

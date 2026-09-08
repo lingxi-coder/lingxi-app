@@ -749,6 +749,36 @@ impl TaskRegistry {
         Ok(())
     }
 
+    /// Kill the background shells a finishing agent started, and report how
+    /// many were still running.
+    ///
+    /// claude-code sweeps these in its agent-run cleanup (`nHn`), which is what
+    /// makes the Bash tool's promise true: a synchronous subagent is told its
+    /// backgrounded command "is terminated when you give your final response".
+    /// Only shells owned by THIS agent are touched, so the main session's and
+    /// other agents' commands are untouched.
+    pub async fn kill_background_shells_for_agent(&self, agent_id: protocol::AgentId) -> usize {
+        let owned: Vec<String> = {
+            let map = self.tasks.read().await;
+            map.values()
+                .filter_map(|state| {
+                    let base = state.base();
+                    let owned_shell = matches!(state, TaskState::LocalBash(_))
+                        && base.creator_agent_id == Some(agent_id)
+                        && !base.status.is_terminal();
+                    owned_shell.then(|| base.id.clone())
+                })
+                .collect()
+        };
+        let mut killed = 0;
+        for id in owned {
+            if self.kill(&id).await.is_ok() {
+                killed += 1;
+            }
+        }
+        killed
+    }
+
     /// Settle a background shell task once its child has been reaped.
     ///
     /// Terminal status follows claude-code `Fpt`: an interrupted/killed child is

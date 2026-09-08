@@ -705,6 +705,10 @@ impl TaskRegistryHandle for TaskRegistry {
             .map_err(task_err_to_registry_err)
     }
 
+    async fn kill_background_shells_for_agent(&self, agent_id: protocol::AgentId) -> usize {
+        TaskRegistry::kill_background_shells_for_agent(self, agent_id).await
+    }
+
     async fn settle_background_bash(
         &self,
         id: &str,

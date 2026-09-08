@@ -374,6 +374,54 @@ async fn an_agents_background_shell_defers_that_agents_rest_notification() {
 }
 
 #[tokio::test]
+async fn a_finishing_agent_stops_only_its_own_background_shells() {
+    // The Bash tool promises a synchronous subagent that a command it
+    // backgrounds is terminated when the agent gives its final response.
+    // claude-code sweeps exactly the finishing agent's own shells; a sweep that
+    // took everything would kill the main session's commands every time any
+    // subagent finished.
+    let (_dir, registry) = make_registry();
+    let mine = protocol::AgentId::new();
+    let theirs = protocol::AgentId::new();
+
+    let mut ids = Vec::new();
+    for (label, owner) in [
+        ("mine", Some(mine)),
+        ("theirs", Some(theirs)),
+        ("main-session", None),
+    ] {
+        let (id, _) = registry.allocate_bash_output().await.unwrap();
+        registry
+            .register_background_bash(
+                id.clone(),
+                format!("sleep 60 # {label}"),
+                label.into(),
+                None,
+                None,
+                owner,
+            )
+            .await
+            .unwrap();
+        ids.push((label, id));
+    }
+
+    let killed = registry.kill_background_shells_for_agent(mine).await;
+    assert_eq!(killed, 1, "exactly the finishing agent's own shell");
+
+    for (label, id) in &ids {
+        let status = registry.get(id).await.unwrap().base().status;
+        if *label == "mine" {
+            assert_eq!(status, TaskStatus::Killed, "{label} must be stopped");
+        } else {
+            assert_eq!(status, TaskStatus::Running, "{label} must be left alone");
+        }
+    }
+
+    // A second sweep finds nothing left to kill.
+    assert_eq!(registry.kill_background_shells_for_agent(mine).await, 0);
+}
+
+#[tokio::test]
 async fn stopping_a_background_bash_closes_its_output_file_with_the_killed_trailer() {
     // claude-code's TaskStop path (`JF`) appends `\n[killed]\n` to the shell's
     // output file before it notifies, so a later Read of the file shows how the

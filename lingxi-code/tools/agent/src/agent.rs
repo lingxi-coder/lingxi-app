@@ -1159,6 +1159,15 @@ fn main_loop_model_parent(ctx: &ToolUseContext) -> Option<String> {
     }
 }
 
+/// The child's agent id, whatever way its run ended.
+fn subagent_result_agent_id(result: &platform_api::SubagentResult) -> protocol::AgentId {
+    match result {
+        platform_api::SubagentResult::Completed { agent_id, .. }
+        | platform_api::SubagentResult::Failed { agent_id, .. }
+        | platform_api::SubagentResult::Killed { agent_id, .. } => *agent_id,
+    }
+}
+
 impl AgentTool {
     fn release_spawn_reservation(&self) {
         if let Some(registry) = &self.ctx.task_registry {
@@ -3943,6 +3952,26 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // `prog_tx` is now dropped → the forwarder drains and exits.
         let _ = forwarder.await;
         let duration_ms = started.elapsed().as_millis() as u64;
+
+        // The Bash tool tells a synchronous subagent that a command it
+        // backgrounds "is terminated when you give your final response". This
+        // is where that becomes true: claude-code sweeps the finishing agent's
+        // own shells in its agent-run cleanup (`nHn`), for any outcome. Only
+        // shells this agent started are killed, so the main session's and other
+        // agents' background work is untouched.
+        if let Some(agent_id) = outcome.as_ref().ok().map(subagent_result_agent_id) {
+            if let Some(registry) = self.ctx.task_registry.as_ref() {
+                let killed = registry.kill_background_shells_for_agent(agent_id).await;
+                if killed > 0 {
+                    tracing::debug!(
+                        target: "tool_agent",
+                        %agent_id,
+                        killed,
+                        "stopped the finishing subagent's background shells"
+                    );
+                }
+            }
+        }
 
         // Worktree lifecycle (claude `fe()` / `getWorktreeResult`): once the
         // agent finished, KEEP the worktree (return its path + branch) if it

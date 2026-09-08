@@ -453,6 +453,7 @@ pub struct BridgeConnection {
     /// abort it so stale turn work cannot survive into the next reconnect and
     /// emit onto a newly-claimed outbound sink.
     active_turn_task: Arc<StdMutex<Option<tokio::task::AbortHandle>>>,
+    queue_wakeup_task: Option<tokio::task::AbortHandle>,
 }
 
 #[derive(Clone, Default)]
@@ -738,6 +739,16 @@ fn tag_loop_tick_in_flight(loop_runtime: &tool_cron::LoopRuntime, is_cron: bool,
     }
 }
 
+impl Drop for BridgeConnection {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.queue_wakeup_task {
+            handle.abort();
+        }
+        self.abort_active_turn_task();
+        self.active_turn.clear();
+    }
+}
+
 impl BridgeConnection {
     /// Create an UNBOUND connection: the outbound sink cell and the tool-name map
     /// exist, but no gate / driver is attached yet. Call
@@ -772,7 +783,63 @@ impl BridgeConnection {
             turn_running: Arc::new(AtomicBool::new(false)),
             active_turn: ActiveTurnControl::default(),
             active_turn_task: Arc::new(StdMutex::new(None)),
+            queue_wakeup_task: None,
         }
+    }
+
+    /// Wake an idle main loop when teammates enqueue a noninterrupting prompt.
+    pub fn with_queue_wakeup(mut self) -> Self {
+        let Some(driver) = self.driver.clone() else {
+            return self;
+        };
+        let queue = self.queue.clone();
+        let running = self.turn_running.clone();
+        let handshaken = self.handshaken.clone();
+        let active_turn = self.active_turn.clone();
+        let active_task = self.active_turn_task.clone();
+        let loop_runtime = self.loop_runtime.clone();
+        let interactions = TurnInteractions {
+            gate: self.gate.clone(),
+            computer_access_broker: self.computer_access_broker.clone(),
+            ask_user_question_broker: self.ask_user_question_broker.clone(),
+            tool_names: self.tool_names.clone(),
+        };
+        let watcher = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if !handshaken.load(Ordering::SeqCst)
+                    || !queue.has_main_thread_commands().await
+                    || running
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_err()
+                {
+                    continue;
+                }
+                let mut task_slot = active_task
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                if !handshaken.load(Ordering::SeqCst) {
+                    running.store(false, Ordering::SeqCst);
+                    continue;
+                }
+                let (driver, queue, running, active_turn, loop_runtime, interactions) = (
+                    driver.clone(),
+                    queue.clone(),
+                    running.clone(),
+                    active_turn.clone(),
+                    loop_runtime.clone(),
+                    interactions.clone(),
+                );
+                let task = tokio::spawn(async move {
+                    drain_main_thread(&driver, &queue, &loop_runtime, &active_turn, &interactions)
+                        .await;
+                    running.store(false, Ordering::SeqCst);
+                });
+                *task_slot = Some(task.abort_handle());
+            }
+        });
+        self.queue_wakeup_task = Some(watcher.abort_handle());
+        self
     }
 
     /// The connection-scoped [`ClientEventSink`] to bind into the orchestrator's
@@ -1660,6 +1727,43 @@ mod tests {
     #[async_trait]
     impl PermissionRequestSink for NoopPermissionSink {
         async fn emit_request(&self, _request: PermissionRequest) {}
+    }
+
+    #[tokio::test]
+    async fn queued_teammate_message_wakes_idle_driver_without_interrupting_busy_turn() {
+        let captured = Arc::new(Mutex::new(None));
+        let notify = Arc::new(Notify::new());
+        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
+            captured: captured.clone(),
+            notify: notify.clone(),
+        });
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let connection = BridgeConnection::new()
+            .bind(gate, driver)
+            .with_queue_wakeup();
+        connection.handshaken.store(true, Ordering::SeqCst);
+        connection.turn_running.store(true, Ordering::SeqCst);
+        let active = CancellationToken::new();
+        connection.queue.register_active_turn(active.clone()).await;
+        let mut command = super::prompt_command(
+            "<teammate-message teammate_id=\"researcher\">\nDone\n</teammate-message>".into(),
+        );
+        command.source = msgqueue::QueueSource::AgentSendMessage;
+        command.skip_slash_commands = true;
+        command.is_meta = true;
+        connection.queue.enqueue(command).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(!active.is_cancelled());
+        assert!(captured.lock().await.is_none());
+        connection.turn_running.store(false, Ordering::SeqCst);
+        tokio::time::timeout(std::time::Duration::from_secs(2), notify.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            captured.lock().await.as_ref().unwrap().0,
+            "<teammate-message teammate_id=\"researcher\">\nDone\n</teammate-message>"
+        );
+        assert!(connection.queue.is_empty().await);
     }
 
     /// A `SendPrompt` carrying inline images must dispatch through

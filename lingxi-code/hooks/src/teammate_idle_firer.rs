@@ -41,6 +41,10 @@ use async_trait::async_trait;
 /// claude-code's `getTeamName() ?? ''` fallback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TeammateIdleFire {
+    /// Trusted session owning the teammate, shared with its transcript.
+    pub session_id: protocol::SessionId,
+    /// Effective live permission mode when the teammate becomes idle.
+    pub permission_mode: String,
     /// Name of the teammate going idle (wire `teammate_name`, required).
     pub teammate_name: String,
     /// Team the teammate belongs to (wire `team_name`, required; `""` when the

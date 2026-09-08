@@ -420,6 +420,23 @@ pub fn tool_header(tool: &str, input: &Value) -> ToolHeader {
     header
 }
 
+/// Derive a resolved call's header, preserving ordinary named subagents.
+/// Claude Code 2.1.263 A$n uses the input name as an @-label only when the
+/// corresponding result confirms a persistent teammate was spawned.
+#[must_use]
+pub fn tool_header_with_result(tool: &str, input: &Value, result: &Value) -> ToolHeader {
+    let mut header = tool_header(tool, input);
+    if tool == "Agent" && result.get("status").and_then(Value::as_str) == Some("teammate_spawned") {
+        if let Some(name) = str_field(input, "name") {
+            header.label = format!("@{name}");
+            header.primary = str_field(input, "subagent_type")
+                .filter(|kind| !matches!(*kind, "general-purpose" | "worker"))
+                .map(str::to_owned);
+        }
+    }
+    header
+}
+
 /// Human label shown in the spinner for an in-flight tool call, mapping the
 /// tool name to a claude-code-style gerund (`Bash` → `Running Bash`).
 #[must_use]
@@ -728,5 +745,33 @@ mod tests {
         for (tool, expected) in cases {
             assert_eq!(tool_icon(tool, &json!({})), expected, "{tool}");
         }
+    }
+}
+
+#[cfg(test)]
+mod teammate_header_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_confirmed_teammates_use_the_input_name_as_an_at_label() {
+        let input =
+            json!({"name":"reviewer","subagent_type":"Explore","description":"Review the module"});
+        let spawned = tool_header_with_result(
+            "Agent",
+            &input,
+            &json!({"status":"teammate_spawned","name":"reviewer-2"}),
+        );
+        assert_eq!(spawned.label, "@reviewer");
+        assert_eq!(spawned.primary.as_deref(), Some("Explore"));
+        let ordinary = tool_header_with_result("Agent", &input, &json!({"status":"completed"}));
+        assert_eq!(ordinary, tool_header("Agent", &input));
+        let generic = tool_header_with_result(
+            "Agent",
+            &json!({"name":"reviewer","subagent_type":"general-purpose"}),
+            &json!({"status":"teammate_spawned"}),
+        );
+        assert_eq!(generic.label, "@reviewer");
+        assert_eq!(generic.primary, None);
     }
 }

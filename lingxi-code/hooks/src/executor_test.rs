@@ -5064,3 +5064,32 @@ mod sh01_classifier_context_tests {
         assert_eq!(PairedRewrite::None.as_str(), "none");
     }
 }
+
+#[test]
+fn teammate_idle_uses_bare_session_uuid_and_omits_tool_context_only_fields() {
+    let ctx = HookContext {
+        session_id: protocol::SessionId::nil(),
+        transcript_path: "/workspace/session.jsonl".into(),
+        cwd: "/workspace".into(),
+        permission_mode: Some("plan".into()),
+        agent_id: Some(protocol::AgentId::new()),
+        effort: Some(crate::hook_payload::EffortLevel {
+            level: "high".into(),
+        }),
+        ..Default::default()
+    };
+    let (_, body) = build_envelope_body(
+        &HookEvent::TeammateIdle {
+            teammate_name: "scout".into(),
+            team_name: "session-team".into(),
+        },
+        &ctx,
+    )
+    .unwrap();
+    // Executed 2.1.263 Sa + E_n, as documented by the independent harness
+    // fixture: E_n has no fourth Sa argument even when its caller has a ctx.
+    assert_eq!(
+        body,
+        r#"{"session_id":"00000000-0000-0000-0000-000000000000","transcript_path":"/workspace/session.jsonl","cwd":"/workspace","permission_mode":"plan","hook_event_name":"TeammateIdle","teammate_name":"scout","team_name":"session-team"}"#
+    );
+}

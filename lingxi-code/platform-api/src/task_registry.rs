@@ -144,6 +144,9 @@ pub struct TaskUpdatePatch {
 /// One task as surfaced to the tool layer.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskRecord {
+    /// A persistent teammate is waiting for the leader's plan decision.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub awaiting_plan_approval: bool,
     /// 9-char `[bartwmdks][0-9a-z]{8}` task id.
     pub task_id: String,
     /// Task type wire string.

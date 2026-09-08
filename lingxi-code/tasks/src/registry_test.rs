@@ -734,6 +734,8 @@ async fn discarding_an_unused_bash_identity_removes_its_output_file() {
 
 fn teammate_input() -> TaskSpawnInput {
     TaskSpawnInput::InProcessTeammate {
+        spawn_request: None,
+        inheritance: None,
         agent_id: protocol::AgentId::new(),
         name: "buddy".into(),
         team_name: "alpha".into(),
@@ -2212,6 +2214,59 @@ async fn spawn_does_not_reallocate_and_worker_output_survives() {
 }
 
 #[tokio::test]
+async fn ordinary_agent_raw_result_id_reads_output_and_stops_owning_handler() {
+    use platform_api::task_registry::TaskRegistryHandle;
+
+    let (_dir, mut registry) = make_registry();
+    let handler = RecordingHandler::new(TaskType::LocalAgent, "aordinarytask");
+    registry.register_handler(TaskType::LocalAgent, handler.clone());
+    let input = local_agent_input();
+    let TaskSpawnInput::LocalAgent { agent_id, .. } = &input else {
+        unreachable!()
+    };
+    // Same canonical address Agent returns after this runtime spawn. This
+    // unnamed launch cannot accidentally resolve through a display-name alias.
+    let emitted_agent_id = agent_id.as_uuid().to_string();
+    let task_id = registry
+        .spawn(TaskType::LocalAgent, input, "ordinary agent".into())
+        .await
+        .unwrap();
+    let spool = registry
+        .get(&task_id)
+        .await
+        .unwrap()
+        .base()
+        .output_file
+        .clone();
+    registry
+        .output_manager
+        .append(&spool, "agent output\n")
+        .await
+        .unwrap();
+
+    let handle: &dyn TaskRegistryHandle = &registry;
+    let task = handle
+        .get(&emitted_agent_id)
+        .await
+        .unwrap()
+        .expect("Agent result ID must locate its task");
+    assert_eq!(task.task_id, task_id);
+    let output = handle.output(&emitted_agent_id, None).await.unwrap();
+    assert_eq!(output.task_id, task_id);
+    assert_eq!(output.content, "agent output\n");
+    assert!(!output.done);
+
+    let stopped = handle.kill(&emitted_agent_id).await.unwrap();
+    assert_eq!(stopped.task_id, task_id);
+    assert_eq!(stopped.status, "killed");
+    assert_eq!(handler.killed_ids(), vec![task_id.clone()]);
+    let retained = handle.output(&emitted_agent_id, None).await.unwrap();
+    assert!(retained.done);
+    assert_eq!(retained.status.as_deref(), Some("killed"));
+    assert_eq!(retained.content, "agent output\n");
+}
+
+#[tokio::test]
 async fn spawned_agent_aliases_resolve_to_task_id_and_kill_routes() {
     let (_d, mut registry) = make_registry();
     let handler = RecordingHandler::new(TaskType::InProcessTeammate, "thandlerid");
@@ -2222,6 +2277,8 @@ async fn spawned_agent_aliases_resolve_to_task_id_and_kill_routes() {
         .spawn(
             TaskType::InProcessTeammate,
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id,
                 name: "buddy".into(),
                 team_name: "alpha".into(),
@@ -4092,6 +4149,7 @@ async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents(
     // the `name@team` alias the spawn path records.
     registry
         .insert_state_for_test(TaskState::InProcessTeammate(InProcessTeammateTaskState {
+            awaiting_plan_approval: false,
             base: TaskStateBase {
                 id: "t-buddy".into(),
                 task_type: TaskType::InProcessTeammate,
@@ -5118,5 +5176,48 @@ async fn kill_after_settle_does_not_demote_completed_task() {
         firer.recorded().len(),
         1,
         "kill fires no additional TaskCompleted hook"
+    );
+}
+
+#[tokio::test]
+async fn plan_review_flag_preserves_task_lifecycle_and_clears_on_terminal() {
+    let (_tmp, registry) = make_registry();
+    let id = registry
+        .create(
+            TaskType::InProcessTeammate,
+            teammate_input(),
+            "plan work".into(),
+        )
+        .await
+        .unwrap();
+    registry.set_status(&id, TaskStatus::Paused).await.unwrap();
+    registry
+        .set_awaiting_plan_approval(&id, true)
+        .await
+        .unwrap();
+    let state = registry.get(&id).await.unwrap();
+    assert_eq!(state.base().status, TaskStatus::Paused);
+    assert!(
+        matches!(state,TaskState::InProcessTeammate(ref teammate) if teammate.awaiting_plan_approval)
+    );
+    registry
+        .set_awaiting_plan_approval(&id, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        registry.get(&id).await.unwrap().base().status,
+        TaskStatus::Paused
+    );
+    registry
+        .set_awaiting_plan_approval(&id, true)
+        .await
+        .unwrap();
+    registry.set_status(&id, TaskStatus::Killed).await.unwrap();
+    registry
+        .set_awaiting_plan_approval(&id, true)
+        .await
+        .unwrap();
+    assert!(
+        matches!(registry.get(&id).await.unwrap(),TaskState::InProcessTeammate(teammate) if !teammate.awaiting_plan_approval)
     );
 }

@@ -44,3 +44,5 @@ pub use local_fusion::{escape_xml, fusion_result_xml, LocalFusionHandler};
 pub use local_workflow::LocalWorkflowHandler;
 pub use monitor::MonitorHandler;
 pub use monitor_mcp::MonitorMcpHandler;
+
+mod teammate_plan;

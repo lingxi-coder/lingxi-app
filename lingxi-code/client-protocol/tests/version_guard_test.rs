@@ -1546,6 +1546,7 @@ fn current_contract_index() -> ContractIndex {
     put("TaskRowDto.started_at_ms", "Option<u64>");
     put("TaskRowDto.error", "Option<String>");
     put("TaskRowDto.stage", "Option<String>");
+    put("TaskRowDto.awaiting_plan_approval", "bool");
 
     put("TaskStatusDto::Pending", "pending");
     put("TaskStatusDto::Running", "running");
@@ -3163,6 +3164,7 @@ fn contract_index_covers_every_dto() {
             },
         },
         TaskRowDto {
+            awaiting_plan_approval: false,
             task_id: String::new(),
             task_type: String::new(),
             status: TaskStatusDto::Pending,

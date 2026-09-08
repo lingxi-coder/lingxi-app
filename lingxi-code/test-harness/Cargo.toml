@@ -92,7 +92,6 @@ tool-skill = { path = "../tools/skill" }
 tool-agent = { path = "../tools/agent" }
 tool-mcp = { path = "../tools/mcp" }
 tool-lsp = { path = "../tools/lsp" }
-tool-team = { path = "../tools/team" }
 tool-worktree = { path = "../tools/worktree" }
 # Used by the M4-05 parity driver (parity_agent_task_tools) to validate the
 # task-id regex against fresh-generated 9-char [bartwmd][0-9a-z]{8} ids.

@@ -35,6 +35,8 @@ use std::sync::Arc;
 
 /// Bundle of everything `run_cli` needs to drive a conversation.
 pub struct Runtime {
+    /// Session team registry and leader inbox shared with Agent/SendMessage.
+    pub coordinator: Arc<engine_desktop::TeamRegistry>,
     /// The fully-constructed orchestrator.
     pub orchestrator: Arc<ConversationOrchestrator>,
     /// Slash-command dispatcher seeded with the 94 builtins + 18 wired core
@@ -908,6 +910,7 @@ pub(crate) fn resolve_desktop_config(
         // from session metadata is a follow-up; the default is byte-identical
         // to the pre-M10 build).
         session_started_as_coordinator: false,
+        initial_teammate_team_name: None,
         // Production memory: load the real `<cwd>/LINGXI.md` +
         // `~/.lingxi/LINGXI.md` hierarchy into the system prompt (claude-code
         // parity), which also makes the session-start
@@ -1179,6 +1182,7 @@ pub async fn build_runtime_from_config(
         );
     }
     Ok(Runtime {
+        coordinator: rt.coordinator,
         orchestrator: rt.orchestrator,
         dispatcher: rt.dispatcher,
         auth: rt.auth,

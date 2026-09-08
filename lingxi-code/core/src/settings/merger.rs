@@ -15,6 +15,7 @@ use crate::settings::schema::{strategy_for, MergeStrategy, SettingsJson};
 #[must_use]
 pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
     SettingsJson {
+        teammate_mode: next.teammate_mode.or(prev.teammate_mode),
         dollar_schema: next.dollar_schema.or(prev.dollar_schema),
         trusted_directories: concat_dedup(prev.trusted_directories, next.trusted_directories),
         additional_directories: concat_dedup(

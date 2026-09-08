@@ -1360,7 +1360,7 @@ mod tests {
         use crate::commands::attach::AttachDisposition;
         let home = tempfile::tempdir().unwrap();
         let mut calls = 0usize;
-        let got = 'wait: loop {
+        let got = 'wait: {
             fn resolve_with<Attach>(
                 home: &Path,
                 session_id: &str,

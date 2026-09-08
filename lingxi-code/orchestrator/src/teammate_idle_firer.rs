@@ -78,12 +78,11 @@ impl TeammateIdleFirer for OrchestratorTeammateIdleFirer {
             teammate_name: fire.teammate_name,
             team_name: fire.team_name,
         };
-        // Context-light: a per-turn-set teammate idle has no live per-turn
-        // session here, so we thread the engine cwd (also the LINGXI_PROJECT_DIR
-        // fallback) and the main session's `transcript_path` (FIX B). Everything
-        // else defaults — matching the orchestrator's other "context-light" hook
-        // fires (`OrchestratorTaskCompletedFirer`).
+        // E_n uses the owning session and the live permission mode, but no
+        // tool-use context (therefore no agent_id or effort).
         let ctx = HookContext {
+            session_id: fire.session_id,
+            permission_mode: Some(fire.permission_mode),
             cwd: self.cwd.clone(),
             transcript_path: self.transcript_path.clone(),
             ..Default::default()
@@ -130,6 +129,8 @@ mod tests {
         // Must not panic / hang.
         let outcome = firer
             .fire(TeammateIdleFire {
+                session_id: protocol::SessionId::nil(),
+                permission_mode: "default".into(),
                 teammate_name: "buddy".into(),
                 team_name: "alpha".into(),
             })

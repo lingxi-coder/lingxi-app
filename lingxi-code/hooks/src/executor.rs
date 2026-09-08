@@ -3195,15 +3195,16 @@ fn build_lifecycle_envelope_body(
             team_name,
         } => {
             let payload = TeammateIdlePayload {
-                hook_event_name: HookEventNameTeammateIdle,
-                session_id: b.session_id,
+                session_id: ctx.session_id.as_uuid().to_string(),
                 transcript_path: b.transcript_path,
                 cwd: b.cwd,
+                // No scratchpad allocator is wired to this hook scope. Omit the
+                // optional field rather than fabricate a directory.
+                scratchpad_dir: None,
                 prompt_id: b.prompt_id,
                 permission_mode: b.permission_mode,
-                agent_id: b.agent_id,
                 agent_type: b.agent_type,
-                effort: b.effort,
+                hook_event_name: HookEventNameTeammateIdle,
                 teammate_name: teammate_name.clone(),
                 team_name: team_name.clone(),
             };

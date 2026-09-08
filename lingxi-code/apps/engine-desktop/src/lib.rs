@@ -29,6 +29,12 @@
 pub mod agent_restore;
 mod agent_skill_loader;
 pub mod auto_mode_propose;
+/// Session-owned teammate registry shared with CLI hosts.
+pub use coordinator::TeamRegistry;
+
+/// Shared teammate envelope used by host message queues.
+pub use tasks::handlers::in_process_teammate::teammate_message_envelope_with_summary;
+
 mod background_agent;
 mod connect;
 mod cron_command;
@@ -37,6 +43,7 @@ pub mod file_changed_watch;
 pub mod fork_resume;
 mod fusion_command;
 pub mod ide;
+mod pane_teammate;
 pub mod session_agents;
 pub mod settings_watch;
 mod skill_loader;
@@ -2191,6 +2198,29 @@ impl DeferredToolInvoker {
 
 #[async_trait::async_trait]
 impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
+    async fn invoke_detailed(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        ctx: platform_api::tool_invoker::SubagentInvocationContext,
+        workspace_lease_token: Option<u64>,
+    ) -> Result<
+        platform_api::tool_invoker::ToolInvocationResult,
+        platform_api::tool_invoker::ToolInvokerError,
+    > {
+        match self.inner.get() {
+            Some(invoker) => {
+                invoker
+                    .invoke_detailed(name, input, ctx, workspace_lease_token)
+                    .await
+            }
+            None => Err(platform_api::tool_invoker::ToolInvokerError::Internal(
+                "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
+                    .to_string(),
+            )),
+        }
+    }
+
     async fn invoke(
         &self,
         name: &str,
@@ -2317,6 +2347,28 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
             .await;
         tasks::handlers::TaskStatusSink::set_status(self.coordinator.as_ref(), task_id, status)
             .await;
+    }
+
+    async fn set_teammate_idle(&self, task_id: &str) {
+        tasks::handlers::TaskStatusSink::set_teammate_idle(self.task_registry.as_ref(), task_id)
+            .await;
+        tasks::handlers::TaskStatusSink::set_teammate_idle(self.coordinator.as_ref(), task_id)
+            .await;
+    }
+
+    async fn set_awaiting_plan_approval(&self, task_id: &str, awaiting: bool) {
+        tasks::handlers::TaskStatusSink::set_awaiting_plan_approval(
+            self.task_registry.as_ref(),
+            task_id,
+            awaiting,
+        )
+        .await;
+        tasks::handlers::TaskStatusSink::set_awaiting_plan_approval(
+            self.coordinator.as_ref(),
+            task_id,
+            awaiting,
+        )
+        .await;
     }
 
     async fn set_failed(&self, task_id: &str, error: &str) {
@@ -2451,54 +2503,74 @@ impl Default for DesktopEngineConfig {
     }
 }
 
-/// M10 (T12): the three coordinator handles a coordinator-capable session
-/// passes to [`register_desktop_tools`] / [`desktop_tool_registry`] so the
-/// composition root can register the coordinator `TeamCreate` / `TeamDelete`
-/// tools IN PLACE OF `tool_team`'s pair.
-///
-/// All four coordinator tool names collide byte-for-byte with the already
-/// registered `tool_team` / `tool_ui` builtins, and [`ToolRegistry`] is
-/// push-no-dedup with first-match-wins ([`ToolRegistry::find_by_name`]).
-/// Naively splicing the coordinator tools *after* `tool_team::register_all`
-/// would therefore silently shadow nothing (the `tool_team` copy wins every
-/// lookup). Mode-exclusivity is the only safe option, and the registry is
-/// built-once-and-moved, so the choice MUST be made at BUILD time — hence this
-/// is threaded through as an `Option` rather than toggled later.
-///
-/// `build()` populates this with `Some(..)` ONLY when
-/// `DesktopConfig::session_started_as_coordinator` is `true`; a default session
-/// passes `None`, leaving the assembled tool set byte-identical to the pre-M10
-/// build.
+/// Session-owned routing for teammate messages. Team creation is implicit;
+/// the tool registry exposes only SendMessage alongside Agent.
 pub struct CoordinatorWiring {
-    /// The per-session team registry the coordinator tools mutate.
+    /// Shared per-session member registry.
     pub team: Arc<coordinator::TeamRegistry>,
-    /// The coordinator-mode gate the tools consult in `call()`
-    /// (defense-in-depth) so a future `/coordinator exit()` can neutralize them
-    /// without rebuilding the registry.
-    pub mode: Arc<coordinator::CoordinatorMode>,
-    /// The spawn/kill seam the tools use to start / stop the real backing
-    /// `InProcessTeammate` task.
+    /// Backing task cancellation and message delivery.
     pub spawn_seam: Arc<dyn platform_api::team_spawn::TeamSpawnSeam>,
-    /// The orchestrator-facing output stream the `TeamCreate` tool pushes the
-    /// live active-worker count through immediately after a spawn is reconciled
-    /// — the same `Arc<dyn OutputStream>` `build()` gives the orchestrator and
-    /// the `CoordinatorStatusSink`. This makes `active_workers > 0` reach every
-    /// client deterministically, independent of the teammate's racy startup
-    /// status emit.
-    pub output: Arc<dyn platform_api::OutputStream>,
-    /// The (optional) analytics bus the coordinator `TeamCreate` / `TeamDelete`
-    /// tools fire their telemetry through (`tengu_team_created` /
-    /// `tengu_team_deleted`). `build()` passes the orchestrator bus; the offline
-    /// snapshot factory passes `None` (telemetry → `tracing`).
-    pub bus: Option<Arc<telemetry::AnalyticsBus>>,
-    /// The (optional) background-task spawner the coordinator `TeamCreate` tool
-    /// uses to start each teammate's mailbox→runner PUMP — the bridge that
-    /// delivers a coordinator `SendMessage` into the teammate's turn loop. `None`
-    /// ⇒ no pump (routed messages queue in the mailbox but are not auto-drained;
-    /// the offline registry-snapshot factory passes `None`). `build()` passes the
-    /// session `PosixRuntime` so the pump runs (D17 — never a direct
-    /// `tokio::spawn`).
-    pub runtime: Option<Arc<dyn platform_api::RuntimeSpawner>>,
+}
+
+fn teammate_backend_selector(
+    cwd: std::path::PathBuf,
+    flag_mode: Option<lingxi_core::settings::schema::TeammateMode>,
+    is_tty: bool,
+) -> Arc<dyn Fn() -> pane_teammate::PaneBackendSelection + Send + Sync> {
+    use platform_posix::swarm::detection::{
+        detect_terminal_env, select_backend, BackendChoice, TeammateMode,
+    };
+    let backends = std::sync::Mutex::new(std::collections::HashMap::<
+        &'static str,
+        Arc<dyn platform_api::SwarmBackend>,
+    >::new());
+    Arc::new(move || {
+        let mode = match flag_mode
+            .or_else(|| load_merged_settings(&cwd).and_then(|s| s.settings.teammate_mode))
+        {
+            Some(lingxi_core::settings::schema::TeammateMode::InProcess) => TeammateMode::InProcess,
+            Some(lingxi_core::settings::schema::TeammateMode::Tmux) => TeammateMode::Tmux,
+            Some(lingxi_core::settings::schema::TeammateMode::ITerm2) => TeammateMode::ITerm2,
+            _ => TeammateMode::Auto,
+        };
+        let terminal = detect_terminal_env();
+        let interactive = is_tty && !platform_api::session_flags::is_non_interactive_session();
+        let selection = select_backend(&terminal, mode, interactive, false);
+        let acquisition_error = if mode == TeammateMode::Auto
+            && interactive
+            && (terminal.inside_tmux || terminal.iterm_app)
+        {
+            select_backend(&terminal, TeammateMode::Tmux, true, false)
+                .err()
+                .map(str::to_string)
+        } else {
+            None
+        };
+        let (backend, error) = match selection {
+            Ok(BackendChoice::InProcess) => (None, acquisition_error),
+            Ok(choice) => {
+                let mut cache = backends
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let key = if choice == BackendChoice::Tmux {
+                    "tmux"
+                } else {
+                    "iterm2"
+                };
+                let backend = cache.entry(key).or_insert_with(|| match choice {
+                    BackendChoice::Tmux => Arc::new(platform_posix::swarm::TmuxBackend::new()),
+                    _ => Arc::new(platform_posix::swarm::ITermSwarmBackend::new()),
+                });
+                (Some(backend.clone()), None)
+            }
+            Err(error) => (None, Some(error.to_string())),
+        };
+        pane_teammate::PaneBackendSelection {
+            backend,
+            explicit: matches!(mode, TeammateMode::Tmux | TeammateMode::ITerm2),
+            error,
+        }
+    })
 }
 
 /// Desktop [`ClaudeAiAuthProvider`](tool_cron::ClaudeAiAuthProvider) backed by
@@ -2556,14 +2628,9 @@ impl tool_cron::ClaudeAiAuthProvider for CredentialStoreAuthProvider {
 /// Assemble the desktop builtin **tool** registry from a freshly-built
 /// [`BuiltinToolContext`].
 ///
-/// This is the canonical desktop tool set: 9 cross-platform crates
-/// (`tool-file/shell/task/web/plan/meta/cron/ui/skill`) + 5 desktop-only
-/// crates (`tool-agent/team/worktree/mcp/lsp`). The mobile composition root
-/// links only the cross-platform subset plus mobile-specific crates.
-///
-/// `coordinator` selects the team-tool variant at build time: `None` registers
-/// `tool_team`'s `TeamCreate` / `TeamDelete` (default), `Some(..)` registers the
-/// coordinator pair IN PLACE OF them. See [`CoordinatorWiring`].
+/// Includes cross-platform tools and desktop Agent, worktree, MCP and LSP tools.
+/// `coordinator` selects the session-backed SendMessage implementation.
+/// Team lifecycle is implicit in both registry variants.
 ///
 /// `cron_auth` is the in-process OAuth resolver `RemoteTrigger` uses; `None`
 /// leaves the tool on its "not authenticated" pre-flight path (used by the
@@ -3040,16 +3107,8 @@ impl orchestrator::StopHookSnapshotProvider for RegistryStopHookSnapshot {
 /// Each `tool_*::register_all` consumes a clone of `ctx`; the final crate
 /// takes ownership to avoid a redundant clone.
 ///
-/// When `coordinator` is `Some(..)` (a coordinator-capable session), the
-/// coordinator `TeamCreate` / `TeamDelete` / `SendMessage` tools are registered
-/// IN PLACE OF their builtin namesakes: `tool_team::register_all` is SKIPPED
-/// entirely (it registers exactly `TeamCreate` + `TeamDelete`), and
-/// `tool_ui::register_all_except_send_message` drops the builtin `SendMessage`,
-/// so the richer coordinator versions are the ONLY ones with those names. This
-/// keeps exactly ONE of each in the registry (no silent shadow — `find_by_name`
-/// is builtin-first — and no duplicate name in the system prompt). When `None`,
-/// `tool_team::register_all` + the full `tool_ui::register_all` run as before and
-/// the coordinator tools are absent — byte-identical to the pre-M10 build.
+/// When `coordinator` is present, its session-backed SendMessage replaces
+/// the builtin implementation. Each tool name is registered exactly once.
 /// JSONL-backed [`tool_api::WorktreeStatePersister`] (parity 2.1.212's
 /// `saveWorktreeState`): appends a `worktree-state` entry — carrying the active
 /// worktree's serialized session, or `null` on exit — to the session transcript,
@@ -5319,8 +5378,7 @@ pub fn register_desktop_tools(
     // below, IN PLACE OF this builtin) carries the swarm routing surface, so we
     // skip the leaner `tool_ui` `SendMessage` here — otherwise, because the
     // registry's `find_by_name` is builtin-first, the earlier `tool_ui` copy
-    // would silently shadow the coordinator one. Mirrors the `tool_team`-skip
-    // for `TeamCreate` / `TeamDelete`.
+    // would silently shadow the coordinator one.
     if coordinator.is_some() {
         if let Some(resolver) = ask_user_question_resolver.clone() {
             tool_ui::register_all_except_send_message_with_ask_resolver(reg, ctx.clone(), resolver);
@@ -5365,26 +5423,14 @@ pub fn register_desktop_tools(
     // Fusion is injected here (not inside `tool_agent::register_all`) so mobile
     // and snapshot tests keep an inert Agent tool.
     tool_agent::register_with_fusion(reg, ctx.clone(), fusion);
-    match coordinator {
-        // Coordinator-capable session: register the coordinator `TeamCreate` /
-        // `TeamDelete` IN PLACE OF `tool_team`'s pair. `tool_team::register_all`
-        // is deliberately NOT called — splicing-after would silently shadow.
-        Some(CoordinatorWiring {
+    if let Some(CoordinatorWiring { team, spawn_seam }) = coordinator {
+        for tool in coordinator::internal_tools::coordinator_internal_tools(
             team,
-            mode,
             spawn_seam,
-            output,
-            bus,
-            runtime,
-        }) => {
-            for tool in coordinator::internal_tools::coordinator_internal_tools(
-                team, mode, spawn_seam, output, bus, runtime,
-            ) {
-                reg.register_builtin(tool);
-            }
+            tool_ui::send_message::truncate_preview,
+        ) {
+            reg.register_builtin(tool);
         }
-        // Default session: `tool_team`'s pair, coordinator tools absent.
-        None => tool_team::register_all(reg, ctx.clone()),
     }
     // (parity 2.1.212) Thread the transcript persister into EnterWorktree /
     // ExitWorktree so a create/enter writes a `worktree-state` entry and an exit
@@ -5525,6 +5571,7 @@ impl std::fmt::Debug for DesktopAudio {
 ///     json_schema: None,
 ///     injected_permission_gate: None,
 ///     session_started_as_coordinator: false,
+///     initial_teammate_team_name: None,
 ///     // `None` ⟶ empty memory (deterministic). A production host injects
 ///     // `Some(orchestrator::prompt::real_provider())` to load real LINGXI.md.
 ///     memory_provider: None,
@@ -5728,14 +5775,11 @@ pub struct DesktopConfig {
     /// (the default + every headless/transport caller) keeps the prior
     /// selection, byte-identical.
     pub injected_permission_gate: Option<Arc<dyn PermissionGate>>,
-    /// M10 build-time coordinator-activation flag. When `true`, `build()`
-    /// enters coordinator multi-agent mode and registers the coordinator
-    /// `TeamCreate`/`TeamDelete` tools IN PLACE OF `tool_team`'s pair (decided
-    /// at build time — the registry is built-once-and-moved). Defaults to
-    /// `false`: a default session is byte-identical to the pre-M10 build
-    /// (mode off, `tool_team` unchanged, no teammate spawned). Additive to the
-    /// frozen field set.
+    /// Enter coordinator mode at session startup. Teammate availability is
+    /// controlled independently by the experimental agent-teams setting.
     pub session_started_as_coordinator: bool,
+    /// Parent-owned implicit team when this host is a terminal teammate.
+    pub initial_teammate_team_name: Option<String>,
     /// The LINGXI.md hierarchy provider the orchestrator loads project/user
     /// memory from. `None` (the default) ⟶ the empty
     /// [`StaticMemoryProvider::empty`], so a default build loads NO memory and
@@ -6333,6 +6377,7 @@ impl Default for DesktopConfig {
             json_schema: None,
             injected_permission_gate: None,
             session_started_as_coordinator: false,
+            initial_teammate_team_name: None,
             memory_provider: None,
             permission_mode: permission::PermissionMode::Auto,
             permission_mode_cli: None,
@@ -6924,7 +6969,7 @@ pub struct DesktopRuntime {
     /// M10: the per-session coordinator team registry. One is constructed per
     /// `build()` regardless of mode so the status feed (and the PHASE-2 command
     /// router) always have a handle to read; it is observable but empty (no
-    /// workers) unless a coordinator session spawns teammates via `TeamCreate`.
+    /// workers) until Agent launches teammates.
     pub coordinator: Arc<coordinator::TeamRegistry>,
     /// M10: the per-session coordinator-mode flag. Entered at build time only
     /// when `cfg.session_started_as_coordinator` is `true`; otherwise this is
@@ -12218,6 +12263,26 @@ pub async fn build(
     //        DISABLED so the build is byte-identical to the pre-M10 build.
     let coordinator_id = protocol::AgentId::new();
     let coordinator = Arc::new(coordinator::TeamRegistry::new(coordinator_id));
+    coordinator.set_permission_gate(perms.clone()).await;
+    // Named background agents can address main even without experimental teams.
+    coordinator
+        .mailbox_router
+        .register(
+            coordinator_id,
+            Arc::new(coordinator::TeammateMailbox::new(coordinator_id)),
+        )
+        .await;
+    coordinator
+        .mailbox_router
+        .register_alias("main", coordinator_id)
+        .await;
+    coordinator
+        .mailbox_router
+        .register_alias("team-lead", coordinator_id)
+        .await;
+    if let Some(team_name) = &cfg.initial_teammate_team_name {
+        coordinator.set_team_name(Some(team_name.clone())).await;
+    }
     let coordinator_mode = {
         let mut mode = coordinator::CoordinatorMode::new();
         mode.session_started_as_coordinator = cfg.session_started_as_coordinator;
@@ -12372,7 +12437,13 @@ pub async fn build(
     // not a chat-only stub.
     .with_budget_enforcer(budget_enforcer.clone())
     .with_hook_executor(hooks.clone())
-    .with_hook_context(subagent_hook_session_id, cwd.clone());
+    .with_plan_approval_mailbox(coordinator.mailbox_router.clone())
+    .with_plan_approval_gate(perms.clone())
+    .with_hook_context(subagent_hook_session_id, cwd.clone())
+    .with_transcript(
+        Arc::new(PosixFileSystem::new(cwd.clone())),
+        main_subagents_dir.clone(),
+    );
     // Grab the teammate handler's set-once cells BEFORE boxing, to fill once the
     // tool registry / skill loader exist (same deferred-fill the spawner uses).
     let teammate_tool_registry_cell = teammate_handler.tool_registry_handle();
@@ -12644,12 +12715,43 @@ pub async fn build(
         }
     }
 
-    // (5.47) M10 (T13): the typed spawn/kill seam the coordinator's `TeamCreate` /
-    //        `TeamDelete` use to start / stop the real backing `InProcessTeammate`
-    //        task. `TaskRegistry` impls `TeamSpawnSeam` (T04); the same `Arc` the
-    //        tool context holds is reused so the spawned teammate is keyed on the
-    //        worker identity threaded through.
-    let spawn_seam: Arc<dyn platform_api::team_spawn::TeamSpawnSeam> = task_registry.clone();
+    // Share task delivery and cancellation with the implicit team service.
+    let spawn_seam: Arc<dyn platform_api::team_spawn::TeamSpawnSeam> =
+        if platform_api::env::agent_swarms_enabled() {
+            let executable = std::env::current_exe()
+                .ok()
+                .filter(|path| {
+                    path.file_stem()
+                        .is_some_and(|name| name == "lingxi-cli" || name == "lingxi")
+                })
+                .or_else(|| {
+                    std::env::var_os("PATH").and_then(|path| {
+                        std::env::split_paths(&path)
+                            .map(|dir| dir.join("lingxi-cli"))
+                            .find(|candidate| candidate.is_file())
+                    })
+                })
+                .unwrap_or_else(|| std::path::PathBuf::from("lingxi-cli"));
+            let seam = pane_teammate::PaneTeammateSpawner::new(
+                task_registry.clone(),
+                coordinator.clone(),
+                Arc::new(PosixRuntime::new()),
+                output.clone(),
+                main_session_id,
+                std::path::PathBuf::from("/tmp"),
+                None,
+                false,
+                executable,
+            )
+            .with_backend_selector(teammate_backend_selector(
+                cwd.clone(),
+                cfg.flag_settings.as_ref().and_then(|s| s.teammate_mode),
+                cfg.is_tty,
+            ));
+            Arc::new(seam)
+        } else {
+            task_registry.clone()
+        };
 
     // (5.5) Assemble the desktop tool registry through the composition root.
     //       A coordinator session shares the team's `MailboxRouter` with the
@@ -12846,9 +12948,26 @@ pub async fn build(
     // after `task_registry` exists — so NO deferred cell is needed; the
     // one-shot / teammate / workflow handlers keep the raw spawner captured
     // earlier (they only use the sync `spawn`, which the decorator delegates).
+    let teammate_spawner = if platform_api::env::agent_swarms_enabled() {
+        let spawner = Arc::new(
+            coordinator::ImplicitTeammateSpawner::new(
+                coordinator.clone(),
+                spawn_seam.clone(),
+                Arc::new(PosixRuntime::new()),
+                output.clone(),
+                main_session_id.to_string(),
+            )
+            .with_home(cfg.lingxi_home.clone()),
+        );
+        spawner.initialize().await;
+        Some(spawner)
+    } else {
+        None
+    };
     let subagent_spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner> =
         Arc::new(background_agent::BackgroundAgentSpawner {
             inner: subagent_spawner,
+            teammate_spawner,
             registry: task_registry.clone(),
             mailbox_router: coordinator.mailbox_router.clone(),
             runtime: Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
@@ -13160,44 +13279,12 @@ pub async fn build(
     // for that worktree — independently inert when `None` (see the function
     // doc); a tmux failure is logged, not a hard boot failure.
     apply_worktree_launch(&cfg.worktree_launch, &cfg.tmux_launch, &tool_ctx).await?;
-    // (5.5) M10 (T12/T13): select the team-tool variant at BUILD time. A
-    //        coordinator session passes `Some(CoordinatorWiring { team, mode,
-    //        spawn_seam })` so the coordinator `TeamCreate` / `TeamDelete` are
-    //        registered IN PLACE OF `tool_team`'s pair; a default session passes
-    //        `None`, leaving `tool_team`'s pair and the coordinator tools absent
-    //        — byte-identical to the pre-M10 build.
-    let coordinator_wiring = if cfg.session_started_as_coordinator {
-        Some(CoordinatorWiring {
+    let coordinator_wiring = (platform_api::env::agent_swarms_enabled()
+        || cfg.session_started_as_coordinator)
+        .then(|| CoordinatorWiring {
             team: coordinator.clone(),
-            mode: coordinator_mode.clone(),
             spawn_seam: spawn_seam.clone(),
-            // The SAME output stream the orchestrator + CoordinatorStatusSink use,
-            // so the TeamCreate activation PUSH and the sink's later transitions
-            // share one client feed. Cloned here because `output` is moved into
-            // the `ConversationOrchestrator` below.
-            output: output.clone(),
-            // The tool-context analytics bus, so TeamCreate/TeamDelete fire
-            // tengu_team_created / tengu_team_deleted through the same bus the
-            // rest of the builtin tools use.
-            bus: Some(tool_ctx.bus.clone()),
-            // (5.47a) The background-task spawner for each teammate's mailbox→
-            //         runner PUMP. A fresh `PosixRuntime` (the canonical desktop
-            //         `RuntimeSpawner`, as used for the task registry / hooks /
-            //         cron throughout `build`); D17-compliant (no direct
-            //         `tokio::spawn`). With this wired, a coordinator
-            //         `SendMessage` to a teammate is drained from its mailbox
-            //         into the teammate's turn loop (via the `TaskRegistry`
-            //         `TeamSpawnSeam::send_message` override) — the
-            //         `injectUserMessageToTeammate` path. The pump exits on its
-            //         own when the teammate is killed (send → Terminated), so it
-            //         needs no separate teardown hook.
-            runtime: Some(Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>),
-        })
-    } else {
-        // Drop the spawn-seam clone path; it is unused in a default session.
-        let _ = &spawn_seam;
-        None
-    };
+        });
     // (5.5b) MCP-invocation Batch 3: expose each Connected server's tools by
     //        their real `mcp__<server>__<tool>` FQN as individual wire entries
     //        (server `inputSchema` + truncated description), routed back to that
@@ -18158,6 +18245,7 @@ still flip to available"
             json_schema: None,
             injected_permission_gate: None,
             session_started_as_coordinator: false,
+            initial_teammate_team_name: None,
             // Boot tests stay deterministic: empty memory, never the real FS.
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
@@ -21708,87 +21796,28 @@ must be filtered out: got {after:?}"
     fn coordinator_wiring() -> CoordinatorWiring {
         CoordinatorWiring {
             team: Arc::new(coordinator::TeamRegistry::new(protocol::AgentId::new())),
-            mode: Arc::new(coordinator::CoordinatorMode::new()),
             spawn_seam: Arc::new(NoopSeam),
-            output: Arc::new(orchestrator::test_support::MockOutputStream::new()),
-            bus: None,
-            // Tool-selection tests don't exercise the pump; no spawner needed.
-            runtime: None,
         }
     }
 
-    /// T12: a default session (`coordinator: None`) registers exactly ONE
-    /// `TeamCreate`, and it is `tool_team`'s — distinguished by its behavior
-    /// marker `max_result_size_chars() == 30_000` (`MAX_TOOL_OUTPUT_LENGTH`),
-    /// vs. the coordinator tool's `100_000`. Guardrail: byte-identical default.
     #[test]
-    fn tool_registry_default_mode_registers_tool_team_create() {
-        let reg = desktop_tool_registry(stub_tool_ctx(), None, None);
-
-        let names = reg.all_names();
-        assert_eq!(
-            names.iter().filter(|n| *n == "TeamCreate").count(),
-            1,
-            "default mode must register exactly one TeamCreate"
-        );
-        assert_eq!(
-            names.iter().filter(|n| *n == "TeamDelete").count(),
-            1,
-            "default mode must register exactly one TeamDelete"
-        );
-
-        // Behavior marker: tool_team's TeamCreate caps results at 30_000;
-        // the coordinator's caps at 100_000.
-        let create = reg
-            .find_by_name("TeamCreate")
-            .expect("TeamCreate must be registered");
-        assert_eq!(
-            create.max_result_size_chars(),
-            tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH,
-            "default mode must register tool_team's TeamCreate (30_000 cap)"
-        );
-    }
-
-    /// T12: a coordinator-capable session (`coordinator: Some`) registers the
-    /// coordinator `TeamCreate` IN PLACE OF `tool_team`'s — still exactly ONE
-    /// `TeamCreate` and ONE `TeamDelete` (no silent shadow, no duplicate name
-    /// in the system prompt). The registered `TeamCreate` is the coordinator's,
-    /// distinguished by `max_result_size_chars() == 100_000`.
-    #[test]
-    fn tool_registry_coordinator_mode_registers_coordinator_create() {
-        let reg = desktop_tool_registry(stub_tool_ctx(), Some(coordinator_wiring()), None);
-
-        let names = reg.all_names();
-        assert_eq!(
-            names.iter().filter(|n| *n == "TeamCreate").count(),
-            1,
-            "coordinator mode must register exactly one TeamCreate (no shadow)"
-        );
-        assert_eq!(
-            names.iter().filter(|n| *n == "TeamDelete").count(),
-            1,
-            "coordinator mode must register exactly one TeamDelete (no shadow)"
-        );
-
-        // No duplicate names ANYWHERE in the assembled registry.
-        let mut sorted = names.clone();
-        sorted.sort();
-        let mut deduped = sorted.clone();
-        deduped.dedup();
-        assert_eq!(
-            sorted, deduped,
-            "no tool name may appear twice in the assembled registry"
-        );
-
-        // Behavior marker: the registered TeamCreate is the coordinator's.
-        let create = reg
-            .find_by_name("TeamCreate")
-            .expect("TeamCreate must be registered");
-        assert_eq!(
-            create.max_result_size_chars(),
-            100_000,
-            "coordinator mode must register the coordinator TeamCreate (100_000 cap)"
-        );
+    fn tool_registry_uses_implicit_teams_in_every_mode() {
+        for wiring in [None, Some(coordinator_wiring())] {
+            let reg = desktop_tool_registry(stub_tool_ctx(), wiring, None);
+            let names = reg.all_names();
+            assert!(!names
+                .iter()
+                .any(|name| name == "TeamCreate" || name == "TeamDelete"));
+            assert_eq!(
+                names.iter().filter(|name| *name == "SendMessage").count(),
+                1
+            );
+            let mut sorted = names.clone();
+            sorted.sort();
+            let mut deduped = sorted.clone();
+            deduped.dedup();
+            assert_eq!(sorted, deduped);
+        }
     }
 
     // ----- T13: build() composition-root coordinator wiring -----------------
@@ -21923,13 +21952,7 @@ must be filtered out: got {after:?}"
         );
         let wiring = CoordinatorWiring {
             team: team.clone(),
-            mode: Arc::new(coordinator::CoordinatorMode::new()),
             spawn_seam: Arc::new(NoopSeam),
-            output: Arc::new(orchestrator::test_support::MockOutputStream::new()),
-            bus: None,
-            // This test exercises SendMessage→mailbox routing only, not the
-            // teammate pump; no spawner needed.
-            runtime: None,
         };
         let reg = desktop_tool_registry(ctx, Some(wiring), None);
 
@@ -21966,7 +21989,7 @@ must be filtered out: got {after:?}"
         let err = default_send
             .call(
                 serde_json::json!({
-                    "to_agent_id": worker.as_uuid().to_string(),
+                    "to": worker.as_uuid().to_string(),
                     "message": "hello teammate",
                 }),
                 tool_api::test_support::fresh_ctx(),
@@ -25357,6 +25380,20 @@ mod workspace_lease_forwarding_tests {
 
     #[async_trait::async_trait]
     impl ToolInvoker for RecordingInvoker {
+        async fn invoke_detailed(
+            &self,
+            _name: &str,
+            _input: serde_json::Value,
+            _ctx: SubagentInvocationContext,
+            workspace_lease_token: Option<u64>,
+        ) -> Result<platform_api::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+            *self.seen.lock().unwrap() = Some(workspace_lease_token);
+            Ok(platform_api::tool_invoker::ToolInvocationResult {
+                data: serde_json::json!({"awaitingLeaderApproval": true}),
+                model_content: Some("Wait for the team lead to review your plan".into()),
+            })
+        }
+
         async fn invoke(
             &self,
             _name: &str,
@@ -25423,6 +25460,26 @@ mod workspace_lease_forwarding_tests {
             Some(Some(77)),
             "the deferred invoker must forward the lease token, not swallow it"
         );
+    }
+
+    #[tokio::test]
+    async fn deferred_invoker_preserves_model_content_and_workspace_lease() {
+        let seen = Arc::new(StdMutex::new(None));
+        let deferred = super::DeferredToolInvoker::new();
+        deferred.set(Arc::new(RecordingInvoker { seen: seen.clone() }));
+        let result = deferred
+            .invoke_detailed("ExitPlanMode", serde_json::json!({}), bare_ctx(), Some(77))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.data,
+            serde_json::json!({"awaitingLeaderApproval": true})
+        );
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some("Wait for the team lead to review your plan")
+        );
+        assert_eq!(*seen.lock().unwrap(), Some(Some(77)));
     }
 }
 

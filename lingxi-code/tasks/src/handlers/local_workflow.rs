@@ -938,6 +938,18 @@ impl ToolInvoker for WorkspaceLeaseToolInvoker {
             .await
     }
 
+    async fn invoke_detailed(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: SubagentInvocationContext,
+        _workspace_lease_token: Option<u64>,
+    ) -> Result<platform_api::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+        self.inner
+            .invoke_detailed(name, input, ctx, Some(self.token))
+            .await
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -1862,6 +1874,7 @@ fn make_request(
     }
 
     SubagentSpawnRequest {
+        teammate_color: None,
         subagent_type,
         prompt: prompt.to_string(),
         observer: None,

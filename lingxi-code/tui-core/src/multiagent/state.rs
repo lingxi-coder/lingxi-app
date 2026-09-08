@@ -9,6 +9,8 @@
 /// maps one-to-one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskRow {
+    /// Plan approval waits take precedence over the task lifecycle label.
+    pub awaiting_plan_approval: bool,
     /// 9-char `[bartwmdks][0-9a-z]{8}` task id.
     pub task_id: String,
     /// Task type wire string (e.g. `"local_bash"`).

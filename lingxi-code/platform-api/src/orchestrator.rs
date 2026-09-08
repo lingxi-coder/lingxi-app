@@ -3146,6 +3146,9 @@ pub trait OutputStream: Send + Sync {
     /// a `ClientEvent::CoordinatorStatus`.
     async fn emit_coordinator_status(&self, _active_workers: u32, _team: Option<&str>) {}
 
+    /// Push a changed coordinator roster row, including independent plan-review state.
+    async fn emit_coordinator_worker(&self, _worker: &crate::team_registry::WorkerInfo) {}
+
     /// Emit the latest unified rate-limit header snapshot.
     ///
     /// Added by llm-client future-work batch 3 (Task 8). Called by the

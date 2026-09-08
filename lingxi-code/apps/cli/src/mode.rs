@@ -92,6 +92,31 @@ fn tui_prompt_command(text: String) -> msgqueue::QueuedCommand {
     }
 }
 
+async fn drain_teammate_prompts(
+    queue: &msgqueue::MessageQueueManager,
+    orchestrator: &dyn OrchestratorHandle,
+    turn_tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+) {
+    while let Some(command) = queue.dequeue_main_thread().await {
+        let Some(text) = command.text() else {
+            continue;
+        };
+        let cancel = CancellationToken::new();
+        let _ = turn_tx.send(tui::TurnEvent::TurnStartedWithCancel(cancel.clone()));
+        queue.register_active_turn(cancel.clone()).await;
+        if let Err(error) = orchestrator
+            .run_turn_streaming_with_cancel(text, cancel)
+            .await
+        {
+            let _ = turn_tx.send(tui::TurnEvent::TextDelta(error.to_string()));
+            let _ = turn_tx.send(tui::TurnEvent::TurnEnded(
+                platform_api::TurnOutcome::EndTurn,
+            ));
+        }
+        queue.clear_active_turn().await;
+    }
+}
+
 fn trim_decimal(mut rendered: String) -> String {
     while rendered.ends_with('0') {
         rendered.pop();
@@ -627,6 +652,13 @@ pub(crate) async fn run_ratatui_with_initial_state(
     handoff: Option<platform_api::BackgroundingSnapshot>,
 ) -> RunOutcome {
     let prompt_queue = Arc::new(msgqueue::MessageQueueManager::new());
+    let teammate_turn_gate = Arc::new(tokio::sync::Mutex::new(()));
+    let leader_mailbox = tui_build
+        .runtime
+        .coordinator
+        .mailbox_router
+        .get(&tui_build.runtime.coordinator.coordinator_id)
+        .await;
     tui_build
         .runtime
         .orchestrator
@@ -719,6 +751,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let carried_mode_gate = tui_build.runtime.enforcing_permission_gate.clone();
     // Cloned BEFORE `on_submit` (below) moves `turn_tx` into its closure.
     let web_turn_tx = turn_tx.clone();
+    let teammate_turn_tx = turn_tx.clone();
     let set_mode_turn_tx = turn_tx.clone();
     let connect_turn_tx = turn_tx.clone();
     let permission_turn_tx = turn_tx.clone();
@@ -985,6 +1018,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         let _ = turn_tx.send(tui::TurnEvent::CostUpdated(format!("${initial_cost:.4}")));
     }
     let submit_queue = prompt_queue.clone();
+    let submit_turn_gate = teammate_turn_gate.clone();
     let submit_cancel_reason = queue_cancel_reason.clone();
     let on_submit =
         move |prompt: String, images: Vec<std::path::PathBuf>, cancel: CancellationToken| {
@@ -992,8 +1026,10 @@ pub(crate) async fn run_ratatui_with_initial_state(
             let orch = orchestrator.clone();
             let tx = turn_tx.clone();
             let queue = submit_queue.clone();
+            let turn_gate = submit_turn_gate.clone();
             let cancel_reason = submit_cancel_reason.clone();
             handle.spawn(async move {
+                let _turn_guard = turn_gate.lock().await;
                 cancel_reason.reset();
                 queue.register_active_turn(cancel.clone()).await;
                 // Image-aware entry: with no images this is byte-identical to
@@ -1017,6 +1053,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     ));
                 }
                 queue.clear_active_turn().await;
+                drain_teammate_prompts(&queue, orch.as_ref(), &tx).await;
             });
         };
     let queued_prompt_queue = prompt_queue.clone();
@@ -1684,6 +1721,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             let agents = records
                 .into_iter()
                 .map(|record| tui_core::orchestrator_bridge::RunningAgentStatus {
+                    awaiting_plan_approval: record.awaiting_plan_approval,
                     id: record.task_id.clone(),
                     task_type: record.task_type.clone(),
                     agent_type: record.agent_type.unwrap_or_else(|| {
@@ -1715,6 +1753,35 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 break;
             }
         }
+    });
+    let teammate_prompt_pumps = leader_mailbox.map(|inbox| {
+        let incoming_queue = prompt_queue.clone();
+        let incoming = tokio::spawn(async move {
+            loop {
+                let Some(message) = inbox.wait_for_message(std::time::Duration::from_millis(500)).await else { continue; };
+                incoming_queue.enqueue(msgqueue::QueuedCommand {
+                    uuid: message.message_id,
+                    content: msgqueue::QueuedCommandContent::UserInput { text: tasks::handlers::in_process_teammate::teammate_message_envelope_with_summary(&message.from_name,&message.content,message.summary.as_deref()) },
+                    priority: msgqueue::QueuePriority::Next,
+                    queued_at: message.timestamp,
+                    source: msgqueue::QueueSource::AgentSendMessage,
+                    agent_id: None,
+                    skip_slash_commands: true,
+                    is_meta: true,
+                }).await;
+            }
+        });
+        let queue = prompt_queue.clone();
+        let orch = concrete_orchestrator.clone();
+        let drain = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if let Ok(_guard) = teammate_turn_gate.try_lock() {
+                    drain_teammate_prompts(&queue, orch.as_ref(), &teammate_turn_tx).await;
+                }
+            }
+        });
+        (incoming, drain)
     });
     let run_result = tokio::task::spawn_blocking(move || {
         tui::app::run_app(
@@ -1767,6 +1834,10 @@ pub(crate) async fn run_ratatui_with_initial_state(
         )
     })
     .await;
+    if let Some((incoming, drain)) = teammate_prompt_pumps {
+        incoming.abort();
+        drain.abort();
+    }
     status_pump.abort();
     agent_status_pump.abort();
     // (/stop, and clean shutdown) The render loop has torn down; close the
@@ -3112,7 +3183,9 @@ fn spawn_status_bridge_forwarder(
     tokio::spawn(async move {
         while let Some(ev) = src.recv().await {
             match &ev {
-                TurnEvent::TurnStarted => reg.update_status("busy", None),
+                TurnEvent::TurnStarted | TurnEvent::TurnStartedWithCancel(_) => {
+                    reg.update_status("busy", None)
+                }
                 TurnEvent::TurnEnded(_) => reg.update_status("idle", None),
                 // The bridge-level PermissionRequest variant (reserved M6-05
                 // wiring) also marks waiting when it fires; the live dialog

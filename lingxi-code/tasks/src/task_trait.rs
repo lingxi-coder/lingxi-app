@@ -21,6 +21,16 @@ pub trait Task: Send + Sync {
     fn supports_messages(&self) -> bool {
         false
     }
+    /// Apply a trusted lead's plan review response at the teammate's idle boundary.
+    async fn apply_plan_approval(
+        &self,
+        _task_id: &str,
+        _response: platform_api::teammate_plan::PlanApprovalResponse,
+        _ctx: TaskContext,
+    ) -> Result<(), TaskError> {
+        Err(TaskError::Unsupported)
+    }
+
     /// Deliver a message to a running task. Default implementation rejects.
     async fn send_message(
         &self,
@@ -87,6 +97,10 @@ pub enum TaskSpawnInput {
     },
     /// Spawn an in-process teammate.
     InProcessTeammate {
+        /// Resolved Agent request and parent execution context.
+        spawn_request: Option<platform_api::subagent_spawn::SubagentSpawnRequest>,
+        /// Tool and budget handles inherited from the invoking session.
+        inheritance: Option<platform_api::subagent_spawn::SubagentInheritance>,
         /// Agent target.
         agent_id: protocol::AgentId,
         /// Display name (claude-code `TeammateContext.agentName`).
@@ -97,8 +111,7 @@ pub enum TaskSpawnInput {
         /// `SubagentContext.team_name` so its dispatched tools see the team
         /// identity (`getTeammateContext()?.teamName`).
         team_name: String,
-        /// The teammate's initial TASK (claude-code the TeamCreate `description`
-        /// / the team lead's purpose) — seeded as the teammate's first user
+        /// The teammate's initial task from the Agent prompt, seeded as its first user
         /// message (`SubagentContext::prompt_messages`) so it has a task to work
         /// on rather than only chatting. Empty ⇒ no initial message (the
         /// teammate parks awaiting the first injected message).

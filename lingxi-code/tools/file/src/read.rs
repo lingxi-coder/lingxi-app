@@ -1840,7 +1840,12 @@ impl Tool for FileReadTool {
         // One snapshot of trusted_dirs for both containment checks below (the
         // primary path and the macOS screenshot alt-path retry), so they
         // can't straddle a swap between the two calls.
-        let trusted_dirs = self.ctx.trusted_dirs();
+        let mut trusted_dirs = self.ctx.trusted_dirs();
+        if let Some(root) =
+            platform_api::teammate_plan::own_plan_file_root(ctx.agent_id.as_ref(), &path)
+        {
+            trusted_dirs.push(root);
+        }
 
         let mut canon = match canonicalize_and_validate(&path, &trusted_dirs) {
             Ok(p) => p,

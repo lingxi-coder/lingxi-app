@@ -278,6 +278,7 @@ mod tests {
     fn agent_block_matches_claude_type_aware_summary() {
         let agents = (0..2)
             .map(|index| RunningAgentStatus {
+                awaiting_plan_approval: false,
                 id: format!("a{index}"),
                 task_type: "local_agent".into(),
                 agent_type: "Explore".into(),
@@ -290,6 +291,7 @@ mod tests {
         assert_eq!(lines, vec!["  2 local agents"]);
 
         let remote = vec![RunningAgentStatus {
+            awaiting_plan_approval: false,
             id: "r1".into(),
             task_type: "remote_agent".into(),
             agent_type: "Agent".into(),
@@ -304,6 +306,7 @@ mod tests {
 
         let teammates = vec![
             RunningAgentStatus {
+                awaiting_plan_approval: false,
                 id: "t1".into(),
                 task_type: "in_process_teammate".into(),
                 agent_type: "teammate".into(),
@@ -312,6 +315,7 @@ mod tests {
                 custom_content: None,
             },
             RunningAgentStatus {
+                awaiting_plan_approval: false,
                 id: "t2".into(),
                 task_type: "in_process_teammate".into(),
                 agent_type: "teammate".into(),
@@ -336,6 +340,7 @@ mod tests {
     fn custom_agent_rows_replace_summary_and_empty_content_hides() {
         let agents = vec![
             RunningAgentStatus {
+                awaiting_plan_approval: false,
                 id: "a1".into(),
                 task_type: "local_agent".into(),
                 agent_type: "Explore".into(),
@@ -344,6 +349,7 @@ mod tests {
                 custom_content: Some("Exploring 42%".into()),
             },
             RunningAgentStatus {
+                awaiting_plan_approval: false,
                 id: "a2".into(),
                 task_type: "local_agent".into(),
                 agent_type: "Plan".into(),

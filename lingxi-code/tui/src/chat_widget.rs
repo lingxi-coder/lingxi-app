@@ -307,6 +307,7 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         | TurnEvent::CompactionCompleted { .. }
         | TurnEvent::TurnEnded(_) => FocusRefreshKind::Full,
         TurnEvent::TurnStarted
+        | TurnEvent::TurnStartedWithCancel(_)
         | TurnEvent::ThinkingDelta(_)
         | TurnEvent::ToolUseStart { .. }
         | TurnEvent::ToolUseResult { .. } => FocusRefreshKind::ResetAssistantTail,
@@ -1188,6 +1189,9 @@ impl ChatWidget {
     /// escape, `SystemNotice`/`BashOutput` push system/bash-output rows — every
     /// bridge-emitted variant is handled (no wildcard drop).
     pub fn apply_turn_event(&mut self, event: TurnEvent) {
+        if let TurnEvent::TurnStartedWithCancel(cancel) = &event {
+            self.current_turn = Some(cancel.clone());
+        }
         let focus_refresh = focus_refresh_for_turn_event(&event);
         let belongs_to_manual_compaction = self.current_compaction.is_some()
             && matches!(
@@ -1207,7 +1211,7 @@ impl ChatWidget {
             return;
         }
         match event {
-            TurnEvent::TurnStarted => {
+            TurnEvent::TurnStarted | TurnEvent::TurnStartedWithCancel(_) => {
                 self.accepts_turn_events = true;
                 self.has_seen_turn = true;
                 self.finalize_collapse_group();
@@ -5527,6 +5531,7 @@ fn agent_status_from_tool_start(
     input: &serde_json::Value,
 ) -> RunningAgentStatus {
     RunningAgentStatus {
+        awaiting_plan_approval: false,
         id: id.to_string(),
         task_type: "local_agent".to_string(),
         agent_type: input
@@ -9396,6 +9401,28 @@ mod tests {
     }
 
     #[test]
+    fn teammate_woken_turn_can_be_cancelled_without_a_composer_submit() {
+        let mut widget = widget();
+        assert!(widget.current_turn.is_none());
+        let cancel = CancellationToken::new();
+        widget.apply_turn_event(TurnEvent::TurnStartedWithCancel(cancel.clone()));
+        assert!(widget.current_turn.is_some());
+        assert!(widget.accepts_turn_events);
+        assert!(widget.turn_started_at.is_some());
+        widget.apply_turn_event(TurnEvent::TextDelta("Responding to teammate".into()));
+
+        widget.handle_key(ctrl(KeyCode::Char('c')));
+        assert!(
+            cancel.is_cancelled(),
+            "Ctrl-C must cancel the actual host-started turn"
+        );
+        assert!(widget
+            .current_turn
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled));
+    }
+
+    #[test]
     fn cancellation_drops_open_queued_and_late_interactive_prompts() {
         let mut widget = widget();
         typ(&mut widget, "x");
@@ -11124,6 +11151,7 @@ mod tests {
 
         widget.apply_turn_event(TurnEvent::AgentStatusSnapshot {
             agents: vec![RunningAgentStatus {
+                awaiting_plan_approval: false,
                 id: "a12345678".into(),
                 task_type: "local_agent".into(),
                 agent_type: "Explore".into(),
@@ -11137,6 +11165,7 @@ mod tests {
         widget.apply_turn_event(TurnEvent::AgentStatusSnapshot {
             agents: vec![
                 RunningAgentStatus {
+                    awaiting_plan_approval: false,
                     id: "a12345678".into(),
                     task_type: "local_agent".into(),
                     agent_type: "Explore".into(),
@@ -11145,6 +11174,7 @@ mod tests {
                     custom_content: None,
                 },
                 RunningAgentStatus {
+                    awaiting_plan_approval: false,
                     id: "a87654321".into(),
                     task_type: "local_agent".into(),
                     agent_type: "Explore".into(),

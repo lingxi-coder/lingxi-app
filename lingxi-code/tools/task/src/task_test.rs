@@ -1339,7 +1339,10 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     Some(v) => std::env::set_var("LINGXI_TEAM_NAME", v),
                     None => std::env::remove_var("LINGXI_TEAM_NAME"),
                 }
-                platform_api::team_registry::clear_leader_team_name();
+                platform_api::team_registry::set_leader_team_name_for_session(
+                    &self.session_id.to_string(),
+                    None,
+                );
             }
         }
 
@@ -1356,8 +1359,15 @@ Running background agents: a1b2c3d4e (survey the crate)"
             // Start from a clean slate for every level.
             std::env::remove_var("LINGXI_TASK_LIST_ID");
             std::env::remove_var("LINGXI_TEAM_NAME");
-            platform_api::team_registry::clear_leader_team_name();
             g
+        }
+
+        fn session_ctx(session_id: protocol::SessionId) -> ToolUseContext {
+            let mut ctx = tool_api::test_support::fresh_ctx();
+            ctx.session = Some(std::sync::Arc::new(tokio::sync::Mutex::new(
+                lingxi_core::SessionState::empty(session_id, "test-model".into()),
+            )));
+            ctx
         }
 
         #[tokio::test]
@@ -1366,8 +1376,11 @@ Running background agents: a1b2c3d4e (survey the crate)"
             std::env::set_var("LINGXI_TASK_LIST_ID", "explicit-list");
             // Even with every lower level set, the explicit env wins.
             std::env::set_var("LINGXI_TEAM_NAME", "env-team");
-            platform_api::team_registry::set_leader_team_name("leader-team");
-            let mut ctx = tool_api::test_support::fresh_ctx();
+            platform_api::team_registry::set_leader_team_name_for_session(
+                &_g.session_id.to_string(),
+                Some("leader-team"),
+            );
+            let mut ctx = session_ctx(_g.session_id);
             ctx.team_name = Some("teammate-team".into());
             assert_eq!(resolve_task_list_id(&ctx).await, "explicit-list");
         }
@@ -1377,8 +1390,11 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let _g = guard();
             // No env override; teammate ctx team_name wins over env + leader.
             std::env::set_var("LINGXI_TEAM_NAME", "env-team");
-            platform_api::team_registry::set_leader_team_name("leader-team");
-            let mut ctx = tool_api::test_support::fresh_ctx();
+            platform_api::team_registry::set_leader_team_name_for_session(
+                &_g.session_id.to_string(),
+                Some("leader-team"),
+            );
+            let mut ctx = session_ctx(_g.session_id);
             ctx.team_name = Some("teammate-team".into());
             assert_eq!(resolve_task_list_id(&ctx).await, "teammate-team");
         }
@@ -1387,27 +1403,47 @@ Running background agents: a1b2c3d4e (survey the crate)"
         async fn level3_env_team_name() {
             let _g = guard();
             std::env::set_var("LINGXI_TEAM_NAME", "env-team");
-            platform_api::team_registry::set_leader_team_name("leader-team");
+            platform_api::team_registry::set_leader_team_name_for_session(
+                &_g.session_id.to_string(),
+                Some("leader-team"),
+            );
             // No teammate ctx team_name ⇒ LINGXI_TEAM_NAME wins over leader.
-            let ctx = tool_api::test_support::fresh_ctx();
+            let ctx = session_ctx(_g.session_id);
             assert_eq!(resolve_task_list_id(&ctx).await, "env-team");
         }
 
         #[tokio::test]
         async fn level4_leader_team_name() {
             let _g = guard();
-            platform_api::team_registry::set_leader_team_name("leader-team");
+            platform_api::team_registry::set_leader_team_name_for_session(
+                &_g.session_id.to_string(),
+                Some("leader-team"),
+            );
             // No env / teammate ctx ⇒ leader team name wins over the session.
-            let ctx = tool_api::test_support::fresh_ctx();
+            let ctx = session_ctx(_g.session_id);
             assert_eq!(resolve_task_list_id(&ctx).await, "leader-team");
         }
 
         #[tokio::test]
         async fn level5_session_fallback() {
             let _g = guard();
-            // Nothing set ⇒ session id (here "default" — no session wired).
-            let ctx = tool_api::test_support::fresh_ctx();
-            assert_eq!(resolve_task_list_id(&ctx).await, "default");
+            // Nothing set ⇒ the calling session id.
+            let ctx = session_ctx(_g.session_id);
+            assert_eq!(resolve_task_list_id(&ctx).await, _g.session_id.to_string());
+        }
+
+        #[tokio::test]
+        async fn subagent_origin_resolves_its_own_leaders_task_list() {
+            let g = guard();
+            let mut ctx = session_ctx(g.session_id);
+            ctx.session = None;
+            ctx.origin_session_id = Some(g.session_id);
+            assert_eq!(resolve_task_list_id(&ctx).await, g.session_id.to_string());
+            platform_api::team_registry::set_leader_team_name_for_session(
+                &g.session_id.to_string(),
+                Some("origin-team"),
+            );
+            assert_eq!(resolve_task_list_id(&ctx).await, "origin-team");
         }
 
         #[tokio::test]
@@ -1416,15 +1452,45 @@ Running background agents: a1b2c3d4e (survey the crate)"
             // Leader (no teammate ctx) resolves to the leader team name; an
             // in-process teammate (ctx.team_name set to the SAME team) resolves
             // to the same on-disk dir — the goal of T1.
-            platform_api::team_registry::set_leader_team_name("alpha-team");
-            let leader_ctx = tool_api::test_support::fresh_ctx();
-            let mut teammate_ctx = tool_api::test_support::fresh_ctx();
+            platform_api::team_registry::set_leader_team_name_for_session(
+                &_g.session_id.to_string(),
+                Some("alpha-team"),
+            );
+            let leader_ctx = session_ctx(_g.session_id);
+            let mut teammate_ctx = session_ctx(_g.session_id);
             teammate_ctx.team_name = Some("alpha-team".into());
             assert_eq!(
                 resolve_task_list_id(&leader_ctx).await,
                 resolve_task_list_id(&teammate_ctx).await
             );
             assert_eq!(resolve_task_list_id(&leader_ctx).await, "alpha-team");
+        }
+        #[tokio::test]
+        async fn independent_sessions_do_not_share_task_lists() {
+            let _g = guard();
+            let other = protocol::SessionId::new();
+            platform_api::team_registry::set_leader_team_name_for_session(
+                &_g.session_id.to_string(),
+                Some("alpha"),
+            );
+            platform_api::team_registry::set_leader_team_name_for_session(
+                &other.to_string(),
+                Some("beta"),
+            );
+            assert_eq!(
+                resolve_task_list_id(&session_ctx(_g.session_id)).await,
+                "alpha"
+            );
+            assert_eq!(resolve_task_list_id(&session_ctx(other)).await, "beta");
+            platform_api::team_registry::set_leader_team_name_for_session(&other.to_string(), None);
+            assert_eq!(
+                resolve_task_list_id(&session_ctx(other)).await,
+                other.to_string()
+            );
+            assert_eq!(
+                resolve_task_list_id(&session_ctx(_g.session_id)).await,
+                "alpha"
+            );
         }
     }
 

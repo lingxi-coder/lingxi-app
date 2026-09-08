@@ -44,6 +44,8 @@ use tasks::TaskType;
 /// Decorator that wires `spawn_async` (the `run_in_background` path) while
 /// delegating every synchronous `SubagentSpawner` method to `inner`.
 pub struct BackgroundAgentSpawner {
+    /// Persistent teammate service for an enabled implicit session team.
+    pub teammate_spawner: Option<Arc<coordinator::ImplicitTeammateSpawner>>,
     /// The wrapped production spawner — every sync method delegates here.
     pub inner: Arc<dyn SubagentSpawner>,
     /// The concrete registry: `spawn(LocalAgent)` dispatches to the persistent
@@ -165,9 +167,7 @@ impl BackgroundAgentSpawner {
         // that id. Register it as an additional address so the send resolves;
         // an alias is not a display name, so this adds no `ListAgents` row and
         // no second copy of a broadcast.
-        self.mailbox_router
-            .register_alias(&task_id, agent_id)
-            .await;
+        self.mailbox_router.register_alias(&task_id, agent_id).await;
 
         let seam: Arc<dyn TeamSpawnSeam> = self.registry.clone();
         let router = self.mailbox_router.clone();
@@ -200,6 +200,23 @@ impl BackgroundAgentSpawner {
 
 #[async_trait]
 impl SubagentSpawner for BackgroundAgentSpawner {
+    fn teammate_enabled(&self) -> bool {
+        self.teammate_spawner.is_some()
+    }
+
+    async fn spawn_teammate(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+    ) -> Result<platform_api::team_spawn::TeammateLaunch, SubagentSpawnError> {
+        match &self.teammate_spawner {
+            Some(spawner) => spawner.spawn(request, inherit).await,
+            None => Err(SubagentSpawnError::Runtime(
+                "Teammate spawning is not available in this session".into(),
+            )),
+        }
+    }
+
     async fn spawn(
         &self,
         request: SubagentSpawnRequest,
@@ -583,6 +600,7 @@ mod tests {
 
     fn request(name: Option<&str>) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
+            teammate_color: None,
             subagent_type: "general-purpose".into(),
             prompt: "go".into(),
             observer: None,
@@ -651,6 +669,7 @@ mod tests {
         let mailbox_router = Arc::new(MailboxRouter::new());
 
         let deco = BackgroundAgentSpawner {
+            teammate_spawner: None,
             inner: Arc::new(InertSpawner),
             registry,
             mailbox_router: mailbox_router.clone(),
@@ -711,6 +730,7 @@ mod tests {
         ));
         let probe = Arc::new(ForwardingProbeSpawner::default());
         let deco = BackgroundAgentSpawner {
+            teammate_spawner: None,
             inner: probe.clone(),
             registry: Arc::new(TaskRegistry::new(runtime.clone(), fs, output_manager)),
             mailbox_router: Arc::new(MailboxRouter::new()),
@@ -770,6 +790,7 @@ mod tests {
         ));
         let probe = Arc::new(ForwardingProbeSpawner::default());
         let deco = BackgroundAgentSpawner {
+            teammate_spawner: None,
             inner: probe.clone(),
             registry: Arc::new(TaskRegistry::new(runtime.clone(), fs, output_manager)),
             mailbox_router: Arc::new(MailboxRouter::new()),
@@ -815,6 +836,7 @@ mod tests {
         ));
 
         let deco = BackgroundAgentSpawner {
+            teammate_spawner: None,
             inner: Arc::new(CountingSpawner { count: 7 }),
             registry: Arc::new(TaskRegistry::new(runtime.clone(), fs, output_manager)),
             mailbox_router: Arc::new(MailboxRouter::new()),
@@ -848,6 +870,7 @@ mod tests {
             }),
         );
         let deco = BackgroundAgentSpawner {
+            teammate_spawner: None,
             inner: Arc::new(InertSpawner),
             registry: Arc::new(reg),
             mailbox_router: Arc::new(MailboxRouter::new()),
@@ -921,6 +944,7 @@ mod tests {
             }),
         );
         let deco = BackgroundAgentSpawner {
+            teammate_spawner: None,
             inner: Arc::new(InertSpawner),
             registry: Arc::new(reg),
             mailbox_router: Arc::new(MailboxRouter::new()),
@@ -980,6 +1004,7 @@ mod tests {
         let mailbox_router = Arc::new(MailboxRouter::new());
 
         let deco = BackgroundAgentSpawner {
+            teammate_spawner: None,
             inner: Arc::new(InertSpawner),
             registry,
             mailbox_router: mailbox_router.clone(),
@@ -1066,6 +1091,7 @@ mod tests {
         let mailbox_router = Arc::new(MailboxRouter::new());
 
         let deco = BackgroundAgentSpawner {
+            teammate_spawner: None,
             inner: Arc::new(InertSpawner),
             registry,
             mailbox_router: mailbox_router.clone(),

@@ -1,6 +1,6 @@
 //! On-disk team-file helpers — 1:1 port of the path/IO surface of
 //! `claude-code/src/utils/swarm/teamHelpers.ts` used by the coordinator
-//! `TeamCreate` / `TeamDelete` tools.
+//! implicit session-team lifecycle.
 //!
 //! Layout (claude-code):
 //! - team dir:  `~/.lingxi/teams/{sanitize(name)}/`
@@ -17,9 +17,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// `TeamFile` — 1:1 with the TS `TeamFile` type (`teamHelpers.ts:64-90`),
-/// reduced to the fields the coordinator `TeamCreate` actually writes
-/// (`TeamCreateTool.ts:157-175`). Unknown fields are preserved on read via
-/// `serde(default)` tolerance — the coordinator only writes the lead member.
+/// typed projection used by readers. Mutations preserve unmodeled metadata
+/// by updating the JSON object directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamFile {
     /// Team name (the un-sanitized display name).
@@ -45,7 +44,7 @@ pub struct TeamFile {
 }
 
 /// A single team member — 1:1 with the TS member object the coordinator writes
-/// (`TeamCreateTool.ts:164-173`).
+/// in the implicit session-team configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamMember {
     /// Member agent id.
@@ -165,31 +164,27 @@ pub fn remove_team_member(
     agent_id: &str,
     member_name: &str,
 ) -> std::io::Result<bool> {
-    let mut file = read_team_file(home, team_name)?;
-    let before = file.members.len();
-    file.members
-        .retain(|m| m.agent_id != agent_id && m.name != member_name);
-    if file.members.len() == before {
+    let path = team_file_path(home, team_name);
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path)?).map_err(std::io::Error::other)?;
+    let Some(members) = value
+        .get_mut("members")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(false);
+    };
+    let before = members.len();
+    members.retain(|m| {
+        m["agentId"].as_str() != Some(agent_id) && m["name"].as_str() != Some(member_name)
+    });
+    if members.len() == before {
         return Ok(false);
     }
-    write_team_file(home, team_name, &file)?;
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(&value).map_err(std::io::Error::other)?,
+    )?;
     Ok(true)
-}
-
-/// `cleanupTeamDirectories` (`TeamDeleteTool.ts:101` → `teamHelpers.ts:641-683`),
-/// reduced to the directory removal the coordinator needs: remove the team dir
-/// (`~/.lingxi/teams/{name}/`) and the tasks dir (`~/.lingxi/tasks/{name}/`).
-/// Worktree teardown is out of scope (in-process teammates have no worktrees).
-/// Best-effort: a missing dir is not an error.
-pub fn cleanup_team_directories(home: &Path, name: &str) {
-    let team = team_dir(home, name);
-    if team.exists() {
-        let _ = std::fs::remove_dir_all(&team);
-    }
-    let tasks = task_dir(home, name);
-    if tasks.exists() {
-        let _ = std::fs::remove_dir_all(&tasks);
-    }
 }
 
 /// Unix-millisecond timestamp (TS `Date.now()`).
@@ -227,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn write_then_exists_then_cleanup() {
+    fn write_persists_team_file() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".lingxi");
         assert!(!team_file_exists(&home, "alpha"));
@@ -264,13 +259,25 @@ mod tests {
         assert_eq!(v["members"][0]["agentType"], "team-lead");
         assert_eq!(v["members"][0]["joinedAt"], 123);
         assert_eq!(v["members"][0]["subscriptions"], serde_json::json!([]));
-
-        // Cleanup removes the team dir (also create the tasks dir to prove that
-        // path is removed too).
-        std::fs::create_dir_all(task_dir(&home, "alpha")).unwrap();
-        cleanup_team_directories(&home, "alpha");
-        assert!(!team_file_exists(&home, "alpha"));
-        assert!(!team_dir(&home, "alpha").exists());
-        assert!(!task_dir(&home, "alpha").exists());
+    }
+    #[test]
+    fn removing_a_member_preserves_current_backend_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = team_file_path(tmp.path(), "session-12345678");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let value = serde_json::json!({"name":"session-12345678","members":[{"agentId":"team-lead@session-12345678","name":"team-lead","backendType":"in-process","color":"red"},{"agentId":"worker@session-12345678","name":"worker","backendType":"tmux"}]});
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert!(remove_team_member(
+            tmp.path(),
+            "session-12345678",
+            "worker@session-12345678",
+            "worker"
+        )
+        .unwrap());
+        let remaining: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(remaining["members"].as_array().unwrap().len(), 1);
+        assert_eq!(remaining["members"][0]["backendType"], "in-process");
+        assert_eq!(remaining["members"][0]["color"], "red");
     }
 }

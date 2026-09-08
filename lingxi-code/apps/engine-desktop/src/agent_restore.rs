@@ -194,6 +194,7 @@ mod tests {
 
     fn request() -> SubagentSpawnRequest {
         SubagentSpawnRequest {
+            teammate_color: None,
             subagent_type: "general-purpose".into(),
             prompt: "the original prompt".into(),
             observer: None,

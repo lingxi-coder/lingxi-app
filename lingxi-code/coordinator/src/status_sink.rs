@@ -75,10 +75,18 @@ impl CoordinatorStatusSink {
 const FAILURE_REASON_CAP: usize = 200;
 
 impl CoordinatorStatusSink {
+    async fn publish_worker(&self, task_id: &str) {
+        if let Some(worker) = self.team.find_by_task_id(task_id).await {
+            self.output
+                .emit_coordinator_worker(&crate::handle::worker_info(worker))
+                .await;
+        }
+    }
+
     /// Apply `status` to the worker linked to `task_id` and push the freshly
     /// computed active-worker count downstream. A status arriving during the
     /// activation→link window is retained by [`TeamRegistry`] and replayed when
-    /// `TeamCreate` publishes the task id; genuinely unknown ids remain a no-op.
+    /// the teammate spawner publishes the task id; genuinely unknown ids remain a no-op.
     async fn apply(&self, task_id: &str, worker_status: WorkerStatus) {
         if !self
             .team
@@ -87,6 +95,8 @@ impl CoordinatorStatusSink {
         {
             return;
         }
+
+        self.publish_worker(task_id).await;
 
         // PUSH the freshly-computed active-worker count + team name downstream.
         let active = self.team.active_worker_count().await;
@@ -99,6 +109,21 @@ impl CoordinatorStatusSink {
 
 #[async_trait]
 impl TaskStatusSink for CoordinatorStatusSink {
+    async fn set_teammate_idle(&self, task_id: &str) {
+        self.apply(task_id, WorkerStatus::Idle).await;
+    }
+
+    async fn set_awaiting_plan_approval(&self, task_id: &str, awaiting: bool) {
+        self.team
+            .set_awaiting_plan_approval(task_id, awaiting)
+            .await;
+        self.publish_worker(task_id).await;
+        let team = self.team.team_name().await;
+        self.output
+            .emit_coordinator_status(self.team.active_worker_count().await, team.as_deref())
+            .await;
+    }
+
     async fn set_status(&self, task_id: &str, status: TaskStatus) {
         let Some(worker_status) = Self::worker_status_for(status) else {
             return;
@@ -131,6 +156,7 @@ mod tests {
     #[derive(Default)]
     struct SpyOutput {
         statuses: StdMutex<Vec<(u32, Option<String>)>>,
+        workers: StdMutex<Vec<platform_api::team_registry::WorkerInfo>>,
     }
 
     impl SpyOutput {
@@ -161,6 +187,9 @@ mod tests {
         ) {
         }
         async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
+        async fn emit_coordinator_worker(&self, worker: &platform_api::team_registry::WorkerInfo) {
+            self.workers.lock().unwrap().push(worker.clone());
+        }
         async fn emit_coordinator_status(&self, active_workers: u32, team: Option<&str>) {
             self.statuses
                 .lock()
@@ -185,6 +214,19 @@ mod tests {
 
     fn status_of(workers: &[crate::team_registry::WorkerAgent]) -> &WorkerStatus {
         &workers[0].status
+    }
+
+    #[tokio::test]
+    async fn persistent_turn_idle_and_wake_push_live_roster() {
+        let (team, output, sink) = fixture("persistent").await;
+        sink.set_status("persistent", TaskStatus::Running).await;
+        sink.set_teammate_idle("persistent").await;
+        assert_eq!(team.list().await[0].status, WorkerStatus::Idle);
+        sink.set_status("persistent", TaskStatus::Running).await;
+        let rows = output.workers.lock().unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].status, "idle");
+        assert_eq!(rows[2].status, "working");
     }
 
     #[tokio::test]
@@ -331,5 +373,17 @@ mod tests {
         sink.set_status("task-1", TaskStatus::Running).await;
 
         assert_eq!(out.last(), Some((1, Some("alpha".to_string()))));
+    }
+    #[tokio::test]
+    async fn plan_wait_changes_push_roster_rows_without_overwriting_idle() {
+        let (_team, output, sink) = fixture("task-plan").await;
+        sink.set_awaiting_plan_approval("task-plan", true).await;
+        sink.set_awaiting_plan_approval("task-plan", false).await;
+        let rows = output.workers.lock().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].awaiting_plan_approval);
+        assert!(!rows[1].awaiting_plan_approval);
+        assert_eq!(rows[0].status, "idle");
+        assert_eq!(rows[1].status, "idle");
     }
 }

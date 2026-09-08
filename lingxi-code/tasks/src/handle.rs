@@ -154,6 +154,7 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
         _ => None,
     };
     TaskRecord {
+        awaiting_plan_approval: matches!(s, TaskState::InProcessTeammate(teammate) if teammate.awaiting_plan_approval && !b.status.is_terminal()),
         task_id: b.id.clone(),
         task_type: task_type_to_wire(b.task_type).to_string(),
         status: status_to_wire(b.status).to_string(),
@@ -254,6 +255,8 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             prompt: String::new(),
         },
         TaskType::InProcessTeammate => TaskSpawnInput::InProcessTeammate {
+            spawn_request: None,
+            inheritance: None,
             agent_id: protocol::AgentId::nil(),
             name: String::new(),
             team_name: String::new(),

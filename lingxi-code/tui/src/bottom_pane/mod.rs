@@ -3131,6 +3131,7 @@ mod tests {
             },
         ]);
         pane.set_running_agents(vec![RunningAgentStatus {
+            awaiting_plan_approval: false,
             id: "a123".into(),
             task_type: "local_agent".into(),
             agent_type: "Explore".into(),

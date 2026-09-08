@@ -453,6 +453,7 @@ pub fn lower_doctor_report(report: &DoctorReport) -> DoctorReportDto {
 #[must_use]
 pub fn lower_task_record(rec: &TaskRecord) -> TaskRowDto {
     TaskRowDto {
+        awaiting_plan_approval: rec.awaiting_plan_approval,
         task_id: rec.task_id.clone(),
         task_type: rec.task_type.clone(),
         status: lower_task_status(&rec.status),
@@ -488,7 +489,11 @@ pub fn lower_worker_agent(info: &WorkerInfo) -> CoordinatorWorkerDto {
         agent_id: info.agent_id.clone(),
         name: info.name.clone(),
         agent_type: info.agent_type.clone(),
-        status: info.status.clone(),
+        status: if info.awaiting_plan_approval {
+            "awaiting approval".into()
+        } else {
+            info.status.clone()
+        },
     }
 }
 
@@ -1002,6 +1007,32 @@ mod tests {
     /// polling client sees the same "Running panels 2/3" text the Agent-tool
     /// path forwards as `subagent_activity`.
     #[test]
+    fn plan_approval_is_typed_and_does_not_replace_task_lifecycle_or_description() {
+        let mut record = TaskRecord {
+            awaiting_plan_approval: true,
+            status: "running".into(),
+            description: "Review API".into(),
+            ..Default::default()
+        };
+        let pending = lower_task_record(&record);
+        assert!(pending.awaiting_plan_approval);
+        assert_eq!(pending.status, TaskStatusDto::Running);
+        assert_eq!(pending.description, "Review API");
+        for _decision in ["approved", "rejected"] {
+            record.awaiting_plan_approval = false;
+            assert!(!lower_task_record(&record).awaiting_plan_approval);
+        }
+        let mut worker = WorkerInfo {
+            awaiting_plan_approval: true,
+            status: "idle".into(),
+            ..Default::default()
+        };
+        assert_eq!(lower_worker_agent(&worker).status, "awaiting approval");
+        worker.awaiting_plan_approval = false;
+        assert_eq!(lower_worker_agent(&worker).status, "idle");
+    }
+
+    #[test]
     fn task_record_stage_lowers_onto_task_row_stage() {
         let with_stage = TaskRecord {
             task_id: "fu3f9zk2x".to_string(),
@@ -1033,6 +1064,7 @@ mod tests {
         // The `WorkerInfo` projection (T17) lowers 1:1 onto the roster DTO, which
         // itself mirrors the TUI `WorkerRow {agent_id, name, agent_type, status}`.
         let info = WorkerInfo {
+            awaiting_plan_approval: false,
             agent_id: "agent:00000000-0000-0000-0000-000000000001".to_string(),
             agent_type: "explorer".to_string(),
             name: "alpha".to_string(),

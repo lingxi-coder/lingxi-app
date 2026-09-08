@@ -348,7 +348,12 @@ impl Tool for FileWriteTool {
         // One snapshot of trusted_dirs for both containment checks below (the
         // parent-ancestor probe and the final target check), so they can't
         // straddle a swap between the two calls.
-        let trusted_dirs = self.ctx.trusted_dirs();
+        let mut trusted_dirs = self.ctx.trusted_dirs();
+        if let Some(root) =
+            platform_api::teammate_plan::own_plan_file_root(ctx.agent_id.as_ref(), &path)
+        {
+            trusted_dirs.push(root);
+        }
 
         // Parents are created unconditionally, matching claude-code, but the
         // creation is performed only after permission/containment checks by the
@@ -1397,5 +1402,66 @@ mod tests {
             std::fs::read_to_string(tmp.path().join("relative.txt")).unwrap(),
             "hello"
         );
+    }
+    struct PlanFileOwner(String);
+    #[async_trait]
+    impl platform_api::teammate_plan::TeammatePlanRequester for PlanFileOwner {
+        fn writable_plan_path(&self) -> Option<&str> {
+            Some(&self.0)
+        }
+        async fn submit(&self, _: Value) -> Result<Value, String> {
+            unreachable!()
+        }
+    }
+    #[tokio::test]
+    async fn teammate_writes_only_own_plan_outside_workspace_and_rejects_symlink() {
+        let workspace = TempDir::new().unwrap();
+        let plans = TempDir::new().unwrap();
+        let root = plans.path().canonicalize().unwrap();
+        let target = root.join("own-plan.md");
+        let sibling = root.join("sibling.md");
+        let (ctx, _) = make_ctx(&workspace);
+        let tool = FileWriteTool::new(ctx);
+        let agent = protocol::AgentId::new();
+        let owner: Arc<dyn platform_api::teammate_plan::TeammatePlanRequester> =
+            Arc::new(PlanFileOwner(target.to_string_lossy().into_owned()));
+        platform_api::teammate_plan::register(agent, &owner);
+        let context = || {
+            let mut ctx = fresh_ctx();
+            ctx.agent_id = Some(agent);
+            ctx
+        };
+        tool.call(
+            json!({"file_path":target,"content":"approved scope"}),
+            context(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "approved scope");
+        assert!(tool
+            .call(
+                json!({"file_path":sibling,"content":"not allowed"}),
+                context(),
+                fresh_tx()
+            )
+            .await
+            .is_err());
+        assert!(!sibling.exists());
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&target).unwrap();
+            std::fs::write(&sibling, "protected").unwrap();
+            std::os::unix::fs::symlink(&sibling, &target).unwrap();
+            assert!(tool
+                .call(
+                    json!({"file_path":target,"content":"no"}),
+                    context(),
+                    fresh_tx()
+                )
+                .await
+                .is_err());
+            assert_eq!(std::fs::read_to_string(&sibling).unwrap(), "protected");
+        }
     }
 }

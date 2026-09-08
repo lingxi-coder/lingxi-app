@@ -120,6 +120,10 @@ pub struct SubagentSpawnRequest {
     /// default-provider path).
     #[serde(default)]
     pub model_profile: Option<String>,
+    /// Session-assigned teammate display color. Internal runtime metadata,
+    /// populated by identity reservation rather than model-facing Agent input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teammate_color: Option<String>,
     /// Whether to run the spawned agent in the background (TS `run_in_background`,
     /// `AgentTool.tsx:87` `z.boolean().optional()`). claude treats it as a
     /// boolean predicate (`run_in_background === true`), so it is collapsed to a
@@ -150,13 +154,11 @@ pub struct SubagentSpawnRequest {
     /// fields above, and defaulted so legacy serialized payloads still parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator_agent_id: Option<AgentId>,
-    /// Permission mode for a spawned teammate (TS `mode`, e.g. `"plan"`).
-    /// DEPRECATED and ignored as of claude-code 2.1.212: the Agent/Task entrypoint
-    /// no longer threads the call param here (it always sends `None`), and the
-    /// spawner no longer applies it. A spawned subagent inherits the parent's live
-    /// permission mode (claude `_=yn(l),y=_.mode`), with the agent-definition
-    /// frontmatter as the only override. The field is retained for back-compat with
-    /// callers that still populate it, but the spawner does not consult it.
+    /// Internal inherited permission mode for a persistent teammate. The Agent
+    /// tool resolves this from the live parent mode, never from its deprecated
+    /// model-facing `mode` parameter. The teammate runtime uses it for plan-mode
+    /// requirements and child permission inheritance; ordinary Agent calls send
+    /// `None` and inherit through their regular runtime context.
     #[serde(default)]
     pub mode: Option<String>,
     /// Isolation mode (`"worktree"` | `"remote"`, TS `isolation`). `worktree`
@@ -839,6 +841,22 @@ pub fn max_subagent_spawn_depth() -> u32 {
 /// Spawn-a-subagent seam used by `AgentTool`.
 #[async_trait]
 pub trait SubagentSpawner: Send + Sync {
+    /// Whether this session exposes its implicit teammate team.
+    fn teammate_enabled(&self) -> bool {
+        false
+    }
+
+    /// Launch a persistent member of this session's implicit team.
+    async fn spawn_teammate(
+        &self,
+        _request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+    ) -> Result<crate::team_spawn::TeammateLaunch, SubagentSpawnError> {
+        Err(SubagentSpawnError::Internal(
+            "Teammate spawner is not wired".into(),
+        ))
+    }
+
     /// Allocate a subagent slot, pump its state machine to completion, and
     /// return the terminal [`SubagentResult`].
     ///

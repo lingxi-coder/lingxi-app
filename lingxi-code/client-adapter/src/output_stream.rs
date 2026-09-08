@@ -477,6 +477,14 @@ impl OutputStream for AdapterOutputStream {
     /// so there is NO transport change — only the trait override lights up the
     /// previously-no-op (T08) default. `team` maps `Option<&str>` →
     /// `Option<String>` 1:1 (no placeholder substitution).
+    async fn emit_coordinator_worker(&self, worker: &platform_api::team_registry::WorkerInfo) {
+        self.sink
+            .emit(ClientEvent::CoordinatorWorker {
+                worker: crate::lowering::lower_worker_agent(worker),
+            })
+            .await;
+    }
+
     async fn emit_coordinator_status(&self, active_workers: u32, team: Option<&str>) {
         self.sink
             .emit(ClientEvent::CoordinatorStatus {

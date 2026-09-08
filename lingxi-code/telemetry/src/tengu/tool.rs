@@ -243,22 +243,6 @@ pub const SEND_MESSAGE_COMPLETED: &str = "tengu_tool_send_message_completed";
 /// `tengu_tool_send_message_failed` — `SendMessageTool` errored (M4-05).
 pub const SEND_MESSAGE_FAILED: &str = "tengu_tool_send_message_failed";
 
-// ===== M4-06 Team tools (6 events, 2 tools × 3 lifecycle stages) =============
-
-/// `tengu_tool_team_create_started` — `TeamCreateTool` began (M4-06).
-pub const TEAM_CREATE_STARTED: &str = "tengu_tool_team_create_started";
-/// `tengu_tool_team_create_completed` — `TeamCreateTool` wrote config (M4-06).
-pub const TEAM_CREATE_COMPLETED: &str = "tengu_tool_team_create_completed";
-/// `tengu_tool_team_create_failed` — `TeamCreateTool` errored (M4-06).
-pub const TEAM_CREATE_FAILED: &str = "tengu_tool_team_create_failed";
-
-/// `tengu_tool_team_delete_started` — `TeamDeleteTool` began (M4-06).
-pub const TEAM_DELETE_STARTED: &str = "tengu_tool_team_delete_started";
-/// `tengu_tool_team_delete_completed` — `TeamDeleteTool` removed dir (M4-06).
-pub const TEAM_DELETE_COMPLETED: &str = "tengu_tool_team_delete_completed";
-/// `tengu_tool_team_delete_failed` — `TeamDeleteTool` errored (M4-06).
-pub const TEAM_DELETE_FAILED: &str = "tengu_tool_team_delete_failed";
-
 // ===== M4-07 MCP + LSP tools (13 new events) ================================
 //
 // Note: `MCP_COMPLETED` and `MCP_FAILED` are already declared above (M3-06
@@ -405,7 +389,7 @@ pub const FILE_READ_LIMITS_OVERRIDE: &str = "tengu_file_read_limits_override";
 /// entry came from a Read, `"edit_write"` when it came from an Edit/Write.
 pub const FILE_READ_REREAD: &str = "tengu_file_read_reread";
 
-/// Order-locked array of all 134 names; consumed by `tengu::ALL_EVENT_NAMES`.
+/// Order-locked array of tool event names; consumed by `tengu::ALL_EVENT_NAMES`.
 /// M3-06 locked the first 40 (less the 6 grep/glob events later removed to
 /// match claude-code, which emits no `tengu_tool_grep_*`/`tengu_tool_glob_*`);
 /// M4-02 appended 9 (powershell/repl/sleep);
@@ -504,13 +488,6 @@ pub(crate) const NAMES: &[&str] = &[
     SEND_MESSAGE_STARTED,
     SEND_MESSAGE_COMPLETED,
     SEND_MESSAGE_FAILED,
-    // M4-06 Team tools (6 events, 2 tools × 3 lifecycle stages)
-    TEAM_CREATE_STARTED,
-    TEAM_CREATE_COMPLETED,
-    TEAM_CREATE_FAILED,
-    TEAM_DELETE_STARTED,
-    TEAM_DELETE_COMPLETED,
-    TEAM_DELETE_FAILED,
     // M4-07 MCP + LSP tools (13 NEW events; MCP_COMPLETED + MCP_FAILED are
     // M3-06 baseline above and already in this array — they cover MCPTool's
     // completed/failed lifecycle states).
@@ -940,41 +917,6 @@ mod m4_05_agent_task_event_tests {
         for n in NAMES {
             assert!(seen.insert(*n), "duplicate event name in NAMES: {n}");
         }
-    }
-}
-
-#[cfg(test)]
-mod m4_06_team_event_tests {
-    use super::*;
-
-    #[test]
-    fn team_constants_are_locked() {
-        assert_eq!(TEAM_CREATE_STARTED, "tengu_tool_team_create_started");
-        assert_eq!(TEAM_CREATE_COMPLETED, "tengu_tool_team_create_completed");
-        assert_eq!(TEAM_CREATE_FAILED, "tengu_tool_team_create_failed");
-        assert_eq!(TEAM_DELETE_STARTED, "tengu_tool_team_delete_started");
-        assert_eq!(TEAM_DELETE_COMPLETED, "tengu_tool_team_delete_completed");
-        assert_eq!(TEAM_DELETE_FAILED, "tengu_tool_team_delete_failed");
-    }
-
-    #[test]
-    fn names_array_contains_exactly_6_team_events() {
-        let team_events = [
-            TEAM_CREATE_STARTED,
-            TEAM_CREATE_COMPLETED,
-            TEAM_CREATE_FAILED,
-            TEAM_DELETE_STARTED,
-            TEAM_DELETE_COMPLETED,
-            TEAM_DELETE_FAILED,
-        ];
-        for n in team_events {
-            assert!(NAMES.contains(&n), "NAMES missing M4-06 event: {n}");
-        }
-        let count = NAMES
-            .iter()
-            .filter(|n| n.starts_with("tengu_tool_team_"))
-            .count();
-        assert_eq!(count, 6, "expected exactly 6 tengu_tool_team_* events");
     }
 }
 

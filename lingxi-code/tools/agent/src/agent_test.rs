@@ -3520,6 +3520,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // The agentId is dynamic; reconstruct the exact expected model_content
         // around it, pinning both changed strings byte-for-byte.
         let agent_id = result.data["agentId"].as_str().expect("agentId string");
+        assert!(
+            !agent_id.contains(':'),
+            "model-facing ID must be directly routable without a compatibility prefix"
+        );
+        assert!(protocol::AgentId::parse_prefixed(agent_id).is_some());
         // 2.1.223 @251729190 (`n` prefix) + @251730184 (else-arm `o` tail):
         // the prefix gained the don't-fabricate sentence, the tail gained the
         // still-running sentence, both new vs the old 2.1.207 lock.
@@ -4384,6 +4389,180 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
+    #[tokio::test]
+    async fn implicit_teammate_dispatch_ignores_legacy_inputs_and_returns_oracle_text() {
+        let spawner = arc_mock_spawner();
+        spawner.enable_teammates();
+        let tool = AgentTool::new(wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        let result = tool
+            .call(
+                json!({"description":"scout", "prompt":"inspect", "name":"scout",
+            "team_name":"ignored", "mode":"plan"}),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["status"], "teammate_spawned");
+        assert_eq!(result.model_content.as_deref(), Some("Spawned successfully. (This tool result is internal metadata — never quote or paste any part of it, including the ID below, into a user-facing reply.)\nagent_id: scout@session\nname: scout\nThe agent is now running and will receive instructions via mailbox."));
+        let calls = spawner.invocations();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].request.team_name, None);
+        assert_eq!(calls[0].request.mode.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn agent_names_reject_normalized_reserved_names_and_current_agent_ids() {
+        for name in [
+            "MAIN",
+            "team-lead",
+            "Team-Lead",
+            "a0123456789abcdef",
+            "aworker-0123456789abcdef",
+            "a_-0123456789ABCDEF",
+        ] {
+            assert!(validate_agent_name(name).is_err(), "reserved name {name}");
+        }
+        for name in [
+            "agent",
+            "a0123456789abcde",
+            "a0123456789abcdef0",
+            "a-0123456789abcdef",
+            "a1234567890abcdefg",
+        ] {
+            assert!(validate_agent_name(name).is_ok(), "ordinary name {name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn teammate_inherits_parent_plan_mode_and_resolved_model_ignoring_input_mode() {
+        let spawner = arc_mock_spawner();
+        spawner.enable_teammates();
+        spawner.script_selection(platform_api::subagent_spawn::SelectedAgentMeta {
+            agent_type: "general-purpose".into(),
+            resolved_model: "resolved-model-id".into(),
+            ..Default::default()
+        });
+        let mut builtin = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        builtin.permission_mode = permission::PermissionMode::Plan;
+        let tool = AgentTool::new(builtin);
+        let mut context = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        context.cwd = Some(std::path::PathBuf::from("/parent/current-repo"));
+        tool.call(json!({"description":"scout", "prompt":"inspect", "name":"scout", "mode":"bypassPermissions", "model":"haiku"}),
+            context, fresh_tx()).await.unwrap();
+        let calls = spawner.invocations();
+        assert_eq!(calls[0].request.mode.as_deref(), Some("plan"));
+        assert_eq!(calls[0].request.model.as_deref(), Some("resolved-model-id"));
+        assert_eq!(
+            calls[0].request.cwd.as_deref(),
+            Some("/parent/current-repo")
+        );
+    }
+
+    #[tokio::test]
+    async fn implicit_team_routing_requires_name_and_no_explicit_cwd_or_isolation() {
+        for (enabled, extra) in [
+            (false, json!({"name":"scout"})),
+            (true, json!({})),
+            (true, json!({"name":"scout","cwd":"/work"})),
+            (true, json!({"name":"scout","isolation":"remote"})),
+        ] {
+            let spawner = arc_mock_spawner();
+            if enabled {
+                spawner.enable_teammates();
+            }
+            let tool = AgentTool::new(wired_ctx(
+                spawner.clone(),
+                arc_mock_task_registry(),
+                arc_mock_mailbox(),
+                arc_mock_budget(u64::MAX),
+            ));
+            let mut input =
+                json!({"description":"scout", "prompt":"inspect", "team_name":"ignored"});
+            input
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let result = tool
+                .call(
+                    input,
+                    fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert_ne!(result.data["status"], "teammate_spawned");
+            assert_eq!(spawner.invocations()[0].request.team_name, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn teammate_nested_name_denial_precedes_background_denial() {
+        let tool = AgentTool::new(wired_ctx(
+            arc_mock_spawner(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        for (name, expected) in [(Some("child"), "Teammates cannot spawn other teammates — the team roster is flat. To spawn a subagent instead, omit the `name` parameter."),
+            (None, "In-process teammates cannot spawn background agents. Use run_in_background=false for synchronous subagents.")] {
+            let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+            ctx.agent_name = Some("scout".into());
+            ctx.team_name = Some("session".into());
+            let mut input = json!({"description":"child", "prompt":"go", "run_in_background":true});
+            if let Some(name) = name { input["name"] = json!(name); }
+            let error = tool.call(input, ctx, fresh_tx()).await.unwrap_err();
+            assert!(matches!(error, ToolError::InvalidInput(ref text) if text == expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn in_process_teammates_default_to_sync_and_reject_background_frontmatter() {
+        for background in [false, true] {
+            let spawner = arc_mock_spawner();
+            spawner.script_selection(platform_api::subagent_spawn::SelectedAgentMeta {
+                agent_type: "general-purpose".into(),
+                background,
+                ..Default::default()
+            });
+            let tool = AgentTool::new(wired_ctx(
+                spawner.clone(),
+                arc_mock_task_registry(),
+                arc_mock_mailbox(),
+                arc_mock_budget(u64::MAX),
+            ));
+            let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+            ctx.agent_name = Some("scout".into());
+            ctx.team_name = Some("session".into());
+            let result = tool
+                .call(
+                    json!({"description":"child", "prompt":"go"}),
+                    ctx,
+                    fresh_tx(),
+                )
+                .await;
+            if background {
+                assert!(
+                    matches!(result, Err(ToolError::InvalidInput(ref text)) if text == "In-process teammates cannot spawn background agents. Agent 'general-purpose' has background: true in its definition.")
+                );
+                assert!(spawner.invocations().is_empty());
+            } else {
+                assert_eq!(result.unwrap().data["status"], "completed");
+                assert!(!spawner.invocations()[0].request.run_in_background);
+            }
+        }
+    }
+
     // The new params thread into the spawn request.
     #[tokio::test]
     async fn spawn_request_carries_new_parity_params() {
@@ -4421,7 +4600,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             "an explicit family override must not be pinned to the inherited provider"
         );
         assert_eq!(req.name.as_deref(), Some("scout"));
-        assert_eq!(req.team_name.as_deref(), Some("alpha"));
+        assert_eq!(req.team_name, None);
         // (parity 2.1.212) The `mode` call param is DEPRECATED and ignored — it is
         // accepted on the wire but NEVER threaded into the spawn request, so the
         // child inherits the parent's live permission mode instead.
@@ -5467,7 +5646,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // claude finalize shape: status/prompt/agentId/agentType/content/totals/usage.
         assert_eq!(data["status"], "completed");
         assert_eq!(data["prompt"], "do it");
-        assert_eq!(data["agentId"], child_id.to_string());
+        assert_eq!(data["agentId"], child_id.as_uuid().to_string());
+        assert_eq!(
+            protocol::AgentId::parse_prefixed(data["agentId"].as_str().unwrap()),
+            Some(child_id)
+        );
         assert_eq!(data["agentType"], "general-purpose");
         assert_eq!(
             data["content"],
@@ -5512,7 +5695,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert_eq!(
             mc,
             format!(
-                "the answer\nagentId: {child_id} (use SendMessage with to: '{child_id}', summary: '<5-10 word recap>' to continue this agent)\n<usage>subagent_tokens: 42\ntool_uses: 3\nduration_ms: 1234</usage>"
+                "the answer\nagentId: {child_id} (use SendMessage with to: '{child_id}', summary: '<5-10 word recap>' to continue this agent)\n<usage>subagent_tokens: 42\ntool_uses: 3\nduration_ms: 1234</usage>",
+                child_id = child_id.as_uuid(),
             )
         );
     }

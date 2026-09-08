@@ -66,3 +66,6 @@ pub use tool_trait::*;
 pub use worktree_session::{
     new_worktree_session_cell, WorktreeSession, WorktreeSessionCell, WorktreeStatePersister,
 };
+
+/// Shared current SendMessage schema, prose, and input coercion.
+pub mod send_message_contract;

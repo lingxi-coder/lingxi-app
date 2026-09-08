@@ -21,8 +21,6 @@ use std::path::Path;
 
 use crate::tool_send_message::SEND_MESSAGE_TOOL_NAME;
 use crate::tool_synthetic_output::SYNTHETIC_OUTPUT_TOOL_NAME;
-use crate::tool_team_create::TEAM_CREATE_TOOL_NAME;
-use crate::tool_team_delete::TEAM_DELETE_TOOL_NAME;
 
 /// `AGENT_TOOL_NAME` (`tools/agent` crate `AGENT_TOOL_NAME = "Agent"`). Lifted
 /// as a literal here to avoid a coordinator → tools/agent dependency edge just
@@ -58,12 +56,7 @@ const ASYNC_AGENT_ALLOWED_TOOLS: &[&str] = &[
 
 /// Mirror of `INTERNAL_WORKER_TOOLS` (`coordinatorMode.ts:29-34`): coordinator-
 /// internal tools that are filtered OUT of the worker-visible tools list.
-const INTERNAL_WORKER_TOOLS: &[&str] = &[
-    TEAM_CREATE_TOOL_NAME,
-    TEAM_DELETE_TOOL_NAME,
-    SEND_MESSAGE_TOOL_NAME,
-    SYNTHETIC_OUTPUT_TOOL_NAME,
-];
+const INTERNAL_WORKER_TOOLS: &[&str] = &[SEND_MESSAGE_TOOL_NAME, SYNTHETIC_OUTPUT_TOOL_NAME];
 
 /// The `simple`-mode worker-tools trio (`coordinatorMode.ts:89` — `[BASH,
 /// FILE_READ, FILE_EDIT]`). Sorted + comma-joined by the renderer.

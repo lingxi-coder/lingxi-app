@@ -4,8 +4,8 @@
 //! claude-code references that justify each row. Unknown tool names default
 //! to [`PromptDefault::DenyByDefault`] (fail-closed).
 //!
-//! Aggregate, oracle-parity set: 23 `DenyByDefault` (destructive / external
-//! side-effects), 21 `AllowByDefault` (read-only or agent-local) = 44 tools,
+//! Aggregate, oracle-parity set: 21 `DenyByDefault` (destructive / external
+//! side-effects), 21 `AllowByDefault` (read-only or agent-local) = 42 tools,
 //! plus one synthetic `<unknown>` fallback.
 //!
 //! LINGXI DIVERGENCE: 39 further rows with no oracle counterpart, reported by
@@ -44,7 +44,7 @@ static TOOL_DEFAULTS: OnceLock<HashMap<&'static str, PromptDefault>> = OnceLock:
 
 fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     use PromptDefault::{AllowByDefault, DenyByDefault};
-    let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(83);
+    let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(81);
 
     // Allow-by-default tools ([Y/n]) — 21 entries. (It said 20 while there
     // were 21, from before `ListAgents` was added; the count is asserted in
@@ -78,7 +78,7 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("TodoWrite", AllowByDefault);
     m.insert("ToolSearch", AllowByDefault);
 
-    // Deny-by-default tools ([y/N]) — 23 entries.
+    // Deny-by-default tools ([y/N]) — 21 entries.
     m.insert("Bash", DenyByDefault);
     m.insert("Edit", DenyByDefault);
     m.insert("EnterWorktree", DenyByDefault);
@@ -97,8 +97,6 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("TaskCreate", DenyByDefault);
     m.insert("TaskStop", DenyByDefault);
     m.insert("TaskUpdate", DenyByDefault);
-    m.insert("TeamCreate", DenyByDefault);
-    m.insert("TeamDelete", DenyByDefault);
     m.insert("WebFetch", DenyByDefault);
     m.insert("WebSearch", DenyByDefault);
     m.insert("Write", DenyByDefault);
@@ -226,9 +224,9 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("LocalAppBackgroundCancel", DenyByDefault);
     m.insert("LocalAppBackgroundRetry", DenyByDefault);
 
-    // 44 oracle-parity tools + 39 LingXi divergence rows (38 local-app
+    // 42 oracle-parity tools + 39 LingXi divergence rows (38 local-app
     // builtins + `Workflow`).
-    debug_assert_eq!(m.len(), 83, "tool defaults table must list all 83 tools");
+    debug_assert_eq!(m.len(), 81, "tool defaults table must list all 81 tools");
     m
 }
 
@@ -265,10 +263,10 @@ pub fn tool_default_row(name: &str) -> Option<PromptDefault> {
 /// could answer "does this ROW name a tool that still exists", because
 /// `TOOL_DEFAULTS` is a private `static` and only single-key lookups were
 /// exported. THREE guards do constrain this table's composition, not one:
-/// `init_defaults`'s own `debug_assert_eq!(m.len(), 83, "tool defaults table
-/// must list all 83 tools")`, the test
+/// `init_defaults`'s own `debug_assert_eq!(m.len(), 81, "tool defaults table
+/// must list all 81 tools")`, the test
 /// `table_splits_into_the_parity_set_and_the_mobile_divergence`'s
-/// `oracle == 44` / `divergence == 39`, and the test
+/// `oracle == 42` / `divergence == 39`, and the test
 /// `the_counts_in_this_module_doc_are_the_counts_in_the_table`'s four
 /// hand-bumped bucket counts (23/21/15/24). NONE of those seven numbers moves
 /// for the orphan this function exists for, because every one of them counts
@@ -434,6 +432,13 @@ mod tests {
     }
 
     #[test]
+    fn removed_team_tools_have_no_permission_rows() {
+        let defaults = init_defaults();
+        assert!(!defaults.contains_key("TeamCreate"));
+        assert!(!defaults.contains_key("TeamDelete"));
+    }
+
+    #[test]
     fn unknown_tool_defaults_to_deny() {
         assert_eq!(tool_default("DoesNotExist"), PromptDefault::DenyByDefault);
         assert_eq!(tool_default(""), PromptDefault::DenyByDefault);
@@ -447,7 +452,7 @@ mod tests {
         // without being recorded as a divergence, which a single total hides.
         let oracle = m.keys().filter(|k| !is_divergence_tool(k)).count();
         let divergence = m.keys().filter(|k| is_divergence_tool(k)).count();
-        assert_eq!(oracle, 44, "oracle-parity tool count changed");
+        assert_eq!(oracle, 42, "oracle-parity tool count changed");
         assert_eq!(divergence, 39, "divergence row count changed");
         assert_eq!(m.len(), oracle + divergence);
         // `Workflow` must be booked as a divergence, never as oracle parity:
@@ -468,7 +473,7 @@ mod tests {
         };
         assert_eq!(
             count(false, PromptDefault::DenyByDefault),
-            23,
+            21,
             "oracle deny"
         );
         assert_eq!(

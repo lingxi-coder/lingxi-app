@@ -798,6 +798,7 @@ fn check_status_variants_round_trip() {
 fn task_row_round_trips() {
     let ev = ClientEvent::TaskRow {
         task: TaskRowDto {
+            awaiting_plan_approval: false,
             task_id: "b1234abcd".to_string(),
             task_type: "background".to_string(),
             status: TaskStatusDto::Running,

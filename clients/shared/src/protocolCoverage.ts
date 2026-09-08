@@ -245,6 +245,7 @@ export const ALL_MANAGED_LOCAL_APP_MCP_STATUS_TYPES: Record<ManagedLocalAppMcpSt
  * missing"; a literal key `TaskRowDto` doesn't have fails on the excess key.
  */
 export const ALL_TASK_ROW_DTO_KEYS: Record<keyof TaskRowDto, true> = {
+  awaiting_plan_approval: true,
   task_id: true,
   task_type: true,
   status: true,

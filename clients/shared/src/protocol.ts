@@ -1011,6 +1011,8 @@ export type TaskStatusDto =
 
 /** One task row (listings.rs `TaskRowDto`). */
 export interface TaskRowDto {
+  /** The teammate is waiting for its leader's plan decision. */
+  awaiting_plan_approval?: boolean;
   task_id: string;
   task_type: string;
   status: TaskStatusDto;

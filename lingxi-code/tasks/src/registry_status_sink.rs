@@ -59,6 +59,12 @@ impl TaskStatusSink for RegistryStatusSink {
         }
     }
 
+    async fn set_awaiting_plan_approval(&self, task_id: &str, awaiting: bool) {
+        if let Some(registry) = self.registry.get() {
+            let _ = registry.set_awaiting_plan_approval(task_id, awaiting).await;
+        }
+    }
+
     async fn set_exit_code(&self, task_id: &str, exit_code: i32) {
         // (M8 cc2.1.198) `local_bash` write-through: the worker reports the
         // child's exit code just before its terminal `set_status`; without

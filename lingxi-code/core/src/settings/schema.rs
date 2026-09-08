@@ -116,6 +116,23 @@ pub fn strategy_for(field: &str) -> Option<MergeStrategy> {
         .find_map(|(k, v)| (*k == field).then_some(*v))
 }
 
+/// Execution backend requested for teammates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum TeammateMode {
+    /// Choose the current terminal backend automatically.
+    #[serde(rename = "auto")]
+    Auto,
+    /// Run inside the existing process.
+    #[serde(rename = "in-process")]
+    InProcess,
+    /// Require terminal panes.
+    #[serde(rename = "tmux")]
+    Tmux,
+    /// Require the native iTerm2 backend.
+    #[serde(rename = "iterm2")]
+    ITerm2,
+}
+
 /// Mirror of claude-code's `settings.json` shape.
 ///
 /// All fields `Option<T>` so a partial file (one layer of the 4-layer stack)
@@ -134,6 +151,10 @@ pub fn strategy_for(field: &str) -> Option<MergeStrategy> {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsJson {
+    /// Terminal backend used for experimental agent-team members.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teammate_mode: Option<TeammateMode>,
+
     /// Forward-compat: claude-code @ 6a25909 does NOT emit this; we keep it
     /// typed so a `$schema` reference injected by IDE tooling round-trips
     /// instead of being stripped on re-serialize.

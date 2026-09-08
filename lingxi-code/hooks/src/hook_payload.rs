@@ -417,21 +417,21 @@ pub struct TaskCreatedPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct TeammateIdlePayload {
-    pub hook_event_name: HookEventNameTeammateIdle,
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
-    /// See [`PreToolUsePayload::prompt_id`].
+    /// Oracle 2.1.263 Sa: present only when the scratchpad feature has a path.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub scratchpad_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub agent_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub effort: Option<EffortLevel>,
+    // E_n spreads Sa before adding the event marker. It does not pass a tool
+    // context to Sa, so agent_id and effort are absent for this event.
+    pub hook_event_name: HookEventNameTeammateIdle,
     pub teammate_name: String,
     pub team_name: String,
 }

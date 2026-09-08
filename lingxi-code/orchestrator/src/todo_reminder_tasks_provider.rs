@@ -11,7 +11,7 @@
 //! 2. in-process teammate `teamName` — N/A at the orchestrator seam (no tool
 //!    `ToolUseContext` here), so skipped;
 //! 3. `LINGXI_TEAM_NAME` env (`zp()`, process-based teammate);
-//! 4. leader team name ([`platform_api::team_registry::leader_team_name`]);
+//! 4. leader team name ([`platform_api::team_registry::leader_team_name_for_session`]);
 //! 5. live orchestrator session id fallback.
 //!
 //! This is the SAME resolution the V2 `Task*` tools use ([`tool_task`]
@@ -32,7 +32,7 @@ pub struct TodoStoreReminderTasks {
 
 impl TodoStoreReminderTasks {
     /// Construct the store-backed provider. Stateless — it resolves the active
-    /// list id at call time so a mid-session `TeamCreate` / env change is
+    /// list id at call time so a session initialization / env change is
     /// honored.
     #[must_use]
     pub fn new() -> Self {
@@ -62,9 +62,10 @@ impl TodoStoreReminderTasks {
                 return team.to_string_lossy().into_owned();
             }
         }
-        // 4. Leader team name (set by `TeamCreate`).
+        // 4. Leader team name belonging to this session.
         if let Some(team) =
-            platform_api::team_registry::leader_team_name().filter(|t| !t.is_empty())
+            platform_api::team_registry::leader_team_name_for_session(&session_id.to_string())
+                .filter(|t| !t.is_empty())
         {
             return team;
         }
@@ -116,7 +117,6 @@ mod tests {
         let prev_config_dir = std::env::var_os(branding::CONFIG_DIR_ENV);
         std::env::remove_var("LINGXI_TASK_LIST_ID");
         std::env::remove_var("LINGXI_TEAM_NAME");
-        platform_api::team_registry::clear_leader_team_name();
 
         let temp = tempfile::tempdir().expect("tempdir");
         std::env::set_var(branding::CONFIG_DIR_ENV, temp.path());
@@ -157,7 +157,6 @@ mod tests {
         } else {
             std::env::remove_var(branding::CONFIG_DIR_ENV);
         }
-        platform_api::team_registry::clear_leader_team_name();
     }
 
     #[tokio::test]
@@ -167,11 +166,45 @@ mod tests {
         let prev_team = std::env::var_os("LINGXI_TEAM_NAME");
         std::env::set_var("LINGXI_TASK_LIST_ID", "explicit-list");
         std::env::set_var("LINGXI_TEAM_NAME", "env-team");
-        platform_api::team_registry::set_leader_team_name("leader-team");
+        let session_id = protocol::SessionId::new();
+        platform_api::team_registry::set_leader_team_name_for_session(
+            &session_id.to_string(),
+            Some("leader-team"),
+        );
 
         assert_eq!(
-            TodoStoreReminderTasks::resolve_list_id(protocol::SessionId::new()),
+            TodoStoreReminderTasks::resolve_list_id(session_id),
             "explicit-list"
+        );
+
+        std::env::remove_var("LINGXI_TASK_LIST_ID");
+        assert_eq!(
+            TodoStoreReminderTasks::resolve_list_id(session_id),
+            "env-team"
+        );
+        std::env::remove_var("LINGXI_TEAM_NAME");
+        assert_eq!(
+            TodoStoreReminderTasks::resolve_list_id(session_id),
+            "leader-team"
+        );
+        let other = protocol::SessionId::new();
+        platform_api::team_registry::set_leader_team_name_for_session(
+            &other.to_string(),
+            Some("other-team"),
+        );
+        assert_eq!(TodoStoreReminderTasks::resolve_list_id(other), "other-team");
+        assert_eq!(
+            TodoStoreReminderTasks::resolve_list_id(session_id),
+            "leader-team"
+        );
+        platform_api::team_registry::set_leader_team_name_for_session(&other.to_string(), None);
+        platform_api::team_registry::set_leader_team_name_for_session(
+            &session_id.to_string(),
+            None,
+        );
+        assert_eq!(
+            TodoStoreReminderTasks::resolve_list_id(session_id),
+            session_id.to_string()
         );
 
         if let Some(v) = prev {
@@ -184,6 +217,5 @@ mod tests {
         } else {
             std::env::remove_var("LINGXI_TEAM_NAME");
         }
-        platform_api::team_registry::clear_leader_team_name();
     }
 }

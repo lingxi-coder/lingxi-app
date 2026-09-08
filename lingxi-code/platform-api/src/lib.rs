@@ -93,6 +93,7 @@ pub mod swarm;
 pub mod task_registry;
 pub mod team_registry;
 pub mod team_spawn;
+pub mod teammate_worker;
 pub mod tool_invoker;
 pub mod traffic_mode;
 pub mod tts;
@@ -230,6 +231,8 @@ pub use task_registry::{
 };
 pub use team_registry::{TeamRegistryHandle, WorkerInfo};
 pub use team_spawn::{TeamSpawnError, TeamSpawnSeam};
+/// Shared cancellation handle for host-initiated interactive turns.
+pub use tokio_util::sync::CancellationToken;
 pub use tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 pub use tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
 pub use voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
@@ -237,3 +240,5 @@ pub use web_search::{WebSearchConfigProvider, WebSearchRuntimeConfig};
 #[allow(unused_imports)]
 pub use worktree::*;
 pub use worktree::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
+
+pub mod teammate_plan;

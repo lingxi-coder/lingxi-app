@@ -20,6 +20,21 @@ pub trait SwarmBackend: Send + Sync {
         agent_id: &AgentId,
         position: PanePosition,
     ) -> Result<PaneId, SwarmError>;
+    /// Resolve coordinates for an externally running teammate pane.
+    async fn pane_metadata(
+        &self,
+        _pane: &PaneId,
+    ) -> Result<crate::team_spawn::PaneLaunchMetadata, SwarmError> {
+        Err(SwarmError::Unsupported)
+    }
+    /// Dispatch a validated worker launch command to an existing pane.
+    async fn send_command_to_pane(&self, _pane: &PaneId, _command: &str) -> Result<(), SwarmError> {
+        Err(SwarmError::Unsupported)
+    }
+    /// Stop and remove a teammate pane without destroying the leader session.
+    async fn kill_pane(&self, _pane: &PaneId) -> Result<(), SwarmError> {
+        Err(SwarmError::Unsupported)
+    }
     /// Tear down a swarm session.
     async fn destroy_swarm(&self, handle: SwarmHandle) -> Result<(), SwarmError>;
     /// Whether the backend is available on the current platform.
@@ -71,6 +86,6 @@ pub enum SwarmError {
     #[error("swarm not supported on this platform")]
     Unsupported,
     /// Tmux-specific (or general backend) error.
-    #[error("tmux error: {0}")]
+    #[error("{0}")]
     Tmux(String),
 }

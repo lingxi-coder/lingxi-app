@@ -107,6 +107,8 @@ pub struct CommandCatalogEntry {
 /// agents arrive as full snapshots from the CLI's task-registry poller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningAgentStatus {
+    /// The teammate is waiting for its leader's plan decision.
+    pub awaiting_plan_approval: bool,
     /// Stable agent/task id (or the foreground tool-use id before launch).
     pub id: String,
     /// Claude task-registry type used by the compact footer summarizer.
@@ -198,6 +200,9 @@ pub enum TurnEvent {
     /// Fired SYNCHRONOUSLY before the orchestrator future is awaited so
     /// the UI shows the spinner immediately on Enter.
     TurnStarted,
+    /// A host-started turn (for example, a teammate message waking the leader)
+    /// carries its cancellation token because no composer submit created one.
+    TurnStartedWithCancel(platform_api::CancellationToken),
     /// Fired when the orchestrator returns. Carries the [`TurnOutcome`].
     TurnEnded(TurnOutcome),
     /// Updated session-cumulative cost, formatted as `$0.0000` (4-decimal

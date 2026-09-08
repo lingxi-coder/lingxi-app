@@ -1864,7 +1864,6 @@ dependencies = [
  "tool-shell",
  "tool-skill",
  "tool-task",
- "tool-team",
  "tool-ui",
  "tool-web",
  "tool-workflow",
@@ -6867,7 +6866,6 @@ dependencies = [
  "tool-shell",
  "tool-skill",
  "tool-task",
- "tool-team",
  "tool-ui",
  "tool-web",
  "tool-worktree",
@@ -7568,26 +7566,6 @@ dependencies = [
  "serde_json",
  "task-store",
  "telemetry",
- "thiserror 2.0.18",
- "tokio",
- "tool-api",
-]
-
-[[package]]
-name = "tool-team"
-version = "0.12.0"
-dependencies = [
- "async-trait",
- "branding",
- "core",
- "once_cell",
- "permission",
- "platform-api",
- "protocol",
- "serde",
- "serde_json",
- "telemetry",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tool-api",

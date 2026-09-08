@@ -783,6 +783,24 @@ pub struct Argv {
     #[arg(long = "session-id", value_name = "uuid")]
     pub session_id: Option<String>,
 
+    /// Private pane-worker launch context (contains no provider credentials).
+    #[arg(long, hide = true)]
+    pub teammate_launch_file: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    pub agent_id: Option<String>,
+    #[arg(long, hide = true)]
+    pub agent_name: Option<String>,
+    #[arg(long, hide = true)]
+    pub team_name: Option<String>,
+    #[arg(long, hide = true)]
+    pub agent_color: Option<String>,
+    #[arg(long, hide = true)]
+    pub parent_session_id: Option<String>,
+    #[arg(long, hide = true)]
+    pub agent_type: Option<String>,
+    #[arg(long, hide = true)]
+    pub plan_mode_required: bool,
+
     /// Set a display name for this session (shown in the prompt box, /resume
     /// picker, and terminal title)
     #[arg(short = 'n', long = "name", value_name = "name")]

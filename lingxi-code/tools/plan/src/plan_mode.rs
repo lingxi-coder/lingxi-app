@@ -462,6 +462,35 @@ impl Tool for ExitPlanModeTool {
         let started_at = Instant::now();
         self.emit_started(&invocation_id).await;
 
+        if let Some(requester) = ctx
+            .agent_id
+            .as_ref()
+            .and_then(platform_api::teammate_plan::requester)
+        {
+            let mut data = match requester.submit(input).await {
+                Ok(data) => data,
+                Err(message) => {
+                    self.emit_failed(
+                        &invocation_id,
+                        "leader_review_submission_failed",
+                        started_at.elapsed().as_millis() as u64,
+                    )
+                    .await;
+                    return Err(ToolError::InvalidInput(message));
+                }
+            };
+            let model_content = data
+                .as_object_mut()
+                .and_then(|object| object.remove("model_content"))
+                .and_then(|value| value.as_str().map(str::to_owned));
+            self.emit_completed(&invocation_id, started_at.elapsed().as_millis() as u64)
+                .await;
+            return Ok(ToolCallResult {
+                model_content,
+                ..ToolCallResult::from_data(data)
+            });
+        }
+
         let session = ctx.session.as_ref().ok_or_else(|| {
             ToolError::Internal(
                 "ExitPlanMode: session not wired into ToolUseContext (M4-04 contract)".into(),
@@ -1009,5 +1038,192 @@ mod tests {
             .expect_err("denied approval must not exit plan mode");
         assert!(matches!(error, ToolError::PermissionDenied(message) if message == "user denied"));
         assert!(session.lock().await.plan_mode);
+    }
+    struct RegisteredReviewRequester;
+    #[async_trait]
+    impl platform_api::teammate_plan::TeammatePlanRequester for RegisteredReviewRequester {
+        async fn submit(&self, _: Value) -> Result<Value, String> {
+            Ok(
+                json!({"awaitingLeaderApproval":true,"requestId":"review-1","model_content":"Your plan has been submitted to the team lead for approval."}),
+            )
+        }
+    }
+    #[tokio::test]
+    async fn teammate_review_uses_registered_requester_and_keeps_model_text_out_of_data() {
+        let (mut bctx, sink, session, mut context) = make_ctx();
+        bctx.permission_gate = None;
+        bctx.bus.attach_sink(sink.clone()).await;
+        session.lock().await.plan_mode = true;
+        let tool = ExitPlanModeTool::new(bctx);
+        let id = AgentId::new();
+        context.agent_id = Some(id);
+        let requester: Arc<dyn platform_api::teammate_plan::TeammatePlanRequester> =
+            Arc::new(RegisteredReviewRequester);
+        platform_api::teammate_plan::register(id, &requester);
+        let result = tool.call(json!({}), context, fresh_tx()).await.unwrap();
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some("Your plan has been submitted to the team lead for approval.")
+        );
+        assert_eq!(result.data["awaitingLeaderApproval"], true);
+        assert!(result.data.get("model_content").is_none());
+        assert!(
+            session.lock().await.plan_mode,
+            "teammate review must not change leader session mode"
+        );
+        assert!(sink
+            .events()
+            .await
+            .iter()
+            .any(|event| event.name == EXIT_PLAN_MODE_COMPLETED));
+    }
+    /// Unlike the interactive ExitPlanMode fixture, this transport never
+    /// supplies a user approval for ordinary file writes.
+    struct UnattendedPlanGate;
+    #[async_trait]
+    impl platform_api::permission_gate::PermissionGate for UnattendedPlanGate {
+        async fn check(
+            &self,
+            _: &str,
+            _: &Value,
+        ) -> platform_api::permission_gate::PermissionDecision {
+            platform_api::permission_gate::PermissionDecision::Deny {
+                reason: "No unattended permission approval".into(),
+            }
+        }
+    }
+
+    struct DiskPlanRequester(String);
+    #[async_trait]
+    impl platform_api::teammate_plan::TeammatePlanRequester for DiskPlanRequester {
+        fn writable_plan_path(&self) -> Option<&str> {
+            Some(&self.0)
+        }
+        async fn submit(&self, _: Value) -> Result<Value, String> {
+            let plan = std::fs::read_to_string(&self.0).map_err(|error| error.to_string())?;
+            Ok(
+                json!({"plan":plan,"awaitingLeaderApproval":true,"requestId":"disk-review-1","model_content":"Your plan has been submitted to the team lead for approval.\n\nDo NOT proceed until you receive approval."}),
+            )
+        }
+    }
+    struct PlanDiskWrite;
+    #[async_trait]
+    impl Tool for PlanDiskWrite {
+        fn name(&self) -> &str {
+            "Write"
+        }
+        fn input_schema(&self) -> &Value {
+            &EXIT_INPUT_SCHEMA
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1000
+        }
+        fn is_concurrency_safe(&self, _: &Value) -> bool {
+            false
+        }
+        fn is_read_only(&self, _: &Value) -> bool {
+            false
+        }
+        async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::Other {
+                    reason: "test filesystem write".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: PermissionMetadata::default(),
+            }
+        }
+        async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+            String::new()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            input: Value,
+            _: ToolUseContext,
+            _: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            std::fs::write(
+                input["file_path"].as_str().unwrap(),
+                input["content"].as_str().unwrap(),
+            )
+            .unwrap();
+            Ok(ToolCallResult::from_data(json!({"written":true})))
+        }
+    }
+    #[tokio::test]
+    async fn registry_plan_file_write_then_exit_keeps_submission_text_and_data() {
+        use platform_api::ToolInvoker;
+        let id = AgentId::new();
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("lingxi-plan-invoker-{}", id.as_uuid()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("plan.md");
+        let owner: Arc<dyn platform_api::teammate_plan::TeammatePlanRequester> =
+            Arc::new(DiskPlanRequester(path.to_string_lossy().into_owned()));
+        platform_api::teammate_plan::register(id, &owner);
+        let (bctx, _, _, _) = make_ctx();
+        let mut registry = tool_api::registry::ToolRegistry::new();
+        registry.register_builtin(Arc::new(PlanDiskWrite));
+        registry.register_builtin(Arc::new(ExitPlanModeTool::new(bctx)));
+        let policy = permission::PermissionPolicy::new(permission::PermissionMode::Plan);
+        let gate = Arc::new(permission::PolicyPermissionGate::new(
+            Arc::new(policy),
+            Arc::new(UnattendedPlanGate),
+        ));
+        let invoker = tool_api::tool_invoker_impl::RegistryToolInvoker::new(Arc::new(registry))
+            .with_gate(gate);
+        let context = || platform_api::tool_invoker::SubagentInvocationContext {
+            parent_agent_id: Some(id),
+            origin_session_id: None,
+            agent_name: Some("planner".into()),
+            team_name: Some("team".into()),
+            is_async: true,
+            is_non_interactive_session: true,
+            can_show_permission_prompts: false,
+            cwd: None,
+            tool_use_id: None,
+            assistant_message_id: None,
+            depth: 1,
+            observer: None,
+            parent_model: None,
+            parent_model_profile: None,
+            mode_override: Some("plan".into()),
+            request_source: None,
+            frozen_command_denies: vec![],
+        };
+        invoker
+            .invoke(
+                "Write",
+                json!({"file_path":path,"content":"Inspect, test, implement"}),
+                context(),
+            )
+            .await
+            .unwrap();
+        assert!(invoker
+            .invoke(
+                "Write",
+                json!({"file_path":root.join("other.md"),"content":"no"}),
+                context()
+            )
+            .await
+            .is_err());
+        let result = invoker
+            .invoke_detailed("ExitPlanMode", json!({}), context(), None)
+            .await
+            .unwrap();
+        assert_eq!(result.data["plan"], "Inspect, test, implement");
+        assert_eq!(result.data["awaitingLeaderApproval"], true);
+        assert!(result.data.get("model_content").is_none());
+        assert_eq!(result.model_content.as_deref(), Some("Your plan has been submitted to the team lead for approval.\n\nDo NOT proceed until you receive approval."));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

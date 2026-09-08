@@ -15,7 +15,7 @@
 //!   (`handleBroadcast`, `SendMessageTool.ts:191-266`).
 //! - [`Address::Name`]: a bare teammate name, resolved to an [`AgentId`] via
 //!   [`TeamRegistry::find_by_name`].
-//! - [`Address::AgentId`]: a raw UUID / `agent:<uuid>` display form (the
+//! - [`Address::AgentId`]: a raw UUID display form (the
 //!   coordinator's `<task-id>` surface — kept so the existing
 //!   continue-a-worker-by-id flow still works).
 //! - [`Address::SessionId`]: the canonical local cross-session UUID address.
@@ -37,7 +37,7 @@
 //! no `bus` to emit on (per the implementation brief, telemetry is optional for
 //! these tools).
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -73,13 +73,6 @@ const TEAM_LEAD_NAME: &str = "team-lead";
 /// `maxResultSizeChars` in the TS tool is `100_000`.
 const MAX_RESULT_SIZE_CHARS: usize = 100_000;
 
-/// Lazily-built input schema cache.
-///
-/// `std::sync::OnceLock` is used instead of `once_cell::sync::Lazy` so the
-/// file stays self-contained: the coordinator crate does not directly depend
-/// on `once_cell`.
-static INPUT_SCHEMA: OnceLock<Value> = OnceLock::new();
-
 /// A parsed `to` recipient address.
 ///
 /// Replaces the former `parse_recipient` (UUID-only) with the full TS
@@ -91,7 +84,7 @@ pub enum Address {
     Broadcast,
     /// A bare teammate name (resolved via [`TeamRegistry::find_by_name`]).
     Name(String),
-    /// A raw agent id (UUID or `agent:<uuid>`).
+    /// A raw host agent UUID.
     AgentId(AgentId),
     /// A live local session id (`session:<uuid>`).
     SessionId(String),
@@ -154,9 +147,8 @@ pub fn parse_address(to: &str) -> Address {
     if trimmed.starts_with('/') {
         return Address::Uds(trimmed.to_string());
     }
-    // `other` scheme: a raw agent id (UUID / `agent:<uuid>`) or a teammate name.
-    let candidate = trimmed.strip_prefix("agent:").unwrap_or(trimmed);
-    if let Ok(uuid) = Uuid::parse_str(candidate) {
+    // `other` scheme: a raw host agent UUID or a teammate name.
+    if let Ok(uuid) = Uuid::parse_str(trimmed) {
         return Address::AgentId(AgentId::from_uuid(uuid));
     }
     Address::Name(trimmed.to_string())
@@ -174,50 +166,6 @@ fn semantic_boolean(v: Option<&Value>) -> Option<bool> {
     }
 }
 
-/// Build the JSON Schema for `SendMessage` inputs.
-fn build_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["to", "message"],
-        "properties": {
-            "to": {
-                "type": "string",
-                "description": "Recipient: teammate name, session:<uuid>, \"*\" for broadcast, \"uds:<socket-path>\" local peer, \"bridge:<session-id>\" Remote Control peer"
-            },
-            "summary": {
-                "type": "string",
-                "description": "A 5-10 word summary shown as a preview in the UI (required when message is a string)"
-            },
-            "message": {
-                "oneOf": [
-                    {
-                        "type": "string",
-                        "description": "Plain text message content"
-                    },
-                    {
-                        "type": "object",
-                        "required": ["type"],
-                        "properties": {
-                            "type": {
-                                "type": "string",
-                                "enum": [
-                                    "shutdown_request",
-                                    "shutdown_response",
-                                    "plan_approval_response"
-                                ]
-                            },
-                            "request_id": { "type": "string" },
-                            "approve": { "type": "boolean" },
-                            "reason": { "type": "string" },
-                            "feedback": { "type": "string" }
-                        }
-                    }
-                ]
-            }
-        }
-    })
-}
-
 /// Coordinator-only `SendMessage` tool.
 ///
 /// Holds an `Arc<TeamRegistry>` so it can resolve the recipient worker's
@@ -225,9 +173,11 @@ fn build_input_schema() -> Value {
 /// optional [`TeamSpawnSeam`] so an approved in-process shutdown can signal the
 /// responding worker's backing task to cancel (TS `handleShutdownApproval`'s
 /// `abortController.abort()`, `SendMessageTool.ts:348-366`).
+#[derive(Clone)]
 pub struct SendMessageTool {
     team: Arc<TeamRegistry>,
     spawn_seam: Option<Arc<dyn TeamSpawnSeam>>,
+    preview: fn(&str, usize) -> String,
 }
 
 impl SendMessageTool {
@@ -235,10 +185,11 @@ impl SendMessageTool {
     /// an approved shutdown routes its response but does not signal cancellation
     /// of the backing task — used by tests that don't exercise that path).
     #[must_use]
-    pub fn new(team: Arc<TeamRegistry>) -> Self {
+    pub fn new(team: Arc<TeamRegistry>, preview: fn(&str, usize) -> String) -> Self {
         Self {
             team,
             spawn_seam: None,
+            preview,
         }
     }
 
@@ -258,6 +209,9 @@ impl SendMessageTool {
 
     /// Resolve the model-visible sender label carried by the teammate envelope.
     async fn sender_name(&self, ctx: &ToolUseContext) -> String {
+        if let Some(name) = &ctx.agent_name {
+            return name.clone();
+        }
         let Some(agent_id) = ctx.agent_id else {
             return TEAM_LEAD_NAME.to_string();
         };
@@ -315,6 +269,15 @@ impl SendMessageTool {
         Ok(())
     }
 
+    /// The mailbox also indexes ordinary named subagents and task addresses
+    /// which are intentionally absent from the persistent teammate roster.
+    async fn registered_recipient(&self, name: &str) -> Option<AgentId> {
+        if let Some(id) = self.team.mailbox_router.resolve_name(name).await {
+            return Some(id);
+        }
+        self.team.mailbox_router.resolve_alias(name).await
+    }
+
     /// Resolve a non-broadcast [`Address`] to a concrete recipient [`AgentId`].
     ///
     /// `Name` → registry lookup; `AgentId` → as-is. `Uds`/`Bridge`/`Broadcast`
@@ -322,14 +285,12 @@ impl SendMessageTool {
     async fn resolve_recipient(&self, addr: &Address) -> Result<AgentId, ToolError> {
         match addr {
             Address::AgentId(id) => Ok(*id),
-            Address::Name(name) => self
-                .team
-                .find_by_name(name)
-                .await
-                .map(|w| w.agent_id)
-                .ok_or_else(|| {
-                    ToolError::InvalidInput(format!("SendMessage: no such teammate: {name}"))
-                }),
+            Address::Name(name) if name.eq_ignore_ascii_case(TEAM_LEAD_NAME) => {
+                Ok(self.team.coordinator_id)
+            }
+            Address::Name(name) => self.registered_recipient(name).await.ok_or_else(|| {
+                ToolError::InvalidInput(format!("SendMessage: no such teammate: {name}"))
+            }),
             Address::Broadcast
             | Address::SessionId(_)
             | Address::InvalidSession(_)
@@ -425,12 +386,16 @@ impl SendMessageTool {
         // generateRequestId('shutdown', target) (utils/agentId.ts:62-68).
         let request_id = generate_request_id("shutdown", to_label);
 
-        let content = serde_json::to_string(&json!({
-            "type": "shutdown_request",
-            "requestId": request_id,
-            "reason": reason,
-        }))
-        .map_err(|e| ToolError::Internal(format!("SendMessage: {e}")))?;
+        let now = SystemTime::now();
+        let from = self.sender_name(ctx).await;
+        let timestamp = tool_api::send_message_contract::protocol_timestamp(now);
+        let content = tool_api::send_message_contract::shutdown_request(
+            &request_id,
+            &from,
+            reason.as_deref(),
+            &timestamp,
+        )
+        .to_string();
 
         let msg = TeammateMessage {
             from: Self::sender_from(ctx),
@@ -462,26 +427,76 @@ impl SendMessageTool {
         reason: Option<String>,
         ctx: &ToolUseContext,
     ) -> Result<ToolCallResult, ToolError> {
-        let leader = self.team.coordinator_id;
-        let payload = if approve {
-            json!({ "type": "shutdown_approved", "requestId": request_id })
-        } else {
-            json!({
-                "type": "shutdown_rejected",
-                "requestId": request_id,
-                "reason": reason,
-            })
-        };
-        let content = serde_json::to_string(&payload)
-            .map_err(|e| ToolError::Internal(format!("SendMessage: {e}")))?;
+        if !approve {
+            return self
+                .handle_shutdown_response_owned(request_id, false, reason, ctx)
+                .await;
+        }
+        // Stopping an in-process teammate aborts the runner that is awaiting
+        // this tool. The accepted response and departure transaction must have
+        // their own lifetime, including file-lock waits after the stop.
+        let owner = self.clone();
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            owner
+                .handle_shutdown_response_owned(request_id, true, reason, &ctx)
+                .await
+        })
+        .await
+        .map_err(|error| {
+            ToolError::Internal(format!("SendMessage: shutdown cleanup failed: {error}"))
+        })?
+    }
 
+    async fn handle_shutdown_response_owned(
+        &self,
+        request_id: String,
+        approve: bool,
+        reason: Option<String>,
+        ctx: &ToolUseContext,
+    ) -> Result<ToolCallResult, ToolError> {
+        let leader = self.team.coordinator_id;
+        let from = if ctx.agent_id.is_none() && ctx.agent_name.is_none() {
+            "teammate".to_owned()
+        } else {
+            self.sender_name(ctx).await
+        };
+        let worker = match ctx.agent_id {
+            Some(agent_id) => self.team.find_by_agent_id(&agent_id).await,
+            None => None,
+        };
+        let pane = if let (Some(seam), Some(worker)) = (&self.spawn_seam, &worker) {
+            seam.pane_metadata(&worker.task_id).await
+        } else {
+            None
+        };
+        let now = SystemTime::now();
+        let timestamp = tool_api::send_message_contract::protocol_timestamp(now);
+        let payload = if approve {
+            tool_api::send_message_contract::shutdown_approved(
+                &request_id,
+                &from,
+                &timestamp,
+                pane.as_ref().map(|pane| pane.pane_id.as_str()),
+                pane.as_ref()
+                    .map(|pane| pane.backend_type.as_str())
+                    .or_else(|| worker.as_ref().map(|_| "in-process")),
+            )
+        } else {
+            tool_api::send_message_contract::shutdown_rejected(
+                &request_id,
+                &from,
+                reason.as_deref().unwrap_or_default(),
+                &timestamp,
+            )
+        };
         let msg = TeammateMessage {
             from: Self::sender_from(ctx),
-            from_name: self.sender_name(ctx).await,
-            content,
+            from_name: from,
+            content: payload.to_string(),
             summary: None,
             message_id: tool_api::util::ids::ulid_or_uuid(),
-            timestamp: SystemTime::now(),
+            timestamp: now,
             request_id: Some(request_id.clone()),
         };
         self.route(&leader, msg).await?;
@@ -588,31 +603,46 @@ impl SendMessageTool {
         feedback: Option<String>,
         ctx: &ToolUseContext,
     ) -> Result<ToolCallResult, ToolError> {
+        let is_lead = ctx.agent_id == Some(self.team.coordinator_id)
+            || (ctx.agent_id.is_none() && ctx.agent_name.is_none());
+        if !is_lead {
+            let action = if approve { "approve" } else { "reject" };
+            return Err(ToolError::InvalidInput(format!("Only the team lead can {action} plans. Teammates cannot {action} their own or other plans.")));
+        }
         let to_id = self.resolve_recipient(addr).await?;
-        let payload = if approve {
-            json!({
-                "type": "plan_approval_response",
-                "requestId": request_id,
-                "approved": true,
-            })
+        let mode = self
+            .team
+            .permission_gate()
+            .await
+            .and_then(|gate| gate.permission_mode())
+            .unwrap_or_else(|| "default".into());
+        let mode = permission::permission_mode_from_cli_string(&mode);
+        let mode = if mode == permission::PermissionMode::Plan {
+            "default"
         } else {
-            json!({
-                "type": "plan_approval_response",
-                "requestId": request_id,
-                "approved": false,
-                "feedback": feedback.clone().unwrap_or_else(|| "Plan needs revision".into()),
-            })
+            mode.wire_str()
         };
-        let content = serde_json::to_string(&payload)
-            .map_err(|e| ToolError::Internal(format!("SendMessage: {e}")))?;
-
+        let now = SystemTime::now();
+        let timestamp = tool_api::send_message_contract::protocol_timestamp(now);
+        let rejection_feedback = feedback.as_deref().unwrap_or("Plan needs revision");
+        let payload = tool_api::send_message_contract::plan_response(
+            &request_id,
+            approve,
+            if approve {
+                feedback.as_deref()
+            } else {
+                Some(rejection_feedback)
+            },
+            &timestamp,
+            approve.then_some(mode),
+        );
         let msg = TeammateMessage {
-            from: Self::sender_from(ctx),
-            from_name: self.sender_name(ctx).await,
-            content,
+            from: MessageSender::Coordinator,
+            from_name: TEAM_LEAD_NAME.into(),
+            content: payload.to_string(),
             summary: None,
             message_id: tool_api::util::ids::ulid_or_uuid(),
-            timestamp: SystemTime::now(),
+            timestamp: now,
             request_id: Some(request_id.clone()),
         };
         self.route(&to_id, msg).await?;
@@ -624,7 +654,7 @@ impl SendMessageTool {
         } else {
             format!(
                 "Plan rejected for {to_label} with feedback: \"{}\"",
-                feedback.unwrap_or_else(|| "Plan needs revision".into())
+                (self.preview)(feedback.as_deref().unwrap_or("Plan needs revision"), 50)
             )
         };
         Ok(Self::ok(json!({
@@ -636,9 +666,15 @@ impl SendMessageTool {
 
     /// Wrap a JSON `data` blob in a successful [`ToolCallResult`].
     fn ok(data: Value) -> ToolCallResult {
+        let mut model_data = data.clone();
+        if let Some(object) = model_data.as_object_mut() {
+            object.remove("display");
+            object.remove("inlineHandback");
+        }
+        let model_content = Some(model_data.to_string());
         ToolCallResult {
             data,
-            model_content: None,
+            model_content,
             new_messages: Vec::new(),
             context_modifier: None,
             is_error: false,
@@ -664,7 +700,10 @@ impl Tool for SendMessageTool {
     }
 
     fn input_schema(&self) -> &Value {
-        INPUT_SCHEMA.get_or_init(build_input_schema)
+        tool_api::send_message_contract::schema(
+            platform_api::live_sessions::cross_session_messaging_enabled(),
+            platform_api::env::agent_swarms_enabled(),
+        )
     }
 
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
@@ -701,7 +740,7 @@ impl Tool for SendMessageTool {
     }
 
     fn search_hint(&self) -> Option<&str> {
-        Some("send messages to agent teammates (swarm protocol)")
+        Some("send messages to agent teammates")
     }
 
     fn should_defer(&self) -> bool {
@@ -730,18 +769,28 @@ impl Tool for SendMessageTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        // Condensed from `src/tools/SendMessageTool/prompt.ts` getPrompt().
-        concat!(
-            "# SendMessage\n\n",
-            "Continue an existing worker by sending a follow-up to its agent id ",
-            "or teammate name, or broadcast to all with \"*\".\n\n",
-            "```json\n",
-            "{\"to\": \"scout\", \"summary\": \"fix npe\", \"message\": \"Fix the null pointer...\"}\n",
-            "```\n\n",
-            "Your plain text output is NOT visible to other agents — to communicate, ",
-            "you MUST call this tool."
+        tool_api::send_message_contract::prompt(
+            platform_api::live_sessions::cross_session_messaging_enabled(),
+            platform_api::env::agent_swarms_enabled(),
         )
         .into()
+    }
+
+    fn coerce_input(&self, input: &Value) -> Option<tool_api::tool_trait::CoercedInput> {
+        tool_api::send_message_contract::coerce(input)
+    }
+
+    async fn validate_input(
+        &self,
+        input: &Value,
+        ctx: &ToolUseContext,
+    ) -> Result<(), tool_api::tool_trait::ValidationError> {
+        tool_api::send_message_contract::validate(
+            input,
+            platform_api::env::agent_swarms_enabled(),
+            ctx.agent_id.is_some() || ctx.agent_name.is_some(),
+        )
+        .map_err(tool_api::tool_trait::ValidationError)
     }
 
     // A faithful 1:1 port of the long TS `SendMessageTool.call`
@@ -754,6 +803,14 @@ impl Tool for SendMessageTool {
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        let input = tool_api::send_message_contract::coerce(&input)
+            .map_or(input.clone(), |coerced| coerced.input);
+        if input.get("to").and_then(Value::as_str) == Some("*") {
+            return Err(ToolError::InvalidInput(
+                "broadcast (to: \"*\") is no longer supported — send a message per recipient"
+                    .into(),
+            ));
+        }
         // --- Parse + validate `to` (validateInput, SendMessageTool.ts:604-718) ---
         let to = input
             .get("to")
@@ -763,7 +820,17 @@ impl Tool for SendMessageTool {
         if to.trim().is_empty() {
             return Err(ToolError::InvalidInput("to must not be empty".into()));
         }
-        let addr = parse_address(to);
+        // Reserved transport syntax must retain its validation even when a
+        // mailbox happens to have the same name. Bare local names/task IDs,
+        // including UUID-shaped aliases, resolve through the shared mailbox.
+        let parsed_address = parse_address(to);
+        let addr = if matches!(&parsed_address, Address::Name(_) | Address::AgentId(_))
+            && self.registered_recipient(to.trim()).await.is_some()
+        {
+            Address::Name(to.trim().to_owned())
+        } else {
+            parsed_address
+        };
         if let Address::InvalidSession(raw) = &addr {
             return Err(ToolError::InvalidInput(format!(
                 "SendMessage: invalid session address '{raw}'; expected session:<uuid>"
@@ -781,8 +848,7 @@ impl Tool for SendMessageTool {
         // `@` is reserved (one team per session) — bare name / "*" only.
         if to.contains('@') {
             return Err(ToolError::InvalidInput(
-                "to must be a bare teammate name or \"*\" — there is only one team per session"
-                    .into(),
+                "to must be a bare teammate name — there is only one team per session".into(),
             ));
         }
         if let Address::SessionId(session_id) = &addr {
@@ -808,20 +874,65 @@ impl Tool for SendMessageTool {
             _ => {}
         }
 
+        // Input-schema gating already ran; defensively preserve validation order
+        // before forwarding to another process or writing a mailbox.
+        tool_api::send_message_contract::validate(
+            &input,
+            true,
+            ctx.agent_id.is_some() || ctx.agent_name.is_some(),
+        )
+        .map_err(ToolError::InvalidInput)?;
+        if let Some(forwarder) = self.team.message_forwarder().await {
+            let forwarded = forwarder
+                .send_message(input.clone())
+                .await
+                .map_err(ToolError::Internal)?;
+            let mut result = Self::ok(forwarded.result);
+            result.is_error = forwarded.is_error;
+            return Ok(result);
+        }
+
         // --- Parse `message`: plain string or structured object -------------
         let message = input
             .get("message")
             .ok_or_else(|| ToolError::InvalidInput("SendMessage: missing 'message'".into()))?;
 
-        // String message: requires a non-empty summary; broadcast or DM.
+        // Plain messages derive their optional summary before routing.
         if let Value::String(s) = message {
-            let summary = input.get("summary").and_then(Value::as_str);
-            if summary.is_none_or(|s| s.trim().is_empty()) {
-                return Err(ToolError::InvalidInput(
-                    "summary is required when message is a string".into(),
+            if s.trim().is_empty() {
+                return Err(ToolError::InvalidInput("message must not be empty".into()));
+            }
+            if let Some(error) = tool_api::send_message_contract::plain_message_error(s) {
+                return Err(ToolError::InvalidInput(error.into()));
+            }
+            let summary = input
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            if matches!(&addr, Address::Name(name) if name.eq_ignore_ascii_case("main")) {
+                if ctx.agent_id.is_none() {
+                    return Ok(Self::ok(
+                        json!({"success":false,"message":"You are the main conversation — \"main\" addresses you. Send to a named agent instead."}),
+                    ));
+                }
+                self.route(
+                    &self.team.coordinator_id,
+                    TeammateMessage {
+                        from: Self::sender_from(&ctx),
+                        from_name: self.sender_name(&ctx).await,
+                        content: s.clone(),
+                        summary: Some(summary),
+                        message_id: tool_api::util::ids::ulid_or_uuid(),
+                        timestamp: SystemTime::now(),
+                        request_id: None,
+                    },
+                )
+                .await?;
+                return Ok(Self::ok(
+                    json!({"success":true,"message":"Message queued for the main conversation's next turn."}),
                 ));
             }
-            let summary = summary.expect("validated above").trim().to_string();
             return match addr {
                 Address::Broadcast => self.handle_broadcast(s.clone(), summary, &ctx).await,
                 Address::SessionId(session_id) => {
@@ -834,19 +945,43 @@ impl Tool for SendMessageTool {
                 }
                 ref a => {
                     let to_id = self.resolve_recipient(a).await?;
+                    if to_id == ctx.agent_id.unwrap_or(self.team.coordinator_id) {
+                        return Ok(Self::ok(json!({
+                            "success": false,
+                            "message": format!("'{to}' is this session's own address — a message or file sent there would only come back to this conversation; there is no one else at that address to send to."),
+                            "display": format!("Not sent — '{to}' is this session's own name."),
+                        })));
+                    }
+                    let message_id = tool_api::util::ids::ulid_or_uuid();
+                    let sender = self.sender_name(&ctx).await;
                     let msg = TeammateMessage {
                         from: Self::sender_from(&ctx),
-                        from_name: self.sender_name(&ctx).await,
+                        from_name: sender.clone(),
                         content: s.clone(),
-                        summary: Some(summary),
-                        message_id: tool_api::util::ids::ulid_or_uuid(),
+                        summary: Some(summary.clone()),
+                        message_id: message_id.clone(),
                         timestamp: SystemTime::now(),
                         request_id: None,
                     };
                     self.route(&to_id, msg).await?;
+                    let sender_color = if ctx
+                        .agent_id
+                        .is_some_and(|id| id != self.team.coordinator_id)
+                    {
+                        self.team.mailbox_router.teammate_color(&sender).await
+                    } else {
+                        None
+                    };
+                    let target_color = self.team.mailbox_router.teammate_color(to).await;
                     Ok(Self::ok(json!({
                         "success": true,
                         "message": format!("Message sent to {}'s inbox", display_target(to, a)),
+                        "msg_id": message_id,
+                        "routing": tool_api::send_message_contract::routing(
+                            &sender, sender_color.as_deref(),
+                            &format!("@{}", display_target(to, a)), target_color.as_deref(),
+                            Some(&summary), Some(&(self.preview)(s, 50)),
+                        ),
                     })))
                 }
             };
@@ -862,14 +997,14 @@ impl Tool for SendMessageTool {
         // structured messages cannot be broadcast (to: "*").
         if addr == Address::Broadcast {
             return Err(ToolError::InvalidInput(
-                "structured messages cannot be broadcast (to: \"*\")".into(),
+                "broadcast (to: \"*\") is no longer supported — send a message per recipient"
+                    .into(),
             ));
         }
 
         if matches!(addr, Address::SessionId(_)) {
             return Err(ToolError::InvalidInput(
-                "SendMessage: structured protocol messages cannot target session:<uuid>; use a team teammate address"
-                    .into(),
+                "structured messages cannot be sent cross-session — only plain text".into(),
             ));
         }
 
@@ -1016,6 +1151,18 @@ mod tests {
         c
     }
 
+    fn preview_ascii(text: &str, width: usize) -> String {
+        assert!(
+            text.is_ascii(),
+            "Unicode uses the host's production formatter"
+        );
+        if text.len() <= width {
+            text.into()
+        } else {
+            format!("{}…", &text[..width.saturating_sub(1)])
+        }
+    }
+
     fn make_registry() -> Arc<TeamRegistry> {
         Arc::new(TeamRegistry::new(AgentId::new()))
     }
@@ -1033,22 +1180,53 @@ mod tests {
         mailbox
     }
 
+    #[tokio::test]
+    async fn shared_mailbox_names_and_task_aliases_win_before_session_parsing() {
+        let team = make_registry();
+        let id = AgentId::new();
+        let inbox = observable_mailbox(&team, id).await;
+        team.mailbox_router
+            .register_name("ordinary-agent", id)
+            .await;
+        team.mailbox_router
+            .register_alias("task-ordinary", id)
+            .await;
+        let uuid_alias = protocol::SessionId::new().as_uuid().to_string();
+        team.mailbox_router.register_alias(&uuid_alias, id).await;
+        let tool = SendMessageTool::new(team, preview_ascii);
+        for address in ["ordinary-agent", "task-ordinary", uuid_alias.as_str()] {
+            let result = tool
+                .call(
+                    json!({"to":address,"message":"hello"}),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.data["success"], true);
+            let delivered = inbox.drain();
+            assert_eq!(delivered.len(), 1, "{address} must reach its local mailbox");
+            assert_eq!(delivered[0].content, "hello");
+        }
+    }
+
     #[test]
     fn name_matches_ts_constant() {
-        let tool = SendMessageTool::new(make_registry());
+        let tool = SendMessageTool::new(make_registry(), preview_ascii);
         assert_eq!(tool.name(), "SendMessage");
         assert_eq!(SEND_MESSAGE_TOOL_NAME, "SendMessage");
     }
 
     #[test]
-    fn schema_shape_matches_ts() {
-        let tool = SendMessageTool::new(make_registry());
-        let schema = tool.input_schema();
-        assert_eq!(schema["type"], "object");
-        assert_eq!(schema["required"], json!(["to", "message"]));
-        assert!(schema["properties"]["to"].is_object());
-        assert!(schema["properties"]["summary"].is_object());
-        assert!(schema["properties"]["message"]["oneOf"].is_array());
+    fn schema_shape_matches_shared_contract() {
+        let tool = SendMessageTool::new(make_registry(), preview_ascii);
+        assert_eq!(
+            tool.input_schema(),
+            tool_api::send_message_contract::schema(
+                platform_api::live_sessions::cross_session_messaging_enabled(),
+                platform_api::env::agent_swarms_enabled()
+            )
+        );
     }
 
     #[test]
@@ -1079,7 +1257,7 @@ mod tests {
         );
         assert_eq!(
             parse_address(&format!("agent:{}", id.as_uuid())),
-            Address::AgentId(id)
+            Address::Name(format!("agent:{}", id.as_uuid()))
         );
     }
 
@@ -1095,11 +1273,168 @@ mod tests {
 
     #[test]
     fn is_read_only_true_only_for_string_message() {
-        let tool = SendMessageTool::new(make_registry());
+        let tool = SendMessageTool::new(make_registry(), preview_ascii);
         assert!(tool.is_read_only(&json!({ "to": "x", "message": "hi" })));
         assert!(
             !tool.is_read_only(&json!({ "to": "x", "message": { "type": "shutdown_request" } }))
         );
+    }
+
+    #[tokio::test]
+    async fn dm_result_matches_oracle_serialization_and_actual_delivered_id() {
+        let registry = make_registry();
+        let agent = registry
+            .spawn_worker("explorer".into(), "scout".into(), "task".into())
+            .await
+            .unwrap();
+        let mailbox = observable_mailbox(&registry, agent).await;
+        let tool = SendMessageTool::new(registry, preview_ascii);
+        let body = "x".repeat(100);
+        let result = tool
+            .call(
+                json!({"to":"scout","summary":"inspect results","message":body}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        let delivered = mailbox.drain();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].content, "x".repeat(100));
+        let expected = format!(
+            "{{\"success\":true,\"message\":\"Message sent to scout's inbox\",\"msg_id\":{},\"routing\":{{\"sender\":\"team-lead\",\"target\":\"@scout\",\"summary\":\"inspect results\",\"content\":\"{}…\"}}}}",
+            json!(delivered[0].message_id), "x".repeat(49)
+        );
+        assert_eq!(result.model_content.as_deref(), Some(expected.as_str()));
+        assert_eq!(result.data.to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn main_routes_child_messages_to_the_leader_and_rejects_leader_self_send() {
+        let registry = make_registry();
+        let mailbox = observable_mailbox(&registry, registry.coordinator_id).await;
+        let agent = registry
+            .spawn_worker("explorer".into(), "scout".into(), "task".into())
+            .await
+            .unwrap();
+        let tool = SendMessageTool::new(registry, preview_ascii);
+        let result = tool
+            .call(
+                json!({"to":"main","message":"update"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some(
+                r#"{"success":false,"message":"You are the main conversation — \"main\" addresses you. Send to a named agent instead."}"#
+            )
+        );
+        assert!(mailbox.drain().is_empty());
+        let result = tool
+            .call(
+                json!({"to":"main","message":"update"}),
+                ctx_as(agent),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some(
+                r#"{"success":true,"message":"Message queued for the main conversation's next turn."}"#
+            )
+        );
+        assert_eq!(mailbox.drain()[0].content, "update");
+        let result = tool
+            .call(
+                json!({"to":"team-lead","message":"another update"}),
+                ctx_as(agent),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["success"], true);
+        assert_eq!(mailbox.drain()[0].content, "another update");
+    }
+
+    #[tokio::test]
+    async fn named_self_send_is_not_delivered() {
+        let registry = make_registry();
+        let agent = registry
+            .spawn_worker("explorer".into(), "scout".into(), "task".into())
+            .await
+            .unwrap();
+        let mailbox = observable_mailbox(&registry, agent).await;
+        let tool = SendMessageTool::new(registry, preview_ascii);
+        let result = tool
+            .call(
+                json!({"to":"scout","message":"update"}),
+                ctx_as(agent),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["success"], false);
+        assert_eq!(
+            result.data["display"],
+            "Not sent — 'scout' is this session's own name."
+        );
+        assert!(!result.model_content.unwrap().contains("display"));
+        assert!(mailbox.drain().is_empty());
+    }
+
+    #[test]
+    fn proxied_result_excludes_ui_only_fields_from_model_json() {
+        let result =
+            SendMessageTool::ok(json!({"success":true,"message":"sent","display":"UI label"}));
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some(r#"{"success":true,"message":"sent"}"#)
+        );
+        assert_eq!(result.data["display"], "UI label");
+    }
+
+    #[tokio::test]
+    async fn colors_follow_registered_teammate_identities_without_accepting_agent_prefix_alias() {
+        let registry = make_registry();
+        let sender = registry
+            .spawn_worker("e".into(), "scout".into(), "sender".into())
+            .await
+            .unwrap();
+        let target = registry
+            .spawn_worker("e".into(), "reviewer".into(), "target".into())
+            .await
+            .unwrap();
+        let mailbox = observable_mailbox(&registry, target).await;
+        registry.mailbox_router.set_color("scout", "blue").await;
+        registry.mailbox_router.set_color("reviewer", "green").await;
+        let tool = SendMessageTool::new(registry, preview_ascii);
+        let result = tool
+            .call(
+                json!({"to":"reviewer","message":"Finished"}),
+                ctx_as(sender),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.data["routing"].to_string(),
+            r#"{"sender":"scout","senderColor":"blue","target":"@reviewer","targetColor":"green","summary":"Finished","content":"Finished"}"#
+        );
+        assert_eq!(mailbox.drain().len(), 1);
+        let error = tool
+            .call(
+                json!({"to":format!("agent:{}",target.as_uuid()),"message":"Finished"}),
+                ctx_as(sender),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.model_facing_message().contains("no such teammate"));
+        assert!(mailbox.drain().is_empty());
     }
 
     #[tokio::test]
@@ -1111,7 +1446,7 @@ mod tests {
             .expect("spawn_worker must succeed");
         let mailbox = observable_mailbox(&registry, agent_id).await;
 
-        let tool = SendMessageTool::new(registry);
+        let tool = SendMessageTool::new(registry, preview_ascii);
         let input = json!({
             "to": agent_id.as_uuid().to_string(),
             "summary": "assign first task",
@@ -1139,7 +1474,7 @@ mod tests {
             .unwrap();
         let mailbox = observable_mailbox(&registry, agent_id).await;
 
-        let tool = SendMessageTool::new(registry);
+        let tool = SendMessageTool::new(registry, preview_ascii);
         // Case-insensitive name resolution.
         let input = json!({ "to": "scout", "summary": "go", "message": "begin" });
         let res = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap();
@@ -1153,63 +1488,10 @@ mod tests {
     #[tokio::test]
     async fn unknown_teammate_name_is_invalid_input() {
         let registry = make_registry();
-        let tool = SendMessageTool::new(registry);
+        let tool = SendMessageTool::new(registry, preview_ascii);
         let input = json!({ "to": "nobody", "summary": "x", "message": "y" });
         let err = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)), "got {err:?}");
-    }
-
-    #[tokio::test]
-    async fn broadcast_fans_out_to_all_but_self() {
-        let registry = make_registry();
-        let a = registry
-            .spawn_worker("e".into(), "alpha".into(), "t-a".into())
-            .await
-            .unwrap();
-        let b = registry
-            .spawn_worker("e".into(), "beta".into(), "t-b".into())
-            .await
-            .unwrap();
-        let c = registry
-            .spawn_worker("e".into(), "gamma".into(), "t-c".into())
-            .await
-            .unwrap();
-        let mb_a = observable_mailbox(&registry, a).await;
-        let mb_b = observable_mailbox(&registry, b).await;
-        let mb_c = observable_mailbox(&registry, c).await;
-
-        let tool = SendMessageTool::new(registry);
-        // alpha broadcasts → beta + gamma receive, alpha does not.
-        let input = json!({ "to": "*", "summary": "all hands", "message": "sync up" });
-        let res = tool.call(input, ctx_as(a), fresh_tx()).await.unwrap();
-        assert_eq!(res.data["success"], true);
-        let recipients = res.data["recipients"].as_array().unwrap();
-        assert_eq!(recipients.len(), 2, "self excluded: {recipients:?}");
-
-        assert!(
-            mb_a.drain().is_empty(),
-            "sender must not receive its own broadcast"
-        );
-        assert_eq!(mb_b.drain().len(), 1);
-        assert_eq!(mb_c.drain().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn broadcast_alone_reports_no_teammates() {
-        let registry = make_registry();
-        let solo = registry
-            .spawn_worker("e".into(), "solo".into(), "t".into())
-            .await
-            .unwrap();
-        let tool = SendMessageTool::new(registry);
-        let input = json!({ "to": "*", "summary": "hi", "message": "anyone?" });
-        let res = tool.call(input, ctx_as(solo), fresh_tx()).await.unwrap();
-        assert_eq!(res.data["success"], true);
-        assert_eq!(res.data["recipients"].as_array().unwrap().len(), 0);
-        assert_eq!(
-            res.data["message"],
-            "No teammates to broadcast to (you are the only team member)"
-        );
     }
 
     #[tokio::test]
@@ -1221,7 +1503,7 @@ mod tests {
             .unwrap();
         let mailbox = observable_mailbox(&registry, target).await;
 
-        let tool = SendMessageTool::new(registry);
+        let tool = SendMessageTool::new(registry, preview_ascii);
         let input = json!({
             "to": "victim",
             "message": { "type": "shutdown_request", "reason": "done" }
@@ -1241,13 +1523,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transport_scheme_aliases_cannot_bypass_address_validation() {
+        let registry = make_registry();
+        let id = AgentId::new();
+        let mailbox = observable_mailbox(&registry, id).await;
+        for alias in ["session:not-a-uuid", "uds:/tmp/private.sock", "bridge:peer"] {
+            registry.mailbox_router.register_alias(alias, id).await;
+        }
+        let tool = SendMessageTool::new(registry, preview_ascii);
+        for address in ["session:not-a-uuid", "uds:/tmp/private.sock", "bridge:peer"] {
+            assert!(
+                tool.call(
+                    json!({"to":address,"message":"hello"}),
+                    fresh_ctx(),
+                    fresh_tx()
+                )
+                .await
+                .is_err(),
+                "{address} must retain transport validation"
+            );
+        }
+        assert!(mailbox.drain().is_empty());
+    }
+
+    #[tokio::test]
     async fn malformed_session_address_is_not_routed_as_a_teammate_name() {
         let registry = make_registry();
         registry
             .spawn_worker("e".into(), "session:not-a-uuid".into(), "t".into())
             .await
             .unwrap();
-        let tool = SendMessageTool::new(registry);
+        let tool = SendMessageTool::new(registry, preview_ascii);
         let err = tool
             .call(
                 json!({"to": "session:not-a-uuid", "message": "hello", "summary": "hi"}),
@@ -1268,7 +1574,7 @@ mod tests {
     #[tokio::test]
     async fn structured_protocol_message_rejects_session_target() {
         let session_id = "11111111-2222-4333-8444-555555555555";
-        let tool = SendMessageTool::new(make_registry());
+        let tool = SendMessageTool::new(make_registry(), preview_ascii);
         let err = tool
             .call(
                 json!({
@@ -1283,7 +1589,7 @@ mod tests {
         match err {
             ToolError::InvalidInput(message) => assert_eq!(
                 message,
-                "SendMessage: structured protocol messages cannot target session:<uuid>; use a team teammate address"
+                "structured messages cannot be sent cross-session — only plain text"
             ),
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -1312,7 +1618,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SendMessageTool::new(make_registry());
+        let tool = SendMessageTool::new(make_registry(), preview_ascii);
         tool.call(
             json!({
                 "to": format!("session:{target_session}"),
@@ -1345,7 +1651,7 @@ mod tests {
             .await
             .unwrap();
 
-        let tool = SendMessageTool::new(registry);
+        let tool = SendMessageTool::new(registry, preview_ascii);
         // Approve. Must be addressed to "team-lead".
         let input = json!({
             "to": "team-lead",
@@ -1360,6 +1666,13 @@ mod tests {
         let body: Value = serde_json::from_str(&drained[0].content).unwrap();
         assert_eq!(body["type"], "shutdown_approved");
         assert_eq!(body["requestId"], "shutdown-1@worker");
+        assert_eq!(body["from"], "worker");
+        assert_eq!(body["backendType"], "in-process");
+        assert!(body.get("paneId").is_none());
+        assert_eq!(
+            body["timestamp"],
+            tool_api::send_message_contract::protocol_timestamp(drained[0].timestamp)
+        );
     }
 
     #[tokio::test]
@@ -1369,7 +1682,7 @@ mod tests {
             .spawn_worker("e".into(), "worker".into(), "t".into())
             .await
             .unwrap();
-        let tool = SendMessageTool::new(registry);
+        let tool = SendMessageTool::new(registry, preview_ascii);
         let input = json!({
             "to": "worker",
             "message": { "type": "shutdown_response", "request_id": "r1", "approve": true }
@@ -1388,7 +1701,7 @@ mod tests {
         let coordinator = AgentId::new();
         let registry = Arc::new(TeamRegistry::new(coordinator));
         observable_mailbox(&registry, coordinator).await;
-        let tool = SendMessageTool::new(registry);
+        let tool = SendMessageTool::new(registry, preview_ascii);
         let input = json!({
             "to": "team-lead",
             "message": { "type": "shutdown_response", "request_id": "r1", "approve": false }
@@ -1420,6 +1733,18 @@ mod tests {
             ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
                 Ok(String::new())
             }
+            async fn pane_metadata(
+                &self,
+                task_id: &str,
+            ) -> Option<platform_api::team_spawn::PaneLaunchMetadata> {
+                assert_eq!(task_id, "task-worker");
+                Some(platform_api::team_spawn::PaneLaunchMetadata {
+                    session_name: "lingxi-test".into(),
+                    window_name: "worker".into(),
+                    pane_id: "%42".into(),
+                    backend_type: "tmux".into(),
+                })
+            }
             async fn kill(
                 &self,
                 task_id: &str,
@@ -1432,7 +1757,7 @@ mod tests {
 
         let coordinator = AgentId::new();
         let registry = Arc::new(TeamRegistry::new(coordinator));
-        observable_mailbox(&registry, coordinator).await;
+        let mailbox = observable_mailbox(&registry, coordinator).await;
         let worker = registry
             .spawn_worker("e".into(), "worker".into(), "task-worker".into())
             .await
@@ -1442,12 +1767,17 @@ mod tests {
             killed: AtomicBool::new(false),
             killed_task: std::sync::Mutex::new(None),
         });
-        let tool = SendMessageTool::new(registry).with_spawn_seam(seam.clone());
+        let tool = SendMessageTool::new(registry, preview_ascii).with_spawn_seam(seam.clone());
         let input = json!({
             "to": "team-lead",
             "message": { "type": "shutdown_response", "request_id": "r1", "approve": true }
         });
         tool.call(input, ctx_as(worker), fresh_tx()).await.unwrap();
+        let messages = mailbox.drain();
+        let approval: Value = serde_json::from_str(&messages[0].content).unwrap();
+        assert_eq!(approval["paneId"], "%42");
+        assert_eq!(approval["backendType"], "tmux");
+        assert_eq!(approval["from"], "worker");
 
         assert!(
             seam.killed.load(Ordering::SeqCst),
@@ -1469,6 +1799,15 @@ mod tests {
     /// frame (Qyt @248040794) carrying RSr's byte-exact notification.
     #[tokio::test]
     async fn approved_shutdown_removes_member_unassigns_tasks_and_notifies_lead() {
+        assert_approved_departure(false).await;
+    }
+
+    #[tokio::test]
+    async fn approved_shutdown_finishes_departure_after_caller_is_aborted() {
+        assert_approved_departure(true).await;
+    }
+
+    async fn assert_approved_departure(cancel_caller: bool) {
         let _lock = DEPART_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1551,12 +1890,63 @@ mod tests {
         owned.owner = Some("nova".into());
         let tid = store.create(owned).await.unwrap();
 
-        let tool = SendMessageTool::new(registry);
+        let tool = SendMessageTool::new(registry, preview_ascii);
         let input = json!({
             "to": "team-lead",
             "message": { "type": "shutdown_response", "request_id": "r9", "approve": true }
         });
-        tool.call(input, ctx_as(worker), fresh_tx()).await.unwrap();
+        let frames = if cancel_caller {
+            struct AbortCaller(std::sync::Mutex<Option<tokio::task::AbortHandle>>);
+            #[async_trait]
+            impl TeamSpawnSeam for AbortCaller {
+                async fn spawn_teammate(
+                    &self,
+                    _: AgentId,
+                    _: String,
+                    _: String,
+                    _: String,
+                ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
+                    unreachable!("shutdown-only seam")
+                }
+                async fn kill(
+                    &self,
+                    _: &str,
+                ) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
+                    self.0.lock().unwrap().as_ref().unwrap().abort();
+                    // Force a suspension after stopping the tool's caller.
+                    tokio::task::yield_now().await;
+                    Ok(())
+                }
+            }
+            let seam = Arc::new(AbortCaller(std::sync::Mutex::new(None)));
+            let tool = tool.with_spawn_seam(seam.clone());
+            let (start, ready) = tokio::sync::oneshot::channel();
+            let caller = tokio::spawn(async move {
+                ready.await.unwrap();
+                tool.call(input, ctx_as(worker), fresh_tx()).await
+            });
+            *seam.0.lock().unwrap() = Some(caller.abort_handle());
+            start.send(()).unwrap();
+            assert!(caller.await.unwrap_err().is_cancelled());
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let mut frames = Vec::new();
+                loop {
+                    frames.extend(lead_mailbox.drain());
+                    if frames
+                        .iter()
+                        .any(|frame| frame.content.contains("teammate_terminated"))
+                    {
+                        return frames;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("detached departure must finish after self-cancellation")
+        } else {
+            tool.call(input, ctx_as(worker), fresh_tx()).await.unwrap();
+            lead_mailbox.drain()
+        };
 
         // jqt: the member is gone from config.json; the lead remains.
         let file = crate::team_file::read_team_file(&home, team_name).unwrap();
@@ -1569,7 +1959,6 @@ mod tests {
         assert_eq!(t.status, lingxi_core::TodoState::Pending);
 
         // Qyt frame in the lead's inbox, after the shutdown_approved frame.
-        let frames = lead_mailbox.drain();
         let terminated = frames
             .iter()
             .find_map(|m| {
@@ -1586,6 +1975,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plan_approval_reads_live_leader_mode_and_preserves_optional_feedback() {
+        struct LiveGate(std::sync::Mutex<String>);
+        #[async_trait]
+        impl platform_api::PermissionGate for LiveGate {
+            async fn check(&self, _: &str, _: &Value) -> platform_api::PermissionDecision {
+                platform_api::PermissionDecision::Deny {
+                    reason: "unused by direct envelope test".into(),
+                }
+            }
+            fn permission_mode(&self) -> Option<String> {
+                Some(self.0.lock().unwrap().clone())
+            }
+            fn can_request_auto_mode(&self) -> bool {
+                true
+            }
+            fn can_request_bypass_permissions(&self) -> bool {
+                true
+            }
+        }
+        let registry = make_registry();
+        let worker = registry
+            .spawn_worker("e".into(), "planner".into(), "t".into())
+            .await
+            .unwrap();
+        let mailbox = observable_mailbox(&registry, worker).await;
+        let gate = Arc::new(LiveGate(std::sync::Mutex::new("default".into())));
+        registry.set_permission_gate(gate.clone()).await;
+        let tool = SendMessageTool::new(registry, preview_ascii);
+        for (mode, expected) in [
+            ("default", "default"),
+            ("plan", "default"),
+            ("acceptEdits", "acceptEdits"),
+            ("auto", "auto"),
+            ("bypassPermissions", "bypassPermissions"),
+        ] {
+            *gate.0.lock().unwrap() = mode.into();
+            tool.call(json!({"to":"planner","message":{"type":"plan_approval_response","request_id":"plan-1@planner","approve":true,"feedback":"Proceed carefully"}}), fresh_ctx(), fresh_tx()).await.unwrap();
+            let delivered = mailbox.drain();
+            let body: Value = serde_json::from_str(&delivered[0].content).unwrap();
+            assert_eq!(body["permissionMode"], expected);
+            assert_eq!(body["feedback"], "Proceed carefully");
+            assert_eq!(
+                body["timestamp"],
+                tool_api::send_message_contract::protocol_timestamp(delivered[0].timestamp)
+            );
+            assert!(body.get("from").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn teammate_cannot_approve_or_reject_any_plan() {
+        let registry = make_registry();
+        let worker = registry
+            .spawn_worker("e".into(), "planner".into(), "t".into())
+            .await
+            .unwrap();
+        let mailbox = observable_mailbox(&registry, worker).await;
+        let tool = SendMessageTool::new(registry, preview_ascii);
+        for (approve, action) in [(true, "approve"), (false, "reject")] {
+            let error = tool.call(json!({"to":"planner","message":{"type":"plan_approval_response","request_id":"plan-1@planner","approve":approve}}), ctx_as(worker), fresh_tx()).await.unwrap_err();
+            assert_eq!(error.model_facing_message(), format!("Only the team lead can {action} plans. Teammates cannot {action} their own or other plans."));
+        }
+        assert!(mailbox.drain().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unregistered_background_sender_uses_trusted_context_name() {
+        let registry = make_registry();
+        let tool = SendMessageTool::new(registry, preview_ascii);
+        let mut context = ctx_as(AgentId::new());
+        context.agent_name = Some("background-reviewer".into());
+        assert_eq!(tool.sender_name(&context).await, "background-reviewer");
+    }
+
+    #[tokio::test]
     async fn plan_approval_routes_to_requesting_worker() {
         let registry = make_registry();
         let worker = registry
@@ -1594,7 +2058,7 @@ mod tests {
             .unwrap();
         let mailbox = observable_mailbox(&registry, worker).await;
 
-        let tool = SendMessageTool::new(registry);
+        let tool = SendMessageTool::new(registry, preview_ascii);
         let input = json!({
             "to": "planner",
             "message": { "type": "plan_approval_response", "request_id": "plan-1@planner", "approve": true }
@@ -1619,7 +2083,7 @@ mod tests {
             .unwrap();
         let mailbox = observable_mailbox(&registry, worker).await;
 
-        let tool = SendMessageTool::new(registry);
+        let tool = SendMessageTool::new(registry, preview_ascii);
         let input = json!({
             "to": "planner",
             "message": {
@@ -1639,12 +2103,15 @@ mod tests {
 
     #[tokio::test]
     async fn structured_broadcast_is_rejected() {
-        let tool = SendMessageTool::new(make_registry());
+        let tool = SendMessageTool::new(make_registry(), preview_ascii);
         let input = json!({ "to": "*", "message": { "type": "shutdown_request" } });
         let err = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap_err();
         match err {
             ToolError::InvalidInput(m) => {
-                assert_eq!(m, "structured messages cannot be broadcast (to: \"*\")");
+                assert_eq!(
+                    m,
+                    "broadcast (to: \"*\") is no longer supported — send a message per recipient"
+                );
             }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -1652,7 +2119,7 @@ mod tests {
 
     #[tokio::test]
     async fn uds_address_is_not_supported() {
-        let tool = SendMessageTool::new(make_registry());
+        let tool = SendMessageTool::new(make_registry(), preview_ascii);
         let input = json!({ "to": "uds:/tmp/x.sock", "summary": "s", "message": "hi" });
         let err = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap_err();
         match err {
@@ -1666,7 +2133,7 @@ mod tests {
 
     #[tokio::test]
     async fn bridge_address_is_not_supported() {
-        let tool = SendMessageTool::new(make_registry());
+        let tool = SendMessageTool::new(make_registry(), preview_ascii);
         let input = json!({ "to": "bridge:sess-1", "summary": "s", "message": "hi" });
         let err = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap_err();
         match err {
@@ -1679,34 +2146,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn string_message_without_summary_is_rejected() {
+    async fn string_message_without_summary_derives_first_line() {
         let registry = make_registry();
-        let agent_id = registry
+        let agent = registry
             .spawn_worker("explorer".into(), "scout".into(), "task-1".into())
             .await
-            .expect("spawn_worker must succeed");
-
-        let tool = SendMessageTool::new(registry);
-        let input = json!({
-            "to": agent_id.as_uuid().to_string(),
-            "message": "no summary here"
-        });
-
-        let err = tool
-            .call(input, fresh_ctx(), fresh_tx())
-            .await
-            .expect_err("string message without summary must be rejected");
-        match err {
-            ToolError::InvalidInput(m) => {
-                assert_eq!(m, "summary is required when message is a string");
-            }
-            other => panic!("expected InvalidInput, got {other:?}"),
-        }
+            .unwrap();
+        let mailbox = observable_mailbox(&registry, agent).await;
+        let tool = SendMessageTool::new(registry, preview_ascii);
+        tool.call(
+            json!({"to":"scout","message":"First line\nSecond"}),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let messages = mailbox.drain();
+        assert_eq!(messages[0].summary.as_deref(), Some("First line"));
     }
 
     #[tokio::test]
     async fn at_bearing_recipient_is_invalid_input() {
-        let tool = SendMessageTool::new(make_registry());
+        let tool = SendMessageTool::new(make_registry(), preview_ascii);
         let input = json!({
             "to": "team-lead@my-team",
             "summary": "hi",
@@ -1727,7 +2188,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_agent_id_recipient_is_invalid_input() {
         let registry = make_registry();
-        let tool = SendMessageTool::new(registry);
+        let tool = SendMessageTool::new(registry, preview_ascii);
         let stranger = AgentId::new();
         let input = json!({
             "to": stranger.as_uuid().to_string(),

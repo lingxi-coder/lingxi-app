@@ -497,6 +497,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     let trusted = args.trusted_workspace;
 
     DesktopConfig {
+        initial_teammate_team_name: None,
         api_base: resolve_api_base(),
         // Credentials are supplied explicitly by the parent over stdin and
         // assigned by `main` immediately before assembly. Never inherit them
@@ -1220,6 +1221,45 @@ pub async fn assemble_with_provider_keys(
     // `Now`-command abort from a user interrupt) and the queue's now-abort hook
     // (sets it to `QueueNowCommand` right before firing the active-turn token).
     let queue = connection.queue_handle();
+    if let Some(inbox) = runtime
+        .coordinator
+        .mailbox_router
+        .get(&runtime.coordinator.coordinator_id)
+        .await
+    {
+        let weak_queue = Arc::downgrade(&queue);
+        tokio::spawn(async move {
+            while weak_queue.strong_count() > 0 {
+                let Some(message) = inbox
+                    .wait_for_message(std::time::Duration::from_millis(500))
+                    .await
+                else {
+                    continue;
+                };
+                let Some(queue) = weak_queue.upgrade() else {
+                    break;
+                };
+                queue
+                    .enqueue(msgqueue::QueuedCommand {
+                        uuid: message.message_id,
+                        content: msgqueue::QueuedCommandContent::UserInput {
+                            text: engine_desktop::teammate_message_envelope_with_summary(
+                                &message.from_name,
+                                &message.content,
+                                message.summary.as_deref(),
+                            ),
+                        },
+                        priority: msgqueue::QueuePriority::Next,
+                        queued_at: message.timestamp,
+                        source: msgqueue::QueueSource::AgentSendMessage,
+                        agent_id: None,
+                        skip_slash_commands: true,
+                        is_meta: true,
+                    })
+                    .await;
+            }
+        });
+    }
     let loop_runtime = connection.loop_runtime_handle();
     let cancel_reason = orchestrator::prompt::mid_turn_input::CancelReasonFlag::new();
     runtime
@@ -1315,7 +1355,8 @@ pub async fn assemble_with_provider_keys(
         // `cfg.audio` above — this is what makes an inbound `AudioResponse` on
         // this connection resolve a call the engine parked on this connection,
         // and a disconnect drain them.
-        .bind_audio(audio_responder);
+        .bind_audio(audio_responder)
+        .with_queue_wakeup();
     Ok(BoundServer {
         connection,
         runtime,
@@ -1853,6 +1894,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
         let cfg = DesktopConfig {
+            initial_teammate_team_name: None,
             // This unit test must not require the signed macOS Credential
             // Broker or inherit a developer login keychain.
             isolated_credential_storage: true,

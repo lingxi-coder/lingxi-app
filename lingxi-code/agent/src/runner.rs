@@ -1988,8 +1988,12 @@ async fn run_subagent_loop(
                         // dispatches (claude `freezeCommandDenies`).
                         frozen_command_denies: ctx.frozen_command_denies.clone(),
                     };
-                    match invoker.invoke(name, input.clone(), inv_ctx).await {
-                        Ok(value) => {
+                    match invoker
+                        .invoke_detailed(name, input.clone(), inv_ctx, None)
+                        .await
+                    {
+                        Ok(invocation) => {
+                            let value = invocation.data;
                             // A subagent reads tool results through the same
                             // eyes the main loop does. Deriving the media blocks
                             // here — from the SHARED rule, not a copy of it — is
@@ -2015,6 +2019,7 @@ async fn run_subagent_loop(
                                 (None, serde_json::Value::String(s)) => s.clone(),
                                 (None, other) => other.to_string(),
                             };
+                            let content = invocation.model_content.unwrap_or(content);
                             tool_results.push(ContentBlock::ToolResult {
                                 tool_use_id: tool_use_id.clone(),
                                 content,

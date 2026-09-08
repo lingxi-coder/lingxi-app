@@ -7,7 +7,7 @@
 use crate::mailbox::{MailboxRouter, TeammateMailbox};
 use protocol::AgentId;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
@@ -15,6 +15,9 @@ use tokio::sync::RwLock;
 /// One spawned worker tracked by the [`TeamRegistry`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerAgent {
+    /// Awaiting a lead plan verdict, independent of the worker being idle.
+    #[serde(default)]
+    pub awaiting_plan_approval: bool,
     /// Worker agent ID.
     pub agent_id: AgentId,
     /// Agent-type string (e.g. "explorer", "writer").
@@ -59,10 +62,16 @@ pub enum WorkerStatus {
 /// Registry of teammate workers owned by a coordinator session.
 pub struct TeamRegistry {
     workers: RwLock<HashMap<AgentId, WorkerAgent>>,
-    /// Handler transitions that arrived after activation but before `TeamCreate`
+    permission_gate: RwLock<Option<Arc<dyn platform_api::PermissionGate>>>,
+    message_forwarder: RwLock<Option<Arc<dyn platform_api::teammate_worker::PaneMessageForwarder>>>,
+    /// Handler transitions that arrived after activation but before the teammate spawner
     /// linked the handler-generated task id to its worker. Access always follows
     /// the `workers` lock so linking and replay cannot miss each other.
     pending_handler_statuses: RwLock<HashMap<String, WorkerStatus>>,
+    pending_plan_approvals: RwLock<HashMap<String, bool>>,
+    /// Identities with an authoritative handler transition, including Idle.
+    /// Accessed under the workers lock so startup cannot overwrite a new event.
+    observed_handler_statuses: std::sync::Mutex<HashSet<AgentId>>,
     /// The coordinator agent's ID (parent of all workers in this registry).
     pub coordinator_id: AgentId,
     /// Shared mailbox router.
@@ -81,11 +90,23 @@ impl TeamRegistry {
     pub fn new(coordinator_id: AgentId) -> Self {
         Self {
             workers: RwLock::new(HashMap::new()),
+            permission_gate: RwLock::new(None),
+            message_forwarder: RwLock::new(None),
             pending_handler_statuses: RwLock::new(HashMap::new()),
+            pending_plan_approvals: RwLock::new(HashMap::new()),
+            observed_handler_statuses: std::sync::Mutex::new(HashSet::new()),
             coordinator_id,
             mailbox_router: Arc::new(MailboxRouter::new()),
             team_name: RwLock::new(None),
         }
+    }
+
+    /// Live leader gate used to derive a teammate's approved permission mode.
+    pub async fn set_permission_gate(&self, gate: Arc<dyn platform_api::PermissionGate>) {
+        *self.permission_gate.write().await = Some(gate);
+    }
+    pub async fn permission_gate(&self) -> Option<Arc<dyn platform_api::PermissionGate>> {
+        self.permission_gate.read().await.clone()
     }
 
     /// Spawn (i.e. register) a new worker.
@@ -96,6 +117,19 @@ impl TeamRegistry {
         task_id: String,
     ) -> Result<AgentId, crate::mailbox::MailboxError> {
         let agent_id = AgentId::new();
+        self.register_worker(agent_id, agent_type, name, task_id)
+            .await?;
+        Ok(agent_id)
+    }
+
+    /// Register a worker whose identity is assigned by a parent process.
+    pub async fn register_worker(
+        &self,
+        agent_id: AgentId,
+        agent_type: String,
+        name: String,
+        task_id: String,
+    ) -> Result<(), crate::mailbox::MailboxError> {
         let mailbox = Arc::new(TeammateMailbox::new(agent_id));
         self.mailbox_router.register(agent_id, mailbox).await;
         // Index the worker's display name so a teammate can be addressed by
@@ -105,6 +139,7 @@ impl TeamRegistry {
         self.workers.write().await.insert(
             agent_id,
             WorkerAgent {
+                awaiting_plan_approval: false,
                 agent_id,
                 agent_type,
                 name,
@@ -115,7 +150,21 @@ impl TeamRegistry {
                 last_active_at: SystemTime::now(),
             },
         );
-        Ok(agent_id)
+        Ok(())
+    }
+
+    /// Install the parent-process message bridge for a pane worker.
+    pub async fn set_message_forwarder(
+        &self,
+        forwarder: Arc<dyn platform_api::teammate_worker::PaneMessageForwarder>,
+    ) {
+        *self.message_forwarder.write().await = Some(forwarder);
+    }
+
+    pub async fn message_forwarder(
+        &self,
+    ) -> Option<Arc<dyn platform_api::teammate_worker::PaneMessageForwarder>> {
+        self.message_forwarder.read().await.clone()
     }
 
     /// Remove a worker and unregister its mailbox.
@@ -123,9 +172,14 @@ impl TeamRegistry {
         {
             let mut workers = self.workers.write().await;
             workers.remove(agent_id);
+            self.observed_handler_statuses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(agent_id);
             let mut pending = self.pending_handler_statuses.write().await;
             if workers.values().all(|worker| !worker.task_id.is_empty()) {
                 pending.clear();
+                self.pending_plan_approvals.write().await.clear();
             }
         }
         self.mailbox_router.unregister(agent_id).await;
@@ -142,17 +196,29 @@ impl TeamRegistry {
     pub async fn update_status(&self, agent_id: &AgentId, status: WorkerStatus) {
         if let Some(worker) = self.workers.write().await.get_mut(agent_id) {
             worker.status = status;
+            if worker_terminal(&worker.status) {
+                worker.awaiting_plan_approval = false;
+            }
             worker.last_active_at = SystemTime::now();
         }
     }
 
-    /// Update a worker only while its current status is non-terminal.
+    /// Initialize a worker only before any authoritative handler transition.
     ///
     /// Team startup uses this to publish its initial derived status without
     /// racing a concurrent handler failure and resurrecting that worker as
-    /// active. The check and write intentionally share one registry lock.
+    /// active, or overwriting an already-published Idle. The check and write
+    /// intentionally share one registry lock.
     pub async fn update_status_if_nonterminal(&self, agent_id: &AgentId, status: WorkerStatus) {
         if let Some(worker) = self.workers.write().await.get_mut(agent_id) {
+            if self
+                .observed_handler_statuses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(agent_id)
+            {
+                return;
+            }
             if matches!(
                 &worker.status,
                 WorkerStatus::Completed | WorkerStatus::Failed { .. } | WorkerStatus::Killed
@@ -160,6 +226,9 @@ impl TeamRegistry {
                 return;
             }
             worker.status = status;
+            if worker_terminal(&worker.status) {
+                worker.awaiting_plan_approval = false;
+            }
             worker.last_active_at = SystemTime::now();
         }
     }
@@ -172,13 +241,20 @@ impl TeamRegistry {
     /// be resurrected as `Failed`, `Completed`, or `Working`.
     pub async fn update_status_from_handler(&self, agent_id: &AgentId, status: WorkerStatus) {
         if let Some(worker) = self.workers.write().await.get_mut(agent_id) {
+            self.observed_handler_statuses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(*agent_id);
             if apply_handler_transition(&mut worker.status, status) {
+                if worker_terminal(&worker.status) {
+                    worker.awaiting_plan_approval = false;
+                }
                 worker.last_active_at = SystemTime::now();
             }
         }
     }
 
-    /// Apply a handler transition by task id, or retain it until `TeamCreate`
+    /// Apply a handler transition by task id, or retain it until the teammate spawner
     /// publishes the worker↔task link.
     ///
     /// Returns `true` when the task id already resolved to a worker. A transition
@@ -198,7 +274,14 @@ impl TeamRegistry {
             .values_mut()
             .find(|worker| worker.task_id == task_id)
         {
+            self.observed_handler_statuses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(worker.agent_id);
             if apply_handler_transition(&mut worker.status, status) {
+                if worker_terminal(&worker.status) {
+                    worker.awaiting_plan_approval = false;
+                }
                 worker.last_active_at = SystemTime::now();
             }
             return true;
@@ -216,6 +299,24 @@ impl TeamRegistry {
         false
     }
 
+    pub async fn set_awaiting_plan_approval(&self, task_id: &str, awaiting: bool) {
+        if task_id.is_empty() {
+            return;
+        }
+        let mut workers = self.workers.write().await;
+        if let Some(worker) = workers
+            .values_mut()
+            .find(|worker| worker.task_id == task_id)
+        {
+            worker.awaiting_plan_approval = awaiting && !worker_terminal(&worker.status);
+        } else if workers.values().any(|worker| worker.task_id.is_empty()) {
+            self.pending_plan_approvals
+                .write()
+                .await
+                .insert(task_id.into(), awaiting);
+        }
+    }
+
     /// Write back the handler-generated task id onto a worker.
     ///
     /// No-op (no panic) if no worker with `agent_id` is registered.
@@ -224,12 +325,23 @@ impl TeamRegistry {
         if let Some(worker) = workers.get_mut(agent_id) {
             let mut pending = self.pending_handler_statuses.write().await;
             if let Some(status) = pending.remove(&task_id) {
+                self.observed_handler_statuses
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(*agent_id);
                 apply_handler_transition(&mut worker.status, status);
+            }
+            if let Some(awaiting) = self.pending_plan_approvals.write().await.remove(&task_id) {
+                worker.awaiting_plan_approval = awaiting && !worker_terminal(&worker.status);
+            }
+            if worker_terminal(&worker.status) {
+                worker.awaiting_plan_approval = false;
             }
             worker.task_id = task_id;
             worker.last_active_at = SystemTime::now();
             if workers.values().all(|worker| !worker.task_id.is_empty()) {
                 pending.clear();
+                self.pending_plan_approvals.write().await.clear();
             }
         }
     }
@@ -319,6 +431,13 @@ impl TeamRegistry {
 /// Apply the handler lifecycle's first-terminal-wins rule to one status value.
 /// A `Failed`→`Failed` transition is the intentional sentinel→real-reason
 /// upgrade used by [`TeamRegistry::update_status_from_handler`].
+fn worker_terminal(status: &WorkerStatus) -> bool {
+    matches!(
+        status,
+        WorkerStatus::Completed | WorkerStatus::Failed { .. } | WorkerStatus::Killed
+    )
+}
+
 fn apply_handler_transition(current: &mut WorkerStatus, status: WorkerStatus) -> bool {
     let current_is_terminal = matches!(
         current,
@@ -402,6 +521,56 @@ mod tests {
 
         reg.update_status(&id, WorkerStatus::Killed).await;
         assert_eq!(reg.list().await[0].status, WorkerStatus::Killed);
+    }
+
+    #[tokio::test]
+    async fn startup_does_not_overwrite_linked_handler_idle() {
+        let registry = TeamRegistry::new(AgentId::new());
+        let id = registry
+            .spawn_worker(
+                "general-purpose".into(),
+                "quick".into(),
+                "task-quick".into(),
+            )
+            .await
+            .unwrap();
+        registry
+            .update_status_from_handler_by_task_id("task-quick", WorkerStatus::Idle)
+            .await;
+        registry
+            .update_status_if_nonterminal(
+                &id,
+                WorkerStatus::Working {
+                    activity: "running".into(),
+                },
+            )
+            .await;
+        assert_eq!(
+            registry.find_by_agent_id(&id).await.unwrap().status,
+            WorkerStatus::Idle
+        );
+        registry.delete_worker(&id).await;
+        registry
+            .register_worker(
+                id,
+                "general-purpose".into(),
+                "quick".into(),
+                "new-task".into(),
+            )
+            .await
+            .unwrap();
+        registry
+            .update_status_if_nonterminal(
+                &id,
+                WorkerStatus::Working {
+                    activity: "running".into(),
+                },
+            )
+            .await;
+        assert!(matches!(
+            registry.find_by_agent_id(&id).await.unwrap().status,
+            WorkerStatus::Working { .. }
+        ));
     }
 
     #[tokio::test]
@@ -615,5 +784,36 @@ mod tests {
         reg.update_status(&AgentId::new(), WorkerStatus::Killed)
             .await;
         assert!(reg.list().await.is_empty());
+    }
+    #[tokio::test]
+    async fn plan_review_flag_replays_before_link_and_keeps_idle_separate() {
+        let registry = TeamRegistry::new(AgentId::new());
+        let worker = registry
+            .spawn_worker("planner".into(), "planner".into(), String::new())
+            .await
+            .unwrap();
+        registry.set_awaiting_plan_approval("task-plan", true).await;
+        registry.set_task_id(&worker, "task-plan".into()).await;
+        let row = registry.find_by_agent_id(&worker).await.unwrap();
+        assert!(row.awaiting_plan_approval);
+        assert_eq!(row.status, WorkerStatus::Idle);
+        registry
+            .set_awaiting_plan_approval("task-plan", false)
+            .await;
+        let row = registry.find_by_agent_id(&worker).await.unwrap();
+        assert!(!row.awaiting_plan_approval);
+        assert_eq!(row.status, WorkerStatus::Idle);
+        registry.set_awaiting_plan_approval("task-plan", true).await;
+        registry
+            .update_status_from_handler(&worker, WorkerStatus::Killed)
+            .await;
+        registry.set_awaiting_plan_approval("task-plan", true).await;
+        assert!(
+            !registry
+                .find_by_agent_id(&worker)
+                .await
+                .unwrap()
+                .awaiting_plan_approval
+        );
     }
 }

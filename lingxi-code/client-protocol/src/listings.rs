@@ -710,6 +710,10 @@ pub struct TaskRowDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub stage: Option<String>,
+    /// The teammate is awaiting the leader's plan decision, independent of lifecycle status.
+    #[serde(default, skip_serializing_if = "is_false")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub awaiting_plan_approval: bool,
 }
 
 /// Task status — the lowered `tasks::TaskStatus` (`tasks/src/state.rs:11`), the

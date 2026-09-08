@@ -47,6 +47,8 @@ export interface AgentTranscriptState {
 
 export interface RuntimeCenterState {
   readonly agents: Readonly<Record<string, SessionAgentSummaryDto>>;
+  /** Live coordinator state is authoritative over transcript snapshots. */
+  readonly coordinatorWorkers: Readonly<Record<string, SessionAgentSummaryDto>>;
   readonly transcripts: Readonly<Record<string, AgentTranscriptState>>;
   readonly resources: readonly RuntimeResource[];
   readonly plan: readonly PlanTaskDto[];
@@ -70,6 +72,7 @@ export const RUNTIME_CENTER_SECTIONS: readonly RuntimeCenterSection[] = [
 export function emptyRuntimeCenterState(): RuntimeCenterState {
   return {
     agents: {},
+    coordinatorWorkers: {},
     transcripts: {},
     resources: [],
     plan: [],
@@ -397,6 +400,13 @@ export function resourcesFromRestoredMessages(
   return resources;
 }
 
+const terminalAgentStatuses = new Set(['completed', 'failed', 'killed', 'cancelled']);
+
+function mergeCoordinatorWorker(state: RuntimeCenterState, agent: SessionAgentSummaryDto): SessionAgentSummaryDto {
+  const worker = state.coordinatorWorkers[agent.agent_id];
+  return worker ? { ...agent, ...worker } : agent;
+}
+
 export function reduceRuntimeCenterEvent(
   state: RuntimeCenterState,
   event: ClientEvent,
@@ -407,12 +417,27 @@ export function reduceRuntimeCenterEvent(
     state = { ...state, submittedPlanState, submittedPlan: latestSubmittedPlan(submittedPlanState) };
   }
   switch (event.type) {
-    case 'session_agent_list':
+    case 'coordinator_worker': {
+      const worker = { ...event.worker, status: event.worker.status === 'working' ? 'running' : event.worker.status };
+      return {
+        ...state,
+        coordinatorWorkers: { ...state.coordinatorWorkers, [worker.agent_id]: worker },
+        agents: { ...state.agents, [worker.agent_id]: { ...state.agents[worker.agent_id], ...worker } },
+      };
+    }
+    case 'session_agent_list': {
       if (event.session_id !== sessionId) return state;
-      return { ...state, agents: Object.fromEntries(event.agents.map((agent) => [agent.agent_id, agent])) };
+      const agents = Object.fromEntries(event.agents.map((agent) => [agent.agent_id, mergeCoordinatorWorker(state, agent)]));
+      for (const worker of Object.values(state.coordinatorWorkers)) {
+        if (!agents[worker.agent_id] && !terminalAgentStatuses.has(worker.status)) {
+          agents[worker.agent_id] = { ...state.agents[worker.agent_id], ...worker };
+        }
+      }
+      return { ...state, agents };
+    }
     case 'session_agent_updated':
       if (event.session_id !== sessionId) return state;
-      return { ...state, agents: { ...state.agents, [event.agent.agent_id]: event.agent } };
+      return { ...state, agents: { ...state.agents, [event.agent.agent_id]: mergeCoordinatorWorker(state, event.agent) } };
     case 'session_agent_message': {
       if (event.session_id !== sessionId) return state;
       return {

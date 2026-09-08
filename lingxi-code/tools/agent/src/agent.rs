@@ -186,7 +186,7 @@ pub struct AgentToolInput {
     /// `name?` — optional teammate name (AgentTool.tsx:94).
     #[serde(default)]
     pub name: Option<String>,
-    /// `team_name?` — optional team name (AgentTool.tsx:95).
+    /// `team_name?` — deprecated and ignored; the session owns one implicit team.
     #[serde(default)]
     pub team_name: Option<String>,
     /// `mode?` — DEPRECATED and ignored (claude 2.1.212). Still accepted on the
@@ -381,7 +381,35 @@ fn validate_agent_name(name: &str) -> Result<(), String> {
     if name == RESERVED_AGENT_NAME {
         return Err(reserved_agent_name_message());
     }
+    let normalized = name.to_ascii_lowercase();
+    if normalized == "main" || normalized == "team-lead" || reserved_agent_id_shape(&normalized) {
+        return Err("name must not be a reserved recipient (\"main\" or \"team-lead\", in any spelling) or have the shape of an agent id — those already address an agent directly".into());
+    }
     Ok(())
+}
+
+/// Oracle Mb: `^a(?:[\\w-]{1,63}-)?[0-9a-f]{16}$`, after recipient normalization.
+fn reserved_agent_id_shape(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('a') else {
+        return false;
+    };
+    let hex = match rest.rsplit_once('-') {
+        Some((prefix, suffix))
+            if !prefix.is_empty()
+                && prefix.len() <= 63
+                && prefix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')) =>
+        {
+            suffix
+        }
+        Some(_) => return false,
+        None => rest,
+    };
+    hex.len() == 16
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
@@ -2681,6 +2709,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             budget,
         };
         let request = SubagentSpawnRequest {
+            teammate_color: None,
             subagent_type: effective_type.to_string(),
             prompt: parsed.prompt.clone(),
             observer: selected.observer.clone().or_else(|| {
@@ -2699,11 +2728,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             },
             run_in_background: true,
             name: if is_fork { None } else { parsed.name.clone() },
-            team_name: if is_fork {
-                None
-            } else {
-                parsed.team_name.clone()
-            },
+            team_name: None,
             // (parity 2.1.212) The `mode` call param is DEPRECATED and ignored:
             // claude no longer destructures/passes it. The child inherits the
             // parent's live permission mode (with agent-definition frontmatter as
@@ -2760,7 +2785,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
 
         match spawner.spawn_async(request, inherit).await {
             Ok(launch) => {
-                let agent_id_str = launch.agent_id.to_string();
+                let agent_id_str = launch.agent_id.as_uuid().to_string();
                 // (G14) Register name → agentId for SendMessage routing — ASYNC
                 // ONLY, post-launch so a failed spawn leaves no stale entry
                 // (claude AgentTool.tsx:700-712). Prefer the ctx-level registry
@@ -3112,6 +3137,23 @@ impl Tool for AgentTool {
             )));
         }
 
+        // 2.1.263: nesting denial precedes the explicit background denial and
+        // both run before fork/type resolution. A named ordinary child has no
+        // team_name, so it must not be mistaken for a teammate.
+        let caller_is_teammate = ctx.agent_name.is_some() && ctx.team_name.is_some();
+        let caller_is_in_process_teammate = caller_is_teammate
+            && std::env::var("LINGXI_CODE_TEAMMATE_BACKEND").as_deref() != Ok("split-pane");
+        if caller_is_teammate && parsed.name.is_some() {
+            return Err(ToolError::InvalidInput(
+                "Teammates cannot spawn other teammates — the team roster is flat. To spawn a subagent instead, omit the `name` parameter.".into(),
+            ));
+        }
+        if caller_is_in_process_teammate && parsed.run_in_background == Some(true) {
+            return Err(ToolError::InvalidInput(
+                "In-process teammates cannot spawn background agents. Use run_in_background=false for synchronous subagents.".into(),
+            ));
+        }
+
         // Binary `AgentTool.call`: `n=n.replace(/\s+/g," ").trim()` — normalize the
         // `description` ONCE at entry so every downstream use (the spawn request,
         // the async-launch payload, the completed `data.description`) carries the
@@ -3194,6 +3236,153 @@ impl Tool for AgentTool {
             return Err(ToolError::InvalidInput(
                 "Fork is not available inside a forked worker. Complete your task directly using your tools.".into(),
             ));
+        }
+
+        // 2.1.263 src_160988549.js:3517864. Named teammates branch before
+        // ordinary type resolution, concurrency accounting, and MCP checks.
+        // team_name and mode are schema-only inputs; neither selects a team.
+        let teammate_candidate = spawner.teammate_enabled()
+            && parsed.name.is_some()
+            && !is_fork
+            && parsed.isolation.is_none()
+            && parsed.cwd.is_none();
+        let listing = if teammate_candidate {
+            spawner.agent_listing().await
+        } else {
+            Vec::new()
+        };
+        let special_type = parsed.subagent_type.as_deref().is_some_and(|kind| {
+            let normalized = normalize_agent_type(WEB_FETCH_AGENT_TYPE);
+            listing
+                .iter()
+                .any(|agent| agent.agent_type == WEB_FETCH_AGENT_TYPE)
+                && (kind == WEB_FETCH_AGENT_TYPE
+                    || (normalize_agent_type(kind) == normalized
+                        && !listing.iter().any(|agent| {
+                            agent.agent_type != WEB_FETCH_AGENT_TYPE
+                                && normalize_agent_type(&agent.agent_type) == normalized
+                        })))
+        });
+        if teammate_candidate && !special_type {
+            let requested = parsed.subagent_type.as_deref();
+            if let (Some(kind), Some(gate)) = (requested, &self.ctx.permission_gate) {
+                if let Some(source) = gate.agent_type_deny(kind).await {
+                    return Err(ToolError::InvalidInput(format!(
+                        "Agent type '{kind}' has been denied by permission rule 'Agent({kind})' from {source}."
+                    )));
+                }
+            }
+            let resolved = requested.and_then(|kind| {
+                listing
+                    .iter()
+                    .find(|agent| agent.agent_type == kind)
+                    .or_else(|| {
+                        let mut matches = listing.iter().filter(|agent| {
+                            normalize_agent_type(&agent.agent_type) == normalize_agent_type(kind)
+                        });
+                        let first = matches.next();
+                        if matches.next().is_none() {
+                            first
+                        } else {
+                            None
+                        }
+                    })
+            });
+            let kind = resolved
+                .map(|agent| agent.agent_type.as_str())
+                .or(requested)
+                .unwrap_or(GENERAL_PURPOSE_AGENT_TYPE);
+            if let Some(gate) = &self.ctx.permission_gate {
+                if let Some(source) = gate.agent_type_deny(kind).await {
+                    return Err(ToolError::InvalidInput(format!(
+                        "Agent type '{kind}' has been denied by permission rule 'Agent({kind})' from {source}."
+                    )));
+                }
+            }
+            let budget = self.ctx.budget_enforcer.clone().ok_or_else(|| {
+                ToolError::Internal(
+                    "AgentTool: BudgetEnforcerHandle not wired into BuiltinToolContext".into(),
+                )
+            })?;
+            let origin_session_id = Self::origin_session_id(&ctx).await;
+            let budget = Self::budget_for_origin(budget, origin_session_id);
+            if let Err(BudgetError::Exceeded { current_nano_usd }) =
+                budget.check_and_charge(0).await
+            {
+                return Err(match budget.max_session_nano_usd() {
+                    Some(limit) => {
+                        ToolError::InvalidInput(budget_limit_reached_error(current_nano_usd, limit))
+                    }
+                    None => ToolError::Internal(format_budget_denied(current_nano_usd)),
+                });
+            }
+            let registry = ctx.subagent_registry.clone().ok_or_else(|| {
+                ToolError::Internal("AgentTool: parent ToolRegistry not threaded via ToolUseContext.subagent_registry".into())
+            })?;
+            let mut invoker = tool_api::tool_invoker_impl::RegistryToolInvoker::new(registry)
+                .with_background_owned(true);
+            if let Some(gate) = self.ctx.permission_gate.clone() {
+                invoker = invoker.with_gate(gate);
+            }
+            let selected = spawner
+                .resolve_selection(kind, parsed.model.as_deref())
+                .await;
+            let inherited_mode = self
+                .ctx
+                .permission_gate
+                .as_ref()
+                .and_then(|gate| gate.permission_mode())
+                .unwrap_or_else(|| self.ctx.permission_mode.wire_str().to_owned());
+            let resolved_model = if selected.resolved_model.is_empty() {
+                parsed.model.clone()
+            } else {
+                Some(selected.resolved_model)
+            };
+            let request = SubagentSpawnRequest {
+                subagent_type: kind.into(),
+                prompt: parsed.prompt.clone(),
+                description: Some(parsed.description),
+                name: parsed.name,
+                model: resolved_model,
+                // The obsolete input mode never overrides the live parent mode.
+                mode: Some(inherited_mode),
+                // Snapshot the caller's current working directory only after
+                // teammate eligibility has ruled out an explicit cwd override.
+                cwd: Some(
+                    ctx.cwd
+                        .clone()
+                        .unwrap_or_else(|| self.ctx.cwd())
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                creator_agent_id: ctx.agent_id,
+                origin_session_id,
+                parent_model_override: main_loop_model_parent(&ctx),
+                depth: ctx.depth + 1,
+                ..Default::default()
+            };
+            let launch = spawner
+                .spawn_teammate(
+                    request,
+                    SubagentInheritance {
+                        tool_invoker: Arc::new(invoker),
+                        budget,
+                    },
+                )
+                .await
+                .map_err(|error| ToolError::Internal(error.to_string()))?;
+            let mut data = serde_json::to_value(&launch)
+                .map_err(|error| ToolError::Internal(error.to_string()))?;
+            data["status"] = json!("teammate_spawned");
+            data["prompt"] = json!(parsed.prompt);
+            return Ok(ToolCallResult {
+                data,
+                model_content: Some(format!(
+                    "Spawned successfully. (This tool result is internal metadata — never quote or paste any part of it, including the ID below, into a user-facing reply.)\nagent_id: {}\nname: {}\nThe agent is now running and will receive instructions via mailbox.",
+                    launch.teammate_id, launch.name
+                )), new_messages: vec![], context_modifier: None,
+                is_error: false, mcp_meta: None,
+            });
         }
 
         // Resolve the EFFECTIVE subagent type (2.1.232 `L ? Yne : t ?? general`):
@@ -3431,6 +3620,15 @@ impl Tool for AgentTool {
             }
         };
 
+        let selected = spawner
+            .resolve_selection(&effective_type, parsed.model.as_deref())
+            .await;
+        if caller_is_in_process_teammate && selected.background {
+            return Err(ToolError::InvalidInput(format!(
+                "In-process teammates cannot spawn background agents. Agent '{}' has background: true in its definition.", selected.agent_type
+            )));
+        }
+
         // Claude Code 2.1.217 rejects rather than queues a launch once the
         // runtime already has the configured number of active subagents. Keep
         // this before the session-total counter so a rejected concurrent spawn
@@ -3610,9 +3808,6 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // resolved model / is_built_in) so we can emit claude's
         // `tengu_agent_tool_selected` (AgentTool.tsx:419-428). One cheap
         // catalog lookup via the spawner seam.
-        let selected = spawner
-            .resolve_selection(&effective_type, parsed.model.as_deref())
-            .await;
         // Claude Code 2.1.206 defaults a local subagent to background execution:
         // `run_in_background !== false`, with an agent definition's
         // `background: true` also forcing the async path. The binary then gates
@@ -3639,7 +3834,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // port ANDed in `is_pro_plan()`, which forced every Pro-plan subagent to
         // run synchronously; the binary never does that.)
         let run_in_background = (parsed.run_in_background.unwrap_or(true) || selected.background)
-            && !background_tasks_disabled;
+            && !background_tasks_disabled
+            && !caller_is_in_process_teammate;
         let is_async = run_in_background;
         Self::emit_agent_tool_selected(
             &bus,
@@ -3811,6 +4007,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
         };
 
         let request = SubagentSpawnRequest {
+            teammate_color: None,
             // Propagate the RESOLVED effective type (fork → `fork`; omitted →
             // general-purpose; explicit-validated otherwise), not the raw input.
             subagent_type: effective_type.clone(),
@@ -3843,11 +4040,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             run_in_background,
             // Fork path carries no teammate/isolation/cwd overrides.
             name: if is_fork { None } else { parsed.name.clone() },
-            team_name: if is_fork {
-                None
-            } else {
-                parsed.team_name.clone()
-            },
+            team_name: None,
             // (parity 2.1.212) DEPRECATED `mode` call param — ignored (see the
             // async spawn path). The child inherits the parent's live permission
             // mode; only agent-definition frontmatter overrides it.
@@ -4029,7 +4222,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // result's `content` array.
                 let raw_content_texts = extract_content_texts(&content);
 
-                let agent_id_str = agent_id.to_string();
+                let agent_id_str = agent_id.as_uuid().to_string();
 
                 // (2.1.212) Indirect-prompt-injection hardening (claude
                 // `ZDu`/`tHu`): run the output guard over the subagent's returned
@@ -4041,7 +4234,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 let sanitized =
                     platform_api::subagent_output_guard::sanitize_blocks(&raw_content_texts);
                 if sanitized.any_reportable() {
-                    Self::emit_subagent_output_flagged(&bus, &agent_id_str, &sanitized).await;
+                    Self::emit_subagent_output_flagged(&bus, &agent_id.to_string(), &sanitized)
+                        .await;
                 }
                 let content_texts = sanitized.content;
                 let content_blocks: Vec<Value> = content_texts

@@ -222,6 +222,7 @@ async fn fill_with_parked_teammates(pool: &StateMachinePool) {
 
 fn agent_tool_request() -> SubagentSpawnRequest {
     SubagentSpawnRequest {
+        teammate_color: None,
         subagent_type: "general-purpose".into(),
         prompt: "do one thing".into(),
         observer: None,

@@ -175,3 +175,63 @@ test('each submitted plan tab keeps its own body when a newer plan arrives', () 
   assert.ok(current.includes('New scope.'));
   assert.ok(!current.includes('Original scope.'));
 });
+
+test('teammate roster preserves idle, running, and terminal states in the inspector', () => {
+  const bridge = runtimeBridge();
+  bridge.desktop = emptyDesktopState();
+  const active = { kind: 'section', id: 'agents' } as const;
+  bridge.runtimeCenter = {
+    ...bridge.runtimeCenter,
+    inspectorOpen: true,
+    activeItem: active,
+    tabs: [active],
+    agents: Object.fromEntries(['running', 'idle', 'completed', 'failed'].map((status) => [`agent-${status}`, {
+      agent_id: `agent-${status}`,
+      name: `reviewer-${status}`,
+      agent_type: 'general-purpose',
+      model: 'claude-sonnet-4-6',
+      status,
+      latest_activity: status === 'idle' ? 'Waiting for a message' : 'Review implementation',
+    }])),
+  };
+  const html = render(React.createElement(RuntimeCenterInspector, { bridge }));
+  for (const status of ['running', 'idle', 'completed', 'failed']) {
+    assert.ok(html.includes(`reviewer-${status}`));
+    assert.ok(html.includes(`>${status}</span>`));
+  }
+  assert.ok(html.includes('Waiting for a message'));
+});
+
+test('an idle teammate transcript does not show active thinking', () => {
+  const bridge = runtimeBridge();
+  const active = { kind: 'agent', id: 'reviewer-id' } as const;
+  bridge.runtimeCenter = {
+    ...bridge.runtimeCenter,
+    inspectorOpen: true,
+    activeItem: active,
+    tabs: [active],
+    agents: {
+      'reviewer-id': { agent_id: 'reviewer-id', name: 'reviewer', agent_type: 'general-purpose', status: 'idle', latest_activity: 'Waiting for a message' },
+    },
+  };
+  const html = render(React.createElement(RuntimeCenterInspector, { bridge }));
+  assert.ok(html.includes('>idle</span>'));
+  assert.ok(html.includes('Waiting for a message'));
+  assert.ok(!html.includes('Thinking'));
+});
+
+test('plan approval state overrides running label and clears after either decision', () => {
+  const task: TaskRowDto = { task_id: 'teammate-plan', task_type: 'in_process_teammate', status: { type: 'running' }, description: 'Review the API', awaiting_plan_approval: true };
+  const pending = render(React.createElement(TaskDetail, { task, bridge: EMPTY_BRIDGE }));
+  assert.ok(pending.includes('>awaiting approval</span>'));
+  assert.ok(pending.includes('Review the API'));
+  for (const decision of ['approved', 'rejected']) {
+    const resolved = render(React.createElement(TaskDetail, { task: { ...task, awaiting_plan_approval: false }, bridge: EMPTY_BRIDGE }));
+    assert.ok(!resolved.includes('awaiting approval'), decision);
+    assert.ok(resolved.includes('>running</span>'), decision);
+    assert.ok(resolved.includes('Review the API'), decision);
+  }
+  const bridge = runtimeBridge();
+  bridge.desktop = { ...emptyDesktopState(), tasks: { [task.task_id]: task } };
+  assert.ok(render(React.createElement(RuntimeCenterOverview, { bridge })).includes('1 awaiting approval'));
+});

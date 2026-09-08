@@ -126,6 +126,7 @@ impl TeammateMailbox {
 
 /// Routes a [`TeammateMessage`] to the mailbox registered for an [`AgentId`].
 pub struct MailboxRouter {
+    colors: tokio::sync::RwLock<std::collections::HashMap<AgentId, String>>,
     mailboxes: tokio::sync::RwLock<std::collections::HashMap<AgentId, Arc<TeammateMailbox>>>,
     /// Display-name → [`AgentId`] index (keys lower-cased) so a message can be
     /// addressed by a teammate's NAME, not just its id. claude-code's mailbox is
@@ -153,10 +154,31 @@ impl MailboxRouter {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            colors: tokio::sync::RwLock::new(std::collections::HashMap::new()),
             mailboxes: tokio::sync::RwLock::new(std::collections::HashMap::new()),
             names: tokio::sync::RwLock::new(std::collections::HashMap::new()),
             aliases: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Store a palette color against the resolved identity so aliases agree.
+    pub async fn set_color(&self, name: &str, color: &str) {
+        if let Some(id) = self
+            .resolve_name(name)
+            .await
+            .or(self.resolve_alias(name).await)
+        {
+            self.colors.write().await.insert(id, color.to_owned());
+        }
+    }
+
+    pub async fn teammate_color(&self, name: &str) -> Option<String> {
+        let id = self
+            .resolve_name(name)
+            .await
+            .or(self.resolve_alias(name).await)
+            .or_else(|| uuid::Uuid::parse_str(name).ok().map(AgentId::from_uuid))?;
+        self.colors.read().await.get(&id).cloned()
     }
 
     /// Register `mailbox` for `agent_id`. Existing entries are overwritten.
@@ -244,6 +266,7 @@ impl MailboxRouter {
     /// it).
     pub async fn unregister(&self, agent: &AgentId) {
         self.mailboxes.write().await.remove(agent);
+        self.colors.write().await.remove(agent);
         self.names.write().await.retain(|_, id| id != agent);
         self.aliases.write().await.retain(|_, id| id != agent);
     }
@@ -258,6 +281,25 @@ impl Default for MailboxRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn palette_color_resolves_aliases_and_is_removed_with_identity() {
+        let router = MailboxRouter::new();
+        let id = AgentId::new();
+        router.register_name("Alice", id).await;
+        router.register_alias("Alice@session", id).await;
+        router.set_color("alice", "blue").await;
+        assert_eq!(
+            router.teammate_color("ALICE").await.as_deref(),
+            Some("blue")
+        );
+        assert_eq!(
+            router.teammate_color("Alice@session").await.as_deref(),
+            Some("blue")
+        );
+        router.unregister(&id).await;
+        assert_eq!(router.teammate_color(&id.as_uuid().to_string()).await, None);
+    }
 
     #[tokio::test]
     async fn get_returns_registered_mailbox() {

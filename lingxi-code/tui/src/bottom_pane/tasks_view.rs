@@ -101,7 +101,11 @@ impl TasksView {
             let text = format!(
                 "{marker}{} {short}  {:<9}  {label}",
                 Self::glyph(&r.status),
-                r.status,
+                if r.awaiting_plan_approval {
+                    "awaiting approval"
+                } else {
+                    &r.status
+                },
             );
             let style = if i == self.selected {
                 Style::default().add_modifier(Modifier::BOLD)
@@ -219,6 +223,7 @@ mod tests {
 
     fn row(id: &str, status: &str, desc: &str) -> TaskRow {
         TaskRow {
+            awaiting_plan_approval: false,
             task_id: id.to_string(),
             task_type: "local_bash".to_string(),
             status: status.to_string(),
@@ -234,6 +239,35 @@ mod tests {
     /// The agents-view entry opens this picker with nothing running, so the
     /// oracle's in-dialog empty body has to render here (Background dialog:
     /// `children: D.length === 0 ? "No tasks currently running" : …`).
+    #[test]
+    fn plan_approval_label_clears_after_approval_or_rejection() {
+        let mut task = row("t12345678", "running", "Review API");
+        task.task_type = "in_process_teammate".into();
+        task.awaiting_plan_approval = true;
+        let pending: Vec<String> = view(vec![task.clone()])
+            .lines()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(pending
+            .iter()
+            .any(|line| line.contains("awaiting approval") && line.contains("Review API")));
+        for _decision in ["approved", "rejected"] {
+            task.awaiting_plan_approval = false;
+            let resolved: Vec<String> = view(vec![task.clone()])
+                .lines()
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            assert!(!resolved
+                .iter()
+                .any(|line| line.contains("awaiting approval")));
+            assert!(resolved
+                .iter()
+                .any(|line| line.contains("running") && line.contains("Review API")));
+        }
+    }
+
     #[test]
     fn empty_snapshot_renders_the_in_view_empty_state() {
         let v = view(Vec::new());

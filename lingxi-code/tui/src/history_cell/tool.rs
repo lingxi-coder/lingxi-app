@@ -102,6 +102,15 @@ pub(crate) fn tool_result_lines(
     width: usize,
     theme: &Theme,
 ) -> Vec<StyledLine> {
+    // Claude Code 2.1.263 src_180132110.js b$n renders no standalone
+    // result for teammate_spawned. The coordinator roster carries its state;
+    // exposing its transport JSON here also leaks pane coordinates into chat.
+    if tool == "Agent"
+        && result.get("status").and_then(serde_json::Value::as_str) == Some("teammate_spawned")
+        && !tool_display::result_is_error(result)
+    {
+        return Vec::new();
+    }
     if old_string.is_some() || new_string.is_some() {
         return edit_write_diff_lines(old_string, new_string, file_path, width, theme);
     }
@@ -194,6 +203,13 @@ pub(crate) fn group_tool_use_lines(
     theme: &Theme,
     verbose: bool,
 ) -> Vec<StyledLine> {
+    if tool == "Agent"
+        && entries.iter().any(|(_, result)| {
+            result.get("status").and_then(serde_json::Value::as_str) == Some("teammate_spawned")
+        })
+    {
+        return grouped_agent_lines(entries, theme);
+    }
     let mut out = vec![StyledLine {
         spans: vec![
             StyledSpan::styled(
@@ -221,6 +237,100 @@ pub(crate) fn group_tool_use_lines(
         }
     }
     out
+}
+
+/// Completed Agent groups receive result-aware labels instead of exposing
+/// transport JSON. Source: Claude Code 2.1.263 A$n / Zg.
+fn grouped_agent_lines(
+    entries: &[(serde_json::Value, serde_json::Value)],
+    theme: &Theme,
+) -> Vec<StyledLine> {
+    let headers: Vec<_> = entries
+        .iter()
+        .map(|(input, result)| {
+            let mut header = tool_display::tool_header_with_result("Agent", input, result);
+            if header.label == "Task" {
+                header.label = "Agent".into();
+            }
+            header
+        })
+        .collect();
+    let homogeneous = headers
+        .first()
+        .is_some_and(|first| headers.iter().all(|header| header.label == first.label));
+    let asynchronous = |input: &serde_json::Value, result: &serde_json::Value| {
+        input
+            .get("run_in_background")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            || matches!(
+                result.get("status").and_then(serde_json::Value::as_str),
+                Some("teammate_spawned" | "async_launched" | "remote_launched")
+            )
+    };
+    let all_async = entries
+        .iter()
+        .all(|(input, result)| asynchronous(input, result));
+    let summary = if all_async {
+        format!("{} background agents launched (↓ manage)", entries.len())
+    } else {
+        format!("{} agents finished", entries.len())
+    };
+    let mut lines = vec![StyledLine {
+        spans: vec![
+            StyledSpan::styled(
+                TOOL_MARKER,
+                SpanStyle {
+                    fg: theme.success,
+                    ..SpanStyle::default()
+                },
+            ),
+            StyledSpan::plain(summary),
+        ],
+    }];
+    for (index, ((input, result), header)) in entries.iter().zip(headers).enumerate() {
+        let last = index + 1 == entries.len();
+        let label = if homogeneous {
+            let name = input.get("name").and_then(serde_json::Value::as_str);
+            match (name, header.primary.as_deref()) {
+                (Some(name), Some(description)) => format!("{name}: {description}"),
+                (Some(name), None) => name.to_owned(),
+                (None, Some(description)) => description.to_owned(),
+                (None, None) => header.label,
+            }
+        } else if let Some(description) = header.primary {
+            format!("{} ({description})", header.label)
+        } else {
+            header.label
+        };
+        let metrics = if asynchronous(input, result) {
+            String::new()
+        } else {
+            let count = result
+                .get("totalToolUseCount")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            format!(
+                " · {count} tool {}",
+                if count == 1 { "use" } else { "uses" }
+            )
+        };
+        lines.push(StyledLine {
+            spans: vec![StyledSpan::plain(format!(
+                "   {} {label}{metrics}",
+                if last { "└" } else { "├" }
+            ))],
+        });
+        if !asynchronous(input, result) {
+            lines.push(StyledLine {
+                spans: vec![dim_span(
+                    format!("   {} ⎿  Done", if last { "  " } else { "│ " }),
+                    theme,
+                )],
+            });
+        }
+    }
+    lines
 }
 
 /// The collapsed Read/Search fold: a dim `Read/Search (N results)` count
@@ -619,6 +729,35 @@ mod tests {
     }
 
     #[test]
+    fn teammate_spawn_has_no_standalone_result_row() {
+        let result = serde_json::json!({
+            "status": "teammate_spawned",
+            "name": "reviewer",
+            "agent_id": "agent-reviewer",
+            "tmux_session_name": "current",
+            "tmux_window_name": "current",
+            "tmux_pane_id": "%4"
+        });
+        assert!(
+            tool_result_lines("Agent", None, &result, None, None, None, 80, &Theme::dark())
+                .is_empty()
+        );
+        let failure = serde_json::json!({"status": "teammate_spawned", "error": "Spawn failed"});
+        let lines = tool_result_lines(
+            "Agent",
+            None,
+            &failure,
+            None,
+            None,
+            None,
+            80,
+            &Theme::dark(),
+        );
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].plain_text().contains("Spawn failed"));
+    }
+
+    #[test]
     fn tool_result_cell_falls_back_to_compact_json() {
         let cell = ToolResultCell::new(
             "Whatever".to_string(),
@@ -815,6 +954,32 @@ mod tests {
             ],
         );
         assert_eq!(plain(&cell, false), vec!["● Read (×2)".to_string()]);
+    }
+
+    #[test]
+    fn grouped_teammate_rows_use_at_names_only_for_spawned_results() {
+        let cell = GroupedToolUseCell::new(
+            "Agent".into(),
+            vec![
+                (
+                    serde_json::json!({"name":"reviewer","subagent_type":"Explore","description":"Review code"}),
+                    serde_json::json!({"status":"teammate_spawned"}),
+                ),
+                (
+                    serde_json::json!({"name":"named-task","subagent_type":"general-purpose","description":"Run checks"}),
+                    serde_json::json!({"status":"async_launched"}),
+                ),
+            ],
+        );
+        assert_eq!(
+            plain(&cell, false),
+            vec![
+                format!("{TOOL_MARKER}2 background agents launched (↓ manage)"),
+                "   ├ @reviewer (Explore)".into(),
+                "   └ Agent (Run checks)".into(),
+            ]
+        );
+        assert_eq!(plain(&cell, true), plain(&cell, false));
     }
 
     #[test]

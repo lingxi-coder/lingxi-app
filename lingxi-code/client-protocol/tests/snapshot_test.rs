@@ -2310,6 +2310,7 @@ fn canonical_doctor() -> DoctorReportDto {
 
 fn canonical_task_row() -> TaskRowDto {
     TaskRowDto {
+        awaiting_plan_approval: false,
         task_id: "b12345678".to_string(),
         task_type: "bash".to_string(),
         status: TaskStatusDto::Running,

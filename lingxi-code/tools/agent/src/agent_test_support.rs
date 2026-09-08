@@ -40,6 +40,7 @@ pub struct MockSpawnInvocation {
 /// Recording mock for `SubagentSpawner`.
 pub struct MockSubagentSpawner {
     invocations: Mutex<Vec<MockSpawnInvocation>>,
+    teammate_enabled: Mutex<bool>,
     response: Mutex<MockSpawnResponse>,
     /// `required_mcp_servers` surfaced from `resolve_required_mcp_servers` (the
     /// `#G3` pre-spawn MCP gate). Default empty (no requirement).
@@ -95,6 +96,7 @@ impl MockSubagentSpawner {
     pub fn new() -> Self {
         Self {
             invocations: Mutex::new(Vec::new()),
+            teammate_enabled: Mutex::new(false),
             response: Mutex::new(MockSpawnResponse::Completed),
             required_mcp_servers: Mutex::new(Vec::new()),
             selection: Mutex::new(None),
@@ -104,6 +106,11 @@ impl MockSubagentSpawner {
             listing_override: Mutex::new(None),
             tools_denied: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Enable the implicit team in this mock session.
+    pub fn enable_teammates(&self) {
+        *self.teammate_enabled.lock().unwrap() = true;
     }
 
     /// Replace the catalog returned by `agent_listing`.
@@ -230,6 +237,35 @@ impl Default for MockSubagentSpawner {
 
 #[async_trait]
 impl SubagentSpawner for MockSubagentSpawner {
+    fn teammate_enabled(&self) -> bool {
+        *self.teammate_enabled.lock().unwrap()
+    }
+
+    async fn spawn_teammate(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+    ) -> Result<platform_api::team_spawn::TeammateLaunch, SubagentSpawnError> {
+        self.invocations.lock().unwrap().push(MockSpawnInvocation {
+            request: request.clone(),
+            inherit,
+        });
+        Ok(platform_api::team_spawn::TeammateLaunch {
+            teammate_id: "scout@session".into(),
+            agent_id: "scout@session".into(),
+            agent_type: request.subagent_type,
+            model: "sonnet".into(),
+            name: request.name.unwrap(),
+            color: "blue".into(),
+            tmux_session_name: String::new(),
+            tmux_window_name: String::new(),
+            tmux_pane_id: "in-process".into(),
+            team_name: "session".into(),
+            is_splitpane: false,
+            plan_mode_required: false,
+        })
+    }
+
     async fn spawn(
         &self,
         request: SubagentSpawnRequest,

@@ -179,6 +179,15 @@ impl ToolInvokerError {
     }
 }
 
+/// A tool's structured result plus its independent model-facing text.
+#[derive(Debug, Clone)]
+pub struct ToolInvocationResult {
+    /// Structured result retained for tool consumers and media handling.
+    pub data: Value,
+    /// Optional prose supplied by the tool's model-facing result mapper.
+    pub model_content: Option<String>,
+}
+
 /// Tool invocation seam used by `AgentTool` to recurse into the registry.
 ///
 /// Concrete impls live in `lingxi-tools` (production wrapper around
@@ -204,6 +213,22 @@ pub trait ToolInvoker: Send + Sync + Any {
         _workspace_lease_token: Option<u64>,
     ) -> Result<Value, ToolInvokerError> {
         self.invoke(name, input, ctx).await
+    }
+
+    /// Preserve model-facing text without replacing the structured result.
+    async fn invoke_detailed(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: SubagentInvocationContext,
+        workspace_lease_token: Option<u64>,
+    ) -> Result<ToolInvocationResult, ToolInvokerError> {
+        self.invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
+            .await
+            .map(|data| ToolInvocationResult {
+                data,
+                model_content: None,
+            })
     }
 
     /// Cast to `&dyn Any` for downcast-based test introspection.

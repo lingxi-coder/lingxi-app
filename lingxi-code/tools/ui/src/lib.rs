@@ -83,8 +83,7 @@ pub fn register_all_without_ask_user_question(
 /// shutdown + plan-approval handshake). Because the registry's `find_by_name`
 /// is builtin-first, both must not be present or the earlier one would
 /// silently shadow the later — so the engine skips this builtin in coordinator
-/// mode, mirroring how `tool_team::register_all` is skipped for `TeamCreate` /
-/// `TeamDelete` (see `engine-desktop::register_desktop_tools`).
+/// mode (see `engine-desktop::register_desktop_tools`).
 pub fn register_all_except_send_message(
     reg: &mut tool_api::ToolRegistry,
     ctx: tool_api::BuiltinToolContext,

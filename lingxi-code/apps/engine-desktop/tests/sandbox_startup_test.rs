@@ -107,6 +107,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         session_agent_observer: None,
         audio: None,
         session_started_as_coordinator: false,
+        initial_teammate_team_name: None,
         memory_provider: None,
         permission_mode: permission::PermissionMode::Default,
         permission_mode_cli: None,

@@ -1,18 +1,4 @@
-//! `TeamSpawnSeam` — narrow trait giving the coordinator's `TeamCreate` /
-//! `TeamDelete` tools a typed way to start and stop a real `InProcessTeammate`
-//! task WITHOUT a `coordinator` → `lingxi-tasks` dependency cycle.
-//!
-//! Mirrors the [`crate::task_registry::TaskRegistryHandle`] decoupling pattern:
-//! the abstract seam lives here in `traits`; the concrete impl lives in
-//! `lingxi-tasks` (lands in T04, calling the real `TaskRegistry::spawn`). Tests
-//! inject an in-memory fake.
-//!
-//! The existing `TaskRegistryHandle::create` cannot carry the worker
-//! `agent_id` / `name` (it builds a placeholder with a nil `AgentId` and an
-//! empty name), so the coordinator needs this dedicated seam to spawn a
-//! teammate keyed on the worker identity. `spawn_teammate` returns the
-//! handler-generated `task_id`, which the coordinator reconciles back onto the
-//! `WorkerAgent`.
+//! Runtime interfaces for implicit session teammates.
 
 use async_trait::async_trait;
 use protocol::AgentId;
@@ -62,6 +48,35 @@ pub trait TeamSpawnSeam: Send + Sync {
         team_name: String,
         description: String,
     ) -> Result<String, TeamSpawnError>;
+
+    /// Start a teammate carrying the Agent invocation's execution context.
+    async fn spawn_teammate_request(
+        &self,
+        agent_id: AgentId,
+        name: String,
+        team_name: String,
+        request: crate::subagent_spawn::SubagentSpawnRequest,
+        _inherit: crate::subagent_spawn::SubagentInheritance,
+    ) -> Result<String, TeamSpawnError> {
+        self.spawn_teammate(agent_id, name, team_name, request.prompt)
+            .await
+    }
+
+    /// Actual pane coordinates when the host selected a terminal backend.
+    async fn pane_metadata(&self, _task_id: &str) -> Option<PaneLaunchMetadata> {
+        None
+    }
+
+    /// Deliver a control response already authenticated as originating at the lead.
+    async fn apply_plan_approval(
+        &self,
+        _task_id: &str,
+        _response: crate::teammate_plan::PlanApprovalResponse,
+    ) -> Result<(), TeamSpawnError> {
+        Err(TeamSpawnError::Unsupported(
+            "plan approval is not supported by this task".into(),
+        ))
+    }
 
     /// Kill the teammate task identified by its handler-generated `task_id`.
     async fn kill(&self, task_id: &str) -> Result<(), TeamSpawnError>;
@@ -148,4 +163,30 @@ mod tests {
             "default send_message returns Unsupported; got {err:?}"
         );
     }
+}
+
+/// Model-facing metadata returned after a persistent teammate starts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TeammateLaunch {
+    pub teammate_id: String,
+    pub agent_id: String,
+    pub agent_type: String,
+    pub model: String,
+    pub name: String,
+    pub color: String,
+    pub tmux_session_name: String,
+    pub tmux_window_name: String,
+    pub tmux_pane_id: String,
+    pub team_name: String,
+    pub is_splitpane: bool,
+    pub plan_mode_required: bool,
+}
+
+/// Coordinates of an externally running teammate.
+#[derive(Debug, Clone)]
+pub struct PaneLaunchMetadata {
+    pub backend_type: String,
+    pub session_name: String,
+    pub window_name: String,
+    pub pane_id: String,
 }

@@ -329,3 +329,40 @@ test('RuntimeCenterOverview feeds its poll ref from shouldPollOverviewTasks, not
     'the poll ref must not be fed the raw in-flight flag again',
   );
 });
+
+test('coordinator plan decisions update the displayed agent status without changing identity', () => {
+  let state = emptyRuntimeCenterState();
+  const worker = { agent_id: 'reviewer', name: 'reviewer', agent_type: 'general-purpose', status: 'awaiting approval' };
+  state = reduceRuntimeCenterEvent(state, { type: 'coordinator_worker', worker }, 'session-a');
+  assert.equal(state.agents.reviewer.status, 'awaiting approval');
+  state = reduceRuntimeCenterEvent(state, { type: 'session_agent_updated', session_id: 'session-a', agent: { ...worker, status: 'idle' } }, 'session-a');
+  assert.equal(state.agents.reviewer.status, 'awaiting approval', 'idle transcript notification is not a plan decision');
+  state = reduceRuntimeCenterEvent(state, { type: 'session_agent_list', session_id: 'session-a', agents: [{ ...worker, status: 'idle' }] }, 'session-a');
+  assert.equal(state.agents.reviewer.status, 'awaiting approval', 'roster refresh is not a plan decision');
+  for (const decision of ['approved', 'rejected']) {
+    state = reduceRuntimeCenterEvent(state, { type: 'coordinator_worker', worker: { ...worker, status: 'idle' } }, 'session-a');
+    assert.equal(state.agents.reviewer.status, 'idle', decision);
+    assert.equal(state.agents.reviewer.name, 'reviewer', decision);
+  }
+});
+
+test('live coordinator workers survive transcript refresh without resurrecting terminal rows', () => {
+  let state = emptyRuntimeCenterState();
+  const worker = { agent_id: 'pane', name: 'pane', agent_type: 'general-purpose', status: 'working' };
+  state = reduceRuntimeCenterEvent(state, { type: 'coordinator_worker', worker }, 'session-a');
+  assert.equal(state.agents.pane.status, 'running');
+  state = reduceRuntimeCenterEvent(state, { type: 'session_agent_list', session_id: 'session-a', agents: [] }, 'session-a');
+  assert.equal(state.agents.pane.status, 'running', 'pane without parent transcript stays visible');
+  state = reduceRuntimeCenterEvent(state, { type: 'session_agent_list', session_id: 'session-a', agents: [{ ...worker, status: 'idle', model: 'test-model' }] }, 'session-a');
+  assert.equal(state.agents.pane.status, 'running');
+  assert.equal(state.agents.pane.model, 'test-model');
+  state = reduceRuntimeCenterEvent(state, { type: 'coordinator_worker', worker: { ...worker, status: 'killed' } }, 'session-a');
+  state = reduceRuntimeCenterEvent(state, { type: 'session_agent_updated', session_id: 'session-a', agent: { ...worker, status: 'running' } }, 'session-a');
+  assert.equal(state.agents.pane.status, 'killed', 'late transcript cannot revive a stopped worker');
+  state = reduceRuntimeCenterEvent(state, { type: 'session_agent_list', session_id: 'session-a', agents: [] }, 'session-a');
+  assert.equal(state.agents.pane, undefined);
+  state = reduceRuntimeCenterEvent(state, { type: 'session_ended' }, 'session-a');
+  assert.deepEqual(state.coordinatorWorkers, {});
+  state = reduceRuntimeCenterEvent(state, { type: 'session_agent_list', session_id: 'session-b', agents: [] }, 'session-b');
+  assert.deepEqual(state.agents, {});
+});

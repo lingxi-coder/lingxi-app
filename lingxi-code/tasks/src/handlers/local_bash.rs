@@ -101,6 +101,12 @@ pub trait TaskStatusSink: Send + Sync {
     /// completion, failure, timeout, or kill.
     async fn set_status(&self, task_id: &str, status: TaskStatus);
 
+    /// A persistent teammate finished a turn and remains available for messages.
+    async fn set_teammate_idle(&self, _task_id: &str) {}
+
+    /// Teammate plan-review wait, independent of running/idle lifecycle state.
+    async fn set_awaiting_plan_approval(&self, _task_id: &str, _awaiting: bool) {}
+
     /// Record a FAILED terminal status together with the failure reason.
     ///
     /// claude-code 2.1.198: a teammate dying on an API error reports "failed"

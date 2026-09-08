@@ -407,8 +407,8 @@ enum StatusInput {
 ///    leader's task list.
 /// 3. `LINGXI_TEAM_NAME` env (TS `getTeamName()`, set when running as a
 ///    process-based teammate).
-/// 4. Leader team name ([`platform_api::team_registry::leader_team_name`], TS
-///    `leaderTeamName` set by `TeamCreate`).
+/// 4. Leader team name ([`platform_api::team_registry::leader_team_name_for_session`], TS
+///    `leaderTeamName` set by implicit team initialization).
 /// 5. Session id (fallback for standalone sessions).
 ///
 /// The leader and its in-process teammates resolve to the SAME on-disk task dir.
@@ -429,15 +429,20 @@ async fn resolve_task_list_id(ctx: &ToolUseContext) -> String {
             return team.to_string_lossy().into_owned();
         }
     }
-    // 4. Leader team name (set by TeamCreate via setLeaderTeamName).
-    if let Some(team) = platform_api::team_registry::leader_team_name().filter(|t| !t.is_empty()) {
-        return team;
-    }
-    // 5. Session id fallback.
-    match &ctx.session {
-        Some(session) => session.lock().await.session_id.to_string(),
-        None => "default".to_string(),
-    }
+    // Subagent invocations carry immutable origin identity instead of the
+    // mutable main-session handle; both resolve the same host task namespace.
+    let session_id = match &ctx.session {
+        Some(session) => Some(session.lock().await.session_id.to_string()),
+        None => ctx.origin_session_id.map(|id| id.to_string()),
+    };
+    session_id.map_or_else(
+        || "default".to_string(),
+        |id| {
+            platform_api::team_registry::leader_team_name_for_session(&id)
+                .filter(|team| !team.is_empty())
+                .unwrap_or(id)
+        },
+    )
 }
 
 fn todo_store(config_home: Option<&std::path::Path>, list_id: &str) -> TodoStore {

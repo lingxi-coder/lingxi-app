@@ -433,7 +433,7 @@ impl TaskRegistry {
     pub async fn create(
         &self,
         task_type: TaskType,
-        _input: TaskSpawnInput,
+        input: TaskSpawnInput,
         description: String,
     ) -> Result<String, TaskError> {
         let id = generate_task_id(task_type);
@@ -482,6 +482,28 @@ impl TaskRegistry {
                 command: String::new(),
                 exit_code: None,
             }),
+            TaskType::InProcessTeammate => {
+                let TaskSpawnInput::InProcessTeammate {
+                    agent_id,
+                    name,
+                    team_name,
+                    ..
+                } = &input
+                else {
+                    return Err(TaskError::Internal(
+                        "teammate row requires teammate identity".into(),
+                    ));
+                };
+                let mut base = base;
+                base.creator_teammate_name = Some(name.clone());
+                base.creator_team_name = Some(team_name.clone());
+                TaskState::InProcessTeammate(crate::state::InProcessTeammateTaskState {
+                    awaiting_plan_approval: false,
+                    base,
+                    agent_id: *agent_id,
+                    pending_messages: vec![],
+                })
+            }
             _ => TaskState::LocalBash(crate::state::LocalBashTaskState {
                 base,
                 command: String::new(),
@@ -492,6 +514,11 @@ impl TaskRegistry {
             }),
         };
         self.tasks.write().await.insert(id.clone(), state);
+        if task_type == TaskType::InProcessTeammate {
+            for alias in aliases_for_spawn(&input) {
+                self.aliases.write().await.insert(alias, id.clone());
+            }
+        }
         // Best-effort `TaskCreated` fire (claude-code `executeTaskCreatedHooks`,
         // fired from `TaskCreateTool`). No-op when no firer is registered.
         self.fire_task_created(&id, task_type, &description_for_hook)
@@ -1213,7 +1240,7 @@ impl TaskRegistry {
     /// for `task_type`, runs [`Task::spawn`], and tracks the resulting task
     /// under the **handler-generated** `task_id` (e.g.
     /// `InProcessTeammateHandler` mints `t…` ids internally), which it returns.
-    /// This is the load-bearing dispatch the coordinator's `TeamCreate` relies
+    /// This is the load-bearing dispatch the implicit teammate service relies
     /// on to start a real worker.
     ///
     /// The typed [`TaskState`] is built from the real `input` fields (not the
@@ -1837,6 +1864,22 @@ impl TaskRegistry {
         }
     }
 
+    pub async fn set_awaiting_plan_approval(
+        &self,
+        task_id: &str,
+        awaiting: bool,
+    ) -> Result<(), TaskError> {
+        let id = self.canonical_or_raw(task_id).await;
+        let mut tasks = self.tasks.write().await;
+        let state = tasks
+            .get_mut(&id)
+            .ok_or_else(|| TaskError::NotFound(id.clone()))?;
+        if let TaskState::InProcessTeammate(teammate) = state {
+            teammate.awaiting_plan_approval = awaiting && !teammate.base.status.is_terminal();
+        }
+        Ok(())
+    }
+
     /// Force `task_id`'s status to `status`. Returns
     /// [`TaskError::NotFound`] if the id is unknown. Only Bash and Agent
     /// variants currently carry a writable `status` field in the M1 surface;
@@ -1863,7 +1906,12 @@ impl TaskRegistry {
                 TaskState::LocalBash(b) => b.base.status = status,
                 TaskState::LocalAgent(a) => a.base.status = status,
                 TaskState::RemoteAgent(r) => r.base.status = status,
-                TaskState::InProcessTeammate(t) => t.base.status = status,
+                TaskState::InProcessTeammate(t) => {
+                    t.base.status = status;
+                    if status.is_terminal() {
+                        t.awaiting_plan_approval = false;
+                    }
+                }
                 TaskState::LocalWorkflow(w) => w.base.status = status,
                 TaskState::MonitorMcp(m) => m.base.status = status,
                 TaskState::Monitor(m) => m.base.status = status,
@@ -2814,7 +2862,7 @@ impl TaskRegistry {
 }
 
 /// `TeamSpawnSeam` impl — the typed spawn/kill seam the coordinator's
-/// `TeamCreate` / `TeamDelete` tools use to start and stop a real
+/// implicit teammate service use to start and stop a real
 /// `InProcessTeammate` task WITHOUT a `coordinator` → `lingxi-tasks` dependency
 /// cycle (the abstract trait lives in `traits`; this concrete impl lives here).
 ///
@@ -2836,10 +2884,12 @@ impl TeamSpawnSeam for TaskRegistry {
         self.spawn(
             TaskType::InProcessTeammate,
             TaskSpawnInput::InProcessTeammate {
+                spawn_request: None,
+                inheritance: None,
                 agent_id,
                 name,
                 team_name,
-                // The TeamCreate description IS the teammate's initial task
+                // The Agent prompt IS the teammate's initial task
                 // (seeded as its first user message); also reused as the task
                 // subject below.
                 description: description.clone(),
@@ -2848,6 +2898,65 @@ impl TeamSpawnSeam for TaskRegistry {
         )
         .await
         .map_err(task_err_to_team_spawn_err)
+    }
+
+    async fn spawn_teammate_request(
+        &self,
+        agent_id: protocol::AgentId,
+        name: String,
+        team_name: String,
+        request: platform_api::subagent_spawn::SubagentSpawnRequest,
+        inherit: platform_api::subagent_spawn::SubagentInheritance,
+    ) -> Result<String, TeamSpawnError> {
+        let description = request.description.clone().unwrap_or_default();
+        self.spawn(
+            TaskType::InProcessTeammate,
+            TaskSpawnInput::InProcessTeammate {
+                agent_id,
+                name,
+                team_name,
+                description: request.prompt.clone(),
+                spawn_request: Some(request),
+                inheritance: Some(inherit),
+            },
+            description,
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "in-process teammate startup failed");
+            TeamSpawnError::Internal("Failed to spawn in-process teammate".into())
+        })
+    }
+
+    async fn apply_plan_approval(
+        &self,
+        task_id: &str,
+        response: platform_api::teammate_plan::PlanApprovalResponse,
+    ) -> Result<(), TeamSpawnError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let kind = self
+            .spawned
+            .read()
+            .await
+            .get(&task_id)
+            .copied()
+            .ok_or(TeamSpawnError::Terminated)?;
+        let handler = self
+            .handlers
+            .get(&kind)
+            .ok_or_else(|| TeamSpawnError::Unsupported(format!("{kind:?}")))?
+            .clone();
+        handler
+            .apply_plan_approval(
+                &task_id,
+                response,
+                TaskContext {
+                    fs: self.fs.clone(),
+                    runtime: self.runtime.clone(),
+                },
+            )
+            .await
+            .map_err(task_err_to_team_spawn_err)
     }
 
     async fn kill(&self, task_id: &str) -> Result<(), TeamSpawnError> {
@@ -3050,6 +3159,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
         }
         TaskSpawnInput::InProcessTeammate { agent_id, .. } => {
             TaskState::InProcessTeammate(crate::state::InProcessTeammateTaskState {
+                awaiting_plan_approval: false,
                 base,
                 agent_id: *agent_id,
                 pending_messages: vec![],
@@ -3179,6 +3289,9 @@ fn aliases_for_spawn(input: &TaskSpawnInput) -> Vec<String> {
             spawn_request,
             ..
         } => {
+            // Agent publishes the bare UUID; typed host callers also address
+            // this task through AgentId's prefixed Display form.
+            aliases.push(agent_id.as_uuid().to_string());
             aliases.push(agent_id.to_string());
             if let Some(request) = spawn_request {
                 if let Some(name) = request.name.as_deref().filter(|s| !s.is_empty()) {
@@ -3195,6 +3308,9 @@ fn aliases_for_spawn(input: &TaskSpawnInput) -> Vec<String> {
             team_name,
             ..
         } => {
+            // Agent publishes the bare UUID; typed host callers also address
+            // this task through AgentId's prefixed Display form.
+            aliases.push(agent_id.as_uuid().to_string());
             aliases.push(agent_id.to_string());
             if !name.is_empty() {
                 aliases.push(name.clone());

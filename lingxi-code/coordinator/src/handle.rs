@@ -26,14 +26,17 @@ pub const CLAIM_WINDOW_SECS: u64 = 30;
 /// main thread), so `route()` must ACCEPT it rather than require an id.
 const TEAM_LEAD_NAME: &str = "team-lead";
 
-/// Parse a bare UUID or the display form `agent:<uuid>` into an [`AgentId`].
+/// Parse a bare UUID recipient into an [`AgentId`].
 fn try_parse_agent_id(s: &str) -> Option<AgentId> {
-    let raw = s.strip_prefix("agent:").unwrap_or(s);
-    Uuid::parse_str(raw).ok().map(AgentId::from_uuid)
+    Uuid::parse_str(s).ok().map(AgentId::from_uuid)
 }
 
 #[async_trait]
 impl MailboxRouterHandle for MailboxRouter {
+    async fn teammate_color(&self, name: &str) -> Option<String> {
+        MailboxRouter::teammate_color(self, name).await
+    }
+
     async fn route(
         &self,
         from_agent: &str,
@@ -49,7 +52,9 @@ impl MailboxRouterHandle for MailboxRouter {
         // (parity with TS, where `from` is just a label).
         let from = if from_agent.eq_ignore_ascii_case(TEAM_LEAD_NAME) {
             MessageSender::Coordinator
-        } else if let Some(id) = try_parse_agent_id(from_agent) {
+        } else if let Some(id) =
+            try_parse_agent_id(from_agent.strip_prefix("agent:").unwrap_or(from_agent))
+        {
             MessageSender::Teammate(id)
         } else if let Some(id) = self.resolve_name(from_agent).await {
             MessageSender::Teammate(id)
@@ -57,7 +62,7 @@ impl MailboxRouterHandle for MailboxRouter {
             MessageSender::Coordinator
         };
 
-        // Resolve the RECIPIENT into an [`AgentId`]: a bare uuid / `agent:<uuid>`
+        // Resolve the RECIPIENT into an [`AgentId`]: a bare uuid
         // first, then a registered display NAME (the common case — `TaskUpdate`
         // assigns ownership by name), then any additional registered address.
         // The last one is what makes a background agent's TASK id routable: a
@@ -108,7 +113,9 @@ impl MailboxRouterHandle for MailboxRouter {
     ) -> Result<Vec<String>, MailboxError> {
         let sender_id = if from_agent.eq_ignore_ascii_case(TEAM_LEAD_NAME) {
             None
-        } else if let Some(id) = try_parse_agent_id(from_agent) {
+        } else if let Some(id) =
+            try_parse_agent_id(from_agent.strip_prefix("agent:").unwrap_or(from_agent))
+        {
             Some(id)
         } else {
             self.resolve_name(from_agent).await
@@ -158,19 +165,20 @@ pub fn worker_status_label(status: &WorkerStatus) -> String {
     .to_string()
 }
 
+pub(crate) fn worker_info(worker: crate::team_registry::WorkerAgent) -> WorkerInfo {
+    WorkerInfo {
+        awaiting_plan_approval: worker.awaiting_plan_approval,
+        agent_id: worker.agent_id.to_string(),
+        agent_type: worker.agent_type,
+        name: worker.name,
+        status: worker_status_label(&worker.status),
+    }
+}
+
 #[async_trait]
 impl TeamRegistryHandle for TeamRegistry {
     async fn list_workers(&self) -> Vec<WorkerInfo> {
-        self.list()
-            .await
-            .into_iter()
-            .map(|w| WorkerInfo {
-                agent_id: w.agent_id.to_string(),
-                agent_type: w.agent_type,
-                name: w.name,
-                status: worker_status_label(&w.status),
-            })
-            .collect()
+        self.list().await.into_iter().map(worker_info).collect()
     }
 
     async fn team_name(&self) -> Option<String> {
@@ -183,6 +191,13 @@ mod tests {
     use super::*;
     use crate::mailbox::TeammateMailbox;
     use std::sync::Arc;
+
+    #[test]
+    fn recipient_parser_rejects_internal_display_prefix() {
+        let id = AgentId::new();
+        assert_eq!(try_parse_agent_id(&id.as_uuid().to_string()), Some(id));
+        assert_eq!(try_parse_agent_id(&id.to_string()), None);
+    }
 
     #[test]
     fn claim_window_locked_30s() {

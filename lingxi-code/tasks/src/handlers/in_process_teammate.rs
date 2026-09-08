@@ -38,7 +38,7 @@
 //!
 //! 1. **Startup** (`if(!standalone) await rIp(...)` before the loop): the
 //!    claim's side effect only — the returned prompt is discarded because the
-//!    TeamCreate description already seeded the first message.
+//!    Agent prompt already seeded the first message.
 //! 2. **While parked**: one 500ms tick first consumes a queued mailbox message,
 //!    then (only when none exists) runs [`check_and_claim_next_task`]. A claimed
 //!    task's [`claimed_task_prompt`] is self-injected wearing the
@@ -70,6 +70,11 @@ use agent::resolve_agent_model;
 use agent::runner::SubagentEvent;
 use agent::PermissionMode;
 use agent::SubagentApiClient;
+
+enum TeammateInput {
+    Message(String),
+    PlanApproval(platform_api::teammate_plan::PlanApprovalResponse),
+}
 
 /// Handler name reported by [`Task::name`] and used as the runtime task-name
 /// prefix.
@@ -433,7 +438,7 @@ struct TeammateEntry {
     /// Coordinator-mailbox messages wait here until the teammate is idle. Only
     /// one drained mailbox batch may sit behind the outer 100-message inbox, so
     /// the two buffering layers cannot multiply to 10,000 pending messages.
-    pending_messages: tokio::sync::mpsc::Sender<String>,
+    pending_messages: tokio::sync::mpsc::Sender<TeammateInput>,
 }
 
 /// Handler for [`TaskType::InProcessTeammate`].
@@ -452,6 +457,9 @@ pub struct InProcessTeammateHandler {
     /// absent, teammate auto-claim preserves the legacy process-global
     /// `HOME`/`LINGXI_CONFIG_DIR` resolution.
     config_home: Option<std::path::PathBuf>,
+    plan_approval_mailbox: Option<Arc<dyn platform_api::mailbox::MailboxRouterHandle>>,
+    plan_approval_gate: Option<Arc<dyn platform_api::PermissionGate>>,
+    transcript: Option<(Arc<dyn platform_api::FileSystem>, std::path::PathBuf)>,
     /// Model API seam handed to every spawned teammate's runner.
     api_client: Arc<dyn SubagentApiClient>,
     /// Tool dispatch seam inherited by the teammate. `None` means the teammate
@@ -547,6 +555,9 @@ impl InProcessTeammateHandler {
             pool,
             output,
             config_home: None,
+            plan_approval_mailbox: None,
+            plan_approval_gate: None,
+            transcript: None,
             api_client,
             tool_invoker: None,
             definitions: Arc::new(DefaultTeammateDefinition),
@@ -715,6 +726,31 @@ impl InProcessTeammateHandler {
     /// Attach a custom [`TeammateDefinitionResolver`] (e.g. an adapter over the
     /// host's loaded agent catalog).
     #[must_use]
+    /// Share the leader inbox used for nonmutating teammate plan review.
+    pub fn with_plan_approval_mailbox(
+        mut self,
+        mailbox: Arc<dyn platform_api::mailbox::MailboxRouterHandle>,
+    ) -> Self {
+        self.plan_approval_mailbox = Some(mailbox);
+        self
+    }
+
+    /// Live mode availability used when the lead approves a teammate plan.
+    pub fn with_plan_approval_gate(mut self, gate: Arc<dyn platform_api::PermissionGate>) -> Self {
+        self.plan_approval_gate = Some(gate);
+        self
+    }
+
+    /// Attach the session transcript filesystem and subagent directory.
+    pub fn with_transcript(
+        mut self,
+        fs: Arc<dyn platform_api::FileSystem>,
+        directory: std::path::PathBuf,
+    ) -> Self {
+        self.transcript = Some((fs, directory));
+        self
+    }
+
     pub fn with_definitions(mut self, definitions: Arc<dyn TeammateDefinitionResolver>) -> Self {
         self.definitions = definitions;
         self
@@ -822,7 +858,7 @@ impl InProcessTeammateHandler {
             }
             None => (Vec::new(), Vec::new()),
         };
-        // The TeamCreate description is the lead's initial assignment. Claude
+        // The Agent prompt is the lead's initial assignment. Claude
         // Code runs it through the same teammate-message renderer as mailbox
         // input, with `from:"team-lead"`; a raw user message changes both the
         // prompt bytes and the trust boundary.
@@ -874,8 +910,12 @@ impl InProcessTeammateHandler {
             can_show_permission_prompts: true,
             session_interactive: self.session_interactive,
             mcp_clients: vec![],
-            transcript_subdir: "/tmp".into(),
-            transcript_fs: None,
+            transcript_subdir: self
+                .transcript
+                .as_ref()
+                .map(|(_, path)| path.clone())
+                .unwrap_or_else(|| "/tmp".into()),
+            transcript_fs: self.transcript.as_ref().map(|(fs, _)| fs.clone()),
             resumed_history: None,
             rendered_system_prompt: Some(rendered_system_prompt),
             mobile_runtime_environment_reminder: None,
@@ -924,7 +964,7 @@ impl InProcessTeammateHandler {
             max_output_tokens_per_turn: None,
             max_input_bytes_per_turn: None,
             query_source_label: None,
-            // Teammates are not spawned through `SubagentSpawnRequest`, so
+            // Teammates do not inherit forked skill execution, so
             // there is no caller correlation id to thread.
             correlation_id: None,
         })
@@ -946,6 +986,34 @@ fn event_line(ev: &SubagentEvent) -> String {
         SubagentEvent::Completed { result, .. } => format!("completed: {result}"),
         SubagentEvent::Failed { error, .. } => format!("failed: {error}"),
         SubagentEvent::Killed { .. } => "killed".to_string(),
+    }
+}
+
+fn apply_spawn_context(context: &mut SubagentContext, request: platform_api::SubagentSpawnRequest) {
+    context.cwd = request.cwd.map(Into::into);
+    context.origin_session_id = request.origin_session_id;
+    context.depth = request.depth;
+    context.model_profile = request.model_profile;
+    if request.mode.as_deref() == Some("plan") {
+        context.permission_mode_override = Some("plan".into());
+    }
+    context.parent_agent_id = request.creator_agent_id;
+    if let Some(color) = request
+        .teammate_color
+        .as_deref()
+        .and_then(|color| match color {
+            "red" => Some(AgentColor::Red),
+            "blue" => Some(AgentColor::Blue),
+            "green" => Some(AgentColor::Green),
+            "yellow" => Some(AgentColor::Yellow),
+            "purple" => Some(AgentColor::Purple),
+            "orange" => Some(AgentColor::Orange),
+            "pink" => Some(AgentColor::Pink),
+            "cyan" => Some(AgentColor::Cyan),
+            _ => None,
+        })
+    {
+        context.display.color = color;
     }
 }
 
@@ -1012,6 +1080,8 @@ impl Task for InProcessTeammateHandler {
     ) -> Result<TaskHandle, TaskError> {
         // 1. Only the InProcessTeammate variant is accepted.
         let TaskSpawnInput::InProcessTeammate {
+            spawn_request,
+            inheritance,
             agent_id,
             name,
             team_name,
@@ -1036,39 +1106,84 @@ impl Task for InProcessTeammateHandler {
             .to_string();
 
         // 3. Resolve the definition and build a persistent SubagentContext.
-        let definition = self
+        let mut definition = self
             .definitions
             .resolve(&agent_id, &name)
             .await
             .ok_or_else(|| {
                 TaskError::Internal(format!("no agent definition for teammate {name}"))
             })?;
-        let subagent_ctx = self
+        if let Some(request) = &spawn_request {
+            if let Some(model) = &request.model {
+                definition.model = AgentModel::Explicit(model.clone());
+            }
+        }
+        let mut subagent_ctx = self
             .build_context(agent_id, &name, &team_name, &description, definition)
             .await?;
-        // `hasTaskListTools` gates both auto-claim call sites upstream. An
-        // unwired standalone/test handler keeps the legacy assumption that the
-        // suite exists; production always has the registry and checks the
-        // actual resolved allow-list.
-        //
-        // The wired branch inherits the 2.1.263 `OO()` model gate for free: the
-        // four Task tools reach `allowed_tools` only through
-        // `augment_teammate_tool_policy` -> `available_tools`, which applies
-        // `is_enabled`. Once the gate closes they are absent here and auto-claim
-        // switches off, matching the oracle.
-        //
-        // The UNWIRED branch is a documented residual. The oracle spells it
-        // `e.hasTaskListTools ?? h3()`, i.e. it falls back to the gate rather
-        // than to `true`. Reproducing that needs `X_()`, which lives in
-        // `tool-task`, and `tasks` does not depend on that crate — a dependency
-        // added for a standalone/test-only path. With no registry there is no
-        // main-loop model either, so `OO()` is open and the two answers differ
-        // only when `LINGXI_ENABLE_TASKS` is explicitly disabled.
+        if let Some(request) = spawn_request {
+            apply_spawn_context(&mut subagent_ctx, request);
+        }
+        if let Some(inherit) = inheritance {
+            subagent_ctx.tool_invoker = Some(inherit.tool_invoker);
+            subagent_ctx.budget = Some(inherit.budget);
+        }
+        let plan_control = match (&self.plan_approval_mailbox, &subagent_ctx.tool_invoker) {
+            (Some(mailbox), Some(inner))
+                if subagent_ctx.permission_mode_override.as_deref() == Some("plan") =>
+            {
+                let home = self
+                    .config_home
+                    .clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from(branding::DOT_DIR));
+                let path = home
+                    .join("plans")
+                    .join(format!("{}.md", agent_id.as_uuid()))
+                    .display()
+                    .to_string();
+                let controller = Arc::new(
+                    super::teammate_plan::PlanAwareInvoker::new(
+                        inner.clone(),
+                        mailbox.clone(),
+                        ctx.fs.clone(),
+                        name.clone(),
+                        team_name.clone(),
+                        path,
+                    )
+                    .with_permission_gate(self.plan_approval_gate.clone())
+                    .with_status_sink(self.status_sink.clone(), task_id.clone()),
+                );
+                let plan_file_info = if ctx
+                    .fs
+                    .read_file(controller.plan_path(), None, None)
+                    .await
+                    .is_ok()
+                {
+                    format!("A plan file already exists at {}. You can read it and make incremental edits using the Edit tool if you need to.",controller.plan_path())
+                } else {
+                    format!("No plan file exists yet. You should create your plan at {} using the Write tool if you need to.",controller.plan_path())
+                };
+                subagent_ctx.prompt_messages.insert(0, protocol::ConversationMessage::user(protocol::MessageId::new(), format!("<system-reminder>\n## Plan File Info:\n{plan_file_info}\nYou should build your plan incrementally by writing to or editing this file. NOTE that this is the only file you are allowed to edit - other than this you are only allowed to take READ-ONLY actions.\n</system-reminder>")));
+                let requester: Arc<dyn platform_api::teammate_plan::TeammatePlanRequester> =
+                    controller.clone();
+                platform_api::teammate_plan::register(agent_id, &requester);
+                subagent_ctx.tool_invoker = Some(controller.clone());
+                Some(controller)
+            }
+            _ => None,
+        };
+        // The wired tool resolver already applies the session model gate.
+        // Without a registry/model, the oracle falls back to the task env gate.
         const TASK_LIST_TOOLS: [&str; 4] = ["TaskCreate", "TaskGet", "TaskUpdate", "TaskList"];
-        let has_task_list_tools = self.tool_registry.get().is_none()
-            || TASK_LIST_TOOLS
+        let has_task_list_tools = if self.tool_registry.get().is_none() {
+            !platform_api::env::is_env_defined_falsy(
+                std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref(),
+            )
+        } else {
+            TASK_LIST_TOOLS
                 .iter()
-                .all(|name| subagent_ctx.allowed_tools.iter().any(|tool| tool == name));
+                .all(|name| subagent_ctx.allowed_tools.iter().any(|tool| tool == name))
+        };
 
         // 4. Resolve startup auto-claim configuration. The actual claim and
         //    pool allocation happen inside the activation-gated worker below:
@@ -1097,6 +1212,14 @@ impl Task for InProcessTeammateHandler {
         // spawn / no team) rides as `""`, matching claude-code's
         // `getTeamName() ?? ''` fallback.
         let idle_firer = self.teammate_idle_firer.clone();
+        let idle_session_id = subagent_ctx
+            .origin_session_id
+            .unwrap_or(subagent_ctx.hook_session_id);
+        let idle_permission_mode = subagent_ctx
+            .permission_mode_override
+            .clone()
+            .unwrap_or_else(|| self.permission_mode.wire_str().to_string());
+        let idle_permission_gate = self.plan_approval_gate.clone();
         let idle_name = name.clone();
         let idle_team_name = team_name.clone();
         let worker_task_id = task_id.clone();
@@ -1221,9 +1344,22 @@ impl Task for InProcessTeammateHandler {
                                 while let Ok(message) = pending_message_rx.try_recv() {
                                     messages.push(message);
                                 }
-                                Some((messages.join("\n\n"), None))
+                                let mut rendered=Vec::new();
+                                for message in messages {
+                                    match message {
+                                        TeammateInput::Message(text) => rendered.push(text),
+                                        TeammateInput::PlanApproval(response) => {
+                                            if let Some(control)=&plan_control {
+                                                if let Some(text)=control.apply(response).await { rendered.push(teammate_message_envelope(TEAM_LEAD_NAME,&text)); }
+                                            }
+                                        }
+                                    }
+                                }
+                                let messages=rendered;
+                                (!messages.is_empty()).then(|| (messages.join("\n\n"), None))
                             }
                             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                                if plan_control.as_ref().is_some_and(|control| control.awaiting()) { continue; }
                                 match &claim_list_id {
                                     Some(list_id) => check_and_claim_next_task(
                                         claim_config_home.as_deref(),
@@ -1273,7 +1409,10 @@ impl Task for InProcessTeammateHandler {
                                 )
                                 .await
                             {
-                                Ok(()) => idle = false,
+                                Ok(()) => {
+                                    idle = false;
+                                    status_sink.set_status(&worker_task_id, TaskStatus::Running).await;
+                                },
                                 Err(e) => {
                                     if let (Some(list_id), Some(task_id)) =
                                         (&claim_list_id, claimed_task_id.as_deref())
@@ -1332,6 +1471,16 @@ impl Task for InProcessTeammateHandler {
                         Some(firer) => {
                             firer
                                 .fire(hooks::TeammateIdleFire {
+                                    session_id: idle_session_id,
+                                    permission_mode: plan_control
+                                        .as_ref()
+                                        .map(|control| control.permission_mode())
+                                        .or_else(|| {
+                                            idle_permission_gate
+                                                .as_ref()
+                                                .and_then(|gate| gate.permission_mode())
+                                        })
+                                        .unwrap_or_else(|| idle_permission_mode.clone()),
                                     teammate_name: idle_name.clone(),
                                     team_name: idle_team_name.clone(),
                                 })
@@ -1367,7 +1516,12 @@ impl Task for InProcessTeammateHandler {
                             )
                             .await
                         {
-                            Ok(()) => idle = false,
+                            Ok(()) => {
+                                idle = false;
+                                status_sink
+                                    .set_status(&worker_task_id, TaskStatus::Running)
+                                    .await;
+                            }
                             Err(e) => {
                                 if stop_loop.load(std::sync::atomic::Ordering::Acquire) {
                                     break;
@@ -1387,6 +1541,7 @@ impl Task for InProcessTeammateHandler {
                         // No hook intervention: open the oracle's 500ms
                         // mailbox/task-list poll window.
                         idle = true;
+                        status_sink.set_teammate_idle(&worker_task_id).await;
                         tick.reset();
                     }
                 }
@@ -1496,7 +1651,26 @@ impl Task for InProcessTeammateHandler {
         // this before considering task-list auto-claim. Awaiting a full channel
         // backpressures the outer mailbox rather than dropping messages.
         pending_messages
-            .send(message)
+            .send(TeammateInput::Message(message))
+            .await
+            .map_err(|_| TaskError::TerminatedTask)
+    }
+
+    async fn apply_plan_approval(
+        &self,
+        task_id: &str,
+        response: platform_api::teammate_plan::PlanApprovalResponse,
+        _ctx: TaskContext,
+    ) -> Result<(), TaskError> {
+        let sender = self
+            .entries
+            .lock()
+            .await
+            .get(task_id)
+            .map(|entry| entry.pending_messages.clone())
+            .ok_or_else(|| TaskError::NotFound(task_id.into()))?;
+        sender
+            .send(TeammateInput::PlanApproval(response))
             .await
             .map_err(|_| TaskError::TerminatedTask)
     }

@@ -231,6 +231,7 @@ function validateTaskRow(v: unknown): void {
   if ('started_at_ms' in task) assert.ok(isNumber(task['started_at_ms']));
   if ('error' in task) assert.ok(isString(task['error']));
   if ('stage' in task) assert.ok(isString(task['stage']));
+  if ('awaiting_plan_approval' in task) assert.equal(typeof task['awaiting_plan_approval'], 'boolean');
 }
 
 // Compile-time contract check for finding B7#11: `TaskRowDto` (listings.rs)
@@ -248,6 +249,7 @@ function validateTaskRow(v: unknown): void {
 // here too.
 test('ALL_TASK_ROW_DTO_KEYS (src/protocolCoverage.ts) matches TaskRowDto exactly', () => {
   assert.deepEqual(Object.keys(ALL_TASK_ROW_DTO_KEYS).sort(), [
+    'awaiting_plan_approval',
     'can_resume',
     'description',
     'error',

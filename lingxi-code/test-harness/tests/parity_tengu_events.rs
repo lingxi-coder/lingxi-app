@@ -27,7 +27,7 @@ struct Fixture {
 fn event_names_match_registry_byte_for_byte() {
     let fx: Fixture = load_fixture("tengu_events");
     let registry = telemetry::tengu::ALL_EVENT_NAMES;
-    assert_eq!(fx.registry_count_lock, 416);
+    assert_eq!(fx.registry_count_lock, 410);
     assert_eq!(registry.len(), fx.registry_count_lock);
     assert_eq!(
         fx.event_names.len(),

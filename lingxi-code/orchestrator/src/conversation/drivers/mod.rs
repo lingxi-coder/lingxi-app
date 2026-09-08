@@ -149,7 +149,17 @@ struct FinalizedStreamingIteration {
 }
 
 impl StreamingTurnDriver<'_> {
-    async fn collect_turn_reminders(orch: &ConversationOrchestrator) -> Vec<ConversationMessage> {
+    /// Collect this step's transient reminders, plus (separately) the durable
+    /// task-completion message.
+    ///
+    /// The second value is NOT a reminder: it has already been appended to
+    /// history and the JSONL, so it must be added to the outgoing snapshot
+    /// exactly once. Returning it in the reminder vector would double it on
+    /// every retry, because a retry rebuilds the request from history and
+    /// re-appends the reminders on top.
+    async fn collect_turn_reminders(
+        orch: &ConversationOrchestrator,
+    ) -> (Vec<ConversationMessage>, Option<ConversationMessage>) {
         let mut turn_reminders: Vec<ConversationMessage> = Vec::new();
 
         // `/brief` (2.1.252): consume the one-shot model-facing reminder
@@ -313,8 +323,19 @@ impl StreamingTurnDriver<'_> {
         // surfaces exactly one `<task-notification>`. `None` when no registry
         // is wired / nothing finished. See
         // [`Self::task_notification_reminder_message`].
-        if let Some(reminder) = orch.task_notification_reminder_message().await {
-            turn_reminders.push(reminder);
+        // A completion notification is a real conversation event, not a
+        // transient reminder (claude-code enqueues it and it becomes a durable
+        // user message). Persist it here, and add it to this call's snapshot
+        // below once that snapshot exists -- NOT to `turn_reminders`, which the
+        // retry path re-appends on top of a request rebuilt from history and
+        // would therefore send it twice.
+        let task_notification = orch.task_notification_reminder_message().await;
+        if let Some(reminder) = task_notification.as_ref() {
+            {
+                let mut session = orch.session.lock().await;
+                session.history.push(reminder.clone());
+            }
+            orch.persist_message_to_jsonl(reminder).await;
         }
 
         // REM-14 `memory_update` (streaming twin): one meta reminder per
@@ -384,7 +405,7 @@ impl StreamingTurnDriver<'_> {
         // ADVANCES the announced-set tracking, so compute it ONCE per model
         // step here and reuse this value on every retry/fallback re-snapshot
         // below (each of which rebuilds the SAME step's request).
-        turn_reminders
+        (turn_reminders, task_notification)
     }
 
     async fn prepare_iteration(
@@ -457,7 +478,13 @@ impl StreamingTurnDriver<'_> {
         // would be silently lost for the rest of the session. Computed
         // ONCE, re-appended on every re-snapshot — the same discipline
         // `deferred_reminder` and `date_change_reminder` already follow.
-        let turn_reminders = Self::collect_turn_reminders(orch).await;
+        let (turn_reminders, task_notification) = Self::collect_turn_reminders(orch).await;
+        // The durable completion message goes in first: it now lives in history,
+        // so it belongs after the last real entry and before the transient
+        // reminders. The snapshot was taken before it was appended.
+        if let Some(reminder) = task_notification {
+            snapshot.push(reminder);
+        }
         snapshot.extend(turn_reminders.iter().cloned());
 
         let wire_tools = orch.build_wire_tools().await;
@@ -3586,3 +3613,5 @@ pub(super) fn parse_generated_session_name(raw: &str) -> Option<String> {
 // were removed in Task 5 — they drove `api_client::AnthropicProvider` directly.
 // The live path is now `ProviderApiAdapter` (provider_adapter.rs), retargeted
 // in Task 6 to drive `llm_client::DefaultLlmClient`. (3b deletes api-client.)
+
+

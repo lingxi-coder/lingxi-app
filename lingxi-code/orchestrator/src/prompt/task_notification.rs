@@ -12,10 +12,18 @@
 //! turn (the registry marks each `notified` + evicts on drain, so a completion
 //! is reported exactly once — the same `notified`-guard claude-code uses).
 //!
-//! Like the skill-/agent-listing and async-hook reminders, the message is
-//! appended ONLY to the per-turn OUTGOING snapshot (never `session.history` /
-//! JSONL), so it never accumulates. When no task finished since the last turn
-//! the reminder is `None` — byte-identical to a build with no background tasks.
+//! Unlike the skill-/agent-listing and async-hook reminders, this message is
+//! DURABLE: claude-code enqueues it onto the command queue and it becomes an
+//! ordinary user message, so both drivers append it to `session.history` and the
+//! JSONL rather than rendering it into the outgoing snapshot alone. A completion
+//! the model was told about therefore survives the turn, which matters because
+//! the drain marks each task notified exactly once — a transient render meant a
+//! turn that ended badly lost the completion for good. When no task finished
+//! since the last turn the message is `None`, exactly as before.
+//!
+//! It is deliberately NOT one of the `turn_reminders`: a retry or model fallback
+//! rebuilds the request from raw history and re-appends the reminders on top, so
+//! a message in both places would reach the model twice.
 //!
 //! ## Non-human-input provenance header ([`NON_USER_INPUT_HEADER`])
 //!

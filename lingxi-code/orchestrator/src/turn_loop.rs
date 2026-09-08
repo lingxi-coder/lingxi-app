@@ -558,7 +558,25 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // inject this reminder. `None` when no registry is wired / nothing finished.
     // See [`ConversationOrchestrator::task_notification_reminder_message`].
     if let Some(reminder) = orch.task_notification_reminder_message().await {
-        turn_reminders.push(reminder);
+        // A completion notification is a real conversation event, not a
+        // transient reminder: claude-code enqueues it onto the command queue and
+        // it becomes a durable user message. The port used to render it into the
+        // outgoing snapshot only, so it vanished from the transcript the moment
+        // the turn ended -- and because the drain marks each task notified once,
+        // it could never be shown again.
+        //
+        // It goes into history (and the JSONL) rather than `turn_reminders`
+        // precisely because `call_api_with_ptl_recovery` rebuilds the request
+        // from raw history on every retry and re-appends the reminders: being in
+        // both would send it twice on any retry or model fallback. Pushing it
+        // onto this call's snapshot too keeps it in THIS turn's request, which
+        // the snapshot taken above predates.
+        {
+            let mut session = orch.session.lock().await;
+            session.history.push(reminder.clone());
+        }
+        orch.persist_message_to_jsonl(&reminder).await;
+        history_snapshot.push(reminder);
     }
 
     // REM-14: dream completions enqueue memory updates while task

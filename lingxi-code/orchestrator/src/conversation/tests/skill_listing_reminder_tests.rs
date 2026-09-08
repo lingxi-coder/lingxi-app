@@ -634,6 +634,62 @@ async fn task_notification_reminder_folds_in_then_drains_once() {
     );
 }
 
+/// A completion notification is a durable conversation event: the drivers push
+/// it into history and the JSONL rather than returning it as a transient
+/// reminder. Keeping it out of the reminder vector is what stops a retry -- which
+/// rebuilds the request from history and re-appends the reminders -- from
+/// sending the same completion twice.
+#[tokio::test]
+async fn task_notification_is_durable_and_not_a_transient_reminder() {
+    let reg = ToolRegistry::new();
+    let bash = platform_api::task_registry::TaskNotification {
+        task_id: "b87654321".into(),
+        task_type: "local_bash".into(),
+        status: "completed".into(),
+        description: "run tests".into(),
+        tool_use_id: None,
+        output_path: Some("/tmp/tasks/b87654321.output".into()),
+        exit_code: Some(0),
+        ..Default::default()
+    };
+    let orch = orch_with(reg, None).with_task_notifications(Arc::new(OnceTaskNotifications(
+        std::sync::Mutex::new(vec![bash]),
+    )));
+
+    let before = orch.session.lock().await.history.len();
+    let message = orch
+        .task_notification_reminder_message()
+        .await
+        .expect("a terminal task produces a message");
+
+    // The drivers are what persist it, so mirror exactly what they do and then
+    // assert the message survives the turn instead of vanishing with it.
+    {
+        let mut session = orch.session.lock().await;
+        session.history.push(message.clone());
+    }
+    orch.persist_message_to_jsonl(&message).await;
+
+    let history = orch.session.lock().await.history.clone();
+    assert_eq!(
+        history.len(),
+        before + 1,
+        "the completion must survive the turn as a history entry",
+    );
+    let rendered = format!("{:?}", history.last().expect("the appended message"));
+    assert!(
+        rendered.contains("b87654321"),
+        "the appended entry must be the completion, got: {rendered}",
+    );
+
+    // Consume-once still holds: a second drain has nothing left, so the
+    // completion cannot be appended twice.
+    assert!(
+        orch.task_notification_reminder_message().await.is_none(),
+        "a drained completion must not surface again",
+    );
+}
+
 #[tokio::test]
 async fn task_notification_reminder_none_without_provider() {
     let reg = ToolRegistry::new();

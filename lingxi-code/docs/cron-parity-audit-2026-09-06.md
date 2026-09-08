@@ -90,7 +90,7 @@ Also in round 2/3: `recurring: false` is omitted on every write path (CronCreate
 ### P1 (model-visible text)
 7. ~~CronCreate `prompt()`/`description()` stubs~~ — fixed; only the Monitor-gated `## Not for live watching` block is still omitted (Monitor tool gated off), and the 7-day paragraph waits on item 1.
 8. ~~CronDelete / CronList `prompt()`~~ — fixed.
-9. ~~`/loop` skill dynamic prompt TEXT~~ — fixed (round 2); previously lagged 2.1.263 `A(e)` (step 4 "decide whether the loop continues", `noop` bullet, step 6 `stop: true`, blank-line layout); dispatch and registration metadata are aligned. The fixtures under `commands/core/tests/fixtures/loop_autonomous/` still pin the 2.1.191 wording of those steps.
+9. ~~`/loop` skill dynamic prompt TEXT~~ — fixed (round 2); previously lagged 2.1.263 `A(e)` (step 4 "decide whether the loop continues", `noop` bullet, step 6 `stop: true`, blank-line layout); dispatch and registration metadata are aligned. (The note that the `loop_autonomous/` fixtures still pinned the 2.1.191 wording was stale — they were regenerated from the oracle templates in round 2; re-verified 2026-09-08: the three dynamic fixtures carry the 2.1.263 steps, `noop` and `stop: true`.)
 10. ~~`recurring: false` must be OMITTED on disk~~ — fixed (CronCreate writes the key only when true; the reader normalises a literal `false` to absent).
 
 ### P2 (11 and 15 fixed 2026-09-07)

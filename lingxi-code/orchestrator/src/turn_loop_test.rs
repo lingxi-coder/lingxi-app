@@ -302,6 +302,7 @@ mod read_file_state_tests {
     use crate::turn_loop::{dispatch_tool_uses, execute_one_turn};
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
+    use platform_api::coordinator_mode::CoordinatorModeHandle;
     use platform_api::OrchestratorHandle;
     use protocol::ToolUseId;
     use serde_json::json;
@@ -1190,6 +1191,71 @@ mod read_file_state_tests {
     async fn build_wire_tools_empty_registry_is_empty() {
         let orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
         assert!(orch.build_wire_tools().await.is_empty());
+    }
+
+    struct StubCoordinatorMode {
+        enabled: bool,
+    }
+
+    impl CoordinatorModeHandle for StubCoordinatorMode {
+        fn is_enabled(&self) -> bool {
+            self.enabled
+        }
+    }
+
+    #[tokio::test]
+    async fn build_wire_tools_coordinator_uses_pool_not_qbt() {
+        let cwd = PathBuf::from("/tmp");
+        let allowed = [
+            "Agent",
+            "SendMessage",
+            "TaskStop",
+            "AskUserQuestion",
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "subscribe_pr_activity",
+            "unsubscribe_pr_activity",
+        ];
+        let hidden = [
+            "Read",
+            "Bash",
+            "Skill",
+            "ListAgents",
+            "Workflow",
+            "ReadNotifications",
+            "TodoWrite",
+            "ToolSearch",
+        ];
+        let tools: Vec<Arc<dyn Tool>> = allowed
+            .iter()
+            .chain(hidden.iter())
+            .map(|name| {
+                Arc::new(StubFileTool {
+                    name,
+                    cwd: cwd.clone(),
+                }) as Arc<dyn Tool>
+            })
+            .collect();
+        let orch = orch_with_tools(cwd, tools)
+            .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }))
+            .with_coordinator_simple_mode_for_test(false);
+        let wire = orch.build_wire_tools().await;
+        let names: Vec<&str> = wire.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let mut actual = names;
+        actual.sort_unstable();
+        let mut expected = allowed;
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+        for name in allowed {
+            assert!(orch.find_dispatchable_tool(name).is_some(), "{name}");
+        }
+        for name in hidden {
+            assert!(orch.find_dispatchable_tool(name).is_none(), "{name}");
+            assert!(
+                orch.tools.find_by_name(name).is_some(),
+                "workers retain {name}"
+            );
+        }
     }
 
     // ----- FIX 1: tool-wide deny filter on the wire `tools` array -----------

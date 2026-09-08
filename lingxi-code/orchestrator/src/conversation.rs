@@ -1367,6 +1367,9 @@ pub struct ConversationOrchestrator {
     /// `None` on hosts that wire no `ScheduleWakeup` seam → the branch never
     /// fires → byte-identical.
     pub(crate) loop_wakeup_armed_slot: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Per-instance test seam avoids mutating process-global simple-mode flags.
+    #[cfg(test)]
+    pub(crate) coordinator_simple_mode_override: Option<bool>,
     /// Live coordinator-mode flag (`Ci()`). `None` is an ordinary session, so
     /// unknown-tool `Ldt` never takes the coordinator `Y7e` arm.
     pub(crate) coordinator_mode:

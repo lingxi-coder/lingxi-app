@@ -309,7 +309,7 @@ impl<'a> StreamingToolExecutor<'a> {
         provider_id: Option<String>,
         assistant_id: MessageId,
     ) {
-        match self.orch.tools.find_by_name(&name) {
+        match self.orch.find_dispatchable_tool(&name) {
             None => {
                 let suffix = unknown_tool_suffix_for(&name, self.orch);
                 let block = synthetic_unknown_tool(id.clone(), &name, provider_id.clone(), &suffix);
@@ -911,9 +911,8 @@ const SUBAGENT_RESTRICTED_TOOLS: &[&str] = &[
     "EndConversation",
 ];
 
-/// Coordinator-owned tools (`qbt`). These stay on the coordinator and must
-/// not get the "run it from a worker" suffix.
-const COORDINATOR_OWN_TOOLS: &[&str] = &[
+/// `qbt` excludes names from the worker-redirect suffix; it is not a tool pool.
+const COORDINATOR_REDIRECT_EXCLUSIONS: &[&str] = &[
     "Agent",
     "TaskStop",
     "SendMessage",
@@ -922,6 +921,11 @@ const COORDINATOR_OWN_TOOLS: &[&str] = &[
     "ListAgents",
     "Workflow",
 ];
+
+#[must_use]
+pub(crate) fn is_coordinator_redirect_excluded(name: &str) -> bool {
+    COORDINATOR_REDIRECT_EXCLUSIONS.contains(&name)
+}
 
 #[must_use]
 pub(crate) fn unknown_tool_suffix_for(name: &str, orch: &ConversationOrchestrator) -> String {
@@ -947,12 +951,14 @@ pub(crate) fn unknown_tool_suffix(
             ". {name} is not available inside subagents. Complete the task with the tools provided and return findings to the orchestrator."
         );
     }
-    let in_catalog = tools.find_registered(name).is_some();
+    let registered = tools.find_registered(name);
+    let canonical = registered.as_ref().map(|tool| tool.name()).unwrap_or(name);
+    let in_catalog = registered.is_some();
     if is_coordinator
         && !is_subagent
         && in_catalog
         && tools.find_by_name("Agent").is_some()
-        && !COORDINATOR_OWN_TOOLS.iter().any(|n| *n == name)
+        && !is_coordinator_redirect_excluded(canonical)
     {
         return format!(
             ". {name} is not available to you as the coordinator \u{2014} run it from a worker via the Agent tool instead."

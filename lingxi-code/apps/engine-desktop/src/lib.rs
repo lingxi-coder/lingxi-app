@@ -14146,6 +14146,10 @@ pub async fn build(
     // EndConversation: hand the orchestrator the SAME end-request slot the tool
     // holds, so the turn loop can terminate on a confirmed (2nd) call. `None`
     // (feature disabled, the default) leaves the turn loop byte-identical.
+    let orch_builder = orch_builder.with_coordinator_mode(
+        coordinator_mode.clone()
+            as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>,
+    );
     let orch_builder = match end_conversation_slot.clone() {
         Some(slot) => orch_builder.with_end_conversation_slot(slot),
         None => orch_builder,

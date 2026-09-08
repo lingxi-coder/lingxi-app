@@ -228,7 +228,7 @@ impl ConversationOrchestrator {
     pub(crate) async fn skill_listing_reminder_message(&self) -> Option<ConversationMessage> {
         let provider = self.prompt_runtime.skill_listing.as_ref()?;
         // Gate on the Skill tool being available this turn (attachments.ts:2668).
-        if self.tools.find_by_name("Skill").is_none() {
+        if self.find_dispatchable_tool("Skill").is_none() {
             return None;
         }
         let entries = provider.skill_entries().await;
@@ -506,7 +506,7 @@ impl ConversationOrchestrator {
             return None;
         }
         // (2) Brief (`SendUserMessage`/`Brief`) present ⇒ skip (both variants).
-        if self.tools.find_by_name("SendUserMessage").is_some() {
+        if self.find_dispatchable_tool("SendUserMessage").is_some() {
             return None;
         }
 
@@ -540,7 +540,7 @@ impl ConversationOrchestrator {
         match mode {
             tool_task::reminder::ReminderMode::V1Todo => {
                 // (3) TodoWrite must be present this turn.
-                if self.tools.find_by_name("TodoWrite").is_none() {
+                if self.find_dispatchable_tool("TodoWrite").is_none() {
                     return None;
                 }
                 let items: Vec<(lingxi_core::TodoState, String)> = s
@@ -561,7 +561,7 @@ impl ConversationOrchestrator {
             }
             tool_task::reminder::ReminderMode::V2Task => {
                 // (3) TaskUpdate must be present this turn.
-                if self.tools.find_by_name("TaskUpdate").is_none() {
+                if self.find_dispatchable_tool("TaskUpdate").is_none() {
                     return None;
                 }
                 let session_id = s.session_id;
@@ -932,10 +932,10 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             return None;
         }
         // Gate on the Agent tool being available this turn (attachments.ts:1497).
-        // `find_by_name` also matches the legacy `Task` alias. This is the ONLY
+        // Dispatch lookup also matches the legacy `Task` alias. This is the ONLY
         // structural gate in the binary's `aLe` — it does NOT gate on a wired
         // DISK catalog (see below).
-        if self.tools.find_by_name("Agent").is_none() {
+        if self.find_dispatchable_tool("Agent").is_none() {
             return None;
         }
 
@@ -1089,7 +1089,7 @@ message with multiple tool uses so they run concurrently."
             return None;
         }
         // (5) the ToolSearch tool must be available this turn.
-        let tool_search = self.tools.find_by_name("ToolSearch")?;
+        let tool_search = self.find_dispatchable_tool("ToolSearch")?;
         let tool_search_name = tool_search.name().to_string();
 
         // (2)+(3) history + both turn counters.

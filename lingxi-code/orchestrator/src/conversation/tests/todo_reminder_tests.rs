@@ -262,8 +262,18 @@ async fn no_fire_below_threshold() {
     let _g = ENV_LOCK.lock().await;
     std::env::remove_var("LINGXI_TODO_REMINDER_MODE");
     std::env::set_var("LINGXI_ENABLE_TASKS", "off"); // V1
-    let orch = orch_with(reg_with(&["TodoWrite"]));
-    prime_session(&orch, 9, 10).await; // write ctr one short
+    let mode = Arc::new(ReminderCoordinatorMode(std::sync::atomic::AtomicBool::new(
+        true,
+    )));
+    let orch = orch_with(reg_with(&["TodoWrite"]))
+        .with_coordinator_mode(mode.clone())
+        .with_coordinator_simple_mode_for_test(false);
+    prime_session(&orch, 10, 10).await;
+    assert!(orch.tools.find_by_name("TodoWrite").is_some());
+    assert!(orch.todo_reminder_message().await.is_none());
+    assert_eq!(orch.session.lock().await.turns_since_last_reminder, 10);
+    mode.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    orch.session.lock().await.turns_since_last_todo_write = 9; // write ctr one short
     assert!(orch.todo_reminder_message().await.is_none());
     // Now both at threshold ⇒ fires.
     {
@@ -428,4 +438,12 @@ async fn v2_fires_base_only_without_provider() {
         "<system-reminder>\nThe task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and TaskUpdate to update task status (set to in_progress when starting, completed when done). Also consider cleaning up the task list if it has become stale. Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n\n</system-reminder>"
     );
     std::env::remove_var("LINGXI_ENABLE_TASKS");
+}
+
+struct ReminderCoordinatorMode(std::sync::atomic::AtomicBool);
+
+impl platform_api::coordinator_mode::CoordinatorModeHandle for ReminderCoordinatorMode {
+    fn is_enabled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }

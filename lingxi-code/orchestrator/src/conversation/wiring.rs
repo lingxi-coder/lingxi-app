@@ -114,6 +114,8 @@ impl ConversationOrchestrator {
             end_conversation_slot: None,
             loop_wakeup_armed_slot: None,
             coordinator_mode: None,
+            #[cfg(test)]
+            coordinator_simple_mode_override: None,
         }
     }
 
@@ -497,15 +499,65 @@ impl ConversationOrchestrator {
     /// mode (`Ci() && !CLAUDE_CODE_SIMPLE`).
     #[must_use]
     pub(crate) fn is_coordinator_session(&self) -> bool {
+        #[cfg(test)]
+        let simple_mode = self
+            .coordinator_simple_mode_override
+            .unwrap_or_else(Self::coordinator_simple_mode);
+        #[cfg(not(test))]
+        let simple_mode = Self::coordinator_simple_mode();
         self.coordinator_mode
             .as_ref()
             .is_some_and(|mode| mode.is_enabled())
-            && !platform_api::env::is_env_truthy(
-                std::env::var("LINGXI_SIMPLE")
-                    .or_else(|_| std::env::var("CLAUDE_CODE_SIMPLE"))
-                    .ok()
-                    .as_deref(),
-            )
+            && !simple_mode
+    }
+
+    fn coordinator_simple_mode() -> bool {
+        platform_api::env::is_env_truthy(
+            std::env::var("LINGXI_SIMPLE")
+                .or_else(|_| std::env::var("CLAUDE_CODE_SIMPLE"))
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_coordinator_simple_mode_for_test(mut self, simple: bool) -> Self {
+        self.coordinator_simple_mode_override = Some(simple);
+        self
+    }
+
+    /// Coordinator prompt's "Your Tools", plus host user/plan controls.
+    /// Registry enablement still applies; this never registers or enables tools.
+    pub(crate) fn is_coordinator_pool_tool(name: &str) -> bool {
+        matches!(
+            name,
+            "Agent"
+                | "SendMessage"
+                | "TaskStop"
+                | "AskUserQuestion"
+                | "EnterPlanMode"
+                | "ExitPlanMode"
+                | "subscribe_pr_activity"
+                | "unsubscribe_pr_activity"
+        )
+    }
+
+    /// Look up a tool the main loop may actually dispatch.
+    ///
+    /// Coordinator sessions keep their assembled pool and treat every other
+    /// registered name as unknown so `Ldt` can take the `Y7e` worker-redirect
+    /// arm. The shared registry stays full — workers still resolve from
+    /// `available_tools`.
+    #[must_use]
+    pub(crate) fn find_dispatchable_tool(
+        &self,
+        name: &str,
+    ) -> Option<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
+        let tool = self.tools.find_by_name(name)?;
+        if self.is_coordinator_session() && !Self::is_coordinator_pool_tool(tool.name()) {
+            return None;
+        }
+        Some(tool)
     }
 
     /// Whether a memory prefetcher has been wired via

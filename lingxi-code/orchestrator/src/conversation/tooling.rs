@@ -290,7 +290,7 @@ impl ConversationOrchestrator {
         // tool_result, but still report recovery (`Ok(true)`) so the caller marks
         // this id handled — the TS sets `hasHandledOrphanedPermission` BEFORE
         // `handleOrphanedPermission` runs, so the gate is consumed even here.
-        if self.tools.find_by_name(&name).is_none() {
+        if self.find_dispatchable_tool(&name).is_none() {
             return Ok(true);
         }
 
@@ -859,6 +859,9 @@ impl ConversationOrchestrator {
                 }
             }
         }
+        if self.is_coordinator_session() {
+            tools.retain(|t| Self::is_coordinator_pool_tool(t.name()));
+        }
         tools
     }
 
@@ -929,7 +932,7 @@ impl ConversationOrchestrator {
         input: serde_json::Value,
         cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Option<protocol::ContentBlock>, OrchestratorError> {
-        if self.tools.find_by_name(&name).is_none() {
+        if self.find_dispatchable_tool(&name).is_none() {
             return Ok(None);
         }
         let tool_uses = vec![(tool_use_id, name, input, None)];

@@ -699,3 +699,27 @@ async fn task_notification_reminder_none_without_provider() {
         "no provider wired ⇒ strict no-op"
     );
 }
+
+struct ReminderCoordinatorMode(std::sync::atomic::AtomicBool);
+
+impl platform_api::coordinator_mode::CoordinatorModeHandle for ReminderCoordinatorMode {
+    fn is_enabled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[tokio::test]
+async fn hidden_skill_does_not_emit_or_consume_listing() {
+    let mut reg = ToolRegistry::new();
+    reg.register_builtin(Arc::new(NamedTool("Skill")));
+    let mode = Arc::new(ReminderCoordinatorMode(std::sync::atomic::AtomicBool::new(
+        true,
+    )));
+    let orch = orch_with(reg, Some(fixture()))
+        .with_coordinator_mode(mode.clone())
+        .with_coordinator_simple_mode_for_test(false);
+    assert!(orch.tools.find_by_name("Skill").is_some());
+    assert!(orch.skill_listing_reminder_message().await.is_none());
+    mode.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(orch.skill_listing_reminder_message().await.is_some());
+}

@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn unknown_tool_suffix_points_glob_and_grep_at_bash() {
         let mut tools = ToolRegistry::new();
-        tools.register_builtin(Arc::new(SafeToolNamed("Bash")) as Arc<dyn Tool>);
+        tools.register_builtin(Arc::new(SafeToolNamed::new("Bash")) as Arc<dyn Tool>);
         assert_eq!(
             unknown_tool_suffix("Glob", &tools, false, false),
             ". Glob is not available in this session \u{2014} find files with `find` via the Bash tool instead."
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn unknown_tool_suffix_pending_mcp_points_at_wait_for_mcp_servers() {
         let mut tools = ToolRegistry::new();
-        tools.register_builtin(Arc::new(SafeToolNamed("WaitForMcpServers")) as Arc<dyn Tool>);
+        tools.register_builtin(Arc::new(SafeToolNamed::new("WaitForMcpServers")) as Arc<dyn Tool>);
         assert_eq!(
             unknown_tool_suffix("mcp__github__issue", &tools, false, false),
             ". The MCP server 'github' is still connecting. Call WaitForMcpServers to wait for it, then try again."
@@ -358,8 +358,8 @@ mod tests {
     #[test]
     fn unknown_tool_suffix_coordinator_points_at_agent() {
         let mut tools = ToolRegistry::new();
-        tools.register_builtin(Arc::new(SafeToolNamed("Agent")) as Arc<dyn Tool>);
-        tools.register_builtin(Arc::new(SafeToolNamed("Read")) as Arc<dyn Tool>);
+        tools.register_builtin(Arc::new(SafeToolNamed::new("Agent")) as Arc<dyn Tool>);
+        tools.register_builtin(Arc::new(SafeToolNamed::new("Read")) as Arc<dyn Tool>);
         tools.set_session_tool_allowlist(&["Agent".to_string()]);
         assert_eq!(
             unknown_tool_suffix("Read", &tools, false, true),
@@ -369,7 +369,7 @@ mod tests {
             unknown_tool_suffix("Read", &tools, false, false),
             ". Read is disabled for this session, in subagents as well as here."
         );
-        tools.register_builtin(Arc::new(SafeToolNamed("Skill")) as Arc<dyn Tool>);
+        tools.register_builtin(Arc::new(SafeToolNamed::new("Skill")) as Arc<dyn Tool>);
         assert_eq!(
             unknown_tool_suffix("Skill", &tools, false, true),
             ". Skill is disabled for this session, in subagents as well as here."
@@ -379,8 +379,8 @@ mod tests {
     #[test]
     fn unknown_tool_suffix_catalog_disabled_hides_glob_via_shell() {
         let mut tools = ToolRegistry::new();
-        tools.register_builtin(Arc::new(SafeToolNamed("Bash")) as Arc<dyn Tool>);
-        tools.register_builtin(Arc::new(SafeToolNamed("Glob")) as Arc<dyn Tool>);
+        tools.register_builtin(Arc::new(SafeToolNamed::new("Bash")) as Arc<dyn Tool>);
+        tools.register_builtin(Arc::new(SafeToolNamed::new("Glob")) as Arc<dyn Tool>);
         tools.set_session_tool_allowlist(&["Bash".to_string()]);
         assert_eq!(
             unknown_tool_suffix("Glob", &tools, false, false),
@@ -391,8 +391,8 @@ mod tests {
     #[test]
     fn unknown_tool_suffix_webfetch_in_catalog_is_disabled_not_artifact() {
         let mut tools = ToolRegistry::new();
-        tools.register_builtin(Arc::new(SafeToolNamed("WebFetch")) as Arc<dyn Tool>);
-        tools.register_builtin(Arc::new(SafeToolNamed("Agent")) as Arc<dyn Tool>);
+        tools.register_builtin(Arc::new(SafeToolNamed::new("WebFetch")) as Arc<dyn Tool>);
+        tools.register_builtin(Arc::new(SafeToolNamed::new("Agent")) as Arc<dyn Tool>);
         tools.set_session_tool_allowlist(&["Agent".to_string()]);
         assert_eq!(
             unknown_tool_suffix("WebFetch", &tools, false, false),
@@ -404,11 +404,200 @@ mod tests {
         );
     }
 
-    struct SafeToolNamed(&'static str);
+    #[test]
+    fn unknown_tool_suffix_qbt_matches_canonical_alias() {
+        let mut tools = ToolRegistry::new();
+        tools.register_builtin(Arc::new(SafeToolNamed::new("Agent")) as Arc<dyn Tool>);
+        tools.register_builtin(Arc::new(SafeToolNamed {
+            name: "ListAgents",
+            aliases: &["ListPeers"],
+        }) as Arc<dyn Tool>);
+        tools.set_session_tool_allowlist(&["Agent".to_string()]);
+        assert_eq!(
+            unknown_tool_suffix("ListPeers", &tools, false, true),
+            ". ListPeers is disabled for this session, in subagents as well as here."
+        );
+    }
+
+    struct StubCoordinatorMode {
+        enabled: bool,
+    }
+
+    impl platform_api::coordinator_mode::CoordinatorModeHandle for StubCoordinatorMode {
+        fn is_enabled(&self) -> bool {
+            self.enabled
+        }
+    }
+
+    fn orch_with_named_tools(names: &[&'static str]) -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        for name in names {
+            registry.register_builtin(Arc::new(SafeToolNamed::new(name)) as Arc<dyn Tool>);
+        }
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_coordinator_simple_mode_for_test(false)
+    }
+
+    #[test]
+    fn unknown_tool_suffix_for_uses_wired_coordinator_mode() {
+        let orch = orch_with_named_tools(&["Agent", "Read"])
+            .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }));
+        assert_eq!(
+            unknown_tool_suffix_for("Read", &orch),
+            ". Read is not available to you as the coordinator \u{2014} run it from a worker via the Agent tool instead."
+        );
+    }
+
+    #[tokio::test]
+    async fn add_tool_disabled_coordinator_handle_dispatches_worker_tool() {
+        let orch = orch_with_named_tools(&["Agent", "Read"])
+            .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: false }));
+        let mut exec = StreamingToolExecutor::new(&orch);
+        exec.add_tool(
+            ToolUseId::new(),
+            "Read".into(),
+            json!({}),
+            None,
+            MessageId::new(),
+        );
+        assert_eq!(exec.tools[0].status, ToolStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn add_tool_simple_mode_dispatches_worker_tool() {
+        let orch = orch_with_named_tools(&["Agent", "Read"])
+            .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }))
+            .with_coordinator_simple_mode_for_test(true);
+        let mut exec = StreamingToolExecutor::new(&orch);
+        exec.add_tool(
+            ToolUseId::new(),
+            "Read".into(),
+            json!({}),
+            None,
+            MessageId::new(),
+        );
+        assert_eq!(exec.tools[0].status, ToolStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn add_tool_coordinator_hidden_worker_tool_gets_y7e() {
+        let orch = orch_with_named_tools(&["Agent", "Read"])
+            .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }));
+        let mut exec = StreamingToolExecutor::new(&orch);
+        exec.add_tool(
+            ToolUseId::new(),
+            "Read".into(),
+            json!({}),
+            None,
+            MessageId::new(),
+        );
+        let t = &exec.tools[0];
+        assert_eq!(t.status, ToolStatus::Completed);
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = t.result.as_ref().unwrap()
+        else {
+            panic!("expected ToolResult block")
+        };
+        assert!(*is_error);
+        assert_eq!(
+            content,
+            "<tool_use_error>Error: No such tool available: Read. Read is not available to you as the coordinator \u{2014} run it from a worker via the Agent tool instead.</tool_use_error>"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_tool_coordinator_pool_dispatches_user_and_plan_controls() {
+        let names = [
+            "Agent",
+            "SendMessage",
+            "TaskStop",
+            "AskUserQuestion",
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "subscribe_pr_activity",
+            "unsubscribe_pr_activity",
+        ];
+        let orch = orch_with_named_tools(&names)
+            .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }));
+        let mut exec = StreamingToolExecutor::new(&orch);
+        for name in names {
+            exec.add_tool(
+                ToolUseId::new(),
+                name.into(),
+                json!({}),
+                None,
+                MessageId::new(),
+            );
+            assert_eq!(
+                exec.tools.last().unwrap().status,
+                ToolStatus::Queued,
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn add_tool_coordinator_hidden_qbt_tools_are_disabled() {
+        let names = ["Skill", "ListAgents", "Workflow", "ReadNotifications"];
+        let orch = orch_with_named_tools(&[
+            "Agent",
+            "Skill",
+            "ListAgents",
+            "Workflow",
+            "ReadNotifications",
+        ])
+        .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }));
+        let mut exec = StreamingToolExecutor::new(&orch);
+        for name in names {
+            exec.add_tool(
+                ToolUseId::new(),
+                name.into(),
+                json!({}),
+                None,
+                MessageId::new(),
+            );
+            let result = exec.tools.last().unwrap();
+            assert_eq!(result.status, ToolStatus::Completed);
+            let ContentBlock::ToolResult {
+                content, is_error, ..
+            } = result.result.as_ref().unwrap()
+            else {
+                panic!("expected tool error");
+            };
+            assert!(*is_error);
+            assert!(content.contains("disabled for this session"), "{content}");
+            assert!(!content.contains("run it from a worker"), "{content}");
+        }
+    }
+
+    struct SafeToolNamed {
+        name: &'static str,
+        aliases: &'static [&'static str],
+    }
+
+    impl SafeToolNamed {
+        fn new(name: &'static str) -> Self {
+            Self { name, aliases: &[] }
+        }
+    }
+
     #[async_trait]
     impl Tool for SafeToolNamed {
         fn name(&self) -> &str {
-            self.0
+            self.name
+        }
+        fn aliases(&self) -> &[&str] {
+            self.aliases
         }
         fn input_schema(&self) -> &serde_json::Value {
             static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
@@ -453,7 +642,7 @@ mod tests {
             _input: &serde_json::Value,
             _opts: &DescriptionOptions,
         ) -> String {
-            self.0.into()
+            self.name.into()
         }
         async fn prompt(&self, _opts: &PromptOptions) -> String {
             String::new()

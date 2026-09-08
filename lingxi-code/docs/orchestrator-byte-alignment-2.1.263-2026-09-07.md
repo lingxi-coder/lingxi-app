@@ -143,10 +143,21 @@ Also mapped this pass:
   provided and return findings to the orchestrator.`
 - Pending MCP `l5o` (non-subagent, `WaitForMcpServers` enabled):
   `The MCP server '${name}' is still connecting. Call WaitForMcpServers…`
-- Coordinator `Y7e`: session `CoordinatorModeHandle` is on (`Ci()`), `Agent`
-  is in the current tools, and the name is in the unfiltered catalog but not
-  `qbt` → `… is not available to you as the coordinator — run it from a
-  worker via the Agent tool instead.`
+- Coordinator `Y7e`: session `CoordinatorModeHandle` is on (`Ci()`), not
+  `LINGXI_SIMPLE` / `CLAUDE_CODE_SIMPLE`, `Agent` is in the current tools,
+  and the name is in the unfiltered catalog but not `qbt` (matched on the
+  registered canonical name, so `ListPeers` → `ListAgents`) → `… is not
+  available to you as the coordinator — run it from a worker via the Agent
+  tool instead.` Desktop/CLI `engine_desktop::build` wires the same
+  `CoordinatorMode` Arc used by `BuiltinToolContext`. The main-loop
+  advertise/dispatch set uses the coordinator prompt pool (`Agent`,
+  `SendMessage`, `TaskStop`, PR subscription/unsubscription) plus enabled
+  `AskUserQuestion`, `EnterPlanMode`, and `ExitPlanMode` controls. `qbt` only
+  excludes names from the redirect suffix; it does not enable `Skill`,
+  `ListAgents`, `Workflow`, or `ReadNotifications`. Workers still resolve
+  from the full registry `available_tools`. Reminder availability gates use
+  the same dispatch lookup. Coordinator tests inject simple mode per instance
+  instead of mutating process-global environment variables.
 - Full-catalog disabled: unfiltered `find_registered` hits a hidden builtin
   → `… is disabled for this session, in subagents as well as here.`
   (this arm precedes Glob/Grep-via-shell, matching `Ldt`).
@@ -231,7 +242,7 @@ Passed:
 - `streaming_partial_finalize_test` (7/7, including idle + suspend)
 - `production_prompt_bodies_match_normalized_2_1_238_manifests` after
   re-blessing Fable/Mythos lengths `10_445` / `10_447`
-- `unknown_tool_suffix_*` (6) + `add_unknown_tool_completes_immediately_with_wrapper`
+- `unknown_tool_suffix_*` + coordinator dispatch/advertise tests (`add_tool_coordinator_hidden_worker_tool_gets_y7e`, `build_wire_tools_coordinator_uses_pool_not_qbt`)
 - `truncated_response_recovery_nudge_matches_2_1_263`
 - `delivering_work_and_corrections_are_opus_5_only`
 - `synthetic_api_error_envelope_stamps_top_level_fields`

@@ -1946,6 +1946,17 @@ export type ClientEvent =
   | { type: 'message_identity'; message_id: string }
   | { type: 'message_retracted'; message_id: string }
   | { type: 'system_notice'; message: string; is_error: boolean }
+  | {
+      type: 'loop_wakeup';
+      /** The resume line, already rendered host-side. */
+      message: string;
+      /** The companion meta line, present only when `streak > 0`. */
+      companion?: string;
+      /** Consecutive quiet ticks before this wakeup; 0 for an ordinary one. */
+      streak: number;
+      /** When the streak began, epoch ms; 0 when there is none. */
+      since_ms: number;
+    }
   | { type: 'ask_user_question'; request: AskUserQuestionRequestDto }
   | { type: 'ask_user_question_resolved'; request_id: number }
   | {

@@ -119,6 +119,7 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   message_identity: true,
   message_retracted: true,
   system_notice: true,
+  loop_wakeup: true,
   ask_user_question: true,
   ask_user_question_resolved: true,
   permission_request_resolved: true,

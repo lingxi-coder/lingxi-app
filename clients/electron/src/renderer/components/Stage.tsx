@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useT } from '../theme/ThemeContext';
 import type { RunItem } from '../model/runItem';
 import {
@@ -159,6 +159,8 @@ const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
   );
 });
 
+import { visibleRows } from './loopFold';
+
 // ─── STAGE (the agent run scrollback) ────────────────────────
 interface StageProps {
   /** The real conversation accumulated from the bridge. */
@@ -175,12 +177,17 @@ interface StageProps {
    * scoped by this and dropped when it changes.
    */
   sessionKey?: string;
+  /**
+   * Rows collapsed behind a `/loop` no-op fold
+   * (`ConversationState.foldedItemIds`). Hidden until their fold row is opened,
+   * which uses the same per-item collapse map as every other disclosure.
+   */
+  foldedItemIds?: readonly string[];
 }
 
-export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', collapseThoughtsByDefault = true }: StageProps) {
+export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', collapseThoughtsByDefault = true, foldedItemIds = [] }: StageProps) {
   const t = useT();
   const tailRef = useRef<HTMLDivElement>(null);
-  const items: RunItem[] = liveItems;
 
   /**
    * Explicit open/closed choices, keyed by the item's STABLE id WITHIN a
@@ -206,6 +213,16 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
   const setOpen = useCallback((id: string, next: boolean) => {
     setCollapse((previous) => collapseSet(previous, sessionRef.current, id, next));
   }, []);
+
+  // Rows a `/loop` no-op fold is hiding drop out here, and come back when their
+  // fold row is opened. A fold row defaults to CLOSED — folding a streak the
+  // reader then has to close by hand would defeat the point.
+  const items: readonly RunItem[] = useMemo(
+    () =>
+      visibleRows(liveItems, foldedItemIds, (foldRowId) =>
+        collapseOpen(visible, sessionKey, foldRowId) ?? false),
+    [liveItems, foldedItemIds, visible, sessionKey],
+  );
 
   // Keep the newest content in view as deltas stream in.
   useEffect(() => {

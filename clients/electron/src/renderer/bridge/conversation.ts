@@ -101,6 +101,16 @@ export interface ConversationState {
   readonly openThinkingIndex: number;
   /** tool-use `id` → index of its tool card in `items`. */
   readonly toolIndex: Readonly<Record<string, number>>;
+  /**
+   * Item ids collapsed behind a `/loop` no-op fold row.
+   *
+   * The engine reports how many quiet wakeup groups to fold; the reducer turns
+   * that into the concrete rows, and the Stage hides them until the fold row is
+   * opened. This is LingXi's stand-in for the oracle's `foldedUuids`, which
+   * cannot be used directly because a wakeup here is one whole turn rather than
+   * a transcript slice.
+   */
+  readonly foldedItemIds: readonly string[];
   /** Latest live token-usage snapshot (`usage_update`), or `null`. */
   readonly usage: UsageSnapshot | null;
   /** Oldest-first compact summaries available for the current session. */
@@ -146,6 +156,7 @@ export function emptyConversation(): ConversationState {
     openAssistantIndex: -1,
     openThinkingIndex: -1,
     toolIndex: {},
+    foldedItemIds: [],
     usage: null,
     summaries: [],
     plan: [],
@@ -634,6 +645,62 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
     case 'system_notice':
       if (event.is_error) return pushError(state, event.message);
       return pushNotice(state, event.message);
+
+    // A `/loop` wakeup announces itself before the turn it starts. `streak > 0`
+    // means the ticks before it were quiet, so the rows back to (and including)
+    // the `streak`-th previous wakeup row collapse behind this one — the
+    // oracle's `foldedUuids`, resolved here because only the client knows which
+    // rows those turns produced.
+    case 'loop_wakeup': {
+      const items = state.items.slice();
+      closeThinking(items, state.openThinkingIndex);
+      let foldedItemIds = state.foldedItemIds;
+      if (event.streak > 0) {
+        const folded: string[] = [];
+        let boundaries = 0;
+        for (let i = items.length - 1; i >= 0 && boundaries < event.streak; i -= 1) {
+          const row = items[i];
+          folded.push(row.id);
+          if (row.type === 'narration' && row.loopWakeupStreak !== undefined) boundaries += 1;
+        }
+        // Fold only a run that really is `streak` whole groups. A shorter
+        // history (a reconnect, a `/clear`) would otherwise swallow rows that
+        // belong to something else entirely.
+        //
+        // The streak is CUMULATIVE — tick 3 reports 3, not 1 — so this run
+        // subsumes what the previous wakeup folded. Deduplicate rather than
+        // append, or every row would be listed once per subsequent fold.
+        if (boundaries === event.streak) {
+          foldedItemIds = [...new Set([...state.foldedItemIds, ...folded])];
+        }
+      }
+      items.push({
+        type: 'narration',
+        id: itemId(state.nextId),
+        text: event.message,
+        role: 'assistant',
+        loopWakeupStreak: event.streak,
+      });
+      let nextId = state.nextId + 1;
+      if (event.companion !== undefined) {
+        items.push({
+          type: 'narration',
+          id: itemId(nextId),
+          text: event.companion,
+          role: 'assistant',
+          tone: 'muted',
+        });
+        nextId += 1;
+      }
+      return {
+        ...state,
+        items,
+        foldedItemIds,
+        openAssistantIndex: -1,
+        openThinkingIndex: -1,
+        nextId,
+      };
+    }
 
     case 'slash_command_result': {
       // A validation failure can precede the engine's first lifecycle event.

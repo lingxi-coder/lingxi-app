@@ -5433,7 +5433,7 @@ pub struct MobileEngineHandle {
     /// session listing reads through the device's real backend.
     fs: Arc<dyn platform_api::FileSystem>,
     /// The deterministic build recipe, captured so the cron firing path
-    /// ([`Self::run_due_cron_now`]) can rebuild a FRESH, throwaway
+    /// (the per-task `run_cron_task_if_due`) can rebuild a FRESH, throwaway
     /// [`MobileRuntime`] per fired job (an isolated session that never pollutes
     /// the user's live conversation). Also carries `cwd`, which resolves the
     /// `<cwd>/.lingxi/scheduled_tasks.json` the cron FFI reads/writes.
@@ -6264,6 +6264,8 @@ impl TurnLifecycleListener {
                 | ClientEvent::ToolHeartbeat { .. }
                 | ClientEvent::ToolUseResult { .. }
                 | ClientEvent::MessageComplete { .. }
+                | ClientEvent::MessageIdentity { .. }
+                | ClientEvent::MessageRetracted { .. }
                 | ClientEvent::CostUpdate { .. }
                 | ClientEvent::CompactionCompleted { .. }
                 | ClientEvent::CoordinatorStatus { .. }
@@ -11297,7 +11299,7 @@ fn task_next_fire_ms(
     now: std::time::SystemTime,
 ) -> Option<u64> {
     // Delegate to the SAME jittered scheduler computation the Android alarm arms
-    // from (`next_cron_fire_time` → `cron::next_fire_epoch_ms`), so the per-task
+    // from (`MobileCronStoreHandle::next_fire_time` → `cron::next_fire_epoch_ms`), so the per-task
     // next fire the management UI shows is the instant the job will ACTUALLY
     // fire. A raw `next_match_after` here omitted Claude Code's recurring jitter,
     // making the displayed time disagree with the armed alarm by up to 30 min.
@@ -11364,7 +11366,9 @@ fn mobile_cron_schedule_error(cron_expr: &str, recurring: bool) -> Option<String
             .min()
             .unwrap_or(24 * 60);
         if std::time::Duration::from_secs(u64::from(min_gap) * 60) < MOBILE_MIN_RECURRING_INTERVAL {
-            return Some("Recurring tasks on this device must be at least 15 minutes apart".to_string());
+            return Some(
+                "Recurring tasks on this device must be at least 15 minutes apart".to_string(),
+            );
         }
     }
     None
@@ -11654,10 +11658,6 @@ impl MobileCronStoreHandle {
         .await
         .is_ok()
     }
-
-    pub fn validate_schedule(&self, cron_expr: String, recurring: bool) -> Option<String> {
-        mobile_cron_schedule_error(&cron_expr, recurring)
-    }
 }
 
 fn finalize_cron_occurrence(
@@ -11682,118 +11682,6 @@ fn finalize_cron_occurrence(
 // the cron methods read as one unit; UniFFI supports multiple exported blocks.
 #[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
 impl MobileEngineHandle {
-    /// Evaluate the persisted cron tasks file ONCE and fire every due job — the
-    /// Android foreground-service entry. Reuses `cron::run_due_jobs` (desktop-1:1
-    /// due-detection + bookkeeping) with a [`MobileTurnFirer`]. Returns one row
-    /// per fired job for the service's result notifications.
-    pub async fn run_due_cron_now(&self) -> Vec<FiredCronJobDto> {
-        let path = cron::tasks_file::scheduled_tasks_path(&self.firer_cfg.cwd);
-        let fs = self.firer_platform.filesystem();
-        let clock = self.firer_platform.clock();
-        let firer = MobileTurnFirer {
-            cfg: self.firer_cfg.clone(),
-            platform: self.firer_platform.clone(),
-        };
-        cron::run_due_jobs(
-            &path,
-            fs,
-            clock,
-            &firer,
-            cron::default_recurring_max_age(),
-        )
-        .await
-        .into_iter()
-        .map(|f| FiredCronJobDto {
-            id: f.id,
-            prompt: f.prompt,
-            result_text: f.result_text,
-            retryable: matches!(
-                &f.status,
-                cron::FireStatus::Failed(message) if cron_failure_is_retryable(message)
-            ),
-            status: match f.status {
-                cron::FireStatus::Ok => CronFireStatusDto::Ok,
-                cron::FireStatus::Failed(message) => CronFireStatusDto::Failed { message },
-            },
-        })
-        .collect()
-    }
-
-    /// Earliest next fire across all persisted enabled jobs, epoch milliseconds,
-    /// or `None` if there are no jobs / none ever fire again. The Android
-    /// scheduler arms its next exact alarm at this instant.
-    pub async fn next_cron_fire_time(&self) -> Option<u64> {
-        MobileCronStoreHandle::new(
-            self.firer_cfg.cwd.clone(),
-            self.firer_platform.filesystem(),
-            self.firer_platform.clock(),
-        )
-        .next_fire_time()
-        .await
-    }
-
-    /// List the persisted cron jobs for the management UI (each with its computed
-    /// next fire + human schedule). A missing / unparseable file lists nothing.
-    pub async fn cron_list(&self) -> Vec<CronTaskDto> {
-        MobileCronStoreHandle::new(
-            self.firer_cfg.cwd.clone(),
-            self.firer_platform.filesystem(),
-            self.firer_platform.clock(),
-        )
-        .list()
-        .await
-    }
-
-    /// Create a durable cron job from the UI: validate the expression, mint a
-    /// `d`+base36 id (the SAME format as the `CronCreate` tool, no on-disk drift),
-    /// and append it to `scheduled_tasks.json`. Returns the created row.
-    ///
-    /// # Errors
-    /// [`MobileEngineError::Internal`] on an invalid cron expression or a write
-    /// failure.
-    pub async fn cron_create(
-        &self,
-        cron_expr: String,
-        prompt: String,
-        recurring: bool,
-    ) -> Result<CronTaskDto, MobileEngineError> {
-        MobileCronStoreHandle::new(
-            self.firer_cfg.cwd.clone(),
-            self.firer_platform.filesystem(),
-            self.firer_platform.clock(),
-        )
-        .create(cron_expr, prompt, recurring)
-        .await
-    }
-
-    /// Edit a task in place while preserving its stable id.
-    pub async fn cron_update(
-        &self,
-        id: String,
-        cron_expr: String,
-        prompt: String,
-        recurring: bool,
-    ) -> Result<CronTaskDto, MobileEngineError> {
-        MobileCronStoreHandle::new(
-            self.firer_cfg.cwd.clone(),
-            self.firer_platform.filesystem(),
-            self.firer_platform.clock(),
-        )
-        .update(id, cron_expr, prompt, recurring)
-        .await
-    }
-
-    /// Delete a cron job by id. Returns `true` iff a job was removed.
-    pub async fn cron_delete(&self, id: String) -> bool {
-        MobileCronStoreHandle::new(
-            self.firer_cfg.cwd.clone(),
-            self.firer_platform.filesystem(),
-            self.firer_platform.clock(),
-        )
-        .delete(id)
-        .await
-    }
-
     /// Run one scheduled occurrence exactly once across duplicate alarm/worker
     /// deliveries. A retryable transport failure intentionally leaves the
     /// occurrence unacknowledged so WorkManager can retry it.
@@ -13558,86 +13446,6 @@ mod tests {
         // Exercises the manual `Debug` impl that renders `memory_provider` as a
         // presence marker (`Arc<dyn MemoryHierarchyProvider>` is not `Debug`).
         let _ = format!("{cfg:?}");
-    }
-
-    /// Cron FFI (Android background-scheduler bridge): `cron_create` / `cron_list`
-    /// / `cron_delete` / `next_cron_fire_time` round-trip through a real handle and
-    /// the shared `scheduled_tasks.json` contract, and `run_due_cron_now` fires
-    /// NOTHING (so makes no network call) for a job that is not yet due. The firing
-    /// CORE (`cron::run_due_jobs` due-detection + bookkeeping) is unit-tested in the
-    /// `cron` crate; here we prove the handle wiring (captured `firer_cfg` /
-    /// `firer_platform`) reaches the on-disk file deterministically off-device.
-    #[test]
-    fn cron_ffi_create_list_delete_round_trips() {
-        use crate::test_support::{
-            new_engine_with_streaming, test_config, CollectingPermissionSink, FakeListener,
-            HostFakePlatform,
-        };
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(tmp.path().join(".lingxi")).expect("mk .lingxi");
-        let platform: Arc<dyn platform_api::Platform> =
-            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
-        let handle = new_engine_with_streaming(
-            test_config(tmp.path()),
-            platform,
-            Arc::new(FakeListener::default()),
-            Arc::new(CollectingPermissionSink::default()),
-            None,
-        )
-        .expect("build handle");
-
-        handle.runtime().block_on(async {
-            // Empty file → empty list, no next fire, nothing fires.
-            assert!(handle.cron_list().await.is_empty());
-            assert_eq!(handle.next_cron_fire_time().await, None);
-            assert!(handle.run_due_cron_now().await.is_empty());
-
-            // Create a far-future job (Jan 1 00:00) → present, with a computed next
-            // fire, and NOT due now (so `run_due_cron_now` fires nothing / no net).
-            let created = handle
-                .cron_create("0 0 1 1 *".to_string(), "happy new year".to_string(), true)
-                .await
-                .expect("create succeeds");
-            // claude-code cron id = `randomUUID().slice(0,8)` → 8 lowercase hex
-            // chars (NOT a `[bartwmdks]`-prefixed task id, and NOT deterministically
-            // 'd'-prefixed — the previous `starts_with('d')` assertion passed only
-            // ~1/16 of the time).
-            assert_eq!(created.id.len(), 8, "cron id is 8 chars: {}", created.id);
-            assert!(
-                created
-                    .id
-                    .bytes()
-                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
-                "cron id is lowercase hex: {}",
-                created.id
-            );
-            assert!(created.recurring);
-            assert!(created.next_fire_ms.is_some());
-
-            let list = handle.cron_list().await;
-            assert_eq!(list.len(), 1);
-            assert_eq!(list[0].prompt, "happy new year");
-            assert_eq!(list[0].cron, "0 0 1 1 *");
-            // The list's per-task next fire matches the scheduler's earliest.
-            assert_eq!(handle.next_cron_fire_time().await, list[0].next_fire_ms);
-            assert!(
-                handle.run_due_cron_now().await.is_empty(),
-                "a far-future job is not due, so nothing fires"
-            );
-
-            // An invalid expression is rejected and does NOT persist.
-            assert!(handle
-                .cron_create("not a cron".to_string(), "x".to_string(), false)
-                .await
-                .is_err());
-            assert_eq!(handle.cron_list().await.len(), 1);
-
-            // Delete removes it; a second delete is a no-op `false`.
-            assert!(handle.cron_delete(created.id.clone()).await);
-            assert!(handle.cron_list().await.is_empty());
-            assert!(!handle.cron_delete(created.id).await);
-        });
     }
 
     /// F3-03: `build_mobile` constructs a real `ConversationOrchestrator`

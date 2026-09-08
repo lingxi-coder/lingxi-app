@@ -198,12 +198,21 @@ elif [[ ! -s "${MODULEMAP}" ]]; then
   # instead of silently packaging an empty map (which makes every FFI symbol
   # disappear from Swift at module-emission time).
   : > "${MODULEMAP}"
-  for header in "${GEN_DIR}"/*FFI.h; do
-    module="$(basename "${header}" .h)"
-    printf 'module %s {\n  header "%s"\n  export *\n}\n\n' \
-      "${module}" "$(basename "${header}")" >> "${MODULEMAP}"
-  done
 fi
+
+# Every generated header needs a module, whether or not uniffi emitted a
+# modulemap for its namespace. It does not always: the run that produced
+# `ios_frameworkFFI.h` emitted no `ios_frameworkFFI.modulemap`, so the merge
+# above wrote three modules for four headers. The miss is SILENT — the Swift
+# file's `#if canImport(ios_frameworkFFI)` simply evaluates false, the import is
+# skipped, and the build fails hundreds of lines later with "cannot find type
+# 'RustBuffer' in scope", naming neither the module nor the modulemap.
+for header in "${GEN_DIR}"/*FFI.h; do
+  module="$(basename "${header}" .h)"
+  grep -q "^module ${module} {" "${MODULEMAP}" 2>/dev/null && continue
+  printf 'module %s {\n  header "%s"\n  export *\n}\n\n' \
+    "${module}" "$(basename "${header}")" >> "${MODULEMAP}"
+done
 shopt -u nullglob
 [[ -s "${MODULEMAP}" ]] || {
   echo "ERROR: generated module.modulemap is empty" >&2

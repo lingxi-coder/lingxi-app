@@ -102,6 +102,7 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   message_identity: 'exposed',
   message_retracted: 'exposed',
   system_notice: 'exposed',
+  loop_wakeup: 'exposed',
   ask_user_question: 'exposed',
   ask_user_question_resolved: 'exposed',
   permission_request_resolved: 'exposed',

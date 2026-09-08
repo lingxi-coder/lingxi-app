@@ -600,6 +600,26 @@ pub enum ClientEvent {
     MessageIdentity {
         message_id: String,
     },
+
+    /// A `/loop` wakeup fired. `message` is the resume line, already rendered
+    /// host-side so its wording lives in one place.
+    ///
+    /// `streak` is how many consecutive QUIET ticks preceded it: `0` for an
+    /// ordinary wakeup, `N > 0` when the client should collapse the previous
+    /// `N` loop-wakeup groups behind this row and show `companion` with it.
+    /// Every wakeup carries this event — including `streak: 0` — so a client
+    /// can mark the group boundary without matching on the copy.
+    ///
+    /// Appended LAST: per §0.10 an additive event that moves no existing
+    /// native ordinal keeps `CLIENT_PROTOCOL_VERSION` and updates the contract
+    /// index only.
+    LoopWakeup {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        companion: Option<String>,
+        streak: u32,
+        since_ms: u64,
+    },
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

@@ -99,6 +99,7 @@ export function App() {
                 // Item ids restart at `i1` in every session; the Stage's
                 // collapse map is scoped by this and dropped when it changes.
                 sessionKey={bridge.conversation.sessionKey}
+                foldedItemIds={bridge.sessionLoading ? [] : bridge.conversation.foldedItemIds}
               />
               <BetaComposer
                 bridge={bridge}

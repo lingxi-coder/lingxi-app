@@ -45,6 +45,13 @@ export interface NarrationRunItem {
   readonly type: 'narration';
   readonly id: string;
   readonly text: string;
+  /**
+   * Set on the row a `/loop` wakeup announces, and never on any other row, so
+   * the reducer can find wakeup group boundaries without reading the copy.
+   * The value is how many QUIET ticks the wakeup folded: `0` for an ordinary
+   * one, `N > 0` when the `N` groups before it are collapsed behind this row.
+   */
+  readonly loopWakeupStreak?: number;
   readonly tone?: 'muted';
   readonly strong?: boolean;
   readonly role?: 'user' | 'assistant';

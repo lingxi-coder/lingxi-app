@@ -854,6 +854,18 @@ impl BridgeConnection {
         })
     }
 
+    /// Sink for a `/loop` wakeup's own announcement.
+    ///
+    /// A wakeup fires BETWEEN turns by construction — it is what starts the
+    /// next turn — so no turn owns it and [`Self::event_sink`] would drop the
+    /// announcement on the floor (`is_owned_turn_event` covers `SystemNotice`).
+    /// Narrow on purpose: the general unscoped sink stays private so
+    /// orchestrator events cannot bypass turn ownership.
+    #[must_use]
+    pub fn loop_wakeup_event_sink(&self) -> Arc<dyn ClientEventSink> {
+        self.unscoped_event_sink()
+    }
+
     /// Sink reserved for command output that is not part of a turn lifecycle.
     /// Keeping it private prevents orchestrator events from bypassing ownership.
     fn unscoped_event_sink(&self) -> Arc<dyn ClientEventSink> {
@@ -1691,6 +1703,18 @@ mod tests {
             attachment: client_protocol::events::AttachmentDto::NestedMemory {
                 display_path: "late".to_string(),
             },
+        }));
+        // A `/loop` fold announces the wakeup that is about to START a turn, so
+        // no turn owns it. If it were owned, the ownership filter would drop
+        // every one of them — which is exactly what happened to the plain
+        // `SystemNotice` resume line until it moved to the unscoped sink.
+        assert!(!is_owned_turn_event(&ClientEvent::LoopWakeup {
+            message: "Claude resuming /loop wakeup (Sep 7 3:04pm)".to_string(),
+            companion: Some(
+                "[2 prior /loop wakeups found nothing actionable; loop is healthy.]".to_string(),
+            ),
+            streak: 2,
+            since_ms: 1_788_790_449_000,
         }));
     }
 

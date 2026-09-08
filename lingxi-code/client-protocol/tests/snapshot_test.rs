@@ -209,6 +209,27 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/loop_wakeup.json",
+            ClientEvent::LoopWakeup {
+                message: "Claude resuming /loop wakeup (Sep 7 3:04pm) \u{b7} 3 no-op ticks since Sep 7 2:14pm".to_string(),
+                companion: Some(
+                    "[3 prior /loop wakeups found nothing actionable; loop is healthy.]"
+                        .to_string(),
+                ),
+                streak: 3,
+                since_ms: 1_788_790_449_000,
+            },
+        ),
+        (
+            "event/loop_wakeup_plain.json",
+            ClientEvent::LoopWakeup {
+                message: "Claude resuming /loop wakeup (Sep 7 3:04pm)".to_string(),
+                companion: None,
+                streak: 0,
+                since_ms: 0,
+            },
+        ),
+        (
             "event/text_delta.json",
             ClientEvent::TextDelta {
                 text: "Hello, world.".to_string(),

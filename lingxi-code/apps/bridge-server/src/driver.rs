@@ -273,20 +273,26 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
                         let now_ms = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-                        let (head, companion) =
-                            tool_cron::loop_wakeup_lines(now_ms, loop_runtime.noop_streak());
-                        sink.emit(ClientEvent::SystemNotice {
-                            message: head,
-                            is_error: false,
+                        let streak = loop_runtime.noop_streak();
+                        let (message, companion) =
+                            tool_cron::loop_wakeup_lines(now_ms, streak);
+                        // EVERY wakeup carries this event, streak or not, so the
+                        // client can mark the group boundary without reading the
+                        // copy. A non-zero streak tells it how many preceding
+                        // groups to collapse — the oracle's `foldedUuids`,
+                        // expressed as a count because a LingXi wakeup is one
+                        // turn.
+                        sink.emit(ClientEvent::LoopWakeup {
+                            message,
+                            companion,
+                            streak: streak.map_or(0, |(streak, _)| streak),
+                            since_ms: streak.map_or(0, |(_, since)| {
+                                since
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+                            }),
                         })
                         .await;
-                        if let Some(companion) = companion {
-                            sink.emit(ClientEvent::SystemNotice {
-                                message: companion,
-                                is_error: false,
-                            })
-                            .await;
-                        }
                     }
                     // Resolve the `<<autonomous-loop-dynamic>>` sentinel at fire
                     // time (else passthrough).

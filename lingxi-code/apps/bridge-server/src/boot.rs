@@ -1296,9 +1296,12 @@ pub async fn assemble_with_provider_keys(
             runtime.runtime_spawner.clone(),
             loop_runtime,
         )
-        // Announce each fire on the connection's sink (binary `onFireTask`),
-        // including the no-op fold's streak line after quiet ticks.
-        .with_event_sink(event_sink.clone()),
+        // Announce each fire on the connection's UNSCOPED sink (binary
+        // `onFireTask`), including the no-op fold's streak line after quiet
+        // ticks. Unscoped because a wakeup fires between turns: the
+        // turn-ownership filter on the regular sink drops a `SystemNotice` that
+        // no active turn owns, which is every wakeup announcement.
+        .with_event_sink(connection.loop_wakeup_event_sink()),
     );
     // The driver re-uses the SAME scheduler at its turn-completion edge to arm the
     // `/loop` keepalive fallback (binary `lKi`); clone before the cell consumes it.

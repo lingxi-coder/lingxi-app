@@ -612,6 +612,7 @@ const TRANSCRIPT_REPLAY_EVENTS = new Set<ClientEvent['type']>([
   'message_identity',
   'message_retracted',
   'system_notice',
+  'loop_wakeup',
   'session_ended',
 ]);
 

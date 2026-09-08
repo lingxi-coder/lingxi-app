@@ -757,6 +757,21 @@ impl TaskRegistry {
     /// backgrounded command "is terminated when you give your final response".
     /// Only shells owned by THIS agent are touched, so the main session's and
     /// other agents' commands are untouched.
+    ///
+    /// The sweep is silent. `nHn` is two halves — kill the rows, then
+    /// `dG((r)=>r.agentId===e)`, where `dG` is
+    /// `pendingNotificationQueue.dequeueAllMatching` — so the kill
+    /// notifications it just produced are dequeued again and never reach the
+    /// model. This engine has no per-agent notification queue (it derives
+    /// notifications from state: terminal AND not `notified`), so the
+    /// equivalent is to stamp `notified` on each row as it is killed.
+    /// Without that, tidying up after a subagent spits a
+    /// `<task-notification> … was stopped` into the MAIN session for every
+    /// shell the subagent happened to leave running.
+    ///
+    /// Note this is the opposite of a user-initiated `TaskStop`, where the stop
+    /// notification is the point; the oracle drops these because nothing is
+    /// left to read them.
     pub async fn kill_background_shells_for_agent(&self, agent_id: protocol::AgentId) -> usize {
         let owned: Vec<String> = {
             let map = self.tasks.read().await;
@@ -774,6 +789,8 @@ impl TaskRegistry {
         for id in owned {
             if self.kill(&id).await.is_ok() {
                 killed += 1;
+                // The `dG` half: suppress the notification the kill just armed.
+                let _ = self.mark_notified(&id).await;
             }
         }
         killed

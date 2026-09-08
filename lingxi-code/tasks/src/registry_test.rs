@@ -219,7 +219,10 @@ async fn background_bash_identity_is_registered_settled_and_notified() {
         "background shell ids are the local_bash prefix plus 8 base-36 chars, got {task_id}",
     );
     assert_eq!(path, registry.output_manager.path_for(&task_id).unwrap());
-    assert!(registry.get(&task_id).await.is_none(), "allocation alone registers nothing");
+    assert!(
+        registry.get(&task_id).await.is_none(),
+        "allocation alone registers nothing"
+    );
 
     // 2. Registering makes the SAME id resolvable, which is what TaskOutput and
     //    TaskStop look up.
@@ -234,7 +237,10 @@ async fn background_bash_identity_is_registered_settled_and_notified() {
         )
         .await
         .unwrap();
-    let state = registry.get(&task_id).await.expect("registered task resolves");
+    let state = registry
+        .get(&task_id)
+        .await
+        .expect("registered task resolves");
     assert_eq!(state.base().status, TaskStatus::Running);
     assert_eq!(state.base().tool_use_id.as_deref(), Some("toolu_1"));
     assert_eq!(state.base().output_file, path);
@@ -250,13 +256,22 @@ async fn background_bash_identity_is_registered_settled_and_notified() {
 
     // 3. Settling from the child's exit writes the status trailer claude-code
     //    appends and drives the record terminal.
-    registry.settle_background_bash(&task_id, Some(0), false).await.unwrap();
+    registry
+        .settle_background_bash(&task_id, Some(0), false)
+        .await
+        .unwrap();
     let state = registry.get(&task_id).await.unwrap();
     assert_eq!(state.base().status, TaskStatus::Completed);
     assert!(state.base().end_time.is_some());
     let written = registry
         .output_manager
-        .read(&path, crate::output_manager::OutputOptions { offset: None, limit: None })
+        .read(
+            &path,
+            crate::output_manager::OutputOptions {
+                offset: None,
+                limit: None,
+            },
+        )
         .await
         .unwrap();
     assert!(
@@ -267,7 +282,10 @@ async fn background_bash_identity_is_registered_settled_and_notified() {
 
     // 4. …and exactly one completion notification is queued for the model.
     let notifications = registry.take_pending_task_notifications().await;
-    let mine: Vec<_> = notifications.iter().filter(|n| n.task_id == task_id).collect();
+    let mine: Vec<_> = notifications
+        .iter()
+        .filter(|n| n.task_id == task_id)
+        .collect();
     assert_eq!(mine.len(), 1, "one completion notification for one command");
     assert_eq!(mine[0].task_type, "local_bash");
     assert_eq!(mine[0].status, "completed");
@@ -279,20 +297,40 @@ async fn settling_a_killed_background_bash_writes_the_killed_trailer() {
     let (_dir, registry) = make_registry();
     let (task_id, path) = registry.allocate_bash_output().await.unwrap();
     registry
-        .register_background_bash(task_id.clone(), "sleep 5".into(), "wait".into(), None, None, None)
+        .register_background_bash(
+            task_id.clone(),
+            "sleep 5".into(),
+            "wait".into(),
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
-    registry.settle_background_bash(&task_id, None, true).await.unwrap();
+    registry
+        .settle_background_bash(&task_id, None, true)
+        .await
+        .unwrap();
     assert_eq!(
         registry.get(&task_id).await.unwrap().base().status,
         TaskStatus::Killed
     );
     let written = registry
         .output_manager
-        .read(&path, crate::output_manager::OutputOptions { offset: None, limit: None })
+        .read(
+            &path,
+            crate::output_manager::OutputOptions {
+                offset: None,
+                limit: None,
+            },
+        )
         .await
         .unwrap();
-    assert!(written.content.contains("[killed]"), "got: {:?}", written.content);
+    assert!(
+        written.content.contains("[killed]"),
+        "got: {:?}",
+        written.content
+    );
 }
 
 #[tokio::test]
@@ -352,7 +390,14 @@ async fn an_agents_background_shell_defers_that_agents_rest_notification() {
 
     // The agent comes to rest while its shell is still running.
     registry
-        .mark_task_rested(&agent_task, Some("done".into()), None, Some(owner), None, None)
+        .mark_task_rested(
+            &agent_task,
+            Some("done".into()),
+            None,
+            Some(owner),
+            None,
+            None,
+        )
         .await;
     let held = registry.take_pending_task_notifications().await;
     assert!(
@@ -419,6 +464,41 @@ async fn a_finishing_agent_stops_only_its_own_background_shells() {
 
     // A second sweep finds nothing left to kill.
     assert_eq!(registry.kill_background_shells_for_agent(mine).await, 0);
+
+    // And the sweep is SILENT. `nHn` kills the rows and then immediately
+    // dequeues the notifications that produced (`dG((r)=>r.agentId===e)`), so
+    // tidying up after a subagent must not narrate itself into the main
+    // session. The other two shells are untouched and still notify normally.
+    let drained = registry.take_pending_task_notifications().await;
+    let swept = ids
+        .iter()
+        .find(|(label, _)| *label == "mine")
+        .map(|(_, id)| id.clone())
+        .unwrap();
+    assert!(
+        !drained.iter().any(|n| n.task_id == swept),
+        "the swept shell must not surface a <task-notification>, got: {:?}",
+        drained.iter().map(|n| &n.task_id).collect::<Vec<_>>(),
+    );
+
+    // Control: an unswept shell reaching the same terminal state DOES notify,
+    // which is what proves the assertion above is about the sweep and not about
+    // the drain being empty.
+    let untouched = ids
+        .iter()
+        .find(|(label, _)| *label == "main-session")
+        .map(|(_, id)| id.clone())
+        .unwrap();
+    registry
+        .settle_background_bash(&untouched, Some(0), false)
+        .await
+        .unwrap();
+    let after = registry.take_pending_task_notifications().await;
+    assert!(
+        after.iter().any(|n| n.task_id == untouched),
+        "an ordinary shell completion must still notify, got: {:?}",
+        after.iter().map(|n| &n.task_id).collect::<Vec<_>>(),
+    );
 }
 
 #[tokio::test]
@@ -429,10 +509,21 @@ async fn stopping_a_background_bash_closes_its_output_file_with_the_killed_trail
     let (_dir, registry) = make_registry();
     let (task_id, path) = registry.allocate_bash_output().await.unwrap();
     registry
-        .register_background_bash(task_id.clone(), "sleep 60".into(), "long one".into(), None, None, None)
+        .register_background_bash(
+            task_id.clone(),
+            "sleep 60".into(),
+            "long one".into(),
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
-    registry.output_manager.append(&path, "partial output\n").await.unwrap();
+    registry
+        .output_manager
+        .append(&path, "partial output\n")
+        .await
+        .unwrap();
 
     registry.kill(&task_id).await.unwrap();
 
@@ -442,7 +533,13 @@ async fn stopping_a_background_bash_closes_its_output_file_with_the_killed_trail
     );
     let written = registry
         .output_manager
-        .read(&path, crate::output_manager::OutputOptions { offset: None, limit: None })
+        .read(
+            &path,
+            crate::output_manager::OutputOptions {
+                offset: None,
+                limit: None,
+            },
+        )
         .await
         .unwrap();
     assert!(
@@ -455,7 +552,13 @@ async fn stopping_a_background_bash_closes_its_output_file_with_the_killed_trail
     registry.kill(&task_id).await.unwrap();
     let again = registry
         .output_manager
-        .read(&path, crate::output_manager::OutputOptions { offset: None, limit: None })
+        .read(
+            &path,
+            crate::output_manager::OutputOptions {
+                offset: None,
+                limit: None,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -477,7 +580,13 @@ async fn discarding_an_unused_bash_identity_removes_its_output_file() {
     assert!(
         registry
             .output_manager
-            .read(&path, crate::output_manager::OutputOptions { offset: None, limit: None })
+            .read(
+                &path,
+                crate::output_manager::OutputOptions {
+                    offset: None,
+                    limit: None
+                }
+            )
             .await
             .map(|out| out.content)
             .unwrap_or_default()
@@ -1063,7 +1172,12 @@ async fn seam_send_message_accepts_the_same_aliases_as_stop_and_output() {
     let agent_id = protocol::AgentId::new();
     let seam: &dyn TeamSpawnSeam = &registry;
     let task_id = seam
-        .spawn_teammate(agent_id, "buddy".into(), "alpha".into(), "a teammate".into())
+        .spawn_teammate(
+            agent_id,
+            "buddy".into(),
+            "alpha".into(),
+            "a teammate".into(),
+        )
         .await
         .unwrap();
 
@@ -1080,7 +1194,11 @@ async fn seam_send_message_accepts_the_same_aliases_as_stop_and_output() {
 
     // Every delivery reached the handler under the CANONICAL task id.
     let received = handler.received();
-    assert_eq!(received.len(), 4, "one delivery per alias, got {received:?}");
+    assert_eq!(
+        received.len(),
+        4,
+        "one delivery per alias, got {received:?}"
+    );
     assert!(
         received.iter().all(|(id, _)| id == &task_id),
         "the handler must always see the canonical id, got {received:?}",
@@ -3839,9 +3957,9 @@ async fn named_rested_agent_waits_for_live_background_children_before_notifying(
             command: "sleep 1".into(),
             pid: None,
             exit_code: None,
-                cwd: None,
-                is_backgrounded: None,
-            }))
+            cwd: None,
+            is_backgrounded: None,
+        }))
         .await;
 
     registry
@@ -3939,9 +4057,9 @@ async fn deferred_rest_requeue_preserves_newer_payload() {
             command: "sleep 1".into(),
             pid: None,
             exit_code: None,
-                cwd: None,
-                is_backgrounded: None,
-            }))
+            cwd: None,
+            is_backgrounded: None,
+        }))
         .await;
 
     registry
@@ -4083,9 +4201,9 @@ async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
             command: "sleep 1".into(),
             pid: None,
             exit_code: None,
-                cwd: None,
-                is_backgrounded: None,
-            }))
+            cwd: None,
+            is_backgrounded: None,
+        }))
         .await;
 
     registry

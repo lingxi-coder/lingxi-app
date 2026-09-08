@@ -74,6 +74,11 @@ pub struct PathConstraintAsk {
     /// Exact path rejected by containment, when this Ask is path-scoped.  Guard
     /// asks such as process substitution or shell expansion leave this absent.
     pub blocked_path: Option<String>,
+    /// This ask came from `permissions.blockReadsOutsideWorkingDirectories`, so
+    /// the caller must render it as the `outsideReadsBlocked` safetyCheck
+    /// (oracle `ppo`'s `decisionReason` passthrough) rather than the ordinary
+    /// `type:"other"` path-constraint ask.
+    pub outside_reads_blocked: bool,
 }
 
 /// Maximum directories listed verbatim before the "and N more" suffix — TS
@@ -565,6 +570,62 @@ fn parse_cd(sub: &str) -> CdParse {
     }
 }
 
+/// PARITY 2.1.263 `ppo(argv, cwd, ctx)` — the directory-changing commands the
+/// oracle validates ALONGSIDE `cd`, extracted here as `(verb, target)`.
+///
+/// ```js
+/// let d = argv[0].slice(argv[0].lastIndexOf("/")+1), p;
+/// if (d === "pushd") { p = vh(argv.slice(1))[0]; if (p === undefined) return }
+/// else if (d === "env") {
+///   for (let i=1;i<argv.length;i++) { let C=argv[i];
+///     if (C === "-C" || C === "--chdir") { p = argv[i+1]; break }
+///     if (C.startsWith("--chdir=")) { p = C.slice(8); break }
+///     if (C.startsWith("-C") && C.length > 2) { p = C.slice(2); break } }
+///   if (p === undefined) return }
+/// else return;
+/// ```
+///
+/// `d` is the BASENAME of argv[0], so `/usr/bin/env -C /etc …` is recognised.
+/// The verb is returned because the refusal copy interpolates it (`${d} moves
+/// later reads …`).
+///
+/// ⚠️ Only the READ-BLOCK branch consumes this. With the block off the oracle's
+/// `PE(target,…,"read")` ALLOWS a plain outside path for these verbs (it refuses
+/// only on a deny rule, `--restricted`, or the block), so wiring them into the
+/// port's generic `cd` containment ask would ask where the binary allows.
+fn parse_dir_change(sub: &str) -> Option<(String, String)> {
+    let mut words = Vec::new();
+    for t in &tokenize_redirects(sub) {
+        match t {
+            Token::Word(w) => words.push(w.clone()),
+            Token::Op { .. } => break,
+        }
+    }
+    let (base, args) = words.split_first()?;
+    let verb = base.rsplit('/').next().unwrap_or(base).to_string();
+    match verb.as_str() {
+        "pushd" => cd_positionals(args)
+            .first()
+            .map(|target| (verb.clone(), (*target).clone())),
+        "env" => {
+            let mut iter = args.iter().enumerate();
+            while let Some((idx, arg)) = iter.next() {
+                if arg == "-C" || arg == "--chdir" {
+                    return args.get(idx + 1).map(|t| (verb.clone(), t.clone()));
+                }
+                if let Some(rest) = arg.strip_prefix("--chdir=") {
+                    return Some((verb.clone(), rest.to_string()));
+                }
+                if arg.starts_with("-C") && arg.len() > 2 {
+                    return Some((verb.clone(), arg[2..].to_string()));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Does any subcommand `cd` somewhere? (TS `compoundCommandHasCd`.) Used to gate
 /// the "cd + write/redirection" asks. A leading-word `cd` in ANY subcommand
 /// counts.
@@ -592,6 +653,7 @@ pub fn check_path_constraints(
     command: &str,
     roots: &FsRoots,
     additional: &[PathBuf],
+    read_block_dirs: Option<&[PathBuf]>,
 ) -> Option<PathConstraintAsk> {
     // 1. Process substitution (`>(…)`/`<(…)`) — `pathValidation.ts:1028`. We are
     //    always on the non-AST path (documented divergence), so this guard is
@@ -601,6 +663,7 @@ pub fn check_path_constraints(
             message: "Process substitution (>(...) or <(...)) can execute arbitrary commands and requires manual approval".to_string(),
             reason: "Process substitution requires manual approval".to_string(),
             blocked_path: None,
+            outside_reads_blocked: false,
         });
     }
 
@@ -628,6 +691,7 @@ pub fn check_path_constraints(
             reason: "Redirect involving /dev/tcp or /dev/udp opens a network connection"
                 .to_string(),
             blocked_path: None,
+            outside_reads_blocked: false,
         });
     }
 
@@ -640,6 +704,7 @@ pub fn check_path_constraints(
             message: "Shell expansion syntax in paths requires manual approval".to_string(),
             reason: "Shell expansion syntax in paths requires manual approval".to_string(),
             blocked_path: None,
+            outside_reads_blocked: false,
         });
     }
 
@@ -658,6 +723,7 @@ pub fn check_path_constraints(
             message: "Commands that change directories and write via output redirection require explicit approval to ensure paths are evaluated correctly. For security, LingXi cannot automatically determine the final working directory when 'cd' is used in compound commands.".to_string(),
             reason: "Compound command contains cd with output redirection - manual approval required to prevent path resolution bypass".to_string(),
             blocked_path: None,
+            outside_reads_blocked: false,
         });
     }
 
@@ -675,6 +741,7 @@ pub fn check_path_constraints(
                 message: "Brace characters in write target require manual approval \u{2014} bash may brace-expand to paths outside the working directory".to_string(),
                 reason: "Brace characters in write target require manual approval \u{2014} bash may brace-expand to paths outside the working directory".to_string(),
                 blocked_path: Some(r.target.clone()),
+                outside_reads_blocked: false,
             });
         }
         // `X6r` `..`-after-directory pre-guard (claude-code `Q6r`/validatePath runs
@@ -692,6 +759,7 @@ pub fn check_path_constraints(
                 message: "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory".to_string(),
                 reason: "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory".to_string(),
                 blocked_path: Some(r.target.clone()),
+                outside_reads_blocked: false,
             });
         }
         let resolved = expand_redirect_target(&r.target, roots);
@@ -706,6 +774,7 @@ pub fn check_path_constraints(
                         "Input redirection from '{resolved_disp}' was blocked. For security, LingXi may only read files in the allowed working directories for this session."
                     ),
                     blocked_path: Some(resolved_disp.into_owned()),
+                    outside_reads_blocked: false,
                 });
             }
             let dirs = all_working_directories(roots, additional);
@@ -720,7 +789,41 @@ pub fn check_path_constraints(
                     "Output redirection to '{resolved_disp}' was blocked. For security, LingXi may only write to files in the allowed working directories for this session: {dir_list}."
                 ),
                 blocked_path: Some(resolved_disp.into_owned()),
+                outside_reads_blocked: false,
             });
+        }
+    }
+
+    // `ppo` — pushd / env -C|--chdir, READ BLOCK ONLY (see `parse_dir_change`).
+    if let Some(block_dirs) = read_block_dirs {
+        for sub in &subs {
+            let Some((verb, target)) = parse_dir_change(sub) else {
+                continue;
+            };
+            // `if (hi(p)) return Op(d)` — a target only known at run time.
+            if target_has_shell_expansion_cd(&target) {
+                return Some(PathConstraintAsk {
+                    message: format!(
+                        "{verb} names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)"
+                    ),
+                    reason: format!(
+                        "{verb} names a path that is computed at run time, which cannot be checked against the read block (permissions.blockReadsOutsideWorkingDirectories)"
+                    ),
+                    blocked_path: Some(target.clone()),
+                    outside_reads_blocked: true,
+                });
+            }
+            let resolved = expand_cd_target(&target, roots);
+            if !path_in_allowed_working_path(Path::new(&resolved), block_dirs, roots) {
+                return Some(PathConstraintAsk {
+                    message: format!(
+                        "{verb} moves later reads to a directory outside the working directories, which the read block does not allow without asking (permissions.blockReadsOutsideWorkingDirectories). Add the directory with /add-dir, or remove that setting."
+                    ),
+                    reason: crate::policy::OUTSIDE_READS_BLOCKED_REASON.to_string(),
+                    blocked_path: Some(resolved.to_string_lossy().into_owned()),
+                    outside_reads_blocked: true,
+                });
+            }
         }
     }
 
@@ -736,6 +839,7 @@ pub fn check_path_constraints(
                     message: "cd with two or more directory arguments requires manual approval. zsh's \"cd OLD NEW\" form substitutes OLD\u{2192}NEW in $PWD, producing a target path that cannot be statically validated.".to_string(),
                     reason: "cd with two or more directory arguments".to_string(),
                     blocked_path: None,
+                    outside_reads_blocked: false,
                 });
             }
             CdParse::Target(target) => target,
@@ -764,6 +868,7 @@ pub fn check_path_constraints(
                 message: "Shell expansion syntax in paths requires manual approval".to_string(),
                 reason: "Shell expansion syntax in paths requires manual approval".to_string(),
                 blocked_path: Some(cd_arg.clone()),
+                outside_reads_blocked: false,
             });
         }
         // `X6r` `..`-after-directory pre-guard for the cd target (claude-code
@@ -778,7 +883,26 @@ pub fn check_path_constraints(
                 message: "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory".to_string(),
                 reason: "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory".to_string(),
                 blocked_path: Some(cd_arg.clone()),
+                outside_reads_blocked: false,
             });
+        }
+        // PARITY 2.1.263 `ppo`: under the read block the cd target is checked
+        // against `mEt` (which EXCLUDES projectSettings-sourced dirs), and the
+        // refusal carries the read block's own copy plus the
+        // `outsideReadsBlocked` safetyCheck instead of the generic containment
+        // ask. `mEt ⊆ rb`, so once the block is armed this branch subsumes the
+        // generic one below for `cd` — exactly as in the binary, where
+        // `PE(target,…,"read")` reports `ov` before the generic path is reached.
+        if let Some(block_dirs) = read_block_dirs {
+            if !path_in_allowed_working_path(Path::new(&resolved), block_dirs, roots) {
+                let resolved_disp = resolved.to_string_lossy();
+                return Some(PathConstraintAsk {
+                    message: "cd moves later reads to a directory outside the working directories, which the read block does not allow without asking (permissions.blockReadsOutsideWorkingDirectories). Add the directory with /add-dir, or remove that setting.".to_string(),
+                    reason: crate::policy::OUTSIDE_READS_BLOCKED_REASON.to_string(),
+                    blocked_path: Some(resolved_disp.into_owned()),
+                    outside_reads_blocked: true,
+                });
+            }
         }
         if !path_in_allowed_working_path(Path::new(&resolved), &work_dirs, roots) {
             let dirs = all_working_directories(roots, additional);
@@ -792,6 +916,7 @@ pub fn check_path_constraints(
                     "cd in '{resolved_disp}' was blocked. For security, LingXi may only change directories to the allowed working directories for this session: {dir_list}."
                 ),
                 blocked_path: Some(resolved_disp.into_owned()),
+                outside_reads_blocked: false,
             });
         }
     }
@@ -893,7 +1018,7 @@ mod tests {
     }
 
     fn check(cmd: &str) -> Option<PathConstraintAsk> {
-        check_path_constraints(cmd, &roots(), &[])
+        check_path_constraints(cmd, &roots(), &[], None)
     }
 
     // ── PATH-04: `..`-after-directory traversal on redirect/cd targets asks ──
@@ -1306,17 +1431,17 @@ mod tests {
     #[test]
     fn redirect_into_additional_working_dir_passes() {
         let extra = vec![PathBuf::from("/tmp/scratch")];
-        assert!(check_path_constraints("echo x > /tmp/scratch/out", &roots(), &extra).is_none());
+        assert!(check_path_constraints("echo x > /tmp/scratch/out", &roots(), &extra, None).is_none());
         // Outside both cwd and the extra dir → still asks, and the dir list
         // includes both.
-        let a = check_path_constraints("echo x > /etc/foo", &roots(), &extra).expect("ask");
+        let a = check_path_constraints("echo x > /etc/foo", &roots(), &extra, None).expect("ask");
         assert!(a.message.contains("'/proj/work', '/tmp/scratch'"));
     }
 
     #[test]
     fn cd_into_additional_working_dir_passes() {
         let extra = vec![PathBuf::from("/tmp/scratch")];
-        assert!(check_path_constraints("cd /tmp/scratch", &roots(), &extra).is_none());
+        assert!(check_path_constraints("cd /tmp/scratch", &roots(), &extra, None).is_none());
     }
 
     // ── format_directory_list parity ───────────────────────────────────────

@@ -244,8 +244,8 @@ impl WorkspacePermissionLeaseRegistry {
                 // generic Bash allow walk. A global `Bash(...)` exact allow
                 // must not authorize `cat /etc/passwd`, `cd /tmp`, or a
                 // redirect outside this local-app workspace.
-                check_path_constraints(&command, &lease_roots, &[]).is_some()
-                    || check_command_path_containment(&command, &lease_roots, &[]).is_some()
+                check_path_constraints(&command, &lease_roots, &[], None).is_some()
+                    || check_command_path_containment(&command, &lease_roots, &[], None).is_some()
             }
             _ => false,
         }
@@ -326,8 +326,8 @@ fn allows_for_lease(
                 lingxi_home: roots.lingxi_home.clone(),
             };
             let command = command_with_guest_workspace_aliases(command, &info.root, &info.app_id);
-            check_path_constraints(&command, &lease_roots, &[]).is_none()
-                && check_command_path_containment(&command, &lease_roots, &[]).is_none()
+            check_path_constraints(&command, &lease_roots, &[], None).is_none()
+                && check_command_path_containment(&command, &lease_roots, &[], None).is_none()
         }
         _ => false,
     }

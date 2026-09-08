@@ -94,7 +94,7 @@ struct LivePermissionState {
     allow_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
     deny_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
     ask_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
-    additional_working_dirs: Vec<PathBuf>,
+    additional_working_dirs: crate::working_dirs::AdditionalWorkingDirs,
 }
 
 fn directory_update_null_byte_reason(update_type: &str, directory: &str) -> String {
@@ -949,9 +949,13 @@ impl PolicyPermissionGate {
             &folded.deny_command_rules,
             PermissionBehavior::Deny,
         );
+        // PARITY `Zm` `case "working_directory"`:
+        // `if (!ctx.additionalWorkingDirectories.has(dir))
+        //    …set(dir, {path: dir, source: "session"})` — an existing entry keeps
+        // its original source, so the guard is `!contains` and not a re-insert.
         if let Some(dir) = folded.additional_working_directory.as_ref() {
-            if !working_dirs.iter().any(|existing| existing == dir) {
-                working_dirs.push(dir.clone());
+            if !working_dirs.contains(dir) {
+                working_dirs.insert(dir.clone(), PermissionRuleSource::Session);
             }
         }
         self.policy
@@ -1634,11 +1638,14 @@ impl PolicyPermissionGate {
                 }
             }
             Some("addDirectories") | Some("removeDirectories") => {
-                if Self::parse_update_destination(update.get("destination").unwrap_or(&Value::Null))
-                    .is_none()
-                {
+                // PARITY `Oc(ctx,{type:"addDirectories",directories,destination})`:
+                // the destination is the SOURCE recorded on each entry, not just a
+                // validity check — `mEt` later drops the `projectSettings` ones.
+                let Some(update_source) = Self::parse_update_destination(
+                    update.get("destination").unwrap_or(&Value::Null),
+                ) else {
                     return;
-                }
+                };
                 let Some(directories) = update.get("directories").and_then(Value::as_array) else {
                     return;
                 };
@@ -1669,21 +1676,14 @@ impl PolicyPermissionGate {
                 match update.get("type").and_then(Value::as_str) {
                     Some("addDirectories") => {
                         for dir in directories {
-                            let dir = PathBuf::from(dir);
-                            if !live
-                                .additional_working_dirs
-                                .iter()
-                                .any(|existing| existing == &dir)
-                            {
-                                live.additional_working_dirs.push(dir);
-                            }
+                            live.additional_working_dirs
+                                .insert(PathBuf::from(dir), update_source);
                         }
                     }
                     Some("removeDirectories") => {
-                        let to_remove: Vec<PathBuf> =
-                            directories.into_iter().map(PathBuf::from).collect();
-                        live.additional_working_dirs
-                            .retain(|dir| !to_remove.iter().any(|remove| remove == dir));
+                        for dir in directories {
+                            live.additional_working_dirs.remove(&PathBuf::from(dir));
+                        }
                     }
                     _ => {}
                 }
@@ -2792,6 +2792,7 @@ mod gate_sysmsg_test {
             sysmsg_decision_reason(&PermissionDecisionReason::SafetyCheck {
                 reason: "danger".into(),
                 classifier_approvable: false,
+                circuit_breaker: None,
             })
             .as_deref(),
             Some("danger")

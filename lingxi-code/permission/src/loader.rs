@@ -248,6 +248,19 @@ struct PermissionsBlock {
     /// and `b$` unions with cwd for the `kF` working-dir auto-allow check.
     #[serde(default, rename = "additionalDirectories")]
     additional_directories: Vec<String>,
+    /// `permissions.blockReadsOutsideWorkingDirectories` (2.1.263). Oracle
+    /// schema text: *"Refuse file-tool reads (Read, Grep, Glob, LSP) outside the
+    /// working directories in every permission mode; **true in any settings
+    /// source wins**. Also set when the user picks "block" on the one-time
+    /// auto-mode prompt for a read outside the working directories."*
+    ///
+    /// Managed policy carries it as a `restrictive` entry
+    /// (`{path:["permissions","blockReadsOutsideWorkingDirectories"], restrictive:true}`),
+    /// and the managed merge is `if (… === true) out = true` — an OR, never a
+    /// last-writer-wins overwrite. See
+    /// [`block_reads_outside_working_directories_from_settings_json`].
+    #[serde(default, rename = "blockReadsOutsideWorkingDirectories")]
+    block_reads_outside_working_directories: Option<bool>,
 }
 
 /// The full startup warning LINE for a rule that carries a
@@ -528,6 +541,33 @@ pub fn additional_directories_from_settings_json(raw: &str) -> Vec<std::path::Pa
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// `permissions.blockReadsOutsideWorkingDirectories` for ONE settings source.
+///
+/// Returns `true` only for a literal JSON `true`. Callers must fold the tiers
+/// with OR — the oracle's managed merge is
+/// `if (e.permissions.blockReadsOutsideWorkingDirectories === !0) d.… = !0`, so
+/// **`true` in any source wins** and a later `false` cannot clear it. Use
+/// [`fold_block_reads_outside_working_directories`] rather than re-implementing
+/// the fold per host.
+#[must_use]
+pub fn block_reads_outside_working_directories_from_settings_json(raw: &str) -> bool {
+    serde_json::from_str::<SettingsTop>(raw)
+        .ok()
+        .and_then(|t| t.permissions)
+        .and_then(|p| p.block_reads_outside_working_directories)
+        == Some(true)
+}
+
+/// Fold `permissions.blockReadsOutsideWorkingDirectories` across every settings
+/// source: `true` in ANY source wins (oracle OR-merge, never last-wins).
+#[must_use]
+pub fn fold_block_reads_outside_working_directories<'a>(
+    raws: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    raws.into_iter()
+        .any(block_reads_outside_working_directories_from_settings_json)
 }
 
 /// Does this settings file set the managed-only permission-rule lockdown?

@@ -3693,7 +3693,9 @@ async fn build_mobile_inner_with_ask(
         // Audit fix (#12): `permissions.additionalDirectories`, unioned across
         // tiers, so an AcceptEdits write under a settings-declared extra dir
         // auto-allows (mirrors desktop's `.with_working_dirs`); empty ⇒ unchanged.
-        let mut additional_working_dirs: Vec<std::path::PathBuf> = Vec::new();
+        let mut additional_working_dirs = permission::working_dirs::AdditionalWorkingDirs::new();
+        // Sticky OR of `permissions.blockReadsOutsideWorkingDirectories` across tiers.
+        let mut block_reads_outside_working_directories = false;
         let proj = cwd.join(branding::DOT_DIR).join("settings.json");
         let user = cfg.lingxi_home.join("settings.json");
         // Audit fix (#6): also read the LocalSettings tier (`settings.local.json`),
@@ -3789,8 +3791,13 @@ async fn build_mobile_inner_with_ask(
                         workflow_session_enabled = b;
                     }
                 }
-                additional_working_dirs
-                    .extend(permission::additional_directories_from_settings_json(&raw));
+                additional_working_dirs.extend_from_source(
+                    permission::additional_directories_from_settings_json(&raw),
+                    source,
+                );
+                if permission::block_reads_outside_working_directories_from_settings_json(&raw) {
+                    block_reads_outside_working_directories = true; // any tier arming wins
+                }
             }
         }
         platform_api::session_flags::set_agent_push_notif_enabled(agent_push_notif_enabled);
@@ -3824,6 +3831,7 @@ async fn build_mobile_inner_with_ask(
         let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
             .with_roots(roots)
             .with_working_dirs(additional_working_dirs)
+            .with_block_reads_outside_working_directories(block_reads_outside_working_directories)
             .with_workspace_leases(workspace_leases.clone());
         // Audit fix (#1): honor the bypassPermissions killswitch resolved above.
         policy.bypass_killswitch_active = bypass_disabled;

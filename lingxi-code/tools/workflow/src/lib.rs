@@ -837,7 +837,7 @@ impl WorkflowTool {
                 roots.push(fs_roots.cwd.clone());
                 roots.push(fs_roots.lingxi_home.clone());
             }
-            roots.extend(policy.additional_working_dirs.iter().cloned());
+            roots.extend(policy.additional_working_dirs.paths());
         }
         // Lightweight hosts/tests may inject a live gate without a policy;
         // the session cwd is then the only safe rooted boundary available.

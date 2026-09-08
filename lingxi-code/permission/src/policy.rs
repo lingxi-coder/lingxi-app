@@ -18,6 +18,7 @@ use crate::result::{
 };
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource};
 use crate::shell_command;
+use crate::working_dirs::AdditionalWorkingDirs;
 use crate::workspace_lease;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -52,6 +53,23 @@ const SOURCES_BY_PRIORITY: [PermissionRuleSource; 10] = [
     PermissionRuleSource::ToolsNarrowing,
     PermissionRuleSource::McpServerPolicy,
 ];
+// ── 2.1.263 working-directory confinement copy (byte-locked) ────────────────
+
+/// Oracle `ov` — the `permissions.blockReadsOutsideWorkingDirectories`
+/// decision reason (`decisionReason:{type:"other", reason: ov}`); also the
+/// `safetyCheck` reason the Bash-side path checks report with
+/// `circuitBreaker:"outsideReadsBlocked"`.
+pub const OUTSIDE_READS_BLOCKED_REASON: &str = "Reads outside the working directories are blocked (permissions.blockReadsOutsideWorkingDirectories). Add the directory with /add-dir, or remove that setting.";
+
+/// Oracle `ic.why` — the `--restricted` half of `sc`.
+pub const RESTRICTED_OUTSIDE_WHY: &str =
+    "--restricted confines the file tools to the working directory.";
+
+/// Oracle `Ctt` — `ic.reason`.
+pub const RESTRICTED_OUTSIDE_REASON: &str = "--restricted: path outside the working directory";
+
+/// Oracle `Ep.why` — the read-block half of `sc`.
+pub const READ_BLOCK_WHY: &str = "the permissions.blockReadsOutsideWorkingDirectories setting blocks reads outside the working directories. Ask the user to add the directory with /add-dir, or to remove that setting.";
 
 /// Rule-driven authorization policy.
 ///
@@ -117,7 +135,19 @@ pub struct PermissionPolicy {
     /// `ToolPermissionContext.additionalWorkingDirectories` map, which
     /// `allWorkingDirectories` (`filesystem.ts:667-674`) unions with the original
     /// cwd. Empty by default; production sets it via [`Self::with_working_dirs`].
-    pub additional_working_dirs: Vec<PathBuf>,
+    /// 1:1 with claude-code `ToolPermissionContext.additionalWorkingDirectories`
+    /// — a path-keyed map carrying the SOURCE that contributed each directory
+    /// (see [`crate::working_dirs`]). `rb(ctx)` is
+    /// `cwd + additional_working_dirs.paths()`; `mEt(ctx)` is
+    /// `cwd + additional_working_dirs.read_block_paths()`, which drops
+    /// `projectSettings` entries so a checked-in settings file cannot widen
+    /// `blockReadsOutsideWorkingDirectories`.
+    pub additional_working_dirs: AdditionalWorkingDirs,
+    /// `permissions.blockReadsOutsideWorkingDirectories` — refuse file-tool
+    /// reads (Read, Grep, Glob, LSP) outside the working directories in EVERY
+    /// permission mode. `true` in any settings source wins (see
+    /// [`crate::loader::block_reads_outside_working_directories_from_settings_json`]).
+    pub block_reads_outside_working_directories: bool,
     /// Minimal sandbox-runtime config for the bash sandbox-auto-allow layer
     /// (`bashToolHasPermission`'s `isSandboxingEnabled() &&
     /// isAutoAllowBashIfSandboxedEnabled() && shouldUseSandbox(input)` branch).
@@ -185,7 +215,8 @@ impl PermissionPolicy {
             roots: None,
             stripped_dangerous: Vec::new(),
             stripped_positions: Vec::new(),
-            additional_working_dirs: Vec::new(),
+            additional_working_dirs: AdditionalWorkingDirs::new(),
+            block_reads_outside_working_directories: false,
             sandbox_runtime: None,
             pwsh_parser: None,
             allow_managed_permission_rules_only: false,
@@ -253,7 +284,7 @@ impl PermissionPolicy {
         }
         let ctx = crate::powershell_containment::PsCtx {
             roots,
-            additional: &self.additional_working_dirs,
+            additional: &self.additional_working_dirs.paths(),
             is_windows: cfg!(target_os = "windows"),
             is_macos: cfg!(target_os = "macos"),
             // PERM-PS-VRG-01: feed the live session mode into the in-working-dir
@@ -368,9 +399,44 @@ impl PermissionPolicy {
     /// TS `ToolPermissionContext.additionalWorkingDirectories`. Backward-compatible
     /// (default empty); production may leave it unset this batch.
     #[must_use]
-    pub fn with_working_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
+    pub fn with_working_dirs(mut self, dirs: AdditionalWorkingDirs) -> Self {
         self.additional_working_dirs = dirs;
         self
+    }
+
+    /// Arm `permissions.blockReadsOutsideWorkingDirectories`.
+    #[must_use]
+    pub fn with_block_reads_outside_working_directories(mut self, blocked: bool) -> Self {
+        self.block_reads_outside_working_directories = blocked;
+        self
+    }
+
+    /// PARITY 2.1.263 `mEt(e)` — the working-dir set the read block compares
+    /// against: cwd plus every additional working dir that did NOT come from
+    /// `projectSettings`. Order is stable (cwd first, then insertion order) so
+    /// the `${dirs.join(", ")}` denial message is deterministic.
+    #[must_use]
+    pub fn read_block_working_dirs(&self, roots: &FsRoots) -> Vec<PathBuf> {
+        let mut dirs = vec![roots.cwd.clone()];
+        for dir in self.additional_working_dirs.read_block_paths() {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+        dirs
+    }
+
+    /// `rb(ctx)` — cwd plus EVERY additional working directory, regardless of
+    /// source. The set every ordinary working-dir consumer wants.
+    #[must_use]
+    pub fn all_working_dirs(&self, roots: &FsRoots) -> Vec<PathBuf> {
+        let mut dirs = vec![roots.cwd.clone()];
+        for dir in self.additional_working_dirs.paths() {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+        dirs
     }
 
     #[must_use]
@@ -654,7 +720,163 @@ impl PermissionPolicy {
         {
             return ask_for_restricted_protected_mutation(tool_name, input);
         }
+        // OUTSIDE-READS-01 (2.1.263 `sc`): `--restricted` and
+        // `permissions.blockReadsOutsideWorkingDirectories` both confine the file
+        // READ tools to the working directories, in EVERY permission mode — so
+        // this runs after the mode walk, like RESTRICTED-01 above.
+        if let Some(denial) = self.outside_working_dirs_denial(tool_name, input, &result) {
+            return denial;
+        }
         result
+    }
+
+    /// PARITY 2.1.263 `BK(path, input, forms, opts)` — the read-side filesystem
+    /// ALLOWANCE walk, restricted to the carve-outs that survive under the read
+    /// block. This is what `sc`'s `ruleCheck().behavior === "allow"` escape
+    /// actually consults — **not** the permission allow-rule bucket.
+    ///
+    /// Under the block the oracle computes `k = remoteSurface || restricted ||
+    /// blockOutsideReads`, and the `!k`-gated carve-outs (agent memory, tasks,
+    /// teams) are therefore SUPPRESSED. What remains reachable here is the
+    /// `readBlockFence && !restricted` group:
+    ///
+    /// ```js
+    /// if (o?.readBlockFence && !o.restricted) {
+    ///   if (d === Ne(be(),"CLAUDE.md")) return De(t,"The user memory file is allowed for reading");
+    ///   for (let F of ["skills","plugins","rules","agents","commands"]) {
+    ///     let V = Ne(be(),F)+Re;
+    ///     if (d === V.slice(0,-1) || d.startsWith(V)) return De(t,`User ${F} files are allowed for reading`);
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// `be()` is the config home (`~/.lingxi` here). The group is gated on
+    /// `!restricted`, so `--restricted` gets no fence carve-out.
+    ///
+    /// NOT yet ported (they need session-directory plumbing the `permission`
+    /// crate cannot reach): the session-scoped allowances that also survive the
+    /// block — plan files, tool-result files, scratchpad, job `tmp/`, project
+    /// temp — and `Rzt()` bundled skill reference files. Their absence makes the
+    /// block STRICTER than the oracle, never looser.
+    fn read_block_allowance(&self, path: &Path, roots: &FsRoots) -> Option<String> {
+        if self.restricted || !self.block_reads_outside_working_directories {
+            return None;
+        }
+        if path == roots.lingxi_home.join("CLAUDE.md") {
+            return Some("The user memory file is allowed for reading".to_string());
+        }
+        for dir in ["skills", "plugins", "rules", "agents", "commands"] {
+            let base = roots.lingxi_home.join(dir);
+            if path == base || path.starts_with(&base) {
+                return Some(format!("User {dir} files are allowed for reading"));
+            }
+        }
+        None
+    }
+
+    /// PARITY 2.1.263 `Pmo` — under the read block, a command the shell parser
+    /// CANNOT analyse escalates to the `zU` ask instead of the ordinary
+    /// bash-safety ask, because an unanalysable command could read anywhere:
+    ///
+    /// ```js
+    /// if (o.blockReadsOutsideWorkingDirectories === !0 && !(jS(e) && Nz())) return zU(p.reason);
+    /// ```
+    ///
+    /// `jS(e) && Nz()` is the sandbox escape — a command that WOULD be
+    /// sandbox-wrapped is exempt, since the sandbox fences its reads anyway.
+    /// `jS(e)` is [`crate::sandbox_auto_allow::SandboxAutoAllowConfig::would_sandbox`];
+    /// `Nz()` (`Wmt() && tVe()`) has no port-side equivalent, so the exemption is
+    /// applied on `would_sandbox` alone. With no sandbox runtime wired (the
+    /// default) nothing is exempt, which is the STRICTER direction.
+    fn read_block_unanalyzable_ask(
+        &self,
+        tool_name: &str,
+        command: &str,
+        reason: &str,
+    ) -> Option<PermissionResult> {
+        if !self.block_reads_outside_working_directories {
+            return None;
+        }
+        if self
+            .sandbox_runtime
+            .as_ref()
+            .is_some_and(|sandbox| sandbox.would_sandbox(command))
+        {
+            return None;
+        }
+        Some(crate::read_block::ask_unanalyzable(tool_name, reason))
+    }
+
+    /// PARITY 2.1.263 `sc(e,t,r,o,d,p)` — the file-tool working-directory
+    /// confinement. Two triggers share one function:
+    ///
+    /// ```js
+    /// if (Bh(path, ctx, forms, workingDirs) || ruleCheck().behavior === "allow") return null;
+    /// return {behavior:"deny",
+    ///         message:`${path} is outside ${[...workingDirs].join(", ")}; ${why.why}`,
+    ///         decisionReason:{type:"other", reason: why.reason}}
+    /// ```
+    ///
+    /// called as `ctx.restricted ? ic : Ep` with
+    /// `ctx.blockReadsOutsideWorkingDirectories ? mEt(ctx) : rb(ctx)`.
+    ///
+    /// 🚨 `ruleCheck()` is [`Self::read_block_allowance`] (`BK`), **not** the
+    /// permission allow-rule bucket. In the oracle's read gate the order is
+    /// `deny rules → sc → allow rules`, so an `sc` denial short-circuits before
+    /// any allow rule is consulted: **an explicit `Read(<path>)` allow rule does
+    /// NOT escape the block.** A `Deny` from the ordinary walk keeps its own
+    /// provenance and is left alone.
+    fn outside_working_dirs_denial(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        result: &PermissionResult,
+    ) -> Option<PermissionResult> {
+        if !self.restricted && !self.block_reads_outside_working_directories {
+            return None;
+        }
+        // The oracle gates this on the READ path (`checkReadPermissionForTool`);
+        // the schema names Read/Grep/Glob/LSP, which is exactly `Reader`.
+        if file_tool_kind(tool_name) != FileToolKind::Reader {
+            return None;
+        }
+        // Deny rules already ran and win with their own reason.
+        if matches!(result, PermissionResult::Deny { .. }) {
+            return None;
+        }
+        let roots = self.roots.as_ref()?;
+        let raw = input_path_for_tool(tool_name, input, roots)?;
+        let path = crate::filesystem::expand_path(&raw, roots);
+        // `ruleCheck().behavior === "allow"` — the filesystem allowance walk.
+        if self.read_block_allowance(&path, roots).is_some() {
+            return None;
+        }
+        let working_dirs = if self.block_reads_outside_working_directories {
+            self.read_block_working_dirs(roots)
+        } else {
+            self.all_working_dirs(roots)
+        };
+        if crate::filesystem::path_in_allowed_working_path(&path, &working_dirs, roots) {
+            return None;
+        }
+        // `${e} is outside ${[...p].join(", ")}; ${d.why}`
+        let listed = working_dirs
+            .iter()
+            .map(|dir| dir.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (why, reason) = if self.restricted {
+            (RESTRICTED_OUTSIDE_WHY, RESTRICTED_OUTSIDE_REASON)
+        } else {
+            (READ_BLOCK_WHY, OUTSIDE_READS_BLOCKED_REASON)
+        };
+        Some(PermissionResult::Deny {
+            reason: PermissionDecisionReason::Other {
+                reason: reason.to_string(),
+            },
+            explanation: Some(format!("{} is outside {listed}; {why}", path.display())),
+            metadata: PermissionMetadata::default(),
+        })
     }
 
     /// Clone this policy, replacing only the live-mutable rule/working-dir
@@ -669,7 +891,7 @@ impl PermissionPolicy {
         allow_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
         deny_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
         ask_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
-        additional_working_dirs: Vec<PathBuf>,
+        additional_working_dirs: AdditionalWorkingDirs,
     ) -> Self {
         Self {
             mode: self.mode,
@@ -690,6 +912,7 @@ impl PermissionPolicy {
             stripped_dangerous: self.stripped_dangerous.clone(),
             stripped_positions: self.stripped_positions.clone(),
             additional_working_dirs,
+            block_reads_outside_working_directories: self.block_reads_outside_working_directories,
             sandbox_runtime: self.sandbox_runtime.clone(),
             pwsh_parser: self.pwsh_parser.clone(),
             allow_managed_permission_rules_only: self.allow_managed_permission_rules_only,
@@ -954,10 +1177,16 @@ impl PermissionPolicy {
                     if let Some(deny) = self.command_path_deny(&sources, command, roots) {
                         return deny;
                     }
+                    // Under the read block the cd target is validated against
+                    // `mEt` (project-settings dirs excluded) — see `ppo`.
+                    let read_block_dirs = self
+                        .block_reads_outside_working_directories
+                        .then(|| self.read_block_working_dirs(roots));
                     if let Some(ask) = crate::path_constraints::check_path_constraints(
                         command,
                         roots,
-                        &self.additional_working_dirs,
+                        &self.additional_working_dirs.paths(),
+                        read_block_dirs.as_deref(),
                     ) {
                         return self.resolve_guard_ask(
                             ask_path_constraint(tool_name, ask),
@@ -988,7 +1217,10 @@ impl PermissionPolicy {
                         crate::command_path_containment::check_command_path_containment(
                             command,
                             roots,
-                            &self.additional_working_dirs,
+                            &self.additional_working_dirs.paths(),
+                            self.block_reads_outside_working_directories
+                                .then(|| self.read_block_working_dirs(roots))
+                                .as_deref(),
                         )
                     {
                         return self.resolve_guard_ask(
@@ -1079,7 +1311,7 @@ impl PermissionPolicy {
                 return allow_with_rule(rule);
             }
         }
-        if let Some(ask) = Self::shell_bash_safety_ask(
+        if let Some(ask) = self.shell_bash_safety_ask(
             tool_name,
             input,
             #[cfg(feature = "bash-ast")]
@@ -1153,10 +1385,7 @@ impl PermissionPolicy {
                     // be auto-allowed; an `Unsafe` path falls through to ask.
                     if check_path_safety_for_auto_edit(&raw_path, roots) == AutoEditSafety::Safe {
                         // Working-dir set = cwd + additional dirs (`allWorkingDirectories`).
-                        let mut working_dirs =
-                            Vec::with_capacity(1 + self.additional_working_dirs.len());
-                        working_dirs.push(roots.cwd.clone());
-                        working_dirs.extend(self.additional_working_dirs.iter().cloned());
+                        let working_dirs = self.all_working_dirs(roots);
                         if path_in_allowed_working_path(
                             Path::new(raw_path.as_ref()),
                             &working_dirs,
@@ -1672,7 +1901,7 @@ impl PermissionPolicy {
                     crate::sed_validation::sed_auto_allow_verdict(
                         sub,
                         roots,
-                        &self.additional_working_dirs,
+                        &self.additional_working_dirs.paths(),
                     )
                 {
                     return Some(ask_sed_constraint(message, reason));
@@ -1726,7 +1955,7 @@ impl PermissionPolicy {
                     &sub,
                     allow_file_writes,
                     roots,
-                    &self.additional_working_dirs,
+                    &self.additional_working_dirs.paths(),
                 )
             {
                 return Some(ask_sed_constraint(message, reason));
@@ -1906,7 +2135,7 @@ impl PermissionPolicy {
         for target in crate::command_path_containment::command_path_deny_targets(
             command,
             roots,
-            &self.additional_working_dirs,
+            &self.additional_working_dirs.paths(),
         ) {
             let rule_tool = if target.is_write { "Edit" } else { "Read" };
             for src in sources {
@@ -2207,6 +2436,7 @@ impl PermissionPolicy {
     }
 
     fn shell_bash_safety_ask(
+        &self,
         tool_name: &str,
         input: &serde_json::Value,
         #[cfg(feature = "bash-ast")] parsed: Option<
@@ -2245,10 +2475,23 @@ impl PermissionPolicy {
             };
             match verdict {
                 ParseForSecurityResult::TooComplex { reason } => {
+                    // `zU(p.reason)` — the read block escalates an unparsable
+                    // command ahead of the ordinary bash-safety ask.
+                    if let Some(escalated) =
+                        self.read_block_unanalyzable_ask(tool_name, command, reason)
+                    {
+                        return Some(escalated);
+                    }
                     return Some(ask_bash_safety(tool_name, reason.clone()));
                 }
                 ParseForSecurityResult::Simple { commands } => {
                     if let SemanticCheckResult::Deny { reason } = check_semantics(commands) {
+                        // `zU(E.reason)` — same escalation on the semantics path.
+                        if let Some(escalated) =
+                            self.read_block_unanalyzable_ask(tool_name, command, &reason)
+                        {
+                            return Some(escalated);
+                        }
                         return Some(ask_bash_safety(tool_name, reason));
                     }
                     return None;
@@ -2993,6 +3236,7 @@ fn ask_for_restricted_protected_mutation(
         reason: PermissionDecisionReason::SafetyCheck {
             reason: reason.clone(),
             classifier_approvable: false,
+            circuit_breaker: None,
         },
         prompt: PermissionPrompt {
             title: "Restricted mode approval".to_string(),
@@ -3096,6 +3340,8 @@ fn ask_dangerous_removal(
         reason: PermissionDecisionReason::SafetyCheck {
             reason: danger.reason,
             classifier_approvable: false,
+            // PARITY oracle `HL`: `circuitBreaker:"dangerousRemoval"`.
+            circuit_breaker: Some(crate::result::SafetyCircuitBreaker::DangerousRemoval),
         },
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
@@ -3160,9 +3406,22 @@ fn ask_path_constraint(
         message,
         reason,
         blocked_path,
+        outside_reads_blocked,
     } = ask;
+    // PARITY `ppo`: the read block's refusal keeps `PE`'s own decisionReason —
+    // the `outsideReadsBlocked` safetyCheck — instead of the ordinary
+    // path-constraint `type:"other"`.
+    let decision_reason = if outside_reads_blocked {
+        PermissionDecisionReason::SafetyCheck {
+            reason,
+            classifier_approvable: false,
+            circuit_breaker: Some(crate::result::SafetyCircuitBreaker::OutsideReadsBlocked),
+        }
+    } else {
+        PermissionDecisionReason::Other { reason }
+    };
     PermissionResult::Ask {
-        reason: PermissionDecisionReason::Other { reason },
+        reason: decision_reason,
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
             message,
@@ -3295,6 +3554,8 @@ fn ask_background_operator(tool_name: &str) -> PermissionResult {
         reason: PermissionDecisionReason::SafetyCheck {
             reason: reason.to_string(),
             classifier_approvable: false,
+            // PARITY oracle `Yqr`: `circuitBreaker:"backgroundOperator"`.
+            circuit_breaker: Some(crate::result::SafetyCircuitBreaker::BackgroundOperator),
         },
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
@@ -3323,6 +3584,7 @@ fn ask_dangerous_rm_variable_path(tool_name: &str, cmd: &str, target: &str) -> P
         reason: PermissionDecisionReason::SafetyCheck {
             reason: format!("Dangerous {cmd} operation on possibly-empty variable path: {target}"),
             classifier_approvable: false,
+            circuit_breaker: None,
         },
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),

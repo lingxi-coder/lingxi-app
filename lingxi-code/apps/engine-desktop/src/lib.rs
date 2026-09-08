@@ -1173,7 +1173,10 @@ struct BootPermissionTiers {
     classify_all_shell: bool,
     /// Union of every tier's `permissions.additionalDirectories` (raw paths;
     /// `authorize` resolves them against the policy roots via `expand_path`).
-    additional_working_dirs: Vec<std::path::PathBuf>,
+    additional_working_dirs: permission::working_dirs::AdditionalWorkingDirs,
+    /// Sticky OR of `permissions.blockReadsOutsideWorkingDirectories` across every
+    /// settings tier — `true` in ANY source wins (oracle managed merge).
+    block_reads_outside_working_directories: bool,
     /// Raw tier texts in ASCENDING priority INCLUDING the managed tier(s) —
     /// feeds the sandbox-auto-allow derivation (last write wins, so a managed
     /// `sandbox.*` overrides user/project/local).
@@ -1230,7 +1233,8 @@ async fn load_boot_permission_tiers_with_flag(
     let mut bypass_disabled = false;
     let mut auto_mode_disabled = false;
     let mut classify_all_shell = false;
-    let mut additional_working_dirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut additional_working_dirs = permission::working_dirs::AdditionalWorkingDirs::new();
+    let mut block_reads_outside_working_directories = false;
     // Retain each tier's raw text (in ascending priority) so the
     // sandbox-auto-allow config can be derived from the SAME settings.
     let mut raw_tiers: Vec<String> = Vec::new();
@@ -1307,8 +1311,13 @@ async fn load_boot_permission_tiers_with_flag(
             }
             // (#34) Union this tier's additionalDirectories into the
             // working-dir set (claude-code merges across SETTING_SOURCES).
-            additional_working_dirs
-                .extend(permission::additional_directories_from_settings_json(&raw));
+            additional_working_dirs.extend_from_source(
+                permission::additional_directories_from_settings_json(&raw),
+                source,
+            );
+            if permission::block_reads_outside_working_directories_from_settings_json(&raw) {
+                block_reads_outside_working_directories = true; // sticky: any tier arming wins
+            }
             raw_tiers.push(raw); // ascending priority preserved for sandbox derivation
         }
     }
@@ -1348,7 +1357,13 @@ async fn load_boot_permission_tiers_with_flag(
         if permission::classify_all_shell_from_settings_json(&raw) {
             classify_all_shell = true;
         }
-        additional_working_dirs.extend(permission::additional_directories_from_settings_json(&raw));
+        additional_working_dirs.extend_from_source(
+            permission::additional_directories_from_settings_json(&raw),
+            source,
+        );
+        if permission::block_reads_outside_working_directories_from_settings_json(&raw) {
+            block_reads_outside_working_directories = true;
+        }
         raw_tiers.push(raw);
     }
     // Managed (policySettings) tier — HIGHEST priority, read LAST. Deliberately
@@ -1387,7 +1402,13 @@ async fn load_boot_permission_tiers_with_flag(
         if permission::classify_all_shell_from_settings_json(raw) {
             classify_all_shell = true; // managed classifyAllShell binds (sticky, QOi)
         }
-        additional_working_dirs.extend(permission::additional_directories_from_settings_json(raw));
+        additional_working_dirs.extend_from_source(
+            permission::additional_directories_from_settings_json(raw),
+            permission::PermissionRuleSource::PolicySettings,
+        );
+        if permission::block_reads_outside_working_directories_from_settings_json(raw) {
+            block_reads_outside_working_directories = true; // managed arming binds (sticky)
+        }
     }
     let allow_managed_permission_rules_only = managed_tiers
         .iter()
@@ -1403,6 +1424,7 @@ async fn load_boot_permission_tiers_with_flag(
         auto_mode_disabled,
         classify_all_shell,
         additional_working_dirs,
+        block_reads_outside_working_directories,
         raw_tiers,
         allow_managed_permission_rules_only,
     }
@@ -11689,6 +11711,7 @@ pub async fn build(
             auto_mode_disabled,
             classify_all_shell,
             mut additional_working_dirs,
+            block_reads_outside_working_directories,
             mut raw_tiers,
             allow_managed_permission_rules_only,
         } = load_boot_permission_tiers_with_flag(
@@ -11699,7 +11722,7 @@ pub async fn build(
         )
         .await;
         if cfg.restricted {
-            additional_working_dirs.clear();
+            additional_working_dirs = permission::working_dirs::AdditionalWorkingDirs::new();
         }
         append_mcp_permission_rules(
             &mut rules,
@@ -11713,10 +11736,14 @@ pub async fn build(
         // the working-dir set, exactly like a settings-tier
         // `additionalDirectories` entry (claude-code "Additional directories
         // to allow tool access to").
-        additional_working_dirs.extend(cfg.add_dir.iter().cloned());
+        additional_working_dirs.extend_from_source(
+            cfg.add_dir.iter().cloned(),
+            permission::PermissionRuleSource::CliArg,
+        );
         // Capture the union (settings additionalDirectories + --add-dir) for the
-        // file-tool `trusted_dirs` and MCP `roots/list` source below.
-        boot_additional_working_dirs = additional_working_dirs.clone();
+        // file-tool `trusted_dirs` and MCP `roots/list` source below. These
+        // consumers want the FULL `rb` union, not the read block's narrower set.
+        boot_additional_working_dirs = additional_working_dirs.paths();
         let rule_count = rules.len();
         // Phase 3a: supply the filesystem roots so file-path CONTENT rules
         // (`Edit(src/**)`, `Read(./secrets/**)`) match the input path. Roots
@@ -11793,6 +11820,9 @@ pub async fn build(
             permission::PermissionPolicy::from_rules(permission::PermissionMode::Default, rules)
                 .with_roots(roots)
                 .with_working_dirs(additional_working_dirs)
+                .with_block_reads_outside_working_directories(
+                    block_reads_outside_working_directories,
+                )
                 .with_workspace_leases(workspace_leases.clone())
                 .with_sandbox_runtime(sandbox_auto_allow)
                 .with_managed_permission_rules_only(allow_managed_permission_rules_only)

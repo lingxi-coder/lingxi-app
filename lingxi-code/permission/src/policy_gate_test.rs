@@ -1470,6 +1470,7 @@ mod tests {
             serialize_decision_reason(&PermissionDecisionReason::SafetyCheck {
                 reason: "dangerous rm".into(),
                 classifier_approvable: false,
+                circuit_breaker: None,
             }),
             Some("dangerous rm".to_string())
         );
@@ -1823,6 +1824,7 @@ mod tests {
             reason: PermissionDecisionReason::SafetyCheck {
                 reason: "test safety check".into(),
                 classifier_approvable: approvable,
+                circuit_breaker: None,
             },
             prompt: crate::result::PermissionPrompt {
                 title: "Allow?".into(),
@@ -2238,6 +2240,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
         let reason = PermissionDecisionReason::SafetyCheck {
             reason: "classifier-approvable action".into(),
             classifier_approvable: true,
+            circuit_breaker: None,
         };
         let workflow_ctx = PermissionCheckContext {
             classifier_approvable: Some(true),

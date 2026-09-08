@@ -55,6 +55,7 @@ pub mod policy_gate;
 pub mod powershell_containment;
 pub mod powershell_parse;
 pub mod prompting_gate;
+pub mod read_block;
 pub mod read_deny_globs;
 pub mod read_only_command;
 pub mod result;
@@ -68,6 +69,7 @@ pub mod shadow;
 pub mod shell_command;
 pub mod shell_rule_matching;
 pub mod update;
+pub mod working_dirs;
 pub mod workspace_lease;
 
 pub use allow_suggestion::{allow_suggestion, call_matches_rule};
@@ -118,8 +120,10 @@ pub use layers::{
 pub use loader::{
     additional_directories_from_settings_json,
     allow_managed_permission_rules_only_from_settings_json, auto_mode_disabled_from_settings_json,
+    block_reads_outside_working_directories_from_settings_json,
     bypass_permissions_disabled_from_settings_json, classify_all_shell_from_settings_json,
-    default_mode_from_settings_json, permission_rule_file_warning, permission_rule_startup_warning,
+    default_mode_from_settings_json, fold_block_reads_outside_working_directories,
+    permission_rule_file_warning, permission_rule_startup_warning,
     permission_rules_from_settings_json,
 };
 pub use mcp_policy::{
@@ -143,7 +147,7 @@ pub use read_deny_globs::read_deny_exclude_globs;
 pub use read_only_command::command_is_read_only;
 pub use result::{
     ClassifierKind, PermissionDecisionReason, PermissionResult, PermissionUpdateDestination,
-    SandboxOverrideReason,
+    SafetyCircuitBreaker, SandboxOverrideReason,
 };
 pub use rule::{
     normalize_legacy_tool_name, PermissionBehavior, PermissionRule, PermissionRuleSource,

@@ -350,8 +350,35 @@ impl Tool for TodoWriteTool {
         // hides TodoWrite rather than revealing it.
         crate::task::todo_write_enabled(ctx)
     }
+    /// claude-code `userFacingName(){return ""}` — an EMPTY display name, not
+    /// an absent one. Upstream reads it with `??` (`qo(e){return
+    /// e.userFacingName?.()??e.name}`), so `""` survives and the tool renders
+    /// with no label; only `undefined` falls back to the wire name.
+    ///
+    /// Nothing in this engine reads `user_facing_name` yet, so this is metadata
+    /// correctness rather than an observable change — but leaving it `None`
+    /// means the first consumer to appear silently labels TodoWrite where
+    /// upstream shows nothing.
+    fn user_facing_name(&self) -> Option<&str> {
+        Some("")
+    }
+    /// claude-code `shouldDefer:!0`. This one IS observable: it is what puts
+    /// TodoWrite behind Tool Search's deferral (`ToolRegistry::available_tools`
+    /// → `DeferralState::wants_defer`), so an undeferred TodoWrite was being
+    /// advertised up front where upstream makes the model discover it.
+    fn should_defer(&self) -> bool {
+        true
+    }
+    /// claude-code `strict:!0`. No production reader in this engine today;
+    /// recorded so the runtime parser matches when one appears.
+    fn strict(&self) -> bool {
+        true
+    }
+    /// claude-code `maxResultSizeChars:1e5`. Observable: this is the truncation
+    /// budget for the tool result, and the shared 30k default was cutting
+    /// TodoWrite's output at less than a third of upstream's limit.
     fn max_result_size_chars(&self) -> usize {
-        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
+        100_000
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         false
@@ -506,6 +533,31 @@ mod tests {
         let mut use_ctx = fresh_ctx();
         use_ctx.session = Some(session.clone());
         (TodoWriteTool::new(bctx), sink, session, use_ctx)
+    }
+
+    /// claude-code's TodoWrite tool definition, field for field
+    /// (`PWn=Tt({name:XS,searchHint:…,maxResultSizeChars:1e5,strict:!0,
+    /// userFacingName(){return""},shouldDefer:!0,…})`).
+    ///
+    /// Two of these are observable and two are not, which is why they are
+    /// pinned together: `should_defer` decides whether Tool Search defers the
+    /// tool, `max_result_size_chars` is the result truncation budget, and the
+    /// other two are metadata no consumer reads yet. A regression in the silent
+    /// pair would otherwise be invisible until the first consumer appears.
+    #[test]
+    fn tool_definition_metadata_matches_the_oracle() {
+        let (tool, _sink, _session, _ctx) = make_tool_and_session();
+        assert_eq!(tool.name(), "TodoWrite");
+        assert_eq!(
+            tool.search_hint(),
+            Some("manage the session task checklist")
+        );
+        assert_eq!(tool.max_result_size_chars(), 100_000);
+        assert!(tool.should_defer(), "shouldDefer:!0");
+        assert!(tool.strict(), "strict:!0");
+        // An EMPTY name, not an absent one: upstream reads this with `??`, so
+        // `""` renders as no label while `None` would fall back to "TodoWrite".
+        assert_eq!(tool.user_facing_name(), Some(""));
     }
 
     #[test]

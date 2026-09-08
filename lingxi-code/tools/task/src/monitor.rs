@@ -344,7 +344,34 @@ impl Tool for MonitorTool {
         let registry = self.ctx.task_registry.as_ref().ok_or_else(|| {
             ToolError::Internal("Monitor: task registry is not configured".into())
         })?;
+        // claude-code's Monitor spawns through the SHARED shell entry point, so
+        // it inherits that path's pre-spawn cwd check: `if(A.preSpawnError)
+        // throw new R(A.preSpawnError, "Monitor: pre-spawn error (cwd/argv
+        // redacted)")`. The port's Monitor does not go through that path, so
+        // the check is spelled out here — without it a monitor is minted for a
+        // directory that no longer exists and only fails later, as a dead task.
+        //
+        // NOTE the second argument to `R` is the TELEMETRY label; the model
+        // sees `preSpawnError` itself. Emitting "Monitor: pre-spawn error
+        // (cwd/argv redacted)" to the model would be byte-wrong.
+        //
+        // Recovery is silent, matching both the oracle and the Bash tool: the
+        // upstream guard is `if(vr>0) return OD(recovered-message)`, where `vr`
+        // is the INDEX of the recovery target that worked — falling back to the
+        // FIRST candidate returns no error at all. This engine has exactly one
+        // fallback (the tool workspace), which is that first candidate.
         let cwd = ctx.cwd.unwrap_or_else(|| self.ctx.cwd());
+        let workspace = self.ctx.cwd();
+        let cwd = if std::fs::canonicalize(&cwd).is_ok() {
+            cwd
+        } else if std::fs::canonicalize(&workspace).is_ok() {
+            workspace
+        } else {
+            return Err(ToolError::Internal(format!(
+                "Working directory \"{}\" no longer exists. Please restart Claude from an existing directory.",
+                cwd.display()
+            )));
+        };
         let timeout_field = if persistent { 0 } else { timeout_ms };
         let task_id = registry
             .spawn_monitor(MonitorRegistration {
@@ -478,6 +505,79 @@ mod tests {
         MonitorTool::new(ctx)
     }
 
+    /// claude-code refuses to start a monitor whose working directory is gone
+    /// (the shared shell path's `preSpawnError`), and recovers silently when
+    /// the workspace is still there. Without the check the port minted a task
+    /// for a directory that does not exist and only failed later, as a dead row.
+    #[tokio::test]
+    async fn a_missing_working_directory_is_refused_before_a_task_is_minted() {
+        let _g = guard();
+        telemetry::test_set_flag(AMBER_SENTINEL_FLAG, true);
+        let registry = Arc::new(RecordingRegistry::default());
+        let t = tool_with_registry(registry.clone());
+
+        // The workspace exists, so a deleted per-call cwd recovers SILENTLY —
+        // upstream returns no error when the first fallback works.
+        let mut ctx = fresh_ctx();
+        ctx.cwd = Some(std::path::PathBuf::from("/definitely/not/here/monitor"));
+        let recovered = t
+            .call(json!({"command": "tail -f log", "description": "d"}), ctx, fresh_tx())
+            .await;
+        assert!(
+            recovered.is_ok(),
+            "a recoverable cwd must not refuse: {recovered:?}"
+        );
+        assert!(
+            registry.monitor.lock().expect("monitor lock").is_some(),
+            "and it still mints the monitor",
+        );
+        // The recovered cwd is what the monitor records, not the dead one.
+        let recorded = registry
+            .monitor
+            .lock()
+            .expect("monitor lock")
+            .as_ref()
+            .and_then(|m| m.cwd.clone())
+            .expect("cwd recorded");
+        assert!(
+            !recorded.contains("not/here/monitor"),
+            "the dead cwd must not be recorded, got: {recorded}"
+        );
+        *registry.monitor.lock().expect("monitor lock") = None;
+
+        // With the workspace gone too there is nothing to fall back to.
+        let mut broken = shell_test_ctx(dummy_out());
+        broken.session_cwd = tool_api::session_cwd::SessionCwd::new(
+            std::path::PathBuf::from("/definitely/not/here/workspace"),
+            Vec::new(),
+        );
+        broken.task_registry = Some(registry.clone());
+        let t = MonitorTool::new(broken);
+        let mut ctx = fresh_ctx();
+        ctx.cwd = Some(std::path::PathBuf::from("/definitely/not/here/monitor"));
+        let err = t
+            .call(json!({"command": "tail -f log", "description": "d"}), ctx, fresh_tx())
+            .await
+            .expect_err("a monitor with no usable cwd must be refused");
+        let message = format!("{err}");
+        assert!(
+            message.contains(
+                "no longer exists. Please restart Claude from an existing directory."
+            ),
+            "byte-exact upstream copy, got: {message}"
+        );
+        // The telemetry label must NOT reach the model.
+        assert!(
+            !message.contains("cwd/argv redacted"),
+            "that string is a telemetry label, not model-facing copy"
+        );
+        assert!(
+            registry.monitor.lock().expect("monitor lock").is_none(),
+            "and no task was minted for the refused call",
+        );
+        telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);
+    }
+
     #[test]
     fn name_and_gate() {
         let _g = guard();
@@ -538,7 +638,15 @@ mod tests {
         let _g = guard();
         let registry = Arc::new(RecordingRegistry::default());
         let mut call_ctx = fresh_ctx();
-        call_ctx.cwd = Some(std::path::PathBuf::from("/tmp/monitor-cwd"));
+        // A REAL directory: the pre-spawn guard recovers a cwd that does not
+        // exist, so a fictitious path here would silently assert the wrong
+        // thing.
+        let monitor_cwd = std::env::temp_dir().join(format!(
+            "lingxi-monitor-cwd-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&monitor_cwd).expect("create the monitor cwd");
+        call_ctx.cwd = Some(monitor_cwd.clone());
         call_ctx.tool_use_id = Some(protocol::ToolUseId::new());
         call_ctx.agent_name = Some("builder".into());
         call_ctx.team_name = Some("alpha".into());
@@ -567,7 +675,10 @@ mod tests {
         assert_eq!(launched.description, "ci");
         assert!(launched.persistent);
         assert_eq!(launched.timeout_ms, 0);
-        assert_eq!(launched.cwd.as_deref(), Some("/tmp/monitor-cwd"));
+        assert_eq!(
+            launched.cwd.as_deref(),
+            Some(monitor_cwd.to_string_lossy().as_ref())
+        );
         assert_eq!(launched.tool_use_id, expected_tool_use_id);
         assert_eq!(launched.creator_teammate_name.as_deref(), Some("builder"));
         assert_eq!(launched.creator_team_name.as_deref(), Some("alpha"));

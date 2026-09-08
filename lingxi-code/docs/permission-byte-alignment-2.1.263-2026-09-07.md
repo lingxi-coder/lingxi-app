@@ -134,31 +134,27 @@ be checked against the read block". Nothing in the port mentions it.
   a permission-crate patch, and it should be planned as one rather than
   retro-fitted from the string list.
 
-- **`sandbox.filesystem` deny merge** (11) — scoped 2026-09-08, NOT started, but
-  the substrate DOES exist and this is the tractable next item:
+- 🚨 **`sandbox.filesystem` deny merge** (11) — **my scoping in `1c69ac4f6` was
+  WRONG and is retracted.** I wrote "only the producer is missing". The producer
+  exists and is correct: `sandbox/src/policy_convert.rs` `apply_rule` maps an
+  `Edit(path)` deny rule to `deny_write` and a `Read(path)` deny rule to
+  `deny_read`, and lines 288-297 merge `sandbox.filesystem.denyWrite`/`denyRead`
+  from the same settings into those lists with the correct (different) path
+  resolution convention. I claimed absence from a string-level grep without
+  reading the conversion path.
 
-  * `FilesystemRestrictionConfig` already has `deny_read` / `deny_write`
-    (`sandbox/src/runtime_config.rs:165-168`) and both are already consumed —
-    `platforms/posix/src/sandbox.rs:211` enforces `deny_write`, and
-    `tools/shell/src/prompt.rs:444-480` reports both to the model.
-  * What is missing is the PRODUCER. The oracle folds permission deny rules into
-    those lists while walking settings sources: an `Edit(...)` deny rule feeds
-    the write-deny list and a `Read(...)` deny rule feeds the read-deny list,
-    merged with `sandbox.filesystem.denyWrite` / `denyRead` from the same tier.
-    `permission::read_deny_exclude_globs` is the closest existing analogue
-    (Read-deny rules → search-exclude globs) and is the model to follow.
-  * Also missing: the two schema descriptions (`Additional paths to deny
-    reading|writing within the sandbox. Merged with paths from Read(...)|Edit(...)
-    deny permission rules.`) and the disabled-source log line `Sandbox: ignoring
-    permission rules and sandbox.filesystem entries from disabled setting source
-    ${source}`.
-- **Sandbox filesystem isolation** (11) — `sandbox.filesystem` additional
-  read/write deny paths merged with `Read(...)`/`Edit(...)` deny rules;
-  enterprise-policy-requires-sandbox on Windows; `Sandbox: ignoring permission
-  rules and sandbox.filesystem entries from disabled setting source`.
-- **cd / working-directory interaction** (14) — `Compound command contains cd
-  with a relative file read while a Read() deny rule exists`; deny evaluation
-  after an unresolvable `cd`.
+  What was actually missing was TEST COVERAGE — nothing pinned either half of
+  the merge, nor the deliberate asymmetry that a `Read` ALLOW rule contributes
+  nothing to `allow_read` (which comes only from `sandbox.filesystem.allowRead`).
+  Both are now pinned; deleting the `deny_read` push turns the merge test red.
+
+  Genuinely still absent: the per-source diagnostic `Sandbox: ignoring permission
+  rules and sandbox.filesystem entries from disabled setting source ${source}`.
+  It has no home here by design — `policy_convert` receives ONE already-merged
+  `SettingsJson` (see its comment at the top of
+  `convert_settings_to_runtime_config`), because this port folds the tiers at the
+  composition root instead of walking them in the sandbox adapter. The log line
+  belongs at that fold, not in this crate.
 
 ### P2
 - **MCP approval** (13), **subagent/teammate permission surface** (8)

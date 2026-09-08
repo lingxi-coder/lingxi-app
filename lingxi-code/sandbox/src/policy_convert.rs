@@ -924,6 +924,94 @@ mod deny_write_symlink_tests {
 }
 
 #[cfg(test)]
+mod deny_merge_tests {
+    use super::{convert_settings_to_runtime_config, SandboxConvertContext};
+    use crate::runtime_config::SettingsJson;
+    use serde_json::json;
+
+    /// PARITY 2.1.263: permission DENY rules feed the sandbox's filesystem deny
+    /// lists — `Edit(path)` deny → `deny_write`, `Read(path)` deny →
+    /// `deny_read` — and `sandbox.filesystem.denyWrite` / `denyRead` from the
+    /// same settings merge into those same lists. The oracle documents the
+    /// merge in the setting's own schema text ("Merged with paths from Read(...)
+    /// deny permission rules.").
+    ///
+    /// The behaviour was already implemented; this pins it, because nothing did.
+    #[test]
+    fn permission_deny_rules_and_settings_deny_paths_merge() {
+        let settings: SettingsJson = serde_json::from_value(json!({
+            "permissions": {
+                "allow": ["Edit(src/**)", "Read(docs/**)"],
+                "deny": ["Edit(src/generated/**)", "Read(secret.txt)"]
+            },
+            "settingsDir": "/proj/.lingxi",
+            "sandbox": {
+                "enabled": true,
+                "filesystem": {
+                    "denyWrite": ["extra/no-write"],
+                    "denyRead": ["extra/no-read"]
+                }
+            }
+        }))
+        .expect("settings parse");
+        let cfg =
+            convert_settings_to_runtime_config(&settings, &SandboxConvertContext::default());
+
+        let has = |v: &[String], needle: &str| v.iter().any(|p| p.contains(needle));
+        // From the permission rules.
+        assert!(
+            has(&cfg.filesystem.deny_write, "src/generated"),
+            "an Edit deny rule must reach deny_write: {:?}",
+            cfg.filesystem.deny_write
+        );
+        assert!(
+            has(&cfg.filesystem.deny_read, "secret.txt"),
+            "a Read deny rule must reach deny_read: {:?}",
+            cfg.filesystem.deny_read
+        );
+        // …merged with the ones the settings file lists directly.
+        assert!(
+            has(&cfg.filesystem.deny_write, "extra/no-write"),
+            "sandbox.filesystem.denyWrite must merge in: {:?}",
+            cfg.filesystem.deny_write
+        );
+        assert!(
+            has(&cfg.filesystem.deny_read, "extra/no-read"),
+            "sandbox.filesystem.denyRead must merge in: {:?}",
+            cfg.filesystem.deny_read
+        );
+        // The Edit ALLOW rule still reaches allow_write, so the deny walk did
+        // not simply swallow every rule.
+        assert!(
+            has(&cfg.filesystem.allow_write, "src"),
+            "an Edit allow rule must still reach allow_write: {:?}",
+            cfg.filesystem.allow_write
+        );
+    }
+
+    /// 🚨 The asymmetry the oracle documents at `apply_rule`: a `Read` ALLOW
+    /// rule contributes NOTHING — `allow_read` comes only from
+    /// `sandbox.filesystem.allowRead`. Easy to "fix" into symmetry and thereby
+    /// widen sandbox reads.
+    #[test]
+    fn a_read_allow_rule_does_not_widen_allow_read() {
+        let settings: SettingsJson = serde_json::from_value(json!({
+            "permissions": { "allow": ["Read(/etc/**)"] },
+            "settingsDir": "/proj/.lingxi",
+            "sandbox": { "enabled": true }
+        }))
+        .expect("settings parse");
+        let cfg =
+            convert_settings_to_runtime_config(&settings, &SandboxConvertContext::default());
+        assert!(
+            !cfg.filesystem.allow_read.iter().any(|p| p.contains("etc")),
+            "a Read allow rule must not reach allow_read: {:?}",
+            cfg.filesystem.allow_read
+        );
+    }
+}
+
+#[cfg(test)]
 mod filesystem_disabled_tests {
     use super::{convert_settings_to_runtime_config, SandboxConvertContext};
     use crate::runtime_config::{FilesystemRestrictionConfig, SandboxSettingsJson, SettingsJson};

@@ -25,17 +25,17 @@ pub mod tasks_file;
 // mirror `tool-cron`'s crate-root API so `cron::<Symbol>` resolves for every
 // symbol the module previously exposed.
 pub use autonomous_loop::{
-    begin_loop_tick, get_autonomous_loop_preamble, is_autonomous_loop_sentinel,
-    is_loop_default_prompt_enabled, is_loop_default_sentinel, is_loop_dynamic_enabled,
-    forget_dynamic_loop, is_loop_file_sentinel, is_loop_keepalive_enabled, is_push_notif_enabled,
-    log_autonomous_loop_activation, loop_consecutive_keepalives, loop_tick_in_flight_prompt,
-    mark_loop_rescheduled, note_loop_invoked, read_loop_file, reset_autonomous_loop_delivered,
-    reset_loop_runtime_state, resolve_autonomous_loop_fire, resolve_loop_default_fire,
-    resolve_loop_file_fire, set_loop_consecutive_keepalives, take_loop_rescheduled,
-    take_loop_tick_in_flight_prompt, LoopFile, LoopFoldOutcome, LoopFoldVeto, LoopRuntime,
-    AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
-    AUTONOMOUS_LOOP_PREAMBLE, AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL,
-    LOOP_FILE_SENTINEL,
+    begin_loop_tick, forget_dynamic_loop, get_autonomous_loop_preamble,
+    is_autonomous_loop_sentinel, is_loop_default_prompt_enabled, is_loop_default_sentinel,
+    is_loop_dynamic_enabled, is_loop_file_sentinel, is_loop_keepalive_enabled,
+    is_push_notif_enabled, log_autonomous_loop_activation, loop_consecutive_keepalives,
+    loop_tick_in_flight_prompt, mark_loop_rescheduled, note_loop_invoked, read_loop_file,
+    reset_autonomous_loop_delivered, reset_loop_runtime_state, resolve_autonomous_loop_fire,
+    resolve_loop_default_fire, resolve_loop_file_fire, set_loop_consecutive_keepalives,
+    take_loop_rescheduled, take_loop_tick_in_flight_prompt, LoopFile, LoopFoldOutcome,
+    LoopFoldVeto, LoopRuntime, LoopSpanCounts, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
+    AUTONOMOUS_LOOP_PREAMBLE,
+    AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL, LOOP_FILE_SENTINEL,
 };
 pub use lock::{release_lock, try_acquire_lock, CronLockError, LockRecord};
 pub use run_due::{
@@ -51,8 +51,8 @@ pub use scheduler::{
     CronTaskDef, NoActiveCronScheduler, SessionCronTask,
 };
 pub use tasks_file::{
-    lock_scheduled_tasks, parse_tasks, project_root_from_tasks_path, read_tasks_body,
-    scheduled_tasks_lock_path, scheduled_tasks_lock_relative_path, scheduled_tasks_path,
-    parse_tasks_strict, scheduled_tasks_relative_path, serialize_tasks, write_tasks_body, CronTask,
-    ScheduledTasks, UnmodeledTask,
+    lock_scheduled_tasks, parse_tasks, parse_tasks_strict, project_root_from_tasks_path,
+    read_tasks_body, scheduled_tasks_lock_path, scheduled_tasks_lock_relative_path,
+    scheduled_tasks_path, scheduled_tasks_relative_path, serialize_tasks, write_tasks_body,
+    CronTask, ScheduledTasks, UnmodeledTask,
 };

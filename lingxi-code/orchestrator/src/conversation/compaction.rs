@@ -1262,6 +1262,9 @@ impl ConversationOrchestrator {
         // Claude closes the compact command status before the query driver
         // publishes its boundary. Preserve this order for stream-json clients.
         self.output.emit_compaction_finished(None).await;
+        // The `/loop` fold's `blocking_system_in_span` veto: a compaction
+        // landed inside the tick, so it was not a quiet one.
+        self.turn_span.note_compaction();
         self.output
             .emit_compact_boundary(&marker.id().as_uuid().to_string(), &metadata)
             .await;

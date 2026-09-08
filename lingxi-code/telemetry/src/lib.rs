@@ -468,13 +468,15 @@ const LOOP_NOOP_FOLD: &str = "loop_noop_fold";
 ///
 /// PARITY the fold chunk's
 /// `y("loop_noop_fold",{streak, span_len, tool_uses, span_duration_s})`.
-/// `span_len` and `tool_uses` count TRANSCRIPT messages and `tool_use` blocks
-/// in the folded span; LingXi folds at the turn boundary and holds no such
-/// span, so those two fields are OMITTED rather than reported as zero.
-pub fn emit_loop_noop_fold(streak: u32, span_duration_s: u64) {
+/// LingXi's span is one turn, so `span_len` and `tool_uses` come from the
+/// orchestrator's per-turn tally (`orchestrator::turn_span`) rather than from
+/// walking a transcript.
+pub fn emit_loop_noop_fold(streak: u32, span_len: u32, tool_uses: u32, span_duration_s: u64) {
     tracing::info!(
         event = LOOP_NOOP_FOLD,
         streak = streak,
+        span_len = span_len,
+        tool_uses = tool_uses,
         span_duration_s = span_duration_s,
     );
 }

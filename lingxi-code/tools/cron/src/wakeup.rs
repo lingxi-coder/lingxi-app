@@ -168,7 +168,8 @@ pub fn wakeup_target(raw: f64, now_ms: i64) -> WakeupTarget {
     let mut target_ms = ceil_to_minute_ms(requested_ms);
     if CACHE_LEAD_MS > 0 && clamped * 1000 <= CACHE_TTL_MS {
         let limit = CACHE_TTL_MS - CACHE_LEAD_MS;
-        while target_ms - now_ms > limit && target_ms - 60_000 >= now_ms + MIN_DELAY_SECONDS * 1000 {
+        while target_ms - now_ms > limit && target_ms - 60_000 >= now_ms + MIN_DELAY_SECONDS * 1000
+        {
             target_ms -= 60_000;
         }
     }
@@ -343,14 +344,18 @@ pub fn loop_wakeup_lines(
 /// The caller marks the disturbances only it can see (a user abort, a `Now`
 /// command) with `LoopRuntime::veto_tick` first; the remaining veto — the model
 /// not ending the tick with `noop: true` — is decided here.
-pub fn settle_loop_tick(runtime: &al::LoopRuntime) -> Option<al::LoopFoldOutcome> {
-    let outcome = runtime.settle_tick(std::time::SystemTime::now())?;
+pub fn settle_loop_tick(
+    runtime: &al::LoopRuntime,
+    span: al::LoopSpanCounts,
+) -> Option<al::LoopFoldOutcome> {
+    let outcome = runtime.settle_tick(std::time::SystemTime::now(), span)?;
     match outcome {
         al::LoopFoldOutcome::Folded {
             streak,
             duration_secs,
+            span,
             ..
-        } => telemetry::emit_loop_noop_fold(streak, duration_secs),
+        } => telemetry::emit_loop_noop_fold(streak, span.span_len, span.tool_uses, duration_secs),
         al::LoopFoldOutcome::Vetoed { reason } => {
             telemetry::emit_loop_noop_fold_veto(reason.reason());
         }
@@ -491,7 +496,15 @@ pub async fn arm_keepalive(scheduler: &Arc<dyn WakeupScheduler>, prompt: &str) -
         end_loop(&state, "model_stopped", Some(true));
         return KeepaliveOutcome::BudgetExhausted;
     }
-    match schedule_dynamic_wakeup(scheduler, KEEPALIVE_DELAY_SECONDS as f64, prompt, None, true).await {
+    match schedule_dynamic_wakeup(
+        scheduler,
+        KEEPALIVE_DELAY_SECONDS as f64,
+        prompt,
+        None,
+        true,
+    )
+    .await
+    {
         Some(_) => KeepaliveOutcome::Armed,
         None => KeepaliveOutcome::AgedOut,
     }
@@ -592,7 +605,11 @@ pub async fn cancel_dynamic_loop_on_user_abort(scheduler: &Arc<dyn WakeupSchedul
     }
     tracing::info!(
         "[loop/dynamic] cancelled {cancelled} pending loop wakeup(s) on user abort{}",
-        if in_flight.is_some() { " (tick in flight)" } else { "" }
+        if in_flight.is_some() {
+            " (tick in flight)"
+        } else {
+            ""
+        }
     );
     telemetry::emit_loop_ended("user_abort", None);
     state.set_loop_ended(true);
@@ -792,6 +809,9 @@ pub struct ScheduleWakeupTool {
     /// fills it via the clone returned by [`Self::wakeup_cell`]; while empty the
     /// tool reports the zero triple (no wakeup can fire).
     wakeup: WakeupSchedulerCell,
+    /// Raised when a call actually ARMS a wakeup, so the turn loop can end the
+    /// turn on a lone `ScheduleWakeup` (see [`Self::loop_wakeup_armed_slot`]).
+    armed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ScheduleWakeupTool {
@@ -802,7 +822,21 @@ impl ScheduleWakeupTool {
         Self {
             ctx,
             wakeup: Arc::new(std::sync::OnceLock::new()),
+            armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// A clone of the flag this tool raises when a call arms a wakeup.
+    ///
+    /// PARITY the oracle's `kg().some(o => o.kind === "loop" && o.prompt === jr)`
+    /// — the turn loop's test for "that `ScheduleWakeup` really did arm a loop
+    /// cron". The oracle re-reads its session cron registry; LingXi has no such
+    /// registry reachable from the orchestrator (which does not depend on
+    /// `tool-cron`), so the tool reports the same fact through a shared flag,
+    /// the way `EndConversationSlot` already does.
+    #[must_use]
+    pub fn loop_wakeup_armed_slot(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.armed.clone()
     }
 
     /// A clone of the set-once cell, for the composition root to fill once the
@@ -820,7 +854,11 @@ impl ScheduleWakeupTool {
     ) -> Self {
         let cell: WakeupSchedulerCell = Arc::new(std::sync::OnceLock::new());
         let _ = cell.set(wakeup);
-        Self { ctx, wakeup: cell }
+        Self {
+            ctx,
+            wakeup: cell,
+            armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 }
 
@@ -903,9 +941,11 @@ fn coerce_delay(value: Option<&Value>) -> Result<Option<f64>, ValidationError> {
     match value {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Number(n)) => Ok(n.as_f64()),
-        Some(Value::String(s)) => s.trim().parse::<f64>().map(Some).map_err(|_| {
-            ValidationError("ScheduleWakeup: `delaySeconds` must be a number".into())
-        }),
+        Some(Value::String(s)) => {
+            s.trim().parse::<f64>().map(Some).map_err(|_| {
+                ValidationError("ScheduleWakeup: `delaySeconds` must be a number".into())
+            })
+        }
         Some(_) => Err(ValidationError(
             "ScheduleWakeup: `delaySeconds` must be a number".into(),
         )),
@@ -919,7 +959,10 @@ fn validate_wakeup_input(input: &Value) -> Result<(), ValidationError> {
         return Ok(());
     }
     for (key, ty) in [("stop", "boolean"), ("noop", "boolean")] {
-        if input.get(key).is_some_and(|v| !v.is_null() && !v.is_boolean()) {
+        if input
+            .get(key)
+            .is_some_and(|v| !v.is_null() && !v.is_boolean())
+        {
             return Err(ValidationError(format!(
                 "ScheduleWakeup: `{key}` must be a {ty}"
             )));
@@ -1096,6 +1139,9 @@ impl Tool for ScheduleWakeupTool {
             return Ok(zero_triple_result(&reason));
         };
         emit_completed(&bus, started.elapsed().as_millis() as u64, true).await;
+        // A wakeup is now armed: the turn loop may end the turn if this was the
+        // round's only tool call (PARITY the `kg()` lookup).
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
 
         // PARITY: `mapToolResultToToolResultBlockParam` — local HH:MM:SS,
         // `Math.max(0, Math.round((e - Date.now())/1000))`, clamp suffix.
@@ -1227,7 +1273,10 @@ mod tests {
     #[async_trait]
     impl WakeupScheduler for Rec {
         async fn schedule(&self, delay: Duration, prompt: String, reason: String) {
-            self.calls.lock().unwrap().push((delay, prompt.clone(), reason));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((delay, prompt.clone(), reason));
             self.pending.lock().unwrap().push(prompt);
         }
         async fn cancel_pending(&self) -> Vec<String> {
@@ -1248,7 +1297,10 @@ mod tests {
         assert_eq!(SCHEDULE_WAKEUP_TOOL_NAME, "ScheduleWakeup");
         assert_eq!(MIN_DELAY_SECONDS, 60);
         assert_eq!(MAX_DELAY_SECONDS, 3600);
-        assert_eq!(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL, "<<autonomous-loop-dynamic>>");
+        assert_eq!(
+            AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
+            "<<autonomous-loop-dynamic>>"
+        );
         assert_eq!(KEEPALIVE_DELAY_SECONDS, 1200);
         assert_eq!(KEEPALIVE_BUDGET, 1);
         assert_eq!(LOOP_MAX_AGE_MS, 7 * 24 * 60 * 60 * 1000);
@@ -1309,7 +1361,10 @@ mod tests {
             props.keys().cloned().collect::<Vec<_>>(),
             vec!["delaySeconds", "reason", "prompt", "stop", "noop"]
         );
-        assert!(SCHEMA.get("required").is_none(), "nothing is required at the schema level");
+        assert!(
+            SCHEMA.get("required").is_none(),
+            "nothing is required at the schema level"
+        );
         assert_eq!(SCHEMA["additionalProperties"], json!(false));
         assert_eq!(
             props["delaySeconds"]["description"],
@@ -1334,7 +1389,13 @@ mod tests {
         let out = OUTPUT_SCHEMA["properties"].as_object().unwrap();
         assert_eq!(
             out.keys().cloned().collect::<Vec<_>>(),
-            vec!["scheduledFor", "clampedDelaySeconds", "wasClamped", "stopped", "cancelledWakeups"]
+            vec![
+                "scheduledFor",
+                "clampedDelaySeconds",
+                "wasClamped",
+                "stopped",
+                "cancelledWakeups"
+            ]
         );
         assert_eq!(
             out["cancelledWakeups"]["description"],
@@ -1368,7 +1429,9 @@ mod tests {
         assert!(prompt.contains("no further wakeups fire.\n\nSet `noop: true` if nothing changed"));
         assert!(prompt.contains("Omit `noop` when stopping (`stop: true`).\n\n## Picking delaySeconds\n\nThe Anthropic prompt cache decides how expensive a wake-up is"));
         assert!(prompt.ends_with("so you don't need to clamp yourself.\n\n## The reason field\n\nOne short sentence on what you chose and why. Goes to telemetry and is shown back to the user. \"watching CI run\" beats \"waiting.\" The user reads this to understand what you're doing without having to predict your cadence in advance — make it specific.\n"));
-        assert!(build_prompt(PromptCacheTtl::FiveMinutes).contains("you don't burn cache 12× per hour"));
+        assert!(
+            build_prompt(PromptCacheTtl::FiveMinutes).contains("you don't burn cache 12× per hour")
+        );
     }
 
     // PARITY 2.1.263 `ScheduleWakeupInputError` messages.
@@ -1381,26 +1444,44 @@ mod tests {
             tool.validate_input(&v, &ctx).await.err().map(|e| e.0)
         };
         assert_eq!(
-            err(json!({"reason": "r", "prompt": "p", "noop": true})).await.as_deref(),
+            err(json!({"reason": "r", "prompt": "p", "noop": true}))
+                .await
+                .as_deref(),
             Some("`delaySeconds` and `reason` are required when `stop` is not true.")
         );
         assert_eq!(
-            err(json!({"delaySeconds": 120, "prompt": "p", "noop": true})).await.as_deref(),
+            err(json!({"delaySeconds": 120, "prompt": "p", "noop": true}))
+                .await
+                .as_deref(),
             Some("`delaySeconds` and `reason` are required when `stop` is not true.")
         );
         assert_eq!(
-            err(json!({"delaySeconds": 120, "reason": "r", "noop": true})).await.as_deref(),
+            err(json!({"delaySeconds": 120, "reason": "r", "noop": true}))
+                .await
+                .as_deref(),
             Some("`prompt` is required when `stop` is not true.")
         );
         assert_eq!(
-            err(json!({"delaySeconds": 120, "reason": "r", "prompt": "p"})).await.as_deref(),
+            err(json!({"delaySeconds": 120, "reason": "r", "prompt": "p"}))
+                .await
+                .as_deref(),
             Some("`noop` is required when `stop` is not true.")
         );
-        assert_eq!(err(json!({"delaySeconds": 120, "reason": "r", "prompt": "p", "noop": false})).await, None);
+        assert_eq!(
+            err(json!({"delaySeconds": 120, "reason": "r", "prompt": "p", "noop": false})).await,
+            None
+        );
         // `DM(number)` coerces a numeric string; `stop: true` needs nothing else.
-        assert_eq!(err(json!({"delaySeconds": "120", "reason": "r", "prompt": "p", "noop": true})).await, None);
+        assert_eq!(
+            err(json!({"delaySeconds": "120", "reason": "r", "prompt": "p", "noop": true})).await,
+            None
+        );
         assert_eq!(err(json!({"stop": true})).await, None);
-        assert!(err(json!({"delaySeconds": "soon", "reason": "r", "prompt": "p", "noop": true})).await.is_some());
+        assert!(
+            err(json!({"delaySeconds": "soon", "reason": "r", "prompt": "p", "noop": true}))
+                .await
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -1433,7 +1514,11 @@ mod tests {
         assert_eq!(calls[0].1, "5m /x");
         assert_eq!(calls[0].2, "idle tick");
         drop(calls);
-        assert_eq!(al::loop_consecutive_keepalives(), 0, "a model call resets the keepalive budget");
+        assert_eq!(
+            al::loop_consecutive_keepalives(),
+            0,
+            "a model call resets the keepalive budget"
+        );
         assert!(al::take_loop_rescheduled());
         assert!(!al::loop_ended());
         let record = al::dynamic_loop_record("5m /x").unwrap();
@@ -1488,10 +1573,17 @@ mod tests {
         );
         assert!(al::loop_ended());
         assert_eq!(al::loop_consecutive_keepalives(), 0);
-        assert!(al::loop_tick_in_flight_prompt().is_none(), "in-flight tick dropped");
+        assert!(
+            al::loop_tick_in_flight_prompt().is_none(),
+            "in-flight tick dropped"
+        );
         // Nothing pending: the zero-count wording names the recurring-cron caveat.
         let again = tool
-            .call(json!({"stop": true, "delaySeconds": 5}), fresh_ctx(), fresh_tx())
+            .call(
+                json!({"stop": true, "delaySeconds": 5}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
         assert_eq!(again.data["cancelledWakeups"], json!(0));
@@ -1501,7 +1593,8 @@ mod tests {
         );
         // Stopping without a wired scheduler still succeeds.
         let tmp = tempfile::tempdir().unwrap();
-        let unwired = ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let unwired =
+            ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = unwired
             .call(json!({"stop": true}), fresh_ctx(), fresh_tx())
             .await
@@ -1569,7 +1662,8 @@ mod tests {
     async fn no_scheduler_returns_zero_triple() {
         let _s = serial();
         let tmp = tempfile::tempdir().unwrap();
-        let tool = ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let tool =
+            ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
             .call(
                 json!({"delaySeconds": 120, "reason": "r", "prompt": "p", "noop": true}),
@@ -1657,15 +1751,26 @@ mod tests {
         let _s = serial();
         let rec = Rec::new();
         let sched: Arc<dyn WakeupScheduler> = rec.clone();
-        assert_eq!(arm_keepalive(&sched, "<<autonomous-loop-dynamic>>").await, KeepaliveOutcome::Armed);
+        assert_eq!(
+            arm_keepalive(&sched, "<<autonomous-loop-dynamic>>").await,
+            KeepaliveOutcome::Armed
+        );
         {
             let calls = rec.calls.lock().unwrap();
             assert_eq!(calls.len(), 1);
-            assert!(calls[0].0 >= Duration::from_secs(1200) && calls[0].0 <= Duration::from_secs(1260));
-            assert_eq!(calls[0].1, "<<autonomous-loop-dynamic>>", "the keepalive re-arms the ORIGINAL sentinel");
+            assert!(
+                calls[0].0 >= Duration::from_secs(1200) && calls[0].0 <= Duration::from_secs(1260)
+            );
+            assert_eq!(
+                calls[0].1, "<<autonomous-loop-dynamic>>",
+                "the keepalive re-arms the ORIGINAL sentinel"
+            );
         }
         assert_eq!(al::loop_consecutive_keepalives(), 1);
-        assert_eq!(arm_keepalive(&sched, "<<autonomous-loop-dynamic>>").await, KeepaliveOutcome::BudgetExhausted);
+        assert_eq!(
+            arm_keepalive(&sched, "<<autonomous-loop-dynamic>>").await,
+            KeepaliveOutcome::BudgetExhausted
+        );
         assert_eq!(rec.calls.lock().unwrap().len(), 1);
         assert!(al::loop_ended());
     }
@@ -1679,7 +1784,10 @@ mod tests {
         assert_eq!(maybe_arm_keepalive(&sched).await, None);
         // Loop tick, model silent → keepalive armed (gate default TRUE in 2.1.263).
         al::begin_loop_tick("5m /x".into());
-        assert_eq!(maybe_arm_keepalive(&sched).await, Some(KeepaliveOutcome::Armed));
+        assert_eq!(
+            maybe_arm_keepalive(&sched).await,
+            Some(KeepaliveOutcome::Armed)
+        );
         // Loop tick, model rescheduled → no keepalive.
         al::begin_loop_tick("5m /x".into());
         al::mark_loop_rescheduled();
@@ -1699,7 +1807,9 @@ mod tests {
         let sched: Arc<dyn WakeupScheduler> = rec.clone();
         assert_eq!(cancel_dynamic_loop_on_user_abort(&sched).await, 0);
         assert!(!al::loop_ended(), "nothing to cancel → no terminal event");
-        sched.schedule(Duration::from_secs(60), "p".into(), "r".into()).await;
+        sched
+            .schedule(Duration::from_secs(60), "p".into(), "r".into())
+            .await;
         al::begin_loop_tick("p".into());
         assert_eq!(cancel_dynamic_loop_on_user_abort(&sched).await, 1);
         assert!(al::loop_ended());
@@ -1715,7 +1825,11 @@ mod tests {
         assert!(resolved.starts_with("# Autonomous loop check\n\n"));
         assert!(resolved.contains("\n\n---\n\n# Autonomous loop tick (dynamic pacing)\n\n"));
         assert_eq!(resolve_wakeup_prompt("5m /babysit-prs"), "5m /babysit-prs");
-        assert_eq!(resolve_wakeup_prompt("  5m /x  "), "  5m /x  ", "real prompts are never trimmed");
+        assert_eq!(
+            resolve_wakeup_prompt("  5m /x  "),
+            "  5m /x  ",
+            "real prompts are never trimmed"
+        );
     }
 
     #[test]

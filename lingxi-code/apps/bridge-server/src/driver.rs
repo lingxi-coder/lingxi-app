@@ -114,20 +114,44 @@ impl TurnDriver for CredentialRequiredTurnDriver {
 /// snapshot+`joinPromptValues`+inject path.
 pub struct MsgQueueMidTurnInput {
     queue: Arc<msgqueue::MessageQueueManager>,
+    /// How many mid-turn prompts a human has folded into turns on this
+    /// connection (see [`Self::foreign_input_counter`]).
+    foreign_inputs: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl MsgQueueMidTurnInput {
     /// Build the adapter over the connection's queue.
     #[must_use]
     pub fn new(queue: Arc<msgqueue::MessageQueueManager>) -> Self {
-        Self { queue }
+        Self {
+            queue,
+            foreign_inputs: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        }
+    }
+}
+
+impl MsgQueueMidTurnInput {
+    /// A clone of the counter this source bumps every time a human's prompt is
+    /// folded into a turn already in flight.
+    ///
+    /// PARITY the `/loop` fold's `foreign_user_input` veto: the oracle spots a
+    /// real user message inside the span; here that message arrives through
+    /// exactly this seam, so counting it is the same fact.
+    #[must_use]
+    pub fn foreign_input_counter(&self) -> Arc<std::sync::atomic::AtomicU32> {
+        self.foreign_inputs.clone()
     }
 }
 
 #[async_trait]
 impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTurnInput {
     async fn take_mid_turn_input(&self) -> Option<String> {
-        self.queue.take_mid_turn_prompt().await
+        let taken = self.queue.take_mid_turn_prompt().await;
+        if taken.is_some() {
+            self.foreign_inputs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        taken
     }
 }
 
@@ -376,6 +400,9 @@ pub struct OrchestratorTurnDriver {
     wakeup_scheduler: Option<Arc<dyn tool_cron::WakeupScheduler>>,
     /// Session-scoped dynamic-loop bookkeeping obtained from the scheduler.
     loop_runtime: Option<Arc<tool_cron::LoopRuntime>>,
+    /// Mid-turn prompts a human folded into a turn — the `/loop` fold's
+    /// `foreign_user_input` veto. `None` ⇒ that arm never fires.
+    foreign_inputs: Option<Arc<std::sync::atomic::AtomicU32>>,
 }
 
 impl OrchestratorTurnDriver {
@@ -395,6 +422,7 @@ impl OrchestratorTurnDriver {
             cancel_reason: None,
             wakeup_scheduler: None,
             loop_runtime: None,
+            foreign_inputs: None,
         }
     }
 
@@ -437,6 +465,7 @@ impl OrchestratorTurnDriver {
             cancel_reason: None,
             wakeup_scheduler: None,
             loop_runtime: None,
+            foreign_inputs: None,
         }
     }
 
@@ -457,6 +486,18 @@ impl OrchestratorTurnDriver {
     pub fn with_wakeup_scheduler(mut self, scheduler: Arc<dyn tool_cron::WakeupScheduler>) -> Self {
         self.loop_runtime = scheduler.loop_runtime();
         self.wakeup_scheduler = Some(scheduler);
+        self
+    }
+
+    /// Wire the mid-turn-input counter so the `/loop` fold can veto a tick a
+    /// human interrupted with a prompt (`foreign_user_input`). Additive; without
+    /// it that arm simply never fires.
+    #[must_use]
+    pub fn with_foreign_input_counter(
+        mut self,
+        counter: Arc<std::sync::atomic::AtomicU32>,
+    ) -> Self {
+        self.foreign_inputs = Some(counter);
         self
     }
 
@@ -522,6 +563,14 @@ impl OrchestratorTurnDriver {
         if let Some(reason) = self.cancel_reason.as_ref() {
             reason.reset();
         }
+        // Fresh `/loop` fold span. Reset for EVERY turn, not just loop ticks —
+        // a count carried over from a working turn would veto the next quiet
+        // tick (or, worse, inflate its telemetry).
+        self.orchestrator.turn_span().reset();
+        let foreign_inputs_before = self
+            .foreign_inputs
+            .as_ref()
+            .map_or(0, |c| c.load(std::sync::atomic::Ordering::Relaxed));
         if let Some(queue) = self.queue.as_ref() {
             queue.register_active_turn(cancel.clone()).await;
         }
@@ -559,19 +608,47 @@ impl OrchestratorTurnDriver {
         // the verdict is taken here. Runs BEFORE the two edges below because
         // both consume the in-flight tick marker `settle_loop_tick` reads.
         //
-        // Only the disturbances the driver can see are marked: an abort by the
-        // user (`tool_abort`) and one by a `Now` command (`queued_command`).
-        // The oracle's `blocking_system_in_span` / `tool_denial` /
-        // `split_tool_pair` / `foreign_user_input` arms have no signal at this
-        // seam yet, so a tick disturbed only in those ways still folds if the
-        // model reported `noop: true`.
+        // The veto arms, in the order the oracle would meet them walking the
+        // span: the blocking system message first, then per-message
+        // disturbances. Only ORDER is approximated — the oracle returns on the
+        // first veto in transcript POSITION, which a tally cannot reconstruct;
+        // every arm's trigger is the same fact it reads.
+        //
+        // There is no `split_tool_pair` arm, and there cannot be one: it fires
+        // when a `tool_result` in the span has no matching `tool_use`, which
+        // happens in the oracle because the span STARTS at a fire anchor that
+        // can fall between the two. LingXi's span is a whole turn, and a turn
+        // always holds the assistant message before its own tool results.
+        // `blocking_system_before_anchor` is unreachable for the same reason.
         if let Some(runtime) = self.loop_runtime.as_ref() {
-            if user_aborted {
+            let span = self.orchestrator.turn_span().snapshot();
+            let foreign_inputs = self
+                .foreign_inputs
+                .as_ref()
+                .map_or(0, |c| c.load(std::sync::atomic::Ordering::Relaxed))
+                .saturating_sub(foreign_inputs_before);
+            if span.compactions > 0 {
+                runtime.veto_tick(tool_cron::LoopFoldVeto::BlockingSystemInSpan);
+            }
+            if user_aborted || span.aborts > 0 {
                 runtime.veto_tick(tool_cron::LoopFoldVeto::ToolAbort);
-            } else if cancel_probe.is_cancelled() {
+            }
+            if span.denials > 0 {
+                runtime.veto_tick(tool_cron::LoopFoldVeto::ToolDenial);
+            }
+            if foreign_inputs > 0 {
+                runtime.veto_tick(tool_cron::LoopFoldVeto::ForeignUserInput);
+            }
+            if cancel_probe.is_cancelled() && !user_aborted {
                 runtime.veto_tick(tool_cron::LoopFoldVeto::QueuedCommand);
             }
-            tool_cron::settle_loop_tick(runtime);
+            tool_cron::settle_loop_tick(
+                runtime,
+                tool_cron::LoopSpanCounts {
+                    tool_uses: span.tool_uses,
+                    span_len: span.messages,
+                },
+            );
         }
         if let Some(scheduler) = self.wakeup_scheduler.as_ref() {
             if user_aborted {

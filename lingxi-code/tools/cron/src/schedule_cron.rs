@@ -403,7 +403,9 @@ fn build_result_content(id: &str, human: &str, recurring: bool, durable: bool) -
         // Accepted divergence: no 7-day auto-expiry in LingXi (per-task `expiresAt`).
         format!("Scheduled recurring job {id} ({human}). {where_}. Runs until cancelled. Use CronDelete to cancel.")
     } else {
-        format!("Scheduled one-shot task {id} ({human}). {where_}. It will fire once then auto-delete.")
+        format!(
+            "Scheduled one-shot task {id} ({human}). {where_}. It will fire once then auto-delete."
+        )
     }
 }
 
@@ -488,21 +490,42 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
     bus.log_event(SCHEDULE_CRON_FAILED, md).await;
 }
 
+/// PARITY 2.1.263 `QI()` = `H("tengu_amber_sentinel", false)` — the gate the
+/// Monitor tool is behind, and the same gate that decides whether the
+/// CronCreate prompt carries its "use Monitor instead" section.
+///
+/// The flag name is duplicated from `tools/task/src/monitor.rs` (`Monitor`'s
+/// own `isEnabled`): `tool-cron` cannot depend on `tool-task`, and the port
+/// keeps flag literals crate-local. The literal is pinned by a test below.
+const AMBER_SENTINEL_FLAG: &str = "tengu_amber_sentinel";
+
+fn amber_sentinel_enabled() -> bool {
+    telemetry::flag_bool(AMBER_SENTINEL_FLAG, false)
+}
+
 /// PARITY 2.1.263 `pbn(true)` — the CronCreate tool prompt with the durable
 /// gate on. `.claude/` → `.lingxi/` (accepted path divergence). The Monitor
-/// section (`QI()`) is omitted: the Monitor tool is gated off by default in the
-/// binary and in the port. The 7-day paragraph is emitted only while the
-/// scheduler's recurring max age is set (see `cron::default_recurring_max_age`),
-/// so the model is never promised an expiry the scheduler does not enforce.
+/// section rides the same `QI()` gate the binary puts it behind, so it appears
+/// exactly when the Monitor tool itself is available. The 7-day paragraph is
+/// emitted only while the scheduler's recurring max age is set (see
+/// `cron::default_recurring_max_age`), so the model is never promised an expiry
+/// the scheduler does not enforce.
 fn build_prompt_text() -> String {
     let durability = "## Durability\n\nBy default (durable: false) the job lives only in this Claude session — nothing is written to disk, and the job is gone when Claude exits. Pass durable: true to write to .lingxi/scheduled_tasks.json so the job survives restarts. Only use durable: true when the user explicitly asks for the task to persist (\"keep doing this every day\", \"set this up permanently\"). Most \"remind me in 5 minutes\" / \"check back in an hour\" requests should stay session-only.";
     let durable_runtime = "Durable jobs persist to .lingxi/scheduled_tasks.json and survive session restarts — on next launch they resume automatically. One-shot durable tasks that were missed while the REPL was closed are surfaced for catch-up. Session-only jobs die with the process. ";
+    // `${o}\n${QI()?`\n## Not for live watching\n\n…\n`:""}\n## Runtime behavior`
+    // — the empty arm collapses to the single blank line the gate-off prompt has.
+    let monitor = if amber_sentinel_enabled() {
+        "\n## Not for live watching\n\nCronCreate re-runs a prompt at fixed wall-clock intervals. To watch a log file, process, or command output and be notified the moment something changes, use the Monitor tool instead — Monitor streams events as they happen; cron polls on a schedule.\n"
+    } else {
+        ""
+    };
     let expiry = cron::default_recurring_max_age().map_or_else(String::new, |age| {
         let days = age.as_secs() / 86_400;
         format!("Recurring tasks auto-expire after {days} days — they fire one final time, then are deleted. This bounds session lifetime. Tell the user about the {days}-day limit when scheduling recurring jobs.\n\n")
     });
     format!(
-        "Schedule a prompt to be enqueued at a future time. Use for both recurring schedules and one-shot reminders.\n\nUses standard 5-field cron in the user's local timezone: minute hour day-of-month month day-of-week. \"0 9 * * *\" means 9am local — no timezone conversion needed.\n\n## One-shot tasks (recurring: false)\n\nFor \"remind me at X\" or \"at <time>, do Y\" requests — fire once then auto-delete.\nPin minute/hour/day-of-month/month to specific values:\n  \"remind me at 2:30pm today to check the deploy\" → cron: \"30 14 <today_dom> <today_month> *\", recurring: false\n  \"tomorrow morning, run the smoke test\" → cron: \"57 8 <tomorrow_dom> <tomorrow_month> *\", recurring: false\n\n## Recurring jobs (recurring: true, the default)\n\nFor \"every N minutes\" / \"every hour\" / \"weekdays at 9am\" requests:\n  \"*/5 * * * *\" (every 5 min), \"0 * * * *\" (hourly), \"0 9 * * 1-5\" (weekdays at 9am local)\n\n## Avoid the :00 and :30 minute marks when the task allows it\n\nEvery user who asks for \"9am\" gets `0 9`, and every user who asks for \"hourly\" gets `0 *` — which means requests from across the planet land on the API at the same instant. When the user's request is approximate, pick a minute that is NOT 0 or 30:\n  \"every morning around 9\" → \"57 8 * * *\" or \"3 9 * * *\" (not \"0 9 * * *\")\n  \"hourly\" → \"7 * * * *\" (not \"0 * * * *\")\n  \"in an hour or so, remind me to...\" → pick whatever minute you land on, don't round\n\nOnly use minute 0 or 30 when the user names that exact time and clearly means it (\"at 9:00 sharp\", \"at half past\", coordinating with a meeting). When in doubt, nudge a few minutes early or late — the user will not notice, and the fleet will.\n\n{durability}\n\n## Runtime behavior\n\nJobs only fire while the REPL is idle (not mid-query). {durable_runtime}The scheduler adds a small deterministic jitter on top of whatever you pick: recurring tasks fire up to 10% of their period late (max 15 min); one-shot tasks landing on :00 or :30 fire up to 90 s early. Picking an off-minute is still the bigger lever.\n\n{expiry}Returns a job ID you can pass to CronDelete."
+        "Schedule a prompt to be enqueued at a future time. Use for both recurring schedules and one-shot reminders.\n\nUses standard 5-field cron in the user's local timezone: minute hour day-of-month month day-of-week. \"0 9 * * *\" means 9am local — no timezone conversion needed.\n\n## One-shot tasks (recurring: false)\n\nFor \"remind me at X\" or \"at <time>, do Y\" requests — fire once then auto-delete.\nPin minute/hour/day-of-month/month to specific values:\n  \"remind me at 2:30pm today to check the deploy\" → cron: \"30 14 <today_dom> <today_month> *\", recurring: false\n  \"tomorrow morning, run the smoke test\" → cron: \"57 8 <tomorrow_dom> <tomorrow_month> *\", recurring: false\n\n## Recurring jobs (recurring: true, the default)\n\nFor \"every N minutes\" / \"every hour\" / \"weekdays at 9am\" requests:\n  \"*/5 * * * *\" (every 5 min), \"0 * * * *\" (hourly), \"0 9 * * 1-5\" (weekdays at 9am local)\n\n## Avoid the :00 and :30 minute marks when the task allows it\n\nEvery user who asks for \"9am\" gets `0 9`, and every user who asks for \"hourly\" gets `0 *` — which means requests from across the planet land on the API at the same instant. When the user's request is approximate, pick a minute that is NOT 0 or 30:\n  \"every morning around 9\" → \"57 8 * * *\" or \"3 9 * * *\" (not \"0 9 * * *\")\n  \"hourly\" → \"7 * * * *\" (not \"0 * * * *\")\n  \"in an hour or so, remind me to...\" → pick whatever minute you land on, don't round\n\nOnly use minute 0 or 30 when the user names that exact time and clearly means it (\"at 9:00 sharp\", \"at half past\", coordinating with a meeting). When in doubt, nudge a few minutes early or late — the user will not notice, and the fleet will.\n\n{durability}\n{monitor}\n## Runtime behavior\n\nJobs only fire while the REPL is idle (not mid-query). {durable_runtime}The scheduler adds a small deterministic jitter on top of whatever you pick: recurring tasks fire up to 10% of their period late (max 15 min); one-shot tasks landing on :00 or :30 fire up to 90 s early. Picking an off-minute is still the bigger lever.\n\n{expiry}Returns a job ID you can pass to CronDelete."
     )
 }
 
@@ -744,7 +767,10 @@ impl Tool for CronCreateTool {
                 recurring: recurring.then_some(true),
                 permanent: None,
                 expires_at: None,
-                session_id: call_ctx.origin_session_id.as_ref().or(self.ctx.session_id.as_ref())
+                session_id: call_ctx
+                    .origin_session_id
+                    .as_ref()
+                    .or(self.ctx.session_id.as_ref())
                     .map(|id| id.as_uuid().to_string()),
             });
             let body = cron::tasks_file::serialize_tasks(&doc);
@@ -848,9 +874,42 @@ mod tests {
                 "Recurring tasks auto-expire after 7 days — they fire one final time, then are deleted. This bounds session lifetime. Tell the user about the 7-day limit when scheduling recurring jobs.\n\n",
                 "",
             );
-            assert_ne!(without, expected, "the fixture must carry the 7-day paragraph");
+            assert_ne!(
+                without, expected,
+                "the fixture must carry the 7-day paragraph"
+            );
             assert_eq!(actual, without);
         }
+    }
+
+    /// PARITY `QI()` = `H("tengu_amber_sentinel", false)`: the Monitor section
+    /// appears exactly when the Monitor tool does, and the gate-off prompt is
+    /// byte-identical to the fixture (the `:""` arm leaves one blank line).
+    ///
+    /// Pins the flag literal too — `tool-cron` cannot import `tool-task`'s copy,
+    /// so a rename there would otherwise silently decouple the two.
+    #[test]
+    fn the_monitor_section_rides_the_amber_sentinel_gate() {
+        const SECTION: &str = "\n## Not for live watching\n\nCronCreate re-runs a prompt at fixed wall-clock intervals. To watch a log file, process, or command output and be notified the moment something changes, use the Monitor tool instead — Monitor streams events as they happen; cron polls on a schedule.\n";
+        assert_eq!(AMBER_SENTINEL_FLAG, "tengu_amber_sentinel");
+
+        let _serial = cron::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);
+        let off = build_prompt_text();
+        assert!(!off.contains("## Not for live watching"));
+
+        telemetry::test_set_flag(AMBER_SENTINEL_FLAG, true);
+        let on = build_prompt_text();
+        telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);
+        assert!(on.contains(SECTION), "{on}");
+        assert_eq!(
+            on.replace(SECTION, ""),
+            off,
+            "the section is the only difference the gate makes"
+        );
+        assert!(on.contains(&format!("{SECTION}\n## Runtime behavior")));
     }
 
     use platform_api::process::ProcessOutput;
@@ -1111,7 +1170,9 @@ mod tests {
         // A durable job is authoritative on disk whether or not this host runs a
         // live scheduler (mobile fires it from its own OS wake), so the result
         // is the oracle text.
-        assert!(content.ends_with("Persisted to .lingxi/scheduled_tasks.json. It will fire once then auto-delete."));
+        assert!(content.ends_with(
+            "Persisted to .lingxi/scheduled_tasks.json. It will fire once then auto-delete."
+        ));
         // PARITY 2.1.263 `nCe`: recurring:false ⇒ the `recurring` key is omitted
         // on disk (and the reader normalises a literal `false` to absent too).
         let doc = read_doc(tmp.path()).await;

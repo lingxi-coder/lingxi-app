@@ -113,6 +113,7 @@ impl ConversationOrchestrator {
             cancel_reason: std::sync::OnceLock::new(),
             end_conversation_slot: None,
             loop_wakeup_armed_slot: None,
+            turn_span: crate::turn_span::TurnSpanTally::default(),
             coordinator_mode: None,
             #[cfg(test)]
             coordinator_simple_mode_override: None,
@@ -733,6 +734,14 @@ impl ConversationOrchestrator {
     pub fn with_cancel_reason(self, flag: crate::prompt::mid_turn_input::CancelReasonFlag) -> Self {
         self.set_cancel_reason(flag);
         self
+    }
+
+    /// The per-turn tallies the `/loop` no-op fold reads (see
+    /// [`crate::turn_span`]): reset at every turn's start, snapshotted at its
+    /// completion edge.
+    #[must_use]
+    pub fn turn_span(&self) -> &crate::turn_span::TurnSpanTally {
+        &self.turn_span
     }
 
     /// Finding #73: wire the V2 task source consulted by the per-turn

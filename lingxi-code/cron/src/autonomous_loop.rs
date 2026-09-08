@@ -478,6 +478,19 @@ impl LoopFoldVeto {
     }
 }
 
+/// What the turn that just ended contributed to the fold span.
+///
+/// PARITY the two fields the oracle counts by walking the transcript span:
+/// `span_len` (messages) and `tool_uses` (`tool_use` blocks). LingXi's span is
+/// one turn, so the orchestrator tallies them as they happen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LoopSpanCounts {
+    /// `tool_use` blocks the assistant emitted (the oracle's `c.size`).
+    pub tool_uses: u32,
+    /// Messages the span holds (the oracle's `b.length`).
+    pub span_len: u32,
+}
+
 /// What the turn-completion edge decided about the tick that just ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoopFoldOutcome {
@@ -492,6 +505,8 @@ pub enum LoopFoldOutcome {
         /// Wall time from the fire that started this tick to now, in seconds
         /// (the oracle's `span_duration_s`).
         duration_secs: u64,
+        /// The span's `tool_use` count and message count.
+        span: LoopSpanCounts,
     },
     /// The tick did something; the streak resets.
     Vetoed {
@@ -584,12 +599,12 @@ impl LoopRuntime {
     ///
     /// Reads the in-flight marker WITHOUT taking it — the keepalive and
     /// user-abort edges that run after this one consume it.
-    pub fn settle_tick(&self, now: SystemTime) -> Option<LoopFoldOutcome> {
+    pub fn settle_tick(&self, now: SystemTime, span: LoopSpanCounts) -> Option<LoopFoldOutcome> {
         let mut st = self.state.lock().unwrap();
         st.tick_in_flight_prompt.as_ref()?;
-        let veto = st
-            .tick_veto
-            .or_else(|| (st.tick_noop_reported != Some(true)).then_some(LoopFoldVeto::ModelReportedWork));
+        let veto = st.tick_veto.or_else(|| {
+            (st.tick_noop_reported != Some(true)).then_some(LoopFoldVeto::ModelReportedWork)
+        });
         st.tick_veto = None;
         st.tick_noop_reported = None;
         let started_at = st.tick_started_at.take();
@@ -608,6 +623,7 @@ impl LoopRuntime {
             streak: st.noop_streak,
             since,
             duration_secs,
+            span,
         })
     }
 
@@ -659,7 +675,12 @@ impl LoopRuntime {
     /// 2.1.263 `PLn(prompt)` — the dynamic-loop record for `prompt`, if any.
     #[must_use]
     pub fn dynamic_loop_record(&self, prompt: &str) -> Option<DynamicLoopRecord> {
-        self.state.lock().unwrap().dynamic_loops.get(prompt).copied()
+        self.state
+            .lock()
+            .unwrap()
+            .dynamic_loops
+            .get(prompt)
+            .copied()
     }
 
     /// 2.1.263 `dYt(prompt, record)` — store the dynamic-loop record for `prompt`.
@@ -704,7 +725,12 @@ static LOOP_RUNTIME: std::sync::LazyLock<Mutex<LoopRuntimeState>> =
 /// Process-global `PLn(prompt)` (hosts without a session-scoped [`LoopRuntime`]).
 #[must_use]
 pub fn dynamic_loop_record(prompt: &str) -> Option<DynamicLoopRecord> {
-    LOOP_RUNTIME.lock().unwrap().dynamic_loops.get(prompt).copied()
+    LOOP_RUNTIME
+        .lock()
+        .unwrap()
+        .dynamic_loops
+        .get(prompt)
+        .copied()
 }
 
 /// Process-global `dYt(prompt, record)`.
@@ -835,7 +861,11 @@ pub fn resolve_autonomous_loop_fire(sentinel: &str) -> Option<String> {
     }
     st.preamble_delivered = true;
     // PARITY 2.1.263: `${v()}\n\n---\n\n${o}`.
-    Some(format!("{}\n\n---\n\n{}", get_autonomous_loop_preamble(), tick))
+    Some(format!(
+        "{}\n\n---\n\n{}",
+        get_autonomous_loop_preamble(),
+        tick
+    ))
 }
 
 /// `sKi` / `resolveLoopFileFire` (cc_all.txt:504966): resolves a loop.md sentinel
@@ -885,7 +915,11 @@ pub fn resolve_loop_file_fire(sentinel: &str, cwd: &Path) -> Option<String> {
     }
     st.last_content = Some(PREAMBLE_SENTINEL.to_string());
     st.preamble_delivered = true;
-    Some(format!("{}\n\n---\n\n{}", get_autonomous_loop_preamble(), tick))
+    Some(format!(
+        "{}\n\n---\n\n{}",
+        get_autonomous_loop_preamble(),
+        tick
+    ))
 }
 
 /// `J4d` / `resolveLoopDefaultFire` (cc_all.txt:504966):
@@ -899,11 +933,20 @@ pub fn resolve_loop_default_fire(sentinel: &str, cwd: &Path) -> String {
 
 #[cfg(test)]
 mod fold_tests {
-    use super::{LoopFoldOutcome, LoopFoldVeto, LoopRuntime};
+    use super::{LoopFoldOutcome, LoopFoldVeto, LoopRuntime, LoopSpanCounts};
     use std::time::{Duration, SystemTime};
 
     fn at(secs: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    /// A quiet tick still costs one assistant message plus the `ScheduleWakeup`
+    /// call and its result.
+    fn quiet_span() -> LoopSpanCounts {
+        LoopSpanCounts {
+            tool_uses: 1,
+            span_len: 2,
+        }
     }
 
     /// A tick the model closed with `noop: true` folds, and consecutive quiet
@@ -915,21 +958,23 @@ mod fold_tests {
         rt.begin_tick_at("p".into(), at(1_000));
         rt.mark_noop_reported(true);
         assert_eq!(
-            rt.settle_tick(at(1_030)),
+            rt.settle_tick(at(1_030), quiet_span()),
             Some(LoopFoldOutcome::Folded {
                 streak: 1,
                 since: at(1_000),
                 duration_secs: 30,
+                span: quiet_span(),
             })
         );
         rt.begin_tick_at("p".into(), at(2_000));
         rt.mark_noop_reported(true);
         assert_eq!(
-            rt.settle_tick(at(2_010)),
+            rt.settle_tick(at(2_010), quiet_span()),
             Some(LoopFoldOutcome::Folded {
                 streak: 2,
                 since: at(1_000),
                 duration_secs: 10,
+                span: quiet_span(),
             })
         );
         assert_eq!(rt.noop_streak(), Some((2, at(1_000))));
@@ -943,13 +988,13 @@ mod fold_tests {
             let rt = LoopRuntime::default();
             rt.begin_tick_at("p".into(), at(1_000));
             rt.mark_noop_reported(true);
-            rt.settle_tick(at(1_010));
+            rt.settle_tick(at(1_010), quiet_span());
             rt.begin_tick_at("p".into(), at(2_000));
             if let Some(noop) = reported {
                 rt.mark_noop_reported(noop);
             }
             assert_eq!(
-                rt.settle_tick(at(2_010)),
+                rt.settle_tick(at(2_010), quiet_span()),
                 Some(LoopFoldOutcome::Vetoed {
                     reason: LoopFoldVeto::ModelReportedWork,
                 })
@@ -968,7 +1013,7 @@ mod fold_tests {
         rt.veto_tick(LoopFoldVeto::ToolAbort);
         rt.veto_tick(LoopFoldVeto::QueuedCommand);
         assert_eq!(
-            rt.settle_tick(at(1_010)),
+            rt.settle_tick(at(1_010), quiet_span()),
             Some(LoopFoldOutcome::Vetoed {
                 reason: LoopFoldVeto::ToolAbort,
             })
@@ -981,7 +1026,7 @@ mod fold_tests {
     fn a_turn_that_was_not_a_tick_settles_nothing() {
         let rt = LoopRuntime::default();
         rt.mark_noop_reported(true);
-        assert_eq!(rt.settle_tick(at(1_000)), None);
+        assert_eq!(rt.settle_tick(at(1_000), quiet_span()), None);
         assert_eq!(rt.noop_streak(), None);
     }
 
@@ -995,9 +1040,31 @@ mod fold_tests {
         rt.begin_tick_at("p".into(), at(2_000));
         rt.mark_noop_reported(true);
         assert!(matches!(
-            rt.settle_tick(at(2_005)),
+            rt.settle_tick(at(2_005), quiet_span()),
             Some(LoopFoldOutcome::Folded { streak: 1, .. })
         ));
+    }
+
+    /// PARITY the counter's `span_len` / `tool_uses`: whatever the turn tallied
+    /// is what the fold reports, not a placeholder.
+    #[test]
+    fn the_span_counts_reach_the_fold_outcome() {
+        let rt = LoopRuntime::default();
+        rt.begin_tick_at("p".into(), at(1_000));
+        rt.mark_noop_reported(true);
+        let span = LoopSpanCounts {
+            tool_uses: 3,
+            span_len: 7,
+        };
+        assert_eq!(
+            rt.settle_tick(at(1_012), span),
+            Some(LoopFoldOutcome::Folded {
+                streak: 1,
+                since: at(1_000),
+                duration_secs: 12,
+                span,
+            })
+        );
     }
 
     /// The in-flight marker is READ, not taken: the keepalive and user-abort
@@ -1007,7 +1074,7 @@ mod fold_tests {
         let rt = LoopRuntime::default();
         rt.begin_tick_at("tick".into(), at(1_000));
         rt.mark_noop_reported(true);
-        rt.settle_tick(at(1_001));
+        rt.settle_tick(at(1_001), quiet_span());
         assert_eq!(rt.take_in_flight_prompt().as_deref(), Some("tick"));
     }
 }
@@ -1066,7 +1133,10 @@ mod tests {
         assert_eq!(PREAMBLE_PERSISTENT.len(), 5380);
         assert!(PREAMBLE_DEFAULT.starts_with("# Autonomous loop check\n\nYou're being invoked"));
         assert!(PREAMBLE_DEFAULT.contains("without the user driving every step - finishing things"));
-        assert!(!PREAMBLE_DEFAULT.contains('\u{2014}'), "the bundled file has no em-dashes");
+        assert!(
+            !PREAMBLE_DEFAULT.contains('\u{2014}'),
+            "the bundled file has no em-dashes"
+        );
         assert!(!PREAMBLE_PERSISTENT.contains('\u{2014}'));
         assert!(PREAMBLE_DEFAULT.contains("You're a steward, not an initiator."));
         assert!(PREAMBLE_DEFAULT.contains("\n\n## What to act on\n\n"));
@@ -1182,7 +1252,9 @@ mod tests {
         assert!(first.starts_with(&expected_head), "{first}");
         assert!(first.contains("and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick."));
         assert!(first.contains("\n\nIf a Monitor is armed (check TaskList)"));
-        assert!(first.contains("To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor"));
+        assert!(first.contains(
+            "To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor"
+        ));
         assert_ne!(
             resolve_loop_default_fire(LOOP_FILE_DYNAMIC_SENTINEL, &cwd),
             LOOP_FILE_DYNAMIC_SENTINEL

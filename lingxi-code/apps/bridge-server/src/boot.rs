@@ -1262,11 +1262,14 @@ pub async fn assemble_with_provider_keys(
     }
     let loop_runtime = connection.loop_runtime_handle();
     let cancel_reason = orchestrator::prompt::mid_turn_input::CancelReasonFlag::new();
+    let mid_turn_input = crate::driver::MsgQueueMidTurnInput::new(queue.clone());
+    // The `/loop` fold's `foreign_user_input` veto reads this counter at the
+    // turn edge; the source bumps it whenever a human's prompt is folded into a
+    // turn already in flight.
+    let foreign_input_counter = mid_turn_input.foreign_input_counter();
     runtime
         .orchestrator
-        .set_mid_turn_input(Arc::new(crate::driver::MsgQueueMidTurnInput::new(
-            queue.clone(),
-        )));
+        .set_mid_turn_input(Arc::new(mid_turn_input));
     runtime
         .orchestrator
         .set_cancel_reason(cancel_reason.clone());
@@ -1315,7 +1318,8 @@ pub async fn assemble_with_provider_keys(
             OrchestratorTurnDriver::with_error_sink(runtime.orchestrator.clone(), event_sink)
                 .with_message_output(message_output)
                 .with_queue(queue, cancel_reason)
-                .with_wakeup_scheduler(driver_wakeup_scheduler),
+                .with_wakeup_scheduler(driver_wakeup_scheduler)
+                .with_foreign_input_counter(foreign_input_counter),
         )
     };
 

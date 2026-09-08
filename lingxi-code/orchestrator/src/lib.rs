@@ -33,6 +33,7 @@ pub mod model;
 pub mod prompt;
 pub mod provider_adapter;
 pub mod refusal_cascade;
+pub mod turn_span;
 pub mod refusal_notice;
 pub mod resume;
 pub(crate) mod schema_validation;

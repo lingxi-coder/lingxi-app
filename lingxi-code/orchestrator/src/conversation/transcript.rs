@@ -218,6 +218,10 @@ impl ConversationOrchestrator {
     /// `automode-blocked`, `automode-unavailable`, `automode-parsing-error`,
     /// plus the abort kinds `cancelled` / `interrupted`.
     pub(crate) async fn record_tool_denial_kind(&self, id: &protocol::ToolUseId, kind: &str) {
+        // The `/loop` fold's `tool_denial` / `tool_abort` vetoes. This is the
+        // single funnel every denial passes through, so counting here cannot
+        // miss one the way a per-call-site count could.
+        self.turn_span.note_denial(kind);
         self.transcript
             .tool_denial_kinds
             .lock()

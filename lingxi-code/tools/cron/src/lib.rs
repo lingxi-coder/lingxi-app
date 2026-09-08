@@ -20,6 +20,8 @@ pub mod cron_list;
 pub mod remote_trigger;
 pub mod schedule_cron;
 pub mod wakeup;
+
+use std::sync::Arc;
 // `autonomous_loop` was relocated to the root-level `cron` crate to satisfy
 // §8.1 dependency layering (command-core / tool-task must not depend on this
 // tool crate). It is re-exported here so `tool_cron::autonomous_loop` and every
@@ -34,9 +36,8 @@ pub use cron::{
     reset_loop_runtime_state, resolve_autonomous_loop_fire, resolve_loop_default_fire,
     resolve_loop_file_fire, set_loop_consecutive_keepalives, take_loop_rescheduled,
     take_loop_tick_in_flight_prompt, LoopFile, LoopFoldOutcome, LoopFoldVeto, LoopRuntime,
-    AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
-    AUTONOMOUS_LOOP_PREAMBLE, AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL,
-    LOOP_FILE_SENTINEL,
+    LoopSpanCounts, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL, AUTONOMOUS_LOOP_PREAMBLE, AUTONOMOUS_LOOP_SENTINEL,
+    LOOP_FILE_DYNAMIC_SENTINEL, LOOP_FILE_SENTINEL,
 };
 pub use cron_delete::CronDeleteTool;
 pub use cron_list::CronListTool;
@@ -44,10 +45,9 @@ pub use remote_trigger::{ClaudeAiAuthProvider, RemoteTriggerTool};
 pub use schedule_cron::CronCreateTool;
 pub use wakeup::{
     arm_keepalive, arm_keepalive_with_runtime, build_prompt as build_schedule_wakeup_prompt,
-    cancel_dynamic_loop_on_user_abort, clamp_delay_seconds, loop_wakeup_lines,
-    maybe_arm_keepalive, maybe_arm_keepalive_with_runtime, note_loop_invoked,
-    resolve_wakeup_prompt, schedule_dynamic_wakeup, settle_loop_tick, stop_dynamic_loop,
-    wakeup_target, KeepaliveOutcome,
+    cancel_dynamic_loop_on_user_abort, clamp_delay_seconds, loop_wakeup_lines, maybe_arm_keepalive,
+    maybe_arm_keepalive_with_runtime, note_loop_invoked, resolve_wakeup_prompt,
+    schedule_dynamic_wakeup, settle_loop_tick, stop_dynamic_loop, wakeup_target, KeepaliveOutcome,
     PromptCacheTtl, ScheduleWakeupTool, WakeupScheduler, WakeupSchedulerCell,
     SCHEDULE_WAKEUP_TOOL_NAME,
 };
@@ -77,15 +77,16 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 /// [`ClaudeAiAuthProvider`] (`Some(..)` on desktop; `None` is equivalent to
 /// [`register_all`]).
 ///
-/// Returns the [`WakeupSchedulerCell`] for the registered `ScheduleWakeup` tool.
-/// A host that owns a per-connection queue + spawner (the desktop bridge) fills
-/// it after `build` via `cell.set(scheduler)`; other hosts drop it (no-op tool).
+/// Returns the `ScheduleWakeup` tool's two host seams: the
+/// [`WakeupSchedulerCell`] a host with a per-connection queue + spawner fills
+/// after `build` (`cell.set(scheduler)`), and the armed flag the turn loop
+/// reads to end a turn whose only tool call armed a `/loop` wakeup. Hosts that
+/// want neither drop both (no-op tool, no turn-loop branch).
 pub fn register_all_with_auth(
     reg: &mut tool_api::ToolRegistry,
     ctx: tool_api::BuiltinToolContext,
     auth: Option<std::sync::Arc<dyn ClaudeAiAuthProvider>>,
-) -> WakeupSchedulerCell {
-    use std::sync::Arc;
+) -> (WakeupSchedulerCell, Arc<std::sync::atomic::AtomicBool>) {
     reg.register_builtin(Arc::new(CronCreateTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(CronDeleteTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(CronListTool::new(ctx.clone())));
@@ -105,7 +106,8 @@ pub fn register_all_with_auth(
     // — harmless and avoids forking the registration API.
     let wakeup_tool = ScheduleWakeupTool::new(ctx.clone());
     let wakeup_cell = wakeup_tool.wakeup_cell();
+    let armed = wakeup_tool.loop_wakeup_armed_slot();
     reg.register_builtin(Arc::new(wakeup_tool));
     reg.register_builtin(Arc::new(RemoteTriggerTool::new(ctx, auth)));
-    wakeup_cell
+    (wakeup_cell, armed)
 }

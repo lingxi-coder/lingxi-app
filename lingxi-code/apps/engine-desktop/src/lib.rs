@@ -2669,7 +2669,7 @@ pub fn desktop_tool_registry(
     // No `CwdChanged` firer here either (offline factory has no hook executor) —
     // the BashTool is the byte-identical no-firer variant. No shared live-cwd
     // cell either: every tool falls back to `ctx.workspace` / the process cwd.
-    register_desktop_tools(
+    let _ = register_desktop_tools(
         &mut reg,
         ctx,
         coordinator,
@@ -5335,7 +5335,10 @@ pub fn register_desktop_tools(
     live_cwd: Option<tool_api::LiveCwdCell>,
     worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
     fusion: Option<Arc<dyn platform_api::FusionExecutor>>,
-) -> tool_cron::WakeupSchedulerCell {
+) -> (
+    tool_cron::WakeupSchedulerCell,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     // ----- cross-platform tool crates (also linked by engine-mobile, P11) ---
     // (P2-08) The shared live-cwd cell (`getCwd()`/`Ct()`): the desktop `BashTool`
     // writes it on a `cd`, and Read/Glob/Grep + the LSP tool read it as their live
@@ -5395,7 +5398,8 @@ pub fn register_desktop_tools(
     // and `ScheduleWakeup`; it returns the wakeup cell threaded out to `build`
     // → `DesktopRuntime` so the bridge fills it once the per-connection queue +
     // spawner exist (see `boot::assemble`).
-    let wakeup_cell = tool_cron::register_all_with_auth(reg, ctx.clone(), cron_auth);
+    let (wakeup_cell, loop_wakeup_armed) =
+        tool_cron::register_all_with_auth(reg, ctx.clone(), cron_auth);
     // In coordinator mode the richer `coordinator` `SendMessage` (registered
     // below, IN PLACE OF this builtin) carries the swarm routing surface, so we
     // skip the leaner `tool_ui` `SendMessage` here — otherwise, because the
@@ -5462,7 +5466,7 @@ pub fn register_desktop_tools(
     tool_worktree::register_all_with_persister(reg, ctx.clone(), worktree_state_persister);
     tool_mcp::register_all(reg, ctx.clone());
     tool_lsp::register_all_with_live_cwd(reg, ctx, live_cwd);
-    wakeup_cell
+    (wakeup_cell, loop_wakeup_armed)
 }
 
 /// Assemble the desktop builtin **skill** registry.
@@ -13503,7 +13507,7 @@ pub async fn build(
         Arc::new(tool_computer_use::TuiBridgeResolver::new(tx))
             as Arc<dyn tool_computer_use::ComputerAccessResolver>
     });
-    let wakeup_scheduler_cell = register_desktop_tools(
+    let (wakeup_scheduler_cell, loop_wakeup_armed) = register_desktop_tools(
         &mut tools_inner,
         tool_ctx,
         coordinator_wiring,
@@ -14152,6 +14156,10 @@ pub async fn build(
     // EndConversation: hand the orchestrator the SAME end-request slot the tool
     // holds, so the turn loop can terminate on a confirmed (2nd) call. `None`
     // (feature disabled, the default) leaves the turn loop byte-identical.
+    // `/loop` dynamic mode: the turn loop ends a turn whose only tool call was
+    // the `ScheduleWakeup` that armed a wakeup (binary's lone-wakeup arm). Same
+    // `Arc` the tool raises.
+    let orch_builder = orch_builder.with_loop_wakeup_armed_slot(loop_wakeup_armed);
     let orch_builder = orch_builder.with_coordinator_mode(
         coordinator_mode.clone()
             as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>,

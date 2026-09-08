@@ -1008,6 +1008,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     }
 
     // 5. If there are tool_use blocks, dispatch them and feed results back.
+    // `/loop` fold span: this response's calls, and the messages it adds.
     let tool_uses: Vec<(ToolUseId, String, serde_json::Value, Option<String>)> = assistant_blocks
         .iter()
         .filter_map(|b| match b {

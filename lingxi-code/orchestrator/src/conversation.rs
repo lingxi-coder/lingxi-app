@@ -1401,6 +1401,10 @@ pub struct ConversationOrchestrator {
     /// `None` on hosts that wire no `ScheduleWakeup` seam → the branch never
     /// fires → byte-identical.
     pub(crate) loop_wakeup_armed_slot: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Per-turn tallies the `/loop` no-op fold reads at the turn-completion
+    /// edge (see [`crate::turn_span`]). Always present — the counters cost a
+    /// relaxed add per turn and nothing reads them unless a fold is pending.
+    pub(crate) turn_span: crate::turn_span::TurnSpanTally,
     /// Per-instance test seam avoids mutating process-global simple-mode flags.
     #[cfg(test)]
     pub(crate) coordinator_simple_mode_override: Option<bool>,

@@ -225,6 +225,117 @@ final class CronRepositoryTests: XCTestCase {
         XCTAssertEqual(repository.state.tasks.first?.task.nextFireMs, 901_000)
     }
 
+    /// A transient failure at wake time must NOT consume the occurrence: the run
+    /// is parked with its attempt count and the next wake retries it, the way
+    /// Android's worker returns `Result.retry()`.
+    func testTransientFailureParksTheOccurrenceAndTheNextWakeResumesIt() async throws {
+        let global = CronScope.global(appSandboxRoot: "/tmp")
+        let task = CronTaskRecord(
+            id: "cron-transient",
+            cron: "*/15 * * * *",
+            prompt: "发送摘要",
+            createdAtMs: 0,
+            lastFiredAtMs: nil,
+            recurring: true,
+            nextFireMs: 1_000,
+            human: "每 15 分钟"
+        )
+        let store = FakeCronStore(tasks: [task])
+        let notifier = FakeNotifier()
+        let offline = CronExecutionError(kind: .network, message: "offline", statusOverride: nil)
+        let executor = SequencedExecutor(
+            dueResults: Array(repeating: .failure(offline), count: 3),
+            fallback: .success(
+                CronExecutionOutcome(status: .succeeded, resultText: "完成", errorMessage: nil, errorKind: nil)
+            )
+        )
+        let repository = makeRepository(
+            scopes: [global],
+            activeScopeID: global.scopeID,
+            storeProvider: FakeStoreProvider(stores: [global.scopeID: store]),
+            executor: executor,
+            notifier: notifier,
+            now: { 2_000 }
+        )
+
+        await repository.reconcile(reason: "wake-1")
+
+        // Parked, not finished: no acknowledgement, no notification, and the run
+        // keeps the attempts this wake spent.
+        var acknowledged = await store.acknowledgedOccurrences.count
+        var notified = await notifier.payloads.count
+        var dueCalls = await executor.dueCallCount
+        XCTAssertEqual(acknowledged, 0, "a retryable failure must not consume the occurrence")
+        XCTAssertEqual(notified, 0)
+        XCTAssertEqual(dueCalls, 3, "one wake spends its in-process attempt budget")
+        XCTAssertEqual(repository.state.history.count, 1)
+        XCTAssertEqual(repository.state.history.first?.status, CronRunStatus.queued)
+        XCTAssertEqual(repository.state.history.first?.attempt, 3)
+        XCTAssertEqual(repository.state.tasks.first?.task.nextFireMs, 1_000, "still due")
+
+        await repository.reconcile(reason: "wake-2")
+
+        acknowledged = await store.acknowledgedOccurrences.count
+        notified = await notifier.payloads.count
+        dueCalls = await executor.dueCallCount
+        XCTAssertEqual(dueCalls, 4, "the next wake resumes the same run")
+        XCTAssertEqual(repository.state.history.count, 1, "resumed, not re-claimed")
+        XCTAssertEqual(repository.state.history.first?.status, CronRunStatus.succeeded)
+        XCTAssertEqual(repository.state.history.first?.attempt, 4)
+        XCTAssertEqual(acknowledged, 1)
+        XCTAssertEqual(notified, 1)
+    }
+
+    /// Once the cross-wake attempt budget is spent the failure becomes terminal
+    /// and the occurrence is acknowledged, so a permanently offline device does
+    /// not retry the same fire forever (Android `MAX_EXECUTION_ATTEMPTS`).
+    func testExhaustedRetriesAcknowledgeAndReportTheFailure() async throws {
+        let global = CronScope.global(appSandboxRoot: "/tmp")
+        let task = CronTaskRecord(
+            id: "cron-exhausted",
+            cron: "*/15 * * * *",
+            prompt: "发送摘要",
+            createdAtMs: 0,
+            lastFiredAtMs: nil,
+            recurring: true,
+            nextFireMs: 1_000,
+            human: "每 15 分钟"
+        )
+        let store = FakeCronStore(tasks: [task])
+        let notifier = FakeNotifier()
+        let executor = SequencedExecutor(
+            dueResults: [],
+            fallback: .failure(CronExecutionError(kind: .network, message: "offline", statusOverride: nil))
+        )
+        let repository = makeRepository(
+            scopes: [global],
+            activeScopeID: global.scopeID,
+            storeProvider: FakeStoreProvider(stores: [global.scopeID: store]),
+            executor: executor,
+            notifier: notifier,
+            now: { 2_000 }
+        )
+
+        await repository.reconcile(reason: "wake-1")
+        var acknowledged = await store.acknowledgedOccurrences.count
+        XCTAssertEqual(acknowledged, 0)
+
+        await repository.reconcile(reason: "wake-2")
+
+        acknowledged = await store.acknowledgedOccurrences.count
+        let notified = await notifier.payloads.count
+        let dueCalls = await executor.dueCallCount
+        XCTAssertEqual(dueCalls, 5, "five attempts across two wakes, then stop")
+        XCTAssertEqual(repository.state.history.first?.status, CronRunStatus.failed)
+        XCTAssertEqual(repository.state.history.first?.attempt, 5)
+        XCTAssertEqual(acknowledged, 1, "the exhausted occurrence is consumed")
+        XCTAssertEqual(notified, 1)
+
+        await repository.reconcile(reason: "wake-3")
+        let afterTerminal = await executor.dueCallCount
+        XCTAssertEqual(afterTerminal, 5, "a terminal run is never retried")
+    }
+
     func testConcurrentReconcileDoesNotRecoverActiveOccurrenceAsTimedOut() async throws {
         let global = CronScope.global(appSandboxRoot: "/tmp")
         let task = CronTaskRecord(
@@ -872,6 +983,36 @@ private actor FakeStoreProvider: CronStoreProviding {
 
     func store(for scope: CronScope, appSandboxRoot: String) async throws -> any CronStoreClient {
         stores[scope.scopeID] ?? FakeCronStore(tasks: [])
+    }
+}
+
+/// An executor whose scheduled-run results are scripted per call, so a test can
+/// fail transiently a few times and then succeed.
+private actor SequencedExecutor: CronTaskExecuting {
+    private var dueResults: [Result<CronExecutionOutcome?, Error>]
+    private let fallback: Result<CronExecutionOutcome?, Error>
+    private(set) var dueCallCount = 0
+
+    init(
+        dueResults: [Result<CronExecutionOutcome?, Error>],
+        fallback: Result<CronExecutionOutcome?, Error>
+    ) {
+        self.dueResults = dueResults
+        self.fallback = fallback
+    }
+
+    func runTaskNow(scope: CronScope, task: CronTaskRecord) async throws -> CronExecutionOutcome {
+        throw SimpleError("manual run not scripted")
+    }
+
+    func runTaskIfDue(
+        scope: CronScope,
+        task: CronTaskRecord,
+        scheduledAtMs: UInt64
+    ) async throws -> CronExecutionOutcome? {
+        dueCallCount += 1
+        let next = dueResults.isEmpty ? fallback : dueResults.removeFirst()
+        return try next.get()
     }
 }
 

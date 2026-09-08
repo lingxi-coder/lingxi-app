@@ -113,6 +113,21 @@ actor CronRunHistoryStore {
         }
     }
 
+    /// Park a run that failed transiently so a later wake resumes it, keeping
+    /// the attempt count and the reason. Mirrors Android `markRetry`, whose
+    /// `Result.retry()` hands the same job back to WorkManager.
+    @discardableResult
+    func markRetry(runID: String, attempt: Int, message: String) async throws -> CronRunRecord? {
+        try update(runID: runID) { run in
+            guard !run.status.isTerminal else { return run }
+            var updated = run
+            updated.status = .queued
+            updated.attempt = attempt
+            updated.errorMessage = truncateUtf8(message, maxBytes: maxCronResultBytes)
+            return updated
+        }
+    }
+
     @discardableResult
     func markTerminal(
         runID: String,

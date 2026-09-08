@@ -59,11 +59,17 @@ impl MailboxRouterHandle for MailboxRouter {
 
         // Resolve the RECIPIENT into an [`AgentId`]: a bare uuid / `agent:<uuid>`
         // first, then a registered display NAME (the common case — `TaskUpdate`
-        // assigns ownership by name). An unresolvable recipient is `NotFound`,
-        // so a genuinely unknown teammate still surfaces cleanly.
+        // assigns ownership by name), then any additional registered address.
+        // The last one is what makes a background agent's TASK id routable: a
+        // completion `<task-notification>` carries that id, and the coordinator
+        // prompt tells the model to continue the agent by sending to it.
+        // An unresolvable recipient is `NotFound`, so a genuinely unknown
+        // teammate still surfaces cleanly.
         let to_id = if let Some(id) = try_parse_agent_id(to_agent) {
             id
         } else if let Some(id) = self.resolve_name(to_agent).await {
+            id
+        } else if let Some(id) = self.resolve_alias(to_agent).await {
             id
         } else {
             return Err(MailboxError::NotFound(format!(
@@ -207,6 +213,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ack.claim_window_secs, 30);
+    }
+
+    #[tokio::test]
+    async fn route_accepts_a_registered_alias_as_the_recipient() {
+        // The gap this closes: a completion notification hands the model the
+        // background agent's task id, the prompt tells it to continue that agent
+        // by sending to the id, and the send came back "unknown recipient"
+        // because only uuids and display names resolved.
+        let router = MailboxRouter::new();
+        let to = AgentId::new();
+        router
+            .register(to, Arc::new(TeammateMailbox::new(to)))
+            .await;
+        router.register_alias("a1b2c3d4e", to).await;
+
+        let h: &dyn MailboxRouterHandle = &router;
+        h.route(
+            "team-lead",
+            "a1b2c3d4e",
+            MailboxMessage {
+                message_id: "m1".into(),
+                content: "carry on".into(),
+                timestamp: SystemTime::now(),
+                color: None,
+            },
+        )
+        .await
+        .expect("a registered alias must resolve");
+
+        // An unregistered string is still a clean NotFound.
+        let err = h
+            .route(
+                "team-lead",
+                "not-an-agent",
+                MailboxMessage {
+                    message_id: "m2".into(),
+                    content: "x".into(),
+                    timestamp: SystemTime::now(),
+                    color: None,
+                },
+            )
+            .await
+            .expect_err("an unknown recipient must not resolve");
+        assert!(matches!(err, MailboxError::NotFound(_)));
     }
 
     #[tokio::test]
@@ -433,3 +483,4 @@ mod tests {
         assert_eq!(worker_status_label(&WorkerStatus::Killed), "killed");
     }
 }
+

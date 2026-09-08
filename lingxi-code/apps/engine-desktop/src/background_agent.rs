@@ -160,6 +160,14 @@ impl BackgroundAgentSpawner {
         if let Some(name) = request.name.as_deref() {
             self.mailbox_router.register_name(name, agent_id).await;
         }
+        // The completion `<task-notification>` carries the TASK id, and the
+        // coordinator prompt tells the model to continue the agent by sending to
+        // that id. Register it as an additional address so the send resolves;
+        // an alias is not a display name, so this adds no `ListAgents` row and
+        // no second copy of a broadcast.
+        self.mailbox_router
+            .register_alias(&task_id, agent_id)
+            .await;
 
         let seam: Arc<dyn TeamSpawnSeam> = self.registry.clone();
         let router = self.mailbox_router.clone();

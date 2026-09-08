@@ -62,6 +62,7 @@ export interface PublicSettings {
   archivedSessions?: ArchivedSessionRecord[];
   version: typeof SETTINGS_VERSION;
   theme?: 'dark' | 'light' | 'system';
+  collapseThoughtsByDefault?: boolean;
   model?: string;
   apiBaseUrl?: string;
   activeProject?: string;

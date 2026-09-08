@@ -217,6 +217,7 @@ export interface UseBridge {
   setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;
   clearPluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   setThemePreference(theme: 'dark' | 'light' | 'system'): Promise<void>;
+  setCollapseThoughtsByDefault(collapseThoughtsByDefault: boolean): Promise<void>;
   /** The device-level (Electron store) custom API base URL override — `null` clears it. Distinct from `updateEngineSettings` below, which writes to an engine settings FILE layer. */
   setApiBaseUrl(apiBaseUrl: string | null): Promise<void>;
   /**
@@ -1908,6 +1909,11 @@ export function useBridge(): UseBridge {
     try { patchBootstrap({ settings: await host.updateSettings({ theme }) }); } catch (cause) { capture(cause); }
   }, [capture, host, patchBootstrap]);
 
+  const setCollapseThoughtsByDefault = useCallback(async (collapseThoughtsByDefault: boolean) => {
+    if (!host) return;
+    try { patchBootstrap({ settings: await host.updateSettings({ collapseThoughtsByDefault }) }); } catch (cause) { capture(cause); }
+  }, [capture, host, patchBootstrap]);
+
   const setApiBaseUrl = useCallback(async (apiBaseUrl: string | null) => {
     if (!host) return;
     try { patchBootstrap({ settings: await host.updateSettings({ apiBaseUrl }) }); } catch (cause) { capture(cause); }
@@ -2359,6 +2365,7 @@ export function useBridge(): UseBridge {
     setPluginSecret,
     clearPluginSecret,
     setThemePreference,
+    setCollapseThoughtsByDefault,
     setApiBaseUrl,
     setVoicePreferences,
     setModelPickerVisibility,

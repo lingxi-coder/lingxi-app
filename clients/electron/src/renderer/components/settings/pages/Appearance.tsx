@@ -1,4 +1,5 @@
-import { Card, Row } from '../rows';
+import { Card, Row, ProvenanceBadge } from '../rows';
+import { Toggle } from '../primitives';
 import { useT } from '../../../theme/ThemeContext';
 import type { ThemeMode } from '../../../theme/tokens';
 import type { PageContentProps } from '../SettingsScreen';
@@ -81,6 +82,18 @@ export function Appearance({ bridge, onTheme }: PageContentProps) {
             );
           })}
         </div>
+      </Row>
+      <Row
+        title="默认折叠 Thought"
+        desc="自动收起思考内容，点击 Thought 可展开。关闭后默认展开；手动展开或收起的内容会保留你的选择。"
+        badge={<ProvenanceBadge destination="device" />}
+        align="center"
+      >
+        <Toggle
+          label="默认折叠 Thought"
+          value={bridge.bootstrap?.settings.collapseThoughtsByDefault ?? true}
+          onChange={(value) => { void bridge.setCollapseThoughtsByDefault(value).catch(() => undefined); }}
+        />
       </Row>
     </Card>
   );

@@ -741,3 +741,26 @@ test('a multi-key permission payload is labelled, redacted, and never dropped', 
   assert.doesNotMatch(html, /sk-ant-abcdefghijklmnop/, 'redaction still applies to every key');
   assert.match(html, /\[REDACTED\]/);
 });
+
+
+test('Thought bodies default to collapsed for live and historical blocks', () => {
+  for (const streamed of [true, undefined]) {
+    for (const done of [true, false]) {
+      const html = render(React.createElement(Stage, { liveItems: [{ type: 'thinking', id: 'thought-default', text: 'Reasoning body', streamed, done }] }));
+      assert.match(html, /aria-expanded="false"/);
+      assert.doesNotMatch(html, /Reasoning body/);
+      assert.match(html, done ? /Thought/ : /Thinking/);
+    }
+  }
+});
+
+test('disabling default Thought collapse expands live and historical content', () => {
+  for (const streamed of [true, undefined]) {
+    const html = render(React.createElement(Stage, {
+      collapseThoughtsByDefault: false,
+      liveItems: [{ type: 'thinking', id: 'thought-expanded', text: 'Reasoning body', streamed, done: true }],
+    }));
+    assert.match(html, /aria-expanded="true"/);
+    assert.match(html, /Reasoning body/);
+  }
+});

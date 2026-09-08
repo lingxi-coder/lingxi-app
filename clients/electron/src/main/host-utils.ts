@@ -70,6 +70,7 @@ export interface PersistedSettings {
   archivedSessions?: import('../shared/settings.js').ArchivedSessionRecord[];
   version: typeof SETTINGS_VERSION;
   theme?: 'dark' | 'light' | 'system';
+  collapseThoughtsByDefault?: boolean;
   model?: string;
   apiBaseUrl?: string;
   activeProject?: string;
@@ -140,6 +141,9 @@ export function parseSettings(value: unknown): PersistedSettings {
     value['theme'] === 'dark' || value['theme'] === 'light' || value['theme'] === 'system'
       ? value['theme']
       : undefined;
+  if (typeof value['collapseThoughtsByDefault'] === 'boolean') {
+    settings.collapseThoughtsByDefault = value['collapseThoughtsByDefault'];
+  }
   settings.model = boundedString(value['model'], 256);
   settings.apiBaseUrl = boundedString(value['apiBaseUrl'], 2_048);
   if (value['bypassPermissionsModeAccepted'] === true) {
@@ -217,7 +221,7 @@ export function parseSettings(value: unknown): PersistedSettings {
 export function publicSettings(settings: PersistedSettings): PublicSettings {
   const {
     version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions,
-    bypassPermissionsModeAccepted, voice, modelPickerVisibility,
+    bypassPermissionsModeAccepted, voice, modelPickerVisibility, collapseThoughtsByDefault,
   } = settings;
   return {
     version,
@@ -229,6 +233,7 @@ export function publicSettings(settings: PersistedSettings): PublicSettings {
     projects: [...projects],
     ...(settings.archivedSessions ? { archivedSessions: settings.archivedSessions.map((item) => ({ ...item })) } : {}),
     pinnedSessions: pinnedSessions.map((session) => ({ ...session })),
+    ...(typeof collapseThoughtsByDefault === 'boolean' ? { collapseThoughtsByDefault } : {}),
     ...(bypassPermissionsModeAccepted ? { bypassPermissionsModeAccepted: true } : {}),
     ...(voice ? { voice: { ...voice } } : {}),
     ...(modelPickerVisibility ? { modelPickerVisibility: cloneModelPickerVisibility(modelPickerVisibility) } : {}),

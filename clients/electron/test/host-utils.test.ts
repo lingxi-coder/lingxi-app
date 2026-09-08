@@ -69,6 +69,48 @@ test("parseSettings keeps 'system' and still rejects garbage", () => {
   );
 });
 
+test('thought collapse preference is omitted for legacy settings and rejects invalid stored values', () => {
+  assert.equal(new SettingsStore(temporaryDirectory()).getPublic().collapseThoughtsByDefault, undefined);
+  for (const value of [undefined, null, 'false', 'true', 0, 1, {}, []]) {
+    const userData = temporaryDirectory();
+    writeFileSync(join(userData, 'settings.v1.json'), JSON.stringify({
+      version: 1, theme: 'light', collapseThoughtsByDefault: value,
+    }));
+    const settings = new SettingsStore(userData).getPublic();
+    assert.equal(settings.collapseThoughtsByDefault, undefined);
+    assert.equal(settings.theme, 'light', 'invalid preference must not discard other settings');
+  }
+});
+
+test('thought collapse preference preserves explicit false and true across restarts and unrelated updates', () => {
+  const userData = temporaryDirectory();
+  let store = new SettingsStore(userData);
+  for (const collapseThoughtsByDefault of [false, true, false]) {
+    assert.equal(store.update({ collapseThoughtsByDefault }).collapseThoughtsByDefault, collapseThoughtsByDefault);
+    assert.equal(store.update({ theme: 'dark' }).collapseThoughtsByDefault, collapseThoughtsByDefault);
+    const persisted = JSON.parse(readFileSync(store.settingsPath, 'utf8'));
+    assert.equal(persisted.collapseThoughtsByDefault, collapseThoughtsByDefault);
+    store = new SettingsStore(userData);
+    assert.equal(store.getPublic().collapseThoughtsByDefault, collapseThoughtsByDefault);
+  }
+});
+
+test('thought collapse preference rejects non-boolean writes without changing saved state', () => {
+  const userData = temporaryDirectory();
+  const store = new SettingsStore(userData);
+  store.update({ collapseThoughtsByDefault: false, theme: 'light' });
+  const saved = readFileSync(store.settingsPath, 'utf8');
+  for (const value of [undefined, null, 'false', 'true', 0, 1, {}, []]) {
+    assert.throws(() => store.update({
+      collapseThoughtsByDefault: value as boolean,
+      theme: 'dark',
+    }), /invalid collapseThoughtsByDefault/);
+    assert.equal(store.getPublic().collapseThoughtsByDefault, false);
+    assert.equal(store.getPublic().theme, 'light');
+    assert.equal(readFileSync(store.settingsPath, 'utf8'), saved);
+  }
+});
+
 test('model picker visibility defaults open, dedupes ids, and persists empty allowlists', () => {
   const parsed = parseSettings({
     version: 1,

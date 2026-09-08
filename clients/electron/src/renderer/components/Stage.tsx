@@ -115,8 +115,8 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
 // The open/closed state lives in the Stage's store, keyed by the block's stable
 // id — NOT in this component. It used to auto-collapse the instant the block
 // sealed, which fought a user who had deliberately opened it to read along; the
-// DEFAULT now comes from `streamed` (a field that never flips) and any explicit
-// user choice wins over it forever.
+// default comes from the device preference, and an explicit user choice wins
+// over that default for the lifetime of this session view.
 const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
   item: Extract<RunItem, { type: 'thinking' }>;
   open: boolean;
@@ -159,15 +159,12 @@ const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
   );
 });
 
-/** Whether a thinking block starts open, before any user choice. */
-function thinkingDefaultOpen(item: Extract<RunItem, { type: 'thinking' }>): boolean {
-  return item.streamed === true;
-}
-
 // ─── STAGE (the agent run scrollback) ────────────────────────
 interface StageProps {
   /** The real conversation accumulated from the bridge. */
   liveItems?: RunItem[];
+  /** Default for untouched Thought blocks, including live streams and history. */
+  collapseThoughtsByDefault?: boolean;
   /** True while a turn is streaming — shows the thinking affordance at the tail. */
   running?: boolean;
   /** Truthful empty/onboarding copy supplied by the host state. */
@@ -180,7 +177,7 @@ interface StageProps {
   sessionKey?: string;
 }
 
-export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '' }: StageProps) {
+export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', collapseThoughtsByDefault = true }: StageProps) {
   const t = useT();
   const tailRef = useRef<HTMLDivElement>(null);
   const items: RunItem[] = liveItems;
@@ -281,7 +278,7 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <ThinkingBlock
                     item={item}
-                    open={collapseOpen(visible, sessionKey, item.id) ?? thinkingDefaultOpen(item)}
+                    open={collapseOpen(visible, sessionKey, item.id) ?? !collapseThoughtsByDefault}
                     onSetOpen={setOpen}
                   />
                 </div>

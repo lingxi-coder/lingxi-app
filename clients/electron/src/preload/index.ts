@@ -159,6 +159,7 @@ export interface LingxiApi {
   settings(): Promise<PublicSettings>;
   updateSettings(patch: {
     theme?: 'dark' | 'light' | 'system';
+    collapseThoughtsByDefault?: boolean;
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;

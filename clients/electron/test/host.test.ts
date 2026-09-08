@@ -1069,7 +1069,7 @@ test('broker-backed bootstrap ignores legacy runtime credential status', async (
   });
 });
 
-test('settings model and voice patches persist without restarting a live session', async () => {
+test('settings model, voice and Thought patches persist without restarting a live session', async () => {
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-settings-update-voice-'));
   const settings = new SettingsStore(userData);
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
@@ -1128,6 +1128,14 @@ test('settings model and voice patches persist without restarting a live session
     });
     assert.deepEqual(settings.getPublic().voice, result.voice, 'the IPC response must reflect what was actually persisted, not an optimistic echo');
     assert.equal(restartCalls, 0, 'a voice-only patch must never restart the bridge');
+
+    for (const value of [false, true]) {
+      const thoughtResult = await update!(event, { collapseThoughtsByDefault: value }) as { collapseThoughtsByDefault?: boolean };
+      assert.equal(thoughtResult.collapseThoughtsByDefault, value);
+      assert.equal(new SettingsStore(userData).getPublic().collapseThoughtsByDefault, value);
+      assert.equal(restartCalls, 0, 'Thought preference must not restart the session');
+    }
+    await assert.rejects(() => Promise.resolve(update!(event, { collapseThoughtsByDefault: 'false' })), /invalid collapseThoughtsByDefault/);
 
     // The allowlist genuinely rejects anything else — `voice` joining it
     // must not have accidentally opened the gate to arbitrary keys.

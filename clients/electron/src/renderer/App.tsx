@@ -94,6 +94,7 @@ export function App() {
               <Stage
                 liveItems={bridge.sessionLoading ? [] : bridge.conversation.items}
                 running={!bridge.sessionLoading && bridge.running}
+                collapseThoughtsByDefault={bridge.bootstrap?.settings.collapseThoughtsByDefault ?? true}
                 emptyMessage={emptyMessage}
                 // Item ids restart at `i1` in every session; the Stage's
                 // collapse map is scoped by this and dropped when it changes.

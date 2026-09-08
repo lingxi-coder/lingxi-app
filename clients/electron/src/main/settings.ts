@@ -142,11 +142,15 @@ export class SettingsStore {
 
   update(patch: {
     theme?: 'dark' | 'light' | 'system';
+    collapseThoughtsByDefault?: boolean;
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;
     modelPickerVisibility?: unknown;
   }): PublicSettings {
+    if ('collapseThoughtsByDefault' in patch && typeof patch.collapseThoughtsByDefault !== 'boolean') {
+      throw new Error('invalid collapseThoughtsByDefault');
+    }
     if ('theme' in patch) {
       if (patch.theme !== 'dark' && patch.theme !== 'light' && patch.theme !== 'system') {
         throw new Error('invalid theme');
@@ -172,6 +176,9 @@ export class SettingsStore {
       const parsed = parseModelPickerVisibility(patch.modelPickerVisibility);
       if (Object.keys(parsed).length > 0) this.settings.modelPickerVisibility = parsed;
       else delete this.settings.modelPickerVisibility;
+    }
+    if (typeof patch.collapseThoughtsByDefault === 'boolean') {
+      this.settings.collapseThoughtsByDefault = patch.collapseThoughtsByDefault;
     }
     this.persist();
     return this.getPublic();

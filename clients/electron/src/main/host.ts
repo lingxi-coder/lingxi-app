@@ -360,7 +360,7 @@ export class HostController {
       this.assertSender(event);
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('invalid settings patch');
       const keys = Object.keys(patch);
-      if (keys.some((key) => key !== 'theme' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice' && key !== 'modelPickerVisibility')) throw new Error('unsupported setting');
+      if (keys.some((key) => key !== 'theme' && key !== 'collapseThoughtsByDefault' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice' && key !== 'modelPickerVisibility')) throw new Error('unsupported setting');
       const restartsBridge = 'apiBaseUrl' in patch;
       if (restartsBridge) this.assertNoActiveTurn();
       // `model` is applied to a live session through `set_model`, then mirrored
@@ -372,6 +372,7 @@ export class HostController {
       // the construction of an already-running provider client.
       const result = this.settings.update(patch as {
         theme?: 'dark' | 'light' | 'system';
+        collapseThoughtsByDefault?: boolean;
         model?: string | null;
         apiBaseUrl?: string | null;
         voice?: unknown;

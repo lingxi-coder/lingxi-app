@@ -445,6 +445,9 @@ pub struct BridgeConnection {
     /// this flag OWNS the drain loop; concurrent prompts enqueue and the owner
     /// drains them before clearing the flag.
     turn_running: Arc<AtomicBool>,
+    /// Serialize idle command admission with the drain loop's release/reclaim
+    /// window. Never hold this mutex while driving a model turn.
+    turn_handoff: Arc<tokio::sync::Mutex<()>>,
     /// Connection-owned active turn identity and cancellation token. Keeping
     /// this outside the spawned driver closes the race where Cancel arrives
     /// after SendPrompt but before the driver registers with msgqueue.
@@ -770,6 +773,7 @@ impl BridgeConnection {
             ))),
             loop_runtime: Arc::new(tool_cron::LoopRuntime::default()),
             turn_running: Arc::new(AtomicBool::new(false)),
+            turn_handoff: Arc::new(tokio::sync::Mutex::new(())),
             active_turn: ActiveTurnControl::default(),
             active_turn_task: Arc::new(StdMutex::new(None)),
         }
@@ -1102,6 +1106,18 @@ impl BridgeConnection {
             // the late-turn filter; automatic in-turn compaction continues to
             // flow through `FrameEventSink` and remains owner-scoped.
             command @ ClientCommand::ForceCompact => {
+                let _handoff = self.turn_handoff.lock().await;
+                // Do not queue on the orchestrator's turn gate in this input
+                // loop: its owner may need a permission reply from this socket.
+                if self.turn_running.load(Ordering::SeqCst) {
+                    self.unscoped_event_sink()
+                        .emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Protocol,
+                            message: "cannot compact the session while a turn is in flight".into(),
+                        })
+                        .await;
+                    return;
+                }
                 if let Some(router) = self.router.clone() {
                     router.route(command, self.unscoped_event_sink()).await;
                 } else {
@@ -1119,6 +1135,26 @@ impl BridgeConnection {
             // only / unknown / no-dispatcher cases fall back to the router's
             // text-surface path.
             ClientCommand::RunSlashCommand { raw, turn_id } => {
+                // Check before dispatch_slash: builtins execute there, not in
+                // the later display-only routing fallback. Use connection run
+                // ownership, which also covers queued follow-up turns.
+                let is_compact = command_api::parser::parse_slash_command(&raw)
+                    .is_some_and(|parsed| parsed.name.eq_ignore_ascii_case("compact"));
+                let _handoff = if is_compact {
+                    Some(self.turn_handoff.lock().await)
+                } else {
+                    None
+                };
+                if is_compact && self.turn_running.load(Ordering::SeqCst) {
+                    self.unscoped_event_sink()
+                        .emit(ClientEvent::SlashCommandResult {
+                            turn_id,
+                            display: "cannot compact the session while a turn is in flight".into(),
+                            is_error: true,
+                        })
+                        .await;
+                    return;
+                }
                 let outcome = match self.router.as_ref() {
                     Some(router) => router.dispatch_slash(&raw).await,
                     None => None,
@@ -1131,6 +1167,7 @@ impl BridgeConnection {
                     Some(platform_api::SlashDispatchResult::RunAsTurn { prompt }) => {
                         // Run the expanded prompt exactly like a direct user
                         // prompt (enqueue-or-spawn; no images).
+                        drop(_handoff);
                         self.handle_send_prompt(prompt, Vec::new(), turn_id).await;
                     }
                     // Display-only / unknown result: surface the SAME dispatch
@@ -1234,6 +1271,7 @@ impl BridgeConnection {
 
         // Try to win the run-loop ownership. compare_exchange fails if a turn is
         // already running, in which case we enqueue instead of spawning.
+        let _handoff = self.turn_handoff.lock().await;
         if self
             .turn_running
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1246,6 +1284,7 @@ impl BridgeConnection {
         let queue = self.queue.clone();
         let loop_runtime = self.loop_runtime.clone();
         let turn_running = self.turn_running.clone();
+        let turn_handoff = self.turn_handoff.clone();
         let active_turn = self.active_turn.clone();
         let interactions = TurnInteractions {
             gate: self.gate.clone(),
@@ -1271,6 +1310,7 @@ impl BridgeConnection {
             loop {
                 drain_main_thread(&driver, &queue, &loop_runtime, &active_turn, &interactions)
                     .await;
+                let _handoff = turn_handoff.lock().await;
                 turn_running.store(false, Ordering::SeqCst);
                 // If a prompt slipped in after the last drain but before the
                 // store, re-claim the loop and drain again; otherwise we're done.
@@ -1563,6 +1603,10 @@ impl BridgeConnection {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "server/compact_admission_test.rs"]
+mod compact_admission_test;
 
 #[cfg(test)]
 mod tests {

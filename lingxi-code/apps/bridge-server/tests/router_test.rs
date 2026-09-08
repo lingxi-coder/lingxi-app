@@ -65,6 +65,9 @@ use tokio_tungstenite::tungstenite::Message;
 #[path = "router_test/compact_shutdown.rs"]
 mod compact_shutdown;
 
+#[path = "router_test/compact_active_turn.rs"]
+mod compact_active_turn;
+
 // ── Test sink ───────────────────────────────────────────────────────────────
 
 /// A [`ClientEventSink`] that captures every emitted event in emission order so

@@ -165,3 +165,35 @@ Earlier first-batch test passes do not validate these changes or the second batc
 Only this task's Cargo/rustc processes were stopped; no cache was removed and no
 other task's build was interrupted. Independent static review approved the four
 source/test files; compilation and runtime verification remain unconfirmed.
+
+## Bridge compact admission correction (after `5ea3f8e7a`)
+
+Reject `ForceCompact` and slash `/compact` before inline dispatch while the
+connection owns a turn. Use the connection's authoritative `turn_running`, not
+the separate router flag. Preserve the orchestrator's chain gate and graceful
+completion of already accepted idle compaction.
+
+A connection-local admission mutex also covers prompt ownership acquisition
+and the drain loop's false/check/reclaim interval. Compact cannot mistake that
+transient false flag for true idleness. Release admission before a custom slash
+dispatcher result starts a model turn; never hold it while driving a model turn.
+
+Regressions added:
+
+- `compact_active_turn::active_compact_refusals_keep_ws_permission_and_cancel_processing_live`:
+  real WebSocket and permission gate, direct/slash/focused compact refusal,
+  subsequent approval and cancellation, and idle dispatch after drained reconnect.
+- `compact_admission_test::compact_cannot_enter_during_transient_idle_handoff`:
+  deterministic pending admission during simulated false/reclaim interval.
+- `compact_admission_test::custom_compact_turn_releases_admission_before_starting_turn`:
+  custom RunAsTurn dispatch does not recursively acquire admission.
+
+Independent static review approved the updated handoff logic. Changed-file
+format checks and `git diff --check` passed. Runtime verification is incomplete:
+the targeted bridge-server router test build stalled for approximately five
+minutes loading a process-macro dylib. A rustc sample showed
+`load_dylib -> dyld -> mapSegments -> fcntl`, not a Cargo lock wait. Only this
+task's Cargo/rustc pair was stopped with SIGTERM; no tests ran and Clippy was not
+run. Logs: `/tmp/fusion-compact-active-test.log` and
+`/tmp/fusion-compact-rustc.sample`. No other build was stopped; no dependencies
+or main-checkout changes were introduced.

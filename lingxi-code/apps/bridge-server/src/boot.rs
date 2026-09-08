@@ -1247,12 +1247,16 @@ pub async fn assemble_with_provider_keys(
     // threaded out of `engine_desktop::build` on `DesktopRuntime` precisely because
     // the tool is constructed before this seam. Setting it more than once is a no-op
     // (`OnceLock`); a fresh per-connection `assemble` builds a fresh runtime + cell.
-    let wakeup_scheduler: Arc<dyn tool_cron::WakeupScheduler> =
-        Arc::new(crate::driver::MsgQueueWakeupScheduler::with_loop_runtime(
+    let wakeup_scheduler: Arc<dyn tool_cron::WakeupScheduler> = Arc::new(
+        crate::driver::MsgQueueWakeupScheduler::with_loop_runtime(
             queue.clone(),
             runtime.runtime_spawner.clone(),
             loop_runtime,
-        ));
+        )
+        // Announce each fire on the connection's sink (binary `onFireTask`),
+        // including the no-op fold's streak line after quiet ticks.
+        .with_event_sink(event_sink.clone()),
+    );
     // The driver re-uses the SAME scheduler at its turn-completion edge to arm the
     // `/loop` keepalive fallback (binary `lKi`); clone before the cell consumes it.
     let driver_wakeup_scheduler = wakeup_scheduler.clone();

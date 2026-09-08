@@ -96,12 +96,11 @@ pub async fn unregister_live_job(
 
 /// PARITY `M()` first-sight diagnostics: `[ScheduledTasks] scheduled ${id} for
 /// ${iso | "never"}`; an unresolvable schedule also counts `next_fire_unresolvable`.
-fn log_scheduled(def: &CronTaskDef) {
-    match next_fire_time(def) {
+fn log_scheduled_at(id: &str, at: Option<SystemTime>, recurring: bool) {
+    match at {
         Some(at) => {
             tracing::info!(
-                "[ScheduledTasks] scheduled {} for {}",
-                def.id,
+                "[ScheduledTasks] scheduled {id} for {}",
                 crate::schedule::iso_8601_utc(unix_epoch_ms(at))
             );
         }
@@ -109,11 +108,75 @@ fn log_scheduled(def: &CronTaskDef) {
             tracing::info!(
                 event = "cron_task_fire",
                 outcome = "next_fire_unresolvable",
-                recurring = def.recurring,
+                recurring,
             );
-            tracing::info!("[ScheduledTasks] scheduled {} for never", def.id);
+            tracing::info!("[ScheduledTasks] scheduled {id} for never");
         }
     }
+}
+
+/// Resolve a job's next fire for the FIRST time (registration, or a tick that
+/// misses the cache) and log it. The value is then cached in
+/// [`CronScheduler::next_fire`] and reused until the job fires — the oracle
+/// only computes a schedule on a cache miss (`M()`: `if(x===void 0){…}`).
+fn schedule_fire(def: &CronTaskDef) -> Option<SystemTime> {
+    let at = next_fire_time(def);
+    log_scheduled_at(&def.id, at, def.recurring);
+    at
+}
+
+/// The inputs [`next_fire_time`] reads, so a cached fire can tell "still the
+/// same schedule" from "this record was edited".
+///
+/// The oracle keys its cache on the task id alone and recomputes only after a
+/// fire, because in claude-code nothing but the scheduler mutates a live task.
+/// LingXi's tasks file is also written by the desktop UI and the cron tools
+/// while the tick loop runs, so an edited record must recompute instead of
+/// firing on the schedule it had when it was first seen.
+#[derive(Clone, PartialEq, Eq)]
+struct FireFingerprint {
+    cron: String,
+    last_run: Option<SystemTime>,
+    created_at: SystemTime,
+    recurring: bool,
+}
+
+impl FireFingerprint {
+    fn of(def: &CronTaskDef) -> Self {
+        Self {
+            cron: def.schedule.raw.clone(),
+            last_run: def.last_run,
+            created_at: def.created_at,
+            recurring: def.recurring,
+        }
+    }
+}
+
+/// PARITY `I` (the oracle's `Map<taskId, nextFireMs>`): one job's cached next
+/// fire. `at: None` is the oracle's `Infinity` — an unresolvable schedule that
+/// never fires and is not recomputed every second.
+struct CachedFire {
+    fingerprint: FireFingerprint,
+    at: Option<SystemTime>,
+}
+
+/// The tasks-file generation a scheduler has applied.
+///
+/// PARITY the chokidar watcher the oracle opens on `rJ(dir)`: durable state is
+/// re-read into the live schedule when the document CHANGES, not once a second.
+/// LingXi compares the bytes rather than subscribing to
+/// [`FileSystem::watch`](platform_api::FileSystem::watch) because a platform
+/// whose watcher yields nothing would silently stop picking up peer edits;
+/// and rather than an mtime/size stamp, which cannot tell a same-second
+/// rewrite of equal length from no write at all. Writes go through
+/// `write_file_rooted_atomic`, so the unlocked comparison read always observes
+/// one whole generation of the file.
+#[derive(Clone, PartialEq, Eq)]
+enum TasksFileSnapshot {
+    /// The file does not exist (the watcher's `unlink`).
+    Absent,
+    /// The exact body last applied.
+    Body(String),
 }
 
 /// PARITY `be(tasks)`: the prompt that surfaces missed durable one-shots.
@@ -416,6 +479,12 @@ pub struct CronScheduler {
     session_tasks: Arc<RwLock<HashMap<String, SessionCronTask>>>,
     /// Durable identities must never fall back to session execution after disk deletion.
     durable_ids: RwLock<HashSet<String>>,
+    /// PARITY `I`: each job's next fire, computed once per schedule instead of
+    /// once per tick. Locked AFTER `tasks` wherever both are held.
+    next_fire: RwLock<HashMap<String, CachedFire>>,
+    /// The tasks-file generation currently mirrored into `tasks`; `None` before
+    /// the first reload. Gates the locked re-read (PARITY the file watcher).
+    applied_snapshot: Mutex<Option<TasksFileSnapshot>>,
     task_registry: Arc<TaskRegistry>,
     fs: Arc<dyn FileSystem>,
     clock: Arc<dyn Clock>,
@@ -494,6 +563,8 @@ impl CronScheduler {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             session_tasks: Arc::new(RwLock::new(HashMap::new())),
             durable_ids: RwLock::new(HashSet::new()),
+            next_fire: RwLock::new(HashMap::new()),
+            applied_snapshot: Mutex::new(None),
             task_registry,
             fs,
             clock,
@@ -721,8 +792,15 @@ impl CronScheduler {
             created_at,
             recurring,
         };
-        log_scheduled(&def);
-        self.tasks.write().await.insert(id.to_string(), def);
+        let at = schedule_fire(&def);
+        let fingerprint = FireFingerprint::of(&def);
+        let mut tasks = self.tasks.write().await;
+        tasks.insert(id.to_string(), def);
+        self.next_fire
+            .write()
+            .await
+            .insert(id.to_string(), CachedFire { fingerprint, at });
+        drop(tasks);
         Ok(())
     }
 
@@ -746,8 +824,13 @@ impl CronScheduler {
             created_at: task.created_at,
             recurring: task.recurring,
         };
-        log_scheduled(&def);
+        let at = schedule_fire(&def);
+        let fingerprint = FireFingerprint::of(&def);
         tasks.insert(task.id.clone(), def);
+        self.next_fire
+            .write()
+            .await
+            .insert(task.id.clone(), CachedFire { fingerprint, at });
         drop(tasks);
         if durable {
             self.durable_ids.write().await.insert(task.id.clone());
@@ -781,7 +864,9 @@ impl CronScheduler {
         }
         self.session_tasks.write().await.remove(id);
         self.durable_ids.write().await.remove(id);
-        self.tasks.write().await.remove(id).is_some()
+        let removed = self.tasks.write().await.remove(id).is_some();
+        self.next_fire.write().await.remove(id);
+        removed
     }
 
     /// Spawn the tick loop on the configured [`RuntimeSpawner`]. Safe to call
@@ -906,26 +991,61 @@ impl CronScheduler {
 
     /// Refresh shared durable state before using schedules to select due jobs.
     /// Keep direct registrations and session-only tasks independent of the file.
+    ///
+    /// PARITY the chokidar watcher (`O.on("add"|"change", () => V(false))`): the
+    /// re-read is CHANGE-gated. A tick over an unchanged document costs one
+    /// unlocked read instead of the process-global cron lock, the tasks-file
+    /// flock, a full parse and a rebuild of the live map — a per-second
+    /// exclusive lock that the cron tools and the desktop UI have to queue
+    /// behind to write.
     async fn refresh_durable_tasks(&self) {
         let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file)
         else {
             return;
         };
+        let seen = match crate::tasks_file::read_tasks_body(self.fs.as_ref(), project_root).await {
+            Ok(body) => Some(TasksFileSnapshot::Body(body)),
+            Err(FsError::NotFound(_)) => Some(TasksFileSnapshot::Absent),
+            // Unreadable for some other reason: take the locked path rather
+            // than read an unknown state as "unchanged".
+            Err(_) => None,
+        };
+        if let Some(current) = seen.as_ref() {
+            if self.applied_snapshot.lock().await.as_ref() == Some(current) {
+                return;
+            }
+        }
         let _process_guard = crate::lock_cron_file().await;
         let Ok(_file_guard) =
             crate::tasks_file::lock_scheduled_tasks(self.fs.as_ref(), project_root).await
         else {
             return;
         };
-        let doc = match crate::tasks_file::read_tasks_body(self.fs.as_ref(), project_root).await {
+        // Re-read under the lock: `seen` was taken before it, so a peer write
+        // may have landed in between. Recording THIS body as the applied
+        // generation is what makes the gate above safe — a write that lands
+        // after it must also change the bytes.
+        let (snapshot, doc) = match crate::tasks_file::read_tasks_body(
+            self.fs.as_ref(),
+            project_root,
+        )
+        .await
+        {
             Ok(body) => match crate::tasks_file::parse_tasks_strict(&body) {
-                Ok(doc) => doc,
+                Ok(doc) => (TasksFileSnapshot::Body(body), doc),
                 Err(error) => {
                     tracing::warn!("cron: cannot refresh invalid durable state: {error}");
+                    // Remember the bad generation so this warns once per broken
+                    // document instead of once per second, and re-reads as soon
+                    // as anything rewrites the file.
+                    *self.applied_snapshot.lock().await = Some(TasksFileSnapshot::Body(body));
                     return;
                 }
             },
-            Err(FsError::NotFound(_)) => crate::tasks_file::ScheduledTasks::default(),
+            Err(FsError::NotFound(_)) => (
+                TasksFileSnapshot::Absent,
+                crate::tasks_file::ScheduledTasks::default(),
+            ),
             Err(_) => return,
         };
         // Keep identity reconciliation atomic with live registration. Registration
@@ -971,26 +1091,85 @@ impl CronScheduler {
         }
         drop(tasks);
         *durable_ids = current;
+        drop(durable_ids);
+        *self.applied_snapshot.lock().await = Some(snapshot);
+    }
+
+    /// PARITY `M()`'s cache probe: a job's next fire is computed on first sight
+    /// (and logged there), then reused until it fires — only the comparison
+    /// against `now` runs every tick, not a cron walk plus a host-timezone
+    /// lookup per job. Due-detection itself is unchanged, including missed-run
+    /// CATCH-UP: a fire time that has passed stays passed, so a run missed
+    /// while the scheduler was down is caught up once, and advancing and
+    /// persisting the anchor prevents cross-restart re-fires.
+    ///
+    /// The trailing sweep is the oracle's
+    /// `for(let e of I.keys()) if(!h.has(e)) I.delete(e)`.
+    async fn due_ids(&self, now: SystemTime) -> Vec<String> {
+        let tasks = self.tasks.read().await;
+        let mut cache = self.next_fire.write().await;
+        let mut due = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::with_capacity(tasks.len());
+        for task in tasks.values() {
+            if !task.enabled {
+                continue;
+            }
+            seen.insert(task.id.as_str());
+            let fingerprint = FireFingerprint::of(task);
+            let cached = cache
+                .get(&task.id)
+                .filter(|cached| cached.fingerprint == fingerprint)
+                .map(|cached| cached.at);
+            let at = match cached {
+                Some(at) => at,
+                None => {
+                    let at = schedule_fire(task);
+                    cache.insert(task.id.clone(), CachedFire { fingerprint, at });
+                    at
+                }
+            };
+            if at.is_some_and(|at| at <= now) {
+                due.push(task.id.clone());
+            }
+        }
+        cache.retain(|id, _| seen.contains(id.as_str()));
+        due
+    }
+
+    /// PARITY `M()`'s post-fire branch: recompute a fired job's next fire from
+    /// the record the claim left behind — a recurring job's advanced
+    /// `lastFiredAt`, or the removal of a one-shot — WITHOUT re-logging, since
+    /// the oracle logs a schedule only on a cache miss. A job that was not
+    /// claimed (a peer held its lock, or the authoritative record was no longer
+    /// due) recomputes to the same instant and stays due for the next tick.
+    async fn resync_fired(&self, ids: &[String]) {
+        let tasks = self.tasks.read().await;
+        let mut cache = self.next_fire.write().await;
+        for id in ids {
+            match tasks.get(id) {
+                Some(task) => {
+                    let entry = CachedFire {
+                        fingerprint: FireFingerprint::of(task),
+                        at: next_fire_time(task),
+                    };
+                    cache.insert(id.clone(), entry);
+                }
+                None => {
+                    cache.remove(id);
+                }
+            }
+        }
     }
 
     async fn tick(&self) {
         self.refresh_durable_tasks().await;
         let now = self.clock.now();
-
-        // Due-detection with missed-run CATCH-UP (`is_job_due`): fires at the
-        // deterministic jittered target and catches up a run missed while the
-        // scheduler was down (once). Advancing and persisting the anchor
-        // prevents cross-restart re-fires.
-        let due_ids: Vec<String> = {
-            let tasks = self.tasks.read().await;
-            tasks
-                .values()
-                .filter(|t| is_job_due(t, now))
-                .map(|t| t.id.clone())
-                .collect()
-        };
-
-        self.process_due_ids(now, due_ids).await;
+        let due_ids = self.due_ids(now).await;
+        if due_ids.is_empty() {
+            return;
+        }
+        self.process_due_ids(now, due_ids.clone()).await;
+        self.resync_fired(&due_ids).await;
     }
 
     /// Cancel the tick loop, if running. Idempotent.
@@ -1008,6 +1187,8 @@ impl CronScheduler {
         self.session_tasks.write().await.clear();
         self.durable_ids.write().await.clear();
         self.tasks.write().await.clear();
+        self.next_fire.write().await.clear();
+        *self.applied_snapshot.lock().await = None;
         cancel_result
     }
 
@@ -2767,6 +2948,116 @@ mod scheduler_tick_tests {
         assert!(tasks.contains_key("direct"));
         assert!(tasks.contains_key("session"));
     }
+    /// PARITY the chokidar watcher: a tick over an UNCHANGED tasks file must not
+    /// re-read, re-parse and re-register durable state.
+    ///
+    /// The probe is a local edit the reload would clobber: `refresh_durable_tasks`
+    /// rebuilds every file-backed definition, so if it ran, the doctored prompt
+    /// would be back to the on-disk one. Asserting the prompt (not a read count)
+    /// keeps the test honest about what the gate is FOR.
+    #[tokio::test]
+    async fn an_unchanged_tasks_file_is_not_reloaded_on_every_tick() {
+        let created_ms = (NOW - 120) * 1000;
+        let body = format!(
+            r#"{{"tasks":[{{"id":"dgate","cron":"0 0 1 1 *","prompt":"on-disk","createdAt":{created_ms},"recurring":true}}]}}"#
+        );
+        let fs = MemFs::with(TASKS_PATH, &body);
+        let clock = FixedClock::at_secs(NOW);
+        let (registry, _) = registry_with_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs.clone(), clock.clone());
+        scheduler.tick().await;
+        assert!(scheduler.durable_ids.read().await.contains("dgate"));
+        scheduler
+            .tasks
+            .write()
+            .await
+            .get_mut("dgate")
+            .unwrap()
+            .prompt = "doctored".into();
+        scheduler.tick().await;
+        assert_eq!(
+            scheduler.tasks.read().await["dgate"].prompt, "doctored",
+            "an unchanged document must not be re-applied"
+        );
+
+        // …and a real edit still lands on the very next tick.
+        let edited = format!(
+            r#"{{"tasks":[{{"id":"dgate","cron":"0 0 1 1 *","prompt":"edited","createdAt":{created_ms},"recurring":true}}]}}"#
+        );
+        fs.files.lock().await.insert(TASKS_PATH.into(), edited);
+        scheduler.tick().await;
+        assert_eq!(scheduler.tasks.read().await["dgate"].prompt, "edited");
+    }
+
+    /// PARITY `I`: the next fire is computed once per schedule and reused, and a
+    /// record the file changed under us recomputes rather than firing on the
+    /// schedule it had when first seen.
+    #[tokio::test]
+    async fn the_next_fire_is_cached_until_the_record_changes() {
+        let created_ms = (NOW - 120) * 1000;
+        let body = format!(
+            r#"{{"tasks":[{{"id":"dcache","cron":"0 0 1 1 *","prompt":"p","createdAt":{created_ms},"recurring":true}}]}}"#
+        );
+        let fs = MemFs::with(TASKS_PATH, &body);
+        let clock = FixedClock::at_secs(NOW);
+        let (registry, handler) = registry_with_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs.clone(), clock.clone());
+        scheduler.tick().await;
+        let first = scheduler.next_fire.read().await["dcache"].at;
+        assert!(first.is_some(), "a resolvable schedule caches an instant");
+        scheduler.tick().await;
+        assert_eq!(
+            scheduler.next_fire.read().await["dcache"].at,
+            first,
+            "an unchanged record reuses the cached fire"
+        );
+        assert_eq!(handler.spawn_count(), 0);
+
+        // A peer rewrites the cron to one that is due now.
+        let edited = format!(
+            r#"{{"tasks":[{{"id":"dcache","cron":"* * * * *","prompt":"p","createdAt":{created_ms},"recurring":true}}]}}"#
+        );
+        fs.files.lock().await.insert(TASKS_PATH.into(), edited);
+        scheduler.tick().await;
+        assert_eq!(
+            handler.spawn_count(),
+            1,
+            "an edited schedule must not keep the fire time it was first seen with"
+        );
+    }
+
+    /// The oracle's `for(let e of I.keys()) if(!h.has(e)) I.delete(e)` sweep: a
+    /// job that is gone — or disabled, which LingXi has and the oracle does not
+    /// — leaves no cache entry behind.
+    #[tokio::test]
+    async fn the_fire_cache_is_swept_of_jobs_that_are_gone_or_disabled() {
+        let fs = MemFs::with(TASKS_PATH, r#"{"tasks":[]}"#);
+        let clock = FixedClock::at_secs(NOW);
+        let (registry, _) = registry_with_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs, clock.clone());
+        scheduler
+            .register("swept", "0 0 1 1 *", "p", None)
+            .await
+            .unwrap();
+        scheduler.tick().await;
+        assert!(scheduler.next_fire.read().await.contains_key("swept"));
+        scheduler
+            .tasks
+            .write()
+            .await
+            .get_mut("swept")
+            .unwrap()
+            .enabled = false;
+        scheduler.tick().await;
+        assert!(
+            !scheduler.next_fire.read().await.contains_key("swept"),
+            "a disabled job keeps no cached fire"
+        );
+        scheduler.unregister_job("swept", None).await;
+        scheduler.tick().await;
+        assert!(scheduler.next_fire.read().await.is_empty());
+    }
+
     #[tokio::test]
     async fn durable_refresh_serializes_identity_with_live_registration() {
         let fs = MemFs::with(TASKS_PATH, r#"{"tasks":[]}"#);

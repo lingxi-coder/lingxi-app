@@ -398,6 +398,38 @@ pub fn local_date_time_string(epoch_ms: u64) -> String {
     format!("{month}/{day}/{year}, {h12}:{minute:02}:{second:02} {period}")
 }
 
+/// PARITY the fold chunk's `S(date)`: a LOCAL wall-clock stamp such as
+/// `Sep 7 3:04pm`, used in the `/loop` wakeup resume line.
+///
+/// The oracle builds it as
+/// `toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})`
+/// then strips the separator (`/,? at |, / -> " "`) and lowercases the meridiem
+/// with its preceding space (`/[ \u202f]([AP]M)/i`), so `"Sep 7 at 3:04\u{202f}PM"`
+/// becomes `"Sep 7 3:04pm"`. `hour:"numeric"` is unpadded, `minute:"2-digit"`
+/// is padded, and midnight/noon render as 12.
+#[must_use]
+pub fn short_local_timestamp(epoch_ms: u64) -> String {
+    let secs = i64::try_from(epoch_ms / 1000).unwrap_or(i64::MAX);
+    short_timestamp_at(secs.saturating_add(local_offset_seconds(secs)).max(0) as u64)
+}
+
+/// The pure formatting half of [`short_local_timestamp`], over an ALREADY
+/// local-shifted instant, so the byte format is testable without the host
+/// timezone.
+fn short_timestamp_at(local_secs: u64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (_, month, day, hour, minute, _, _) = decompose(local_secs);
+    let name = MONTHS[(month.clamp(1, 12) - 1) as usize];
+    let period = if hour < 12 { "am" } else { "pm" };
+    let h12 = match hour % 12 {
+        0 => 12,
+        h => h,
+    };
+    format!("{name} {day} {h12}:{minute:02}{period}")
+}
+
 /// JS `new Date(ms).toISOString()` — `YYYY-MM-DDTHH:MM:SS.mmmZ`.
 #[must_use]
 pub fn iso_8601_utc(epoch_ms: u64) -> String {
@@ -525,6 +557,26 @@ pub fn local_offset_seconds(unix_secs: i64) -> i64 {
 #[cfg(not(any(unix, windows)))]
 pub fn local_offset_seconds(_unix_secs: i64) -> i64 {
     0
+}
+
+#[cfg(test)]
+mod short_timestamp_tests {
+    use super::short_timestamp_at;
+
+    /// PARITY the fold chunk's `S(date)`: `Sep 7 3:04pm` — short month, unpadded
+    /// day and hour, 2-digit minute, lowercase meridiem with no space, and 12
+    /// (not 0) at midnight and noon.
+    #[test]
+    fn matches_the_oracle_wall_clock_format() {
+        // 2026-09-07T15:04:09Z
+        assert_eq!(short_timestamp_at(1_788_793_449), "Sep 7 3:04pm");
+        // 2026-09-07T00:00:00Z / T12:00:00Z / T09:07:00Z
+        assert_eq!(short_timestamp_at(1_788_739_200), "Sep 7 12:00am");
+        assert_eq!(short_timestamp_at(1_788_782_400), "Sep 7 12:00pm");
+        assert_eq!(short_timestamp_at(1_788_772_020), "Sep 7 9:07am");
+        // 2026-01-31T23:59:00Z — a two-digit day and the last minute of a month.
+        assert_eq!(short_timestamp_at(1_769_903_940), "Jan 31 11:59pm");
+    }
 }
 
 #[cfg(test)]

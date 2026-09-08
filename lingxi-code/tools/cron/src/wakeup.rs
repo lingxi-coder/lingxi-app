@@ -271,6 +271,91 @@ impl LoopState {
             None => al::set_loop_ended(ended),
         }
     }
+    /// Record this turn's `ScheduleWakeup({noop})` for the no-op fold.
+    ///
+    /// Fold bookkeeping is session-scoped ONLY. The process-global fallback
+    /// exists for hosts with no session object, and such a host also has no
+    /// message queue to deliver a wakeup into (`WakeupSchedulerCell` stays
+    /// empty), so it has no tick to fold and nothing to render a streak on.
+    fn mark_noop(&self, noop: bool) {
+        if let Some(rt) = &self.0 {
+            rt.mark_noop_reported(noop);
+        }
+    }
+}
+
+/// JS `pluralize(n, word)`: the bare word at exactly 1, else `word + "s"`.
+fn plural(n: u32, word: &str) -> String {
+    if n == 1 {
+        word.to_string()
+    } else {
+        format!("{word}s")
+    }
+}
+
+/// PARITY `D(transcript, shouldFold, task, uuid)` — the two lines a firing
+/// `/loop` wakeup announces itself with.
+///
+/// Always `Claude resuming /loop wakeup (Sep 7 3:04pm)`; when the ticks before
+/// it were quiet, the fold suffix `<MIDDLE DOT> N no-op tick(s) since <when>`
+/// and the companion meta line `K(n)`.
+///
+/// The oracle appends these to the transcript array and hangs `foldedUuids` on
+/// the fire record so its renderer can collapse the span. LingXi has no
+/// transcript array at this seam and no renderer that honours `foldedUuids`, so
+/// the lines are emitted as system notices: the streak is surfaced and counted,
+/// but the earlier quiet turns stay on screen instead of collapsing.
+#[must_use]
+pub fn loop_wakeup_lines(
+    now_ms: u64,
+    streak: Option<(u32, std::time::SystemTime)>,
+) -> (String, Option<String>) {
+    let head = format!(
+        "Claude resuming /loop wakeup ({})",
+        cron::short_local_timestamp(now_ms)
+    );
+    let Some((streak, since)) = streak else {
+        return (head, None);
+    };
+    let since_ms = since
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(now_ms, |d| u64::try_from(d.as_millis()).unwrap_or(now_ms));
+    (
+        format!(
+            "{head} \u{b7} {streak} no-op {} since {}",
+            plural(streak, "tick"),
+            cron::short_local_timestamp(since_ms)
+        ),
+        Some(format!(
+            "[{streak} prior /loop {} found nothing actionable; loop is healthy.]",
+            plural(streak, "wakeup")
+        )),
+    )
+}
+
+/// PARITY `v()` + `D()`: settle the turn that just ended into the `/loop` no-op
+/// streak and emit the `loop_noop_fold` counter.
+///
+/// Call at EVERY turn-completion edge, BEFORE [`maybe_arm_keepalive`] and
+/// [`cancel_dynamic_loop_on_user_abort`] — both consume the in-flight tick
+/// marker this reads. Returns `None` for turns that were not loop ticks.
+///
+/// The caller marks the disturbances only it can see (a user abort, a `Now`
+/// command) with `LoopRuntime::veto_tick` first; the remaining veto — the model
+/// not ending the tick with `noop: true` — is decided here.
+pub fn settle_loop_tick(runtime: &al::LoopRuntime) -> Option<al::LoopFoldOutcome> {
+    let outcome = runtime.settle_tick(std::time::SystemTime::now())?;
+    match outcome {
+        al::LoopFoldOutcome::Folded {
+            streak,
+            duration_secs,
+            ..
+        } => telemetry::emit_loop_noop_fold(streak, duration_secs),
+        al::LoopFoldOutcome::Vetoed { reason } => {
+            telemetry::emit_loop_noop_fold_veto(reason.reason());
+        }
+    }
+    Some(outcome)
 }
 
 /// Binary `L(reason, extras)`: emit `tengu_loop_ended` and mark the loop ended.
@@ -955,6 +1040,13 @@ impl Tool for ScheduleWakeupTool {
         let started = Instant::now();
         let bus = self.ctx.bus.clone();
 
+        // PARITY `v()`'s `if(i.name===Xi) p = i.input?.noop===!0`: the LAST
+        // `ScheduleWakeup` of the tick decides whether it was quiet. Recorded
+        // for EVERY call — including a `stop: true` one, which carries no
+        // `noop` and therefore vetoes, exactly as `p !== true` does there.
+        LoopState(self.wakeup.get().and_then(|w| w.loop_runtime()))
+            .mark_noop(input.get("noop").and_then(Value::as_bool) == Some(true));
+
         // PARITY: `if(p===!0) return {…stopped:!0, cancelledWakeups: ZXn()}`.
         if input.get("stop").and_then(Value::as_bool) == Some(true) {
             let cancelled = stop_dynamic_loop(self.wakeup.get()).await;
@@ -1031,6 +1123,63 @@ impl Tool for ScheduleWakeupTool {
             "model_content": model_content,
             "reason": reason,
         })))
+    }
+}
+
+#[cfg(test)]
+mod fold_line_tests {
+    use super::loop_wakeup_lines;
+    use std::time::{Duration, SystemTime};
+
+    const NOW_MS: u64 = 1_788_793_449_000;
+    const SINCE_MS: u64 = 1_788_790_449_000;
+
+    fn since() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_millis(SINCE_MS)
+    }
+
+    /// With no streak the wakeup announces itself with the bare resume line and
+    /// no companion — the oracle's `e.kind !== "fold"` arm.
+    #[test]
+    fn a_wakeup_after_a_working_tick_has_no_streak_suffix() {
+        let (head, companion) = loop_wakeup_lines(NOW_MS, None);
+        assert_eq!(
+            head,
+            format!(
+                "Claude resuming /loop wakeup ({})",
+                cron::short_local_timestamp(NOW_MS)
+            )
+        );
+        assert_eq!(companion, None);
+    }
+
+    /// PARITY the fold arm: the `\u{b7}` suffix and the `K(n)` companion, with the
+    /// oracle's singular/plural at exactly 1.
+    #[test]
+    fn a_folded_wakeup_carries_the_streak_and_its_companion() {
+        let (head, companion) = loop_wakeup_lines(NOW_MS, Some((1, since())));
+        assert_eq!(
+            head,
+            format!(
+                "Claude resuming /loop wakeup ({}) \u{b7} 1 no-op tick since {}",
+                cron::short_local_timestamp(NOW_MS),
+                cron::short_local_timestamp(SINCE_MS)
+            )
+        );
+        assert_eq!(
+            companion.as_deref(),
+            Some("[1 prior /loop wakeup found nothing actionable; loop is healthy.]")
+        );
+
+        let (head, companion) = loop_wakeup_lines(NOW_MS, Some((4, since())));
+        assert!(head.ends_with(&format!(
+            "\u{b7} 4 no-op ticks since {}",
+            cron::short_local_timestamp(SINCE_MS)
+        )));
+        assert_eq!(
+            companion.as_deref(),
+            Some("[4 prior /loop wakeups found nothing actionable; loop is healthy.]")
+        );
     }
 }
 

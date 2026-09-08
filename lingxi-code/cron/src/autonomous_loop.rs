@@ -45,6 +45,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 // ── Sentinels (binary string-table) ──────────────────────────────────────────
 
@@ -436,6 +437,69 @@ pub struct DynamicLoopRecord {
     pub aged_out: bool,
 }
 
+/// Why a `/loop` tick was NOT quiet — the veto arms of the oracle's `v()`,
+/// with its exact reason literals.
+///
+/// The oracle finds these by walking the transcript span between the last
+/// `scheduled_task_fire{cronKind:"loop"}` anchor and the end of the transcript.
+/// LingXi has no live transcript array to walk: a wakeup is enqueued as ONE
+/// command, so the span IS the turn it runs. The components that observe a
+/// disturbance therefore mark it on [`LoopRuntime`] as it happens, and the
+/// turn-completion edge reads the mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoopFoldVeto {
+    /// A blocking system message (a compaction boundary or another scheduled
+    /// fire) landed in the span.
+    BlockingSystemInSpan,
+    /// A tool call was interrupted or cancelled.
+    ToolAbort,
+    /// A tool call was denied.
+    ToolDenial,
+    /// Real input arrived from a human during the tick.
+    ForeignUserInput,
+    /// A queued command was waiting to run.
+    QueuedCommand,
+    /// The model did not end the tick with `ScheduleWakeup({noop: true})`.
+    ModelReportedWork,
+}
+
+impl LoopFoldVeto {
+    /// The oracle's literal, as passed to `g("loop_noop_fold", reason)`.
+    #[must_use]
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::BlockingSystemInSpan => "blocking_system_in_span",
+            Self::ToolAbort => "tool_abort",
+            Self::ToolDenial => "tool_denial",
+            Self::ForeignUserInput => "foreign_user_input",
+            Self::QueuedCommand => "queued_command",
+            Self::ModelReportedWork => "model_reported_work",
+        }
+    }
+}
+
+/// What the turn-completion edge decided about the tick that just ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoopFoldOutcome {
+    /// The tick was quiet. `streak` counts it (so it is never 0) and `since` is
+    /// when the run of quiet ticks began — the oracle's `noOpStreak` /
+    /// `streakStartedAt`.
+    Folded {
+        /// Consecutive quiet ticks including this one.
+        streak: u32,
+        /// Start of the quiet run.
+        since: SystemTime,
+        /// Wall time from the fire that started this tick to now, in seconds
+        /// (the oracle's `span_duration_s`).
+        duration_secs: u64,
+    },
+    /// The tick did something; the streak resets.
+    Vetoed {
+        /// The oracle's veto literal.
+        reason: LoopFoldVeto,
+    },
+}
+
 #[derive(Default)]
 struct LoopRuntimeState {
     /// `Nt.loopTickInFlightPrompt` — prompt of the loop tick being processed.
@@ -452,6 +516,20 @@ struct LoopRuntimeState {
     /// 2.1.263 `OLn()` / `gHt(bool)` — the loop already emitted its terminal
     /// `tengu_loop_ended`; a later `stop: true` is cleanup only.
     loop_ended: bool,
+    /// When the in-flight tick started (the oracle's anchor timestamp), used for
+    /// `span_duration_s`.
+    tick_started_at: Option<SystemTime>,
+    /// `noop` of the LAST `ScheduleWakeup` call in the current tick — the
+    /// oracle's `p` in `v()`. `None` when the model armed no wakeup at all,
+    /// which vetoes exactly as `p !== true` does.
+    tick_noop_reported: Option<bool>,
+    /// The FIRST disturbance seen during the current tick. The oracle returns on
+    /// the first veto it meets walking the span forward, so first-wins.
+    tick_veto: Option<LoopFoldVeto>,
+    /// `noOpStreak` — consecutive quiet ticks folded so far.
+    noop_streak: u32,
+    /// `streakStartedAt` — when the current quiet run began.
+    streak_started_at: Option<SystemTime>,
 }
 
 /// Session-scoped dynamic-loop state.
@@ -467,9 +545,82 @@ pub struct LoopRuntime {
 impl LoopRuntime {
     /// Mark the start of a loop tick and clear the prior reschedule marker.
     pub fn begin_tick(&self, prompt: String) {
+        self.begin_tick_at(prompt, SystemTime::now());
+    }
+
+    /// [`Self::begin_tick`] with an explicit start instant (tests, and hosts
+    /// with their own clock). Also clears the per-tick fold marks, so a veto or
+    /// a `noop` from the previous tick can never settle this one.
+    pub fn begin_tick_at(&self, prompt: String, at: SystemTime) {
         let mut st = self.state.lock().unwrap();
         st.tick_in_flight_prompt = Some(prompt);
         st.rescheduled_this_turn = false;
+        st.tick_started_at = Some(at);
+        st.tick_noop_reported = None;
+        st.tick_veto = None;
+    }
+
+    /// Record the `noop` argument of a `ScheduleWakeup` call made during this
+    /// tick. The LAST call of the tick wins, matching the oracle's `p`, which is
+    /// overwritten by each `ScheduleWakeup` tool_use it walks past.
+    pub fn mark_noop_reported(&self, noop: bool) {
+        self.state.lock().unwrap().tick_noop_reported = Some(noop);
+    }
+
+    /// Mark this tick as not-quiet. The FIRST veto recorded wins.
+    pub fn veto_tick(&self, veto: LoopFoldVeto) {
+        let mut st = self.state.lock().unwrap();
+        if st.tick_veto.is_none() {
+            st.tick_veto = Some(veto);
+        }
+    }
+
+    /// PARITY `v()` + the streak arithmetic in `D()`: settle the tick that just
+    /// ended into the no-op streak.
+    ///
+    /// Returns `None` when no tick was in flight (the turn was not a loop
+    /// wakeup). A veto resets the streak; a fold extends it and returns the
+    /// count INCLUDING this tick, which is what the next wakeup renders.
+    ///
+    /// Reads the in-flight marker WITHOUT taking it — the keepalive and
+    /// user-abort edges that run after this one consume it.
+    pub fn settle_tick(&self, now: SystemTime) -> Option<LoopFoldOutcome> {
+        let mut st = self.state.lock().unwrap();
+        st.tick_in_flight_prompt.as_ref()?;
+        let veto = st
+            .tick_veto
+            .or_else(|| (st.tick_noop_reported != Some(true)).then_some(LoopFoldVeto::ModelReportedWork));
+        st.tick_veto = None;
+        st.tick_noop_reported = None;
+        let started_at = st.tick_started_at.take();
+        if let Some(reason) = veto {
+            st.noop_streak = 0;
+            st.streak_started_at = None;
+            return Some(LoopFoldOutcome::Vetoed { reason });
+        }
+        let since = st.streak_started_at.or(started_at).unwrap_or(now);
+        st.noop_streak = st.noop_streak.saturating_add(1);
+        st.streak_started_at = Some(since);
+        let duration_secs = started_at
+            .and_then(|start| now.duration_since(start).ok())
+            .map_or(0, |d| d.as_secs());
+        Some(LoopFoldOutcome::Folded {
+            streak: st.noop_streak,
+            since,
+            duration_secs,
+        })
+    }
+
+    /// The current no-op streak and when it started — what a firing wakeup
+    /// renders as `\u{b7} N no-op tick(s) since \u{2026}`. `None` when the last tick
+    /// was not quiet.
+    #[must_use]
+    pub fn noop_streak(&self) -> Option<(u32, SystemTime)> {
+        let st = self.state.lock().unwrap();
+        match (st.noop_streak, st.streak_started_at) {
+            (0, _) | (_, None) => None,
+            (streak, Some(since)) => Some((streak, since)),
+        }
     }
 
     /// Peek at the current in-flight loop prompt.
@@ -744,6 +895,121 @@ pub fn resolve_loop_default_fire(sentinel: &str, cwd: &Path) -> String {
     resolve_autonomous_loop_fire(sentinel)
         .or_else(|| resolve_loop_file_fire(sentinel, cwd))
         .unwrap_or_else(|| sentinel.to_string())
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::{LoopFoldOutcome, LoopFoldVeto, LoopRuntime};
+    use std::time::{Duration, SystemTime};
+
+    fn at(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    /// A tick the model closed with `noop: true` folds, and consecutive quiet
+    /// ticks keep the streak's ORIGINAL start (the oracle's
+    /// `since: s.streakStartedAt ?? s.timestamp`).
+    #[test]
+    fn consecutive_quiet_ticks_extend_one_streak() {
+        let rt = LoopRuntime::default();
+        rt.begin_tick_at("p".into(), at(1_000));
+        rt.mark_noop_reported(true);
+        assert_eq!(
+            rt.settle_tick(at(1_030)),
+            Some(LoopFoldOutcome::Folded {
+                streak: 1,
+                since: at(1_000),
+                duration_secs: 30,
+            })
+        );
+        rt.begin_tick_at("p".into(), at(2_000));
+        rt.mark_noop_reported(true);
+        assert_eq!(
+            rt.settle_tick(at(2_010)),
+            Some(LoopFoldOutcome::Folded {
+                streak: 2,
+                since: at(1_000),
+                duration_secs: 10,
+            })
+        );
+        assert_eq!(rt.noop_streak(), Some((2, at(1_000))));
+    }
+
+    /// PARITY `if(p!==!0) return {kind:"veto",reason:"model_reported_work"}` —
+    /// a tick that did work, and one that armed no wakeup at all, both veto.
+    #[test]
+    fn work_or_silence_vetoes_and_resets_the_streak() {
+        for reported in [Some(false), None] {
+            let rt = LoopRuntime::default();
+            rt.begin_tick_at("p".into(), at(1_000));
+            rt.mark_noop_reported(true);
+            rt.settle_tick(at(1_010));
+            rt.begin_tick_at("p".into(), at(2_000));
+            if let Some(noop) = reported {
+                rt.mark_noop_reported(noop);
+            }
+            assert_eq!(
+                rt.settle_tick(at(2_010)),
+                Some(LoopFoldOutcome::Vetoed {
+                    reason: LoopFoldVeto::ModelReportedWork,
+                })
+            );
+            assert_eq!(rt.noop_streak(), None, "a veto resets the streak");
+        }
+    }
+
+    /// A veto marked by the driver wins over the model's own `noop: true`, and
+    /// the FIRST veto of the tick is the one reported.
+    #[test]
+    fn a_marked_veto_beats_a_noop_claim_and_first_wins() {
+        let rt = LoopRuntime::default();
+        rt.begin_tick_at("p".into(), at(1_000));
+        rt.mark_noop_reported(true);
+        rt.veto_tick(LoopFoldVeto::ToolAbort);
+        rt.veto_tick(LoopFoldVeto::QueuedCommand);
+        assert_eq!(
+            rt.settle_tick(at(1_010)),
+            Some(LoopFoldOutcome::Vetoed {
+                reason: LoopFoldVeto::ToolAbort,
+            })
+        );
+    }
+
+    /// A turn that was not a loop tick settles nothing — the edge runs after
+    /// EVERY turn, so this is what keeps a normal turn out of the streak.
+    #[test]
+    fn a_turn_that_was_not_a_tick_settles_nothing() {
+        let rt = LoopRuntime::default();
+        rt.mark_noop_reported(true);
+        assert_eq!(rt.settle_tick(at(1_000)), None);
+        assert_eq!(rt.noop_streak(), None);
+    }
+
+    /// `begin_tick` clears the previous tick's marks, so a stale veto or a
+    /// stale `noop` can never decide the next one.
+    #[test]
+    fn beginning_a_tick_clears_the_previous_ticks_marks() {
+        let rt = LoopRuntime::default();
+        rt.begin_tick_at("p".into(), at(1_000));
+        rt.veto_tick(LoopFoldVeto::ToolDenial);
+        rt.begin_tick_at("p".into(), at(2_000));
+        rt.mark_noop_reported(true);
+        assert!(matches!(
+            rt.settle_tick(at(2_005)),
+            Some(LoopFoldOutcome::Folded { streak: 1, .. })
+        ));
+    }
+
+    /// The in-flight marker is READ, not taken: the keepalive and user-abort
+    /// edges run after the fold and still need it.
+    #[test]
+    fn settling_leaves_the_in_flight_prompt_for_the_later_edges() {
+        let rt = LoopRuntime::default();
+        rt.begin_tick_at("tick".into(), at(1_000));
+        rt.mark_noop_reported(true);
+        rt.settle_tick(at(1_001));
+        assert_eq!(rt.take_in_flight_prompt().as_deref(), Some("tick"));
+    }
 }
 
 #[cfg(test)]

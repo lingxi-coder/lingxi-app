@@ -445,6 +445,36 @@ pub fn emit_loop_dynamic_wakeup_scheduled(
     );
 }
 
+/// The `/loop` no-op fold counter. NOT a `tengu_*` analytics event: the oracle
+/// records it through its counter API (`y` / `g`), the same family as
+/// `cron_task_fire`, so the name has no prefix and is not in `tengu::*::NAMES`.
+const LOOP_NOOP_FOLD: &str = "loop_noop_fold";
+
+/// Emit the `loop_noop_fold` success counter for a folded (quiet) `/loop` tick.
+///
+/// PARITY the fold chunk's
+/// `y("loop_noop_fold",{streak, span_len, tool_uses, span_duration_s})`.
+/// `span_len` and `tool_uses` count TRANSCRIPT messages and `tool_use` blocks
+/// in the folded span; LingXi folds at the turn boundary and holds no such
+/// span, so those two fields are OMITTED rather than reported as zero.
+pub fn emit_loop_noop_fold(streak: u32, span_duration_s: u64) {
+    tracing::info!(
+        event = LOOP_NOOP_FOLD,
+        streak = streak,
+        span_duration_s = span_duration_s,
+    );
+}
+
+/// Emit the `loop_noop_fold` failure counter with the veto literal.
+///
+/// PARITY the fold chunk's `g("loop_noop_fold", e.reason)`.
+pub fn emit_loop_noop_fold_veto(reason: &str) {
+    tracing::info!(
+        event = LOOP_NOOP_FOLD,
+        outcome = %reason,
+    );
+}
+
 /// Emit `tengu_uncompilable_ignore_pattern` with its `site`.
 ///
 /// PARITY: binary helper `oeg(site, pattern)` fires

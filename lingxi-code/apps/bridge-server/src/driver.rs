@@ -162,6 +162,11 @@ pub struct MsgQueueWakeupScheduler {
     /// supersedes them; `stop: true` and a user abort cancel them AND forget
     /// those prompts' loop records (`Ort`), which is why the prompt is kept.
     pending: Arc<std::sync::Mutex<Vec<(platform_api::BackgroundTaskHandle, String)>>>,
+    /// The connection's event sink, used at fire time to announce the wakeup
+    /// (binary `onFireTask`'s transcript append) and, after quiet ticks, the
+    /// no-op fold's streak line. `None` ⇒ the wakeup fires silently (tests, and
+    /// any host assembled without a sink).
+    events: Option<Arc<dyn ClientEventSink>>,
 }
 
 impl MsgQueueWakeupScheduler {
@@ -176,6 +181,7 @@ impl MsgQueueWakeupScheduler {
             runtime,
             loop_runtime: Arc::new(tool_cron::LoopRuntime::default()),
             pending: Arc::new(std::sync::Mutex::new(Vec::new())),
+            events: None,
         }
     }
 
@@ -191,7 +197,17 @@ impl MsgQueueWakeupScheduler {
             runtime,
             loop_runtime,
             pending: Arc::new(std::sync::Mutex::new(Vec::new())),
+            events: None,
         }
+    }
+
+    /// Announce each firing wakeup on `events` (binary `onFireTask`). Additive
+    /// over [`Self::new`] / [`Self::with_loop_runtime`]; without it a wakeup is
+    /// delivered silently, as it was before the no-op fold landed.
+    #[must_use]
+    pub fn with_event_sink(mut self, events: Arc<dyn ClientEventSink>) -> Self {
+        self.events = Some(events);
+        self
     }
 }
 
@@ -201,6 +217,8 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
         let queue = self.queue.clone();
         let runtime = self.runtime.clone();
         let pending = self.pending.clone();
+        let events = self.events.clone();
+        let loop_runtime = self.loop_runtime.clone();
         // The task body consumes `prompt`; keep the un-resolved text for the
         // pending list so `cancel_pending` can report it back for `Ort`.
         let prompt_for_pending = prompt.clone();
@@ -220,6 +238,31 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .retain(|(h, _)| h.task_id != id);
+                    }
+                    // PARITY `onFireTask`'s loop branch (`s.replace(f => D(f,
+                    // u, U(t), l))`): announce the resume, carrying the no-op
+                    // streak the ticks before this one accumulated. Read HERE,
+                    // after the sleep — the streak is settled at the turn edge
+                    // of the tick that armed this wakeup, which is long past by
+                    // the time it fires.
+                    if let Some(sink) = &events {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                        let (head, companion) =
+                            tool_cron::loop_wakeup_lines(now_ms, loop_runtime.noop_streak());
+                        sink.emit(ClientEvent::SystemNotice {
+                            message: head,
+                            is_error: false,
+                        })
+                        .await;
+                        if let Some(companion) = companion {
+                            sink.emit(ClientEvent::SystemNotice {
+                                message: companion,
+                                is_error: false,
+                            })
+                            .await;
+                        }
                     }
                     // Resolve the `<<autonomous-loop-dynamic>>` sentinel at fire
                     // time (else passthrough).
@@ -509,6 +552,27 @@ impl OrchestratorTurnDriver {
             && self.cancel_reason.as_ref().is_none_or(|reason| {
                 reason.get() == orchestrator::prompt::mid_turn_input::CancelReason::UserInterrupt
             });
+        // NO-OP FOLD (binary `D()` → `v()`): settle the tick that just ended
+        // into the `/loop` no-op streak. The oracle decides this at the NEXT
+        // fire by walking the transcript span since the last one; LingXi
+        // delivers a wakeup as one queued command, so the span IS this turn and
+        // the verdict is taken here. Runs BEFORE the two edges below because
+        // both consume the in-flight tick marker `settle_loop_tick` reads.
+        //
+        // Only the disturbances the driver can see are marked: an abort by the
+        // user (`tool_abort`) and one by a `Now` command (`queued_command`).
+        // The oracle's `blocking_system_in_span` / `tool_denial` /
+        // `split_tool_pair` / `foreign_user_input` arms have no signal at this
+        // seam yet, so a tick disturbed only in those ways still folds if the
+        // model reported `noop: true`.
+        if let Some(runtime) = self.loop_runtime.as_ref() {
+            if user_aborted {
+                runtime.veto_tick(tool_cron::LoopFoldVeto::ToolAbort);
+            } else if cancel_probe.is_cancelled() {
+                runtime.veto_tick(tool_cron::LoopFoldVeto::QueuedCommand);
+            }
+            tool_cron::settle_loop_tick(runtime);
+        }
         if let Some(scheduler) = self.wakeup_scheduler.as_ref() {
             if user_aborted {
                 tool_cron::cancel_dynamic_loop_on_user_abort(scheduler).await;
@@ -1127,6 +1191,67 @@ mod tests {
         );
         assert!(loop_runtime.loop_ended(), "user abort ends the loop");
         telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
+        loop_runtime.reset();
+    }
+
+    /// PARITY `D()` + `v()`: a tick the model closed with `noop: true` folds
+    /// into the streak, and the next wakeup renders it.
+    #[tokio::test]
+    async fn a_quiet_loop_tick_folds_into_the_streak() {
+        let _serial = LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
+        loop_runtime.begin_tick("<<autonomous-loop-dynamic>>".to_string());
+        // What `ScheduleWakeup({noop:true})` records during the tick.
+        loop_runtime.mark_noop_reported(true);
+
+        let rec = Arc::new(KaRec {
+            calls: std::sync::Mutex::new(Vec::new()),
+            runtime: loop_runtime.clone(),
+        });
+        let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
+        let driver = build_driver(streaming_one_turn()).with_wakeup_scheduler(sched);
+        driver.run_turn("loop tick".to_string()).await;
+
+        let (streak, _) = loop_runtime
+            .noop_streak()
+            .expect("a quiet tick must fold into the streak");
+        assert_eq!(streak, 1);
+        let (head, companion) = tool_cron::loop_wakeup_lines(0, loop_runtime.noop_streak());
+        assert!(head.contains("1 no-op tick since"), "{head}");
+        assert!(companion.is_some());
+        loop_runtime.reset();
+    }
+
+    /// PARITY the `tool_abort` veto: a tick the user interrupted is not quiet,
+    /// whatever the model claimed before the interrupt.
+    #[tokio::test]
+    async fn a_user_aborted_loop_tick_vetoes_the_fold() {
+        let _serial = LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
+        loop_runtime.begin_tick("<<autonomous-loop-dynamic>>".to_string());
+        loop_runtime.mark_noop_reported(true);
+
+        let rec = Arc::new(KaRec {
+            calls: std::sync::Mutex::new(Vec::new()),
+            runtime: loop_runtime.clone(),
+        });
+        let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
+        let driver = build_driver(streaming_one_turn()).with_wakeup_scheduler(sched);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        driver
+            .run_turn_with_cancel("loop tick".to_string(), cancel)
+            .await;
+
+        assert_eq!(
+            loop_runtime.noop_streak(),
+            None,
+            "an interrupted tick must not count as quiet"
+        );
         loop_runtime.reset();
     }
 

@@ -32,7 +32,8 @@ pub use autonomous_loop::{
     mark_loop_rescheduled, note_loop_invoked, read_loop_file, reset_autonomous_loop_delivered,
     reset_loop_runtime_state, resolve_autonomous_loop_fire, resolve_loop_default_fire,
     resolve_loop_file_fire, set_loop_consecutive_keepalives, take_loop_rescheduled,
-    take_loop_tick_in_flight_prompt, LoopFile, LoopRuntime, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
+    take_loop_tick_in_flight_prompt, LoopFile, LoopFoldOutcome, LoopFoldVeto, LoopRuntime,
+    AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
     AUTONOMOUS_LOOP_PREAMBLE, AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL,
     LOOP_FILE_SENTINEL,
 };
@@ -42,7 +43,8 @@ pub use run_due::{
     run_due_jobs, CronJobFirer, FireStatus, FiredJob,
 };
 pub use schedule::{
-    human_schedule, iso_8601_utc, local_date_time_string, parse_cron, CronExpression, CronField, CronParseError,
+    human_schedule, iso_8601_utc, local_date_time_string, parse_cron, short_local_timestamp,
+    CronExpression, CronField, CronParseError,
 };
 pub use scheduler::{
     register_live_job, session_jobs, task_registry_identity, unregister_live_job, CronScheduler,

@@ -33,7 +33,8 @@ pub use cron::{
     mark_loop_rescheduled, read_loop_file, reset_autonomous_loop_delivered,
     reset_loop_runtime_state, resolve_autonomous_loop_fire, resolve_loop_default_fire,
     resolve_loop_file_fire, set_loop_consecutive_keepalives, take_loop_rescheduled,
-    take_loop_tick_in_flight_prompt, LoopFile, LoopRuntime, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
+    take_loop_tick_in_flight_prompt, LoopFile, LoopFoldOutcome, LoopFoldVeto, LoopRuntime,
+    AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
     AUTONOMOUS_LOOP_PREAMBLE, AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL,
     LOOP_FILE_SENTINEL,
 };
@@ -43,9 +44,10 @@ pub use remote_trigger::{ClaudeAiAuthProvider, RemoteTriggerTool};
 pub use schedule_cron::CronCreateTool;
 pub use wakeup::{
     arm_keepalive, arm_keepalive_with_runtime, build_prompt as build_schedule_wakeup_prompt,
-    cancel_dynamic_loop_on_user_abort, clamp_delay_seconds, maybe_arm_keepalive,
-    maybe_arm_keepalive_with_runtime, note_loop_invoked, resolve_wakeup_prompt,
-    schedule_dynamic_wakeup, stop_dynamic_loop, wakeup_target, KeepaliveOutcome,
+    cancel_dynamic_loop_on_user_abort, clamp_delay_seconds, loop_wakeup_lines,
+    maybe_arm_keepalive, maybe_arm_keepalive_with_runtime, note_loop_invoked,
+    resolve_wakeup_prompt, schedule_dynamic_wakeup, settle_loop_tick, stop_dynamic_loop,
+    wakeup_target, KeepaliveOutcome,
     PromptCacheTtl, ScheduleWakeupTool, WakeupScheduler, WakeupSchedulerCell,
     SCHEDULE_WAKEUP_TOOL_NAME,
 };

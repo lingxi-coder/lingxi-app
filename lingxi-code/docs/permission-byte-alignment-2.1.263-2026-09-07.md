@@ -123,10 +123,35 @@ be checked against the read block". Nothing in the port mentions it.
   `(PermissionRequest decision must be {"behavior": "allow"} or {"behavior":
   "deny", "message": "..."})`; `PermissionRequest allow ignored: a confined
   session takes grants only from its command line`.
-- **Plan-mode approval / consent floor** (28) — `Plan-mode artifact consent
-  floor`, "in plan mode the approval must come from the user, not the
-  auto-permission classifier", artifact delete/upload refusals from plan mode,
-  `Only the team lead can approve plans`.
+- **Plan-mode approval / consent floor** (28) — scoped 2026-09-08, NOT started.
+  `Plan-mode artifact consent floor`, "in plan mode the approval must come from
+  the user, not the auto-permission classifier", artifact delete/upload refusals
+  from plan mode, `Only the team lead can approve plans`.
+
+  🚨 **Zero substrate**: all four probe strings have 0 hits in the port, and the
+  feature spans plan mode × artifacts × teammates × the auto-mode classifier —
+  three of which this crate does not own. This is a cross-subsystem feature, not
+  a permission-crate patch, and it should be planned as one rather than
+  retro-fitted from the string list.
+
+- **`sandbox.filesystem` deny merge** (11) — scoped 2026-09-08, NOT started, but
+  the substrate DOES exist and this is the tractable next item:
+
+  * `FilesystemRestrictionConfig` already has `deny_read` / `deny_write`
+    (`sandbox/src/runtime_config.rs:165-168`) and both are already consumed —
+    `platforms/posix/src/sandbox.rs:211` enforces `deny_write`, and
+    `tools/shell/src/prompt.rs:444-480` reports both to the model.
+  * What is missing is the PRODUCER. The oracle folds permission deny rules into
+    those lists while walking settings sources: an `Edit(...)` deny rule feeds
+    the write-deny list and a `Read(...)` deny rule feeds the read-deny list,
+    merged with `sandbox.filesystem.denyWrite` / `denyRead` from the same tier.
+    `permission::read_deny_exclude_globs` is the closest existing analogue
+    (Read-deny rules → search-exclude globs) and is the model to follow.
+  * Also missing: the two schema descriptions (`Additional paths to deny
+    reading|writing within the sandbox. Merged with paths from Read(...)|Edit(...)
+    deny permission rules.`) and the disabled-source log line `Sandbox: ignoring
+    permission rules and sandbox.filesystem entries from disabled setting source
+    ${source}`.
 - **Sandbox filesystem isolation** (11) — `sandbox.filesystem` additional
   read/write deny paths merged with `Read(...)`/`Edit(...)` deny rules;
   enterprise-policy-requires-sandbox on Windows; `Sandbox: ignoring permission

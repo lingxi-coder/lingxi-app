@@ -709,6 +709,47 @@ impl TaskRegistryHandle for TaskRegistry {
         TaskRegistry::kill_background_shells_for_agent(self, agent_id).await
     }
 
+    async fn register_foreground_bash(
+        &self,
+        task_id: &str,
+        registration: platform_api::task_registry::BackgroundBashRegistration,
+        auto_background_armed: bool,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::register_foreground_bash(self, task_id, registration, auto_background_armed)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+
+    async fn unregister_foreground_bash(&self, task_id: &str) {
+        TaskRegistry::unregister_foreground_bash(self, task_id).await;
+    }
+
+    async fn bind_background_requester(
+        &self,
+        task_id: &str,
+        requester: std::sync::Arc<dyn platform_api::task_registry::TaskBackgrounder>,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::bind_background_requester(self, task_id, requester)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+
+    async fn background_task(&self, task_id: &str) -> bool {
+        TaskRegistry::background_task(self, task_id).await
+    }
+
+    async fn background_task_for_tool_use(&self, tool_use_id: &str) -> bool {
+        TaskRegistry::background_task_for_tool_use(self, tool_use_id).await
+    }
+
+    async fn background_all_tasks(&self) -> usize {
+        TaskRegistry::background_all_tasks(self).await
+    }
+
+    async fn has_backgroundable_tasks(&self) -> bool {
+        TaskRegistry::has_backgroundable_tasks(self).await
+    }
+
     async fn settle_background_bash(
         &self,
         id: &str,
@@ -1312,9 +1353,9 @@ mod tests {
             command: "cargo build --release".into(),
             pid: None,
             exit_code: None,
-                cwd: None,
-                is_backgrounded: None,
-            });
+            cwd: None,
+            is_backgrounded: None,
+        });
         registry.insert_state_for_test(state).await;
 
         let h: &dyn TaskRegistryHandle = registry.as_ref();

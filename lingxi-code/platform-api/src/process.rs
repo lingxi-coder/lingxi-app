@@ -295,6 +295,19 @@ pub struct BackgroundTaskBinding {
     /// task record (claude-code `Ger`, which sets the terminal status from
     /// `Fpt(result)` and enqueues the completion `<task-notification>`).
     pub on_exit: Option<Arc<dyn BackgroundExitSink>>,
+    /// Fired to move a still-running FOREGROUND child to the background on
+    /// demand — the port of claude-code `I_t`'s first act, `t.background(e)`,
+    /// where `t` is the live `shellCommand`.
+    ///
+    /// The runner waits on this alongside the deadline; either one takes the
+    /// same move-to-background path, so an on-demand request and a timeout
+    /// produce the same task record and the same output file. `None` means the
+    /// command cannot be backgrounded on request (nothing holds the other end).
+    ///
+    /// One permit is enough: [`tokio::sync::Notify::notify_one`] stores a
+    /// permit when no waiter is parked yet, so a request that races the
+    /// runner's first poll is still observed rather than dropped.
+    pub on_demand: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl std::fmt::Debug for BackgroundTaskBinding {
@@ -303,6 +316,7 @@ impl std::fmt::Debug for BackgroundTaskBinding {
             .field("task_id", &self.task_id)
             .field("output_path", &self.output_path)
             .field("on_exit", &self.on_exit.is_some())
+            .field("on_demand", &self.on_demand.is_some())
             .finish()
     }
 }

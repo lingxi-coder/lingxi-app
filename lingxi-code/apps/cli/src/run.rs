@@ -1183,6 +1183,43 @@ async fn dispatch_control_request(
             }
             writer.reply_success(request_id, Some(json!({})));
         }
+        "background_tasks" => {
+            // claude-code's SDK/bridge `background_tasks` request:
+            // `if(D.toolUseId!==void 0){let ue=Ode(D.toolUseId,F);Xe(r,{backgrounded:ue})}
+            //  else zM(F),Xe(r,{})`.
+            //
+            // `K4t` validation runs FIRST, before the disabled gate: absent,
+            // null or empty means "background everything", a string means
+            // "background that one tool call", and any other JSON type is a
+            // hard error.
+            enum Target {
+                All,
+                One(String),
+                Invalid,
+            }
+            let target = match field("tool_use_id") {
+                None | Some(Value::Null) => Target::All,
+                Some(Value::String(id)) if id.is_empty() => Target::All,
+                Some(Value::String(id)) => Target::One(id.clone()),
+                Some(_) => Target::Invalid,
+            };
+            match target {
+                Target::Invalid => {
+                    writer.reply_error(request_id, "background_tasks: tool_use_id must be a string")
+                }
+                _ if platform_api::env::background_tasks_disabled() => {
+                    writer.reply_error(request_id, "Background tasks are disabled in this session.")
+                }
+                Target::One(id) => {
+                    let backgrounded = task_registry.background_task_for_tool_use(&id).await;
+                    writer.reply_success(request_id, Some(json!({"backgrounded": backgrounded})));
+                }
+                Target::All => {
+                    task_registry.background_all_tasks().await;
+                    writer.reply_success(request_id, Some(json!({})));
+                }
+            }
+        }
         "register_repo_root" => {
             let request_value = frame.get("request").cloned().unwrap_or_else(|| json!({}));
             match serde_json::from_value::<platform_api::RegisterRepoRootRequest>(request_value) {

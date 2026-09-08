@@ -418,6 +418,133 @@ async fn an_agents_background_shell_defers_that_agents_rest_notification() {
     );
 }
 
+/// A stub for the live command behind an armed row — claude-code keeps the real
+/// `shellCommand` there and calls `t.background(e)` on it.
+#[derive(Default)]
+struct RecordingBackgrounder {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl platform_api::task_registry::TaskBackgrounder for RecordingBackgrounder {
+    async fn background(&self) {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+async fn arm_foreground(
+    registry: &TaskRegistry,
+    label: &str,
+) -> (String, std::sync::Arc<RecordingBackgrounder>) {
+    let (id, _) = registry.allocate_bash_output().await.unwrap();
+    registry
+        .register_foreground_bash(
+            &id,
+            platform_api::task_registry::BackgroundBashRegistration {
+                command: format!("sleep 60 # {label}"),
+                description: label.into(),
+                tool_use_id: Some(format!("toolu_{label}")),
+                cwd: None,
+                creator_agent_id: None,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    let requester = std::sync::Arc::new(RecordingBackgrounder::default());
+    registry
+        .bind_background_requester(&id, requester.clone())
+        .await
+        .unwrap();
+    (id, requester)
+}
+
+/// claude-code `U6t` after `cnr` ms, then `W6t` when the command finishes in the
+/// foreground: an armed row is visible while the command runs and is GONE once
+/// it finishes there. A row left behind would sit `running` forever and
+/// eventually narrate a completion for a command the model was never told had
+/// started.
+#[tokio::test]
+async fn an_armed_foreground_row_is_visible_and_then_withdrawn() {
+    let (_dir, registry) = make_registry();
+    let (id, _) = arm_foreground(&registry, "slow").await;
+
+    let state = registry.get(&id).await.expect("armed row is addressable");
+    assert_eq!(state.base().status, TaskStatus::Running);
+    assert!(
+        matches!(&state, TaskState::LocalBash(bash) if bash.is_backgrounded == Some(false)),
+        "an armed row is NOT a background task",
+    );
+
+    registry.unregister_foreground_bash(&id).await;
+    assert!(
+        registry.get(&id).await.is_none(),
+        "the row must be withdrawn when the command finishes in the foreground",
+    );
+    assert!(
+        registry.take_pending_task_notifications().await.is_empty(),
+        "and withdrawing it must not narrate a completion",
+    );
+}
+
+/// claude-code `Wer`/`I_t`: ask the live command to detach FIRST, then flip
+/// `isBackgrounded`. A row that was already backgrounded is not asked twice.
+#[tokio::test]
+async fn backgrounding_an_armed_row_asks_the_command_then_flips_the_flag() {
+    let (_dir, registry) = make_registry();
+    let (id, requester) = arm_foreground(&registry, "slow").await;
+
+    assert!(registry.background_task(&id).await);
+    assert_eq!(
+        requester.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the live command must actually be asked to detach",
+    );
+    let state = registry.get(&id).await.unwrap();
+    assert!(matches!(&state, TaskState::LocalBash(bash) if bash.is_backgrounded == Some(true)));
+
+    // Idempotent: `Upt` excludes an already-backgrounded row.
+    assert!(!registry.background_task(&id).await);
+    assert_eq!(
+        requester.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a second request must not reach the command again",
+    );
+
+    // And `W6t` leaves it alone now — it owns a live child.
+    registry.unregister_foreground_bash(&id).await;
+    assert!(
+        registry.get(&id).await.is_some(),
+        "a backgrounded row must survive the foreground withdrawal",
+    );
+}
+
+/// claude-code `zM` / `H_t` / `Ode`.
+#[tokio::test]
+async fn background_all_moves_every_armed_row_and_tool_use_targets_one() {
+    let (_dir, registry) = make_registry();
+    let (first, _) = arm_foreground(&registry, "one").await;
+    let (second, _) = arm_foreground(&registry, "two").await;
+
+    assert!(registry.has_backgroundable_tasks().await);
+
+    // `Ode` moves exactly the row owning that tool_use_id.
+    assert!(registry.background_task_for_tool_use("toolu_one").await);
+    assert!(!registry.background_task_for_tool_use("toolu_missing").await);
+    let one = registry.get(&first).await.unwrap();
+    assert!(matches!(&one, TaskState::LocalBash(b) if b.is_backgrounded == Some(true)));
+    let two = registry.get(&second).await.unwrap();
+    assert!(
+        matches!(&two, TaskState::LocalBash(b) if b.is_backgrounded == Some(false)),
+        "the other row must be untouched",
+    );
+
+    // `zM` then takes what is left, and nothing remains backgroundable.
+    assert_eq!(registry.background_all_tasks().await, 1);
+    assert!(!registry.has_backgroundable_tasks().await);
+    assert_eq!(registry.background_all_tasks().await, 0);
+}
+
 #[tokio::test]
 async fn a_finishing_agent_stops_only_its_own_background_shells() {
     // The Bash tool promises a synchronous subagent that a command it

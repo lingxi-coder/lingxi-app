@@ -41,6 +41,13 @@ pub struct TaskRegistry {
     /// participate in the same teardown path instead of dropping the only
     /// synchronous cleanup handle.
     cleanups: Arc<tokio::sync::Mutex<HashMap<String, TaskCleanup>>>,
+    /// Per-task handles that move a still-running FOREGROUND command to the
+    /// background (claude-code `I_t`'s `t.background(e)`). Separate from
+    /// `cleanups` because backgrounding is not teardown: the child keeps
+    /// running, it just stops being awaited.
+    backgrounders: Arc<
+        tokio::sync::Mutex<HashMap<String, Arc<dyn platform_api::task_registry::TaskBackgrounder>>>,
+    >,
     /// Handler-spawned task ids → their [`TaskType`], so [`Self::kill`] can
     /// dispatch teardown to the owning handler ([`Task::kill`]). Distinct from
     /// `handles`, which tracks the [`create`](Self::create) /
@@ -263,6 +270,7 @@ impl TaskRegistry {
             handlers: HashMap::new(),
             handles: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cleanups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            backgrounders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             spawned: Arc::new(RwLock::new(HashMap::new())),
             runtime,
             fs,
@@ -679,6 +687,33 @@ impl TaskRegistry {
         cwd: Option<String>,
         creator_agent_id: Option<protocol::AgentId>,
     ) -> Result<(String, std::path::PathBuf), TaskError> {
+        self.register_bash_row(
+            id,
+            command,
+            description,
+            tool_use_id,
+            cwd,
+            creator_agent_id,
+            true,
+        )
+        .await
+    }
+
+    /// Shared row builder for the two `local_bash` registration entry points.
+    /// `backgrounded` is claude-code's `isBackgrounded`: `true` for `Xne` (an
+    /// explicit background spawn or a timed-out command), `false` for `U6t`
+    /// (the 2 s foreground arming).
+    #[allow(clippy::too_many_arguments)]
+    async fn register_bash_row(
+        &self,
+        id: String,
+        command: String,
+        description: String,
+        tool_use_id: Option<String>,
+        cwd: Option<String>,
+        creator_agent_id: Option<protocol::AgentId>,
+        backgrounded: bool,
+    ) -> Result<(String, std::path::PathBuf), TaskError> {
         let path = self
             .output_manager
             .path_for(&id)
@@ -706,9 +741,11 @@ impl TaskRegistry {
             pid: None,
             exit_code: None,
             cwd,
-            // Registration only happens for a shell that is actually being
+            // This entry point only fires for a shell that is actually being
             // backgrounded (claude-code `Xne` registers `isBackgrounded: true`).
-            is_backgrounded: Some(true),
+            // The 2 s foreground arming registers `false` through
+            // [`Self::register_foreground_bash`].
+            is_backgrounded: Some(backgrounded),
         });
         self.tasks.write().await.insert(id.clone(), state);
         self.fire_task_created(&id, TaskType::LocalBash, &description_for_hook)
@@ -747,6 +784,170 @@ impl TaskRegistry {
         });
         self.cleanups.lock().await.insert(task_id, cleanup);
         Ok(())
+    }
+
+    /// Register a still-running FOREGROUND shell (claude-code `U6t`, fired by
+    /// the Bash poll loop once the command has run for `cnr` = 2000 ms).
+    ///
+    /// The row is `running` with `is_backgrounded = Some(false)`: visible to
+    /// `/tasks` and addressable by Ctrl+B / background-all, but not a background
+    /// task. [`Self::unregister_foreground_bash`] withdraws it again when the
+    /// command finishes in the foreground.
+    ///
+    /// # Errors
+    /// Returns [`TaskError`] if the record cannot be published.
+    pub async fn register_foreground_bash(
+        &self,
+        task_id: &str,
+        registration: platform_api::task_registry::BackgroundBashRegistration,
+        auto_background_armed: bool,
+    ) -> Result<(), TaskError> {
+        // `autoBackgroundArmed` rides on the record in claude-code purely so the
+        // UI can say whether the deadline will background or kill. Nothing in
+        // this engine reads it yet, so it is not stored — recording a field no
+        // consumer reads would be the "named, computed, never wired" shape.
+        let _ = auto_background_armed;
+        self.register_bash_row(
+            task_id.to_string(),
+            registration.command,
+            registration.description,
+            registration.tool_use_id,
+            registration.cwd,
+            registration.creator_agent_id,
+            false,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Withdraw an armed foreground row because the command finished in the
+    /// foreground.
+    ///
+    /// claude-code `W6t`: `if(!bp(o)||o.isBackgrounded||o.notified) return;
+    /// r.remove(e)`. A row that was backgrounded in the meantime is left alone —
+    /// it owns a real child now and will produce its own completion
+    /// notification.
+    pub async fn unregister_foreground_bash(&self, task_id: &str) {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        let Some(TaskState::LocalBash(bash)) = map.get(&task_id) else {
+            return;
+        };
+        if bash.is_backgrounded == Some(true) || bash.base.notified {
+            return;
+        }
+        map.remove(&task_id);
+    }
+
+    /// Attach the handle that moves an armed foreground shell to the background
+    /// on demand (claude-code holds the live `shellCommand` on the record and
+    /// calls `t.background(e)`).
+    ///
+    /// # Errors
+    /// Returns [`TaskError::NotFound`] when the id is unknown.
+    pub async fn bind_background_requester(
+        &self,
+        task_id: &str,
+        requester: Arc<dyn platform_api::task_registry::TaskBackgrounder>,
+    ) -> Result<(), TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        if !self.tasks.read().await.contains_key(&task_id) {
+            return Err(TaskError::NotFound(task_id));
+        }
+        self.backgrounders.lock().await.insert(task_id, requester);
+        Ok(())
+    }
+
+    /// claude-code `Upt` — is this task backgroundable right now?
+    ///
+    /// For a shell: not already backgrounded, and there is a live command behind
+    /// it (`Boolean(e.shellCommand)`; here, a bound requester). A terminal row
+    /// has nothing to background.
+    fn shell_is_backgroundable(state: &TaskState) -> bool {
+        matches!(state, TaskState::LocalBash(bash)
+            if bash.is_backgrounded != Some(true) && !bash.base.status.is_terminal())
+    }
+
+    /// claude-code `H_t` — whether anything can be backgrounded, i.e. whether
+    /// the Ctrl+B affordance should be offered at all.
+    pub async fn has_backgroundable_tasks(&self) -> bool {
+        let map = self.tasks.read().await;
+        let requesters = self.backgrounders.lock().await;
+        map.iter()
+            .any(|(id, state)| Self::shell_is_backgroundable(state) && requesters.contains_key(id))
+    }
+
+    /// claude-code `Wer` → `I_t` — move one still-running foreground shell to
+    /// the background. Returns whether it moved.
+    ///
+    /// Order matters and is the oracle's: ask the command to detach FIRST
+    /// (`if(!t.background(e)) return!1`), and only then flip `isBackgrounded`.
+    /// Flipping first would leave a row claiming to be a background task if the
+    /// request could not be delivered.
+    pub async fn background_task(&self, task_id: &str) -> bool {
+        let task_id = self.canonical_or_raw(task_id).await;
+        {
+            let map = self.tasks.read().await;
+            match map.get(&task_id) {
+                Some(state) if Self::shell_is_backgroundable(state) => {}
+                _ => return false,
+            }
+        }
+        let Some(requester) = self.backgrounders.lock().await.get(&task_id).cloned() else {
+            return false;
+        };
+        requester.background().await;
+        let mut map = self.tasks.write().await;
+        if let Some(TaskState::LocalBash(bash)) = map.get_mut(&task_id) {
+            bash.is_backgrounded = Some(true);
+        }
+        true
+    }
+
+    /// claude-code `Ode` — move the task that owns `tool_use_id` to the
+    /// background. Returns whether it moved.
+    ///
+    /// The oracle scans for the FIRST row with that `toolUseId` and returns
+    /// early from the scan whether or not it could be backgrounded, so a
+    /// terminal row does not fall through to some other task that happens to
+    /// share the id.
+    pub async fn background_task_for_tool_use(&self, tool_use_id: &str) -> bool {
+        let target = {
+            let map = self.tasks.read().await;
+            map.iter()
+                .find(|(_, state)| state.base().tool_use_id.as_deref() == Some(tool_use_id))
+                .map(|(id, state)| (id.clone(), Self::shell_is_backgroundable(state)))
+        };
+        match target {
+            Some((id, true)) => self.background_task(&id).await,
+            _ => false,
+        }
+    }
+
+    /// claude-code `zM` — move everything backgroundable to the background and
+    /// report how many moved.
+    ///
+    /// The oracle runs two passes over the SAME snapshot, `local_bash` first and
+    /// every other type second. Only the shell pass exists here; the agent pass
+    /// (`s9`) needs foreground agents to be registered at all, which they are
+    /// not yet — see `AGT-04` in `docs/task-parity-audit-2026-09-07.md`. The
+    /// two-pass shape is kept so adding it is an insertion, not a rewrite.
+    pub async fn background_all_tasks(&self) -> usize {
+        let shells: Vec<String> = {
+            let map = self.tasks.read().await;
+            map.iter()
+                .filter(|(_, state)| Self::shell_is_backgroundable(state))
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        let mut moved = 0;
+        for id in shells {
+            if self.background_task(&id).await {
+                moved += 1;
+            }
+        }
+        // Pass 2 (`s9` over non-`local_bash` rows) lands with AGT-04.
+        moved
     }
 
     /// Kill the background shells a finishing agent started, and report how

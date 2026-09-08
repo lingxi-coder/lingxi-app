@@ -103,6 +103,19 @@ pub trait TaskKiller: Send + Sync {
     async fn kill(&self);
 }
 
+/// Moves a still-running FOREGROUND task to the background on request.
+///
+/// The port of claude-code `I_t`'s first act, `t.background(e)` on the live
+/// `shellCommand`. The registry holds one of these per armed foreground row so
+/// Ctrl+B, background-all and the SDK `background_tasks` request can reach a
+/// child the registry did not spawn.
+#[async_trait]
+pub trait TaskBackgrounder: Send + Sync {
+    /// Ask the in-flight command to detach. Best-effort and idempotent: the
+    /// runner takes the same path a timeout would.
+    async fn background(&self);
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskListFilter {
     /// Optional status filter — one of the 5 byte-locked status strings.
@@ -776,6 +789,87 @@ pub trait TaskRegistryHandle: Send + Sync {
         let _ = task_id;
     }
 
+    /// Register a still-running FOREGROUND shell so it is addressable
+    /// (claude-code `U6t`, called from the Bash poll loop once the command has
+    /// been running for `cnr` = 2000 ms).
+    ///
+    /// The row is `status:"running"` with `isBackgrounded:false`. It exists so
+    /// `/tasks`, Ctrl+B and background-all can see a long-running foreground
+    /// command; it is NOT a background task and must be withdrawn by
+    /// [`Self::unregister_foreground_bash`] when the command finishes in the
+    /// foreground, or the model would be told a command "completed" that it was
+    /// never told had started.
+    ///
+    /// `auto_background_armed` records whether the deadline would background
+    /// this command rather than kill it, which the row carries for the UI.
+    ///
+    /// # Errors
+    /// Returns [`TaskRegistryError`] when no registry is wired.
+    async fn register_foreground_bash(
+        &self,
+        task_id: &str,
+        registration: BackgroundBashRegistration,
+        auto_background_armed: bool,
+    ) -> Result<(), TaskRegistryError> {
+        let _ = (task_id, registration, auto_background_armed);
+        Err(TaskRegistryError::Internal(
+            "foreground bash registration unwired".into(),
+        ))
+    }
+
+    /// Withdraw an armed foreground row because the command finished in the
+    /// foreground (claude-code `W6t`: `if(!bp(o)||o.isBackgrounded||o.notified)
+    /// return; r.remove(e)`).
+    ///
+    /// A row that was backgrounded in the meantime is left alone — it is a real
+    /// background task now and owns its own completion notification.
+    async fn unregister_foreground_bash(&self, task_id: &str) {
+        let _ = task_id;
+    }
+
+    /// Attach the handle that moves an armed foreground shell to the background
+    /// on demand.
+    ///
+    /// # Errors
+    /// Returns [`TaskRegistryError`] when the task is unknown or no registry is
+    /// wired.
+    async fn bind_background_requester(
+        &self,
+        task_id: &str,
+        requester: std::sync::Arc<dyn TaskBackgrounder>,
+    ) -> Result<(), TaskRegistryError> {
+        let _ = (task_id, requester);
+        Err(TaskRegistryError::Internal(
+            "background requester binding unwired".into(),
+        ))
+    }
+
+    /// Move one task to the background (claude-code `Wer` for `local_bash`,
+    /// `s9` for everything else). Returns whether anything moved.
+    async fn background_task(&self, task_id: &str) -> bool {
+        let _ = task_id;
+        false
+    }
+
+    /// Move the task owning `tool_use_id` to the background (claude-code
+    /// `Ode`). Returns whether anything moved.
+    async fn background_task_for_tool_use(&self, tool_use_id: &str) -> bool {
+        let _ = tool_use_id;
+        false
+    }
+
+    /// Move every backgroundable task to the background (claude-code `zM`) and
+    /// report how many moved.
+    async fn background_all_tasks(&self) -> usize {
+        0
+    }
+
+    /// Whether anything is currently backgroundable (claude-code `H_t`), i.e.
+    /// whether a Ctrl+B hint should be offered at all.
+    async fn has_backgroundable_tasks(&self) -> bool {
+        false
+    }
+
     /// Attach the killer that terminates a background shell's OS process, so
     /// `TaskStop` and session teardown can reach a child the registry did not
     /// spawn itself.
@@ -995,7 +1089,10 @@ mod tests {
         async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
             unimplemented!("not exercised by this test")
         }
-        async fn list(&self, _filter: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+        async fn list(
+            &self,
+            _filter: TaskListFilter,
+        ) -> Result<Vec<TaskRecord>, TaskRegistryError> {
             Ok(self.tasks.clone())
         }
         async fn update(
@@ -1005,7 +1102,11 @@ mod tests {
         ) -> Result<TaskRecord, TaskRegistryError> {
             unimplemented!("not exercised by this test")
         }
-        async fn set_status(&self, _id: &str, _status: &str) -> Result<TaskRecord, TaskRegistryError> {
+        async fn set_status(
+            &self,
+            _id: &str,
+            _status: &str,
+        ) -> Result<TaskRecord, TaskRegistryError> {
             unimplemented!("not exercised by this test")
         }
         async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {

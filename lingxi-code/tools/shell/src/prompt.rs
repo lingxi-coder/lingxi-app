@@ -115,7 +115,9 @@ fn is_env_truthy(name: &str) -> bool {
 /// SCHEMA, which drops the `run_in_background` property entirely when background
 /// tasks are off (oracle `egm`: `WA() ? Qhm().omit({run_in_background:!0, …}) : …`).
 pub(crate) fn background_tasks_disabled() -> bool {
-    is_env_truthy("LINGXI_DISABLE_BACKGROUND_TASKS")
+    // Single source of truth: the SDK `background_tasks` control request in
+    // `apps/cli` reads the same gate and cannot reach this crate.
+    platform_api::env::background_tasks_disabled()
 }
 
 /// Port of `getBackgroundUsageNote` (`prompt.ts:35`). Returns `None` when

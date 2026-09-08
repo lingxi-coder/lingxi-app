@@ -195,6 +195,23 @@ const STDERR_FILE_PREFIX: &[u8] = b"[stderr] ";
 /// Exit code reported for a command killed at its deadline because it was not
 /// eligible to be moved to the background (claude-code `fAt = 143`, the shell's
 /// SIGTERM code).
+/// Why the foreground wait loop stopped.
+///
+/// The port of claude-code's two exits from the `Wes` poll loop: the child
+/// finished, the deadline fired, or something asked for the child to be
+/// backgrounded while it was still running (`I_t` → `shellCommand.background`).
+/// The last two share the move-to-background path; only the deadline consults
+/// `shouldAutoBackground`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ForegroundBreak {
+    /// The child exited and both pipes reached EOF.
+    Finished,
+    /// The timeout fired first.
+    Deadline,
+    /// A background request arrived while the child was still running.
+    Requested,
+}
+
 const TIMEOUT_KILL_EXIT_CODE: i32 = 143;
 
 const TASK_OUTPUT_COLLISION_RETRIES: usize = 16;
@@ -907,17 +924,35 @@ impl ProcessRunner for PosixProcess {
 
         let sleep = tokio::time::sleep(timeout);
         tokio::pin!(sleep);
+        // claude-code `I_t` backgrounds a still-running FOREGROUND child by
+        // calling `t.background(e)` on the live `shellCommand`. That request
+        // arrives here, on the same footing as the deadline: whichever fires
+        // first takes the identical move-to-background path below, so an
+        // on-demand background and a timeout produce the same task record and
+        // append to the same output file.
+        let on_demand = cmd
+            .background_task()
+            .and_then(|bound| bound.on_demand.clone());
+        let background_requested = async {
+            match on_demand.as_ref() {
+                Some(notify) => notify.notified().await,
+                // No requester wired: park forever so the branch never fires.
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(background_requested);
 
         // Drive both pipes and the child's exit concurrently, bounded by the
         // deadline. Reading into buffers (rather than `wait_with_output`) keeps
         // the child + its still-open pipes in hand if the deadline fires.
-        let timed_out = loop {
+        let backgrounding = loop {
             if out_done && err_done && exit_status.is_some() {
-                break false;
+                break ForegroundBreak::Finished;
             }
             tokio::select! {
                 biased;
-                () = &mut sleep => break true,
+                () = &mut sleep => break ForegroundBreak::Deadline,
+                () = &mut background_requested => break ForegroundBreak::Requested,
                 r = sout.read_buf(&mut out_buf), if !out_done => {
                     match r {
                         Ok(0) | Err(_) => out_done = true,
@@ -946,7 +981,7 @@ impl ProcessRunner for PosixProcess {
             }
         };
 
-        if !timed_out {
+        if matches!(backgrounding, ForegroundBreak::Finished) {
             let status = exit_status.expect("loop breaks with a status when not timed out");
             return self.completed_foreground_result(
                 &out_buf,
@@ -1020,7 +1055,9 @@ impl ProcessRunner for PosixProcess {
         // off the timer runs `#b(143)` rather than `background()`). The partial
         // output collected so far still comes back, with `timed_out` set, which
         // is the interrupted-result shape the tool layer already renders.
-        if !cmd.auto_background_on_timeout() {
+        // An EXPLICIT request always backgrounds: the caller has already decided,
+        // and `shouldAutoBackground` only ever governed what the DEADLINE does.
+        if matches!(backgrounding, ForegroundBreak::Deadline) && !cmd.auto_background_on_timeout() {
             let _ = kill_tree_force(spawned_pid);
             let _ = child.wait().await;
             return Ok(platform_api::ForegroundRunResult {
@@ -1034,7 +1071,7 @@ impl ProcessRunner for PosixProcess {
             });
         }
 
-        // ===== Timeout → move to background =====
+        // ===== Deadline or on-demand request → move to background =====
         // Open the per-task output through the runner's pinned, no-follow root
         // before handing the live child to a detached reaper. The partial
         // output captured before the deadline is flushed first so a `Read` on
@@ -1917,6 +1954,66 @@ mod streaming_tests {
         assert_eq!(output.stdout, "ok\n");
         assert_eq!(output.stderr.len(), 256 * 1024);
         assert_eq!(sink.stderr.lock().expect("stderr lock").len(), 256 * 1024);
+    }
+
+    /// claude-code `I_t` starts by calling `t.background(e)` on the LIVE
+    /// `shellCommand`, which is how Ctrl+B and background-all reach a command
+    /// that is still running in the foreground. The request lands on the same
+    /// footing as the deadline: same move-to-background path, same task id,
+    /// same output file.
+    #[tokio::test]
+    async fn an_on_demand_request_moves_a_running_foreground_child_to_the_background() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output_path = dir.path().join("armed.output");
+        std::fs::write(&output_path, b"").expect("seed the bound output file");
+        let notify = Arc::new(tokio::sync::Notify::new());
+
+        // A 60 s timeout that will NOT fire: only the request can end this wait,
+        // so a pass cannot be the deadline in disguise.
+        let command = stream_sh("echo started; sleep 60", Duration::from_secs(60))
+            .with_background_task(platform_api::BackgroundTaskBinding {
+                task_id: "btestid01".to_string(),
+                output_path: output_path.clone(),
+                on_exit: None,
+                on_demand: Some(notify.clone()),
+            });
+
+        let requester = notify.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            requester.notify_one();
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            PosixProcess::new().run_foreground_with_output_limit(&command, None),
+        )
+        .await
+        .expect("the request must end the foreground wait well before the deadline")
+        .expect("the run itself must not error");
+
+        let handle = match result.outcome {
+            platform_api::ForegroundOutcome::MovedToBackground(handle) => handle,
+            other => panic!("expected MovedToBackground, got {other:?}"),
+        };
+        // The BOUND identity is reported, not a runner-minted one: an on-demand
+        // background must be addressable by the row that asked for it.
+        assert_eq!(handle.task_id, "btestid01");
+
+        // And the child really is still running, still writing to the bound
+        // file — otherwise this would be a kill wearing a background's clothes.
+        for _ in 0..40 {
+            if std::fs::read(&output_path).is_ok_and(|b| b.windows(7).any(|w| w == b"started")) {
+                let _ = kill_tree_force(handle.pid);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let _ = kill_tree_force(handle.pid);
+        panic!(
+            "the detached child never reached the bound output file: {:?}",
+            std::fs::read_to_string(&output_path)
+        );
     }
 
     #[tokio::test]

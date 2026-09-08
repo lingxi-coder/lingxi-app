@@ -77,6 +77,27 @@ pub fn is_bg_session() -> bool {
     std::env::var("LINGXI_SESSION_KIND").ok().as_deref() == Some("bg")
 }
 
+/// Port of claude-code `areBackgroundTasksDisabled` (2.1.263 `Dl()`;
+/// 2.1.238 `WA()`: `getSettings().backgroundTasksDisabled ||
+/// env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`).
+///
+/// Only the env half is modelled — LingXi has no `backgroundTasksDisabled`
+/// settings key, and the settings half defaults to `false`, so the env check is
+/// the sole observable gate.
+///
+/// This lives here rather than in `tool-shell` because the gate has consumers on
+/// both sides of that crate: the Bash prompt and input schema inside it, and the
+/// SDK `background_tasks` control request in `apps/cli`, which does not depend
+/// on it. Two private copies would drift.
+#[must_use]
+pub fn background_tasks_disabled() -> bool {
+    is_env_truthy(
+        std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
+            .ok()
+            .as_deref(),
+    )
+}
+
 /// Group-digit separator characters accepted by claude-code's `BZa`/`$Za`
 /// regexes: ASCII underscore/comma/space plus U+00A0 NO-BREAK SPACE and
 /// U+202F NARROW NO-BREAK SPACE (`/[_,   ]/`).

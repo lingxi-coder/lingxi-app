@@ -1622,6 +1622,50 @@ fn first_statement_is_sleep(command: &str) -> bool {
 
 /// Settles a background shell's task record when its child is reaped.
 ///
+/// claude-code `cnr` — how long a foreground command must run before it earns a
+/// `local_bash` row (2.1.263 `src_160988549.js` @4321443: `cnr=2000`).
+const FOREGROUND_ARMING_DELAY: std::time::Duration = std::time::Duration::from_millis(2000);
+
+/// The registry's end of claude-code `I_t`'s `t.background(e)`.
+///
+/// Firing the notify is all it takes: the process runner is already waiting on
+/// it alongside the deadline, and takes the identical move-to-background path.
+struct BackgroundBashRequester {
+    notify: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl platform_api::task_registry::TaskBackgrounder for BackgroundBashRequester {
+    async fn background(&self) {
+        // `notify_one` stores a permit when no waiter is parked, so a request
+        // that races the runner's first poll is observed rather than dropped.
+        self.notify.notify_one();
+    }
+}
+
+/// The live arming of one foreground command: the 2 s timer, plus what it takes
+/// to withdraw the row again.
+struct ForegroundArming {
+    timer: tokio::task::JoinHandle<()>,
+    task_id: String,
+    registry: std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+}
+
+impl ForegroundArming {
+    /// claude-code `W6t` — the command finished in the foreground, so cancel the
+    /// timer and withdraw the row if it ever appeared.
+    ///
+    /// Withdrawing is not optional: a row left behind is `running` forever, and
+    /// the registry would eventually narrate a completion for a command the
+    /// model was never told had started.
+    async fn disarm(self) {
+        self.timer.abort();
+        self.registry
+            .unregister_foreground_bash(&self.task_id)
+            .await;
+    }
+}
+
 /// Port of claude-code `Ger` (2.1.263 `src_160988549.js` @4284565): the shell's
 /// result promise drives the record to its terminal status, which is what makes
 /// the completion `<task-notification>` fire.
@@ -1786,7 +1830,6 @@ pub struct BashTool {
 }
 
 impl BashTool {
-
     /// Mint the task identity for this shell command: a registry task id and an
     /// output file for the process runner to append to.
     ///
@@ -1818,6 +1861,7 @@ impl BashTool {
         &self,
         sandboxed: platform_api::SandboxedCommand,
         bound: Option<&(String, String)>,
+        on_demand: Option<std::sync::Arc<tokio::sync::Notify>>,
     ) -> platform_api::SandboxedCommand {
         let Some((task_id, output_path)) = bound else {
             return sandboxed;
@@ -1829,6 +1873,7 @@ impl BashTool {
                 std::sync::Arc::new(BackgroundBashExitSink { registry })
                     as std::sync::Arc<dyn platform_api::BackgroundExitSink>
             }),
+            on_demand,
         })
     }
 
@@ -1859,13 +1904,76 @@ impl BashTool {
             // does (claude-code stamps the record's `agentId` the same way).
             creator_agent_id: ctx.agent_id.clone(),
         };
-        if let Err(error) = registry.register_background_bash(task_id, registration).await {
+        if let Err(error) = registry
+            .register_background_bash(task_id, registration)
+            .await
+        {
             tracing::warn!(
                 target: "tool_shell::bash",
                 %error,
                 "could not register the backgrounded shell task"
             );
         }
+    }
+
+    /// Arm the 2 s foreground record (claude-code `U6t`, fired once the poll
+    /// loop sees the command has been running for `cnr` = 2000 ms).
+    ///
+    /// Nothing is registered at spawn: arming immediately would flash a
+    /// `/tasks` row for every `ls` and `git status`. Only a command that is
+    /// still running after two seconds becomes addressable, and it is withdrawn
+    /// again by [`ForegroundArming::disarm`] if it then finishes in the
+    /// foreground.
+    fn arm_foreground_record(
+        &self,
+        ctx: &ToolUseContext,
+        task_id: &str,
+        command: &str,
+        description: Option<&str>,
+        notify: std::sync::Arc<tokio::sync::Notify>,
+    ) -> Option<ForegroundArming> {
+        let registry = self.ctx.task_registry.clone()?;
+        let registration = platform_api::task_registry::BackgroundBashRegistration {
+            command: command.to_string(),
+            description: description
+                .filter(|d| !d.is_empty())
+                .unwrap_or(command)
+                .to_string(),
+            tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
+            cwd: Some(self.shell_cwd.lock().unwrap().display().to_string()),
+            creator_agent_id: ctx.agent_id.clone(),
+        };
+        let auto_background_armed =
+            !crate::prompt::background_tasks_disabled() && !first_statement_is_sleep(command);
+        let id = task_id.to_string();
+        let arming_registry = registry.clone();
+        let timer = tokio::spawn(async move {
+            tokio::time::sleep(FOREGROUND_ARMING_DELAY).await;
+            if let Err(error) = arming_registry
+                .register_foreground_bash(&id, registration, auto_background_armed)
+                .await
+            {
+                tracing::debug!(
+                    target: "tool_shell::bash",
+                    %error,
+                    "could not arm the foreground shell record"
+                );
+                return;
+            }
+            // Only now is the row addressable, so bind the handle that moves it
+            // to the background before anything can ask for that.
+            let _ = arming_registry
+                .bind_background_requester(
+                    &id,
+                    std::sync::Arc::new(BackgroundBashRequester { notify }),
+                )
+                .await;
+        });
+        Some(ForegroundArming {
+            timer,
+            task_id: task_id.to_string(),
+            registry,
+        })
     }
 
     /// Keep the minted identity only if the process runner actually used it.
@@ -1901,11 +2009,7 @@ impl BashTool {
     /// `task_id` is the id the REGISTRY knows; `handle` is what the runner needs
     /// to signal the process, and the two differ when the runner ignored the
     /// binding.
-    async fn bind_background_task(
-        &self,
-        task_id: &str,
-        handle: &platform_api::ProcessHandle,
-    ) {
+    async fn bind_background_task(&self, task_id: &str, handle: &platform_api::ProcessHandle) {
         let Some(registry) = self.ctx.task_registry.as_ref() else {
             return;
         };
@@ -2625,7 +2729,7 @@ impl Tool for BashTool {
             // registry the runner keeps minting its own — the previous
             // behaviour, retained for hosts that have no task registry.
             let bound = self.allocate_task_identity().await;
-            let sandboxed = self.bind_identity(sandboxed, bound.as_ref());
+            let sandboxed = self.bind_identity(sandboxed, bound.as_ref(), None);
             return match self.ctx.process.spawn_background(&sandboxed).await {
                 Ok(handle) => {
                     // Only claim the registry identity if the runner actually
@@ -2777,7 +2881,28 @@ impl Tool for BashTool {
         // regardless of whether it is ever backgrounded — and settle it as
         // completed when the command actually finishes in the foreground.
         let fg_bound = self.allocate_task_identity().await;
-        let sandboxed = self.bind_identity(sandboxed, fg_bound.as_ref());
+        // The other end of claude-code `I_t`'s `t.background(e)`. Ctrl+B,
+        // background-all and the SDK `background_tasks` request all reach a
+        // still-running foreground shell through this, and the runner treats it
+        // exactly like the deadline firing.
+        let on_demand = fg_bound
+            .as_ref()
+            .map(|_| std::sync::Arc::new(tokio::sync::Notify::new()));
+        let sandboxed = self.bind_identity(sandboxed, fg_bound.as_ref(), on_demand.clone());
+        // claude-code `U6t` after `cnr` (2000) ms: a foreground command that is
+        // still running becomes a visible `local_bash` row so `/tasks`, Ctrl+B
+        // and background-all have something to address. Short commands never
+        // appear — arming at spawn would flash a row for every `ls`.
+        let arming = match (fg_bound.as_ref(), on_demand.as_ref()) {
+            (Some((task_id, _)), Some(notify)) => self.arm_foreground_record(
+                &ctx,
+                task_id,
+                &cmd_str,
+                input.get("description").and_then(Value::as_str),
+                notify.clone(),
+            ),
+            _ => None,
+        };
 
         // ===== Foreground spawn =====
         // PHASE-2: race the run against the sibling cancel token. On cancel the
@@ -2832,6 +2957,17 @@ impl Tool for BashTool {
                 ..
             })
         );
+        // claude-code `W6t`: a command that finished in the FOREGROUND gives its
+        // armed row back. A command that moved to the background keeps it — it
+        // owns a live child now, and the background arm below flips
+        // `isBackgrounded` and takes over the record.
+        if let Some(arming) = arming {
+            if moved_to_background {
+                arming.timer.abort();
+            } else {
+                arming.disarm().await;
+            }
+        }
         if !moved_to_background {
             if let (Some(registry), Some((task_id, _))) =
                 (self.ctx.task_registry.as_ref(), fg_bound.as_ref())
@@ -5232,10 +5368,33 @@ mod tests {
         >,
         bound: std::sync::Mutex<Vec<String>>,
         discarded: std::sync::Mutex<Vec<String>>,
+        armed: std::sync::Mutex<Vec<String>>,
+        requesters: std::sync::Mutex<Vec<String>>,
+        unarmed: std::sync::Mutex<Vec<String>>,
     }
 
     #[async_trait::async_trait]
     impl platform_api::task_registry::TaskRegistryHandle for RecordingRegistry {
+        async fn register_foreground_bash(
+            &self,
+            task_id: &str,
+            _r: platform_api::task_registry::BackgroundBashRegistration,
+            _armed: bool,
+        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            self.armed.lock().unwrap().push(task_id.to_string());
+            Ok(())
+        }
+        async fn unregister_foreground_bash(&self, task_id: &str) {
+            self.unarmed.lock().unwrap().push(task_id.to_string());
+        }
+        async fn bind_background_requester(
+            &self,
+            task_id: &str,
+            _r: std::sync::Arc<dyn platform_api::task_registry::TaskBackgrounder>,
+        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            self.requesters.lock().unwrap().push(task_id.to_string());
+            Ok(())
+        }
         async fn create(
             &self,
             _i: platform_api::task_registry::TaskCreateInput,
@@ -5449,6 +5608,84 @@ mod tests {
         );
     }
 
+    /// claude-code `U6t` after `cnr` = 2000 ms, then `W6t` on foreground
+    /// completion. This is the wiring test: the pieces are unit-tested
+    /// elsewhere, but nothing else proves `call()` actually starts the timer,
+    /// binds the requester, and withdraws the row afterwards.
+    #[tokio::test]
+    async fn a_slow_foreground_command_arms_a_row_and_gives_it_back() {
+        struct SlowRunner;
+        #[async_trait::async_trait]
+        impl ProcessRunner for SlowRunner {
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                _cmd: &SandboxedCommand,
+                _max: Option<usize>,
+            ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+                // Past `cnr`, then a normal foreground finish.
+                tokio::time::sleep(std::time::Duration::from_millis(2400)).await;
+                Ok(platform_api::ForegroundRunResult {
+                    outcome: platform_api::ForegroundOutcome::Completed(ProcessOutput {
+                        stdout: "done\n".into(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                        timed_out: false,
+                    }),
+                    output_file: None,
+                })
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let registry = Arc::new(RecordingRegistry::default());
+        let mut ctx = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        ctx.task_registry = Some(registry.clone());
+        ctx.process = Arc::new(SlowRunner);
+        let tool = BashTool::new(ctx);
+        tool.call(json!({"command": "sleep 3"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+
+        assert_eq!(
+            registry.armed.lock().unwrap().as_slice(),
+            ["b1a2b3c4d"],
+            "a command still running at 2 s must become an addressable row",
+        );
+        assert_eq!(
+            registry.requesters.lock().unwrap().as_slice(),
+            ["b1a2b3c4d"],
+            "and it must carry the handle that backgrounds it, or Ctrl+B has no target",
+        );
+        assert_eq!(
+            registry.unarmed.lock().unwrap().as_slice(),
+            ["b1a2b3c4d"],
+            "finishing in the foreground must give the row back (`W6t`)",
+        );
+        assert!(
+            registry.registered.lock().unwrap().is_empty(),
+            "arming is not a background registration",
+        );
+    }
+
     #[test]
     fn first_statement_is_sleep_matches_the_oracle_predicate() {
         // `$es`: only the FIRST word of the FIRST statement counts.
@@ -5492,7 +5729,10 @@ mod tests {
                 cmd: &SandboxedCommand,
                 _max: Option<usize>,
             ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
-                self.seen.lock().unwrap().push(cmd.auto_background_on_timeout());
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push(cmd.auto_background_on_timeout());
                 Ok(platform_api::ForegroundRunResult {
                     outcome: platform_api::ForegroundOutcome::Completed(ProcessOutput {
                         stdout: String::new(),

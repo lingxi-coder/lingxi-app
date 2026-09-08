@@ -213,6 +213,9 @@ pub struct EvidenceReceipt {
     /// exhausted by panel/run caps.
     pub metadata_complete: bool,
     locator_digest_hex: Option<String>,
+    /// Opaque locator for the captured search result, never a model-supplied
+    /// path or a claim that every matching file was read. Only Grep/Glob mint it.
+    search_result_locator: Option<String>,
 }
 
 impl fmt::Debug for EvidenceReceipt {
@@ -481,6 +484,11 @@ impl EvidenceContext {
         let full_len = snapshot.full_len;
         let body_digest_hex = snapshot.digest_hex;
         let receipt_ref = EvidenceReceiptRef(format!("evr_{}", Uuid::new_v4().simple()));
+        let search_result_locator = match capability {
+            EvidenceCapability::Grep => Some(format!("lingxi-search:grep:{receipt_ref}")),
+            EvidenceCapability::Glob => Some(format!("lingxi-search:glob:{receipt_ref}")),
+            EvidenceCapability::Read | EvidenceCapability::WebFetch => None,
+        };
         let block_ref = EvidenceBlockRef(Uuid::new_v4());
 
         // The run lock is always acquired before the panel lock.  No other
@@ -520,7 +528,9 @@ impl EvidenceContext {
             locator_digest_hex: material
                 .locator
                 .as_deref()
+                .or(search_result_locator.as_deref())
                 .map(|locator| digest_hex(locator.as_bytes())),
+            search_result_locator,
         };
         let record = EvidenceRecord {
             receipt: receipt.clone(),

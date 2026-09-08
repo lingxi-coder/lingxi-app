@@ -11908,7 +11908,14 @@ async fn build_with_evaluation(
     let strict_plugin_only_agents = strict_plugin_policy.is_locked(plugin::PluginComponent::Agents);
     let strict_plugin_only_skills = strict_plugin_policy.is_locked(plugin::PluginComponent::Skills);
     let _ = subagent_strict_plugin_hooks_cell.set(strict_plugin_only_hooks);
-    let mut mcp_configs = mcp::load_mcp_servers(&project_mcp_path, &global_mcp_path, &cwd);
+    // A host (including Fusion evaluation) can enable safe mode after the CLI
+    // resolved these paths. Enforce the discovery gate at consumption too;
+    // explicit servers and managed policy are still folded below.
+    let mut mcp_configs = if cfg.customization_gates.disables_mcp_discovery() {
+        Vec::new()
+    } else {
+        mcp::load_mcp_servers(&project_mcp_path, &global_mcp_path, &cwd)
+    };
     // CLI `--mcp-config` servers: highest precedence — override a discovered
     // server of the same name, else append. (With `--strict-mcp-config` the host
     // nulled the discovered paths above, so `mcp_configs` starts empty and these
@@ -22423,6 +22430,71 @@ must be filtered out: got {after:?}"
             !bare.disables_claude_md(true),
             "--add-dir re-enables in bare"
         );
+    }
+
+    #[tokio::test]
+    async fn late_safe_mode_blocks_resolved_ambient_mcp_but_keeps_explicit_servers() {
+        let (_tmp, mut cfg) = test_config(true);
+        let global = cfg.cwd.join("global-config.json");
+        // Disabled fixtures are still registered by normal discovery, without
+        // starting processes or touching the network if the regression returns.
+        std::fs::write(
+            &cfg.mcp_paths[0],
+            serde_json::json!({
+                "mcpServers": {"ambient-project": {
+                    "command": "/nonexistent-fusion-mcp", "disabled": true
+                }}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &global,
+            serde_json::json!({
+                "mcpServers": {"ambient-user": {
+                    "command": "/nonexistent-fusion-mcp", "disabled": true
+                }}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        cfg.mcp_paths.push(global.clone());
+        let discovered = mcp::load_mcp_servers(&cfg.mcp_paths[0], &global, &cfg.cwd);
+        assert!(discovered
+            .iter()
+            .any(|server| server.name == "ambient-project"));
+        assert!(discovered
+            .iter()
+            .any(|server| server.name == "ambient-user"));
+        let mut explicit = discovered
+            .iter()
+            .find(|server| server.name == "ambient-user")
+            .unwrap()
+            .clone();
+        explicit.name = "explicit-server".into();
+        cfg.cli_mcp_servers.push(explicit);
+        // Exactly the evaluation order: paths have already been resolved.
+        cfg.customization_gates.safe_mode = true;
+        cfg.customization_gates.bare = true;
+        let rt = build(
+            cfg,
+            Arc::new(orchestrator::test_support::MockOutputStream::new()),
+            Arc::new(RecordingPermissionSink::default()),
+        )
+        .await
+        .unwrap();
+        let names = rt.mcp_registry.server_names().await;
+        assert!(
+            !names
+                .iter()
+                .any(|name| name == "ambient-project" || name == "ambient-user"),
+            "ambient discovery escaped late safe mode: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "explicit-server"),
+            "safe mode must preserve explicit server policy: {names:?}"
+        );
+        assert!(rt.session_lifecycle.shutdown_and_drain().await.complete);
     }
 
     /// (M3 cc2.1.198) `--safe-mode` / `--bare` boot: the SAME project-settings

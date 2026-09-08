@@ -989,13 +989,9 @@ impl JsonlWriter {
                 "durable transcript target is not configured".into(),
             )));
         };
-        self.append_json_once_durable_locked(
-            target.path,
-            target.writer,
-            delivery_id,
-            payload,
-        )
-        .await
+        self.append_json_once_durable_locked(target.path, target.writer, delivery_id, payload)
+            .await
+            .map(|(outcome, _)| outcome)
     }
 
     /// Append once for a run pinned to its originating session. The target is
@@ -1008,6 +1004,21 @@ impl JsonlWriter {
         delivery_id: &str,
         payload: serde_json::Value,
     ) -> Result<TranscriptAppendOutcome, TranscriptWriterError> {
+        self.append_json_once_durable_for_session_with_tip(session_id, delivery_id, payload)
+            .await
+            .map(|(outcome, _)| outcome)
+    }
+
+    /// Append to a pinned session and return whether the acknowledged delivery
+    /// is still its durable UUID tip. The observation shares the bounded
+    /// duplicate scan and transaction lock with the append itself. Callers
+    /// reconciling live cursors must also serialize their foreground turns.
+    pub async fn append_json_once_durable_for_session_with_tip(
+        &self,
+        session_id: SessionId,
+        delivery_id: &str,
+        payload: serde_json::Value,
+    ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
         let _guard = self.lock.lock().await;
         let target = self
             .session_targets
@@ -1103,7 +1114,7 @@ impl JsonlWriter {
         durable_lock: Arc<DurableTranscriptWriter>,
         delivery_id: &str,
         payload: serde_json::Value,
-    ) -> Result<TranscriptAppendOutcome, TranscriptWriterError> {
+    ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
         let delivery_id = delivery_id.to_string();
         tokio::task::spawn_blocking(move || {
             durable_lock.with_transaction(|transaction| {
@@ -1121,7 +1132,7 @@ impl JsonlWriter {
                         "active transcript path has no file name".into(),
                     ))
                 })?;
-                transaction.append_json_once_at(
+                transaction.append_json_once_at_with_tip(
                     parent,
                     &identity,
                     &relative,

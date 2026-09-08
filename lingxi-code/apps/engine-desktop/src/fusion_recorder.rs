@@ -425,11 +425,28 @@ impl DesktopFusionRecorder {
         };
         let delivery_id = outbox.delivery_id.clone();
         let payload = outbox.payload.clone();
+        let orchestrator = target
+            .history
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(Weak::upgrade);
         let append = if let Some(session_id) = target.session_id {
-            target
-                .writer
-                .append_json_once_durable_for_session(session_id, &delivery_id, payload)
-                .await?
+            if let Some(orchestrator) = orchestrator {
+                orchestrator
+                    .append_fusion_transcript(
+                        target.writer.as_ref(),
+                        session_id,
+                        &delivery_id,
+                        payload,
+                    )
+                    .await?
+            } else {
+                target
+                    .writer
+                    .append_json_once_durable_for_session(session_id, &delivery_id, payload)
+                    .await?
+            }
         } else {
             target
                 .writer

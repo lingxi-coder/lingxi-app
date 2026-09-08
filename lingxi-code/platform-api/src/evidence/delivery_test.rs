@@ -32,6 +32,154 @@ fn captured(owner: &EvidenceContext) -> CapturedToolEvidence {
 }
 
 #[test]
+fn search_receipts_attest_only_the_exact_host_minted_result_locator() {
+    use crate::{EvidenceExcerptStatus, EvidenceKind};
+    let cases = [
+        (
+            EvidenceCapability::Grep,
+            "grep",
+            json!({"mode":"content","numFiles":0,"filenames":[],"content":"a.rs:1:source evidence","numLines":1,"totalLines":1}),
+        ),
+        (
+            EvidenceCapability::Grep,
+            "grep",
+            json!({"mode":"count","numFiles":1,"filenames":[],"content":"a.rs:2","numMatches":2}),
+        ),
+        (
+            EvidenceCapability::Grep,
+            "grep",
+            json!({"mode":"files_with_matches","numFiles":1,"filenames":["a.rs"],"totalFiles":1}),
+        ),
+        (
+            EvidenceCapability::Grep,
+            "grep",
+            json!({"mode":"files_with_matches","numFiles":0,"filenames":[],"totalFiles":0}),
+        ),
+        (
+            EvidenceCapability::Glob,
+            "glob",
+            json!({"filenames":["a.rs"],"numFiles":1,"totalMatches":1,"durationMs":1,"truncated":false,"countIsComplete":true}),
+        ),
+        (
+            EvidenceCapability::Glob,
+            "glob",
+            json!({"filenames":[],"numFiles":0,"totalMatches":0,"durationMs":1,"truncated":false,"countIsComplete":true}),
+        ),
+    ];
+    for (capability, tool, data) in cases {
+        let run = EvidenceRun::new();
+        let owner = run.new_panel();
+        let sibling = run.new_panel();
+        let foreign = EvidenceRun::new().new_panel();
+        let capture = owner.capture_observed(capability, None, &data).unwrap();
+        let reference = capture.receipt().receipt_ref().as_str().to_owned();
+        let locator = format!("lingxi-search:{tool}:{reference}");
+        let duplicate = owner.capture_observed(capability, None, &data).unwrap();
+        let duplicate_ref = duplicate.receipt().receipt_ref().as_str().to_owned();
+        assert_ne!(reference, duplicate_ref);
+        let mut result = message(data.to_string());
+        let binding = capture.decorate_and_bind(&mut result, 0).unwrap();
+        assert!(serde_json::to_string(&result).unwrap().contains(&locator));
+        let selected = EvidenceDelivery::select(&owner, &[binding], &[result]);
+        assert_eq!(selected.selected().len(), 1);
+        assert!(selected.selected()[0].mark_included_after_dispatch());
+        owner.freeze();
+        sibling.freeze();
+        foreign.freeze();
+        let attestation = owner
+            .attest_reference(&reference, EvidenceKind::File, &locator, None)
+            .unwrap();
+        assert!(attestation.allows_citation());
+        assert_eq!(
+            attestation.excerpt_status(),
+            EvidenceExcerptStatus::NotRequested
+        );
+        for wrong in [
+            "a.rs".to_string(),
+            format!("{locator}x"),
+            format!("lingxi-search:{tool}:{duplicate_ref}"),
+        ] {
+            assert!(owner
+                .attest_reference(&reference, EvidenceKind::File, &wrong, None)
+                .is_none());
+        }
+        assert!(owner
+            .attest_reference(&reference, EvidenceKind::Url, &locator, None)
+            .is_none());
+        for wrong in [&sibling, &foreign] {
+            assert!(wrong
+                .attest_reference(&reference, EvidenceKind::File, &locator, None)
+                .is_none());
+        }
+        let fetched = owner
+            .attest_reference(
+                &duplicate_ref,
+                EvidenceKind::File,
+                &format!("lingxi-search:{tool}:{duplicate_ref}"),
+                None,
+            )
+            .unwrap();
+        assert!(
+            !fetched.allows_citation(),
+            "capture alone cannot authorize a search citation"
+        );
+        let absent = owner
+            .attest_reference(
+                &reference,
+                EvidenceKind::File,
+                &locator,
+                Some("never present in this search result"),
+            )
+            .unwrap();
+        assert_eq!(absent.excerpt_status(), EvidenceExcerptStatus::NotFound);
+        assert!(!absent.allows_citation());
+    }
+}
+
+#[test]
+fn search_excerpt_support_remains_bounded_by_the_captured_material() {
+    use crate::{EvidenceExcerptStatus, EvidenceKind, MAX_EVIDENCE_BYTES_PER_RECEIPT};
+    let owner = EvidenceRun::new().new_panel();
+    let data = json!({"mode":"content","numFiles":0,"filenames":[],"content":format!("source evidence {} missing tail", "x".repeat(MAX_EVIDENCE_BYTES_PER_RECEIPT)),"numLines":1,"totalLines":1});
+    let capture = owner
+        .capture_observed(EvidenceCapability::Grep, None, &data)
+        .unwrap();
+    let reference = capture.receipt().receipt_ref().as_str().to_owned();
+    let locator = format!("lingxi-search:grep:{reference}");
+    let mut result = message(data.to_string());
+    let binding = capture.decorate_and_bind(&mut result, 0).unwrap();
+    let selected = EvidenceDelivery::select(&owner, &[binding], &[result]);
+    assert!(selected.selected()[0].mark_included_after_dispatch());
+    owner.freeze();
+    let prefix = owner
+        .attest_reference(
+            &reference,
+            EvidenceKind::File,
+            &locator,
+            Some("source evidence"),
+        )
+        .unwrap();
+    assert_eq!(
+        prefix.excerpt_status(),
+        EvidenceExcerptStatus::PresentInPrefix
+    );
+    assert!(prefix.allows_citation());
+    let tail = owner
+        .attest_reference(
+            &reference,
+            EvidenceKind::File,
+            &locator,
+            Some("missing tail"),
+        )
+        .unwrap();
+    assert_eq!(
+        tail.excerpt_status(),
+        EvidenceExcerptStatus::UnknownTruncated
+    );
+    assert!(!tail.allows_citation());
+}
+
+#[test]
 fn selection_needs_owned_binding_not_copied_content_or_tool_id() {
     let owner = EvidenceRun::new().new_panel();
     let original = message(value().to_string());

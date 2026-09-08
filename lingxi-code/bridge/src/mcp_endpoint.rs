@@ -115,6 +115,11 @@ impl FrameSink {
 #[async_trait::async_trait]
 pub trait FramePump: Send + Sync + 'static {
     /// Handle one inbound [`Frame`]. Use `out` to send reply / push frames.
+    /// Endpoint shutdown waits for an accepted frame to finish before calling
+    /// [`Self::on_close_with_sink`]. This future can include a multi-append
+    /// durable command (for example compact boundary followed by summary), so
+    /// dropping it on shutdown is unsafe. Long-running commands should support
+    /// cooperative cancellation or own their work in the host lifecycle.
     async fn on_frame(&self, frame: Frame, out: FrameSink);
 
     /// Called exactly once when the connection ends — the client disconnected,
@@ -388,7 +393,16 @@ where
                 if let Some(frame) = maybe_out {
                     match serde_json::to_string(&frame) {
                         Ok(text) => {
-                            if write.send(Message::Text(text)).await.is_err() {
+                            // Once an outer select arm is selected its body
+                            // is no longer raced against shutdown. A peer that
+                            // stops reading must not hold the endpoint's join
+                            // drain (and the host lifecycle) indefinitely.
+                            let sent = tokio::select! {
+                                biased;
+                                _ = shutdown.changed() => break,
+                                sent = write.send(Message::Text(text)) => sent,
+                            };
+                            if sent.is_err() {
                                 tracing::debug!(?addr, "bridge: write closed; ending pump");
                                 break;
                             }
@@ -404,6 +418,10 @@ where
                 match maybe_in {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<Frame>(&text) {
+                            // Unlike a network send, an accepted command is
+                            // not generally cancellation-safe. Finish its
+                            // commit before observing shutdown on the next
+                            // loop iteration and invoking the close hook.
                             Ok(frame) => pump.on_frame(frame, sink.clone()).await,
                             Err(e) => {
                                 tracing::debug!(?addr, error = %e, "bridge: undecodable inbound frame ignored");
@@ -449,6 +467,140 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    /// One inbound command followed by a permanently stalled write flush.
+    /// No socket-buffer sizing or sleeps are needed to force backpressure.
+    struct BackpressuredSocket {
+        inbound: Option<Message>,
+        flushing: Arc<Notify>,
+    }
+
+    impl futures_util::Stream for BackpressuredSocket {
+        type Item = Result<Message, tokio_tungstenite::tungstenite::Error>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            match self.inbound.take() {
+                Some(message) => Poll::Ready(Some(Ok(message))),
+                None => Poll::Pending,
+            }
+        }
+    }
+
+    impl futures_util::Sink<Message> for BackpressuredSocket {
+        type Error = tokio_tungstenite::tungstenite::Error;
+
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, _: Message) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.flushing.notify_one();
+            Poll::Pending
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct ShutdownPump {
+        frame_started: Notify,
+        stall_frame: bool,
+        finish_frame: Notify,
+        closes: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl FramePump for ShutdownPump {
+        async fn on_frame(&self, frame: Frame, out: FrameSink) {
+            self.frame_started.notify_one();
+            if self.stall_frame {
+                self.finish_frame.notified().await;
+            }
+            assert!(out.send(frame));
+        }
+
+        async fn on_close_with_sink(&self, _sink: FrameSink) {
+            // The close hook itself must be awaited, not cancelled by the
+            // already-ready shutdown notification.
+            tokio::task::yield_now().await;
+            self.closes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn assert_shutdown_interrupts_pending_operation(stall_frame: bool) {
+        let flushing = Arc::new(Notify::new());
+        let frame = Frame::Request(crate::wire::BridgeRequest {
+            id: 1,
+            method: "test".into(),
+            params: serde_json::Value::Null,
+        });
+        let socket = BackpressuredSocket {
+            inbound: Some(Message::Text(serde_json::to_string(&frame).unwrap())),
+            flushing: flushing.clone(),
+        };
+        let pump = Arc::new(ShutdownPump {
+            frame_started: Notify::new(),
+            stall_frame,
+            finish_frame: Notify::new(),
+            closes: AtomicUsize::new(0),
+        });
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut task = tokio::spawn(run_frame_pump(
+            socket,
+            "127.0.0.1:1".parse().unwrap(),
+            pump.clone(),
+            shutdown_rx,
+        ));
+        let ready = async {
+            if stall_frame {
+                pump.frame_started.notified().await;
+            } else {
+                flushing.notified().await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(2), ready)
+            .await
+            .expect("the selected operation must reach its pending point");
+        shutdown_tx.send(true).unwrap();
+        if stall_frame {
+            // Accepted commands may have already committed part of a durable
+            // transaction. Shutdown must wait for their remaining work, not
+            // drop the future and mistake socket cleanup for command cleanup.
+            assert!(tokio::time::timeout(Duration::from_millis(50), &mut task)
+                .await
+                .is_err());
+            assert_eq!(pump.closes.load(Ordering::SeqCst), 0);
+            pump.finish_frame.notify_one();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(2), &mut task).await;
+        if result.is_err() {
+            task.abort();
+            let _ = task.await;
+            panic!("shutdown must interrupt the pending operation and finish teardown");
+        }
+        result.unwrap().unwrap();
+        assert_eq!(pump.closes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_backpressured_write_and_awaits_close_once() {
+        assert_shutdown_interrupts_pending_operation(false).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_finishes_accepted_frame_before_closing_once() {
+        assert_shutdown_interrupts_pending_operation(true).await;
+    }
 
     #[test]
     fn websocket_config_declares_the_inbound_frame_limit() {

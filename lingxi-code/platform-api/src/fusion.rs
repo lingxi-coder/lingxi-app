@@ -1497,7 +1497,7 @@ pub struct PanelClaim {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceKind {
-    /// A workspace file.
+    /// A workspace file or host-located workspace search result.
     File,
     /// A fetched URL.
     Url,
@@ -1515,7 +1515,8 @@ pub struct PanelEvidence {
     pub id: String,
     /// Evidence kind.
     pub kind: EvidenceKind,
-    /// Path, URL, or command string.
+    /// Path, URL, command string, or exact host-minted `lingxi-search:` locator
+    /// identifying captured search output (not a read of all matching files).
     pub locator: String,
     /// Optional excerpt.
     #[serde(default, skip_serializing_if = "Option::is_none")]

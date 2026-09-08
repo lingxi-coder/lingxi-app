@@ -507,9 +507,67 @@ impl ConversationOrchestrator {
         let message = protocol::ConversationMessage::user_meta(message_id, text);
         session.model_context_excluded_messages.insert(message_id);
         session.history.push(message);
-        drop(session);
-        *self.transcript.last_jsonl_uuid.lock().await = Some(message_uuid.to_string());
         Ok(())
+    }
+
+    /// Serialize a background Fusion append with foreground chain ownership.
+    /// The recorder's detached delivery task owns this future through fsync;
+    /// its public timeout must not cancel the append/cursor transaction.
+    /// Off-session delivery still uses its pinned target but never advances
+    /// the currently selected session's cursor. Duplicate delivery likewise
+    /// cannot rewind a cursor that has moved past the original durable row.
+    pub async fn append_fusion_transcript(
+        &self,
+        writer: &session::jsonl::JsonlWriter,
+        session_id: protocol::SessionId,
+        delivery_id: &str,
+        payload: serde_json::Value,
+    ) -> Result<session::jsonl::TranscriptAppendOutcome, session::jsonl::TranscriptWriterError>
+    {
+        let uuid = payload
+            .get("uuid")
+            .and_then(serde_json::Value::as_str)
+            .filter(|uuid| !uuid.is_empty())
+            .ok_or(session::jsonl::TranscriptWriterError::MissingMessageUuid)?
+            .to_string();
+        let _turn = self.turn_gate.lock().await;
+        let result = writer
+            .append_json_once_durable_for_session_with_tip(session_id, delivery_id, payload)
+            .await;
+        self.reconcile_fusion_transcript_append(session_id, uuid, result)
+            .await
+    }
+
+    /// Called only while holding `turn_gate`, including after a failed fresh
+    /// append. A known complete visible row must enter the parent chain before
+    /// a foreground turn can run, even while publication remains unacknowledged.
+    async fn reconcile_fusion_transcript_append(
+        &self,
+        session_id: protocol::SessionId,
+        uuid: String,
+        result: Result<
+            (session::jsonl::TranscriptAppendOutcome, bool),
+            session::jsonl::TranscriptWriterError,
+        >,
+    ) -> Result<session::jsonl::TranscriptAppendOutcome, session::jsonl::TranscriptWriterError>
+    {
+        // A write can reach the file before fsync reports failure. Its retry
+        // is AlreadyPresent, but still must repair the unadvanced cursor if
+        // the same locked scan proves no later UUID exists. Older duplicates
+        // cannot rewind the chain once a foreground append has advanced it.
+        let is_visible_tip = matches!(
+            &result,
+            Ok((_, true))
+                | Err(session::jsonl::TranscriptWriterError::WrittenButNotDurable(
+                    _
+                ))
+        );
+        if is_visible_tip && self.session.lock().await.session_id == session_id {
+            *self.transcript.last_jsonl_uuid.lock().await = Some(uuid);
+        }
+        // Advancing a visible cursor is not a durability acknowledgement.
+        // Preserve the error so the recorder cannot mark this row Published.
+        result.map(|(appended, _)| appended)
     }
 
     /// Persist a session-cwd move before directing future transcript appends

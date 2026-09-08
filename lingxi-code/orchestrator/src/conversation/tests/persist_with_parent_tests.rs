@@ -38,6 +38,263 @@ fn read_jsonl(path: &std::path::Path) -> Vec<JsonlMessage> {
 }
 
 #[tokio::test]
+async fn fusion_retry_of_visible_unacknowledged_tip_repairs_resume_chain() {
+    check_fusion_unacknowledged_resume_chain(false).await;
+}
+
+#[tokio::test]
+async fn fusion_written_sync_failure_preserves_chain_when_foreground_precedes_retry() {
+    check_fusion_unacknowledged_resume_chain(true).await;
+}
+
+async fn check_fusion_unacknowledged_resume_chain(foreground_before_retry: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let state_root = dir.path().join("state");
+    std::fs::create_dir(&state_root).unwrap();
+    let id = SessionId::new();
+    let writer = Arc::new(
+        session::jsonl::JsonlWriter::new(
+            path.clone(),
+            Arc::new(PosixFileSystem::new(dir.path().to_path_buf())),
+        )
+        .with_durable_lock(Arc::new(
+            session::jsonl::DurableTranscriptWriter::open(&state_root).unwrap(),
+        )),
+    );
+    writer
+        .activate_session_target(id, path.clone(), dir.path().to_path_buf())
+        .unwrap();
+    let orch = orch_with_writer(dir.path(), path.clone())
+        .with_jsonl_writer(writer.clone())
+        .with_session_id(id);
+    let first = ConversationMessage::user(protocol::MessageId::new(), "first".into());
+    orch.persist_message_to_jsonl(&first).await;
+    let fusion = ConversationMessage::user_meta(protocol::MessageId::new(), "fusion".into());
+    let payload = serde_json::to_value(orch.to_jsonl_message(
+        &fusion,
+        &id.to_string(),
+        None,
+        None,
+        None,
+        None,
+    ))
+    .unwrap();
+    let fusion_uuid = fusion.id().as_uuid().to_string();
+    let cursor = orch.transcript.last_jsonl_uuid.lock().await.clone();
+    {
+        let _turn = orch.turn_gate.lock().await;
+        let failure = orch
+            .reconcile_fusion_transcript_append(
+                id,
+                fusion_uuid.clone(),
+                Err(session::jsonl::TranscriptWriterError::Fs(
+                    platform_api::FsError::Io("partial write".into()),
+                )),
+            )
+            .await;
+        assert!(failure.is_err());
+        assert_eq!(*orch.transcript.last_jsonl_uuid.lock().await, cursor);
+        let off_session = orch
+            .reconcile_fusion_transcript_append(
+                SessionId::new(),
+                fusion_uuid.clone(),
+                Err(session::jsonl::TranscriptWriterError::WrittenButNotDurable(
+                    platform_api::FsError::Io("other session sync failed".into()),
+                )),
+            )
+            .await;
+        assert!(off_session.is_err());
+        assert_eq!(*orch.transcript.last_jsonl_uuid.lock().await, cursor);
+    }
+    // Reproduce the orchestrator state after write succeeds but its durability
+    // acknowledgement fails: the disk has the row, while the live cursor has
+    // not advanced. The session unit test injects the genuine post-write fault.
+    writer
+        .append_json_once_durable_for_session(id, "delivery", payload.clone())
+        .await
+        .unwrap();
+    if foreground_before_retry {
+        let _turn = orch.turn_gate.lock().await;
+        let failure = orch
+            .reconcile_fusion_transcript_append(
+                id,
+                fusion_uuid,
+                Err(session::jsonl::TranscriptWriterError::WrittenButNotDurable(
+                    platform_api::FsError::Io("sync failed".into()),
+                )),
+            )
+            .await;
+        assert!(matches!(
+            failure,
+            Err(session::jsonl::TranscriptWriterError::WrittenButNotDurable(
+                _
+            ))
+        ));
+    } else {
+        assert_eq!(
+            orch.append_fusion_transcript(writer.as_ref(), id, "delivery", payload.clone())
+                .await
+                .unwrap(),
+            session::jsonl::TranscriptAppendOutcome::AlreadyPresent
+        );
+    }
+    let next = ConversationMessage::user(protocol::MessageId::new(), "next".into());
+    orch.persist_message_to_jsonl(&next).await;
+    // Retry after the intervening foreground prompt must not rewind the cursor.
+    orch.append_fusion_transcript(writer.as_ref(), id, "delivery", payload)
+        .await
+        .unwrap();
+    let last = ConversationMessage::user(protocol::MessageId::new(), "last".into());
+    orch.persist_message_to_jsonl(&last).await;
+    let rows = read_jsonl(&path);
+    let messages: Vec<_> = rows
+        .iter()
+        .filter(|row| matches!(row.message_type.as_str(), "user" | "assistant"))
+        .collect();
+    assert_eq!(messages.len(), 4);
+    for pair in messages.windows(2) {
+        assert_eq!(pair[1].parent_uuid.as_deref(), Some(pair[0].uuid.as_str()));
+    }
+    let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(&path).unwrap());
+    let (chain, _) = session::jsonl::loader::build_conversation_chain(&loaded, &id.to_string());
+    assert_eq!(chain.len(), messages.len());
+    assert!(chain
+        .iter()
+        .any(|row| row.uuid == fusion.id().as_uuid().to_string()));
+}
+
+#[tokio::test]
+async fn fusion_append_waits_for_foreground_and_never_rewinds_a_newer_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let state_root = dir.path().join("state");
+    std::fs::create_dir(&state_root).unwrap();
+    let id = SessionId::new();
+    let writer = Arc::new(
+        session::jsonl::JsonlWriter::new(
+            path.clone(),
+            Arc::new(PosixFileSystem::new(dir.path().to_path_buf())),
+        )
+        .with_durable_lock(Arc::new(
+            session::jsonl::DurableTranscriptWriter::open(&state_root).unwrap(),
+        )),
+    );
+    writer
+        .activate_session_target(id, path.clone(), dir.path().to_path_buf())
+        .unwrap();
+    let orch = Arc::new(
+        orch_with_writer(dir.path(), path.clone())
+            .with_jsonl_writer(writer.clone())
+            .with_session_id(id),
+    );
+    let user = ConversationMessage::user(protocol::MessageId::new(), "first".into());
+    orch.persist_message_to_jsonl(&user).await;
+    let foreground = orch.turn_gate.lock().await;
+    let fusion_id = protocol::MessageId::new();
+    let fusion_uuid = fusion_id.as_uuid().to_string();
+    let fusion_message = ConversationMessage::user_meta(fusion_id, "fusion".into());
+    let payload = serde_json::to_value(orch.to_jsonl_message(
+        &fusion_message,
+        &id.to_string(),
+        None,
+        None,
+        None,
+        None,
+    ))
+    .unwrap();
+    let append = orch.append_fusion_transcript(writer.as_ref(), id, "delivery", payload.clone());
+    tokio::pin!(append);
+    tokio::select! { biased;
+        _ = &mut append => panic!("Fusion disk append must wait for the foreground chain owner"),
+        () = tokio::task::yield_now() => {}
+    }
+    let answer = ConversationMessage::Assistant {
+        id: protocol::MessageId::new(),
+        content: vec![protocol::ContentBlock::Text {
+            text: "foreground answer".into(),
+        }],
+        stop_reason: None,
+    };
+    orch.persist_message_to_jsonl(&answer).await;
+    drop(foreground);
+    assert_eq!(
+        append.await.unwrap(),
+        session::jsonl::TranscriptAppendOutcome::Appended
+    );
+    let next = ConversationMessage::user(protocol::MessageId::new(), "next".into());
+    orch.persist_message_to_jsonl(&next).await;
+    // A delayed projection and an old durable duplicate may never rewind the
+    // cursor after an ordinary message has already advanced it.
+    orch.record_persisted_fusion_meta(id, &fusion_uuid, "fusion".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        orch.append_fusion_transcript(writer.as_ref(), id, "delivery", payload)
+            .await
+            .unwrap(),
+        session::jsonl::TranscriptAppendOutcome::AlreadyPresent
+    );
+    let final_user = ConversationMessage::user(protocol::MessageId::new(), "last".into());
+    orch.persist_message_to_jsonl(&final_user).await;
+    let rows = read_jsonl(&path);
+    let messages: Vec<_> = rows
+        .iter()
+        .filter(|row| matches!(row.message_type.as_str(), "user" | "assistant"))
+        .collect();
+    assert_eq!(messages.len(), 5);
+    for pair in messages.windows(2) {
+        assert_eq!(
+            pair[1].parent_uuid.as_deref(),
+            Some(pair[0].uuid.as_str()),
+            "resume must retain the entire foreground/Fusion/next-prompt chain"
+        );
+    }
+    let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(&path).unwrap());
+    let (chain, loaded_session) =
+        session::jsonl::loader::build_conversation_chain(&loaded, &id.to_string());
+    assert_eq!(loaded_session, id.to_string());
+    let chain_ids: Vec<_> = chain.iter().map(|row| row.uuid.as_str()).collect();
+    for row in messages {
+        assert!(
+            chain_ids.contains(&row.uuid.as_str()),
+            "resume lost {}",
+            row.uuid
+        );
+    }
+
+    let other = SessionId::new();
+    let other_path = dir.path().join("other.jsonl");
+    let other_root = dir.path().join("other-state");
+    std::fs::create_dir(&other_root).unwrap();
+    writer.activate_session_target_with_durable_lock(
+        other,
+        other_path.clone(),
+        dir.path().to_path_buf(),
+        Arc::new(session::jsonl::DurableTranscriptWriter::open(other_root).unwrap()),
+    );
+    let cursor = orch.transcript.last_jsonl_uuid.lock().await.clone();
+    let other_uuid = protocol::MessageId::new().as_uuid().to_string();
+    assert_eq!(
+        orch.append_fusion_transcript(
+            writer.as_ref(),
+            other,
+            "other-delivery",
+            serde_json::json!({"uuid":other_uuid,"text":"off-session"})
+        )
+        .await
+        .unwrap(),
+        session::jsonl::TranscriptAppendOutcome::Appended
+    );
+    assert_eq!(
+        *orch.transcript.last_jsonl_uuid.lock().await,
+        cursor,
+        "off-session delivery must not mutate the active session cursor"
+    );
+    assert!(other_path.exists());
+}
+
+#[tokio::test]
 async fn fusion_meta_appends_only_to_launch_session_and_stays_out_of_model_context() {
     let dir = tempfile::tempdir().expect("tempdir");
     let home = dir.path().join(branding::DOT_DIR);

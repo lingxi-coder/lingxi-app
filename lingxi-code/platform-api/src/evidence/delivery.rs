@@ -104,7 +104,10 @@ impl CapturedToolEvidence {
         {
             return None;
         }
-        let suffix = format!("\n\n<host-evidence-receipt>\nreceipt_ref: {}\nHost fetched this tool result. Cite this receipt_ref in evidence for this result; provenance does not verify your interpretation.\n</host-evidence-receipt>", self.receipt.receipt_ref().as_str());
+        let locator_hint = self.receipt.search_result_locator.as_ref().map(|locator| {
+            format!("\nlocator: {locator}\nCopy this locator exactly for this workspace search result (kind: file). It identifies the captured search output, not a read of every matching file.")
+        }).unwrap_or_default();
+        let suffix = format!("\n\n<host-evidence-receipt>\nreceipt_ref: {}{locator_hint}\nHost fetched this tool result. Cite this receipt_ref in evidence for this result; provenance does not verify your interpretation.\n</host-evidence-receipt>", self.receipt.receipt_ref().as_str());
         if let ConversationMessage::User { content, .. } = message {
             if let ContentBlock::ToolResult { content, .. } = &mut content[block_index] {
                 content.push_str(&suffix);

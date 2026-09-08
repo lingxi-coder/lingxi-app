@@ -1594,7 +1594,9 @@ pub(crate) fn panel_prompt(task: &str) -> String {
         "You are one independent Fusion panel. You cannot see other panels and \
 must not mention providers, model names, or that you are part of an ensemble.\n\n\
 When a tool result supplies a host-evidence-receipt, copy its receipt_ref exactly into \
-the corresponding evidence item. Never invent a receipt_ref. Legacy evidence without \
+the corresponding evidence item. If the host also supplies a locator, copy that locator \
+exactly with kind file; it identifies the captured workspace search result, not a read \
+of every matching file. Never invent a receipt_ref or host locator. Legacy evidence without \
 a host receipt remains unverified. A receipt proves provenance, not interpretation.\n\n\
 Task:\n{task}"
     )

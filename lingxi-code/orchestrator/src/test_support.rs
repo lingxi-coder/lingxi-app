@@ -13,6 +13,47 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Attach the real forced-compaction pipeline with a deterministic summarizer.
+/// Host integration tests can exercise transcript commits without adding
+/// compaction/sidequery dependency edges or making provider calls.
+pub fn with_scripted_compactor(
+    orchestrator: crate::ConversationOrchestrator,
+    summary: &str,
+) -> crate::ConversationOrchestrator {
+    struct SummaryClient(String);
+
+    #[async_trait]
+    impl sidequery::SideQueryClient for SummaryClient {
+        async fn query(
+            &self,
+            _request: sidequery::SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+            Ok(sidequery::SideQueryResponse {
+                text: Some(format!("<summary>{}</summary>", self.0)),
+                structured: None,
+                tool_calls: Vec::new(),
+                usage: cost::Usage::default(),
+                stop_reason: Some("end_turn".into()),
+                retry_count: 0,
+            })
+        }
+    }
+
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let runner = Arc::new(sidequery::ForkedAgentRunner::new().with_side_query_client(
+        Arc::new(SummaryClient(summary.to_string())),
+        "test-compact-model".to_string(),
+    ));
+    orchestrator
+        .with_compaction(Arc::new(
+            compaction::CompactionOrchestrator::with_autocompactor(
+                compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+                1_000,
+            ),
+        ))
+        .with_cache_safe_slot(slot)
+}
+
 // ============================================================================
 // MockApiClient (Task 6)
 // ============================================================================

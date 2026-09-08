@@ -42,12 +42,16 @@ impl Tool for ReadFixture {
         self.name
     }
     fn evidence_capability(&self) -> Option<platform_api::EvidenceCapability> {
-        self.capability
-            .then_some(platform_api::EvidenceCapability::Read)
+        self.capability.then(|| match self.name {
+            "Read" => platform_api::EvidenceCapability::Read,
+            "Grep" => platform_api::EvidenceCapability::Grep,
+            "Glob" => platform_api::EvidenceCapability::Glob,
+            _ => panic!("uncalled fixture has no evidence capability"),
+        })
     }
     fn input_schema(&self) -> &Value {
         static SCHEMA: OnceLock<Value> = OnceLock::new();
-        SCHEMA.get_or_init(|| json!({"type":"object","properties":{"file_path":{"type":"string"}}}))
+        SCHEMA.get_or_init(|| json!({"type":"object","properties":{"file_path":{"type":"string"},"pattern":{"type":"string"}}}))
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -84,14 +88,19 @@ impl Tool for ReadFixture {
         _: ToolUseContext,
         _: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        assert_eq!(
-            self.name, "Read",
-            "other declared read-only fixtures must not execute"
-        );
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ToolCallResult::from_data(
-            json!({"type":"text","file":{"filePath":"a.rs","content":"source evidence","numLines":1,"startLine":1,"totalLines":1}}),
-        ))
+        Ok(ToolCallResult::from_data(match self.name {
+            "Read" => {
+                json!({"type":"text","file":{"filePath":"a.rs","content":"source evidence","numLines":1,"startLine":1,"totalLines":1}})
+            }
+            "Grep" => {
+                json!({"mode":"content","numFiles":0,"filenames":[],"content":"a.rs:1:source evidence","numLines":1,"totalLines":1})
+            }
+            "Glob" => {
+                json!({"filenames":["source evidence.rs"],"numFiles":1,"totalMatches":1,"durationMs":1,"truncated":false,"countIsComplete":true})
+            }
+            _ => panic!("other declared read-only fixtures must not execute"),
+        }))
     }
 }
 
@@ -183,6 +192,7 @@ struct EvidenceTransport {
     state: Mutex<WireState>,
     forged: bool,
     capability: bool,
+    selected_tool: &'static str,
 }
 
 fn judge_payload(body: &Value) -> Option<Value> {
@@ -290,21 +300,26 @@ impl Transport for EvidenceTransport {
         } else {
             let calls = state.panel_calls.entry(model.to_owned()).or_default();
             *calls += 1;
-            assert!(*calls <= 2, "each real panel gets exactly Read then report");
+            assert!(
+                *calls <= 2,
+                "each real panel gets exactly one tool then report"
+            );
             if *calls == 1 {
                 let advertised = body["tools"]
                     .as_array()
                     .expect("resolved tool schemas must reach wire");
                 assert!(
-                    advertised.iter().any(|tool| tool["name"] == "Read"),
-                    "Read must pass the real tool resolver and be advertised"
+                    advertised
+                        .iter()
+                        .any(|tool| tool["name"] == self.selected_tool),
+                    "selected tool must pass the real resolver and be advertised"
                 );
                 assert!(advertised
                     .iter()
                     .any(|tool| tool["name"] == "StructuredOutput"));
                 response_stream(
                     model,
-                    json!({"name":"Read","input":{"file_path":"a.rs"}}),
+                    json!({"name":self.selected_tool,"input":{"file_path":"a.rs","pattern":"source evidence"}}),
                     true,
                     11,
                     7,
@@ -330,6 +345,24 @@ impl Transport for EvidenceTransport {
                     assert!(reference.starts_with("evr_") && reference.len() == 36);
                     state.panel_refs.insert(model.to_owned(), reference.clone());
                     evidence["receipt_ref"] = json!(reference);
+                }
+                if self.selected_tool != "Read" && self.capability {
+                    let locator = text
+                        .split_once("\nlocator: ")
+                        .expect("search results supply a host locator")
+                        .1
+                        .lines()
+                        .next()
+                        .unwrap();
+                    assert_eq!(
+                        locator,
+                        format!(
+                            "lingxi-search:{}:{}",
+                            self.selected_tool.to_lowercase(),
+                            evidence["receipt_ref"].as_str().unwrap()
+                        )
+                    );
+                    evidence["locator"] = json!(locator);
                 }
                 response_stream(
                     model,
@@ -395,10 +428,15 @@ fn service(transport: Arc<EvidenceTransport>) -> Arc<llm_client::ApiService> {
 }
 
 async fn run_case(forged: bool, capability: bool) -> FusionUsage {
+    run_tool_case(forged, capability, "Read").await
+}
+
+async fn run_tool_case(forged: bool, capability: bool, selected_tool: &'static str) -> FusionUsage {
     let transport = Arc::new(EvidenceTransport {
         state: Mutex::new(WireState::default()),
         forged,
         capability,
+        selected_tool,
     });
     let service = service(transport.clone());
     let api = Arc::new(orchestrator::ProviderApiAdapter::new(service.clone()));
@@ -407,7 +445,7 @@ async fn run_case(forged: bool, capability: bool) -> FusionUsage {
         2,
     ));
     let read = Arc::new(ReadFixture {
-        name: "Read",
+        name: selected_tool,
         capability,
         permissions: AtomicUsize::new(0),
         calls: AtomicUsize::new(0),
@@ -418,7 +456,10 @@ async fn run_case(forged: bool, capability: bool) -> FusionUsage {
     // resolve_subagent_tools rejects missing explicit names; it does not simply
     // filter them. Register inert fixtures for the three uncalled tools instead
     // of weakening the real resolver/runner guard.
-    for name in ["Grep", "Glob", "WebFetch"] {
+    for name in ["Read", "Grep", "Glob", "WebFetch"]
+        .into_iter()
+        .filter(|name| *name != selected_tool)
+    {
         registry.register_builtin(Arc::new(ReadFixture {
             name,
             capability: false,
@@ -560,4 +601,11 @@ async fn fusion_evidence_real_pool_wire_and_merge_preserve_citations_and_invalid
 #[tokio::test]
 async fn fusion_evidence_legacy_read_without_receipt_is_never_host_verified() {
     run_case(false, false).await;
+}
+
+#[tokio::test]
+async fn fusion_evidence_search_receipts_reach_real_wire_and_synthesis_allowlist() {
+    for tool in ["Grep", "Glob"] {
+        run_tool_case(false, true, tool).await;
+    }
 }

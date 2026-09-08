@@ -62,6 +62,9 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
 
+#[path = "router_test/compact_shutdown.rs"]
+mod compact_shutdown;
+
 // ── Test sink ───────────────────────────────────────────────────────────────
 
 /// A [`ClientEventSink`] that captures every emitted event in emission order so

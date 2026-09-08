@@ -68,19 +68,64 @@ oracle. The rest are, on inspection of the decision core:
   capability is essential…`) and the port's single const is their exact
   concatenation — **not** a divergence.
 
-Two items in the decision core are still genuinely unresolved and want an
-oracle-side answer before any edit:
+Both items in the decision core are now **resolved at the oracle** (2026-09-08):
 
-- `policy.rs` `"Command exceeds maximum length of 10000 characters and cannot be
-  statically analyzed"` — `10000 characters` has **zero** hits in 2.1.263. The
-  oracle's neighbouring texts are `Contains shell syntax (${type}) that cannot
-  be statically analyzed`, `timeout with ${x} flag cannot be statically
-  analyzed`. Does 2.1.263 cap command length at all?
-- `policy.rs:2164` prefix-matches `"Dangerous rm operation"` / `"Dangerous rmdir
-  operation"`. The oracle's producer is
-  `HL(e,t,r) → decisionReason.reason = \`Dangerous ${e} operation ${r}\``
-  (`classifierApprovable:!1`, `circuitBreaker:"dangerousRemoval"`). The prefix
-  match is compatible; the **message** (`t`) still needs a side-by-side.
+- ✅ **Command length.** The threshold is real and the port's number is right:
+  `Ox = 1e4`. What is wrong is the shape. `10000 characters` has zero hits, and
+  none of the four `maximum length of` hits is command-related (OTEL attributes,
+  a multipart boundary). All eleven `> Ox` sites **degrade, never refuse**:
+  `Lm` returns the whole command as one span, `jZt`/`Yse`/`vy` extract nothing,
+  `GZt`/`Ive` return `true` (fail-closed unanalyzable), `Qte` parses no
+  redirections, `zfo` falls back to the regex path, `Jet` asks with the **sed**
+  message, and `bun` returns
+  `{behavior:"passthrough", message:"Command too long for read-only analysis"}`.
+
+  So `"Command exceeds maximum length of 10000 characters and cannot be
+  statically analyzed"` is invented copy for an ask the binary does not emit.
+
+  🚨 But it is not merely surplus: the port's `command_is_read_only` has **no
+  length bail at all**, while `bun`'s whole job at `> Ox` is to stop a giant
+  command being treated as read-only. Deleting the overlength ask without first
+  adding that bail would turn a stricter divergence into a LOOSER one — a 10k+
+  command could be auto-allowed by the read-only inference where the oracle
+  refuses to classify it. Landed accordingly: the `bun` bail is now in
+  `command_is_read_only`, and the invented ask is **kept, and recorded here as a
+  deliberate divergence on the safety side**. Removing it is a separate change
+  that first has to show the port's unanalyzable paths (the `Ive`/`GZt`
+  equivalents) are as conservative as the binary's for a 10k+ command.
+
+- ✅ **`HL` side-by-side, all eight call sites.** `HL(e,t,r)` sets
+  `message = t` and `decisionReason.reason = \`Dangerous ${e} operation ${r}\``
+  with `classifierApprovable:!1, circuitBreaker:"dangerousRemoval"`. The port's
+  prefix match on `"Dangerous rm operation"` / `"Dangerous rmdir operation"` is
+  therefore correct. Comparing message and reason for each site:
+
+  | # | shape | reason suffix | port |
+  |---|---|---|---|
+  | 1 | `cd` before a relative glob removal | `on statically-unresolvable target: ${F}` | ✅ byte-exact |
+  | 2 | target unresolvable to a directory | `on statically-unresolvable target: ${F}` | ✅ byte-exact |
+  | 3 | critical system directory | `on critical path: ${F}` | ✅ byte-exact |
+  | 4 | workspace directory or an ancestor | `on working directory or its ancestor: ${F}` | ✅ byte-exact |
+  | 5 | glob traverses unenumerable dirs | `on statically-unresolvable target: ${F}` | ✅ byte-exact |
+  | 6 | possibly-empty `$VAR` at top level | `on possibly-empty variable path: ${E}` | ✅ byte-exact; **`circuit_breaker` was `None` and is now `DangerousRemoval`** — it goes through `HL` like the rest |
+  | 7 | `> 64` command substitutions | `\u2014 too many command substitutions to analyze (${n})` | ✅ landed 2026-09-08 |
+  | 8 | possibly-empty `$VAR` inside a substitution | `on possibly-empty variable path inside command substitution: ${D.target}` | ✅ landed 2026-09-08 |
+
+  🚨 #7's bail is **removal-specific**: over the threshold it returns `null`
+  unless the text also matches `/\brm(?:dir)?\b/`. Porting it as an
+  unconditional refusal would ask on any command with 65 substitutions.
+
+  🚨 #8's message is NOT #6's — it drops the
+  `\u2014 e.g. \`rm -rf $UNSET/*\` becomes \`rm -rf /*\`` clause. Two oracle
+  sites, two strings; reusing one for both is a byte-level divergence that no
+  behavioural test would catch.
+
+  The `h9` half of `Amo` — evaluating removal targets *inside* each substitution
+  — was already present: `check_dangerous_removal_inner` recurses through
+  `active_command_substitutions` to depth 8. Only the two shapes above were
+  missing. The port counts nested substitutions the way `Amo`'s AST walk does
+  (a `$( $( … ) )` is two nodes), pinned by a test that goes red if the
+  collector is made non-recursive.
 
 ## The 2.1.232 → 2.1.263 delta, by theme
 

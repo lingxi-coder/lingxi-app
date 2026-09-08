@@ -285,6 +285,22 @@ fn contains_active_metachar(command: &str) -> bool {
 /// non-allowlisted base word (see the module docs' safe-direction note).
 #[must_use]
 pub fn command_is_read_only(command: &str) -> bool {
+    // PARITY 2.1.263 `bun`: `if (r.length > Ox) return {behavior:"passthrough",
+    // message:"Command too long for read-only analysis"}`, with `Ox = 1e4`.
+    // Over the threshold the oracle refuses to CLASSIFY the command at all, so
+    // it can never be auto-allowed as read-only. Without this the port would
+    // happily walk a 10k+ command and allow it, which is looser than the binary
+    // — and the overlength ask in `policy.rs` is a LingXi-only backstop that
+    // must not be the only thing standing between a giant command and an
+    // auto-allow.
+    //
+    // Counted in `char`s to match the sibling threshold in
+    // `shell_overlength_bash_ask`; the oracle counts UTF-16 code units, so a
+    // command built almost entirely from astral-plane characters would cross
+    // the oracle's threshold slightly sooner. Not worth a second convention.
+    if command.chars().count() > 10_000 {
+        return false;
+    }
     let subs = crate::shell_command::split_command(command);
     if subs.is_empty() {
         return false;
@@ -723,6 +739,36 @@ fn git_branch_is_dangerous(args: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PARITY 2.1.263 `bun`'s `r.length > Ox` bail (`Ox = 1e4`). Over the
+    /// threshold the oracle returns `passthrough` rather than classifying, so a
+    /// giant command must never come back read-only however benign it looks.
+    #[test]
+    fn an_overlength_command_is_never_read_only() {
+        // A command made only of unambiguously read-only subcommands.
+        let unit = "echo hi && ";
+        let short: String = unit.repeat(50) + "echo done";
+        assert!(short.chars().count() < 10_000);
+        assert!(
+            command_is_read_only(&short),
+            "the same shape under the threshold must still classify as read-only"
+        );
+
+        let long: String = unit.repeat(1000) + "echo done";
+        assert!(long.chars().count() > 10_000, "fixture must cross Ox");
+        assert!(
+            !command_is_read_only(&long),
+            "past Ox the oracle refuses to classify, so this must not be read-only"
+        );
+
+        // The boundary is `>`, not `>=`.
+        let exact: String = "e".repeat(10_000);
+        assert_eq!(exact.chars().count(), 10_000);
+        assert!(
+            !command_is_read_only(&exact),
+            "not read-only, but for the ordinary reason (unknown command), not the bail"
+        );
+    }
 
     // Binary `vho` read-only base set excludes `test`/`getconf`; the port
     // previously over-allowed them.

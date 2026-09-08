@@ -2128,12 +2128,20 @@ impl PermissionPolicy {
         if !too_complex {
             return None;
         }
-        let (cmd, target) = crate::dangerous_removal::dangerous_rm_on_variable_path(command)?;
         // NOTE(telemetry): CC emits `tengu_bash_dangerous_rm_too_complex` here
         // (`hHg`). The permission crate emits no AST-branch tengu events yet —
         // same as the sibling `tengu_bash_ast_too_complex`, which is likewise
         // unemitted — so the emission is deferred to the engine layer.
-        Some(ask_dangerous_rm_variable_path(tool_name, cmd, &target))
+        if let Some((cmd, target)) =
+            crate::dangerous_removal::dangerous_rm_on_variable_path(command)
+        {
+            return Some(ask_dangerous_rm_variable_path(tool_name, cmd, &target));
+        }
+        // PARITY 2.1.263 `xmo`: `mtt` first, then `Amo` over the AST's
+        // substitutions. Both live on this same too-complex branch, and `Amo`
+        // runs ONLY once `mtt` has come back empty.
+        let found = crate::dangerous_removal::dangerous_removal_in_substitutions(command)?;
+        Some(ask_dangerous_removal_in_substitution(tool_name, &found))
     }
 
     /// Shell-only bash command-injection safety ASK (the 2c layer). Splits the
@@ -3620,11 +3628,38 @@ fn ask_dangerous_rm_variable_path(tool_name: &str, cmd: &str, target: &str) -> P
         reason: PermissionDecisionReason::SafetyCheck {
             reason: format!("Dangerous {cmd} operation on possibly-empty variable path: {target}"),
             classifier_approvable: false,
-            circuit_breaker: None,
+            // PARITY 2.1.263: this ask is produced by `HL` in the oracle
+            // (@2206595), and `HL` sets `circuitBreaker:"dangerousRemoval"` on
+            // every one of its eight call sites — this one included.
+            circuit_breaker: Some(crate::result::SafetyCircuitBreaker::DangerousRemoval),
         },
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
             message,
+            options: vec!["Allow once".into(), "Deny".into()],
+        },
+        pending_classifier_check: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// PARITY 2.1.263 `Amo` → `HL`. Same `safetyCheck` shape as every other `HL`
+/// ask — `classifierApprovable:!1`, `circuitBreaker:"dangerousRemoval"` — with
+/// the message and reason carried by the finding.
+#[cfg(feature = "bash-ast")]
+fn ask_dangerous_removal_in_substitution(
+    tool_name: &str,
+    found: &crate::dangerous_removal::SubstitutionRemoval,
+) -> PermissionResult {
+    PermissionResult::Ask {
+        reason: PermissionDecisionReason::SafetyCheck {
+            reason: found.reason(),
+            classifier_approvable: false,
+            circuit_breaker: Some(crate::result::SafetyCircuitBreaker::DangerousRemoval),
+        },
+        prompt: PermissionPrompt {
+            title: format!("Allow {tool_name}?"),
+            message: found.message(),
             options: vec!["Allow once".into(), "Deny".into()],
         },
         pending_classifier_check: None,

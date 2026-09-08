@@ -50,6 +50,7 @@ pub mod coordinator_mode;
 pub mod deep_link;
 pub mod device_status;
 pub mod effect_handler;
+pub mod display;
 pub mod env;
 pub mod file_history_sink;
 pub mod filesystem;

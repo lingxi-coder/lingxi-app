@@ -738,6 +738,14 @@ impl TaskRegistryHandle for TaskRegistry {
         TaskRegistry::background_task(self, task_id).await
     }
 
+    async fn not_found_rosters(
+        &self,
+        caller_agent_id: Option<&str>,
+        named_agent_ids: &[String],
+    ) -> platform_api::task_registry::TaskNotFoundRosters {
+        TaskRegistry::not_found_rosters(self, caller_agent_id, named_agent_ids).await
+    }
+
     async fn background_task_for_tool_use(&self, tool_use_id: &str) -> bool {
         TaskRegistry::background_task_for_tool_use(self, tool_use_id).await
     }

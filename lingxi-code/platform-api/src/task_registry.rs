@@ -103,6 +103,18 @@ pub trait TaskKiller: Send + Sync {
     async fn kill(&self);
 }
 
+/// The rosters claude-code appends to a TaskStop / TaskOutput "no task found"
+/// message so the model can see what it COULD have addressed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskNotFoundRosters {
+    /// `bjn` — running `in_process_teammate` rows, by their addressable
+    /// identity (`name@team` where one exists).
+    pub running_teammates: Vec<String>,
+    /// `JFe` — running backgrounded `local_agent` rows that are NOT in the
+    /// agent-name registry, rendered `{id} ({description})` or a bare id.
+    pub background_agents: Vec<String>,
+}
+
 /// Moves a still-running FOREGROUND task to the background on request.
 ///
 /// The port of claude-code `I_t`'s first act, `t.background(e)` on the live
@@ -849,6 +861,22 @@ pub trait TaskRegistryHandle: Send + Sync {
     async fn background_task(&self, task_id: &str) -> bool {
         let _ = task_id;
         false
+    }
+
+    /// Collect the rosters a "no task found" message names (claude-code `bjn`
+    /// and `JFe`).
+    ///
+    /// `caller_agent_id` is excluded from the background-agent roster (`JFe`'s
+    /// `p.id!==r`), and `named_agent_ids` — the values of the agent-name
+    /// registry — are excluded too, because those are reported separately as
+    /// "Running named agents".
+    async fn not_found_rosters(
+        &self,
+        caller_agent_id: Option<&str>,
+        named_agent_ids: &[String],
+    ) -> TaskNotFoundRosters {
+        let _ = (caller_agent_id, named_agent_ids);
+        TaskNotFoundRosters::default()
     }
 
     /// Move the task owning `tool_use_id` to the background (claude-code

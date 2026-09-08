@@ -131,6 +131,163 @@ mod tests {
         );
     }
 
+    /// A registry that knows nothing but its rosters — enough to pin the
+    /// ASSEMBLY of the two not-found messages. Roster COMPUTATION is tested
+    /// against the real registry in `tasks`.
+    struct RosterRegistry(platform_api::task_registry::TaskNotFoundRosters);
+
+    #[async_trait::async_trait]
+    impl platform_api::task_registry::TaskRegistryHandle for RosterRegistry {
+        async fn create(
+            &self,
+            _i: platform_api::task_registry::TaskCreateInput,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn get(
+            &self,
+            _id: &str,
+        ) -> Result<
+            Option<platform_api::task_registry::TaskRecord>,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            Ok(None)
+        }
+        async fn list(
+            &self,
+            _f: platform_api::task_registry::TaskListFilter,
+        ) -> Result<
+            Vec<platform_api::task_registry::TaskRecord>,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            Ok(Vec::new())
+        }
+        async fn update(
+            &self,
+            _id: &str,
+            _p: platform_api::task_registry::TaskUpdatePatch,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn set_status(
+            &self,
+            _id: &str,
+            _s: &str,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn kill(
+            &self,
+            _id: &str,
+        ) -> Result<
+            platform_api::task_registry::TaskRecord,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn output(
+            &self,
+            _id: &str,
+            _offset: Option<u64>,
+        ) -> Result<
+            platform_api::task_registry::TaskOutputChunk,
+            platform_api::task_registry::TaskRegistryError,
+        > {
+            unreachable!()
+        }
+        async fn not_found_rosters(
+            &self,
+            _caller: Option<&str>,
+            _named: &[String],
+        ) -> platform_api::task_registry::TaskNotFoundRosters {
+            self.0.clone()
+        }
+    }
+
+    fn roster_ctx() -> tool_api::BuiltinToolContext {
+        use std::sync::Arc;
+        use telemetry::AnalyticsBus;
+        use tool_api::test_support::{ctx_for_file_tools, make_dummy_fs};
+        ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![std::env::temp_dir()],
+        )
+    }
+
+    /// claude-code `Mut` @3595720. Every clause is its own `if`, appended in a
+    /// fixed order, so a message can carry all of them at once.
+    #[tokio::test]
+    async fn task_stop_not_found_names_what_could_have_been_addressed() {
+        use std::sync::Arc;
+        let registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle> = Arc::new(
+            RosterRegistry(platform_api::task_registry::TaskNotFoundRosters {
+                running_teammates: vec!["buddy@alpha".into(), "pal@alpha".into()],
+                background_agents: vec!["a1b2c3d4e (survey the crate)".into()],
+            }),
+        );
+        let message = super::task_stop_not_found_message(
+            &roster_ctx(),
+            &registry,
+            "nope",
+            Some("buddy@alpha"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            message,
+            "No task found with ID: nope. Did you mean: buddy@alpha?. \
+Running teammates: buddy@alpha, pal@alpha. \
+Running background agents: a1b2c3d4e (survey the crate)"
+        );
+    }
+
+    /// With nothing running, the message is exactly the bare base line — no
+    /// stray separators from an empty clause.
+    #[tokio::test]
+    async fn task_stop_not_found_is_bare_when_nothing_is_running() {
+        use std::sync::Arc;
+        let registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle> =
+            Arc::new(RosterRegistry(Default::default()));
+        let message =
+            super::task_stop_not_found_message(&roster_ctx(), &registry, "nope", None, None).await;
+        assert_eq!(message, "No task found with ID: nope");
+    }
+
+    /// `SWn` @3695814 is NOT `Mut`: TaskOutput appends only the background-agent
+    /// clause, and interpolates the requested id RAW rather than through `w1`.
+    #[tokio::test]
+    async fn task_output_not_found_appends_only_the_background_agents_clause() {
+        use std::sync::Arc;
+        let registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle> = Arc::new(
+            RosterRegistry(platform_api::task_registry::TaskNotFoundRosters {
+                running_teammates: vec!["buddy@alpha".into()],
+                background_agents: vec!["a1b2c3d4e".into()],
+            }),
+        );
+        let message =
+            super::task_output_not_found_message(&roster_ctx(), &registry, "nope", None).await;
+        assert_eq!(
+            message, "No task found with ID: nope. Running background agents: a1b2c3d4e",
+            "no teammates clause, and the id is not sanitized",
+        );
+        // The raw-id half, made observable: TaskStop would collapse this,
+        // TaskOutput must not.
+        let empty: Arc<dyn platform_api::task_registry::TaskRegistryHandle> =
+            Arc::new(RosterRegistry(Default::default()));
+        let raw = super::task_output_not_found_message(&roster_ctx(), &empty, "a  b", None).await;
+        assert_eq!(raw, "No task found with ID: a  b");
+    }
+
     // ── Product-A V2 gating (sub-batch [2]) ──────────────────────────────
 
     #[test]
@@ -1163,10 +1320,11 @@ mod tests {
     mod task_list_id_precedence {
         use super::*;
 
-        /// Restore-on-drop guard for the env vars + leader-team-name global this
+        /// Restore-on-drop guard for the env vars + session-owned leader names this
         /// module flips. Holds the shared ENV_LOCK so it does not race other
         /// env-mutating tests.
         struct Guard {
+            session_id: protocol::SessionId,
             prev_list: Option<std::ffi::OsString>,
             prev_team: Option<std::ffi::OsString>,
             _lock: std::sync::MutexGuard<'static, ()>,
@@ -1190,6 +1348,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let g = Guard {
+                session_id: protocol::SessionId::new(),
                 prev_list: std::env::var_os("LINGXI_TASK_LIST_ID"),
                 prev_team: std::env::var_os("LINGXI_TEAM_NAME"),
                 _lock: lock,

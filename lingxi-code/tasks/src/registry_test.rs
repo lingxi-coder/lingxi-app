@@ -4038,6 +4038,18 @@ async fn seed_agent(
     parent: Option<protocol::AgentId>,
     status: TaskStatus,
 ) {
+    seed_agent_described(registry, id, agent_id, parent, status, id).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_agent_described(
+    registry: &TaskRegistry,
+    id: &str,
+    agent_id: protocol::AgentId,
+    parent: Option<protocol::AgentId>,
+    status: TaskStatus,
+    description: &str,
+) {
     use crate::state::{LocalAgentTaskState, TaskStateBase};
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
@@ -4045,7 +4057,7 @@ async fn seed_agent(
                 id: id.into(),
                 task_type: TaskType::LocalAgent,
                 status,
-                description: id.into(),
+                description: description.into(),
                 tool_use_id: None,
                 start_time: SystemTime::now(),
                 end_time: None,
@@ -4068,6 +4080,88 @@ async fn seed_agent(
             forked_skill_name: None,
         }))
         .await;
+}
+
+/// claude-code `bjn` + `JFe` — the rosters a "no task found" message names.
+#[tokio::test]
+async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents() {
+    use crate::state::{InProcessTeammateTaskState, TaskStateBase};
+    let (_d, registry) = make_registry();
+
+    // A running teammate. `bjn` reports its addressable identity, which here is
+    // the `name@team` alias the spawn path records.
+    registry
+        .insert_state_for_test(TaskState::InProcessTeammate(InProcessTeammateTaskState {
+            base: TaskStateBase {
+                id: "t-buddy".into(),
+                task_type: TaskType::InProcessTeammate,
+                status: TaskStatus::Running,
+                description: "buddy".into(),
+                tool_use_id: None,
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from("/tmp/tasks/t-buddy.output"),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
+            },
+            agent_id: protocol::AgentId::new(),
+            pending_messages: vec![],
+        }))
+        .await;
+    registry
+        .register_alias_for_test("buddy@alpha", "t-buddy")
+        .await;
+
+    // A backgrounded running agent with a description, and one WITHOUT — the
+    // oracle renders the latter as a bare id, not `id ()`.
+    seed_agent_described(
+        &registry,
+        "a-bg",
+        protocol::AgentId::new(),
+        None,
+        TaskStatus::Running,
+        "survey the crate",
+    )
+    .await;
+    seed_agent_described(
+        &registry,
+        "a-bare",
+        protocol::AgentId::new(),
+        None,
+        TaskStatus::Running,
+        "",
+    )
+    .await;
+    // A named agent is reported under its NAME elsewhere, so `JFe` excludes it.
+    seed_agent_described(
+        &registry,
+        "a-named",
+        protocol::AgentId::new(),
+        None,
+        TaskStatus::Running,
+        "named one",
+    )
+    .await;
+
+    let rosters = registry
+        .not_found_rosters(None, &["a-named".to_string()])
+        .await;
+    assert_eq!(rosters.running_teammates, vec!["buddy@alpha".to_string()]);
+    assert_eq!(
+        rosters.background_agents,
+        vec!["a-bare".to_string(), "a-bg (survey the crate)".to_string()],
+        "a named agent is excluded, and a description-less agent is a bare id",
+    );
+
+    // The caller never suggests itself.
+    let from_bg = registry
+        .not_found_rosters(Some("a-bg"), &["a-named".to_string()])
+        .await;
+    assert_eq!(from_bg.background_agents, vec!["a-bare".to_string()]);
 }
 
 /// claude-code's cascade block in `rY`: stopping a RESTING agent stops every

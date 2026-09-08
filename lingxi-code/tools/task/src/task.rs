@@ -192,6 +192,121 @@ fn todo_v2_enabled_inner(enable_tasks_env_defined_falsy: bool) -> bool {
     !enable_tasks_env_defined_falsy
 }
 
+/// The rosters a "no task found" message names, gathered once.
+///
+/// Ports the data half of claude-code `Mut` (@3595720) and `JFe` (@3594626).
+/// `named_agents` is the agent-name registry's KEYS (the names, which is what
+/// `wzo` reports), while its VALUES are passed to the registry so the
+/// background-agent roster can exclude them — a named agent is reported once,
+/// under its name.
+async fn not_found_rosters(
+    ctx: &tool_api::BuiltinToolContext,
+    registry: &std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    caller_agent_id: Option<&str>,
+) -> (
+    Vec<String>,
+    platform_api::task_registry::TaskNotFoundRosters,
+) {
+    // `wzo`: a registry name counts only while its agent is actually running.
+    let mut named_agents = Vec::new();
+    let mut named_ids = Vec::new();
+    if let Some(names) = ctx.agent_name_registry.as_ref() {
+        for (name, agent_id) in names.list().await {
+            let id = agent_id.to_string();
+            if matches!(registry.get(&id).await, Ok(Some(record))
+                if record.task_type == "local_agent" && record.status == "running")
+            {
+                named_agents.push(name);
+            }
+            named_ids.push(id);
+        }
+    }
+    named_agents.sort();
+    let rosters = registry
+        .not_found_rosters(caller_agent_id, &named_ids)
+        .await;
+    (named_agents, rosters)
+}
+
+/// claude-code `Mut` (@3595720) — TaskStop's "no task found" message.
+///
+/// Four independent appends in a fixed order; each clause is its own `if`, not
+/// an else-if, so a message can carry all of them. The `. Did you mean: X?`
+/// clause needs the `XFe`/`Szo` fuzzy resolver, which is AGT-02 and not ported
+/// yet — `suggestion` is threaded so that lands as one argument change rather
+/// than a rewrite here.
+async fn task_stop_not_found_message(
+    ctx: &tool_api::BuiltinToolContext,
+    registry: &std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    requested: &str,
+    suggestion: Option<&str>,
+    caller_agent_id: Option<&str>,
+) -> String {
+    use platform_api::display::sanitize_display;
+    let (named_agents, rosters) = not_found_rosters(ctx, registry, caller_agent_id).await;
+    let mut message = format!("No task found with ID: {}", sanitize_display(requested));
+    if let Some(suggestion) = suggestion {
+        message.push_str(&format!(
+            ". Did you mean: {}?",
+            sanitize_display(suggestion)
+        ));
+    }
+    if !rosters.running_teammates.is_empty() {
+        message.push_str(&format!(
+            ". Running teammates: {}",
+            join_sanitized(&rosters.running_teammates)
+        ));
+    }
+    if !named_agents.is_empty() {
+        message.push_str(&format!(
+            ". Running named agents: {}",
+            join_sanitized(&named_agents)
+        ));
+    }
+    message.push_str(&background_agents_clause(&rosters));
+    message
+}
+
+/// claude-code `SWn` (@3695814) — TaskOutput's "no task found" message.
+///
+/// Deliberately NOT the same builder as TaskStop's. `SWn` interpolates the
+/// requested id RAW (`${e}`, not `w1(e)`) and appends ONLY the background-agent
+/// clause. Folding the two together would diverge on both axes at once.
+async fn task_output_not_found_message(
+    ctx: &tool_api::BuiltinToolContext,
+    registry: &std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    requested: &str,
+    caller_agent_id: Option<&str>,
+) -> String {
+    let (_named, rosters) = not_found_rosters(ctx, registry, caller_agent_id).await;
+    format!(
+        "No task found with ID: {requested}{}",
+        background_agents_clause(&rosters)
+    )
+}
+
+/// `JFe`'s tail: the clause, or an empty string when the roster is empty.
+fn background_agents_clause(rosters: &platform_api::task_registry::TaskNotFoundRosters) -> String {
+    if rosters.background_agents.is_empty() {
+        return String::new();
+    }
+    // Entries are pre-rendered `{id} ({description})` by the registry, whose
+    // description already went through the sanitizer; joining them raw here
+    // matches `d.join(", ")`.
+    format!(
+        ". Running background agents: {}",
+        rosters.background_agents.join(", ")
+    )
+}
+
+fn join_sanitized(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| platform_api::display::sanitize_display(value))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Whether the Product-A V2 Task tools are advertised (and `TodoWrite` hidden).
 ///
 /// Port of `isTodoV2Enabled()` (binary `TE()`): enabled UNLESS
@@ -1932,12 +2047,16 @@ impl Tool for TaskStopTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
         let invocation_id = fresh_invocation_id();
         let bus = self.ctx.bus.clone();
+        // claude-code `qne(t)` — the calling agent, excluded from the
+        // background-agent roster so a not-found message never suggests the
+        // caller to itself.
+        let caller_agent_id = ctx.agent_id.map(|id| id.to_string());
 
         // Resolve id: `task_id ?? shell_id`, then `if (!id)` (`TaskStopTool.ts:111-115`).
         // `??` (`Option::or`) only falls back for an absent `task_id`; a present
@@ -1995,9 +2114,17 @@ impl Tool for TaskStopTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "No task found with ID: {task_id}"
-                )));
+                return Err(ToolError::InvalidInput(
+                    task_stop_not_found_message(
+                        &self.ctx,
+                        &registry,
+                        &task_id,
+                        // AGT-02: the `XFe`/`Szo` fuzzy resolver is not ported.
+                        None,
+                        caller_agent_id.as_deref(),
+                    )
+                    .await,
+                ));
             }
             Err(e) => {
                 emit_failed(
@@ -2444,6 +2571,8 @@ impl Tool for TaskOutputTool {
         let started = Instant::now();
         let invocation_id = fresh_invocation_id();
         let bus = self.ctx.bus.clone();
+        // `qne(t)` — same caller exclusion as TaskStop.
+        let caller_agent_id = ctx.agent_id.map(|id| id.to_string());
 
         // `task_id` is required by the schema; guard mirrors `validateInput`
         // (`TaskOutputTool.tsx:188-193`): `if (!task_id)` → "Task ID is required".
@@ -2503,9 +2632,15 @@ impl Tool for TaskOutputTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "No task found with ID: {task_id}"
-                )));
+                return Err(ToolError::InvalidInput(
+                    task_output_not_found_message(
+                        &self.ctx,
+                        &registry,
+                        &task_id,
+                        caller_agent_id.as_deref(),
+                    )
+                    .await,
+                ));
             }
             Err(e) => {
                 emit_failed(

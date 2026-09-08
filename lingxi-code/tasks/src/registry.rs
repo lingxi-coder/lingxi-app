@@ -904,6 +904,73 @@ impl TaskRegistry {
         true
     }
 
+    /// claude-code `bjn` + `JFe` — the two rosters a "no task found" message
+    /// names.
+    ///
+    /// `bjn` lists a teammate by `identity.agentId`, which upstream is the
+    /// `name@team` string. Here that form lives in the alias map (built at
+    /// spawn by `aliases_for_spawn`), so the roster reverse-looks-it-up and
+    /// falls back to the raw agent id when a teammate has no team.
+    pub async fn not_found_rosters(
+        &self,
+        caller_agent_id: Option<&str>,
+        named_agent_ids: &[String],
+    ) -> platform_api::task_registry::TaskNotFoundRosters {
+        let map = self.tasks.read().await;
+        let aliases = self.aliases.read().await;
+        // task id → its most addressable alias (`name@team` beats a bare name
+        // beats the raw id), matching what the model is told to pass back.
+        let mut addressable: HashMap<&str, &str> = HashMap::new();
+        for (alias, task_id) in aliases.iter() {
+            let better = addressable
+                .get(task_id.as_str())
+                .is_none_or(|current| !current.contains('@') && alias.contains('@'));
+            if better {
+                addressable.insert(task_id.as_str(), alias.as_str());
+            }
+        }
+
+        let mut running_teammates = Vec::new();
+        let mut background_agents = Vec::new();
+        for (id, state) in map.iter() {
+            match state {
+                TaskState::InProcessTeammate(teammate)
+                    if teammate.base.status == TaskStatus::Running =>
+                {
+                    running_teammates.push(
+                        addressable
+                            .get(id.as_str())
+                            .map_or_else(|| teammate.agent_id.to_string(), ToString::to_string),
+                    );
+                }
+                TaskState::LocalAgent(agent)
+                    if agent.base.status == TaskStatus::Running
+                        && agent.is_backgrounded
+                        && Some(id.as_str()) != caller_agent_id
+                        && agent.subagent_type != "main-session"
+                        && !named_agent_ids.iter().any(|named| named == id) =>
+                {
+                    // `p.description ? `${p.id} (${Vn(p.description)})` : p.id`.
+                    background_agents.push(if agent.base.description.is_empty() {
+                        id.clone()
+                    } else {
+                        format!(
+                            "{id} ({})",
+                            platform_api::display::sanitize_display(&agent.base.description)
+                        )
+                    });
+                }
+                _ => {}
+            }
+        }
+        running_teammates.sort();
+        background_agents.sort();
+        platform_api::task_registry::TaskNotFoundRosters {
+            running_teammates,
+            background_agents,
+        }
+    }
+
     /// claude-code `Ode` — move the task that owns `tool_use_id` to the
     /// background. Returns whether it moved.
     ///
@@ -1728,6 +1795,15 @@ impl TaskRegistry {
     /// `local_agent` clean-result branch) without spinning up the variant's
     /// real handler.
     #[cfg(test)]
+    /// Seed an alias → task-id mapping the way `aliases_for_spawn` would.
+    #[cfg(test)]
+    pub(crate) async fn register_alias_for_test(&self, alias: &str, task_id: &str) {
+        self.aliases
+            .write()
+            .await
+            .insert(alias.to_string(), task_id.to_string());
+    }
+
     pub(crate) async fn insert_state_for_test(&self, state: TaskState) {
         let id = state.base().id.clone();
         self.tasks.write().await.insert(id, state);

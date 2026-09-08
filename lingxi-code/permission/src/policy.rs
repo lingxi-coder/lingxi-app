@@ -526,6 +526,30 @@ impl PermissionPolicy {
         mode: PermissionMode,
         rules: impl IntoIterator<Item = PermissionRule>,
     ) -> Self {
+        Self::from_rules_confined(
+            mode,
+            rules,
+            platform_api::env::is_eval_confined_session(),
+        )
+    }
+
+    /// [`Self::from_rules`] with the confinement flag passed in rather than read
+    /// from the process environment.
+    ///
+    /// 🚨 This exists because `CLAUDE_CODE_EVAL_CONFINED` is a PROCESS global and
+    /// the test harness runs a binary's tests on parallel threads. A test that
+    /// sets the variable to exercise `OG` filters the allow rules of every other
+    /// test constructing a policy in the same window — which showed up here as
+    /// `content_allow_rule_matches_only_matching_path` failing in a full run and
+    /// passing in isolation. Reading the environment once, at the edge, and
+    /// threading the answer keeps the flag out of that race; tests call this
+    /// directly and mutate nothing.
+    #[must_use]
+    pub fn from_rules_confined(
+        mode: PermissionMode,
+        rules: impl IntoIterator<Item = PermissionRule>,
+        confined: bool,
+    ) -> Self {
         let mut policy = Self::new(PermissionMode::Default);
         // PARITY 2.1.263 `OG(e)`:
         // `let t = Bm(e); return YYe() ? t.filter(r => r.ruleBehavior !== "allow") : t`
@@ -536,7 +560,6 @@ impl PermissionPolicy {
         // narrows what may be granted, it does not disarm the policy. The
         // sibling half of this lives in `hooks` (`H_n`), which drops a hook's
         // allow the same way.
-        let confined = platform_api::env::is_eval_confined_session();
         for rule in rules {
             if confined && rule.behavior == PermissionBehavior::Allow {
                 continue;

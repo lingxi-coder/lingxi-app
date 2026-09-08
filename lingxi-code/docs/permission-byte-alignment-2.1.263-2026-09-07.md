@@ -573,7 +573,101 @@ green; restored byte-identically.
 | unanalysable command (`zU`) + sandbox exemption | ✅ |
 | interpreters: stdin `-`, inline-code flags, `xargs`, heredoc/pipe | ✅ |
 | glob-containing paths → `ymo`'s `_tt` upward-escape guard | ✅ |
-| `env FOO=bar` outside the safe list (`eO`) | ❌ — the safe list was not located in the binary |
+| env vars outside the safe list: prefix (`Eun`) + `env` command (`ymo` head), via `eO`/`sle` | ✅ |
+
+### 🚨 `CLAUDE_CODE_EVAL_CONFINED` was a flaky process global — fixed 2026-09-08
+
+The `OG` gate landed in `19deb0373` reading the variable inside
+`PermissionPolicy::from_rules`, and its test set the variable with
+`std::env::set_var`. The test harness runs a binary's tests on parallel threads,
+so during that window EVERY other test constructing a policy lost its allow
+rules. It surfaced as `content_allow_rule_matches_only_matching_path` failing in
+a full run and passing in isolation — the classic shape, and it would have
+reached CI as an intermittent red.
+
+Fix: `from_rules` now reads the environment once and delegates to
+`from_rules_confined(mode, rules, confined)`; the test passes the flag and
+mutates nothing. The env read moved to the edge, which is where it belonged.
+
+⚠️ **Open, same class, not fixed here:** `hooks/src/executor_test.rs` mutates the
+same variable for the `H_n` test, and five tests in that binary assert
+`HookDecision::Approve` / `PermissionRequestResult::Allow`. The same race exists
+there. It is untouched because another session holds that file uncommitted; the
+fix is the same shape — thread the flag through the `H_n` suppression instead of
+reading `platform_api::env::is_eval_confined_session()` at `executor.rs:4542`.
+
+
+### `eO` / `sle` — the env-var safe list, wired 2026-09-08
+
+**Retraction.** The row above previously read *"the safe list was not located in
+the binary."* That was wrong, and it was wrong the cheap way: I never ran the
+search. `eO` is one line —
+
+```js
+function eO(e){return sle.has(e)||!1}          // c_160988549.js @2180276
+sle=new Set([...])                             // c_160988549.js @2179751, 39 entries
+```
+
+— and the table was already in the port, TWICE, byte-identical to `sle` and in
+the same order: `allow_suggestion::SAFE_ENV_ASSIGNMENTS` and
+`shell_command::SAFE_ENV_VARS`. Same failure mode as the `sandbox.filesystem`
+scoping claim retracted in `887d755d2`: an assertion of absence published without
+the grep that would have refuted it.
+
+**Refactor.** The two copies are now one `pub(crate) const SAFE_ENV_VARS` in
+`shell_command.rs`, plus `is_safe_env_var` (= `eO`). Three consumers reference
+it: `EC`/`strip_safe_wrappers`, `KQt`'s prefix narrowing
+(`allow_suggestion.rs`, `sandbox_auto_allow.rs`), and the read block.
+
+🚨 `bash_ast_security::SAFE_ENV_VARS` carries the SAME oracle name for a
+DIFFERENT table — shell-CONTROLLED variables (`BASHPID`, …). It is deliberately
+untouched.
+
+**What was actually missing** are the two escalations that consume `eO`, both
+under `blockReadsOutsideWorkingDirectories` in `Oun`:
+
+```js
+if (Eun(e,o) && !(jS(e)&&Nz()))
+  return zU("an environment variable prefix outside the safe list cannot be checked against the read block");
+let de = ymo(o, d, t, r===!0, jS(e)&&Nz());   // its first statement is the `env` COMMAND check
+```
+
+`Eun`'s walk has three exits and only one is `false`. A SAFE name whose VALUE the
+strip pattern cannot match is still unsafe — `LANG=$(id) cat f` escalates —
+because the walk cannot advance past it and so cannot prove the rest of the
+prefix is assignment-free. Its value pattern is deliberately NOT
+`strip_safe_wrappers`': it accepts `NAME+=`, allows `+` in a bare value, and
+admits an empty value. The `ymo` head is narrower in one way (no `+=`) and wider
+in another (it scans all of `argv[1..]`, so `env -u FOO SECRET=1 cat f` is
+caught).
+
+**Placement.** Both run AFTER the per-path walk, matching `Oun`, which reaches
+them only past `ele`. The `mmo` stdin check correctly sits at the TOP of the same
+section because that one lives in `Pmo`, upstream of `Oun`.
+
+**Two divergences, both recorded rather than papered over:**
+
+1. The `!(jS(e)&&Nz())` suppressor — "this command will run sandboxed anyway" —
+   is NOT applied, exactly as it is already not applied to the `mmo` stdin check
+   this section shipped earlier. This seam has no sandbox-decision input;
+   threading one changes the signature and every caller, and would have to land
+   for both checks together. The port is more conservative than the binary here.
+2. `Eun`'s `t` branch (`node.envVars`) is not wired — no AST node at this seam,
+   so the port always takes the oracle's own string fallback. A visible
+   consequence: for the SIMPLE form `SECRET=1 cat /etc/passwd` the oracle sees
+   `SECRET=1` as an envVar and still resolves the path, surfacing the PATH copy,
+   while the port surfaces the ENV copy (`strip_safe_wrappers` strips only SAFE
+   names, so `SECRET=1` lands as argv[0] and matches no verb). Both refuse and
+   both carry the `outsideReadsBlocked` safety check; only the wording differs.
+   The ordering assertion therefore uses a COMPOUND command,
+   `SECRET=1 ls && cat /etc/passwd`, where the port does produce both.
+
+**Red-proofed**, three ways: `eO` forced to `true` reddens 3 of the 4 new tests
+and correctly leaves the block-off baseline green; dropping the
+`read_block_dirs.is_some()` gate reddens exactly that baseline; hoisting the env
+check above the path walk **with its real message** is caught by the ordering
+assertion alone.
+
 
 ### Glob upward-escape guard wired 2026-09-08
 

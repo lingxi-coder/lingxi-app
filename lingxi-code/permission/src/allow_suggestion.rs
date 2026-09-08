@@ -261,52 +261,6 @@ const INTERPRETER_BLOCKLIST: &[&str] = &[
     "runuser",
 ];
 
-/// The 2.1.211 `KQt` safe leading-env-assignment allowlist `Jqr`: a leading
-/// `NAME=value` prefix keeps the command prefix-narrowable only when every NAME
-/// is in this set (else the suggestion falls back to the EXACT full command, so
-/// a `SECRET=… cmd` grant never widens to `cmd *`).
-pub(crate) const SAFE_ENV_ASSIGNMENTS: &[&str] = &[
-    "GOEXPERIMENT",
-    "GOOS",
-    "GOARCH",
-    "CGO_ENABLED",
-    "GO111MODULE",
-    "RUST_BACKTRACE",
-    "RUST_LOG",
-    "NODE_ENV",
-    "PYTHONUNBUFFERED",
-    "PYTHONDONTWRITEBYTECODE",
-    "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
-    "PYTEST_DEBUG",
-    "ANTHROPIC_API_KEY",
-    "LANG",
-    "LANGUAGE",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LC_TIME",
-    "CHARSET",
-    "TERM",
-    "COLORTERM",
-    "NO_COLOR",
-    "FORCE_COLOR",
-    "TZ",
-    "LS_COLORS",
-    "LSCOLORS",
-    "GREP_COLOR",
-    "GREP_COLORS",
-    "GCC_COLORS",
-    "TIME_STYLE",
-    "BLOCK_SIZE",
-    "BLOCKSIZE",
-    "COLUMNS",
-    "LINES",
-    "CLICOLOR",
-    "CLICOLOR_FORCE",
-    "CI",
-    "DEBIAN_FRONTEND",
-    "GIT_TERMINAL_PROMPT",
-];
-
 /// `Fro=/^[A-Za-z_]\w*=/` — a leading `NAME=` env-assignment token.
 fn env_assignment_re() -> &'static regex::Regex {
     static RE: LazyLock<regex::Regex> =
@@ -362,7 +316,7 @@ fn static_prefix(command: &str) -> Option<String> {
     while r < tokens.len() && env_assignment_re().is_match(tokens[r]) {
         // `ts(tok,"=")` — the NAME before the first `=`.
         let name = tokens[r].split_once('=').map_or(tokens[r], |(n, _)| n);
-        if !SAFE_ENV_ASSIGNMENTS.contains(&name) {
+        if !crate::shell_command::is_safe_env_var(name) {
             return None; // unsafe leading env → fall back to exact command.
         }
         r += 1;
@@ -406,7 +360,7 @@ fn heredoc_prefix(command: &str) -> Option<String> {
     let mut i = 0;
     while i < tokens.len() && env_assignment_re().is_match(tokens[i]) {
         let name = tokens[i].split_once('=').map_or(tokens[i], |(n, _)| n);
-        if !SAFE_ENV_ASSIGNMENTS.contains(&name) {
+        if !crate::shell_command::is_safe_env_var(name) {
             return None;
         }
         i += 1;

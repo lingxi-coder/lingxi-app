@@ -151,7 +151,7 @@ impl SandboxAutoAllowConfig {
 /// (The BAu rm-dangerous-op refusal (#3 in CC) is covered separately by the
 /// policy's catastrophic-removal guard, which runs before the sandbox branch.)
 /// Reuses the crate's already-CC-faithful primitives — the `Jqr`
-/// [`crate::allow_suggestion::SAFE_ENV_ASSIGNMENTS`] set and
+/// [`crate::shell_command::SAFE_ENV_VARS`] set and
 /// [`crate::path_constraints::command_has_network_device_redirect`] — so the
 /// refusal cannot drift from the corresponding deny/ask paths.
 fn bau_refuses(command: &str) -> bool {
@@ -161,7 +161,7 @@ fn bau_refuses(command: &str) -> bool {
     for sub in &subs {
         for tok in sub.split_whitespace() {
             if let Some(name) = env_assignment_name(tok) {
-                if !crate::allow_suggestion::SAFE_ENV_ASSIGNMENTS.contains(&name) {
+                if !crate::shell_command::is_safe_env_var(name) {
                     return true;
                 }
             }

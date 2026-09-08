@@ -4333,6 +4333,109 @@ mod tests {
         }
     }
 
+    /// PARITY 2.1.263 — the two env-var read-block escalations (`Eun` and the
+    /// head of `ymo`). Every path here is INSIDE the working dirs, so the path
+    /// walk finds nothing and the env check is demonstrably what fires.
+    #[test]
+    fn read_block_covers_unsafe_env_prefix_and_env_command() {
+        let blocked = || {
+            policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
+                .with_block_reads_outside_working_directories(true)
+        };
+        let tail = "; under the read block (permissions.blockReadsOutsideWorkingDirectories) \
+                    a command the shell parser cannot analyze asks the person";
+        for (cmd, kind) in [
+            // `Eun`: a leading NAME=value prefix whose NAME is off the list.
+            ("SECRET=1 cat /proj/work/x", "prefix"),
+            // …and one that only becomes visible after a SAFE pair is stripped.
+            ("LANG=C SECRET=1 cat /proj/work/x", "prefix"),
+            // `NAME+=` counts as an assignment for `Eun` (its name pattern has
+            // `\+?`), so an off-list append escalates too.
+            ("SECRET+=1 cat /proj/work/x", "prefix"),
+            // `ymo`: the `env` COMMAND carrying an off-list assignment.
+            ("env SECRET=1 cat /proj/work/x", "assignment"),
+            ("/usr/bin/env SECRET=1 cat /proj/work/x", "assignment"),
+            // Scanned across ALL of argv[1..], not just the leading run.
+            ("env -u FOO SECRET=1 cat /proj/work/x", "assignment"),
+        ] {
+            let out = blocked().authorize("Bash", &bash(cmd));
+            let PermissionResult::Ask { reason, prompt, .. } = &out else {
+                panic!("{cmd} must ask under the read block, got {out:?}");
+            };
+            assert!(
+                crate::read_block::is_outside_reads_blocked(reason),
+                "{cmd}: expected the outsideReadsBlocked safetyCheck, got {reason:?}"
+            );
+            assert_eq!(
+                prompt.message,
+                format!(
+                    "an environment variable {kind} outside the safe list cannot be \
+                     checked against the read block{tail}"
+                ),
+                "{cmd}"
+            );
+        }
+
+        // A name ON the list is analyzable and must NOT escalate — otherwise the
+        // whole table is decorative.
+        for cmd in [
+            "LANG=C cat /proj/work/x",
+            "env LANG=C cat /proj/work/x",
+            "CI=1 LANG=C NO_COLOR=1 cat /proj/work/x",
+        ] {
+            if let PermissionResult::Ask { prompt, .. } = blocked().authorize("Bash", &bash(cmd)) {
+                assert!(
+                    !prompt.message.contains("outside the safe list"),
+                    "{cmd}: every NAME is on the safe list, got {}",
+                    prompt.message
+                );
+            }
+        }
+
+        // 🚨 ORDER. `Oun` runs `ele` (the path containment) and only THEN the
+        // env checks, so a command that is both outside-path AND env-unsafe
+        // must surface the PATH copy. If these checks ever migrate to the top
+        // of the read-block section, this is the assertion that catches it.
+        //
+        // It takes a COMPOUND command to exhibit the pairing here: `Eun` reads
+        // the leading prefix of the whole string, while the path walk runs
+        // per-subcommand — and on a SIMPLE command an off-list prefix is
+        // exactly what stops the port's walk from reaching a path at all
+        // (`strip_safe_wrappers` only strips SAFE names, so `SECRET=1` becomes
+        // argv[0] and matches no verb). `SECRET=1 cat /etc/passwd` therefore
+        // has no path refusal to lose, and takes the env branch.
+        let out = blocked().authorize("Bash", &bash("SECRET=1 ls && cat /etc/passwd"));
+        let PermissionResult::Ask { prompt, .. } = &out else {
+            panic!("expected an ask, got {out:?}");
+        };
+        assert!(
+            !prompt.message.contains("outside the safe list"),
+            "the path refusal must win over the env one, got {}",
+            prompt.message
+        );
+    }
+
+    /// 🚨 With the block OFF an unsafe env prefix is merely NOT stripped for
+    /// matching (`strip_safe_wrappers` leaves it in place) — the binary emits no
+    /// ask of its own for it, so neither may the port.
+    #[test]
+    fn unsafe_env_is_untouched_without_the_read_block() {
+        let plain = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        for cmd in [
+            "SECRET=1 cat /proj/work/x",
+            "env SECRET=1 cat /proj/work/x",
+            "SECRET=1 cat /etc/passwd",
+        ] {
+            if let PermissionResult::Ask { prompt, .. } = plain.authorize("Bash", &bash(cmd)) {
+                assert!(
+                    !prompt.message.contains("outside the safe list"),
+                    "{cmd} must not take the read-block env branch with the block off, got {}",
+                    prompt.message
+                );
+            }
+        }
+    }
+
     /// 🚨 With the block OFF these verbs must behave EXACTLY as before: the
     /// oracle's `PE(target,…,"read")` allows a plain outside path for `ppo`
     /// (it refuses only on a deny rule, `--restricted`, or the block), so
@@ -4650,28 +4753,27 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let settings = r#"{ "permissions": { "allow": ["Bash(ls:*)"], "deny": ["Bash(curl:*)"] } }"#;
-        let build = || {
+        let build = |confined: bool| {
             let rules = crate::loader::permission_rules_from_settings_json(
                 settings,
                 PermissionRuleSource::ProjectSettings,
             )
             .unwrap();
-            PermissionPolicy::from_rules(PermissionMode::Default, rules).with_roots(roots())
+            PermissionPolicy::from_rules_confined(PermissionMode::Default, rules, confined)
+                .with_roots(roots())
         };
 
         // Baseline: unconfined, the allow rule grants.
-        std::env::remove_var("CLAUDE_CODE_EVAL_CONFINED");
         assert!(
             matches!(
-                build().authorize("Bash", &bash("ls")),
+                build(false).authorize("Bash", &bash("ls")),
                 PermissionResult::Allow { .. }
             ),
             "unconfined, an allow rule must still grant"
         );
 
         // Confined: the same allow rule is gone…
-        std::env::set_var("CLAUDE_CODE_EVAL_CONFINED", "true");
-        let confined = build();
+        let confined = build(true);
         assert!(
             !matches!(
                 confined.authorize("Bash", &bash("ls")),
@@ -4690,7 +4792,6 @@ mod tests {
             ),
             "a confined session must still honour deny rules"
         );
-        std::env::remove_var("CLAUDE_CODE_EVAL_CONFINED");
     }
 
 }

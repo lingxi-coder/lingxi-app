@@ -55,7 +55,9 @@
 
 use crate::filesystem::{path_in_allowed_working_path, FsRoots};
 use crate::path_constraints::PathConstraintAsk;
+use regex::Regex;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 /// The per-command file-operation type — 1:1 with TS `FileOperationType`
 /// (`utils/permissions/pathValidation.ts:27`). Drives both the glob-in-write
@@ -821,6 +823,104 @@ fn read_block_unanalyzable_ask(reason: &str) -> PathConstraintAsk {
     }
 }
 
+/// PARITY 2.1.263 `Eun(input, node)` — does the command carry a leading
+/// `NAME=value` env PREFIX whose NAME is outside the safe list?
+///
+/// ```js
+/// function Eun(e,t){
+///   if(t) return t.envVars.some((p)=>!eO(p.name));
+///   let r=/^([A-Za-z_][A-Za-z0-9_]*)\+?=/,
+///       o=/^[A-Za-z_][A-Za-z0-9_]*\+?=(?:"[^"$`\\]*"|'[^']*'|[A-Za-z0-9_./:+-]*)[ \t]+/,
+///       d=e.command;
+///   for(;;){
+///     let p=d.match(r);   if(!p) return !1;
+///     if(!eO(p[1])) return !0;
+///     let _=d.match(o);   if(!_) return !0;
+///     d=d.slice(_[0].length)
+///   }
+/// }
+/// ```
+///
+/// 🚨 The loop has three exits and only ONE of them is `false`: "there is no
+/// leading assignment at all". A SAFE name whose VALUE does not match the
+/// (narrower) strip pattern `o` is still UNSAFE — the walk cannot advance past
+/// it, so it cannot prove the rest of the prefix is assignment-free. So
+/// `LANG=$(id) cat f` escalates even though `LANG` is on the list.
+///
+/// 🚨 Pattern `o` is NOT `strip_safe_wrappers`' env regex: this one accepts
+/// `NAME+=`, allows `+` inside a bare value, and admits an EMPTY value (`*`, not
+/// `+`), so `LANG= cat f` advances here but not there. Kept separate deliberately.
+///
+/// DIVERGENCE: the `t` branch (`node.envVars`) is not wired — this seam has no
+/// AST node, so the port always takes the oracle's string fallback. That is the
+/// same shape the oracle uses whenever the AST is unavailable, and it is only
+/// ever more conservative for a compound command (it inspects the leading
+/// prefix of the whole string rather than each node).
+fn env_prefix_outside_safe_list(command: &str) -> bool {
+    static NAME_RE: OnceLock<Regex> = OnceLock::new();
+    static ASSIGN_RE: OnceLock<Regex> = OnceLock::new();
+    let name_re =
+        NAME_RE.get_or_init(|| Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)\+?=").unwrap());
+    let assign_re = ASSIGN_RE.get_or_init(|| {
+        Regex::new(r#"^[A-Za-z_][A-Za-z0-9_]*\+?=(?:"[^"$`\\]*"|'[^']*'|[A-Za-z0-9_./:+-]*)[ \t]+"#)
+            .unwrap()
+    });
+    let mut rest = command;
+    loop {
+        let Some(name) = name_re.captures(rest).map(|c| c[1].to_string()) else {
+            return false;
+        };
+        if !crate::shell_command::is_safe_env_var(&name) {
+            return true;
+        }
+        let Some(m) = assign_re.find(rest) else {
+            return true;
+        };
+        rest = &rest[m.end()..];
+    }
+}
+
+/// PARITY 2.1.263 `ymo`'s first statement — the `env` COMMAND carrying an
+/// assignment outside the safe list.
+///
+/// ```js
+/// if(!d && p.slice(p.lastIndexOf("/")+1)==="env" && e.argv.slice(1).some((D)=>{
+///     let N=/^([A-Za-z_][A-Za-z0-9_]*)=/.exec(D);
+///     return N!==null && !eO(N[1])
+///   }))
+///   return zU("an environment variable assignment outside the safe list cannot be checked against the read block");
+/// ```
+///
+/// 🚨 This runs on the RAW argv, BEFORE `_v`/`strip_safe_wrappers` — which strips
+/// `env` itself. Checking the stripped form would make this unreachable.
+///
+/// 🚨 It scans ALL of `argv[1..]`, not the leading assignment run, so
+/// `env -u FOO BAR=1 cat f` is caught on `BAR`. The NAME pattern here has no
+/// `\+?`, unlike [`env_prefix_outside_safe_list`].
+fn env_command_assignment_outside_safe_list(tokens: &[String]) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)=").unwrap());
+    let Some(argv0) = tokens.first() else {
+        return false;
+    };
+    if basename(argv0) != "env" {
+        return false;
+    }
+    tokens[1..].iter().any(|t| {
+        re.captures(t)
+            .is_some_and(|c| !crate::shell_command::is_safe_env_var(&c[1]))
+    })
+}
+
+/// `p.slice(p.lastIndexOf("/")+1)` — the oracle's basename, which also treats a
+/// bare `foo` as its own basename.
+fn basename(arg: &str) -> &str {
+    match arg.rfind('/') {
+        Some(i) => &arg[i + 1..],
+        None => arg,
+    }
+}
+
 fn extract_git(args: &[String]) -> Vec<String> {
     if args.first().map(String::as_str) == Some("diff") && args.iter().any(|a| a == "--no-index") {
         // PATH-05: ALL positional args after `diff` (TS `Bx(e.slice(1))`), not a
@@ -1529,6 +1629,62 @@ pub fn check_command_path_containment(
             }
         }
     }
+    // PARITY 2.1.263 — the two env-var read-block escalations, in the binary's
+    // order. Both sit AFTER the per-path walk above, matching `Oun`, which runs
+    // `ele` (the path containment these lines mirror) and only then reaches:
+    //
+    // ```js
+    // if (t.blockReadsOutsideWorkingDirectories === !0) {
+    //   if (Eun(e,o) && !(jS(e)&&Nz()))
+    //     return zU("an environment variable prefix outside the safe list cannot be checked against the read block");
+    //   let de = ymo(o, d, t, r===!0, jS(e)&&Nz());
+    //   if (de) return de;
+    // }
+    // ```
+    //
+    // 🚨 Order is observable, but only for a COMPOUND command
+    // (`SECRET=1 ls && cat /etc/passwd`): `env_prefix_outside_safe_list` reads
+    // the leading prefix of the whole string while the walk above runs
+    // per-subcommand, so both can fire and the PATH message must win. On a
+    // SIMPLE command an off-list prefix is precisely what stops the walk from
+    // reaching a path — `strip_safe_wrappers` strips only SAFE names, so
+    // `SECRET=1` lands as argv[0] and matches no verb — and there is no path
+    // refusal to lose. Putting these at the top of the read-block section,
+    // where the `mmo` stdin check correctly lives (that one is in `Pmo`,
+    // upstream of `Oun`), would silently swap the copy the person sees.
+    //
+    // DIVERGENCE, same root: with an AST the oracle sees `SECRET=1` as an
+    // envVar and still resolves `cat /etc/passwd`, so for the SIMPLE form it
+    // surfaces the path copy where the port surfaces the env copy. Both refuse,
+    // both carry the outsideReadsBlocked safety check; only the wording differs.
+    //
+    // 🚨 READ-BLOCK ONLY: with the block off, none of this runs and an unsafe
+    // env prefix is simply stripped for matching (`strip_safe_wrappers`).
+    //
+    // DIVERGENCE: the `!(jS(e)&&Nz())` suppressor — "this command will run
+    // sandboxed anyway, so the read block need not analyze it" — is NOT applied,
+    // exactly as it is already not applied to the `mmo` stdin check above. This
+    // seam has no sandbox-decision input to consult; wiring it is a change to
+    // this function's signature and to every caller, and it would have to land
+    // for both checks at once. The port is therefore more conservative than the
+    // binary here: it asks where a sandboxed run would have passed through.
+    if read_block_dirs.is_some() {
+        if env_prefix_outside_safe_list(command) {
+            return Some(read_block_unanalyzable_ask(
+                "an environment variable prefix outside the safe list cannot be checked \
+                 against the read block",
+            ));
+        }
+        for sub in &subs {
+            if env_command_assignment_outside_safe_list(&split_argv(sub)) {
+                return Some(read_block_unanalyzable_ask(
+                    "an environment variable assignment outside the safe list cannot be checked \
+                     against the read block",
+                ));
+            }
+        }
+    }
+
     None
 }
 
@@ -2027,6 +2183,72 @@ mod tests {
         // `timeout 10 cat /etc/passwd` must validate `cat`, not `timeout`.
         let a = check("timeout 10 cat /etc/passwd").expect("ask");
         assert!(a.message.starts_with("cat in '/etc/passwd' was blocked."));
+    }
+
+    // ── PARITY 2.1.263 `Eun` / `ymo`-head: env vars vs the read block ──────
+
+    #[test]
+    fn env_prefix_safe_list_walk_has_three_exits() {
+        // (1) No leading assignment at all → the only `false` exit.
+        assert!(!env_prefix_outside_safe_list("cat /etc/passwd"));
+        assert!(!env_prefix_outside_safe_list(""));
+        assert!(!env_prefix_outside_safe_list("env FOO=1 cat f"));
+
+        // (2) A leading NAME off the list → true, immediately.
+        assert!(env_prefix_outside_safe_list("SECRET=1 cat f"));
+        assert!(env_prefix_outside_safe_list("SECRET+=1 cat f"));
+
+        // Safe names are walked past, one pair at a time, until an off-list one.
+        assert!(!env_prefix_outside_safe_list("LANG=C CI=1 cat f"));
+        assert!(env_prefix_outside_safe_list("LANG=C CI=1 SECRET=1 cat f"));
+
+        // (3) 🚨 The exit that is easy to get wrong: a SAFE name whose VALUE the
+        // strip pattern cannot match is ALSO `true`. The walk cannot advance, so
+        // it cannot prove what follows is assignment-free.
+        assert!(env_prefix_outside_safe_list("LANG=$(id) cat f"));
+        assert!(env_prefix_outside_safe_list("LANG=a;b cat f"));
+        // Quoted forms and an EMPTY value ARE matched by the pattern, so these
+        // advance and come back clean — this is where `Eun` is WIDER than
+        // `strip_safe_wrappers`, whose value class is `+` and unquoted only.
+        assert!(!env_prefix_outside_safe_list(r#"LANG="en_US" cat f"#));
+        assert!(!env_prefix_outside_safe_list("LANG='en_US' cat f"));
+        assert!(!env_prefix_outside_safe_list("LANG= cat f"));
+        // `+` is inside `Eun`'s bare-value class but not `strip_safe_wrappers`'.
+        assert!(!env_prefix_outside_safe_list("LANG=a+b cat f"));
+    }
+
+    #[test]
+    fn env_command_assignment_scans_all_of_argv() {
+        let argv = |c: &str| split_argv(c);
+        // Only the `env` COMMAND, by basename.
+        assert!(env_command_assignment_outside_safe_list(&argv("env SECRET=1 cat f")));
+        assert!(env_command_assignment_outside_safe_list(&argv(
+            "/usr/bin/env SECRET=1 cat f"
+        )));
+        // Not the leading run — an assignment after a flag still counts.
+        assert!(env_command_assignment_outside_safe_list(&argv(
+            "env -u FOO SECRET=1 cat f"
+        )));
+        // On-list names are fine.
+        assert!(!env_command_assignment_outside_safe_list(&argv("env LANG=C cat f")));
+        assert!(!env_command_assignment_outside_safe_list(&argv("env -C /etc cat f")));
+        // A different argv[0] is not this branch's business, even with an
+        // off-list assignment in the tail (that is `Eun`'s prefix job, and only
+        // when it LEADS the command).
+        assert!(!env_command_assignment_outside_safe_list(&argv("cat SECRET=1")));
+        assert!(!env_command_assignment_outside_safe_list(&argv("envx SECRET=1 cat f")));
+        assert!(!env_command_assignment_outside_safe_list(&[]));
+        // 🚨 The oracle's name pattern here has NO `\+?`, unlike `Eun`'s, so an
+        // append is not an assignment for this branch.
+        assert!(!env_command_assignment_outside_safe_list(&argv("env SECRET+=1 cat f")));
+    }
+
+    #[test]
+    fn basename_matches_the_oracle_slice() {
+        assert_eq!(basename("/usr/bin/env"), "env");
+        assert_eq!(basename("env"), "env");
+        assert_eq!(basename("./env"), "env");
+        assert_eq!(basename("/"), "");
     }
 
     #[test]

@@ -684,6 +684,7 @@ impl TaskRegistryHandle for TaskRegistry {
             registration.description,
             registration.tool_use_id,
             registration.cwd,
+            registration.creator_agent_id,
         )
         .await
         .map(|_| ())

@@ -1855,6 +1855,9 @@ impl BashTool {
                 .to_string(),
             tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
             cwd: Some(self.shell_cwd.lock().unwrap().display().to_string()),
+            // The launching agent owns the task; `None` means the main session
+            // does (claude-code stamps the record's `agentId` the same way).
+            creator_agent_id: ctx.agent_id.clone(),
         };
         if let Err(error) = registry.register_background_bash(task_id, registration).await {
             tracing::warn!(

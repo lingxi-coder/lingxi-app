@@ -677,6 +677,7 @@ impl TaskRegistry {
         description: String,
         tool_use_id: Option<String>,
         cwd: Option<String>,
+        creator_agent_id: Option<protocol::AgentId>,
     ) -> Result<(String, std::path::PathBuf), TaskError> {
         let path = self
             .output_manager
@@ -697,7 +698,7 @@ impl TaskRegistry {
             notified: false,
             creator_teammate_name: None,
             creator_team_name: None,
-            creator_agent_id: None,
+            creator_agent_id,
         };
         let state = TaskState::LocalBash(crate::state::LocalBashTaskState {
             base,

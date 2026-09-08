@@ -230,6 +230,7 @@ async fn background_bash_identity_is_registered_settled_and_notified() {
             "wait a bit".into(),
             Some("toolu_1".into()),
             Some("/work".into()),
+            None,
         )
         .await
         .unwrap();
@@ -278,7 +279,7 @@ async fn settling_a_killed_background_bash_writes_the_killed_trailer() {
     let (_dir, registry) = make_registry();
     let (task_id, path) = registry.allocate_bash_output().await.unwrap();
     registry
-        .register_background_bash(task_id.clone(), "sleep 5".into(), "wait".into(), None, None)
+        .register_background_bash(task_id.clone(), "sleep 5".into(), "wait".into(), None, None, None)
         .await
         .unwrap();
     registry.settle_background_bash(&task_id, None, true).await.unwrap();
@@ -295,6 +296,84 @@ async fn settling_a_killed_background_bash_writes_the_killed_trailer() {
 }
 
 #[tokio::test]
+async fn an_agents_background_shell_defers_that_agents_rest_notification() {
+    // claude-code stamps the launching agent on the `local_bash` record
+    // (`Xne`'s `agentId: _`). That is what lets the engine tell whether an agent
+    // that came to rest still has live background work of its own: without the
+    // stamp the shell looks like the main session's, the agent is reported as
+    // fully at rest, and the model is told it finished while its own command is
+    // still running.
+    let (_dir, registry) = make_registry();
+    let owner = protocol::AgentId::new();
+
+    let agent_task = "a-owner-rest".to_string();
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+            base: crate::state::TaskStateBase {
+                id: agent_task.clone(),
+                task_type: TaskType::LocalAgent,
+                status: TaskStatus::Running,
+                description: "worker".into(),
+                tool_use_id: None,
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from("/tmp/tasks/a-owner-rest.output"),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
+            },
+            agent_id: owner,
+            subagent_type: "general-purpose".into(),
+            prompt: String::new(),
+            error: None,
+            messages: vec![],
+            pending_messages: vec![],
+            is_backgrounded: true,
+            outcome: Default::default(),
+            forked_skill_name: None,
+        }))
+        .await;
+
+    let (shell_id, _path) = registry.allocate_bash_output().await.unwrap();
+    registry
+        .register_background_bash(
+            shell_id.clone(),
+            "sleep 60".into(),
+            "long one".into(),
+            None,
+            None,
+            Some(owner),
+        )
+        .await
+        .unwrap();
+
+    // The agent comes to rest while its shell is still running.
+    registry
+        .mark_task_rested(&agent_task, Some("done".into()), None, Some(owner), None, None)
+        .await;
+    let held = registry.take_pending_task_notifications().await;
+    assert!(
+        !held.iter().any(|n| n.task_id == agent_task),
+        "the rest notification must wait for the agent's own background shell",
+    );
+
+    // Once the shell settles, the deferred rest notification is released.
+    registry
+        .settle_background_bash(&shell_id, Some(0), false)
+        .await
+        .unwrap();
+    let released = registry.take_pending_task_notifications().await;
+    assert!(
+        released.iter().any(|n| n.task_id == agent_task),
+        "the rest notification must be released once no live child remains, got: {:?}",
+        released.iter().map(|n| &n.task_id).collect::<Vec<_>>(),
+    );
+}
+
+#[tokio::test]
 async fn stopping_a_background_bash_closes_its_output_file_with_the_killed_trailer() {
     // claude-code's TaskStop path (`JF`) appends `\n[killed]\n` to the shell's
     // output file before it notifies, so a later Read of the file shows how the
@@ -302,7 +381,7 @@ async fn stopping_a_background_bash_closes_its_output_file_with_the_killed_trail
     let (_dir, registry) = make_registry();
     let (task_id, path) = registry.allocate_bash_output().await.unwrap();
     registry
-        .register_background_bash(task_id.clone(), "sleep 60".into(), "long one".into(), None, None)
+        .register_background_bash(task_id.clone(), "sleep 60".into(), "long one".into(), None, None, None)
         .await
         .unwrap();
     registry.output_manager.append(&path, "partial output\n").await.unwrap();
@@ -359,7 +438,7 @@ async fn discarding_an_unused_bash_identity_removes_its_output_file() {
     );
     // Re-allocating the same identity must be possible after a discard.
     registry
-        .register_background_bash(task_id.clone(), "cmd".into(), "d".into(), None, None)
+        .register_background_bash(task_id.clone(), "cmd".into(), "d".into(), None, None, None)
         .await
         .unwrap();
     registry.discard_bash_output(&task_id).await;

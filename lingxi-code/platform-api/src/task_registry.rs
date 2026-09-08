@@ -81,6 +81,10 @@ pub struct BackgroundBashRegistration {
     pub tool_use_id: Option<String>,
     /// Working directory the command was launched in.
     pub cwd: Option<String>,
+    /// The agent that launched it, when a subagent did. claude-code stores this
+    /// as the record's `agentId` and uses it to decide who a completion belongs
+    /// to; a `None` here means the main session owns the task.
+    pub creator_agent_id: Option<protocol::AgentId>,
 }
 
 /// The identity the registry minted for a background shell command.

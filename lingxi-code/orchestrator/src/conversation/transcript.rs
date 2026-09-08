@@ -852,6 +852,12 @@ impl ConversationOrchestrator {
     /// through a model turn: the next user message observes the seeded history
     /// exactly once and input ordering remains owned by the caller.
     pub async fn append_external_history_message(&self, msg: ConversationMessage) {
+        // SDK history/Bash inputs arrive between model turns, but background
+        // Fusion publication and session switches still run concurrently.
+        // Own the same gate before choosing a session or transcript parent.
+        // Do not acquire it inside persistence helpers: model turns already
+        // hold it when calling those helpers.
+        let _turn_guard = self.turn_gate.lock().await;
         let compact_metadata = match &msg {
             ConversationMessage::System {
                 subtype: Some(subtype),

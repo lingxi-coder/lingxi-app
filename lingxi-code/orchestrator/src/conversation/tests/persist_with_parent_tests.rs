@@ -38,6 +38,217 @@ fn read_jsonl(path: &std::path::Path) -> Vec<JsonlMessage> {
 }
 
 #[tokio::test]
+async fn manual_compaction_owns_snapshot_and_commit_before_queued_fusion() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let state_root = dir.path().join("state");
+    std::fs::create_dir(&state_root).unwrap();
+    let id = SessionId::new();
+    let writer = Arc::new(
+        session::jsonl::JsonlWriter::new(
+            path.clone(),
+            Arc::new(PosixFileSystem::new(dir.path().to_path_buf())),
+        )
+        .with_durable_lock(Arc::new(
+            session::jsonl::DurableTranscriptWriter::open(&state_root).unwrap(),
+        )),
+    );
+    writer
+        .activate_session_target(id, path.clone(), dir.path().to_path_buf())
+        .unwrap();
+    let orch = crate::test_support::with_scripted_compactor(
+        orch_with_writer(dir.path(), path.clone())
+            .with_jsonl_writer(writer.clone())
+            .with_session_id(id),
+        "retained manual compaction summary",
+    );
+    let owner = orch.turn_gate.lock().await;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let canceled_compact = orch.force_compact_with_cancel(cancel.clone());
+    tokio::pin!(canceled_compact);
+    assert!(futures::poll!(canceled_compact.as_mut()).is_pending());
+    cancel.cancel();
+    assert!(matches!(
+        canceled_compact.await,
+        Err(platform_api::HandleError::ActionFailed(message)) if message == "Compaction canceled."
+    ));
+    assert!(orch.session.lock().await.history.is_empty());
+    assert!(!path.exists());
+
+    let compact = orch.force_compact_with_cancel(tokio_util::sync::CancellationToken::new());
+    tokio::pin!(compact);
+    // Empty history must not be snapshotted/rejected before acquiring the gate.
+    assert!(futures::poll!(compact.as_mut()).is_pending());
+    for index in 0..6 {
+        let message_id = protocol::MessageId::new();
+        let text = format!("history {index}: preserve this conversational context");
+        let message = if index % 2 == 0 {
+            ConversationMessage::user(message_id, text)
+        } else {
+            ConversationMessage::Assistant {
+                id: message_id,
+                content: vec![protocol::ContentBlock::Text { text }],
+                stop_reason: None,
+            }
+        };
+        orch.session.lock().await.history.push(message.clone());
+        orch.persist_message_to_jsonl(&message).await;
+    }
+    let fusion = ConversationMessage::user_meta(protocol::MessageId::new(), "fusion".into());
+    let payload = serde_json::to_value(orch.to_jsonl_message(
+        &fusion,
+        &id.to_string(),
+        None,
+        None,
+        None,
+        None,
+    ))
+    .unwrap();
+    let append = orch.append_fusion_transcript(writer.as_ref(), id, "delivery", payload);
+    tokio::pin!(append);
+    assert!(futures::poll!(append.as_mut()).is_pending());
+    drop(owner);
+    let (compacted, appended) = tokio::join!(compact, append);
+    compacted.unwrap();
+    appended.unwrap();
+    orch.append_external_history_message(ConversationMessage::user(
+        protocol::MessageId::new(),
+        "next".into(),
+    ))
+    .await;
+    let contents = std::fs::read_to_string(&path).unwrap();
+    let loaded = session::jsonl::reader::route_lines(&contents);
+    let (chain, _) = session::jsonl::loader::build_conversation_chain(&loaded, &id.to_string());
+    let summary_index = chain
+        .iter()
+        .position(|row| {
+            row.message
+                .to_string()
+                .contains("retained manual compaction summary")
+        })
+        .expect("cold replay retains the committed summary");
+    let fusion_index = chain
+        .iter()
+        .position(|row| row.uuid == fusion.id().as_uuid().to_string())
+        .expect("cold replay retains the queued Fusion publication");
+    assert!(summary_index < fusion_index);
+    assert_eq!(
+        chain.last().unwrap().parent_uuid.as_deref(),
+        Some(chain[fusion_index].uuid.as_str())
+    );
+}
+
+#[tokio::test]
+async fn external_history_and_fusion_share_chain_ownership_in_both_orders() {
+    for history_first in [false, true] {
+        for bash_history in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("session.jsonl");
+            let state_root = dir.path().join("state");
+            std::fs::create_dir(&state_root).unwrap();
+            let id = SessionId::new();
+            let writer = Arc::new(
+                session::jsonl::JsonlWriter::new(
+                    path.clone(),
+                    Arc::new(PosixFileSystem::new(dir.path().to_path_buf())),
+                )
+                .with_durable_lock(Arc::new(
+                    session::jsonl::DurableTranscriptWriter::open(&state_root).unwrap(),
+                )),
+            );
+            writer
+                .activate_session_target(id, path.clone(), dir.path().to_path_buf())
+                .unwrap();
+            let orch = orch_with_writer(dir.path(), path.clone())
+                .with_jsonl_writer(writer.clone())
+                .with_session_id(id);
+            orch.append_external_history_message(ConversationMessage::user(
+                protocol::MessageId::new(),
+                "first".into(),
+            ))
+            .await;
+            let external_id = protocol::MessageId::new();
+            let external = if bash_history {
+                ConversationMessage::user(external_id, "<bash-stdout>result</bash-stdout>".into())
+            } else {
+                ConversationMessage::Assistant {
+                    id: external_id,
+                    content: vec![protocol::ContentBlock::Text {
+                        text: "SDK history".into(),
+                    }],
+                    stop_reason: None,
+                }
+            };
+            let fusion =
+                ConversationMessage::user_meta(protocol::MessageId::new(), "fusion".into());
+            let payload = serde_json::to_value(orch.to_jsonl_message(
+                &fusion,
+                &id.to_string(),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .unwrap();
+            // Poll both real entrypoints while the chain gate is held, fixing
+            // their FIFO order without sleeps or a fake persistence layer.
+            let owner = orch.turn_gate.lock().await;
+            let fusion_append =
+                orch.append_fusion_transcript(writer.as_ref(), id, "delivery", payload);
+            let history_append = orch.append_external_history_message(external);
+            tokio::pin!(fusion_append, history_append);
+            if history_first {
+                assert!(futures::poll!(history_append.as_mut()).is_pending());
+                assert!(futures::poll!(fusion_append.as_mut()).is_pending());
+            } else {
+                assert!(futures::poll!(fusion_append.as_mut()).is_pending());
+                assert!(futures::poll!(history_append.as_mut()).is_pending());
+            }
+            assert!(
+                !orch
+                    .session
+                    .lock()
+                    .await
+                    .history
+                    .iter()
+                    .any(|message| message.id() == external_id),
+                "external history must not mutate the session before owning its chain"
+            );
+            drop(owner);
+            let (appended, ()) = tokio::join!(fusion_append, history_append);
+            appended.unwrap();
+            orch.append_external_history_message(ConversationMessage::user(
+                protocol::MessageId::new(),
+                "next".into(),
+            ))
+            .await;
+            let rows = read_jsonl(&path);
+            assert_eq!(rows.len(), 4);
+            for pair in rows.windows(2) {
+                assert_eq!(pair[1].parent_uuid.as_deref(), Some(pair[0].uuid.as_str()));
+            }
+            let first_queued = if history_first {
+                external_id
+            } else {
+                fusion.id()
+            };
+            assert_eq!(rows[1].uuid, first_queued.as_uuid().to_string());
+            let loaded =
+                session::jsonl::reader::route_lines(&std::fs::read_to_string(&path).unwrap());
+            let (chain, _) =
+                session::jsonl::loader::build_conversation_chain(&loaded, &id.to_string());
+            assert_eq!(chain.len(), 4);
+            assert!(chain
+                .iter()
+                .any(|row| row.uuid == fusion.id().as_uuid().to_string()));
+            assert!(chain
+                .iter()
+                .any(|row| row.uuid == external_id.as_uuid().to_string()));
+        }
+    }
+}
+
+#[tokio::test]
 async fn fusion_retry_of_visible_unacknowledged_tip_repairs_resume_chain() {
     check_fusion_unacknowledged_resume_chain(false).await;
 }

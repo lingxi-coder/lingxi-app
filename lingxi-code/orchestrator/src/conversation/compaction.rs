@@ -307,6 +307,21 @@ impl ConversationOrchestrator {
             ));
         };
 
+        // Manual compaction runs outside the model turn, but its history
+        // snapshot and boundary/summary commit must share chain ownership with
+        // background Fusion publication and session switches. Cancellation may
+        // abandon the queue, never a partially persisted commit. Automatic
+        // compaction already runs under its caller's turn gate.
+        let _turn_guard = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                return Err(platform_api::HandleError::ActionFailed(
+                    "Compaction canceled.".into(),
+                ));
+            }
+            guard = self.turn_gate.lock() => guard,
+        };
+
         // Snapshot history (clone — we don't hold the lock across the
         // network call inside `process_iteration`).
         let (history_before, model) = {

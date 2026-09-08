@@ -141,3 +141,27 @@ dependency), and `apps/bridge-server/tests/router_test.rs` plus its new
 At commit preflight, free space had recovered to 26 GiB. The user requested a
 commit rather than resumed validation; no new build/test results are claimed.
 No new dependencies, main edits, merges or cache deletion were made in this task.
+
+## Third-review corrections (after `35ea030c4`)
+
+- Make `reconcile_fusion_transcript_append` parent-module visible so the sibling
+  conversation regression tests can call it; no public API expansion.
+- Acquire `turn_gate` at the external-history entrypoint, before session mutation
+  and parent selection. SDK History and Bash now serialize with Fusion delivery
+  and session switching. Internal persistence helpers remain ungated because
+  normal model turns already own the gate.
+- Acquire the same gate at the manual-compaction entrypoint before its snapshot,
+  retaining ownership through boundary/summary commit. Waiting is cooperatively
+  cancellable; automatic compaction and its shared commit helpers are unchanged.
+- Add deterministic regressions for both History/Bash-versus-Fusion orderings,
+  manual-compaction queue cancellation and snapshot deferral, and actual scripted
+  compaction followed by queued Fusion publication and cold replay.
+
+Verification remains incomplete: changed-file formatting and `git diff --check`
+passed, but the targeted orchestrator test compilation was stopped with SIGTERM
+(exit 143) when available disk fell to approximately 2 GiB. No new tests ran.
+Logs: `/tmp/fusion-history-verification.uFfNiy/build.jsonl` and `build.stderr`.
+Earlier first-batch test passes do not validate these changes or the second batch.
+Only this task's Cargo/rustc processes were stopped; no cache was removed and no
+other task's build was interrupted. Independent static review approved the four
+source/test files; compilation and runtime verification remain unconfirmed.

@@ -541,7 +541,7 @@ impl ConversationOrchestrator {
     /// Called only while holding `turn_gate`, including after a failed fresh
     /// append. A known complete visible row must enter the parent chain before
     /// a foreground turn can run, even while publication remains unacknowledged.
-    async fn reconcile_fusion_transcript_append(
+    pub(super) async fn reconcile_fusion_transcript_append(
         &self,
         session_id: protocol::SessionId,
         uuid: String,

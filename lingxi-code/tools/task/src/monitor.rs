@@ -50,10 +50,21 @@ const CCR_TIMEOUT_CAP_MS: u64 = 1_800_000;
 
 /// Binary `cJr` — the Monitor description (byte-exact). Spliced with `lJr()` for
 /// both `description()` and `prompt()`.
-const CJR: &str = r#"Start a background monitor that streams events from a long-running script. Each stdout line is an event — you keep working and notifications arrive in the chat. Events arrive on their own schedule and are not replies from the user, even if one lands while you're waiting for the user to answer a question.
+/// claude-code `Sbn()` — the Monitor description, which has TWO spots that
+/// change when background tasks are disabled (`Dl()`). Upstream splices them
+/// inline; here they are named so the two variants are visible side by side.
+///
+/// Everything else in the description is identical between the two.
+const CJR_HEAD: &str = r#"Start a background monitor that streams events from a long-running script. Each stdout line is an event — you keep working and notifications arrive in the chat. Events arrive on their own schedule and are not replies from the user, even if one lands while you're waiting for the user to answer a question.
 
 Pick by how many notifications you need:
-- **One** ("tell me when the server is ready / the build finishes") → use **Bash with `run_in_background`** and a command that exits when the condition is true, e.g. `until grep -q "Ready in" dev.log; do sleep 0.5; done`. You get a single completion notification when it exits.
+- **One** ("tell me when the server is ready / the build finishes") → "#;
+/// `Dl()` false — the default: point at `run_in_background`.
+const CJR_ONE_SHOT_BACKGROUND: &str = r#"use **Bash with `run_in_background`** and a command that exits when the condition is true, e.g. `until grep -q "Ready in" dev.log; do sleep 0.5; done`. You get a single completion notification when it exits."#;
+/// `Dl()` true — background tasks are off, so the same job is a foreground
+/// Bash loop.
+const CJR_ONE_SHOT_FOREGROUND: &str = r#"run the command in the **foreground with Bash**, exiting when the condition is true, e.g. `until grep -q "Ready in" dev.log; do sleep 0.5; done`."#;
+const CJR_MID: &str = r#"
 - **One per occurrence, indefinitely** ("tell me every time an ERROR line appears") → Monitor with an unbounded command (`tail -f`, `inotifywait -m`, `while true`).
 - **One per occurrence, until a known end** ("emit each CI step result, stop when the run completes") → Monitor with a command that emits lines and then exits.
 
@@ -87,7 +98,11 @@ Your script's stdout is the event stream. Each line becomes a notification. Exit
     sleep 30
   done
 
-**Don't use an unbounded command for a single notification.** `tail -f`, `inotifywait -m`, and `while true` never exit on their own, so the monitor stays armed until timeout even after the event has fired. For "tell me when X is ready," use Bash `run_in_background` with an `until` loop instead (one notification, ends in seconds). Note that `tail -f log | grep -m 1 ...` does *not* fix this: if the log goes quiet after the match, `tail` never receives SIGPIPE and the pipeline hangs anyway.
+**Don't use an unbounded command for a single notification.** `tail -f`, `inotifywait -m`, and `while true` never exit on their own, so the monitor stays armed until timeout even after the event has fired. For "tell me when X is ready," "#;
+/// The same choice again, in the "unbounded command" warning.
+const CJR_UNBOUNDED_BACKGROUND: &str = r#"use Bash `run_in_background` with an `until` loop instead (one notification, ends in seconds)"#;
+const CJR_UNBOUNDED_FOREGROUND: &str = r#"use a foreground Bash `until` loop instead"#;
+const CJR_TAIL: &str = r#". Note that `tail -f log | grep -m 1 ...` does *not* fix this: if the log goes quiet after the match, `tail` never receives SIGPIPE and the pipeline hangs anyway.
 
 **Script quality:**
 - Every pipe stage must flush per line or matches sit in its buffer unseen: `grep` needs `--line-buffered`, `awk` needs `fflush()`. `head` cannot flush at all — `| head -N` delivers nothing until N matches accumulate, then ends the stream.
@@ -111,6 +126,17 @@ For poll loops checking job state, emit on every terminal status (`succeeded|fai
 Stdout lines within 200ms are batched into a single notification, so multiline output from a single event groups naturally.
 
 The script runs in the same shell environment as Bash. Exit ends the watch (exit code is reported). Timeout → killed. Set `persistent: true` for session-length watches (PR monitoring, log tails) — the monitor runs until you call TaskStop or the session ends. Use TaskStop to cancel early."#;
+
+/// Assemble the description for the current background-tasks setting.
+fn cjr() -> String {
+    let disabled = platform_api::env::background_tasks_disabled();
+    let (one_shot, unbounded) = if disabled {
+        (CJR_ONE_SHOT_FOREGROUND, CJR_UNBOUNDED_FOREGROUND)
+    } else {
+        (CJR_ONE_SHOT_BACKGROUND, CJR_UNBOUNDED_BACKGROUND)
+    };
+    format!("{CJR_HEAD}{one_shot}{CJR_MID}{unbounded}{CJR_TAIL}")
+}
 
 /// Binary `lJr()` (cc_all.txt:504932) — the `Yke()`-gated PushNotification
 /// addendum (leading newline) spliced onto BOTH `description()` and `prompt()`.
@@ -304,12 +330,12 @@ impl Tool for MonitorTool {
 
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
         // PARITY: `description(){return cJr+lJr()}`.
-        format!("{CJR}{}", ljr())
+        format!("{}{}", cjr(), ljr())
     }
 
     async fn prompt(&self, _opts: &PromptOptions) -> String {
         // PARITY: `prompt(){return cJr+lJr()}` (identical to description).
-        format!("{CJR}{}", ljr())
+        format!("{}{}", cjr(), ljr())
     }
 
     async fn call(
@@ -576,6 +602,43 @@ mod tests {
             "and no task was minted for the refused call",
         );
         telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);
+    }
+
+    /// claude-code `Sbn()` splices two spots on `Dl()`. With background tasks
+    /// ON the description must be byte-identical to what it always was; with
+    /// them OFF both spots must point at a foreground Bash loop instead, or the
+    /// tool tells the model to use a parameter that has been removed from the
+    /// Bash schema.
+    #[tokio::test]
+    async fn the_description_follows_the_background_tasks_setting() {
+        let _g = guard();
+        let t = tool();
+
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        let enabled = t.description(&json!({}), &DescriptionOptions { is_non_interactive_session: false }).await;
+        assert!(enabled.contains(
+            "use **Bash with `run_in_background`** and a command that exits when the condition is true"
+        ));
+        assert!(enabled.contains(
+            "use Bash `run_in_background` with an `until` loop instead (one notification, ends in seconds)"
+        ));
+        assert!(!enabled.contains("foreground with Bash"));
+
+        std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
+        let disabled = t.description(&json!({}), &DescriptionOptions { is_non_interactive_session: false }).await;
+        assert!(disabled.contains(
+            "run the command in the **foreground with Bash**, exiting when the condition is true"
+        ));
+        assert!(disabled.contains("use a foreground Bash `until` loop instead"));
+        assert!(
+            !disabled.contains("run_in_background"),
+            "with the parameter gone, nothing may still recommend it"
+        );
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+
+        // Everything outside the two spliced spots is the same text.
+        assert!(enabled.starts_with("Start a background monitor that streams events"));
+        assert!(disabled.starts_with("Start a background monitor that streams events"));
     }
 
     #[test]

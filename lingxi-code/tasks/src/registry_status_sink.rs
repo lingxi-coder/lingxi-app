@@ -82,6 +82,12 @@ impl TaskStatusSink for RegistryStatusSink {
         }
     }
 
+    async fn set_monitor_stdout_bytes(&self, task_id: &str, bytes: u64) {
+        if let Some(reg) = self.registry.get() {
+            let _ = reg.set_monitor_stdout_bytes(task_id, bytes).await;
+        }
+    }
+
     async fn notify_rest(
         &self,
         task_id: &str,

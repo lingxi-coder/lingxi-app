@@ -197,6 +197,11 @@ struct MonitorStreamSink {
     cancel: CancellationToken,
     batch: Arc<Mutex<BatchState>>,
     flush_notify: Arc<Notify>,
+    /// Bytes seen on STDOUT (claude-code `pipedStdoutBytes`). Counted from the
+    /// SPOOLED form — line plus its newline — because that is the raw chunk
+    /// upstream measures; counting the stripped line would read a stream of
+    /// bare newlines as no output at all. Stderr is deliberately not counted.
+    stdout_bytes: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl MonitorStreamSink {
@@ -252,6 +257,10 @@ impl ProcessStreamSink for MonitorStreamSink {
     async fn stdout_line(&self, line: String) -> Result<(), ProcessError> {
         let mut spool = line.clone();
         spool.push('\n');
+        self.stdout_bytes.fetch_add(
+            spool.len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         self.output_manager
             .append(&self.output_file, &spool)
             .await
@@ -426,6 +435,7 @@ impl Task for MonitorHandler {
             cancel: cancel.clone(),
             batch: Arc::new(Mutex::new(BatchState::default())),
             flush_notify: Arc::new(Notify::new()),
+            stdout_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         });
         // One batching worker per monitor. A per-batch RuntimeSpawner task would
         // retain a completed JoinHandle every 200ms for the lifetime of the
@@ -520,6 +530,16 @@ impl Task for MonitorHandler {
                     .notify_monitor_event(&worker_id, TIMEOUT_MARKER)
                     .await;
             }
+            // Before the terminal status, so the drain that reads the row can
+            // already see it (same ordering rule as the exit code).
+            status_sink
+                .set_monitor_stdout_bytes(
+                    &worker_id,
+                    worker_sink
+                        .stdout_bytes
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                )
+                .await;
             if let Ok(output) = &result {
                 status_sink
                     .set_exit_code(&worker_id, output.exit_code)
@@ -785,6 +805,47 @@ mod tests {
         assert_eq!(MonitorStreamSink::truncate_line("hello"), "hello");
     }
 
+    /// The stdout byte count that selects the completion summary. Counted from
+    /// the SPOOLED form — line plus newline — because that is the raw chunk
+    /// upstream measures: a script emitting bare newlines HAS produced output,
+    /// and counting stripped lines would report zero. Stderr is not counted.
+    #[tokio::test]
+    async fn stdout_bytes_are_counted_from_the_spooled_form() {
+        let sink = Arc::new(RecordingSink::default());
+        let status_sink: Arc<dyn TaskStatusSink> = sink.clone();
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let stream = MonitorStreamSink {
+            task_id: "s1".into(),
+            output_file: std::path::PathBuf::from("/spool/s1.output"),
+            output_manager: Arc::new(TaskOutputManager::new(
+                std::path::PathBuf::from("/spool"),
+                fs,
+            )),
+            status_sink,
+            cancel: CancellationToken::new(),
+            batch: Arc::new(Mutex::new(BatchState::default())),
+            flush_notify: Arc::new(Notify::new()),
+            stdout_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        };
+        let read = || {
+            stream
+                .stdout_bytes
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        assert_eq!(read(), 0, "a monitor that never emits stays at zero");
+
+        stream.stdout_line("abc".into()).await.unwrap();
+        assert_eq!(read(), 4, "three bytes plus the newline");
+
+        // An EMPTY line is dropped as an event but is still output.
+        stream.stdout_line(String::new()).await.unwrap();
+        assert_eq!(read(), 5, "a bare newline still counts");
+
+        // Stderr is not stdout.
+        stream.stderr_chunk(b"boom".to_vec()).await.unwrap();
+        assert_eq!(read(), 5, "stderr must not be counted");
+    }
+
     /// claude-code says why the monitor died, THEN kills it. Persistent
     /// monitors arm no timer upstream, so they must never produce the marker
     /// even though they do meet the process runner's own default deadline.
@@ -840,6 +901,7 @@ mod tests {
             cancel: CancellationToken::new(),
             batch: Arc::new(Mutex::new(batch)),
             flush_notify: Arc::new(Notify::new()),
+            stdout_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         stream.flush().await;
 

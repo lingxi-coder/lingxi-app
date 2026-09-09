@@ -405,6 +405,13 @@ pub struct TaskNotification {
     /// Process exit code for `local_bash` / `monitor_ws` tasks, folded into the
     /// summary (e.g. `(exit code 1)`). `None` ⇒ the exit clause is omitted.
     pub exit_code: Option<i32>,
+    /// `monitor_ws` only: bytes the script wrote to STDOUT over its life
+    /// (claude-code `pipedStdoutBytes`). `Some(0)` selects the
+    /// "ended without producing output" completion summary; `None` means the
+    /// count was never taken — an `mcp_task`/`monitor_mcp` row has no stdout at
+    /// all — and must NOT be read as zero. Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_bytes: Option<u64>,
     /// Failure reason for a `local_agent` task, folded into the `failed`
     /// summary (`Agent "…" came to rest with an error: {error}`). `None` falls
     /// back to `Unknown error` (claude-code `error || 'Unknown error'`).

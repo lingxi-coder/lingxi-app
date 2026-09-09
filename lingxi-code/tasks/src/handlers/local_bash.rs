@@ -128,6 +128,11 @@ pub trait TaskStatusSink: Send + Sync {
     /// [`ProcessOutput::exit_code`]). Called once on natural completion.
     async fn set_exit_code(&self, _task_id: &str, _exit_code: i32) {}
 
+    /// Report how many bytes a MONITOR's script wrote to stdout over its life
+    /// (claude-code `taskOutput.pipedStdoutBytes`). Defaulted so every existing
+    /// sink compiles unchanged; only the monitor worker calls it.
+    async fn set_monitor_stdout_bytes(&self, _task_id: &str, _bytes: u64) {}
+
     /// Record the child's OS pid once known. Retained for sink-implementer
     /// compatibility; the single-child `run()` path does not surface a pid
     /// (the OS process is owned by the worker future, killed via cancellation),

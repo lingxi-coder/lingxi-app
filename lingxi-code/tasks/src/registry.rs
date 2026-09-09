@@ -537,6 +537,7 @@ impl TaskRegistry {
                 base,
                 command: String::new(),
                 exit_code: None,
+                stdout_bytes: None,
             }),
             TaskType::InProcessTeammate => {
                 let TaskSpawnInput::InProcessTeammate {
@@ -1800,6 +1801,27 @@ impl TaskRegistry {
     /// projects it as `exit_code`/`done`. Non-bash variants are a benign
     /// no-op (only bash and monitor children carry an OS exit code). `NotFound` for an
     /// unknown id — the sink swallows it (racing teardown tolerance).
+    /// Record a monitor's total stdout byte count (claude-code
+    /// `pipedStdoutBytes`), which selects its completion summary.
+    ///
+    /// # Errors
+    /// Returns [`TaskError::NotFound`] when the id is unknown.
+    pub async fn set_monitor_stdout_bytes(
+        &self,
+        task_id: &str,
+        bytes: u64,
+    ) -> Result<(), TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        let entry = map
+            .get_mut(&task_id)
+            .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
+        if let TaskState::Monitor(m) = entry {
+            m.stdout_bytes = Some(bytes);
+        }
+        Ok(())
+    }
+
     pub async fn set_bash_exit_code(&self, task_id: &str, exit_code: i32) -> Result<(), TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
         let mut map = self.tasks.write().await;
@@ -2589,6 +2611,7 @@ impl TaskRegistry {
             let exit_code = match state {
                 TaskState::LocalBash(bash) => bash.exit_code,
                 TaskState::Monitor(monitor) => monitor.exit_code,
+                // (the stdout byte count is monitor-only; see below)
                 _ => None,
             };
             let error = match state {
@@ -2643,6 +2666,10 @@ impl TaskRegistry {
                 tool_use_id: b.tool_use_id.clone(),
                 output_path,
                 exit_code,
+                stdout_bytes: match state {
+                    TaskState::Monitor(monitor) => monitor.stdout_bytes,
+                    _ => None,
+                },
                 error,
                 // `local_agent` `<result>` / `<usage>`: the terminating run's
                 // final text and usage rollup, reported through
@@ -2771,6 +2798,8 @@ impl TaskRegistry {
                 // reads it (it was told it can Read/Bash-tail the output file).
                 output_path: Some(b.output_file.to_string_lossy().into_owned()),
                 exit_code: None,
+                // A resting AGENT has no stdout stream to have measured.
+                stdout_bytes: None,
                 error: None,
                 // The agent's final-text response + run usage, captured at rest
                 // time. The binary `enqueueAgentNotification` always emits these
@@ -3388,6 +3417,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
                 base,
                 command: command.clone(),
                 exit_code: None,
+                stdout_bytes: None,
             })
         }
         TaskSpawnInput::McpTask {

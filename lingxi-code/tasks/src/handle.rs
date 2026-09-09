@@ -994,6 +994,7 @@ mod tests {
                 },
                 command: "tail -f build.log".into(),
                 exit_code: None,
+                            stdout_bytes: None,
             }))
             .await;
 

@@ -432,6 +432,13 @@ pub struct MonitorTaskState {
     pub command: String,
     /// Exit code once the command terminates.
     pub exit_code: Option<i32>,
+    /// Bytes the script wrote to STDOUT over the monitor's life (claude-code
+    /// `taskOutput.pipedStdoutBytes`). `Some(0)` is what selects the
+    /// "ended without producing output" completion summary, so the distinction
+    /// from `None` — "never measured", e.g. an MCP monitor that has no stdout
+    /// at all — is load-bearing and must not collapse to a defaulting `0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_bytes: Option<u64>,
 }
 
 /// State specific to a backgrounded MCP tool call (claude-code `mcp_task`,

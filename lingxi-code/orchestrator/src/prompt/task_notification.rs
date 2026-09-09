@@ -49,7 +49,9 @@
 //!   N)` / `… failed with exit code N` / `… was stopped`. The summary is
 //!   `escapeXml`-escaped.
 //! - `monitor_mcp` (`enqueueShellNotification`, `monitor` kind): summary
-//!   `Monitor "{desc}" stream ended` / `Monitor "{desc}" script failed (exit N)`
+//!   `Monitor "{desc}" ended without producing output (exit N)` when the script
+//!   wrote nothing to stdout, else `Monitor "{desc}" stream ended` /
+//!   `Monitor "{desc}" script failed (exit N)`
 //!   / `Monitor "{desc}" stopped`. Also `escapeXml`-escaped.
 //! - `local_agent` (`enqueueAgentNotification`, `LocalAgentTask.tsx`, v2.1.193):
 //!   summary `Agent "{desc}" finished` / `Agent "{desc}" failed: {error or
@@ -645,6 +647,18 @@ fn render_one(n: &TaskNotification) -> String {
             // summary escaped.
             let exit = n.exit_code;
             let summary = match n.status.as_str() {
+                // claude-code `$pt`: `d===0 ? "ended without producing
+                // output${_}" : "stream ended"`, where `d` is the piped stdout
+                // byte count and `_` is the ` (exit N)` suffix. The test is
+                // STRICT on zero: `monitor_mcp` watches a server and has no
+                // stdout at all, so its count is `None` and it must keep
+                // "stream ended" — a `u64` defaulting to 0 would make every
+                // completed MCP monitor claim it produced nothing.
+                "completed" if n.stdout_bytes == Some(0) => format!(
+                    "Monitor \"{}\" ended without producing output{}",
+                    n.description,
+                    exit.map_or(String::new(), |c| format!(" (exit {c})"))
+                ),
                 "completed" => format!("Monitor \"{}\" stream ended", n.description),
                 "failed" => format!(
                     "Monitor \"{}\" script failed{}",
@@ -1464,6 +1478,37 @@ mod tests {
         );
         // Monitor uses the no-`<task-type>` shell format.
         assert!(!block.contains("<task-type>"), "got: {block}");
+    }
+
+    /// claude-code `$pt`: a monitor whose script wrote NOTHING to stdout says
+    /// so, and carries the exit code; anything else keeps "stream ended".
+    #[test]
+    fn a_silent_monitor_says_it_produced_no_output() {
+        let mut n = base("m12345678", "monitor_ws", "completed", "watch");
+        n.stdout_bytes = Some(0);
+        n.exit_code = Some(0);
+        assert!(
+            render_one(&n).contains(
+                "<summary>Monitor \"watch\" ended without producing output (exit 0)</summary>"
+            ),
+            "got: {}",
+            render_one(&n)
+        );
+
+        // Any output at all ⇒ the ordinary summary, with no exit clause.
+        let mut noisy = base("m12345678", "monitor_ws", "completed", "watch");
+        noisy.stdout_bytes = Some(1);
+        noisy.exit_code = Some(0);
+        let block = render_one(&noisy);
+        assert!(block.contains("<summary>Monitor \"watch\" stream ended</summary>"));
+        assert!(!block.contains("exit 0"), "no exit clause on this arm");
+
+        // `None` is NOT zero: an mcp monitor has no stdout to have measured, so
+        // it must not claim it produced nothing.
+        let unmeasured = base("m12345678", "monitor_mcp", "completed", "watch");
+        assert_eq!(unmeasured.stdout_bytes, None);
+        assert!(render_one(&unmeasured)
+            .contains("<summary>Monitor \"watch\" stream ended</summary>"));
     }
 
     #[test]

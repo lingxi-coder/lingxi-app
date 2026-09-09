@@ -4367,6 +4367,70 @@ async fn seed_agent_described(
         .await;
 }
 
+/// The link between the monitor worker that counts stdout bytes and the
+/// renderer that reads them. Both ends have their own tests; without this one,
+/// dropping the forward in the drain leaves every one of them green.
+#[tokio::test]
+async fn a_monitors_stdout_byte_count_reaches_the_notification() {
+    use crate::state::{MonitorTaskState, TaskStateBase};
+    let (_d, registry) = make_registry();
+
+    let seed = |id: &str| MonitorTaskState {
+        base: TaskStateBase {
+            id: id.into(),
+            task_type: TaskType::Monitor,
+            status: TaskStatus::Running,
+            description: "watch".into(),
+            tool_use_id: None,
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+            output_offset: 0,
+            notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
+        },
+        command: "tail -f log".into(),
+        exit_code: None,
+        stdout_bytes: None,
+    };
+    registry
+        .insert_state_for_test(TaskState::Monitor(seed("m-silent")))
+        .await;
+    registry
+        .insert_state_for_test(TaskState::Monitor(seed("m-unmeasured")))
+        .await;
+
+    registry
+        .set_monitor_stdout_bytes("m-silent", 0)
+        .await
+        .unwrap();
+    for id in ["m-silent", "m-unmeasured"] {
+        registry.set_status(id, TaskStatus::Completed).await.unwrap();
+    }
+
+    let drained = registry.take_pending_task_notifications().await;
+    let silent = drained
+        .iter()
+        .find(|n| n.task_id == "m-silent")
+        .expect("the silent monitor notifies");
+    assert_eq!(
+        silent.stdout_bytes,
+        Some(0),
+        "a measured zero must reach the renderer as Some(0)",
+    );
+    let unmeasured = drained
+        .iter()
+        .find(|n| n.task_id == "m-unmeasured")
+        .expect("the unmeasured monitor notifies");
+    assert_eq!(
+        unmeasured.stdout_bytes, None,
+        "never measured must stay None, not collapse to zero",
+    );
+}
+
 /// claude-code `bjn` + `JFe` — the rosters a "no task found" message names.
 #[tokio::test]
 async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents() {

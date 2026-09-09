@@ -2690,9 +2690,35 @@ fn render_task_output(retrieval_status: &str, task: Option<&TaskOutputView>) -> 
         // `<output>` only when the RAW trimmed output is non-blank (TS
         // `output?.trim()`), then truncate-and-format and `.trimEnd()` the
         // result (TS: `formatTaskOutput(output, task_id)` → `content.trimEnd()`).
+        //
+        // A `local_bash` spool goes through verbatim; EVERY other task type is
+        // untrusted model-adjacent text and runs through the subagent-output
+        // guard first (2.1.263 `src_160988549.js` @3695156):
+        //
+        // ```js
+        // d = e.task.task_type==="local_bash" ? o.trimEnd()
+        //   : uH(o.trimEnd(),{prependMarker:!e.task.isRawTranscript}).sanitized
+        // ```
+        //
+        // Without it an agent whose report contained `<system-reminder>` or an
+        // `antml:` tag had that text handed to the model with its control
+        // syntax intact — the very hole `Task`'s own result path closes.
         if !t.output.trim().is_empty() {
             let formatted = format_task_output(&t.output, &t.task_id, t.output_path.as_deref());
-            parts.push(format!("<output>\n{}\n</output>", formatted.trim_end()));
+            let trimmed = formatted.trim_end();
+            let body = if t.task_type == "local_bash" {
+                trimmed.to_string()
+            } else {
+                platform_api::subagent_output_guard::sanitize_text(
+                    trimmed,
+                    // `prependMarker: !isRawTranscript` — a raw transcript was
+                    // never a report addressed to the model, so it is
+                    // neutralized silently.
+                    !t.is_raw_transcript,
+                )
+                .sanitized
+            };
+            parts.push(format!("<output>\n{body}\n</output>"));
         }
         // `<error>` AFTER `<output>` (TS `mapToolResultToToolResultBlockParam`
         // lines 299-301: `if (data.task.error) parts.push(\`<error>…</error>\`)`).
@@ -2724,6 +2750,11 @@ struct TaskOutputView {
     /// so the `[Truncated. Full output: <path>]` header shows the real path
     /// (claude-code `getTaskOutputPath(taskId)`). `None` ⟶ bare-filename fallback.
     output_path: Option<String>,
+    /// claude `TaskOutput.isRawTranscript` — the body is the agent's raw
+    /// transcript rather than a report it addressed to the caller. Suppresses
+    /// the subagent-guard marker (`prependMarker: !isRawTranscript`);
+    /// neutralisation still runs. `false` for every non-agent type.
+    is_raw_transcript: bool,
 }
 
 /// Byte-faithful port of `TaskOutputTool.tsx`'s `retrieval_status` decision.
@@ -3004,11 +3035,14 @@ impl Tool for TaskOutputTool {
         // `getTaskOutputData` `local_agent`: `output: cleanResult || output`).
         // `result` is `None` for non-agent tasks / empty extractions, leaving
         // the raw spool content in place.
-        let output = chunk
-            .result
-            .clone()
-            .filter(|r| !r.is_empty())
-            .unwrap_or_else(|| chunk.content.clone());
+        let clean_result = chunk.result.clone().filter(|r| !r.is_empty());
+        // claude `isRawTranscript: !ue` — true exactly when the clean report was
+        // empty and the body fell back to the transcript. Set ONLY in the
+        // oracle's `local_agent` branch; every other type leaves it undefined,
+        // so `prependMarker: !isRawTranscript` is `true` for them.
+        let is_raw_transcript =
+            record.task_type == "local_agent" && clean_result.is_none();
+        let output = clean_result.unwrap_or_else(|| chunk.content.clone());
         let view = TaskOutputView {
             task_id: chunk.task_id.clone(),
             task_type: record.task_type.clone(),
@@ -3025,6 +3059,7 @@ impl Tool for TaskOutputTool {
             // Absolute spool path threaded from the registry (T11/T16) for the
             // `[Truncated. Full output: <path>]` header.
             output_path: chunk.output_path.clone(),
+            is_raw_transcript,
         };
         let content = render_task_output(retrieval_status, Some(&view));
 

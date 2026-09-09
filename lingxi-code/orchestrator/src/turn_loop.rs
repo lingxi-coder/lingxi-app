@@ -1021,6 +1021,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             _ => None,
         })
         .collect();
+    orch.turn_span.note_assistant_response(tool_uses.len());
 
     // HOOK.2: a PreToolUse hook returning `continue:false` (preventContinuation)
     // stops the agent loop AFTER this turn step's tools have run (TS
@@ -1165,25 +1166,12 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // tells the model the harness will re-invoke it when the wakeup fires, so
     // feeding that result back just buys one more model round to say so.
     //
-    // The flag is CONSUMED unconditionally (`swap`) so a call that armed a
-    // wakeup alongside other tools cannot leak into the next round; the guards
-    // then decide whether this round actually takes the branch.
-    let wakeup_armed = orch
-        .loop_wakeup_armed_slot
-        .as_ref()
-        .is_some_and(|slot| slot.swap(false, std::sync::atomic::Ordering::SeqCst));
-    let lone_wakeup_ended_turn = wakeup_armed
-        && !hook_prevent_continuation
+    // The flag is CONSUMED either way (inside the predicate) so a call that
+    // armed a wakeup alongside other tools cannot leak into the next round.
+    let lone_wakeup_ended_turn = !hook_prevent_continuation
         && !tool_requested_end_turn
-        && matches!(
-            tool_uses.as_slice(),
-            [(_, name, _, _)] if name == SCHEDULE_WAKEUP_TOOL_NAME
-        )
-        && {
-            let session = orch.session();
-            let model = session.lock().await.model.clone();
-            lone_wakeup_ends_turn_model(&model)
-        };
+        && take_lone_wakeup_turn_end(orch, tool_uses.iter().map(|(_, name, _, _)| name.as_str()))
+            .await;
     if lone_wakeup_ended_turn {
         emit_loop_dynamic_wakeup_ends_turn_telemetry(orch).await;
     }
@@ -2605,6 +2593,42 @@ fn lone_wakeup_ends_turn_model(model_id: &str) -> bool {
     use platform_api::model_capabilities::{has_capability, normalize_model_id, ModelCapability};
     has_capability(model_id, ModelCapability::Fable5Mitigations)
         || normalize_model_id(model_id) == "claude-mythos-5"
+}
+
+/// Consume the wakeup-armed flag and report whether this round was exactly one
+/// `ScheduleWakeup` that armed a wakeup, on a model the binary's gate covers.
+///
+/// PARITY `if(yo.length===1 && yo[0].name===Xi && Zoe(...)) { if(kg().some(…loop…)) … }`.
+///
+/// Shared by BOTH turn loops — the batched one in this module and the streaming
+/// twin in `conversation::drivers`. One definition matters more than usual here:
+/// the first cut of this arm lived only in the batched loop, and the streaming
+/// loop is the one the desktop bridge takes, so `/loop` never reached it.
+///
+/// The flag is consumed on every call (`swap`), including the early returns, so
+/// a `ScheduleWakeup` that armed a wakeup alongside other tools cannot leak into
+/// the next round.
+pub(crate) async fn take_lone_wakeup_turn_end<'a>(
+    orch: &ConversationOrchestrator,
+    tool_names: impl Iterator<Item = &'a str>,
+) -> bool {
+    let armed = orch
+        .loop_wakeup_armed_slot
+        .as_ref()
+        .is_some_and(|slot| slot.swap(false, std::sync::atomic::Ordering::SeqCst));
+    if !armed {
+        return false;
+    }
+    let mut names = tool_names;
+    if !matches!(
+        (names.next(), names.next()),
+        (Some(only), None) if only == SCHEDULE_WAKEUP_TOOL_NAME
+    ) {
+        return false;
+    }
+    let session = orch.session();
+    let model = session.lock().await.model.clone();
+    lone_wakeup_ends_turn_model(&model)
 }
 
 /// PARITY the turn-loop branch that ends a turn on a lone `ScheduleWakeup`:

@@ -2801,6 +2801,12 @@ impl ConversationOrchestrator {
             crate::turn_loop::prior_assistant_used_structured_output(&s.history)
         };
 
+        // `/loop` fold span (streaming twin of the count in `turn_loop`): this
+        // response's tool calls, and the messages it adds. Counted here because
+        // this is the one point every streamed response passes through.
+        self.turn_span
+            .note_assistant_response(pumped.tool_uses.len());
+
         // The oracle guard checks the immediately preceding transition,
         // rather than whether any earlier attempt in this turn was malformed.
         if pumped.stop_reason.as_deref() != Some("tool_use") || !pumped.tool_uses.is_empty() {
@@ -2892,6 +2898,21 @@ impl ConversationOrchestrator {
                             final_message_id: assistant_id,
                         },
                     ));
+                }
+                // LONE `ScheduleWakeup` ENDS THE TURN (streaming twin). Same
+                // arm, same order, and the same shared flag as `turn_loop`'s —
+                // the streaming loop is the one the desktop bridge actually
+                // takes, which is where `/loop` runs at all.
+                if crate::turn_loop::take_lone_wakeup_turn_end(
+                    self,
+                    pumped.tool_uses.iter().map(|tool_use| tool_use.name.as_str()),
+                )
+                .await
+                {
+                    crate::turn_loop::emit_loop_dynamic_wakeup_ends_turn_telemetry(self).await;
+                    let cost = self.snapshot_cost_real().await;
+                    self.output.emit_end_turn("end_turn", &cost).await;
+                    return Ok(StreamingIterationDisposition::Complete(assistant_id));
                 }
                 return Ok(StreamingIterationDisposition::Continue);
             }

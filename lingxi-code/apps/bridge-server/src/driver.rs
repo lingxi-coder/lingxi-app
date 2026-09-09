@@ -800,6 +800,16 @@ mod tests {
         OrchestratorTurnDriver::new(orchestrator)
     }
 
+    /// [`build_driver`] plus the orchestrator it wraps, for tests that read the
+    /// per-turn tally back off it.
+    fn build_driver_with_orchestrator(
+        streaming: Arc<MockStreamingApiClient>,
+    ) -> (OrchestratorTurnDriver, Arc<ConversationOrchestrator>) {
+        let driver = build_driver(streaming);
+        let orchestrator = driver.orchestrator.clone();
+        (driver, orchestrator)
+    }
+
     /// Extract the content blocks of the FIRST user message in a captured request.
     fn first_user_content(messages: &[ConversationMessage]) -> Vec<ContentBlock> {
         messages
@@ -1275,6 +1285,63 @@ mod tests {
         assert!(loop_runtime.loop_ended(), "user abort ends the loop");
         telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
         loop_runtime.reset();
+    }
+
+    /// The `/loop` fold's span tally has to be BUMPED BY THE TURN LOOP, not
+    /// merely defined: `turn_span`'s own unit tests call the counter directly
+    /// and pass whether or not production ever does.
+    ///
+    /// A text-only turn is the sharpest probe available — it calls
+    /// `note_assistant_response(0)`, so `tool_uses` stays 0 while `messages`
+    /// goes to exactly 1. An unwired call site leaves BOTH at 0, and reporting
+    /// `span_len: 0` in `loop_noop_fold` is precisely the "reported as zero"
+    /// this counter exists to avoid.
+    #[tokio::test]
+    async fn a_turn_bumps_the_fold_span_tally() {
+        let (driver, orchestrator) = build_driver_with_orchestrator(streaming_one_turn());
+        assert_eq!(
+            orchestrator.turn_span().snapshot(),
+            orchestrator::turn_span::TurnSpanCounts::default(),
+            "a fresh orchestrator starts at zero",
+        );
+        driver.run_turn("hello".to_string()).await;
+        let span = orchestrator.turn_span().snapshot();
+        assert_eq!(
+            span.messages, 1,
+            "the assistant response must be counted by the turn loop (0 = call site missing)",
+        );
+        assert_eq!(span.tool_uses, 0, "a text-only turn calls no tools");
+    }
+
+    /// The tally is reset at the START of every turn, not only loop ticks: a
+    /// count carried over from a working turn would veto the next quiet tick,
+    /// or inflate its `loop_noop_fold`.
+    ///
+    /// Poking the counters before the turn (rather than running two turns) also
+    /// keeps this honest with a single-turn mock — a second `run_turn` against
+    /// an exhausted script never reaches the model, so it would read 0 whether
+    /// or not the reset happened.
+    #[tokio::test]
+    async fn a_turn_resets_the_fold_span_tally_it_inherits() {
+        let (driver, orchestrator) = build_driver_with_orchestrator(streaming_one_turn());
+        let tally = orchestrator.turn_span();
+        tally.note_assistant_response(9);
+        tally.note_denial("user-rejected");
+        tally.note_compaction();
+        assert_eq!(tally.snapshot().tool_uses, 9, "the leftovers are really there");
+
+        driver.run_turn("hello".to_string()).await;
+
+        let span = orchestrator.turn_span().snapshot();
+        assert_eq!(
+            span,
+            orchestrator::turn_span::TurnSpanCounts {
+                tool_uses: 0,
+                messages: 1,
+                ..Default::default()
+            },
+            "only this turn's own assistant response survives the reset",
+        );
     }
 
     /// PARITY `D()` + `v()`: a tick the model closed with `noop: true` folds

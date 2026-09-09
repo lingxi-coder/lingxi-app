@@ -813,22 +813,34 @@ fn bash_result_data(
     serde_json::Value::Object(m)
 }
 
-/// Port of claude-code 2.1.238 `L0i` — the model-facing note attached to a
-/// backgrounded command (`mapToolResultToToolResultBlockParam`'s `y`).
+/// Port of claude-code 2.1.263 `$2t` (`src_160988549.js` @1886651) — the
+/// model-facing note attached to a backgrounded command
+/// (`mapToolResultToToolResultBlockParam`'s `y`). The 2.1.238 spelling was
+/// `L0i`, with three head arms instead of four.
 ///
 /// ```js
-/// function L0i({backgroundTaskId:e,outputPath:t,backgroundedByUser:r,timedOutAfterMs:n,
-///               reapedAtFinalResponse:o,readToolName:i}){
-///  let s=r?`Command was manually backgrounded by user with ID: ${e}. Output is being written to: ${t}.`
-///       :n!==void 0?`Command did not complete within its ${Math.max(1,Math.round(n/1000))}s timeout and was moved to the background (ID: ${e}). Output is being written to: ${t}.`
+/// function $2t({backgroundTaskId:e,outputPath:t,backgroundedByUser:r,
+///               backgroundedToDeliverMessage:o,timedOutAfterMs:d,
+///               reapedAtFinalResponse:p,readToolName:_}){
+///  let E=r?`Command was manually backgrounded by user with ID: ${e}. Output is being written to: ${t}.`
+///       :o?`Command was moved to the background (ID: ${e}) so that a message that arrived while it was running can reach you; it was not interrupted. Output is being written to: ${t}.`
+///       :d!==void 0?`Command did not complete within its ${Math.max(1,Math.round(d/1000))}s timeout and was moved to the background (ID: ${e}). Output is being written to: ${t}.`
 ///       :`Command running in background with ID: ${e}. Output is being written to: ${t}.`,
-///   a=o?"If it exits while you are still working…":r?void 0:"You will be notified when it completes.",
-///   l=r?void 0:`To check interim output, use ${i} on that file path.`;
-///  return[s,a,l].filter(Boolean).join(" ")}
+///   C=p?"If it exits while you are still working…":r?void 0:"You will be notified when it completes.",
+///   I=r?void 0:`To check interim output, use ${_} on that file path.`;
+///  return[E,C,I].filter(Boolean).join(" ")}
 /// ```
 ///
-/// RESIDUAL (unchanged by this port): LingXi has no Ctrl+B manual-background
-/// path, so the `backgroundedByUser` arm has no call site and is not modelled.
+/// Two of the four head arms have NO producer in the port yet, so they are not
+/// modelled rather than added as unreachable branches:
+///
+/// * `backgroundedByUser` — the note's Ctrl+B arm. The keybinding exists, but
+///   it backgrounds through the registry rather than by re-rendering this tool
+///   result, so nothing calls this function with that flag.
+/// * `backgroundedToDeliverMessage` — set when a message queued for the model
+///   arrives while a command is running and the command is moved aside so the
+///   turn can continue. That backgrounding trigger is itself unported; the arm
+///   becomes reachable the moment it lands, and this comment is the pointer.
 fn background_note(
     background_task_id: &str,
     output_path: &str,

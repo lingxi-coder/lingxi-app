@@ -138,28 +138,50 @@ fn cjr() -> String {
     format!("{CJR_HEAD}{one_shot}{CJR_MID}{unbounded}{CJR_TAIL}")
 }
 
-/// Binary `lJr()` (cc_all.txt:504932) — the `Yke()`-gated PushNotification
-/// addendum (leading newline) spliced onto BOTH `description()` and `prompt()`.
-/// Reuses `cron::is_push_notif_enabled` (the exact `Yke()` predicate).
+/// 2.1.263 `ybn()` (`src_160113288.js` @1041; `lJr()` in the older builds) —
+/// the `oJ()`-gated PushNotification addendum spliced onto BOTH `description()`
+/// and `prompt()`. Reuses `cron::is_push_notif_enabled` (the exact predicate).
+///
+/// TWO leading newlines, not one: the oracle returns
+/// `` `\n\nWhen an event lands…` `` so the addendum starts its own paragraph
+/// after the preceding section. With one it ran on as the next line of that
+/// section.
 fn ljr() -> String {
     if cron::is_push_notif_enabled() {
         format!(
-            "\nWhen an event lands that the user would want to act on now \u{2014} an error appeared, the status they were waiting on flipped \u{2014} send a {PUSH_NOTIFICATION_NAME}. Not every event is worth a push; the ones that change what they'd do next are."
+            "\n\nWhen an event lands that the user would want to act on now \u{2014} an error appeared, the status they were waiting on flipped \u{2014} send a {PUSH_NOTIFICATION_NAME}. Not every event is worth a push; the ones that change what they'd do next are."
         )
     } else {
         String::new()
     }
 }
 
-/// `Eq()` = `nt("tengu_amber_sentinel", false)` (port: `telemetry::flag_bool`).
+/// 2.1.263 `QI()` = `H("tengu_amber_sentinel", false)` (port:
+/// `telemetry::flag_bool`). Spelled `Eq()` in the 2.1.2xx builds this module
+/// was first written against.
 fn amber_sentinel_enabled() -> bool {
     telemetry::flag_bool(AMBER_SENTINEL_FLAG, false)
 }
 
-/// `mu()` — shell-available. The port's host always has a shell (the Bash tool is
-/// gated the same way); no Windows-without-powershell host is modeled → true.
+/// 2.1.263 `Ys()` (`src_160256736.js` @17607), the second half of the Monitor
+/// gate — spelled `mu()` in the older builds:
+///
+/// ```js
+/// function Ys(){if(P()!=="windows")return!0;return _1()!==null}
+/// ```
+///
+/// NOT unconditional: on Windows the tool is withdrawn unless a bash can be
+/// found. `_1()` is the Git-Bash discovery the Bash tool already ports as
+/// [`tool_shell::bash::git_bash_path`], so this reuses it instead of repeating
+/// the probe order (env override → Program Files → git-on-PATH). Every other
+/// platform answers `true`, which is why the previous unconditional `true` was
+/// right everywhere except a Windows host with no Git Bash — there it offered a
+/// tool whose commands could not run.
 fn shell_available() -> bool {
-    true
+    if !cfg!(windows) {
+        return true;
+    }
+    tool_shell::bash::git_bash_path().is_some()
 }
 
 /// Binary `Mnl` (`applyCcrTimeoutCap`): under `LINGXI_REMOTE` a persistent
@@ -256,7 +278,8 @@ impl Tool for MonitorTool {
     }
 
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
-        // PARITY: binary `isEnabled(){return Eq()&&mu()}` — default OFF.
+        // PARITY: 2.1.263 `isEnabled(){return QI()&&Ys()}`
+        // (`src_168769646.js` @12008) — default OFF.
         amber_sentinel_enabled() && shell_available()
     }
 
@@ -687,11 +710,16 @@ mod tests {
                 is_non_interactive_session: false,
             },
         ));
-        assert!(d.contains("send a PushNotification"));
-        // The lJr() helper itself produces the byte-exact splice when Yke() holds.
-        // (Directly exercise the format to lock the string.)
-        let splice = "\nWhen an event lands that the user would want to act on now \u{2014} an error appeared, the status they were waiting on flipped \u{2014} send a PushNotification. Not every event is worth a push; the ones that change what they'd do next are.";
-        assert!(splice.contains("send a PushNotification"));
+        // Byte-exact, INCLUDING the two leading newlines: `ybn()` returns
+        // `\n\nWhen an event lands…` so the addendum opens its own paragraph.
+        // The previous form of this assertion compared a local literal against
+        // itself and so could not have caught the one-newline port.
+        let splice = "\n\nWhen an event lands that the user would want to act on now \u{2014} an error appeared, the status they were waiting on flipped \u{2014} send a PushNotification. Not every event is worth a push; the ones that change what they'd do next are.";
+        assert!(
+            d.contains(splice),
+            "description must carry the byte-exact ybn() splice; tail was: {:?}",
+            &d[d.len().saturating_sub(400)..]
+        );
         platform_api::session_flags::set_agent_push_notif_enabled(false);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
     }

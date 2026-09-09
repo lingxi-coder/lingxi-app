@@ -548,8 +548,8 @@ impl TaskRegistryHandle for TaskRegistry {
         .map_err(task_err_to_registry_err)
     }
 
-    async fn notify_monitor_event(&self, id: &str, event: &str) {
-        let _ = TaskRegistry::enqueue_monitor_event(self, id, event).await;
+    async fn notify_monitor_event(&self, id: &str, event: &str, housekeeping: bool) {
+        let _ = TaskRegistry::enqueue_monitor_event(self, id, event, housekeeping).await;
     }
 
     async fn register_mcp_task(
@@ -1000,7 +1000,7 @@ mod tests {
 
         let handle: &dyn TaskRegistryHandle = registry.as_ref();
         handle
-            .notify_monitor_event(&task_id, "step <2> complete")
+            .notify_monitor_event(&task_id, "step <2> complete", false)
             .await;
         let events = handle.take_pending_task_notifications().await.unwrap();
         assert_eq!(events.len(), 1);

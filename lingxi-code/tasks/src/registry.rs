@@ -1841,7 +1841,12 @@ impl TaskRegistry {
     /// producer must not grow session memory without limit while the model is
     /// busy. The monitor handler performs its own token-bucket suppression;
     /// this final cap protects the registry boundary as well.
-    pub async fn enqueue_monitor_event(&self, task_id: &str, event: &str) -> Result<(), TaskError> {
+    pub async fn enqueue_monitor_event(
+        &self,
+        task_id: &str,
+        event: &str,
+        housekeeping: bool,
+    ) -> Result<(), TaskError> {
         const MAX_PENDING_MONITOR_EVENTS: usize = 1_024;
 
         let task_id = self.canonical_or_raw(task_id).await;
@@ -1864,6 +1869,10 @@ impl TaskRegistry {
                 tool_use_id: monitor.base.tool_use_id.clone(),
                 output_path: Some(monitor.base.output_file.to_string_lossy().into_owned()),
                 result: Some(event.to_string()),
+                // `GM(…,{isHousekeeping})` — a harness line about the monitor,
+                // not script output. The renderer suppresses the per-event
+                // push hint for these.
+                monitor_housekeeping: housekeeping,
                 ..Default::default()
             }
         };
@@ -2691,6 +2700,8 @@ impl TaskRegistry {
                 // Set only when the run ended by exhausting its turn budget;
                 // selects the turn-limit variant of the `completed` summary.
                 max_turns_reached: agent_outcome.max_turns_reached,
+                // Terminal notifications are never monitor events.
+                monitor_housekeeping: false,
                 result: workflow_outcome
                     .as_ref()
                     .and_then(|outcome| outcome.result.clone())
@@ -2826,6 +2837,8 @@ impl TaskRegistry {
                     TaskState::LocalAgent(agent) => agent.outcome.max_turns_reached,
                     _ => None,
                 },
+                // A rest notification is never a monitor event.
+                monitor_housekeeping: false,
                 workflow_failures: Vec::new(),
                 workflow_agent_count: None,
                 workflow_total_tokens: None,

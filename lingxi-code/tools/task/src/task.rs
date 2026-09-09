@@ -13,10 +13,15 @@
 //!   `lingxi_core::TodoState` = `pending`/`in_progress`/`completed`). They do NOT use
 //!   `validate_task_id`, `TASK_TYPES`, or `TASK_STATUSES`.
 //! - **Product-B (background-registry):** `TaskStop` / `TaskOutput` dispatch the
-//!   M1 background `TaskRegistry` (9-char `[bartwmdksf][0-9a-z]{8}` ids). The
-//!   `validate_task_id` / `TASK_TYPES` / `TASK_STATUSES` symbols below back ONLY
-//!   these two tools now — they are retained Product-B-only (also for the locked
-//!   `parity_agent_task_tools` / `parity_registry` fixtures).
+//!   M1 background `TaskRegistry` (9-char `[bartwmdksf][0-9a-z]{8}` ids).
+//!
+//! `validate_task_id` / `TASK_TYPES` / `TASK_STATUSES` are Product-B SHAPES,
+//! not Product-B code paths: neither `TaskStop` nor `TaskOutput` calls them.
+//! Both resolve an id by asking the registry and report `not found` when it
+//! does not answer — which is what the oracle does too (`RZn` reads through
+//! `EK` rather than shape-checking first). The symbols exist for the locked
+//! `parity_agent_task_tools` fixture, which pins the id grammar; saying they
+//! "back these two tools" claimed a call site that has never existed.
 //!
 //! All six tool-name constants stay reachable at `tool_task::task::*`.
 
@@ -63,10 +68,12 @@ pub const TASK_STOP_TOOL_NAME: &str = "TaskStop";
 /// Tool name `'TaskOutput'` (claude-code `TASK_OUTPUT_TOOL_NAME`).
 pub const TASK_OUTPUT_TOOL_NAME: &str = "TaskOutput";
 
-/// The 9 background task-type wire strings. Byte-aligned with `tasks::TaskType`
-/// variants (snake_case).
+/// The 10 background task-type wire strings — the nine claude-code variants
+/// plus LingXi's `local_fusion`. Byte-aligned with `tasks::TaskType` variants
+/// (snake_case). The array has held ten entries since `local_fusion` landed;
+/// the count in this sentence had not been updated.
 ///
-// Product-B (background-registry) — retained for TaskStop/TaskOutput + fixture lock.
+// Product-B SHAPE — no production caller; see the module header.
 pub const TASK_TYPES: &[&str] = &[
     "local_bash",
     "local_agent",
@@ -82,13 +89,16 @@ pub const TASK_TYPES: &[&str] = &[
 
 /// The 5 background task-status wire strings.
 ///
-// Product-B (background-registry) — retained for TaskStop/TaskOutput + fixture lock.
+// Product-B SHAPE — no production caller; see the module header.
 pub const TASK_STATUSES: &[&str] = &["pending", "running", "completed", "failed", "killed"];
 
-/// Validate the task-id format `[bartwmdksf][0-9a-z]{8}` (9 chars total).
+/// Validate the task-id format `[bartwmdksf][0-9a-z]{8}` (9 chars total) —
+/// nine claude-code type prefixes plus LingXi's `f` (`local_fusion`).
 ///
-// Product-B (background-registry) — retained for TaskStop/TaskOutput + fixture lock.
-/// V2 (Product-A) task ids are decimal strings and MUST NOT route through this.
+/// NO production caller: this pins the id grammar for the locked
+/// `parity_agent_task_tools` fixture. `TaskStop`/`TaskOutput` resolve ids
+/// through the registry instead. V2 (Product-A) task ids are decimal strings
+/// and MUST NOT route through this.
 ///
 /// # Errors
 /// Returns a locked human-readable error string on mismatch.

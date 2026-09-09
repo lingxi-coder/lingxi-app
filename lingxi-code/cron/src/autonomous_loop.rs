@@ -159,13 +159,10 @@ pub fn is_loop_keepalive_enabled() -> bool {
 // flag/setting are ever enabled.
 #[must_use]
 pub fn is_push_notif_enabled() -> bool {
-    telemetry::flag_bool("tengu_kairos_push_notifications", false) && agent_push_notif_setting()
-}
-
-/// `mc("agentPushNotifEnabled", false).value` (cc_all.txt:504927).
-#[must_use]
-fn agent_push_notif_setting() -> bool {
-    platform_api::session_flags::agent_push_notif_enabled()
+    // ONE implementation, hosted in `telemetry` so the orchestrator's
+    // monitor-event renderer can gate on the same predicate without taking a
+    // dependency on `cron`.
+    telemetry::push_notifications_enabled()
 }
 
 fn env_truthy(key: &str) -> bool {

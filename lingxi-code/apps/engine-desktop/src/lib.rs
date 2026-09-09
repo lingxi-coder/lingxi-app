@@ -2481,17 +2481,19 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
         .await;
     }
 
-    async fn notify_monitor_event(&self, task_id: &str, event: &str) {
+    async fn notify_monitor_event(&self, task_id: &str, event: &str, housekeeping: bool) {
         tasks::handlers::TaskStatusSink::notify_monitor_event(
             self.task_registry.as_ref(),
             task_id,
             event,
+            housekeeping,
         )
         .await;
         tasks::handlers::TaskStatusSink::notify_monitor_event(
             self.coordinator.as_ref(),
             task_id,
             event,
+            housekeeping,
         )
         .await;
     }

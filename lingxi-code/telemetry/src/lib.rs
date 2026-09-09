@@ -23,8 +23,8 @@ pub mod tengu;
 pub use bus::{AnalyticsBus, OverflowPolicy};
 pub use error::TelemetryError;
 pub use feature_flags::{
-    flag_bool, flag_string_list, test_clear_flag, test_clear_flag_list, test_set_flag,
-    test_set_flag_list, FeatureFlagsClient, FeatureFlagsFetcher, FeatureValue,
+    flag_bool, flag_string_list, push_notifications_enabled, test_clear_flag, test_clear_flag_list,
+    test_set_flag, test_set_flag_list, FeatureFlagsClient, FeatureFlagsFetcher, FeatureValue,
 };
 pub use killswitch::Killswitch;
 pub use pii::{strip_proto_fields, PiiTagged, Verified};

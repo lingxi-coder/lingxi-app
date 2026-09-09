@@ -190,9 +190,11 @@ impl TaskStatusSink for RegistryStatusSink {
         }
     }
 
-    async fn notify_monitor_event(&self, task_id: &str, event: &str) {
+    async fn notify_monitor_event(&self, task_id: &str, event: &str, housekeeping: bool) {
         if let Some(reg) = self.registry.get() {
-            let _ = reg.enqueue_monitor_event(task_id, event).await;
+            let _ = reg
+                .enqueue_monitor_event(task_id, event, housekeeping)
+                .await;
         }
     }
 

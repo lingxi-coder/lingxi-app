@@ -11,7 +11,11 @@ use thiserror::Error;
 /// Input to [`TaskRegistryHandle::create`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskCreateInput {
-    /// Wire string for the task type — one of the 9 byte-locked variants.
+    /// Wire string for the task type — one of TEN: the nine claude-code
+    /// variants (`local_bash`, `local_agent`, `remote_agent`,
+    /// `in_process_teammate`, `local_workflow`, `monitor_mcp`, `monitor_ws`,
+    /// `mcp_task`, `dream`) plus LingXi's own `local_fusion`. The oracle's
+    /// tenth, `auto_mode_scan` (prefix `e`), has no port.
     pub task_type: String,
     /// Human-readable description shown in UI listings.
     pub description: String,
@@ -150,7 +154,7 @@ pub struct TaskRecord {
     /// A persistent teammate is waiting for the leader's plan decision.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub awaiting_plan_approval: bool,
-    /// 9-char `[bartwmdks][0-9a-z]{8}` task id.
+    /// 9-char `[bartwmdksf][0-9a-z]{8}` task id.
     pub task_id: String,
     /// Task type wire string.
     pub task_type: String,
@@ -394,7 +398,8 @@ pub struct WorkflowTerminalOutcome {
 pub struct TaskNotification {
     /// 9-char task id → `<task-id>`.
     pub task_id: String,
-    /// Task type wire string (one of the 9 byte-locked variants). Selects the
+    /// Task type wire string (one of the ten — see [`TaskRecord::task_type`]).
+    /// Selects the
     /// per-type notification format (bash / agent / monitor / generic).
     pub task_type: String,
     /// Terminal status wire string — one of `completed` / `failed` / `killed`
@@ -452,6 +457,12 @@ pub struct TaskNotification {
     /// `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// `monitor_ws` while running: this event is a harness housekeeping line
+    /// (suppression notice, timeout marker) rather than script output —
+    /// claude-code `GM`'s `isHousekeeping`. Suppresses the per-event
+    /// push-notification hint. Additive default `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub monitor_housekeeping: bool,
     /// `local_agent` only: the turn budget the run exhausted (claude-code
     /// `enqueueAgentNotification`'s `maxTurnsReached`). `Some(n)` on a
     /// `completed` task replaces the "finished" verb with
@@ -681,7 +692,13 @@ pub trait TaskRegistryHandle: Send + Sync {
     }
 
     /// Enqueue one live stdout event for the next task-notification drain.
-    async fn notify_monitor_event(&self, _id: &str, _event: &str) {}
+    ///
+    /// `housekeeping` marks a line the harness produced ABOUT the monitor (the
+    /// suppression notice, the timeout marker) rather than one the watched
+    /// script wrote — claude-code's `GM(…, {isHousekeeping:!0})`. It suppresses
+    /// the per-event push-notification hint, which only makes sense for real
+    /// output.
+    async fn notify_monitor_event(&self, _id: &str, _event: &str, _housekeeping: bool) {}
 
     /// Stop the background agent work that Claude Code tears down when the
     /// session reaches `--max-budget-usd`.

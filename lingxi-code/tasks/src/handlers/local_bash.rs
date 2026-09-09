@@ -265,7 +265,10 @@ pub trait TaskStatusSink: Send + Sync {
 
     /// Queue a live stdout event from a `monitor_ws` task. Default no-op keeps
     /// standalone handlers and existing test sinks source-compatible.
-    async fn notify_monitor_event(&self, _task_id: &str, _event: &str) {}
+    ///
+    /// `housekeeping` marks a harness line ABOUT the monitor rather than script
+    /// output (claude-code `GM`'s `isHousekeeping`).
+    async fn notify_monitor_event(&self, _task_id: &str, _event: &str, _housekeeping: bool) {}
 
     /// Whether the owning registry has inserted the task row. Handler-backed
     /// tasks receive their generated id before [`crate::registry::TaskRegistry`]

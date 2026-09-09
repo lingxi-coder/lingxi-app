@@ -105,6 +105,20 @@ fn escape_xml(s: &str) -> String {
 /// the model's conversation. Redact just those two leaves; everything else in
 /// the args JSON is left byte-for-byte so a resume command a user copies
 /// still runs.
+/// claude-code `cR` — the `PushNotification` tool name interpolated into the
+/// per-monitor-event hint.
+const PUSH_NOTIFICATION_TOOL_NAME: &str = "PushNotification";
+
+/// The `GM` per-event push hint, or empty. Split out as a pure function so the
+/// two conditions can be pinned without touching the process-global feature
+/// flag and session setting that `oJ()` reads.
+fn monitor_push_hint(housekeeping: bool, push_enabled: bool) -> String {
+    if housekeeping || !push_enabled {
+        return String::new();
+    }
+    format!("\nIf this event is something the user would act on now, send a {PUSH_NOTIFICATION_TOOL_NAME}. Routine or benign output doesn't need one.")
+}
+
 /// claude-code `Vr` — the `SendMessage` tool name interpolated into the
 /// turn-limit completion summary (`${Vr} to task-id to continue`).
 const SEND_MESSAGE_TOOL_NAME: &str = "SendMessage";
@@ -650,12 +664,31 @@ fn render_one(n: &TaskNotification) -> String {
             // `<event>` body ONLY. `Vq` skips falsy fields and this call passes
             // toolUseId/taskType/outputFile/status as undefined, so they are
             // OMITTED for this arm. Summary is `Monitor event: "{desc}"` and the
-            // event rides in `<event>…</event>` (not `<result>`). The optional
-            // push-notification hint clause is omitted (that surface is off).
+            // event rides in `<event>…</event>` (not `<result>`).
+            //
+            // The push-notification hint rides AFTER the `</event>` tag, inside
+            // the body, exactly as claude-code `GM` builds it
+            // (`src_160988549.js` @3387635):
+            //
+            // ```js
+            // let d = !o?.isHousekeeping && oJ()
+            //   ? `\nIf this event is something the user would act on now, send a ${cR}. Routine or benign output doesn't need one.`
+            //   : "";
+            // … body: `\n<event>${Nt(t)}</event>${d}`
+            // ```
+            //
+            // A previous comment here said the surface was off; it is not — the
+            // Monitor tool's own description already splices the same
+            // `oJ()`-gated addendum, so the hint was missing only from the
+            // events themselves.
             let event = n.result.as_deref().unwrap_or_default();
             let summary = format!("Monitor event: \"{}\"", n.description);
+            let push_hint = monitor_push_hint(
+                n.monitor_housekeeping,
+                telemetry::push_notifications_enabled(),
+            );
             format!(
-                "<task-notification>\n<task-id>{}</task-id>\n<summary>{}</summary>\n<event>{}</event>\n</task-notification>",
+                "<task-notification>\n<task-id>{}</task-id>\n<summary>{}</summary>\n<event>{}</event>{push_hint}\n</task-notification>",
                 n.task_id,
                 escape_xml(&summary),
                 escape_xml(event)
@@ -1573,6 +1606,21 @@ mod tests {
         assert_eq!(unmeasured.stdout_bytes, None);
         assert!(render_one(&unmeasured)
             .contains("<summary>Monitor \"watch\" stream ended</summary>"));
+    }
+
+    /// MON-11: the `GM` per-event hint rides after `</event>`, only for real
+    /// script output and only when the push surface is live. A stale comment
+    /// here claimed the surface was off — the Monitor tool's own description
+    /// already splices the same `oJ()`-gated addendum.
+    #[test]
+    fn the_monitor_event_push_hint_needs_both_conditions() {
+        let hint = "\nIf this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.";
+        assert_eq!(monitor_push_hint(false, true), hint);
+        // Housekeeping lines are the harness talking ABOUT the monitor.
+        assert_eq!(monitor_push_hint(true, true), "");
+        // No push surface ⇒ no hint, whatever the line is.
+        assert_eq!(monitor_push_hint(false, false), "");
+        assert_eq!(monitor_push_hint(true, false), "");
     }
 
     #[test]

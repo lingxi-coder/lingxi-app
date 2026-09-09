@@ -228,18 +228,18 @@ impl MonitorStreamSink {
                 // Two separate notifications, housekeeping notice FIRST.
                 if let Some(notice) = notice {
                     self.status_sink
-                        .notify_monitor_event(&self.task_id, &notice)
+                        .notify_monitor_event(&self.task_id, &notice, true)
                         .await;
                 }
                 self.status_sink
-                    .notify_monitor_event(&self.task_id, &event)
+                    .notify_monitor_event(&self.task_id, &event, false)
                     .await;
             }
             // High-volume auto-stop: deliver the stop message to the model FIRST,
             // then cancel — the terminal status becomes Killed (epilogue).
             FlushOutcome::Stop(event) => {
                 self.status_sink
-                    .notify_monitor_event(&self.task_id, &event)
+                    .notify_monitor_event(&self.task_id, &event, false)
                     .await;
                 self.cancel.cancel();
             }
@@ -527,7 +527,7 @@ impl Task for MonitorHandler {
                 worker_cancel.is_cancelled(),
             ) {
                 status_sink
-                    .notify_monitor_event(&worker_id, TIMEOUT_MARKER)
+                    .notify_monitor_event(&worker_id, TIMEOUT_MARKER, true)
                     .await;
             }
             // Before the terminal status, so the drain that reads the row can
@@ -1058,7 +1058,7 @@ mod tests {
         async fn set_status(&self, _task_id: &str, status: TaskStatus) {
             self.statuses.lock().unwrap().push(status);
         }
-        async fn notify_monitor_event(&self, _task_id: &str, event: &str) {
+        async fn notify_monitor_event(&self, _task_id: &str, event: &str, _housekeeping: bool) {
             self.events.lock().unwrap().push(event.to_string());
         }
     }

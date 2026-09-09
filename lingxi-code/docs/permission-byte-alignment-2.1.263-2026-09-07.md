@@ -202,11 +202,19 @@ be checked against the read block". Nothing in the port mentions it.
   belongs at that fold, not in this crate.
 
 ### P2
-- **MCP approval** (13), **subagent/teammate permission surface** (8)
-  (`Subagent declared permissionMode: bypassPermissions but this session is not
-  running in a contained no-internet environment…`), **remote-control /
-  `--print` permission host** (4), **host-asserted `classifierContext`** (2).
-- 343 further strings not yet themed — see the JSON.
+- 🚨 **Subagent/teammate permission surface** (8) — **mis-filed here; see the
+  subagent bypass clamps section below.** It was a privilege escalation, not
+  copy, and it is now landed.
+- **MCP approval** (13), **remote-control / `--print` permission host** (4),
+  **host-asserted `classifierContext`** (2). Both of the latter two have
+  substrate in the port already (`permission/src/host_context.rs`,
+  `classifier.rs`, `policy_gate.rs`, `mcp_policy.rs`), so these counts are an
+  upper bound on the copy, not on the work.
+- 🚨 **"343 further strings not yet themed" is NOT a task count.** Same
+  over-capture as the retracted "434 absent strings": the extraction is
+  keyword-driven and pulls minified code, not just prose. Re-running it on
+  2026-09-08 produced 574 "MCP" and 311 "subagent" candidates, overwhelmingly
+  code. ⇒ verify an extraction's SCOPE before quoting any count from it.
 
 ## Suggested order
 
@@ -619,6 +627,91 @@ green; restored byte-identically.
 | interpreters: stdin `-`, inline-code flags, `xargs`, heredoc/pipe | ✅ |
 | glob-containing paths → `ymo`'s `_tt` upward-escape guard | ✅ |
 | env vars outside the safe list: prefix (`Eun`) + `env` command (`ymo` head), via `eO`/`sle` | ✅ |
+
+### 🚨 The subagent bypass clamps — found and landed 2026-09-08
+
+Filed under "P2 — subagent/teammate permission surface (8)" and waved past. It is
+not a P2 copy item: **it is a privilege escalation, and the port had none of it.**
+
+Oracle 2.1.263, runAgent's `bs(Rn)` (chunk offset `164393262`):
+
+```js
+let as = Y6(je, on), So = as ?? e.permissionMode;      // `ye`, then `ve`
+function bs(Rn) {
+  let Ar = Rn;
+  if (So && (as || Rn.mode!=="bypassPermissions" && Rn.mode!=="acceptEdits" && Rn.mode!=="auto")) {
+    let ys = So;
+    if (YYe() && !as && (So==="bypassPermissions"||So==="acceptEdits"||So==="auto"))
+      n(`Subagent declared permissionMode: ${So} inside a confined evaluation run; keeping parent mode '${Rn.mode}'.`,{level:"warn"}), ys = Rn.mode;
+    else if (So === "bypassPermissions") {
+      let ws = ey(), _s = !1;
+      if (ws || !1 || Rn.restricted)
+        n(`Subagent declared permissionMode: bypassPermissions but this session is not running in a contained no-internet environment (or bypass is policy-disabled, or the session is --restricted); keeping parent mode '${Rn.mode}'.`,{level:"warn"}), ys = Rn.mode;
+    }
+    Ar = {...Ar, mode: ys};
+  } … }
+```
+
+`agent/src/permission_mode.rs::effective_child_mode` ported the OUTER guard
+byte-accurately and **dropped both inner arms**. The outer guard only suppresses
+the definition fallback when the parent is ALREADY permissive — so a restrictive
+parent is precisely the case it lets through, and
+
+```yaml
+---
+name: helper
+permissionMode: bypassPermissions
+---
+```
+
+in any discovered agent file raised a `default` session's child to full bypass,
+in a confined evaluation run included.
+
+**🚨 The refusal copy is misleading and I nearly ported the wrong predicate.**
+The message says "not running in a contained no-internet environment", but there
+is no containment probe. Resolved at the binary:
+
+```js
+function pAn(){if((bn()||{}).permissions?.disableBypassPermissionsMode==="disable")
+  return "Bypass permissions mode was disabled by settings";return}
+function ey(){return pAn()!==void 0}
+```
+
+so `ey()` is just the settings bit, the middle disjunct is the constant-folded
+`!1` (dead in this build), and the two LIVE conditions are
+`disableBypassPermissionsMode === "disable"` and `--restricted`. ⇒ **resolve every
+minified predicate in a refusal before trusting the sentence it prints.** Cf. the
+`Ox = 1e4` entry below, where the threshold was real and every use of it was a
+DOWNGRADE, not the refusal the copy implied.
+
+`YYe()` is the same confined predicate already ported for `OG` (allow-rule
+filter) and `H_n` (hook-allow suppression) — this is its **third** oracle
+consumer, and missing it meant the two landed gates could be walked around by a
+frontmatter line.
+
+**Landed:** `SpawnBypassGates { confined, bypass_disabled, restricted }` threaded
+into `effective_child_mode` as DATA plus a `warn: &mut dyn FnMut(&str)` sink
+(`tracing::warn!` in production, matching `model_resolution`'s existing shape).
+Both messages verified byte-exact against the binary. Wired at both
+`PoolSubagentSpawner` composition roots: engine-desktop through a set-once cell
+(`spawn_bypass_gates_handle`) because `bypass_disabled` only exists after the boot
+tier fold, far below where the spawner is built and boxed — with a fallback fill
+for the enforcement-off arm; engine-mobile through a hoisted variable published
+next to `policy.bypass_killswitch_active` (`restricted` is always `false` there —
+mobile has no `--restricted`).
+
+⛔ **`confined` is read at the composition root, never inside the clamp.**
+`CLAUDE_CODE_EVAL_CONFINED` is a process global; a gate that reads it while a
+sibling test `set_var`s it makes the whole binary's parallel suite flaky. That is
+the bug documented under `CLAUDE_CODE_EVAL_CONFINED` below, and the same fix
+shape (thread the flag) is applied here pre-emptively.
+
+Seven tests, each red-proofed: the escalation itself (3 declared modes × 3
+restrictive parents), the flag-not-the-mode control, the `!as` exemption, the two
+`ey()`/`restricted` disjuncts independently, the bypass arm NOT clamping
+`acceptEdits`/`auto` (a single shared clamp would pass every other test), the
+oracle's `else if` exclusivity (one warning, not two), and the outer guard still
+winning for a permissive parent.
 
 ## What is left, and why each is not a permission-crate patch (2026-09-08)
 

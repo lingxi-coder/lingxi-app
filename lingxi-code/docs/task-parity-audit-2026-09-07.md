@@ -91,7 +91,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | `TOF-02` | confirmed | P2 | medium | Six independent derivations of the task-output root/file name (oracle has one) |
 | `TOF-03` | confirmed | P2 | low | Desktop spool directory is keyed by a freshly minted UUID, not the session id **[fixed]** |
 | `TOF-04` | confirmed **[fixed]** | P2 | medium | Full-output read has no 8MB tail cap and no "[NKB of earlier output omitted]" header |
-| `TOF-05` | confirmed | P2 | medium | Writer failure semantics missing: no "[output omitted: it could not be written to disk]" marker, no retry-once, no 16MB drop, no writer eviction |
+| `TOF-05` | confirmed **[partially fixed: the marker and the retry-once-with-the-marker are done, and `lost_output` is set-once. The 16 MiB gate is NOT portable (the oracle's counter can only grow from appends concurrent with a failing drain, which an awaited `append` cannot produce); the queue/drain machinery and writer eviction (`Sd`) remain]** | P2 | medium | Writer failure semantics missing: no "[output omitted: it could not be written to disk]" marker, no retry-once, no 16MB drop, no writer eviction |
 | `TOF-06` | confirmed | P2 | medium | Background shell output files never get the `[killed]` / `[exited with code N]` trailer **[fixed]** |
 | `TOF-09` | confirmed | P2 | medium | Tool-side tasks-directory recognition absent (jSn ignore globs, Grep guard, USn sandbox deny, gMe .output id parse) |
 | `TOF-07` | confirmed **[fixed]** | P3 | low | 5GB cap counted in UTF-8 bytes; oracle counts JS string length (UTF-16 code units) |
@@ -377,6 +377,13 @@ user-vs-model split is wrong.
   shell's SPAWNER) and is NOT the oracle's separate `ownerAgentId` — using the
   creator would have let a parent stop a child and refused the child itself.
   Ordering is pinned: not-running is reported before ownership.
+
+- `b759e7564` **TOF-05, write path** — an ENOSPC on a spool used to vanish
+  entirely. The retry re-issues the MARKER, not the chunk (`#p()` splices before
+  awaiting, so the body is already gone), and `lostOutput` is set on the FIRST
+  failure and never cleared. I had both backwards until the adversarial pass over
+  my own plan caught them; both readings are now pinned by a test, because both
+  look right. The 16 MiB gate is explicitly not ported — see the row.
 
 Guards worth keeping in mind for follow-up work:
 

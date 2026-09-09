@@ -37,7 +37,7 @@ Derived oracle facts are in `~/.claude/oracle-chunks/notes/agent-audit/`.
 
 ## Result
 
-Fifteen divergences confirmed. Eleven are fixed; the rest are recorded with their
+Fifteen divergences confirmed. Twelve are fixed; the rest are recorded with their
 blockers.
 
 A correction to an earlier draft of this report: it said source precedence was
@@ -304,21 +304,31 @@ a kill-switch).
 
 ## Not fixed — recorded with the blocker
 
-### AG-18 (P2) — `--add-dir` agent directories are never loaded
+### AG-18 (P2) — `--add-dir` agent directories were never loaded
 
 For `kind === "agents"` only, `wQr` adds a second projectSettings source: each
 `Rp()` directory (the `--add-dir` set) contributes `<dir>/.claude/agents`,
 tagged `fromAdditionalDirectory: true`, minus any the upward walk already
-covered. `Z$` ranks those BELOW the ordinary project directories within the same
-tier.
+covered. `Z$` ranks those BELOW the ordinary project directories within the
+same tier.
 
-`agent::catalog::load_agents_from_additional_directory` exists and has **zero
+`agent::catalog::load_agents_from_additional_directory` existed with **zero
 callers** — named, implemented, never wired.
 
-Blocker: `EngineConfig` carries no add-dir list. The port's
-`permissions.additionalDirectories` is resolved elsewhere in boot and is not in
-scope at the point the catalog is built. `agent_dir_precedence` is the seam to
-extend once it is; its rustdoc names this.
+Fixed: `agent_dir_precedence` takes the add-dir roots and places them between
+the user tier and the project tier, skipping any the walk already covers. The
+composition root passes `cfg.add_dir`. The single-directory loader is deleted
+rather than left beside the new path, so there is only one way to load them.
+
+(An earlier draft of this report said `EngineConfig` carried no add-dir list.
+That was wrong — `cfg.add_dir` has been there all along, which is why this
+turned out to be wiring rather than plumbing.)
+
+claude compares REALPATHS when excluding an already-covered add-dir; this
+compares the joined paths. They differ only when one directory is reachable
+under two spellings, and then the port merely reads it twice — the ordinary
+project entry still comes later and still wins, which is the answer claude
+reaches by dropping the duplicate.
 
 ### AG-19 (P2) — the managed policy agent directory is never loaded
 
@@ -421,7 +431,7 @@ branding, and the deferred remote/CCR isolation path.
 
 | suite | before | after |
 |---|---|---|
-| `agent --lib` | 405 passed, 8 failed | 420 passed, 2 failed |
+| `agent --lib` | 405 passed, 8 failed | 421 passed, 2 failed |
 | `tool-agent --lib` | 161 passed, 0 failed | 165 passed, 0 failed |
 | `platform-api --lib` | 300 passed, 0 failed | 302 passed, 0 failed |
 
@@ -472,6 +482,8 @@ Tests were added for behaviour that had none:
   non-markdown neighbour and an over-cap file do not;
   `a_symlink_cycle_does_not_hang_the_scan`, which fails by hanging rather than
   by asserting if the visited set is dropped.
+* `agent_dir_precedence_places_add_dirs_below_the_project_tier` — the tier
+  position and the dedup against the walk.
 * `project_agent_dirs_walks_up_to_the_project_root` — all three stop conditions
   (project root, home ceiling, filesystem root) and the returned order;
   `agent_dir_precedence_puts_the_deepest_project_dir_last`; and

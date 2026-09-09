@@ -1787,30 +1787,52 @@ pub fn project_agent_dirs(cwd: &Path, home: &Path, project_root: Option<&Path>) 
 /// reversed (shallowest first) gives later-wins the same answer without a
 /// second sort.
 ///
-/// ⛔ Two of claude's sources are still missing here, and both need plumbing
-/// this function cannot invent: the `--add-dir` directories
-/// (`Rp()`-derived, `fromAdditionalDirectory`, ranked BELOW the ordinary
-/// project tier — `EngineConfig` carries no add-dir list) and the managed
-/// policy directory (`SN(Jb(),".claude",e)`, the LOWEST tier).
+/// `additional_dirs` are the `--add-dir` roots. For `kind === "agents"` ONLY,
+/// `wQr` gives each of them a second projectSettings source —
+/// `<dir>/.claude/agents`, tagged `fromAdditionalDirectory: true` — minus any
+/// the upward walk already covers, and `Z$` ranks those BELOW the ordinary
+/// project directories:
+///
+/// ```js
+/// let C=e==="agents"?K(await Promise.all(Rp().map(async(De)=>{
+///       let Le=SN(i9e(De),".claude",e); return await s9e(Le).catch(()=>Le)})))
+///     .filter((De)=>!E.has(Pf(De))):[];
+/// …
+/// let p=[...e.filter((D)=>D.source==="projectSettings"&&D.fromAdditionalDirectory),
+///        ...e.filter((D)=>D.source==="projectSettings"&&!D.fromAdditionalDirectory).sort(ITe)];
+/// ```
+///
+/// claude compares REALPATHS when excluding an add-dir the walk already
+/// covered; this compares the joined paths. The two differ only when the same
+/// directory is reached under two spellings, and then the port merely reads it
+/// twice — the ordinary project entry still comes later and still wins, which
+/// is the same answer claude reaches by dropping the duplicate.
+///
+/// ⛔ One of claude's sources is still missing: the managed policy directory
+/// (`SN(Jb(),".claude",e)`, the LOWEST tier). The port has no managed-settings
+/// DIRECTORY helper, only `managed-settings.json` content handling.
 #[must_use]
 pub fn agent_dir_precedence(
     user_agents_dir: PathBuf,
     cwd: &Path,
     home: &Path,
     project_root: Option<&Path>,
+    additional_dirs: &[PathBuf],
 ) -> Vec<(PathBuf, AgentSource)> {
-    let mut dirs = vec![(user_agents_dir, AgentSource::UserDefined)];
     let mut project = project_agent_dirs(cwd, home, project_root);
     project.reverse();
+
+    let mut dirs = vec![(user_agents_dir, AgentSource::UserDefined)];
+    let mut seen_additional: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for extra in additional_dirs {
+        let dir = extra.join(branding::DOT_DIR).join("agents");
+        if project.contains(&dir) || !seen_additional.insert(dir.clone()) {
+            continue;
+        }
+        dirs.push((dir, AgentSource::AdditionalDirectory));
+    }
     dirs.extend(project.into_iter().map(|d| (d, AgentSource::Project)));
     dirs
-}
-
-/// Load agents from a caller-supplied additional directory.  This preserves
-/// the oracle's distinct `additionalDirectory` provenance instead of
-/// collapsing it into user/project settings.
-pub async fn load_agents_from_additional_directory(path: PathBuf) -> Vec<AgentDefinition> {
-    load_agents_from_dirs(&[(path, AgentSource::AdditionalDirectory)]).await
 }
 
 /// Recipient comparison used by implicit teammate name reservation.
@@ -2319,6 +2341,7 @@ mod tests {
             &d("/home/u/repo/packages/foo"),
             &d("/home/u"),
             Some(&d("/home/u/repo")),
+            &[],
         );
         let names: Vec<String> = got
             .iter()
@@ -2336,6 +2359,32 @@ mod tests {
         );
         assert_eq!(got[0].1, AgentSource::UserDefined);
         assert!(got[1..].iter().all(|(_, s)| *s == AgentSource::Project));
+    }
+
+    /// `--add-dir` agents rank between the user tier and the ordinary project
+    /// tier, and a root the upward walk already covers is not added twice.
+    #[test]
+    fn agent_dir_precedence_places_add_dirs_below_the_project_tier() {
+        let d = |p: &str| PathBuf::from(p);
+        let agents = |p: &str| d(p).join(branding::DOT_DIR).join("agents");
+        let got = agent_dir_precedence(
+            d("/home/u/.lingxi/agents"),
+            &d("/home/u/repo"),
+            &d("/home/u"),
+            Some(&d("/home/u/repo")),
+            // `/other` is new; `/home/u/repo` is already the project walk's
+            // only entry and must not be repeated.
+            &[d("/other"), d("/home/u/repo"), d("/other")],
+        );
+        assert_eq!(
+            got,
+            vec![
+                (d("/home/u/.lingxi/agents"), AgentSource::UserDefined),
+                (agents("/other"), AgentSource::AdditionalDirectory),
+                (agents("/home/u/repo"), AgentSource::Project),
+            ],
+            "user < additionalDirectory < projectSettings, deduped",
+        );
     }
 
     /// The deepest definition of a name must be the one that survives — the
@@ -2361,6 +2410,7 @@ mod tests {
             &deep,
             tmp.path(),
             Some(&root),
+            &[],
         );
         let loaded = load_agents_from_dirs(&dirs).await;
         let reviewer = loaded

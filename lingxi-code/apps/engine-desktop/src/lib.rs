@@ -11407,6 +11407,8 @@ pub async fn build(
     // to the cwd winning. The port used to read the cwd's directory alone.
     // `HOME` is the ceiling (never itself collected); `project_root_of` is the
     // `kQr(cwd)` boundary — its absence just lets the walk run to the ceiling.
+    // `--add-dir` roots contribute their own `<dir>/<DOT_DIR>/agents` between
+    // the user tier and the project tier (`Rp()` in `wQr`, agents-only).
     let agent_dirs = agent::catalog::agent_dir_precedence(
         user_agents_dir,
         &cwd,
@@ -11414,6 +11416,7 @@ pub async fn build(
             .map_or_else(|| std::path::PathBuf::from("/"), std::path::PathBuf::from)
             .as_path(),
         permission::set_cwd::project_root_of(&cwd).as_deref(),
+        &cfg.add_dir,
     );
     // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom agent definitions
     // (`V5d.agents:!0`, `K5d.agents:!1`) — skip the dir scan, empty catalog.

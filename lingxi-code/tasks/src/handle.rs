@@ -183,8 +183,28 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
 /// exactly mirroring the TS `.filter(...).map(...).join(...)` over a typed
 /// block array.
 pub(crate) fn extract_text_content(content: &serde_json::Value) -> String {
-    let Some(blocks) = content.as_array() else {
-        return String::new();
+    // The runner's completion payload is an OBJECT — `{text, content:[…]}` —
+    // and the `local_agent` spool holds exactly that object, pretty-printed.
+    // Reading only a bare array meant `as_array()` failed for every production
+    // agent, so `TaskOutputChunk.result` was ALWAYS `None` and `TaskOutput`
+    // fell back to the raw JSON transcript instead of the agent's answer. The
+    // bare-array form is still accepted: it is what a caller holding the
+    // content blocks directly passes (the one-shot handler does), and what the
+    // fixtures use.
+    //
+    // `text` wins over `content` when both are present, matching the runner's
+    // own `completed_result_text`.
+    if let Some(text) = content.get("text").and_then(serde_json::Value::as_str) {
+        if !text.is_empty() {
+            return text.to_string();
+        }
+    }
+    let blocks = match content.as_array() {
+        Some(blocks) => blocks,
+        None => match content.get("content").and_then(serde_json::Value::as_array) {
+            Some(blocks) => blocks,
+            None => return String::new(),
+        },
     };
     blocks
         .iter()
@@ -1049,6 +1069,51 @@ mod tests {
     }
 
     // ── agent-specific output helpers (T3) ───────────────────────────────
+
+    /// TO-07 step 0: the shape the RUNNER actually produces. `SubagentResult`'s
+    /// `content` is the runner's completion payload — an object carrying `text`
+    /// and/or a `content` block array — and the `local_agent` spool holds that
+    /// object pretty-printed. Requiring a bare array made this return `""` for
+    /// every production agent, so `TaskOutputChunk.result` was always `None` and
+    /// `TaskOutput` served the raw JSON transcript instead of the answer.
+    #[test]
+    fn extract_text_content_reads_the_runners_object_shape() {
+        // `text` wins when present, matching the runner's own
+        // `completed_result_text`.
+        assert_eq!(
+            extract_text_content(&serde_json::json!({
+                "text": "the answer",
+                "content": [{"type": "text", "text": "ignored"}]
+            })),
+            "the answer"
+        );
+        // Falls back to the block array under `content`.
+        assert_eq!(
+            extract_text_content(&serde_json::json!({
+                "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "tool_use", "name": "Bash"},
+                    {"type": "text", "text": "second"}
+                ]
+            })),
+            "first\nsecond"
+        );
+        // An empty `text` is not an answer — fall through rather than return "".
+        assert_eq!(
+            extract_text_content(&serde_json::json!({
+                "text": "",
+                "content": [{"type": "text", "text": "real"}]
+            })),
+            "real"
+        );
+        // The max-turns payload carries neither, so it yields nothing.
+        assert_eq!(
+            extract_text_content(&serde_json::json!({
+                "reason": "max_turns_exhausted", "max_turns": 12
+            })),
+            ""
+        );
+    }
 
     #[test]
     fn extract_text_content_joins_text_blocks_with_newline() {

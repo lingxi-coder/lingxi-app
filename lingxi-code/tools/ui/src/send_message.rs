@@ -30,6 +30,7 @@ use async_trait::async_trait;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use platform_api::mailbox::{MailboxMessage, MailboxRouterHandle};
+use platform_api::task_registry::TaskRegistryHandle;
 use serde_json::{json, Value};
 use telemetry::pii::Verified;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -295,6 +296,30 @@ impl SendMessageTool {
         }
     }
 
+    /// Refuse a message aimed at an agent the USER stopped (AGT-07).
+    ///
+    /// Best-effort by construction: no registry wired, an id that does not
+    /// resolve, or a lookup error all fall through to the ordinary delivery
+    /// path. The gate exists to convert a KNOWN cancellation into something the
+    /// model can act on, not to add a new way for `SendMessage` to fail.
+    async fn refuse_if_stopped_by_user(
+        registry: Option<&Arc<dyn TaskRegistryHandle>>,
+        target: &str,
+    ) -> Result<(), ToolError> {
+        let Some(registry) = registry else {
+            return Ok(());
+        };
+        let Ok(Some(record)) = registry.get(target).await else {
+            return Ok(());
+        };
+        if record.killed_by.as_deref() == Some("user") {
+            return Err(ToolError::InvalidInput(
+                platform_api::task_registry::stopped_by_user_message(&record.task_id),
+            ));
+        }
+        Ok(())
+    }
+
     /// Deliver through the live mailbox seam. Delivery failures are surfaced;
     /// returning a success result after `NotFound`/`Full` would falsely tell the
     /// model that a background agent received a course correction.
@@ -366,12 +391,19 @@ impl SendMessageTool {
         summary: Option<&str>,
         sender: &str,
         notify_when_idle: bool,
+        task_registry: Option<&Arc<dyn TaskRegistryHandle>>,
     ) -> Result<Value, ToolError> {
         // A teammate name belongs to the current team before it is considered
         // a live-session alias. The router's named-recipient snapshot tells us
         // whether the name is actually owned by the current team; otherwise
         // the compatibility live-session alias may handle it.
         if let Recipient::Teammate(target) = recipient {
+            // AGT-07 pre-flight. `deliver` returns as soon as the MAILBOX
+            // accepts the message, so the registry's own refusal surfaces a hop
+            // later inside the pump and can never reach this tool's return
+            // value. Asking first is what makes the user's cancellation legible
+            // to the model SYNCHRONOUSLY, in the result of the call it made.
+            Self::refuse_if_stopped_by_user(task_registry, target).await?;
             let is_team_recipient = router
                 .named_recipients()
                 .await
@@ -1058,6 +1090,7 @@ impl Tool for SendMessageTool {
                         summary.as_deref(),
                         &sender,
                         notify_when_idle,
+                        self.ctx.task_registry.as_ref(),
                     )
                     .await
                 }
@@ -1282,6 +1315,28 @@ mod tests {
     #[derive(Default)]
     struct RecordingTaskRegistry {
         killed: Mutex<Vec<String>>,
+        /// Alias-or-id → record, so `get` can answer the AGT-07 pre-flight the
+        /// way the production registry does (`canonical_or_raw` resolves a
+        /// teammate NAME to its task id before the map lookup).
+        records: Mutex<HashMap<String, TaskRecord>>,
+    }
+
+    impl RecordingTaskRegistry {
+        fn with_record(address: &str, killed_by: Option<&str>) -> Arc<Self> {
+            let me = Self::default();
+            me.records.lock().unwrap().insert(
+                address.to_string(),
+                TaskRecord {
+                    task_id: "a1b2c3d4e".to_string(),
+                    task_type: "in_process_teammate".to_string(),
+                    status: if killed_by.is_some() { "killed" } else { "running" }.to_string(),
+                    description: "research".to_string(),
+                    killed_by: killed_by.map(str::to_string),
+                    ..TaskRecord::default()
+                },
+            );
+            Arc::new(me)
+        }
     }
 
     #[async_trait]
@@ -1290,8 +1345,8 @@ mod tests {
             unreachable!("not used by SendMessage")
         }
 
-        async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
-            Ok(None)
+        async fn get(&self, id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+            Ok(self.records.lock().unwrap().get(id).cloned())
         }
 
         async fn list(
@@ -1425,6 +1480,12 @@ mod tests {
 
     #[test]
     fn schema_shape_matches_latest_shared_contract() {
+        // Both sides read the SAME two env-backed flags, one after the other,
+        // so a sibling test flipping `LINGXI_EXPERIMENTAL_AGENT_TEAMS` between
+        // the two reads makes them disagree about the structured-message
+        // variants — a real flake, not a schema divergence. Every mutator here
+        // already takes this lock; this reader has to as well.
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tool = SendMessageTool::new(shell_test_ctx(dummy_out()));
         assert_eq!(
             tool.input_schema(),
@@ -2322,6 +2383,81 @@ mod tests {
             registry.killed.lock().unwrap().as_slice(),
             &[agent_id.to_string()]
         );
+    }
+
+    /// AGT-07. A user stop is a decision, not a transient failure: the model
+    /// must learn about it in the RESULT of the call it made, not one hop later
+    /// inside the pump (which logs `Terminated` at debug and stops).
+    #[tokio::test]
+    async fn a_message_to_a_user_stopped_teammate_is_refused_synchronously() {
+        let router = Arc::new(RecordingRouter::new());
+        let registry = RecordingTaskRegistry::with_record("researcher", Some("user"));
+        let tool = SendMessageTool::new(ctx_with_shutdown(router.clone(), registry));
+
+        let err = tool
+            .call(
+                json!({ "to": "researcher", "summary": "s", "message": "keep going" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("a user-stopped agent must not silently accept messages");
+
+        assert_eq!(
+            err.model_facing_message(),
+            platform_api::task_registry::stopped_by_user_message("a1b2c3d4e")
+        );
+        // The refusal is a PRE-flight: nothing may reach the mailbox, because
+        // `deliver` returns as soon as the mailbox accepts and the registry's
+        // own refusal could then never surface in this tool's return value.
+        assert!(
+            router.routed.lock().unwrap().is_empty(),
+            "the message must not be routed"
+        );
+    }
+
+    /// The gate is keyed on WHO stopped it. A parent/model stop carries no user
+    /// intent, so it keeps the ordinary delivery path (the seam still answers
+    /// `Terminated` if the agent is really gone).
+    #[tokio::test]
+    async fn a_parent_stopped_teammate_still_takes_the_ordinary_path() {
+        let router = Arc::new(RecordingRouter::new());
+        let registry = RecordingTaskRegistry::with_record("researcher", Some("parent"));
+        let tool = SendMessageTool::new(ctx_with_shutdown(router.clone(), registry));
+
+        let res = tool
+            .call(
+                json!({ "to": "researcher", "summary": "s", "message": "keep going" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("a parent stop must not be reported as a user cancellation");
+
+        assert_eq!(res.data["success"], true);
+        assert_eq!(router.routed.lock().unwrap().len(), 1);
+    }
+
+    /// Best-effort by construction: an address the registry cannot resolve
+    /// falls through. The gate exists to convert a KNOWN cancellation into
+    /// something the model can act on, not to add a new way to fail.
+    #[tokio::test]
+    async fn an_unresolvable_target_falls_through_to_delivery() {
+        let router = Arc::new(RecordingRouter::new());
+        let registry = Arc::new(RecordingTaskRegistry::default());
+        let tool = SendMessageTool::new(ctx_with_shutdown(router.clone(), registry));
+
+        let res = tool
+            .call(
+                json!({ "to": "researcher", "summary": "s", "message": "keep going" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("an unknown address must not be refused");
+
+        assert_eq!(res.data["success"], true);
+        assert_eq!(router.routed.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

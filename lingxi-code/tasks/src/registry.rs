@@ -3403,6 +3403,25 @@ impl TeamSpawnSeam for TaskRegistry {
         // resolved for `TaskStop` and `TaskOutput` but came back `Terminated`
         // here, which reads to the model as "that agent is gone".
         let task_id = &self.canonical_or_raw(task_id).await;
+        // AGT-07. BEFORE the `spawned` lookup, and the order is load-bearing:
+        // `kill` REMOVES the spawned entry, so a user-stopped agent no longer
+        // has one — a gate placed after the lookup would compile, pass a test
+        // that stubs the registry, and be unreachable in production for exactly
+        // the case it exists to catch.
+        //
+        // A user stop means the work was deliberately cancelled. Falling through
+        // to `Terminated` here told the model nothing at all (the pump logs that
+        // at debug and stops), so it could relaunch what the user had just
+        // stopped.
+        if matches!(
+            self.tasks.read().await.get(task_id),
+            Some(TaskState::LocalAgent(agent))
+                if agent.outcome.killed_by.as_deref() == Some("user")
+        ) {
+            return Err(TeamSpawnError::StoppedByUser(
+                platform_api::task_registry::stopped_by_user_message(task_id),
+            ));
+        }
         // Resolve the owning handler via the spawned-id index (mirrors `kill`'s
         // dispatch). An unknown id ⇒ the teammate is gone ⇒ `Terminated`.
         let task_type = self

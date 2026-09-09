@@ -30,6 +30,19 @@ pub enum TeamSpawnError {
     /// stopped-but-resumable state, so no auto-resume; see the pump docs).
     #[error("TeamSpawn: teammate terminated — cannot accept messages")]
     Terminated,
+    /// The target agent was stopped BY THE USER, so it will not be resumed and
+    /// the message is refused with something the model can act on.
+    ///
+    /// Deliberately NOT [`Self::Terminated`]: the mailbox pump treats that as a
+    /// silent stop, which is the defect — the model was told nothing and could
+    /// relaunch work the user had just cancelled. Deliberately not
+    /// [`Self::Unsupported`] either, whose message is built from a `{:?}` task
+    /// type at three call sites and would leak that debug shape to the model.
+    ///
+    /// Carries the model-facing sentence rather than an id, because the caller
+    /// that surfaces it (the pump) has no better wording to add.
+    #[error("{0}")]
+    StoppedByUser(String),
     /// Any other internal failure surfaced from the task registry.
     #[error("TeamSpawn: internal error: {0}")]
     Internal(String),

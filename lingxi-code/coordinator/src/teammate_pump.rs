@@ -283,6 +283,15 @@ async fn deliver_batch(
             tracing::debug!(task_id, "teammate pump: runner terminated, stopping pump");
             DeliverOutcome::Stop
         }
+        // AGT-07: same control flow as `Terminated` — stop pumping and let the
+        // owner unregister the mailbox — but NOT the same silence. The user
+        // deliberately cancelled this agent's work, and the arm above is the
+        // model of what not to do here: it drops the reason at debug level, so
+        // the model learns nothing and may relaunch what was just stopped.
+        Err(TeamSpawnError::StoppedByUser(message)) => {
+            tracing::warn!(task_id, %message, "teammate pump: target was stopped by the user");
+            DeliverOutcome::Stop
+        }
         Err(TeamSpawnError::Internal(error)) => {
             tracing::warn!(task_id, %error, "teammate pump: transient send_message failure; retaining batch for retry");
             DeliverOutcome::Retry

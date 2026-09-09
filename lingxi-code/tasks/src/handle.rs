@@ -118,6 +118,12 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
         TaskState::LocalBash(bash) => bash.base.creator_agent_id.map(|id| id.to_string()),
         _ => None,
     };
+    // Who stopped it, when something did — the port's witness for the oracle's
+    // `stoppedByUser`. `local_agent` only; see the field's doc.
+    let killed_by = match s {
+        TaskState::LocalAgent(a) => a.outcome.killed_by.clone(),
+        _ => None,
+    };
     let (agent_type, server, tool, name, is_backgrounded, forked_skill_name) = match s {
         TaskState::LocalAgent(a) => (
             Some(a.subagent_type.clone()),
@@ -175,6 +181,7 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
         command,
         agent_type,
         owner_agent_id,
+        killed_by,
         server,
         tool,
         name,

@@ -204,6 +204,36 @@ pub struct TaskRecord {
     /// task rows. Additive default `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_agent_id: Option<String>,
+    /// Who stopped this task, when something did — `"user"` or `"parent"`.
+    ///
+    /// `local_agent` only, and the port's stand-in for claude-code's separate
+    /// `stoppedByUser` boolean: a USER stop means the work was deliberately
+    /// cancelled and must not be silently resumed, where a model/parent stop
+    /// carries no such intent. `None` on a task nothing stopped.
+    ///
+    /// The two are not the same axis upstream — `stoppedByUser` is set by a
+    /// helper (`LV`) that a budget-halt or teardown stop-all also calls, with
+    /// `source: "system"`. This port has no such path, so the kill reason is a
+    /// faithful witness today; if one is ever added it must set the flag
+    /// independently of the reason.
+    ///
+    /// The gate this feeds is claude-code `z2t`
+    /// (`src_160988549.js` @2030017): `local_agent` only, refuse when
+    /// `stoppedByUser`, and a `userInitiated` resume bypasses it outright. Its
+    /// two companions are deliberately NOT ported, because nothing in this port
+    /// can produce their input:
+    ///
+    /// * `userStopCount` / `userInitiatedAt` (`V2t` / `K2t`) stamp each queued
+    ///   message with the stop epoch it was enqueued in, so a user stop
+    ///   invalidates messages queued before it. The port has no persistent
+    ///   per-agent message queue to stamp.
+    /// * the `userInitiated` bypass needs a USER-typed message aimed at an
+    ///   agent. Every message-to-an-agent path here is model-initiated
+    ///   (`SendMessage`, the mailbox pump); `git grep user_initiated` is empty.
+    ///
+    /// Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub killed_by: Option<String>,
     /// `monitor_mcp` / `mcp_task` only: the MCP server name, surfaced as the
     /// `background_tasks[].server` field (claude-code `Lic`'s `r.server`).
     /// `None` for every other task type. Additive default `None`.
@@ -615,6 +645,27 @@ pub struct McpTaskOutputMeta {
     /// `(endTime ?? now) - startTime` → the `elapsed: …` line. Computed at the
     /// registry, which owns both timestamps.
     pub elapsed_ms: u64,
+}
+
+/// The model-facing refusal for a message aimed at a USER-stopped agent
+/// (AGT-07), byte-locked to claude-code's `uM` message in the resume queue
+/// (`src_180597926.js` @407402):
+/// `` `Agent ${Ke} was stopped by the user and won't be resumed.` `` — where
+/// `Ke` is the TASK id (the registry key `z2t`/`K2t` are handed), not the
+/// agent id.
+///
+/// Lives here because two crates need the SAME wording — the registry's own
+/// `send_message` gate and `SendMessage`'s synchronous pre-flight — and the
+/// model must not get two different accounts of one fact.
+///
+/// The oracle's sibling arm — `` `Agent ${Ke} is ${jt} and cannot take queued
+/// messages.` `` for a non-running/completed status — is deliberately NOT
+/// ported: that case already reaches the pump as
+/// [`TeamSpawnError::Terminated`](crate::team_spawn::TeamSpawnError::Terminated)
+/// through the spawned-id lookup, and it is not what AGT-07 names.
+#[must_use]
+pub fn stopped_by_user_message(task_id: &str) -> String {
+    format!("Agent {task_id} was stopped by the user and won't be resumed.")
 }
 
 /// Failure modes for [`TaskRegistryHandle`] operations.
@@ -1197,6 +1248,18 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    /// AGT-07. Byte-locked to claude-code `uM`
+    /// (`src_180597926.js` @407402): `` `Agent ${Ke} was stopped by the user
+    /// and won't be resumed.` ``. Two crates render this one fact, so the bytes
+    /// live here and are pinned here.
+    #[test]
+    fn stopped_by_user_message_matches_the_oracle_bytes() {
+        assert_eq!(
+            super::stopped_by_user_message("a1b2c3d4e"),
+            "Agent a1b2c3d4e was stopped by the user and won't be resumed."
+        );
+    }
 
     #[test]
     fn trait_is_object_safe() {

@@ -3654,6 +3654,53 @@ async fn kill_with_reason_records_the_stop_initiator() {
     }
 }
 
+/// AGT-07. Claude-code's resume queue refuses a stopped-by-user agent with
+/// `uM` (`src_180597926.js` @407402) BEFORE it looks at anything else; the
+/// gate's whole point is that the model must not silently resume work the user
+/// cancelled.
+///
+/// The ordering is what this test really pins: `kill` REMOVES the spawned-id
+/// entry, so a user-stopped agent has none. A gate placed after that lookup
+/// would compile, pass a stubbed test, and be unreachable in production for
+/// exactly the case it exists to catch — which is why the "parent" row here
+/// asserts the ORDINARY `Terminated`, reached through the same missing entry.
+#[tokio::test]
+async fn seam_send_message_refuses_a_user_stopped_agent() {
+    use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+
+    let (_d, registry) = make_registry();
+    registry
+        .insert_state_for_test(agent_state("astopusr1", TaskStatus::Running))
+        .await;
+    registry
+        .insert_state_for_test(agent_state("astoppar1", TaskStatus::Running))
+        .await;
+    registry.kill_with_reason("astopusr1", "user").await.unwrap();
+    registry
+        .kill_with_reason("astoppar1", "parent")
+        .await
+        .unwrap();
+
+    let seam: &dyn TeamSpawnSeam = &registry;
+    match seam.send_message("astopusr1", "keep going".into()).await {
+        Err(TeamSpawnError::StoppedByUser(message)) => assert_eq!(
+            message,
+            "Agent astopusr1 was stopped by the user and won't be resumed."
+        ),
+        other => panic!("a user stop must be named, got {other:?}"),
+    }
+
+    // A model/parent stop carries no user intent, so it keeps the ordinary
+    // "that agent is gone" answer.
+    assert!(
+        matches!(
+            seam.send_message("astoppar1", "keep going".into()).await,
+            Err(TeamSpawnError::Terminated)
+        ),
+        "a parent stop must not be reported as a user cancellation"
+    );
+}
+
 #[tokio::test]
 async fn find_running_workflow_by_run_id_matches_only_running_same_id() {
     use crate::state::{LocalWorkflowTaskState, TaskState, TaskStateBase};

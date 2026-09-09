@@ -159,7 +159,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | `AGT-04` | confirmed | P2 | medium | Foreground (run_in_background:false) agents are never registered, so s9 backgrounding via Ctrl+B / bridge background_tasks / deliver-message / auto-background / done-with-live-children has no target |
 | `AGT-06` | confirmed | P2 | high | Resting persistent agent is modelled as status `running` instead of `completed`+keepalive (GS), so Stop-hook background_tasks / goal check-in count a parked agent as live work and /tasks shows it running |
 | `AGT-08` | confirmed **[fixed]** | P2 | medium | maxTurnsReached completion summary variant missing from the agent notification |
-| `AGT-07` | confirmed | P3 | medium | No stoppedByUser / userStopCount: a user stop cannot be resumed by the user, and model-initiated resumes are not gated |
+| `AGT-07` | confirmed **[fixed: the `stoppedByUser` gate landed on both message paths. `userStopCount` / `userInitiatedAt` (`V2t` / `K2t`) and the `userInitiated` bypass are deliberately NOT ported — they stamp queued messages with a stop epoch, and this port has neither a persistent per-agent message queue nor any user-typed message aimed at an agent (`git grep user_initiated` is empty). Documented at `TaskRecord::killed_by`]** | P3 | medium | No stoppedByUser / userStopCount: a user stop cannot be resumed by the user, and model-initiated resumes are not gated |
 | `AGT-09` | confirmed | P3 | medium | in_process_teammate has no isIdle on its task record, so idle teammates count as active delegated work (MI/n3t) |
 | `AGT-10` | confirmed | P3 | medium | Observer tasks (isObserver / td) absent — note: env-gated experimental in 2.1.263 |
 | `AGT-11` | confirmed **[fixed]** | P3 | medium | Terminal local_agent records are never evicted (oracle: 30 s after notification) |
@@ -377,6 +377,22 @@ user-vs-model split is wrong.
   shell's SPAWNER) and is NOT the oracle's separate `ownerAgentId` — using the
   creator would have let a parent stop a child and refused the child itself.
   Ordering is pinned: not-running is reported before ownership.
+
+- **AGT-07** — a user stop is now a fact the model is told. `TaskRecord.killed_by`
+  is the port's witness for `stoppedByUser`, and both message paths refuse on it:
+  the registry seam's `send_message` (BEFORE the spawned-id lookup, because
+  `kill` removes that entry — a gate placed after it would compile, pass a
+  stubbed test, and be unreachable for exactly the case it exists to catch) and
+  `SendMessage`'s own synchronous pre-flight, since `deliver` returns the moment
+  the MAILBOX accepts and the seam's refusal could otherwise never reach the
+  tool's return value. The sentence is byte-locked to `uM`. Two deliberate
+  divergences are recorded at the field: `stoppedByUser` is NOT user-stop-only
+  upstream (`LV` is also called by a `source:"system"` stop-all, which this port
+  lacks, so the kill reason is a faithful witness only for as long as that stays
+  true), and the `userStopCount` epoch has no substrate here. A pre-existing
+  flake surfaced alongside it and is fixed in the same commit:
+  `schema_shape_matches_latest_shared_contract` read `LINGXI_EXPERIMENTAL_AGENT_TEAMS`
+  twice without the lock every mutator in the file already takes.
 
 - `b759e7564` **TOF-05, write path** — an ENOSPC on a spool used to vanish
   entirely. The retry re-issues the MARKER, not the chunk (`#p()` splices before

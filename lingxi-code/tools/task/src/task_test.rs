@@ -3121,6 +3121,106 @@ Running background agents: a1b2c3d4e (survey the crate)"
             assert!(*reg.output_calls.lock().unwrap() >= 3);
         }
 
+        // ── TO-04: TaskStop's ownership guard ────────────────────────────────
+
+        fn owned_rec(status: &str, owner: Option<&str>) -> TaskRecord {
+            TaskRecord {
+                task_id: "b12345678".into(),
+                task_type: "local_bash".into(),
+                status: status.into(),
+                description: "echo hi".into(),
+                command: Some("echo hi > out.txt".into()),
+                owner_agent_id: owner.map(str::to_string),
+                ..Default::default()
+            }
+        }
+
+        async fn stop_as(
+            caller: Option<protocol::AgentId>,
+            record: TaskRecord,
+        ) -> Result<ToolCallResult, ToolError> {
+            let reg = MockRegistry::with_record(Some(record));
+            let mut ctx = fresh_ctx();
+            ctx.agent_id = caller;
+            TaskStopTool::new(bctx(reg))
+                .call(json!({ "task_id": "b12345678" }), ctx, fresh_tx())
+                .await
+        }
+
+        /// The security case: a subagent cannot stop another agent's background
+        /// task. The caller's identity was resolved and then ignored, so ANY
+        /// agent could stop ANY other agent's work.
+        #[tokio::test]
+        async fn a_subagent_cannot_stop_another_agents_task() {
+            let owner = protocol::AgentId::new();
+            let intruder = protocol::AgentId::new();
+            let err = stop_as(
+                Some(intruder),
+                owned_rec("running", Some(&owner.to_string())),
+            )
+            .await
+            .expect_err("a non-owner must be refused");
+            let message = format!("{err}");
+            assert!(
+                message.contains(&format!("is owned by {owner}; agent {intruder} cannot stop it.")),
+                "got: {message}"
+            );
+        }
+
+        /// ...and the owner still can.
+        #[tokio::test]
+        async fn the_owning_agent_may_stop_its_own_task() {
+            let owner = protocol::AgentId::new();
+            stop_as(Some(owner), owned_rec("running", Some(&owner.to_string())))
+                .await
+                .expect("the owner may stop it");
+        }
+
+        /// `sut`'s first line: an absent caller is the main session, which may
+        /// stop anything — including a task an agent owns.
+        #[tokio::test]
+        async fn the_main_session_may_stop_any_task() {
+            let owner = protocol::AgentId::new();
+            stop_as(None, owned_rec("running", Some(&owner.to_string())))
+                .await
+                .expect("the main session may stop it");
+            stop_as(None, owned_rec("running", None))
+                .await
+                .expect("...including an ownerless one");
+        }
+
+        /// An ownerless task is main-session-only: `sut(Some(caller), None)` is
+        /// false, and the refusal names the owner as "main session".
+        #[tokio::test]
+        async fn an_ownerless_task_refuses_an_agent_caller() {
+            let caller = protocol::AgentId::new();
+            let err = stop_as(Some(caller), owned_rec("running", None))
+                .await
+                .expect_err("an agent may not stop an ownerless task");
+            assert!(
+                format!("{err}").contains("is owned by main session;"),
+                "got: {err}"
+            );
+        }
+
+        /// Ordering: the oracle checks not-running BEFORE ownership. A
+        /// non-owner asking about a finished task hears that it is not running,
+        /// not that it belongs to someone else.
+        #[tokio::test]
+        async fn not_running_is_reported_before_ownership() {
+            let owner = protocol::AgentId::new();
+            let intruder = protocol::AgentId::new();
+            let err = stop_as(
+                Some(intruder),
+                owned_rec("completed", Some(&owner.to_string())),
+            )
+            .await
+            .expect_err("a finished task cannot be stopped");
+            let message = format!("{err}");
+            assert!(message.contains("is not running (status: completed)"), "got: {message}");
+            assert!(!message.contains("cannot stop it"), "got: {message}");
+        }
+
         // ── TO-06: the synthetic mcp_task metadata block ─────────────────────
 
         fn mcp_meta() -> platform_api::task_registry::McpTaskOutputMeta {

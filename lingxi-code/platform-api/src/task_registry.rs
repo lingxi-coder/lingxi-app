@@ -190,6 +190,20 @@ pub struct TaskRecord {
     /// every other task type. Additive default `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
+    /// claude-code `task.agentId` — the agent that OWNS this background task,
+    /// and the sole non-main-session caller `TaskStop` will let stop it
+    /// (`sut(callerAgentId, task.agentId)`, `src_160988549.js` @3386470).
+    ///
+    /// `local_bash`: the SPAWNING agent. `local_agent`: the agent's OWN id —
+    /// deliberately NOT its creator, which is the oracle's separate
+    /// `ownerAgentId` that `sut` does not read. Every other task type carries no
+    /// `agentId` upstream, so this stays `None` and only the main session may
+    /// stop them.
+    ///
+    /// Engine-internal: deliberately NOT lowered into the client protocol's
+    /// task rows. Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_agent_id: Option<String>,
     /// `monitor_mcp` / `mcp_task` only: the MCP server name, surfaced as the
     /// `background_tasks[].server` field (claude-code `Lic`'s `r.server`).
     /// `None` for every other task type. Additive default `None`.

@@ -210,6 +210,28 @@ fn todo_v2_enabled_inner(enable_tasks_env_defined_falsy: bool) -> bool {
     !enable_tasks_env_defined_falsy
 }
 
+/// claude-code `sut(e,t)` (`src_160988549.js` @3386470):
+///
+/// ```js
+/// function sut(e,t){if(e===void 0)return!0;return e===t}
+/// ```
+///
+/// `e` is the CALLER's agent id and `t` the task's owner. An absent caller is
+/// the main session, which may stop anything; otherwise the two must match.
+/// Note what this does NOT do: it never walks a parent chain, so an agent
+/// cannot stop its own child's background task — only the child itself or the
+/// main session can.
+fn caller_may_stop(caller: Option<&str>, owner: Option<&str>) -> bool {
+    match caller {
+        None => true,
+        Some(caller) => Some(caller) == owner,
+    }
+}
+
+/// claude-code `iue(e){return e??"main session"}` (@3386524) — how an ownerless
+/// task is named in the refusal.
+const NO_OWNER_DISPLAY: &str = "main session";
+
 /// The rosters a "no task found" message names, gathered once.
 ///
 /// Ports the data half of claude-code `Mut` (@3595720) and `JFe` (@3594626).
@@ -2413,6 +2435,11 @@ impl Tool for TaskStopTool {
                 return Err(registry_err_to_tool_err("TaskStop", e));
             }
         };
+        // ORDER IS THE ORACLE'S: not-running first, ownership second
+        // (`src_160988549.js` @3597258 —
+        // `if(I.status!=="running"&&…)throw not_running; if(!td(I)&&!sut(p,I.agentId))throw not_owner`).
+        // Swapping them would tell a non-owner that a finished task is theirs to
+        // stop, or refuse on ownership a task that was never running.
         if record.status != "running"
             && !(record.task_type == "in_process_teammate"
                 && registry.has_pending_teammate_departure(&task_id).await)
@@ -2428,6 +2455,30 @@ impl Tool for TaskStopTool {
             return Err(ToolError::InvalidInput(format!(
                 "Task {task_id} is not running (status: {})",
                 record.status
+            )));
+        }
+
+        // TO-04: a background task may only be stopped by the agent that owns it,
+        // or by the main session. Without this, ANY subagent could stop ANY
+        // other agent's background work — the `_ctx` that carries the caller's
+        // identity was resolved and then ignored.
+        if !caller_may_stop(caller_agent_id.as_deref(), record.owner_agent_id.as_deref()) {
+            emit_failed(
+                &bus,
+                TASK_STOP_FAILED,
+                &invocation_id,
+                "not_owner",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
+            return Err(ToolError::InvalidInput(format!(
+                "Task {task_id} is owned by {}; agent {} cannot stop it.",
+                platform_api::display::sanitize_display(
+                    record.owner_agent_id.as_deref().unwrap_or(NO_OWNER_DISPLAY)
+                ),
+                platform_api::display::sanitize_display(
+                    caller_agent_id.as_deref().unwrap_or_default()
+                ),
             )));
         }
 

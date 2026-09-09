@@ -107,6 +107,17 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
     // carries `name` (← `workflow_id`); `monitor_mcp` carries only `server`
     // (`MonitorMcpTaskState` watches resources, not one tool), while `mcp_task`
     // (`McpTaskState`) carries BOTH `server` and `tool`.
+    // claude-code `task.agentId`, the input to `TaskStop`'s ownership guard
+    // (`sut`). A `local_agent` reports its OWN id — NOT its creator, which is
+    // the oracle's separate `ownerAgentId` and is not what `sut` reads. A
+    // `local_bash` reports the agent that SPAWNED it. Every other type carries
+    // no `agentId` upstream, so it stays `None`, which `sut` treats as
+    // main-session-only.
+    let owner_agent_id = match s {
+        TaskState::LocalAgent(a) => Some(a.agent_id.to_string()),
+        TaskState::LocalBash(bash) => bash.base.creator_agent_id.map(|id| id.to_string()),
+        _ => None,
+    };
     let (agent_type, server, tool, name, is_backgrounded, forked_skill_name) = match s {
         TaskState::LocalAgent(a) => (
             Some(a.subagent_type.clone()),
@@ -163,6 +174,7 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
         started_at_ms,
         command,
         agent_type,
+        owner_agent_id,
         server,
         tool,
         name,

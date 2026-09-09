@@ -4542,6 +4542,81 @@ async fn stopping_a_shell_is_silent_but_stopping_an_agent_is_not() {
     );
 }
 
+/// A handler that flips its row to `Killed` through a bound `RegistryStatusSink`
+/// from INSIDE `kill`, exactly as every production handler does
+/// (`handlers/monitor.rs:594`, `handlers/local_bash.rs:586`,
+/// `handlers/in_process_teammate.rs:1713`). `RecordingHandler` cannot stand in:
+/// it has no registry back-reference, so its kill leaves the row non-terminal
+/// and never reaches `mark_killed`'s already-terminal branch.
+struct SinkKillingHandler {
+    sink: Arc<crate::registry_status_sink::RegistryStatusSink>,
+}
+
+#[async_trait]
+impl Task for SinkKillingHandler {
+    fn name(&self) -> &str {
+        "sink-killing"
+    }
+    fn task_type(&self) -> TaskType {
+        TaskType::InProcessTeammate
+    }
+    async fn spawn(
+        &self,
+        _input: TaskSpawnInput,
+        _ctx: TaskContext,
+    ) -> Result<TaskHandle, TaskError> {
+        Ok(TaskHandle::new("tsinkkill".to_string(), None))
+    }
+    async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+        use crate::handlers::TaskStatusSink;
+        self.sink.set_status(task_id, TaskStatus::Killed).await;
+        Ok(())
+    }
+}
+
+/// The stamp has to survive a handler that flipped the row terminal FIRST.
+///
+/// `kill_backing_task` awaits `handler.kill(..)` before `mark_killed`, and every
+/// handler with a bound `RegistryStatusSink` — Monitor and LocalBash
+/// (`register_self_contained_handlers`), the desktop's InProcessTeammate, Dream,
+/// LocalWorkflow, LocalFusion — sets `Killed` inside that call. With the stamp
+/// only on `mark_killed`'s non-terminal path it was dead code for every one of
+/// them and they kept double-telling.
+#[tokio::test]
+async fn a_kill_still_silences_a_row_its_handler_flipped_to_killed_first() {
+    let (_d, mut registry) = make_registry();
+    let sink = Arc::new(crate::registry_status_sink::RegistryStatusSink::new());
+    registry.register_handler(
+        TaskType::InProcessTeammate,
+        Arc::new(SinkKillingHandler { sink: sink.clone() }),
+    );
+    let registry = Arc::new(registry);
+    // Bound after the `Arc` exists — the production registration cycle.
+    sink.bind(registry.clone());
+
+    let id = registry
+        .spawn(
+            TaskType::InProcessTeammate,
+            teammate_input(),
+            "buddy".into(),
+        )
+        .await
+        .unwrap();
+    registry.kill_with_reason(&id, "parent").await.unwrap();
+
+    assert_eq!(
+        registry.get(&id).await.unwrap().base().status,
+        TaskStatus::Killed,
+        "premise: the handler's sink really did flip the row",
+    );
+    let drained = registry.take_pending_task_notifications().await;
+    let ids: Vec<&str> = drained.iter().map(|n| n.task_id.as_str()).collect();
+    assert!(
+        !ids.contains(&id.as_str()),
+        "a row its own handler killed must still be stamped, got: {ids:?}",
+    );
+}
+
 /// claude-code `bjn` + `JFe` — the rosters a "no task found" message names.
 #[tokio::test]
 async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents() {

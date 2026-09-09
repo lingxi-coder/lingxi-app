@@ -1896,6 +1896,7 @@ impl BashTool {
         bound: Option<&(String, String)>,
         command: &str,
         description: Option<&str>,
+        cwd: &std::path::Path,
     ) {
         let (Some((task_id, _)), Some(registry)) = (bound, self.ctx.task_registry.as_ref()) else {
             return;
@@ -1910,7 +1911,10 @@ impl BashTool {
                 .unwrap_or(command)
                 .to_string(),
             tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
-            cwd: Some(self.shell_cwd.lock().unwrap().display().to_string()),
+            // The directory the child is actually spawned in — NOT a fresh read
+            // of `shell_cwd`, which ignores a subagent's per-call `ctx.cwd` and
+            // would advertise a directory the command never ran in.
+            cwd: Some(cwd.display().to_string()),
             // The launching agent owns the task; `None` means the main session
             // does (claude-code stamps the record's `agentId` the same way).
             creator_agent_id: ctx.agent_id.clone(),
@@ -2647,6 +2651,46 @@ impl Tool for BashTool {
                 *synced = workspace.clone();
             }
         }
+        // ===== BASH.4 persistent cwd, resolved ONCE for BOTH modes =====
+        // A subagent isolated in a worktree (`isolation:"worktree"`) or given an
+        // explicit `cwd` runs EACH command in that directory, reset per call
+        // (claude-code's "Agent threads always have their cwd reset between bash
+        // calls"), WITHOUT touching the shared persistent shell cwd (which the
+        // main loop owns). The main loop (`ctx.cwd` None) reads the live
+        // persistent shell cwd as before.
+        //
+        // claude-code has ONE shell spawn for both modes (`vV`), so this is
+        // derived above the `run_bg` branch and consumed by both arms —
+        // including the recovery below, which the background arm used to get
+        // for free by being pinned to the workspace.
+        let agent_cwd = ctx.cwd.clone();
+        let cwd = match &agent_cwd {
+            Some(c) => c.clone(),
+            None => self.shell_cwd.lock().unwrap().clone(),
+        };
+        // Deleted-cwd recovery (Shell.ts:220-238): if the live cwd no longer
+        // exists on disk (e.g. a prior command deleted its own dir), fall back
+        // to the tool workspace (TS `getOriginalCwd`); if that is also gone,
+        // fail with the byte-locked message.
+        let cwd = if std::fs::canonicalize(&cwd).is_ok() {
+            cwd
+        } else if std::fs::canonicalize(&workspace).is_ok() {
+            // Only the main loop's FOREGROUND path persists the recovered cwd to
+            // the shared shell: a subagent's cwd is per-call, and a background
+            // launch must never mutate the shared cwd (BASH.4). A background
+            // command still RUNS in the recovered directory; it just leaves the
+            // repair to the next foreground call.
+            if agent_cwd.is_none() && !run_bg {
+                self.shell_cwd.lock().unwrap().clone_from(&workspace);
+            }
+            workspace.clone()
+        } else {
+            return Err(ToolError::Internal(format!(
+                "Working directory \"{}\" no longer exists. Please restart Claude from an existing directory.",
+                cwd.display()
+            )));
+        };
+
         let decision = should_use_sandbox(
             &cmd_str,
             self.ctx.sandbox_available,
@@ -2717,9 +2761,10 @@ impl Tool for BashTool {
             }
         };
 
-        // ===== Background path (UNCHANGED — TS `!result.backgroundTaskId`) =====
+        // ===== Background path (TS `!result.backgroundTaskId`) =====
         // Background tasks never mutate the shared cwd, so they skip the
-        // `pwd -P` readback entirely and keep spawning under the workspace.
+        // `pwd -P` readback entirely — but they START in it, same as the
+        // foreground arm (see the shared `cwd` derivation above).
         if run_bg {
             let pcmd = SbxCommand {
                 command: shell,
@@ -2727,17 +2772,14 @@ impl Tool for BashTool {
                 // after `-c`, matching `bashProvider.ts:201-205` with the
                 // snapshot path deferred.
                 args: vec!["-c".into(), "-l".into(), inner_cmd],
-                // The PERSISTENT shell cwd, same as the foreground arm.
-                // claude-code has ONE spawn for both modes (`vV`);
+                // The PERSISTENT shell cwd, the SAME binding the foreground
+                // arm uses. claude-code has ONE spawn for both modes (`vV`);
                 // `run_in_background` only decides what happens AFTER the shell
                 // is already running in the session cwd, so a `cd sub` from an
                 // earlier foreground call must be visible here too. Spawning in
                 // the workspace instead made a backgrounded command silently
                 // run somewhere else than the command before it.
-                cwd: Some(match ctx.cwd.as_ref() {
-                    Some(c) => c.clone(),
-                    None => self.shell_cwd.lock().unwrap().clone(),
-                }),
+                cwd: Some(cwd.clone()),
                 env: HashMap::new(),
                 timeout: Some(Duration::from_millis(timeout_ms)),
                 stdin: None,
@@ -2763,6 +2805,7 @@ impl Tool for BashTool {
                         bound.as_ref(),
                         &cmd_str,
                         input.get("description").and_then(Value::as_str),
+                        &cwd,
                     )
                     .await;
                     let task_id = bound
@@ -2788,7 +2831,7 @@ impl Tool for BashTool {
                     if crate::read_only::command_has_statement_level_cd(&cmd_str) {
                         note.push_str(&format!(
                             "\nSession cwd remains {}; directory changes made by the backgrounded command do not apply to subsequent commands.",
-                            workspace.display()
+                            cwd.display()
                         ));
                     }
                     let model_content = bash_model_content("", "", false, Some(&note));
@@ -2828,38 +2871,6 @@ impl Tool for BashTool {
                 }
             };
         }
-
-        // ===== Foreground: BASH.4 persistent cwd =====
-        // A subagent isolated in a worktree (`isolation:"worktree"`) or given an
-        // explicit `cwd` runs EACH command in that directory, reset per call
-        // (claude-code's "Agent threads always have their cwd reset between bash
-        // calls"), WITHOUT touching the shared persistent shell cwd (which the
-        // main loop owns). The main loop (`ctx.cwd` None) reads the live
-        // persistent shell cwd as before.
-        let agent_cwd = ctx.cwd.clone();
-        let cwd = match &agent_cwd {
-            Some(c) => c.clone(),
-            None => self.shell_cwd.lock().unwrap().clone(),
-        };
-        // Deleted-cwd recovery (Shell.ts:220-238): if the live cwd no longer
-        // exists on disk (e.g. a prior command deleted its own dir), fall back
-        // to the tool workspace (TS `getOriginalCwd`); if that is also gone,
-        // fail with the byte-locked message.
-        let cwd = if std::fs::canonicalize(&cwd).is_ok() {
-            cwd
-        } else if std::fs::canonicalize(&workspace).is_ok() {
-            // Only the main loop persists the recovered cwd to the shared
-            // shell; a subagent's cwd is per-call.
-            if agent_cwd.is_none() {
-                self.shell_cwd.lock().unwrap().clone_from(&workspace);
-            }
-            workspace.clone()
-        } else {
-            return Err(ToolError::Internal(format!(
-                "Working directory \"{}\" no longer exists. Please restart Claude from an existing directory.",
-                cwd.display()
-            )));
-        };
 
         // Internal cwd-tracking temp file (not model-facing): the shell writes
         // its physical cwd here via `pwd -P` once the user command succeeds.
@@ -3026,6 +3037,7 @@ impl Tool for BashTool {
                     fg_bound.as_ref(),
                     &cmd_str,
                     input.get("description").and_then(Value::as_str),
+                    &cwd,
                 )
                 .await;
                 let task_id = fg_bound
@@ -3048,7 +3060,7 @@ impl Tool for BashTool {
                 if crate::read_only::command_has_statement_level_cd(&cmd_str) {
                     note.push_str(&format!(
                         "\nSession cwd remains {}; directory changes made by the backgrounded command do not apply to subsequent commands.",
-                        workspace.display()
+                        cwd.display()
                     ));
                 }
                 let model_content = bash_model_content("", "", false, Some(&note));

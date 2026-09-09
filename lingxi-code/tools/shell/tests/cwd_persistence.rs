@@ -252,7 +252,10 @@ async fn background_spawns_in_the_persisted_shell_cwd() {
     .await
     .expect("background call ok");
 
-    // Premise: the foreground `cd` really did move the shell.
+    // Anti-vacuity: the shell STARTED at the workspace, so the bg assertion
+    // below is about the `cd` having landed and not about the two paths having
+    // been the same all along. (That the `cd` landed is what the bg assertion
+    // itself proves — there is no earlier observation of `shell_cwd`.)
     {
         let fg = runner.fg.lock().unwrap();
         assert_eq!(fg.len(), 1, "one foreground spawn expected");

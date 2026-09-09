@@ -321,7 +321,6 @@ mod tests {
         router.unregister(&agent).await;
         assert!(router.get(&agent).await.is_none());
     }
-}
 
     #[tokio::test]
     async fn an_alias_routes_without_becoming_a_second_name() {
@@ -355,3 +354,4 @@ mod tests {
         assert_eq!(router.resolve_alias("a1b2c3d4e").await, None);
         assert_eq!(router.resolve_name("reviewer").await, None);
     }
+}

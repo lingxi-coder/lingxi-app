@@ -2908,6 +2908,19 @@ impl TaskRegistry {
     async fn kill_backing_task(&self, task_id: &str) -> Result<(), TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
         let task_id_ref = task_id.as_str();
+        // Read liveness BEFORE any kill dispatch. A handler's status sink flips
+        // the row to `Killed` INSIDE `handler.kill(..)`, so by the time
+        // `mark_killed` runs it can no longer tell "this kill is what ended it"
+        // (stamp: the stop is redundant with the tool result) from "it had
+        // already settled on its own" (do NOT stamp: a shell that hit its own
+        // timeout also settles as `Killed`, `handlers/local_bash.rs:422`, and
+        // still owes the model the notification it has not drained yet).
+        let was_live = !self
+            .tasks
+            .read()
+            .await
+            .get(task_id_ref)
+            .is_some_and(|state| state.base().status.is_terminal());
         if self
             .external_teammate_tasks
             .read()
@@ -2928,7 +2941,7 @@ impl TaskRegistry {
                 .await
                 .map_err(|error| TaskError::Internal(error.to_string()))?;
             self.unregister_external_teammate_task(task_id_ref).await;
-            let output = self.mark_killed(task_id_ref).await;
+            let output = self.mark_killed(task_id_ref, was_live).await;
             self.append_killed_trailer(output).await;
             return Ok(());
         }
@@ -3003,7 +3016,7 @@ impl TaskRegistry {
             // must NOT be demoted to `Killed` — that would leave the task
             // `Killed` after `TaskCompleted` already fired. Skip the status
             // flip once terminal (mirrors `settle_mcp_task`'s re-check).
-            let killed_bash_output = self.mark_killed(task_id_ref).await;
+            let killed_bash_output = self.mark_killed(task_id_ref, was_live).await;
             self.append_killed_trailer(killed_bash_output).await;
             if let Some(cleanup) = cleanup {
                 cleanup();
@@ -3020,7 +3033,7 @@ impl TaskRegistry {
                 .await
                 .map_err(|e| TaskError::Internal(e.to_string()))?;
         }
-        let killed_bash_output = self.mark_killed(task_id_ref).await;
+        let killed_bash_output = self.mark_killed(task_id_ref, was_live).await;
         self.append_killed_trailer(killed_bash_output).await;
         if let Some(cleanup) = cleanup {
             cleanup();
@@ -3035,53 +3048,54 @@ impl TaskRegistry {
     /// Reverse-race guard: a task that already reached a terminal status (e.g.
     /// an MCP settle that won the race and fired `TaskCompleted`) must NOT be
     /// demoted to `Killed`.
-    async fn mark_killed(&self, task_id: &str) -> Option<std::path::PathBuf> {
+    /// `was_live` is the row's liveness as of BEFORE the kill dispatch — see
+    /// [`Self::kill_backing_task`]. It is what separates a handler that flipped
+    /// the row terminal during THIS kill from a task that had already settled.
+    async fn mark_killed(&self, task_id: &str, was_live: bool) -> Option<std::path::PathBuf> {
         let mut map = self.tasks.write().await;
         let Some(state) = map.get_mut(task_id) else {
             return None;
         };
-        if state.base().status.is_terminal() {
-            return None;
-        }
-        let mut killed_bash_output = None;
         // claude-code stamps `notified:!0` in EVERY per-type kill handler
         // (`JF` for local_bash, `THn` for monitors, and the remote-agent /
         // teammate / dream handlers) with ONE exception: `local_agent`, whose
         // kill uses `notified: D.notified || Yf(D)` and therefore lets its stop
-        // notification through.
+        // notification through. [`stamp_kill_notified`] is that policy, in one
+        // place so it cannot drift per variant.
         //
         // The stamp is what suppresses the redundant second telling. A model
         // that called TaskStop already has `Successfully stopped task: X` in
         // hand; without this it ALSO got a `<task-notification>` saying the
         // same command "was stopped", because this engine derives notifications
         // from `terminal && !notified`.
-        //
-        // Scoped per type on purpose. Stamping in the shared `base_mut()` would
-        // also silence `Agent "X" was stopped by Claude`, which is the one stop
-        // the model is NOT otherwise told about.
+        if state.base().status.is_terminal() {
+            // The status flip is skipped (the reverse-race guard above), but the
+            // STAMP still has to land here: `kill_backing_task` awaits
+            // `handler.kill(..)` BEFORE calling this, and every handler with a
+            // bound `RegistryStatusSink` (Monitor, LocalBash, the desktop's
+            // InProcessTeammate, Dream, LocalWorkflow, LocalFusion) flips the row
+            // to `Killed` inside that call. Without this the stamp below is dead
+            // code for every handler-spawned type and they keep double-telling.
+            //
+            // Only a row THIS kill ended is stamped. One that had already
+            // settled on its own — a completion, a failure, or a shell that hit
+            // its own timeout (also `Killed`) — still owes the model the
+            // notification it has not drained yet.
+            if was_live && state.base().status == TaskStatus::Killed {
+                stamp_kill_notified(state);
+            }
+            return None;
+        }
+        let mut killed_bash_output = None;
+        state.base_mut().status = TaskStatus::Killed;
+        stamp_kill_notified(state);
         match state {
             TaskState::LocalBash(bash) => {
-                bash.base.status = TaskStatus::Killed;
-                bash.base.notified = true;
                 killed_bash_output = Some(bash.base.output_file.clone());
-            }
-            // NOT stamped — see above.
-            TaskState::LocalAgent(agent) => agent.base.status = TaskStatus::Killed,
-            TaskState::InProcessTeammate(teammate) => {
-                teammate.base.status = TaskStatus::Killed;
-                teammate.base.notified = true;
-            }
-            TaskState::Monitor(monitor) => {
-                monitor.base.status = TaskStatus::Killed;
-                monitor.base.notified = true;
             }
             // A backgrounded MCP call: mark killed + `mcpStatus:"cancelled"`
             // (the poll loop's `status==="killed"` → `cancelTask` branch).
-            TaskState::McpTask(mcp) => {
-                mcp.base.status = TaskStatus::Killed;
-                mcp.base.notified = true;
-                mcp.mcp_status = "cancelled".to_string();
-            }
+            TaskState::McpTask(mcp) => mcp.mcp_status = "cancelled".to_string(),
             _ => {}
         }
         killed_bash_output
@@ -3097,6 +3111,19 @@ impl TaskRegistry {
                 .append(&output_file, "\n[killed]\n")
                 .await;
         }
+    }
+}
+
+/// The `notified` half of a kill — claude-code's `notified:!0`, stamped by every
+/// per-type kill handler with ONE exception.
+///
+/// `local_agent` is that exception: its kill uses `notified: D.notified || Yf(D)`,
+/// so `Agent "X" was stopped by Claude` still reaches the model. That is the one
+/// stop the model is NOT otherwise told about, which is why this is a policy
+/// function rather than an unconditional write in [`TaskState::base_mut`].
+fn stamp_kill_notified(state: &mut TaskState) {
+    if !matches!(state, TaskState::LocalAgent(_)) {
+        state.base_mut().notified = true;
     }
 }
 

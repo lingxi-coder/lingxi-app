@@ -27,6 +27,10 @@ fn utf16_units(content: &str) -> u64 {
 /// (claude-code `MAX_TASK_OUTPUT_BYTES_DISPLAY = '5GB'`, `diskOutput.ts:31`).
 pub const MAX_TASK_OUTPUT_BYTES_DISPLAY: &str = "5GB";
 
+/// claude-code `wt` — the one thing a failed write still tries to get onto disk,
+/// so a reader can tell truncation from silence. Leading AND trailing newline.
+const OUTPUT_OMITTED_MARKER: &str = "\n[output omitted: it could not be written to disk]\n";
+
 /// claude-code `Bt = 8388608` — `getTaskOutput` never returns more than the
 /// LAST 8 MiB of a spool, however large the file is
 /// (`Rbt(t, e = Bt)` → `k_(handle, e)`).
@@ -113,6 +117,10 @@ struct CapState {
     /// strings), not bytes on disk.
     bytes_written: u64,
     capped: bool,
+    /// claude-code `lostOutput` — a write for this spool has failed at least
+    /// once, so its contents are known-incomplete. See
+    /// [`TaskOutputManager::lost_output`]; set-once, never cleared.
+    lost_output: bool,
 }
 
 /// Errors produced by [`TaskOutputManager`].
@@ -402,17 +410,65 @@ impl TaskOutputManager {
             }
         };
         if let Some(body) = to_write {
-            self.fs
+            let first = self
+                .fs
                 .append_file_rooted_no_follow_pinned(
                     &self.output_dir,
                     &relative,
                     &body,
                     root_identity.as_ref(),
                 )
-                .await
-                .map_err(|e| self.map_rooted_error(e))?;
+                .await;
+            if let Err(error) = first {
+                // TOF-05. claude-code retries a failed drain EXACTLY once, and
+                // the retry does NOT re-issue the chunk: `#p()` splices the
+                // buffer before the await, so by the time the catch runs the
+                // original body is gone and only the marker is queued. The
+                // chunk is deliberately lost — the retry exists to get the
+                // MARKER on disk, not the output.
+                //
+                // `lostOutput` is set in the INNER catch, i.e. on this first
+                // failure, and the oracle never clears it: `#w()` resets
+                // `failing` and the reported-error set, `cancel()` resets the
+                // queue, neither touches `#l`. Once a spool has lost output it
+                // has lost it.
+                {
+                    let mut caps = self.caps.lock().await;
+                    let state = caps.entry(output_file.to_path_buf()).or_default();
+                    state.lost_output = true;
+                }
+                tracing::error!(
+                    "Task output drain failed (will retry once): {}",
+                    self.map_rooted_error(error)
+                );
+                self.fs
+                    .append_file_rooted_no_follow_pinned(
+                        &self.output_dir,
+                        &relative,
+                        OUTPUT_OMITTED_MARKER,
+                        root_identity.as_ref(),
+                    )
+                    .await
+                    .map_err(|e| self.map_rooted_error(e))?;
+            }
         }
         Ok(())
+    }
+
+    /// Whether this spool has ever failed a write — claude-code `lostOutput`.
+    ///
+    /// SET-ONCE: the oracle stamps it in the drain's inner catch and never
+    /// clears it, so a spool that lost a chunk keeps saying so even after later
+    /// writes succeed. Its reader upstream is the `TaskOutput` footer, which
+    /// swaps "Full output saved to: {path}" for a sentence saying the file may
+    /// be incomplete — a surface this port does not have yet, which is why this
+    /// accessor currently has no production caller.
+    pub async fn lost_output(&self, output_file: &Path) -> bool {
+        self.caps
+            .lock()
+            .await
+            .get(output_file)
+            .is_some_and(|state| state.lost_output)
     }
 
     /// Replace a terminal task payload in its already-allocated spool.
@@ -461,6 +517,8 @@ impl TaskOutputManager {
                 // Same unit as `append`: UTF-16 code units.
                 bytes_written: utf16_units(content),
                 capped: false,
+                // A terminal replacement is a fresh, complete payload.
+                lost_output: false,
             },
         );
         Ok(())
@@ -519,6 +577,8 @@ impl TaskOutputManager {
                 // Same unit as `append`: UTF-16 code units.
                 bytes_written: utf16_units(content),
                 capped: false,
+                // A terminal replacement is a fresh, complete payload.
+                lost_output: false,
             },
         );
         Ok(())
@@ -655,16 +715,30 @@ mod tests {
     struct ExclusiveFs {
         files: Mutex<HashMap<String, String>>,
         creates: AtomicUsize,
+        /// TOF-05: fail the next N appends, so the retry path is reachable.
+        fail_appends: AtomicUsize,
+        /// Every body `append_file` was ASKED to write, failed ones included —
+        /// the retry writes a different body from the first attempt, and that
+        /// difference is the whole point.
+        append_bodies: Mutex<Vec<String>>,
     }
     impl ExclusiveFs {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 files: Mutex::new(HashMap::new()),
                 creates: AtomicUsize::new(0),
+                fail_appends: AtomicUsize::new(0),
+                append_bodies: Mutex::new(Vec::new()),
             })
         }
         fn create_count(&self) -> usize {
             self.creates.load(Ordering::SeqCst)
+        }
+        fn fail_next_appends(&self, n: usize) {
+            self.fail_appends.store(n, Ordering::SeqCst);
+        }
+        async fn append_bodies(&self) -> Vec<String> {
+            self.append_bodies.lock().await.clone()
         }
     }
     #[async_trait]
@@ -723,6 +797,16 @@ mod tests {
             Err(FsError::Io("not supported".into()))
         }
         async fn append_file(&self, path: &str, body: &str) -> Result<(), FsError> {
+            self.append_bodies.lock().await.push(body.to_string());
+            if self
+                .fail_appends
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    n.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(FsError::Io("no space left on device".into()));
+            }
             self.files
                 .lock()
                 .await
@@ -903,6 +987,80 @@ mod tests {
                 .content,
             "independent-right\n"
         );
+    }
+
+    /// TOF-05: a failed write retries EXACTLY once, and the retry does NOT
+    /// re-issue the chunk — the oracle splices its buffer before awaiting, so
+    /// the original body is already gone by the time the catch runs. The retry
+    /// exists to get the MARKER on disk, not the output. Getting this backwards
+    /// (retrying the same body, or writing the marker only after a second
+    /// failure) is the natural reading and it is wrong in both directions.
+    #[tokio::test]
+    async fn a_failed_write_retries_once_with_the_marker_not_the_chunk() {
+        let (fs, mgr) = manager();
+        let path = mgr.allocate("bfail0001").await.unwrap();
+        fs.fail_next_appends(1);
+
+        mgr.append(&path, "the chunk that is lost\n").await.unwrap();
+
+        let attempts = fs.append_bodies().await;
+        assert_eq!(attempts.len(), 2, "one failure, one retry: {attempts:?}");
+        assert_eq!(attempts[0], "the chunk that is lost\n", "the chunk is tried first");
+        assert_eq!(
+            attempts[1], "\n[output omitted: it could not be written to disk]\n",
+            "the RETRY carries the marker, not the chunk"
+        );
+
+        // What actually landed is the marker alone — the chunk is gone.
+        let read = mgr.read(&path, OutputOptions::default()).await.unwrap();
+        assert_eq!(read.content, "\n[output omitted: it could not be written to disk]\n");
+        assert!(mgr.lost_output(&path).await, "the spool is known-incomplete");
+    }
+
+    /// `lostOutput` is SET-ONCE: the oracle stamps it in the drain's inner catch
+    /// and never clears it — `#w()` resets `failing` and the reported set,
+    /// `cancel()` resets the queue, neither touches it. A later good write does
+    /// not make the spool complete again.
+    #[tokio::test]
+    async fn lost_output_survives_a_later_successful_write() {
+        let (fs, mgr) = manager();
+        let path = mgr.allocate("bfail0002").await.unwrap();
+        fs.fail_next_appends(1);
+        mgr.append(&path, "lost\n").await.unwrap();
+        assert!(mgr.lost_output(&path).await);
+
+        mgr.append(&path, "this one lands\n").await.unwrap();
+        assert!(
+            mgr.lost_output(&path).await,
+            "a good write does not un-lose earlier output"
+        );
+        let read = mgr.read(&path, OutputOptions::default()).await.unwrap();
+        assert!(read.content.ends_with("this one lands\n"), "got: {:?}", read.content);
+    }
+
+    /// A spool that never failed reports nothing lost — the flag must not be a
+    /// constant `true` hiding behind two passing failure tests.
+    #[tokio::test]
+    async fn a_healthy_spool_reports_no_lost_output() {
+        let (_fs, mgr) = manager();
+        let path = mgr.allocate("bfail0003").await.unwrap();
+        mgr.append(&path, "all good\n").await.unwrap();
+        assert!(!mgr.lost_output(&path).await);
+    }
+
+    /// When the RETRY fails too the error surfaces to the caller — the oracle
+    /// only swallows the first failure.
+    #[tokio::test]
+    async fn a_second_failure_is_reported_to_the_caller() {
+        let (fs, mgr) = manager();
+        let path = mgr.allocate("bfail0004").await.unwrap();
+        fs.fail_next_appends(2);
+        let err = mgr
+            .append(&path, "gone\n")
+            .await
+            .expect_err("both attempts failed");
+        assert!(matches!(err, OutputError::Io(_)), "got: {err:?}");
+        assert!(mgr.lost_output(&path).await);
     }
 
     /// TOF-04: a full read never returns more than the last 8 MiB, and says how

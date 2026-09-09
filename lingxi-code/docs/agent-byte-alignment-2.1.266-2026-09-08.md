@@ -37,7 +37,7 @@ Derived oracle facts are in `~/.claude/oracle-chunks/notes/agent-audit/`.
 
 ## Result
 
-Fifteen divergences confirmed. Fourteen are fixed; the rest are recorded with their
+Sixteen divergences confirmed. Fifteen are fixed; the rest are recorded with their
 blockers.
 
 A correction to an earlier draft of this report: it said source precedence was
@@ -287,6 +287,27 @@ lean)` picks between them per RENDER, keeping the JS `||` fall-through so an
 empty lean variant does not render a blank description. Both call sites already
 knew their model, so the `SubagentSpawner` trait is unchanged.
 
+### AG-22 (P3) — the tool declared no `outputSchema`, so hook rewrites went unchecked
+
+`V4o` is a union of the result shapes `call` can return. It is NOT advertised to
+the model — its one consumer is the PostToolUse hook path, where a hook's
+`updatedToolOutput` is validated against it and DISCARDED on mismatch, keeping
+the original result (`turn_loop.rs`, `e.outputSchema?.safeParse(...)`). The
+port's Agent tool implemented no `output_schema`, so ANY shape a hook returned
+was substituted into an agent result unchecked.
+
+I had recorded this as "actively risky — declaring it could fail live calls".
+That was wrong, and reading the consumer rather than grepping for it is what
+showed why: the schema never fails a tool call, it only gates a hook's
+substitution.
+
+Fixed with the two arms `call` actually emits (`completed`, `async_launched`).
+The `remote_launched` arm is omitted on purpose: the port has no remote path and
+cannot produce that status, so declaring it would only widen what a hook may
+substitute. `harnessNoteCount` / `harnessTailCount` / `harnessSectionHash` are
+declared because `D2n` declares them (all optional) even though AG-14 leaves
+them unpopulated.
+
 ### AG-09 (P3) — the Explore inherit-cap kill-switch
 
 2.1.266's `yX` short-circuits the cap ahead of the tier test:
@@ -428,28 +449,30 @@ hook** that can deny it, rewrite the agent type / model / cwd / background flag,
 and is re-checked against permission rules afterwards. Its six error strings
 (@3585420–3587034) are all absent from the port.
 
-Blocker: this is not an agent-subsystem gap. The port has no functionHooks
-runtime at all (`functionHooks` / `hooks-worker`: zero hits), so `agent.spawn`
-lands only after that subsystem exists.
+Blocker: this is not an agent-subsystem gap, and it is not a small one. The
+oracle runs plugin function hooks in a bundled JS worker
+(`HOOKS_WORKER_URL: "/$bunfs/root/src/plugins/functionHooks/hooks-worker/hooks-worker.js"`).
+The port has no such runtime — `functionHooks` / `hooks-worker` have zero hits
+outside this report — and its `HookEvent` enum carries only the command-hook
+events (`PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`, …).
+`agent.spawn` lands only after a function-hook runtime exists, which is a
+subsystem port in its own right rather than a gap in this one.
 
-### AG-16 (P3) — smaller residuals
+### AG-16 (P3) — the remaining two residuals
 
-* `outputSchema` (`V4o`, @3575900): the oracle declares a discriminated union of
-  `completed` / `async_launched` / `remote_launched` shapes with per-field
-  descriptions. `Tool::output_schema` exists in the port's trait but the Agent
-  tool does not implement it.
-* `cacheTtl`: `sKt(e)` reads `frontmatter.experimental.cacheTtl` (key
-  case-normalized to `cachettl`) into the definition. The port's frontmatter
-  parser covers every other field but this one.
-* `forceAsync`: `vBo`'s `e.forceAsync` (`L5() && !teammate`) is deliberately NOT
-  modeled. The binary backgrounds every spawn once the fork feature is on, but
-  the port's fork path is synchronous end to end — the parent's rendered system
-  prompt and the fork context messages are threaded onto the request the SYNC
-  dispatch builds, and `dispatch_async` has no equivalent; adding the disjunct
-  first sent forks down a route that drops their inherited context (three fork
-  tests went red on exactly that). It only changes the answer for an explicit
-  `run_in_background: false`, which the schema does not advertise while fork is
-  on. The reason is recorded on `should_run_in_background`.
+**`cacheTtl` — deliberately NOT ported.** `sKt(e)` reads
+`frontmatter.experimental.cacheTtl` (key case-normalized to `cachettl`, value
+checked against `k_e`) onto the definition. The port has no prompt-cache TTL
+concept ANYWHERE: no request-side `cache_control` breakpoint selection, no
+`1h`/`5m` ephemeral setting — the `cache_control` occurrences in
+`llm-client/src/stream_accumulator.rs` are response parsing. Adding the field
+costs an edit to all 74 `AgentDefinition` literals and produces a value nothing
+can ever read, which is the "named, computed, never wired" shape this audit
+exists to find, not to create. It becomes worth porting the moment a cache-TTL
+seam exists on the request path.
+
+**`forceAsync`** — see AG-07; the reason is recorded on
+`should_run_in_background`.
 
 ## Preserved LingXi divergences
 
@@ -468,7 +491,7 @@ branding, and the deferred remote/CCR isolation path.
 |---|---|---|
 | `agent --lib` | 405 passed, 8 failed | 425 passed, 2 failed |
 | `tool-agent --lib` re-run | — | 165 passed |
-| `tool-agent --lib` | 161 passed, 0 failed | 165 passed, 0 failed |
+| `tool-agent --lib` | 161 passed, 0 failed | 166 passed, 0 failed |
 | `platform-api --lib` | 300 passed, 0 failed | 302 passed, 0 failed |
 
 `cargo check -p engine-desktop` is clean too — the composition root is the only
@@ -520,6 +543,9 @@ Tests were added for behaviour that had none:
   by asserting if the visited set is dropped.
 * `agent_dir_precedence_places_add_dirs_below_the_project_tier` — the tier
   position and the dedup against the walk.
+* `output_schema_covers_every_status_the_tool_emits` — both emitted shapes
+  satisfy their arm's `required` set and every emitted key is declared, plus the
+  negative half that the omitted remote status is not accepted.
 * `one_file_reachable_from_two_dirs_is_loaded_once` and its negative half
   `two_distinct_files_with_one_name_still_resolve_by_precedence`;
   `merge_agents_later_wins_replaces_in_place` and `policy_agent_dir_sits_under_the_managed_root`.

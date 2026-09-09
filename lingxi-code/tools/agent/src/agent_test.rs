@@ -5978,6 +5978,73 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert!(mc.contains("<usage>subagent_tokens: 0"));
     }
 
+    /// The declared `outputSchema` must cover BOTH shapes `call` returns, or a
+    /// PostToolUse hook's replacement would be discarded for results the port
+    /// produces itself. Checked structurally (the crate carries no JSON Schema
+    /// validator): every `required` key of the matching arm must be present in
+    /// the payload the tool actually builds.
+    #[test]
+    fn output_schema_covers_every_status_the_tool_emits() {
+        let arms = AGENT_OUTPUT_SCHEMA["anyOf"].as_array().expect("anyOf");
+        assert_eq!(arms.len(), 2, "completed + async_launched, no remote arm");
+
+        let completed = json!({
+            "status": "completed",
+            "prompt": "do it",
+            "agentId": "01J000000000000000000000",
+            "agentType": "general-purpose",
+            "content": [{ "type": "text", "text": "done" }],
+            "totalToolUseCount": 2,
+            "totalDurationMs": 30,
+            "totalTokens": 100,
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        });
+        let async_launched = json!({
+            "isAsync": true,
+            "status": "async_launched",
+            "agentId": "01J000000000000000000000",
+            "description": "d",
+            "resolvedModel": "claude-opus-5",
+            "prompt": "do it",
+            "outputFile": "/tmp/x.output",
+            "canReadOutputFile": true
+        });
+
+        for payload in [&completed, &async_launched] {
+            let status = payload["status"].as_str().unwrap();
+            let arm = arms
+                .iter()
+                .find(|a| a["properties"]["status"]["const"] == json!(status))
+                .unwrap_or_else(|| panic!("no arm declares status {status}"));
+            for key in arm["required"].as_array().unwrap() {
+                let key = key.as_str().unwrap();
+                assert!(
+                    payload.get(key).is_some(),
+                    "{status} arm requires `{key}`, which the emitted payload does not carry",
+                );
+            }
+            // Every key the tool emits must be declared, or a hook replacement
+            // carrying it would still validate but silently lose its shape
+            // guarantee. `model_content` is the port's own transport field.
+            let props = arm["properties"].as_object().unwrap();
+            for key in payload.as_object().unwrap().keys() {
+                assert!(
+                    props.contains_key(key),
+                    "{status} arm does not declare `{key}`",
+                );
+            }
+        }
+
+        // The remote arm is deliberately absent, so the union is not a
+        // catch-all: nothing declares that status.
+        assert!(
+            !arms
+                .iter()
+                .any(|a| a["properties"]["status"]["const"] == json!("remote_launched")),
+            "the port has no remote path and must not widen what a hook may substitute",
+        );
+    }
+
     /// `vBo`'s `shouldRunAsync`, arm by arm. The interesting one is `!Pw(n)`:
     /// it gates ONLY the implicit default, so the two explicit arms still
     /// background the built-in web-fetch agent.

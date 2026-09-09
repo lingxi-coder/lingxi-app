@@ -548,6 +548,102 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+/// claude `V4o` — the Agent tool's `outputSchema`, a union of the result shapes
+/// `call` can return.
+///
+/// ```js
+/// q4o = D2n().extend({status:k("completed"),prompt:s(),worktreePath:s().optional(),worktreeBranch:s().optional()})
+/// V4o = Ne([q4o, {status:k("async_launched"), …}, {status:k("remote_launched"), …}])
+/// ```
+///
+/// This is NOT advertised to the model. Its one consumer is the PostToolUse
+/// hook path: when a hook returns `updatedToolOutput`, the replacement is
+/// validated against this schema and DISCARDED on mismatch, keeping the
+/// original result (`turn_loop.rs`, `e.outputSchema?.safeParse(...)`). Without
+/// it, any shape a hook returned was substituted unchecked.
+///
+/// The `remote_launched` arm is omitted — the port has no remote/CCR path and
+/// `call` cannot produce that status, so declaring it would only widen what a
+/// hook may substitute. The two arms here are exactly the two statuses `call`
+/// emits.
+///
+/// `harnessNoteCount` / `harnessTailCount` / `harnessSectionHash` are declared
+/// because `D2n` declares them (all optional); the port does not populate them
+/// yet — see the harness-note residual in the audit report.
+static AGENT_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
+    let usage = json!({
+        "type": "object",
+        "properties": {
+            "input_tokens": { "type": "number" },
+            "output_tokens": { "type": "number" },
+            "cache_creation_input_tokens": { "type": ["number", "null"] },
+            "cache_read_input_tokens": { "type": ["number", "null"] },
+            "server_tool_use": { "type": ["object", "null"] },
+            "service_tier": { "type": ["string", "null"] },
+            "cache_creation": { "type": ["object", "null"] }
+        },
+        "required": ["input_tokens", "output_tokens"]
+    });
+    json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "status": { "const": "completed" },
+                    "agentId": { "type": "string" },
+                    "agentType": { "type": "string" },
+                    "prompt": { "type": "string" },
+                    "content": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "text" },
+                                "text": { "type": "string" }
+                            },
+                            "required": ["type", "text"]
+                        }
+                    },
+                    "resolvedModel": { "type": "string" },
+                    "modelsUsed": { "type": "array", "items": { "type": "string" } },
+                    "totalToolUseCount": { "type": "number" },
+                    "totalDurationMs": { "type": "number" },
+                    "totalTokens": { "type": "number" },
+                    "usage": usage,
+                    "worktreePath": { "type": "string" },
+                    "worktreeBranch": { "type": "string" },
+                    "harnessNoteCount": { "type": "number" },
+                    "harnessTailCount": { "type": "number" },
+                    "harnessSectionHash": { "type": "string" }
+                },
+                "required": [
+                    "status", "agentId", "prompt", "content",
+                    "totalToolUseCount", "totalDurationMs", "totalTokens", "usage"
+                ]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "status": { "const": "async_launched" },
+                    "isAsync": { "type": "boolean" },
+                    "agentId": { "type": "string", "description": "The ID of the async agent" },
+                    "description": { "type": "string", "description": "The description of the task" },
+                    "resolvedModel": { "type": "string", "description": "Model in use at the backgrounding transition (a pre-background swap is reflected here)" },
+                    "modelsUsed": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Ordered distinct models used before backgrounding (length > 1 means a mid-run swap)"
+                    },
+                    "prompt": { "type": "string", "description": "The prompt for the agent" },
+                    "outputFile": { "type": "string", "description": "Path to the output file for checking agent progress" },
+                    "canReadOutputFile": { "type": "boolean", "description": "Whether the calling agent has Read/Bash tools to check progress" }
+                },
+                "required": ["status", "agentId", "description", "prompt", "outputFile"]
+            }
+        ]
+    })
+});
+
 /// The MODEL-FACING input schema = [`AGENT_INPUT_SCHEMA`] with `cwd` removed.
 ///
 /// claude resolves the AgentTool's advertised schema as `yJp().omit({cwd:!0})`
@@ -3176,6 +3272,9 @@ impl Tool for AgentTool {
             issues.push(serde_json::json!({"code":"custom","path":["name"],"message":"name must not be a reserved recipient (\"main\" or \"team-lead\", in any spelling) or have the shape of an agent id — those already address an agent directly"}));
         }
         issues
+    }
+    fn output_schema(&self) -> Option<&Value> {
+        Some(&AGENT_OUTPUT_SCHEMA)
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true

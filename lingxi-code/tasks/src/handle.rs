@@ -649,6 +649,29 @@ impl TaskRegistryHandle for TaskRegistry {
             .physical_spool_authoritative
             .then(|| output_file.to_str().map(str::to_string))
             .flatten();
+        // TO-06: an `mcp_task`'s model-facing output is a SYNTHETIC metadata
+        // block, not the spool (claude-code `getTaskOutputData`'s `mcp_task`
+        // branch). The registry owns the two timestamps the block's `elapsed:`
+        // line needs, so the elapsed value is computed here rather than at the
+        // tool, which has neither.
+        let mcp = match &state {
+            TaskState::McpTask(mcp) => {
+                let end = mcp.base.end_time.unwrap_or_else(std::time::SystemTime::now);
+                let elapsed_ms = end
+                    .duration_since(mcp.base.start_time)
+                    .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+                    // `Math.max(0, …)`: a clock that went backwards reads as 0.
+                    .unwrap_or(0);
+                Some(platform_api::task_registry::McpTaskOutputMeta {
+                    server_name: mcp.server_name.clone(),
+                    tool_name: mcp.tool_name.clone(),
+                    mcp_status: mcp.mcp_status.clone(),
+                    status_message: mcp.status_message.clone(),
+                    elapsed_ms,
+                })
+            }
+            _ => None,
+        };
         Ok(TaskOutputChunk {
             task_id: state.base().id.clone(),
             content: out.content,
@@ -664,6 +687,7 @@ impl TaskRegistryHandle for TaskRegistry {
             // the authoritative projection. A terminal in-memory override can
             // remain authoritative after a best-effort disk rewrite fails.
             output_path,
+            mcp,
         })
     }
 

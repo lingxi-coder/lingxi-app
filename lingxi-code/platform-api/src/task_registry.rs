@@ -578,6 +578,29 @@ pub struct TaskOutputChunk {
     /// path it can read. `None` ⟶ the tool falls back to the bare
     /// `<taskId>.output` filename.
     pub output_path: Option<String>,
+    /// `mcp_task` only: the fields claude-code's `getTaskOutputData` folds into
+    /// a SYNTHETIC metadata block instead of returning the spool
+    /// (`src_160988549.js` @3690698). `None` for every other type. Additive
+    /// default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpTaskOutputMeta>,
+}
+
+/// The `mcp_task` half of [`TaskOutputChunk`] — see its `mcp` field.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpTaskOutputMeta {
+    /// `serverName` → the `server: …` line.
+    pub server_name: String,
+    /// `toolName` → the `tool: …` line.
+    pub tool_name: String,
+    /// `mcpStatus` → the `status: …` line (or `server status when stopped: …`
+    /// once the task was killed). Underscores render as spaces.
+    pub mcp_status: String,
+    /// `statusMessage` → the optional `status message: …` line.
+    pub status_message: Option<String>,
+    /// `(endTime ?? now) - startTime` → the `elapsed: …` line. Computed at the
+    /// registry, which owns both timestamps.
+    pub elapsed_ms: u64,
 }
 
 /// Failure modes for [`TaskRegistryHandle`] operations.

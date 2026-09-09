@@ -2528,6 +2528,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 prompt: Some("do the thing".into()),
                 result: result.map(str::to_string),
                 output_path: None,
+                mcp: None,
             }
         }
 
@@ -3120,6 +3121,124 @@ Running background agents: a1b2c3d4e (survey the crate)"
             assert!(*reg.output_calls.lock().unwrap() >= 3);
         }
 
+        // ── TO-06: the synthetic mcp_task metadata block ─────────────────────
+
+        fn mcp_meta() -> platform_api::task_registry::McpTaskOutputMeta {
+            platform_api::task_registry::McpTaskOutputMeta {
+                server_name: "acme".into(),
+                tool_name: "deploy".into(),
+                mcp_status: "input_required".into(),
+                status_message: Some("  waiting   for\n  approval  ".into()),
+                elapsed_ms: 95_000,
+            }
+        }
+
+        /// claude-code returns METADATA for an `mcp_task`, never the spool:
+        /// server, tool, status, an optional status message and the elapsed
+        /// time, plus the elicitation line while the dialog is open.
+        #[test]
+        fn an_mcp_task_renders_a_metadata_block() {
+            let block = render_mcp_task_output(&mcp_meta(), "running");
+            assert_eq!(
+                block,
+                "server: acme\n\
+tool: deploy\n\
+status: input required\n\
+status message: waiting for approval\n\
+elapsed: 1m 35s\n\
+waiting on the user: an elicitation dialog is open"
+            );
+        }
+
+        /// A stopped task reports what the SERVER thought when it was stopped,
+        /// and the elicitation line goes away with the running status.
+        #[test]
+        fn a_killed_mcp_task_reports_the_server_status_when_stopped() {
+            let block = render_mcp_task_output(&mcp_meta(), "killed");
+            assert!(
+                block.contains("server status when stopped: input required"),
+                "got: {block}"
+            );
+            assert!(!block.contains("status: input required"), "got: {block}");
+            assert!(!block.contains("elicitation dialog"), "got: {block}");
+        }
+
+        /// An empty or whitespace-only status message is DROPPED (`rg()` returns
+        /// undefined), not rendered as an empty line.
+        #[test]
+        fn a_blank_mcp_status_message_is_dropped() {
+            let mut meta = mcp_meta();
+            meta.status_message = Some("   \n  ".into());
+            let block = render_mcp_task_output(&meta, "running");
+            assert!(!block.contains("status message"), "got: {block}");
+            meta.status_message = None;
+            assert!(!render_mcp_task_output(&meta, "running").contains("status message"));
+        }
+
+        /// TO-06 wiring: the block the registry resolved has to REPLACE the
+        /// spool in `<output>`, and set `omitOutputPath`. Building the block
+        /// correctly is useless if the tool still renders the spool.
+        #[tokio::test]
+        async fn task_output_returns_the_mcp_block_instead_of_the_spool() {
+            let record = TaskRecord {
+                task_id: "k12345678".into(),
+                task_type: "mcp_task".into(),
+                status: "completed".into(),
+                description: "deploy".into(),
+                ..Default::default()
+            };
+            let reg = MockRegistry::with_record(Some(record));
+            reg.push_chunk(TaskOutputChunk {
+                task_id: "k12345678".into(),
+                content: "RAW SPOOL THAT MUST NOT SURFACE".into(),
+                total_lines: 1,
+                truncated: false,
+                status: Some("completed".into()),
+                done: true,
+                mcp: Some(platform_api::task_registry::McpTaskOutputMeta {
+                    server_name: "acme".into(),
+                    tool_name: "deploy".into(),
+                    mcp_status: "completed".into(),
+                    status_message: None,
+                    elapsed_ms: 3_000,
+                }),
+                ..Default::default()
+            });
+            let out = TaskOutputTool::new(bctx(reg))
+                .call(json!({ "task_id": "k12345678" }), fresh_ctx(), fresh_tx())
+                .await
+                .expect("output ok");
+            let content = out.data["content"].as_str().expect("rendered content");
+            assert!(
+                content.contains("server: acme\ntool: deploy\nstatus: completed\nelapsed: 3s"),
+                "got: {content}"
+            );
+            assert!(
+                !content.contains("RAW SPOOL"),
+                "the spool must not surface: {content}"
+            );
+        }
+
+        /// `omitOutputPath` picks the other truncation header — there is no
+        /// spool path worth naming for a synthetic block.
+        #[test]
+        fn the_omit_path_truncation_header_reports_what_survived() {
+            let max = max_task_output_length();
+            let out = format!("{}TAILEND", "C".repeat(max + 500));
+            let formatted = format_task_output(&out, "k12345678", None, true);
+            assert!(
+                formatted.starts_with("[Truncated to the last "),
+                "got: {}",
+                &formatted[..60]
+            );
+            assert!(!formatted.contains("Full output:"), "no path is named");
+            assert!(formatted.ends_with("TAILEND"));
+            assert!(
+                formatted.chars().count() <= max,
+                "the result must stay inside the cap"
+            );
+        }
+
         // ── TO-08: where the output cap comes from ───────────────────────────
 
         /// Serializes on the same lock the env-var tests use, and always clears
@@ -3202,7 +3321,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
         fn format_task_output_passthrough_under_limit() {
             // `output.length <= maxLen` ⇒ returned verbatim, no header.
             let out = "hello world\nsecond line\n";
-            assert_eq!(format_task_output(out, "b12345678", None), out);
+            assert_eq!(format_task_output(out, "b12345678", None, false), out);
         }
 
         #[test]
@@ -3216,7 +3335,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             assert_eq!(out.chars().count(), total);
 
             // With NO resolved path the header falls back to the bare filename.
-            let formatted = format_task_output(&out, "b12345678", None);
+            let formatted = format_task_output(&out, "b12345678", None, false);
             assert!(formatted.starts_with("[Truncated. Full output: b12345678.output]\n\n"));
             // The leading marker was truncated away; the tail is preserved.
             assert!(!formatted.contains("HEADMARKER"));
@@ -3233,7 +3352,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let max = max_task_output_length();
             let out = format!("{}TAILEND", "C".repeat(max + 200));
             let abs = "/private/tmp/claude-501/-Users-me-proj/sess-abc/tasks/b12345678.output";
-            let formatted = format_task_output(&out, "b12345678", Some(abs));
+            let formatted = format_task_output(&out, "b12345678", Some(abs), false);
             assert!(
                 formatted.starts_with(&format!("[Truncated. Full output: {abs}]\n\n")),
                 "absolute path is used verbatim in the header; got {:?}",
@@ -3265,6 +3384,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 error: None,
                 output_path: None,
                 is_raw_transcript: false,
+                omit_output_path: false,
             };
             let rendered = render_task_output("success", Some(&view));
             assert!(rendered.contains("<output>\n[Truncated. Full output: b12345678.output]\n\n"));
@@ -3287,6 +3407,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 error: None,
                 output_path: None,
                 is_raw_transcript: false,
+                omit_output_path: false,
             };
             let rendered = render_task_output("success", Some(&view));
             assert!(
@@ -3314,6 +3435,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 error: None,
                 output_path: None,
                 is_raw_transcript: false,
+                omit_output_path: false,
             };
             let rendered = render_task_output("success", Some(&view));
             assert!(!rendered.contains("[harness: subagent output matched"), "got: {rendered}");
@@ -3340,6 +3462,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 error: None,
                 output_path: None,
                 is_raw_transcript: true,
+                omit_output_path: false,
             };
             let rendered = render_task_output("success", Some(&view));
             assert!(!rendered.contains("[harness: subagent output matched"), "got: {rendered}");
@@ -3366,6 +3489,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 error: None,
                 output_path: Some(abs.into()),
                 is_raw_transcript: false,
+                omit_output_path: false,
             };
             let rendered = render_task_output("success", Some(&view));
             assert!(

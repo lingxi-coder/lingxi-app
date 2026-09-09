@@ -2701,11 +2701,32 @@ fn task_output_path(task_id: &str, output_path: Option<&str>) -> String {
 /// TS measures `String.length`/`slice` in UTF-16 code units; this port measures
 /// Unicode scalar values (`chars()`), which differ only for astral-plane chars.
 /// For the ASCII/BMP output that task spools carry this is identical.
-fn format_task_output(output: &str, task_id: &str, output_path: Option<&str>) -> String {
+fn format_task_output(
+    output: &str,
+    task_id: &str,
+    output_path: Option<&str>,
+    omit_path: bool,
+) -> String {
     let max_len = max_task_output_length();
     let char_count = output.chars().count();
     if char_count <= max_len {
         return output.to_string();
+    }
+    if omit_path {
+        // claude-code `yWn`'s `omitPath` arm — there is no file to point at, so
+        // the header says how much survived instead:
+        //
+        // ```js
+        // let _=Qu(e,Math.max(0,o-hWn(o).length));
+        // return{content:hWn(_.length)+_,wasTruncated:!0}
+        // ```
+        //
+        // The budget is computed from `hWn(o)` (the CAP's digits) but the header
+        // finally emitted is `hWn(_.length)` (the KEPT length) — two different
+        // numbers, and the difference is what keeps the result inside the cap.
+        let available = max_len.saturating_sub(truncated_tail_header(max_len).chars().count());
+        let tail: String = output.chars().skip(char_count - available).collect();
+        return format!("{}{tail}", truncated_tail_header(tail.chars().count()));
     }
     let header = format!(
         "[Truncated. Full output: {}]\n\n",
@@ -2715,6 +2736,13 @@ fn format_task_output(output: &str, task_id: &str, output_path: Option<&str>) ->
     // TS `output.slice(-availableSpace)` — keep the last `available` chars.
     let tail: String = output.chars().skip(char_count - available).collect();
     format!("{header}{tail}")
+}
+
+/// claude-code `hWn(e)` — the `omitPath` truncation header.
+fn truncated_tail_header(kept_chars: usize) -> String {
+    format!(
+        "[Truncated to the last {kept_chars} characters; the earlier part of the report is not retrievable.]\n\n"
+    )
 }
 
 /// 1:1 port of `TaskOutputTool.tsx`'s `mapToolResultToToolResultBlockParam`
@@ -2752,7 +2780,12 @@ fn render_task_output(retrieval_status: &str, task: Option<&TaskOutputView>) -> 
         // `antml:` tag had that text handed to the model with its control
         // syntax intact — the very hole `Task`'s own result path closes.
         if !t.output.trim().is_empty() {
-            let formatted = format_task_output(&t.output, &t.task_id, t.output_path.as_deref());
+            let formatted = format_task_output(
+                &t.output,
+                &t.task_id,
+                t.output_path.as_deref(),
+                t.omit_output_path,
+            );
             let trimmed = formatted.trim_end();
             let body = if t.task_type == "local_bash" {
                 trimmed.to_string()
@@ -2781,6 +2814,78 @@ fn render_task_output(retrieval_status: &str, task: Option<&TaskOutputView>) -> 
     parts.join("\n\n")
 }
 
+/// claude-code `rg()` — normalise a server-supplied status line before it goes
+/// in front of the model: collapse every run of whitespace (newlines included)
+/// to a single space, trim, drop an empty result, and truncate a long one.
+///
+/// ```js
+/// function v(e){if(e===void 0)return;
+///   let s=e.replace(re," ").replace(/ {2,}/g," ").trim();
+///   if(s==="")return;
+///   return s.length>B?`${oe(s,B)}\u2026 [truncated]`:s}
+/// ```
+fn normalize_mcp_status_message(raw: Option<&str>) -> Option<String> {
+    let collapsed = raw?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    if collapsed.chars().count() > MCP_STATUS_MESSAGE_MAX {
+        let head: String = collapsed.chars().take(MCP_STATUS_MESSAGE_MAX).collect();
+        return Some(format!("{head}\u{2026} [truncated]"));
+    }
+    Some(collapsed)
+}
+
+/// Cap for [`normalize_mcp_status_message`] (claude-code `B`).
+const MCP_STATUS_MESSAGE_MAX: usize = 200;
+
+/// The synthetic `mcp_task` output block — claude-code's `getTaskOutputData`
+/// `mcp_task` branch (`src_160988549.js` @3690698), which returns METADATA
+/// instead of the spool and sets `omitOutputPath`.
+///
+/// Two of the oracle's lines have no input here and are therefore omitted, not
+/// invented — exactly as the oracle omits them when its own values are
+/// undefined:
+///
+/// * `server task id: …` rides only when the SERVER's task id differs from the
+///   registry id (`e.mcpTaskId!==e.id`). The port mints one id and stores no
+///   separate server id, so there is nothing that could differ.
+/// * `poll interval: …` rides only when `pollIntervalMs` is set; the port's
+///   `McpTaskState` does not carry one.
+/// * the `sep2663` protocol sentence needs a protocol field the port has not
+///   modelled.
+fn render_mcp_task_output(
+    meta: &platform_api::task_registry::McpTaskOutputMeta,
+    status: &str,
+) -> String {
+    let mut lines = vec![
+        format!("server: {}", meta.server_name),
+        format!("tool: {}", meta.tool_name),
+    ];
+    // Underscores render as spaces (`e.mcpStatus.replace("_"," ")`) — note the
+    // oracle's non-global replace, which only touches the FIRST underscore.
+    let mcp_status = meta.mcp_status.replacen('_', " ", 1);
+    lines.push(if status == "killed" {
+        format!("server status when stopped: {mcp_status}")
+    } else {
+        format!("status: {mcp_status}")
+    });
+    if let Some(message) = normalize_mcp_status_message(meta.status_message.as_deref()) {
+        lines.push(format!("status message: {message}"));
+    }
+    lines.push(format!(
+        "elapsed: {}",
+        tool_shell::bash::format_duration_ms(meta.elapsed_ms)
+    ));
+    if meta.mcp_status == "input_required" && status == "running" {
+        lines.push("waiting on the user: an elicitation dialog is open".to_string());
+    }
+    lines.join("\n")
+}
+
 /// The `task` payload surfaced by `TaskOutputTool` — the subset of the TS
 /// `TaskOutput` shape the narrow registry surface can resolve.
 struct TaskOutputView {
@@ -2803,6 +2908,10 @@ struct TaskOutputView {
     /// the subagent-guard marker (`prependMarker: !isRawTranscript`);
     /// neutralisation still runs. `false` for every non-agent type.
     is_raw_transcript: bool,
+    /// claude `TaskOutput.omitOutputPath` — the body is synthetic (the
+    /// `mcp_task` metadata block), so there is no spool path worth naming in a
+    /// truncation header. `false` for every other type.
+    omit_output_path: bool,
 }
 
 /// Byte-faithful port of `TaskOutputTool.tsx`'s `retrieval_status` decision.
@@ -3096,6 +3205,18 @@ impl Tool for TaskOutputTool {
         // `getTaskOutputData` `local_agent`: `output: cleanResult || output`).
         // `result` is `None` for non-agent tasks / empty extractions, leaving
         // the raw spool content in place.
+        // TO-06: an `mcp_task` returns a SYNTHETIC metadata block, never the
+        // spool. Built here (the tool renders) from what the registry resolved
+        // (it owns the timestamps).
+        let mcp_block = chunk.mcp.as_ref().map(|meta| {
+            render_mcp_task_output(
+                meta,
+                chunk
+                    .status
+                    .as_deref()
+                    .unwrap_or_else(|| record.status.as_str()),
+            )
+        });
         let clean_result = chunk.result.clone().filter(|r| !r.is_empty());
         // claude `isRawTranscript: !ue` — true exactly when the clean report was
         // empty and the body fell back to the transcript. Set ONLY in the
@@ -3103,7 +3224,10 @@ impl Tool for TaskOutputTool {
         // so `prependMarker: !isRawTranscript` is `true` for them.
         let is_raw_transcript =
             record.task_type == "local_agent" && clean_result.is_none();
-        let output = clean_result.unwrap_or_else(|| chunk.content.clone());
+        let omit_output_path = mcp_block.is_some();
+        let output = mcp_block
+            .or(clean_result)
+            .unwrap_or_else(|| chunk.content.clone());
         let view = TaskOutputView {
             task_id: chunk.task_id.clone(),
             task_type: record.task_type.clone(),
@@ -3121,6 +3245,7 @@ impl Tool for TaskOutputTool {
             // `[Truncated. Full output: <path>]` header.
             output_path: chunk.output_path.clone(),
             is_raw_transcript,
+            omit_output_path,
         };
         let content = render_task_output(retrieval_status, Some(&view));
 

@@ -8,6 +8,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -371,6 +372,11 @@ fn modern_request_requires_result_type(method: &str) -> bool {
 /// One instance per server connection; owns its `Connection` and inbound
 /// handler registrations.
 pub struct McpClient {
+    /// claude-code `transportErrorState.pendingElicitations` — how many
+    /// elicitations this connection has OPEN right now. Shared with the
+    /// registered `elicitation/create` handler, which owns the increment and
+    /// the decrement-on-drop; see [`Self::has_pending_elicitation`].
+    elicitation_pending: Arc<AtomicUsize>,
     /// Logical server name (used in tool full-names and error messages).
     server_name: String,
     /// Absolute cwd advertised to the server via `roots/list`.
@@ -547,17 +553,22 @@ impl McpClient {
                 }),
             )
             .await;
+        // Shared with the handler so the auto-background race can ask this
+        // client whether a dialog is open (MON-08). One Arc, two owners.
+        let elicitation_pending = Arc::new(AtomicUsize::new(0));
         connection
             .register_handler(
                 "elicitation/create",
-                Arc::new(ElicitationCreateHandler::with_dispatcher(
+                Arc::new(ElicitationCreateHandler::with_dispatcher_and_counter(
                     server_name.clone(),
                     dispatcher,
+                    Arc::clone(&elicitation_pending),
                 )),
             )
             .await;
 
         Self {
+            elicitation_pending,
             server_name,
             cwd,
             connection,
@@ -709,6 +720,21 @@ impl McpClient {
     #[must_use]
     pub fn server_name(&self) -> &str {
         &self.server_name
+    }
+
+    /// claude-code's `((conn.transportErrorState?.pendingElicitations) ?? 0) > 0`
+    /// — is an elicitation dialog open on this connection right now?
+    ///
+    /// The MCP auto-background race consults this at each deadline: while it is
+    /// true the call stays in the FOREGROUND, because detaching a `tools/call`
+    /// that is waiting on the user turns a question into an orphan (MON-08).
+    ///
+    /// The oracle's `type === "connected"` guard needs no analogue — holding an
+    /// `Arc<McpClient>` already means a live registered client, and a lookup
+    /// miss is the `?? 0` fallback.
+    #[must_use]
+    pub fn has_pending_elicitation(&self) -> bool {
+        self.elicitation_pending.load(Ordering::Acquire) > 0
     }
 
     /// Send the MCP `initialize` request, parse the server capability

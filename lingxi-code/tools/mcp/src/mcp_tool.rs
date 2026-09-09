@@ -1864,21 +1864,45 @@ impl Tool for MCPTool {
             })
         };
 
-        // `Promise.race([f, xr(s)])`: settled-first returns the result directly;
-        // timeout-first breaks out to the background path. `biased` polls the
-        // call before the timer so a call that finishes exactly at the deadline
-        // still returns inline (matching the binary's `==="settled"` check).
-        tokio::select! {
-            biased;
-            joined = &mut call_task => {
-                return match joined {
-                    Ok(result) => result,
-                    Err(join_err) => Err(ToolError::Internal(format!(
-                        "MCPTool: background task join error: {join_err}"
-                    ))),
-                };
+        // `while(!0){ Promise.race([f, xr(s)]); if(B?.())continue; break }`:
+        // settled-first returns the result directly; timeout-first consults the
+        // elicitation predicate and, while a dialog is OPEN, re-arms a whole
+        // fresh window instead of detaching. `biased` polls the call before the
+        // timer so a call that finishes exactly at the deadline still returns
+        // inline (matching the binary's `==="settled"` check).
+        //
+        // MON-08: the port had a bare single-shot select here, so a `tools/call`
+        // waiting on the user was backgrounded at the first deadline — turning a
+        // question into an orphan. The window is 120 s by default and the port's
+        // Elicitation hook has a 10-minute default timeout, so this was a real
+        // window, not a theoretical one.
+        //
+        // NOTE the granularity: each `continue` mints a NEW full-length timer,
+        // exactly as the oracle does. Polling more tightly would be a divergence
+        // — a dialog closing at T=121 s backgrounds at T=240 s upstream, not at
+        // T=121 s.
+        loop {
+            tokio::select! {
+                biased;
+                joined = &mut call_task => {
+                    return match joined {
+                        Ok(result) => result,
+                        Err(join_err) => Err(ToolError::Internal(format!(
+                            "MCPTool: background task join error: {join_err}"
+                        ))),
+                    };
+                }
+                () = tokio::time::sleep(std::time::Duration::from_millis(auto_bg_ms as u64)) => {}
             }
-            () = tokio::time::sleep(std::time::Duration::from_millis(auto_bg_ms as u64)) => {}
+            // `B?.()` — an absent predicate is falsy, so a server with no live
+            // client backgrounds exactly as before.
+            let dialog_open = registry
+                .get_client(server.as_str())
+                .await
+                .is_some_and(|client| client.has_pending_elicitation());
+            if !dialog_open {
+                break;
+            }
         }
 
         // Timeout — move the still-running call to the background as an

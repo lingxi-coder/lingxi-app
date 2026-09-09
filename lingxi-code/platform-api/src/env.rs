@@ -115,9 +115,18 @@ pub fn is_bg_session() -> bool {
 /// 2.1.238 `WA()`: `getSettings().backgroundTasksDisabled ||
 /// env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`).
 ///
-/// Only the env half is modelled — LingXi has no `backgroundTasksDisabled`
-/// settings key, and the settings half defaults to `false`, so the env check is
-/// the sole observable gate.
+/// Only the env half is modelled, and the reason is NOT the one an earlier
+/// version of this comment gave. `i5().backgroundTasksDisabled` is not a
+/// settings key with a `false` default — it is a runtime LATCH, flipped by
+/// `disableBackgroundTasks()` on the MCP-serve/SDK http entry path
+/// (`let p=S==="http"; if(p){let r=i5(); r.disableBackgroundTasks(),
+/// r.disableUnsandboxedCommands()}`, `src_187861758.js`).
+///
+/// That entry path has no analogue here: the port has no `mcp serve` / http
+/// server mode, so nothing could set the latch. Adding one would be a field with
+/// no producer. If such a mode is ever added it must flip this gate too — and
+/// `disableUnsandboxedCommands` alongside it, which the oracle sets in the same
+/// breath.
 ///
 /// This lives here rather than in `tool-shell` because the gate has consumers on
 /// both sides of that crate: the Bash prompt and input schema inside it, and the

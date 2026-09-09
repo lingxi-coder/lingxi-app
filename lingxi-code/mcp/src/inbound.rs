@@ -6,6 +6,7 @@
 //! (elicitation default cancel).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -113,6 +114,29 @@ pub struct ElicitationCreateHandler {
     /// fired, default `{"action":"cancel"}`), matching the
     /// `RawConnectionProvider`/auth-provider injection pattern.
     dispatcher: Option<Arc<dyn HookDispatcher>>,
+    /// claude-code `transportErrorState.pendingElicitations` — how many
+    /// elicitations this connection currently has OPEN.
+    ///
+    /// The oracle `++`s it on entry to the elicitation handler and `--`s it in a
+    /// `finally`; its one behavioural reader is the MCP auto-background race,
+    /// which defers detaching a `tools/call` while a dialog is open (MON-08).
+    /// Shared with the owning `McpClient`, which is what the race consults.
+    pending: Arc<AtomicUsize>,
+}
+
+/// Decrement-on-drop for [`ElicitationCreateHandler::pending`].
+///
+/// The oracle's `--` sits in a `finally`; `handle` has four exits (hook
+/// responds, hook denies, hook passes through to the default, or the await is
+/// cancelled), so a guard is the faithful analogue — a manual decrement per
+/// return would leak the count on whichever path someone forgets, and a leaked
+/// count defers auto-backgrounding FOREVER.
+struct PendingElicitation(Arc<AtomicUsize>);
+
+impl Drop for PendingElicitation {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
 }
 
 impl Default for ElicitationCreateHandler {
@@ -129,6 +153,9 @@ impl ElicitationCreateHandler {
         Self {
             server_name: String::new(),
             dispatcher: None,
+            // Its own counter: a handler nobody shares with is behaviourally
+            // identical to one with no counter at all.
+            pending: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -141,9 +168,28 @@ impl ElicitationCreateHandler {
         server_name: impl Into<String>,
         dispatcher: Option<Arc<dyn HookDispatcher>>,
     ) -> Self {
+        Self::with_dispatcher_and_counter(
+            server_name,
+            dispatcher,
+            Arc::new(AtomicUsize::new(0)),
+        )
+    }
+
+    /// As [`Self::with_dispatcher`], but SHARING the open-elicitation counter
+    /// with the owning [`crate::McpClient`] — the port of the oracle's
+    /// per-connection `transportErrorState.pendingElicitations`. The MCP
+    /// auto-background race reads it through the client to decide whether to
+    /// keep a `tools/call` in the foreground (MON-08).
+    #[must_use]
+    pub fn with_dispatcher_and_counter(
+        server_name: impl Into<String>,
+        dispatcher: Option<Arc<dyn HookDispatcher>>,
+        pending: Arc<AtomicUsize>,
+    ) -> Self {
         Self {
             server_name: server_name.into(),
             dispatcher,
+            pending,
         }
     }
 
@@ -196,6 +242,11 @@ impl ElicitationCreateHandler {
 #[async_trait]
 impl InboundHandler for ElicitationCreateHandler {
     async fn handle(&self, req: Request) -> Response {
+        // BEFORE the telemetry emit, matching the oracle's order
+        // (`if(s)s.pendingElicitations++;` then the debug log then
+        // `tengu_mcp_elicitation_shown`).
+        self.pending.fetch_add(1, Ordering::AcqRel);
+        let _open = PendingElicitation(Arc::clone(&self.pending));
         let mode = Self::telemetry_mode(req.params.as_ref());
         emit_elicitation_shown(mode);
         // When a dispatcher is wired, consult the `Elicitation` hook first.
@@ -544,6 +595,92 @@ mod tests {
         let obj = result.as_object().expect("object");
         assert_eq!(obj.len(), 1);
         assert_eq!(obj["action"], "decline");
+    }
+
+    /// MON-08: the open-elicitation refcount. A dispatcher runs INSIDE
+    /// `handle()`, which makes it the one place a test can observe the count
+    /// mid-flight — the state the auto-background race actually consults.
+    struct CountObservingDispatcher {
+        counter: Arc<AtomicUsize>,
+        seen_inside: Arc<std::sync::Mutex<Option<usize>>>,
+        outcome: ElicitationHookOutcome,
+    }
+
+    #[async_trait]
+    impl HookDispatcher for CountObservingDispatcher {
+        async fn dispatch_elicitation(
+            &self,
+            _request: ElicitationHookRequest,
+        ) -> ElicitationHookOutcome {
+            *self.seen_inside.lock().unwrap() = Some(self.counter.load(Ordering::Acquire));
+            self.outcome.clone()
+        }
+    }
+
+    async fn count_during_and_after(outcome: ElicitationHookOutcome) -> (usize, usize) {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let seen_inside = Arc::new(std::sync::Mutex::new(None));
+        let dispatcher = Arc::new(CountObservingDispatcher {
+            counter: Arc::clone(&counter),
+            seen_inside: Arc::clone(&seen_inside),
+            outcome,
+        });
+        let handler = ElicitationCreateHandler::with_dispatcher_and_counter(
+            "linear",
+            Some(dispatcher as Arc<dyn HookDispatcher>),
+            Arc::clone(&counter),
+        );
+        let _ = handler.handle(elicit_req(json!({"message": "Pick"}))).await;
+        let during = seen_inside.lock().unwrap().expect("the hook ran");
+        (during, counter.load(Ordering::Acquire))
+    }
+
+    /// The count is up while the elicitation is open and back to zero after —
+    /// on EVERY exit path. `handle` has four, and a leaked count would defer
+    /// auto-backgrounding forever, so the guard is checked per outcome rather
+    /// than once.
+    #[tokio::test]
+    async fn an_open_elicitation_is_counted_and_released_on_every_path() {
+        for outcome in [
+            ElicitationHookOutcome::Respond(json!({"action": "accept"})),
+            ElicitationHookOutcome::Deny,
+            ElicitationHookOutcome::Pass,
+        ] {
+            let (during, after) = count_during_and_after(outcome.clone()).await;
+            assert_eq!(during, 1, "open while the hook runs ({outcome:?})");
+            assert_eq!(after, 0, "released when handle returns ({outcome:?})");
+        }
+    }
+
+    /// Two overlapping elicitations on one connection count as two — the oracle
+    /// keeps a refcount, not a boolean, so the second one closing does not
+    /// declare the first finished.
+    #[tokio::test]
+    async fn overlapping_elicitations_refcount_rather_than_toggle() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        counter.fetch_add(1, Ordering::AcqRel);
+        let (during, _) = {
+            let seen_inside = Arc::new(std::sync::Mutex::new(None));
+            let dispatcher = Arc::new(CountObservingDispatcher {
+                counter: Arc::clone(&counter),
+                seen_inside: Arc::clone(&seen_inside),
+                outcome: ElicitationHookOutcome::Pass,
+            });
+            let handler = ElicitationCreateHandler::with_dispatcher_and_counter(
+                "linear",
+                Some(dispatcher as Arc<dyn HookDispatcher>),
+                Arc::clone(&counter),
+            );
+            let _ = handler.handle(elicit_req(json!({"message": "Pick"}))).await;
+            let during = seen_inside.lock().unwrap().expect("the hook ran");
+            (during, ())
+        };
+        assert_eq!(during, 2, "a second open elicitation stacks");
+        assert_eq!(
+            counter.load(Ordering::Acquire),
+            1,
+            "and closing it leaves the first still open"
+        );
     }
 
     #[tokio::test]

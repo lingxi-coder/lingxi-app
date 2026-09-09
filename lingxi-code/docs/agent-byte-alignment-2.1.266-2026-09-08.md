@@ -390,14 +390,20 @@ if(n.agentId!==void 0&&jH(n.agentId))
   throw new pE("This agent has been stopped and its stop is still completing; it cannot launch new agents.")
 ```
 
-Blocker: no substrate, and the substrate is a whole mechanism rather than a
-flag. In the oracle the set is filled by the KILL-ESCALATION path `Xne` — a
-kill marks every agent id of the task stop-pending, arms a 10s escalation and a
-30s overdue timer, and a settle callback clears them; `N3` clears an id again
-when a run starts. Three sites read it (the `Agent` tool, the `Skill` tool, and
-shell exec, each with its own refusal copy). The port's `kill_with_reason` has
-no such unsettled window and no per-agent-id tracking, so adding only the read
-would be a gate that can never fire.
+Blocker, and this one held up when I went back to test it the way the other
+"blockers" failed to. In the oracle the set is filled by the KILL-ESCALATION
+path `Xne`: a kill marks every agent id of the task stop-pending, arms a 10s
+escalation and a 30s overdue timer, and a settle callback clears them; `N3`
+clears an id again when a run starts. Three sites read it — the `Agent` tool,
+the `Skill` tool, and shell exec, each with its own refusal copy.
+
+The port has no window to hook. `kill_backing_task`'s own comment records why:
+"a handler's status sink flips the row to `Killed` INSIDE `handler.kill(..)`",
+so by the time `kill()` returns the task is already terminal. A
+`stop_pending_agent_ids` set would be filled and drained inside one call — a
+gate that can never fire, which is worse than its absence. Porting the guard
+means porting `Xne`'s escalation machinery first, and that lives in the task
+registry another session is actively committing into.
 
 ### AG-14 (P2) — the harness-note layer around agent results
 
@@ -461,6 +467,7 @@ branding, and the deferred remote/CCR isolation path.
 | suite | before | after |
 |---|---|---|
 | `agent --lib` | 405 passed, 8 failed | 425 passed, 2 failed |
+| `tool-agent --lib` re-run | — | 165 passed |
 | `tool-agent --lib` | 161 passed, 0 failed | 165 passed, 0 failed |
 | `platform-api --lib` | 300 passed, 0 failed | 302 passed, 0 failed |
 

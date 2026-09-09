@@ -214,11 +214,34 @@ impl TaskOutputManager {
         Ok(relative)
     }
 
+    /// claude-code `b(path, reason, recovery?)`:
+    ///
+    /// ```js
+    /// let o=`task output swap refused (${e}): ${t}`+(i===void 0?"":`. To recover: ${i}.`)
+    /// ```
+    ///
+    /// The recovery clause is OPTIONAL, and the oracle attaches it to exactly
+    /// ONE of its eight refusals — `tasks dir moved or linked`, the only one a
+    /// user can act on. The port appended it to every reason, so a refusal that
+    /// says a single output FILE changed identity underneath us told the user to
+    /// restart with a fresh temp directory, which does not address that at all.
     fn swap_refused(&self, reason: &str) -> OutputError {
         OutputError::SwapRefused(format!(
-            "task output swap refused ({reason}): {}. To recover: restart the application with its temporary-directory setting pointed at a fresh directory; or, if {} is a stray directory or a symbolic link that should not be there, remove that entry itself (not what it points to) and restart.",
+            "task output swap refused ({reason}): {}",
             self.output_dir.display(),
-            self.output_dir.display(),
+        ))
+    }
+
+    /// The one refusal that carries the oracle's recovery clause. `LINGXI_TMPDIR`
+    /// is the port's spelling of `CLAUDE_CODE_TMPDIR`; naming it is the point of
+    /// the sentence — "its temporary-directory setting" left the reader with
+    /// nothing to set. The oracle strips trailing separators from the temp root
+    /// before interpolating it.
+    fn swap_refused_dir_moved(&self) -> OutputError {
+        let root = self.output_dir.display().to_string();
+        let root = root.trim_end_matches(['/', '\\']);
+        OutputError::SwapRefused(format!(
+            "task output swap refused (tasks dir moved or linked): {root}. To recover: restart with LINGXI_TMPDIR set to a fresh directory; or, if {root} is a stray directory or a symbolic link that should not be there, remove that entry itself (not what it points to) and restart.",
         ))
     }
 
@@ -229,13 +252,22 @@ impl TaskOutputManager {
         let current = match self.fs.root_identity_no_follow(&self.output_dir).await {
             Ok(identity) => identity,
             Err(error) if state.initialized => {
-                return Err(self.swap_refused(&format!("directory identity check failed: {error}")))
+                // The pin no longer resolves — the directory was replaced by a
+                // symlink or removed under us. Same actionable refusal as an
+                // identity CHANGE, and the same one the oracle raises when its
+                // own pin is refused; it logs the cause separately rather than
+                // folding it into the message, which is why the errno-carrying
+                // `lstat refused a swapped path (${a})` family is per-FILE.
+                tracing::warn!("task output: pin of {} refused: {error}", self.output_dir.display());
+                return Err(self.swap_refused_dir_moved());
             }
             Err(error) => return Err(self.map_rooted_error(error)),
         };
         if state.initialized {
             if state.identity != current {
-                return Err(self.swap_refused("directory identity changed"));
+                // The one actionable refusal — the tasks directory itself was
+                // replaced. This is the oracle's `tasks dir moved or linked`.
+                return Err(self.swap_refused_dir_moved());
             }
         } else {
             state.initialized = true;
@@ -247,6 +279,10 @@ impl TaskOutputManager {
     fn map_rooted_error(&self, error: platform_api::FsError) -> OutputError {
         match error {
             platform_api::FsError::OutsideWorkspace(_) => {
+                // A LingXi-specific check (the port validates the relative path
+                // before opening, where the oracle relies on `O_NOFOLLOW`), so
+                // the reason stays truthful to what was refused rather than
+                // borrowing an oracle string that describes an open() failure.
                 self.swap_refused("a parent or final path component is unsafe")
             }
             other => OutputError::Io(other.to_string()),
@@ -1010,6 +1046,25 @@ mod tests {
         assert_eq!(MAX_TASK_OUTPUT_BYTES_DISPLAY, "5GB");
     }
 
+    /// TOF-08: the recovery clause belongs to exactly ONE refusal. Every other
+    /// reason ends at the path — telling a user whose output FILE changed
+    /// identity to restart with a fresh temp directory addresses nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_the_moved_directory_refusal_carries_recovery_guidance() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = TaskOutputManager::new(dir.path().join("tasks"), ExclusiveFs::new());
+        let plain = manager.swap_refused("not a regular nlink-1 file");
+        let OutputError::SwapRefused(message) = plain else {
+            panic!("expected SwapRefused");
+        };
+        assert!(
+            message.starts_with("task output swap refused (not a regular nlink-1 file): "),
+            "got: {message}"
+        );
+        assert!(!message.contains("To recover"), "got: {message}");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn output_root_swap_is_refused_with_recovery_guidance() {
@@ -1036,8 +1091,16 @@ mod tests {
         let OutputError::SwapRefused(message) = error else {
             panic!("expected SwapRefused, got {error:?}");
         };
-        assert!(message.contains("task output swap refused"));
-        assert!(message.contains("fresh directory"));
+        // The one refusal that carries a recovery clause — and it NAMES the
+        // env var, so the reader has something to set.
+        assert!(
+            message.starts_with("task output swap refused (tasks dir moved or linked): "),
+            "got: {message}"
+        );
+        assert!(
+            message.contains("restart with LINGXI_TMPDIR set to a fresh directory"),
+            "got: {message}"
+        );
         assert!(message.contains("remove that entry itself"));
         assert!(!victim.path().join("bpin0002.output").exists());
         assert!(!fs

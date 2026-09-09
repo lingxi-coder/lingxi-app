@@ -111,7 +111,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | `TO-03` | confirmed **[fixed]** | P2 | medium | Not-found messages lack the oracle's suffixes (". Did you mean: …?", ". Running teammates: …", ". Running named agents: …", ". Running background agents: id (desc)") and teammate/name ambiguity errors |
 | `TO-04` | confirmed | P2 | medium | TaskStop has no ownership / observer checks and no owner notification — `_ctx` (which carries `agent_id`) is ignored |
 | `TO-05` | confirmed **[fixed]** | P2 | medium | Non-bash TaskOutput `<output>` is not passed through the subagent-output sanitiser (`uH`): no `[harness: subagent output matched instruction-shaped pattern(s): …]` marker, no `Human:`/`Assistant:` turn-marker neutralisation |
-| `TO-06` | confirmed | P2 | medium | TaskOutput for an `mcp_task` returns the spooled result text; the oracle returns a synthetic metadata block (server/tool/status/elapsed…) with `omitOutputPath` and its own truncation header |
+| `TO-06` | confirmed **[fixed]** | P2 | medium | TaskOutput for an `mcp_task` returns the spooled result text; the oracle returns a synthetic metadata block (server/tool/status/elapsed…) with `omitOutputPath` and its own truncation header |
 | `TO-07` | confirmed | P2 | medium | local_agent output shaping: no `[The agent produced no report text.]`, no `harnessHead` prefix, no `isRawTranscript` flag on the transcript fallback |
 | `TO-08` | confirmed **[fixed]** | P3 | medium | Output-cap sources differ: oracle honours settings `taskOutputMaxChars` (clamped 4000..128000) before the env var; `maxResultSizeChars` is a getter `zut()+18000` (50000 default) and `persistenceThresholdCeiling` 146000 — port is env-only, 100_000, no ceiling |
 | `TO-09` | confirmed | P3 | low | Blocking-wait edges and UI hints: task evicted mid-wait should yield `{retrieval_status:"timeout",task:null}`, abort should raise (not return timeout), `waiting_for_task` progress event and `non-blocking` tool-use render are absent |
@@ -180,7 +180,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | `MON-08` | confirmed | P3 | medium | MCP auto-background ignores hasPendingElicitation: oracle keeps the call in the foreground while an elicitation dialog is open |
 | `MON-10` | confirmed **[partially fixed: the `Dl()`-gated description split landed; `getMcpAutoBackgroundMs`'s host latch remains]** | P3 | low | Dl()-gated variants missing: Monitor prompt has no 'foreground with Bash' wording when background tasks are disabled, and getMcpAutoBackgroundMs ignores the host-level backgroundTasksDisabled latch |
 | `MON-11` | confirmed **[fixed]** | P3 | low | Push-notification splices: ybn leads with two newlines (port one) and the per-event GM hint is omitted even when push is enabled |
-| `MON-12` | confirmed | P3 | medium | monitor_mcp: dormant on both sides, but the port's handler/doc/hook projection describe a resource-catalog watcher that 2.1.263 does not have (oracle record carries server+tool, no producer, no kill module) |
+| `MON-12` | confirmed **[fixed]** | P3 | medium | monitor_mcp: dormant on both sides, but the port's handler/doc/hook projection describe a resource-catalog watcher that 2.1.263 does not have (oracle record carries server+tool, no producer, no kill module) |
 | `MON-13` | confirmed **[fixed]** | P3 | low | Monitor pre-spawn failure returns a task id instead of the oracle's `Monitor: pre-spawn error (cwd/argv redacted)` tool error |
 
 ### Task CRUD + TodoWrite
@@ -315,6 +315,18 @@ Four more, same day:
   any Bash call instead of taking an unconditional sandbox bypass; the wrapped
   form travels as `spawn_command` so the displayed command stays raw. Plugin
   monitors stay unsandboxed, matching `shouldUseSandbox: !1`.
+
+And two more:
+
+- `03c884fed` **MON-12** — the `monitor_mcp` handler's header cited a
+  connection-level resource refresh as if it were this task type. 2.1.263's
+  `monitor_mcp` is a `{server, tool}` record with NO producer and no kill
+  module; the port's resource-catalog watcher is a LingXi shape, dormant on
+  both sides, and now says so.
+- `9a92aad2a` **TO-06** — an `mcp_task` returns the oracle's synthetic metadata
+  block (server / tool / status / status message / elapsed / elicitation)
+  instead of its spool, with `omitOutputPath`'s truncation header. Three lines
+  whose inputs the port does not model are omitted rather than invented.
 
 Guards worth keeping in mind for follow-up work:
 

@@ -686,7 +686,7 @@ impl ConversationOrchestrator {
 
     /// T35: wire the source of terminal background tasks, folded back into the
     /// next turn as a `<task-notification>` reminder by
-    /// [`Self::task_notification_reminder_message`] (claude-code's per-task-type
+    /// [`Self::task_notification_reminder_messages`] (claude-code's per-task-type
     /// `enqueue*Notification`). Without it that method is a strict no-op.
     #[must_use]
     pub fn with_task_notifications(

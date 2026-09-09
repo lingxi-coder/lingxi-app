@@ -285,14 +285,16 @@ impl ConversationOrchestrator {
         Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
-    /// T35: the per-turn, transient `task-notification` reminder, or `None` when
-    /// no source is wired or no background task finished since the last turn.
+    /// T35: the per-turn `task-notification` reminders — one message per
+    /// completion, empty when no source is wired or no background task finished
+    /// since the last turn.
     ///
     /// Mirrors [`Self::async_hook_response_reminder_message`]: drains the
     /// registry's terminal-not-notified tasks (CONSUME-ONCE — the registry marks
     /// each `notified` + evicts on drain) and renders their `<task-notification>`
     /// blocks (claude-code's per-task-type `enqueue*Notification` formats) inside
-    /// one `<system-reminder>` meta user message whose first line is the
+    /// one `<system-reminder>` meta user message PER completion, each whose
+    /// first line is the
     /// `NON_USER_INPUT_HEADER` provenance header (2.1.238 `b_a` @285068292,
     /// applied to every `task-notification`-origin user message so the model
     /// never treats a machine-generated completion as user consent; it also
@@ -306,12 +308,20 @@ impl ConversationOrchestrator {
     /// this is where the oracle's `setAppState({pendingMemoryUpdates:[…]})`
     /// enqueue lands. The queue is drained separately by
     /// [`Self::memory_update_reminder_messages`].
-    pub(crate) async fn task_notification_reminder_message(&self) -> Option<ConversationMessage> {
-        let provider = self.prompt_runtime.task_notifications.as_ref()?;
+    pub(crate) async fn task_notification_reminder_messages(&self) -> Vec<ConversationMessage> {
+        let Some(provider) = self.prompt_runtime.task_notifications.as_ref() else {
+            return Vec::new();
+        };
         let notifications = provider.take_pending_task_notifications().await;
         self.enqueue_memory_updates_from(&notifications);
-        let content = crate::prompt::task_notification::render_reminder(&notifications)?;
-        Some(ConversationMessage::user_meta(MessageId::new(), content))
+        // ONE message per completion: claude-code's `ha(…)` enqueue runs once
+        // per notification and the envelope is applied per message, so two
+        // tasks finishing in the same turn are two user messages. Folding them
+        // into one envelope also folded two provenance headers into one.
+        crate::prompt::task_notification::render_reminders(&notifications)
+            .into_iter()
+            .map(|content| ConversationMessage::user_meta(MessageId::new(), content))
+            .collect()
     }
 
     /// Cap on [`Self::pending_memory_updates`]. The BATCHED turn driver calls

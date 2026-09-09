@@ -251,6 +251,9 @@ pub struct AgentOutcomeState {
     /// Kept isolation worktree branch → `<worktreeBranch>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// Turn budget the run exhausted → the turn-limit `completed` summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns_reached: Option<u64>,
 }
 
 impl AgentOutcomeState {
@@ -264,6 +267,7 @@ impl AgentOutcomeState {
             error: _,
             worktree_path,
             worktree_branch,
+            max_turns_reached,
         } = incoming;
         if result.is_some() {
             self.result = result;
@@ -276,6 +280,9 @@ impl AgentOutcomeState {
         }
         if worktree_branch.is_some() {
             self.worktree_branch = worktree_branch;
+        }
+        if max_turns_reached.is_some() {
+            self.max_turns_reached = max_turns_reached;
         }
     }
 }

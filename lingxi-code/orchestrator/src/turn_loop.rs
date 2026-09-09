@@ -574,9 +574,11 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // surfaces exactly one `<task-notification>`. Placed after the async-hook
     // reminder and before the relevant-memory reminder, identical to the
     // streaming twin — claude-code has ONE main loop, so both LingXi twins must
-    // inject this reminder. `None` when no registry is wired / nothing finished.
-    // See [`ConversationOrchestrator::task_notification_reminder_message`].
-    if let Some(reminder) = orch.task_notification_reminder_message().await {
+    // inject these reminders — ONE message per completion, matching the
+    // oracle's per-notification enqueue. Empty when no registry is wired /
+    // nothing finished.
+    // See [`ConversationOrchestrator::task_notification_reminder_messages`].
+    for reminder in orch.task_notification_reminder_messages().await {
         // A completion notification is a real conversation event, not a
         // transient reminder: claude-code enqueues it onto the command queue and
         // it becomes a durable user message. The port used to render it into the

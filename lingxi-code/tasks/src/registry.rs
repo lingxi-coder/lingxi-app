@@ -2688,6 +2688,9 @@ impl TaskRegistry {
                 killed_by: agent_outcome.killed_by,
                 worktree_path: agent_outcome.worktree_path,
                 worktree_branch: agent_outcome.worktree_branch,
+                // Set only when the run ended by exhausting its turn budget;
+                // selects the turn-limit variant of the `completed` summary.
+                max_turns_reached: agent_outcome.max_turns_reached,
                 result: workflow_outcome
                     .as_ref()
                     .and_then(|outcome| outcome.result.clone())
@@ -2812,6 +2815,17 @@ impl TaskRegistry {
                 killed_by: None,
                 worktree_path: None,
                 worktree_branch: None,
+                // A persistent agent can come to rest by exhausting its turn
+                // budget just as a one-shot can end that way, and the oracle
+                // passes `maxTurnsReached` on every `enqueueAgentNotification`
+                // — rest included. The budget does not ride on `RestPayload`
+                // (that carries only what `notify_rest` is handed); the handler
+                // reports it through `set_agent_outcome` before it arms the
+                // rest, so it is read back off the stored outcome here.
+                max_turns_reached: match state {
+                    TaskState::LocalAgent(agent) => agent.outcome.max_turns_reached,
+                    _ => None,
+                },
                 workflow_failures: Vec::new(),
                 workflow_agent_count: None,
                 workflow_total_tokens: None,

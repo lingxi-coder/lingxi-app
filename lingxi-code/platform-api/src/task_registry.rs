@@ -317,6 +317,12 @@ pub struct AgentTerminalOutcome {
     /// The kept worktree's branch → `<worktreeBranch>` inside that section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// The agent's turn budget, set ONLY when the run ended by exhausting it
+    /// (claude-code `enqueueAgentNotification`'s `maxTurnsReached`). Selects the
+    /// turn-limit variant of the `completed` summary; `None` ⇒ the plain
+    /// "finished" verb. Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns_reached: Option<u64>,
 }
 
 /// Agent-run usage for a `local_agent` task-notification's optional `<usage>`
@@ -446,6 +452,13 @@ pub struct TaskNotification {
     /// `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// `local_agent` only: the turn budget the run exhausted (claude-code
+    /// `enqueueAgentNotification`'s `maxTurnsReached`). `Some(n)` on a
+    /// `completed` task replaces the "finished" verb with
+    /// `stopped at its {n}-turn limit (partial result; SendMessage to task-id
+    /// to continue)`. Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns_reached: Option<u64>,
     /// `local_workflow`: non-fatal per-item diagnostics rendered in a separate
     /// `<failures>` section, never appended to `<result>`.
     #[serde(default)]

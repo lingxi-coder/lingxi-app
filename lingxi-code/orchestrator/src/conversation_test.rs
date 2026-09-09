@@ -273,7 +273,7 @@ mod changed_files_reminder_tests;
 // Proves the two halves of the port of `jzm` @296554545:
 // - ENQUEUE: a terminal `dream` task notification queues a pending update
 //   (`ConversationOrchestrator::enqueue_memory_updates_from`, reached from
-//   `task_notification_reminder_message`, which BOTH turn drivers call);
+//   `task_notification_reminder_messages`, which BOTH turn drivers call);
 // - DRAIN: `memory_update_reminder_messages` renders it once, with the memdir
 //   files that moved and the subset the model is still holding.
 #[cfg(test)]

@@ -29,27 +29,46 @@ pub fn is_env_truthy(value: Option<&str>) -> bool {
     matches!(v.to_lowercase().trim(), "1" | "true" | "yes" | "on")
 }
 
-/// The env core of `isAgentSwarmsEnabled()` / oracle `Jc()` (2.1.223
-/// @247378175: `(CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS || svy()) &&
-/// getFeatureValue("tengu_amber_flint", true)`): Anthropic-internal runs
-/// (`USER_TYPE=ant`) are on by default, external runs need the experimental
-/// env opt-in (port-renamed `LINGXI_EXPERIMENTAL_AGENT_TEAMS`).
+/// `isAgentSwarmsEnabled()` — oracle 2.1.263 `zr()`
+/// (`src_160714897.js` @752):
 ///
-/// The oracle's remaining terms are not modeled: `tengu_amber_flint` is a
-/// default-TRUE GrowthBook killswitch (no GrowthBook in the port ⇒ always
-/// true) and `svy()` is internal-run detection folded into the `USER_TYPE`
-/// arm here. The single SHARED implementation for the two runtime gates
-/// (`tool-task`'s TaskUpdate side-effects, `tool-ui`'s SendMessage); the
-/// coordinator team tools gate on a host `agent_swarms_enabled` feature flag
-/// at `is_enabled` time instead — a different, documented surface.
+/// ```js
+/// function t(){return process.argv.includes("--agent-teams")}
+/// function zr(){
+///   if(!a.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS&&!t())return!1;
+///   if(!H("tengu_amber_flint",!0))return!1;
+///   return!0}
+/// ```
+///
+/// Two opt-ins, either of which turns the surface on: the experimental env var
+/// (port-renamed `LINGXI_EXPERIMENTAL_AGENT_TEAMS`) or the `--agent-teams`
+/// argv flag.
+///
+/// The second term used to be `USER_TYPE=ant` here, ported from 2.1.223's
+/// `svy()` internal-run detection. 2.1.263 replaced that with the explicit
+/// flag, so an Anthropic-internal environment variable no longer decides it
+/// — which also matters for a multi-provider port, where `USER_TYPE` says
+/// nothing about whether the operator wants agent teams.
+///
+/// `tengu_amber_flint` is a default-TRUE GrowthBook killswitch (no GrowthBook
+/// in the port ⇒ always true), so it is not modeled. The single SHARED
+/// implementation for the two runtime gates (`tool-task`'s TaskUpdate
+/// side-effects, `tool-ui`'s SendMessage); the coordinator team tools gate on a
+/// host `agent_swarms_enabled` feature flag at `is_enabled` time instead — a
+/// different, documented surface.
 #[must_use]
 pub fn agent_swarms_enabled() -> bool {
-    std::env::var("USER_TYPE").is_ok_and(|v| v == "ant")
-        || is_env_truthy(
-            std::env::var("LINGXI_EXPERIMENTAL_AGENT_TEAMS")
-                .ok()
-                .as_deref(),
-        )
+    is_env_truthy(
+        std::env::var("LINGXI_EXPERIMENTAL_AGENT_TEAMS")
+            .ok()
+            .as_deref(),
+    ) || agent_teams_argv_flag()
+}
+
+/// Oracle `t(){return process.argv.includes("--agent-teams")}` — an EXACT
+/// element match on the raw argv, not a prefix or `--flag=value` form.
+fn agent_teams_argv_flag() -> bool {
+    std::env::args().any(|arg| arg == "--agent-teams")
 }
 
 /// `isEnvDefinedFalsy(envVar)` (`utils/envUtils.ts:39-47`): a defined,

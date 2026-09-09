@@ -193,7 +193,7 @@ pub(crate) struct PromptRuntime {
     /// if(t.length===0)return[]; e.setAppState(…clear…)`), drained
     /// consume-once by [`Self::memory_update_reminder_messages`].
     ///
-    /// Filled by [`Self::task_notification_reminder_message`] when it drains a
+    /// Filled by [`Self::task_notification_reminder_messages`] when it drains a
     /// TERMINAL `dream` (background memory consolidation) task — the port's
     /// dream handler is a forked subagent whose completion only surfaces through
     /// the task registry, so that drain is the one place the signal exists.
@@ -267,7 +267,7 @@ pub(crate) struct PromptRuntime {
     /// `local_agent` / MCP `monitor` …) finished since the last turn, folded back
     /// into the next turn as a `<task-notification>` reminder so the model learns
     /// its async task completed (claude-code's per-task-type `enqueue*Notification`).
-    /// `None` ⇒ [`Self::task_notification_reminder_message`] is a strict no-op (the
+    /// `None` ⇒ [`Self::task_notification_reminder_messages`] is a strict no-op (the
     /// default — keeps fixtures byte-identical). Wired at the desktop composition
     /// root from the `TaskRegistry`.
     pub(crate) task_notifications:

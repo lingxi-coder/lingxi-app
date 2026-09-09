@@ -2,7 +2,7 @@
 //! [`TaskRegistryHandle`].
 //!
 //! T35: the orchestrator folds a `<task-notification>` reminder into each turn
-//! (see [`ConversationOrchestrator::task_notification_reminder_message`]) by
+//! (see [`ConversationOrchestrator::task_notification_reminder_messages`]) by
 //! draining the registry's terminal-not-notified tasks. The orchestrator names
 //! the registry only through the narrow `platform_api::task_registry::TaskRegistryHandle`
 //! seam (it has no dependency on the `tasks` crate), so this adapter closes the
@@ -20,7 +20,7 @@
 //! `Arc` it registers as the `task_registry`, then injects it via
 //! [`ConversationOrchestrator::with_task_notifications`].
 //!
-//! [`ConversationOrchestrator::task_notification_reminder_message`]:
+//! [`ConversationOrchestrator::task_notification_reminder_messages`]:
 //!     crate::ConversationOrchestrator
 //! [`ConversationOrchestrator::with_task_notifications`]:
 //!     crate::ConversationOrchestrator

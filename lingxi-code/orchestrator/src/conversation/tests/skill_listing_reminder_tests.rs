@@ -608,11 +608,9 @@ async fn task_notification_reminder_folds_in_then_drains_once() {
     )));
     // Turn 0: the terminal task is folded in as a byte-faithful
     // `<task-notification>` inside one `<system-reminder>`.
-    let t0 = orch
-        .task_notification_reminder_message()
-        .await
-        .expect("turn-0 task notification")
-        .text_content();
+    let mut t0_messages = orch.task_notification_reminder_messages().await;
+    assert_eq!(t0_messages.len(), 1, "one completion ⇒ one message");
+    let t0 = t0_messages.pop().expect("turn-0 task notification").text_content();
     // 2.1.238 `b_a` (@285068292): the provenance header sits INSIDE the
     // `<system-reminder>` envelope.
     let body = "<task-notification>\n\
@@ -630,7 +628,7 @@ async fn task_notification_reminder_folds_in_then_drains_once() {
     );
     // Turn 1: consume-once — the notified+evicted task must NOT re-appear.
     assert!(
-        orch.task_notification_reminder_message().await.is_none(),
+        orch.task_notification_reminder_messages().await.is_empty(),
         "a delivered task notification must be drained, not repeated"
     );
 }
@@ -658,10 +656,9 @@ async fn task_notification_is_durable_and_not_a_transient_reminder() {
     )));
 
     let before = orch.session.lock().await.history.len();
-    let message = orch
-        .task_notification_reminder_message()
-        .await
-        .expect("a terminal task produces a message");
+    let mut messages = orch.task_notification_reminder_messages().await;
+    assert_eq!(messages.len(), 1, "one terminal task ⇒ one message");
+    let message = messages.pop().expect("a terminal task produces a message");
 
     // The drivers are what persist it, so mirror exactly what they do and then
     // assert the message survives the turn instead of vanishing with it.
@@ -686,7 +683,7 @@ async fn task_notification_is_durable_and_not_a_transient_reminder() {
     // Consume-once still holds: a second drain has nothing left, so the
     // completion cannot be appended twice.
     assert!(
-        orch.task_notification_reminder_message().await.is_none(),
+        orch.task_notification_reminder_messages().await.is_empty(),
         "a drained completion must not surface again",
     );
 }
@@ -696,7 +693,7 @@ async fn task_notification_reminder_none_without_provider() {
     let reg = ToolRegistry::new();
     let orch = orch_with(reg, None);
     assert!(
-        orch.task_notification_reminder_message().await.is_none(),
+        orch.task_notification_reminder_messages().await.is_empty(),
         "no provider wired ⇒ strict no-op"
     );
 }

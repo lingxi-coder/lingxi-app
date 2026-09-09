@@ -3304,6 +3304,7 @@ async fn take_pending_carries_agent_result_usage_and_worktree() {
                 error: None,
                 worktree_path: Some("/repo/.lingxi/worktrees/agent-1".into()),
                 worktree_branch: Some("worktree-agent-1".into()),
+                max_turns_reached: None,
             },
         )
         .await;
@@ -3326,6 +3327,62 @@ async fn take_pending_carries_agent_result_usage_and_worktree() {
     );
     assert_eq!(n.worktree_branch.as_deref(), Some("worktree-agent-1"));
     assert!(n.killed_by.is_none(), "a completion has no stop initiator");
+}
+
+/// AGT-08 / TN-06 middle link: `max_turns_reached` has to SURVIVE the drain.
+/// The renderer's turn-limit variant and the handler that reads
+/// `{"reason":"max_turns_exhausted"}` are both useless if the registry drops
+/// the field between them.
+#[tokio::test]
+async fn take_pending_carries_the_exhausted_turn_budget() {
+    let (_d, registry) = make_registry();
+    registry
+        .insert_state_for_test(agent_state("aturn0001", TaskStatus::Running))
+        .await;
+    registry
+        .set_agent_outcome(
+            "aturn0001",
+            platform_api::task_registry::AgentTerminalOutcome {
+                max_turns_reached: Some(12),
+                ..Default::default()
+            },
+        )
+        .await;
+    registry
+        .set_status("aturn0001", TaskStatus::Completed)
+        .await
+        .unwrap();
+
+    let drained = registry.take_pending_task_notifications().await;
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].max_turns_reached, Some(12));
+}
+
+/// The same drain leaves the field `None` for a run that stopped for any other
+/// reason — otherwise every completion would render the turn-limit verb.
+#[tokio::test]
+async fn take_pending_leaves_the_turn_budget_unset_for_a_normal_completion() {
+    let (_d, registry) = make_registry();
+    registry
+        .insert_state_for_test(agent_state("aturn0002", TaskStatus::Running))
+        .await;
+    registry
+        .set_agent_outcome(
+            "aturn0002",
+            platform_api::task_registry::AgentTerminalOutcome {
+                result: Some("done".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+    registry
+        .set_status("aturn0002", TaskStatus::Completed)
+        .await
+        .unwrap();
+
+    let drained = registry.take_pending_task_notifications().await;
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].max_turns_reached, None);
 }
 
 /// `outcome.error` lands on the state's `error` field — the failed summary's

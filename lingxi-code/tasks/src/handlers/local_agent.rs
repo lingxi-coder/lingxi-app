@@ -75,6 +75,21 @@ const HANDLER_NAME: &str = "local_agent";
 /// Public because it appears in the signature of the public
 /// [`LocalAgentHandler::workers_map`] accessor (parity with
 /// `LocalBashHandler::children_map`); fields stay private.
+/// claude-code `maxTurnsReached` — the turn budget a run exhausted, or `None`
+/// when it stopped for any other reason.
+///
+/// The runner's max-turns fall-through is the ONLY completion whose payload is
+/// `{"reason":"max_turns_exhausted","max_turns":N}` (`agent/src/runner.rs`);
+/// every other completion carries the agent's answer under `text`. Reading the
+/// budget from the payload is what lets the terminal notification say the
+/// result is partial instead of reporting the run as simply "finished".
+fn max_turns_reached_from(result: &serde_json::Value) -> Option<u64> {
+    if result.get("reason").and_then(serde_json::Value::as_str) != Some("max_turns_exhausted") {
+        return None;
+    }
+    result.get("max_turns").and_then(serde_json::Value::as_u64)
+}
+
 pub struct WorkerCancel {
     handle: BackgroundTaskHandle,
     runtime: Arc<dyn RuntimeSpawner>,
@@ -669,10 +684,26 @@ impl Task for LocalAgentHandler {
                                 if rest_usage.is_some() {
                                     outcome.usage = rest_usage.clone();
                                 }
+                                // Unconditional, unlike the two above: this
+                                // accumulator is what a LATER terminal
+                                // notification reads, so a clean rest after a
+                                // turn-limited one must clear the flag rather
+                                // than leave the stale "-turn limit" verb
+                                // standing.
+                                outcome.max_turns_reached = max_turns_reached_from(&result);
                                 persistent_outcomes
                                     .lock()
                                     .await
                                     .insert(worker_task_id.clone(), outcome.clone());
+                                // Report the accumulated payload to the registry
+                                // BEFORE arming the rest: `RestPayload` carries
+                                // only what `notify_rest` is handed, so the rest
+                                // notification reads the exhausted turn budget
+                                // off the stored outcome. The task is still
+                                // non-terminal, so nothing drains it yet.
+                                status_sink
+                                    .set_agent_outcome(&worker_task_id, outcome.clone())
+                                    .await;
                                 status_sink
                                     .notify_rest(
                                         &worker_task_id,
@@ -818,6 +849,10 @@ impl Task for LocalAgentHandler {
                                 tool_uses: *total_tool_use_count,
                                 duration_ms: *total_duration_ms,
                             });
+                            // A run that fell through its turn budget completes
+                            // with a partial answer; claude-code says so in the
+                            // summary rather than reporting it as "finished".
+                            outcome.max_turns_reached = max_turns_reached_from(content);
                         }
                         Ok(SubagentResult::Failed { reason, .. }) => {
                             outcome.error = Some(reason.clone());
@@ -2072,6 +2107,53 @@ mod tests {
         assert!(outcome.error.is_none(), "a clean run reports no error");
     }
 
+    /// AGT-08 / TN-06 producer link: the runner's max-turns fall-through
+    /// completes with `{"reason":"max_turns_exhausted","max_turns":N}`, and
+    /// that budget has to reach the outcome or the notification cannot say the
+    /// result is partial.
+    #[tokio::test]
+    async fn an_agent_that_exhausts_its_turns_reports_the_budget() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let content = json!({ "reason": "max_turns_exhausted", "max_turns": 12 });
+        let spawner = MockSpawner::new(CannedResult::Completed(content, 7));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let handler = make_handler(spawner, mgr, sink.clone());
+        let workers = handler.workers_map();
+
+        handler
+            .spawn(local_agent_input("p"), make_ctx(fs))
+            .await
+            .unwrap();
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        await_workers_drained(&workers).await;
+
+        assert_eq!(sink.outcome().max_turns_reached, Some(12));
+    }
+
+    /// The budget is read ONLY from the max-turns payload: an ordinary
+    /// completion must leave it unset, or every finished agent would render
+    /// the turn-limit verb.
+    #[tokio::test]
+    async fn an_ordinary_completion_reports_no_turn_budget() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let content = json!([{ "type": "text", "text": "done" }]);
+        let spawner = MockSpawner::new(CannedResult::Completed(content, 7));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let handler = make_handler(spawner, mgr, sink.clone());
+        let workers = handler.workers_map();
+
+        handler
+            .spawn(local_agent_input("p"), make_ctx(fs))
+            .await
+            .unwrap();
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        await_workers_drained(&workers).await;
+
+        assert_eq!(sink.outcome().max_turns_reached, None);
+    }
+
     /// An agent whose final content has no text blocks omits `<result>` rather
     /// than rendering an empty one — claude gates the section on a TRUTHY
     /// `finalMessage` (`s ? "<result>…" : ""`).
@@ -2528,8 +2610,10 @@ mod tests {
         assert_eq!(sink.last_status(), Some(TaskStatus::Killed));
         assert_eq!(
             sink.calls(),
-            vec!["outcome", "status"],
-            "terminal payload lands before Killed"
+            vec!["outcome", "outcome", "status"],
+            "the rest reports its accumulated payload (so the rest notification \
+             can read the exhausted turn budget off it), then the TERMINAL \
+             payload lands before Killed"
         );
         let outcome = sink.outcome();
         assert_eq!(outcome.result.as_deref(), Some("rest answer"));

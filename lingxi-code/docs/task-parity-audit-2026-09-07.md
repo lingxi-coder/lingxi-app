@@ -394,6 +394,20 @@ user-vs-model split is wrong.
   `schema_shape_matches_latest_shared_contract` read `LINGXI_EXPERIMENTAL_AGENT_TEAMS`
   twice without the lock every mutator in the file already takes.
 
+- **A leak `nHn`'s second half covers and the port's sweep did not** — found by
+  probing, not by the audit. `kill_background_shells_for_agent` stamped
+  `notified` only on the shells it killed, but `dG((r)=>r.agentId===e)` drops
+  every pending notification addressed to the exiting agent, and the kill loop
+  is gated on `status==="running"`. A shell the subagent ran to completion and
+  never read was therefore left to surface a `<task-notification>` in the MAIN
+  session. The sweep now covers both populations.
+
+  Worth recording HOW this surfaced: neutering the sweep's own `mark_notified`
+  changed nothing, because `kill` → `mark_killed` → `stamp_kill_notified`
+  already suppresses any row the sweep kills. The existing test could not tell
+  the two mechanisms apart, so it read as coverage of a line it never
+  exercised. Only a row the kill loop never touches separates them.
+
 A second research fan-out — the owner-routing / idle-wake / active-task cluster
 (`AGT-05`, `TN-10`, `TN-03`, `TID-06`, `TID-07`, `AGT-09`) — is banked in
 `subagents/workflows/wf_87b17957-723/journal.jsonl`. All six plans came back

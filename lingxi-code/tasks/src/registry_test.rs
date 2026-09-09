@@ -774,6 +774,72 @@ async fn background_all_moves_every_armed_row_and_tool_use_targets_one() {
     assert_eq!(registry.background_all_tasks().await, 0);
 }
 
+/// `nHn`'s second half, `dG((r)=>r.agentId===e)`, is NOT scoped to the rows the
+/// kill loop just touched: it drops every pending notification addressed to the
+/// exiting agent. A shell the subagent ran to completion and never read is
+/// exactly that case — the kill loop skips it (it is already terminal), so
+/// before this the sweep left it to surface in the MAIN session.
+///
+/// This is the break the sibling test cannot see: `kill` itself stamps
+/// `notified` through `mark_killed`, so neutering the sweep's own stamping
+/// changes nothing for a row the sweep killed. Only a row the kill loop never
+/// touches distinguishes the two mechanisms.
+#[tokio::test]
+async fn a_finishing_agent_also_silences_shells_it_already_finished() {
+    let (_dir, registry) = make_registry();
+    let mine = protocol::AgentId::new();
+    let theirs = protocol::AgentId::new();
+
+    let mut ids = Vec::new();
+    for (label, owner) in [
+        ("mine-finished", Some(mine)),
+        ("theirs-finished", Some(theirs)),
+        ("main-finished", None),
+    ] {
+        let (id, _) = registry.allocate_bash_output().await.unwrap();
+        registry
+            .register_background_bash(
+                id.clone(),
+                format!("echo hi # {label}"),
+                label.into(),
+                None,
+                None,
+                owner,
+            )
+            .await
+            .unwrap();
+        // Each one finishes on its OWN — no kill involved, so nothing has
+        // stamped `notified` and each still owes the model a notification.
+        registry
+            .settle_background_bash(&id, Some(0), false)
+            .await
+            .unwrap();
+        ids.push((label, id));
+    }
+
+    // The sweep kills nothing: every owned shell is already terminal.
+    assert_eq!(
+        registry.kill_background_shells_for_agent(mine).await,
+        0,
+        "nothing was still running to kill"
+    );
+
+    let drained = registry.take_pending_task_notifications().await;
+    let surfaced: Vec<&str> = ids
+        .iter()
+        .filter(|(_, id)| drained.iter().any(|n| &n.task_id == id))
+        .map(|(label, _)| *label)
+        .collect();
+    // The exiting agent's own finished shell is silenced; the other two are
+    // untouched, which is what proves this is about ownership and not about the
+    // drain being empty.
+    assert_eq!(
+        surfaced,
+        vec!["theirs-finished", "main-finished"],
+        "only the exiting agent's own finished shell may be silenced"
+    );
+}
+
 #[tokio::test]
 async fn a_finishing_agent_stops_only_its_own_background_shells() {
     // The Bash tool promises a synchronous subagent that a command it
@@ -788,6 +854,10 @@ async fn a_finishing_agent_stops_only_its_own_background_shells() {
     let mut ids = Vec::new();
     for (label, owner) in [
         ("mine", Some(mine)),
+        // A SECOND shell owned by the same agent, so the silence assertion
+        // below is a COUNT and not a single-row `any`: a suppression that
+        // stamped only the first row it killed would still pass the `any`.
+        ("mine-2", Some(mine)),
         ("theirs", Some(theirs)),
         ("main-session", None),
     ] {
@@ -807,11 +877,11 @@ async fn a_finishing_agent_stops_only_its_own_background_shells() {
     }
 
     let killed = registry.kill_background_shells_for_agent(mine).await;
-    assert_eq!(killed, 1, "exactly the finishing agent's own shell");
+    assert_eq!(killed, 2, "exactly the finishing agent's own shells");
 
     for (label, id) in &ids {
         let status = registry.get(id).await.unwrap().base().status;
-        if *label == "mine" {
+        if label.starts_with("mine") {
             assert_eq!(status, TaskStatus::Killed, "{label} must be stopped");
         } else {
             assert_eq!(status, TaskStatus::Running, "{label} must be left alone");
@@ -826,14 +896,19 @@ async fn a_finishing_agent_stops_only_its_own_background_shells() {
     // tidying up after a subagent must not narrate itself into the main
     // session. The other two shells are untouched and still notify normally.
     let drained = registry.take_pending_task_notifications().await;
-    let swept = ids
+    let swept: Vec<String> = ids
         .iter()
-        .find(|(label, _)| *label == "mine")
+        .filter(|(label, _)| label.starts_with("mine"))
         .map(|(_, id)| id.clone())
-        .unwrap();
-    assert!(
-        !drained.iter().any(|n| n.task_id == swept),
-        "the swept shell must not surface a <task-notification>, got: {:?}",
+        .collect();
+    assert_eq!(swept.len(), 2, "both of the agent's shells were swept");
+    assert_eq!(
+        drained
+            .iter()
+            .filter(|n| swept.contains(&n.task_id))
+            .count(),
+        0,
+        "no swept shell may surface a <task-notification>, got: {:?}",
         drained.iter().map(|n| &n.task_id).collect::<Vec<_>>(),
     );
 

@@ -1116,40 +1116,77 @@ impl TaskRegistry {
     /// Only shells owned by THIS agent are touched, so the main session's and
     /// other agents' commands are untouched.
     ///
-    /// The sweep is silent. `nHn` is two halves — kill the rows, then
-    /// `dG((r)=>r.agentId===e)`, where `dG` is
-    /// `pendingNotificationQueue.dequeueAllMatching` — so the kill
-    /// notifications it just produced are dequeued again and never reach the
-    /// model. This engine has no per-agent notification queue (it derives
-    /// notifications from state: terminal AND not `notified`), so the
-    /// equivalent is to stamp `notified` on each row as it is killed.
-    /// Without that, tidying up after a subagent spits a
-    /// `<task-notification> … was stopped` into the MAIN session for every
-    /// shell the subagent happened to leave running.
+    /// The sweep is silent. `nHn` (`src_160988549.js` @3376778) is two halves —
+    /// kill the running rows, then `dG((r)=>r.agentId===e)`, where `dG` is
+    /// `pendingNotificationQueue.dequeueAllMatching`. Note the two halves range
+    /// over DIFFERENT populations: the kill loop is gated on
+    /// `status==="running"`, but the dequeue drops every pending notification
+    /// addressed to the exiting agent, whatever produced it.
+    ///
+    /// This engine has no per-agent notification queue — it derives
+    /// notifications from state (terminal AND not `notified`) — so the
+    /// equivalent is to stamp `notified` on both populations: the rows this
+    /// sweep kills, and the agent's shells that had already finished on their
+    /// own with their completion still undrained. Without the first, tidying up
+    /// after a subagent spits a `<task-notification> … was stopped` into the
+    /// MAIN session for every shell it left running; without the second it does
+    /// the same for every command the subagent finished but never read.
     ///
     /// Note this is the opposite of a user-initiated `TaskStop`, where the stop
     /// notification is the point; the oracle drops these because nothing is
     /// left to read them.
     pub async fn kill_background_shells_for_agent(&self, agent_id: protocol::AgentId) -> usize {
-        let owned: Vec<String> = {
+        // Two lists, because `nHn` is two halves over two different
+        // populations. The kill loop is gated on `status==="running"`, but
+        // `dG((r)=>r.agentId===e)` afterwards drops EVERY pending notification
+        // addressed to the exiting agent — including one from a shell that had
+        // already finished on its own and whose completion nobody has read yet.
+        let (live, already_terminal): (Vec<String>, Vec<String>) = {
             let map = self.tasks.read().await;
-            map.values()
-                .filter_map(|state| {
-                    let base = state.base();
-                    let owned_shell = matches!(state, TaskState::LocalBash(_))
-                        && base.creator_agent_id == Some(agent_id)
-                        && !base.status.is_terminal();
-                    owned_shell.then(|| base.id.clone())
-                })
-                .collect()
+            let mut live = Vec::new();
+            let mut already_terminal = Vec::new();
+            for state in map.values() {
+                let base = state.base();
+                if !matches!(state, TaskState::LocalBash(_))
+                    || base.creator_agent_id != Some(agent_id)
+                {
+                    continue;
+                }
+                if base.status.is_terminal() {
+                    // Only rows that still owe a notification; a drained one has
+                    // nothing left to suppress.
+                    if !base.notified {
+                        already_terminal.push(base.id.clone());
+                    }
+                } else {
+                    live.push(base.id.clone());
+                }
+            }
+            (live, already_terminal)
         };
         let mut killed = 0;
-        for id in owned {
+        for id in live {
             if self.kill(&id).await.is_ok() {
                 killed += 1;
-                // The `dG` half: suppress the notification the kill just armed.
+                // Belt and braces for the race `kill` deliberately excludes: it
+                // stamps only a row THIS kill ended (`was_live`), so a shell
+                // that settled between the snapshot above and the kill would
+                // otherwise keep its notification. `dG` drops that one too.
                 let _ = self.mark_notified(&id).await;
             }
+        }
+        // The rest of `dG`'s reach: finished-on-their-own shells the kill loop
+        // never touches. Without this the sweep still leaked a
+        // `<task-notification>` into the MAIN session for every command the
+        // subagent happened to complete but not read.
+        //
+        // Narrowing: `dG`'s filter is `r.agentId === e` over the whole pending
+        // queue and is blind to task TYPE, so upstream it also drops a monitor
+        // or backgrounded MCP call the agent owned. This stays shell-scoped —
+        // the function is the shell sweep, and the port has no enqueue-time
+        // agent attribution to reproduce the queue-wide reach faithfully.
+        for id in already_terminal {
+            let _ = self.mark_notified(&id).await;
         }
         killed
     }

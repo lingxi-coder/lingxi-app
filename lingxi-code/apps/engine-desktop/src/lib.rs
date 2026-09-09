@@ -7910,6 +7910,13 @@ fn load_merged_agent_push_notif_enabled(project_dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Load the merged `settings.taskOutputMaxChars`. `None` when unset — the
+/// oracle's `Ge().taskOutputMaxChars === undefined` branch, which is what makes
+/// `TASK_MAX_OUTPUT_LENGTH` apply.
+fn load_merged_task_output_max_chars(project_dir: &std::path::Path) -> Option<u32> {
+    load_merged_settings(project_dir).and_then(|eff| eff.settings.task_output_max_chars)
+}
+
 /// Load `settings.workflowKeywordTriggerEnabled`. The default remains off,
 /// matching Claude Code's optional setting.
 fn load_merged_workflow_keyword_trigger_enabled(project_dir: &std::path::Path) -> bool {
@@ -10952,6 +10959,16 @@ pub async fn build(
             .unwrap_or(false)
     } else {
         load_merged_agent_push_notif_enabled(&cfg.cwd)
+    });
+    // `settings.taskOutputMaxChars` — the soft cap `TaskOutput` truncates a
+    // task's model-facing output to, and the base its result budget is derived
+    // from. Published RAW; `tool_task` applies the oracle's `see()` clamp.
+    platform_api::session_flags::set_task_output_max_chars(if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .and_then(|settings| settings.settings.task_output_max_chars)
+    } else {
+        load_merged_task_output_max_chars(&cfg.cwd)
     });
     // OUTSTYLE.3: custom output-style search dirs — user (`~/.lingxi/output-styles`)
     // then project (`<cwd>/.lingxi/output-styles`), in increasing priority so a

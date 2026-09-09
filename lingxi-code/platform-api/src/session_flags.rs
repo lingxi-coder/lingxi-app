@@ -9,7 +9,7 @@
 //! prompt-build-time reads: set once by the composition point that knows the
 //! session mode, read by builders such as the `AgentTool` fork gate.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// `getIsNonInteractiveSession()` analog. Defaults `false` (interactive); set by
@@ -330,6 +330,28 @@ pub fn show_thinking_summaries() -> bool {
 /// Publish the merged `agentPushNotifEnabled` setting.
 pub fn set_agent_push_notif_enabled(enabled: bool) {
     AGENT_PUSH_NOTIF_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// `settings.taskOutputMaxChars`, published by the composition root, or `0`
+/// when unset. Held as a `u32` because the value is clamped to
+/// `4_000..=128_000` before it is ever read.
+static TASK_OUTPUT_MAX_CHARS: AtomicU32 = AtomicU32::new(0);
+
+/// Publish `settings.taskOutputMaxChars`. `None` (or a startup that never
+/// calls this) leaves the reader answering `None`, which is the oracle's
+/// `Ge().taskOutputMaxChars === undefined` branch.
+pub fn set_task_output_max_chars(chars: Option<u32>) {
+    TASK_OUTPUT_MAX_CHARS.store(chars.unwrap_or(0), Ordering::Relaxed);
+}
+
+/// The published `settings.taskOutputMaxChars`, RAW — the `see()` clamp is the
+/// consumer's job, because the two consumers apply it to different fallbacks.
+#[must_use]
+pub fn task_output_max_chars() -> Option<u32> {
+    match TASK_OUTPUT_MAX_CHARS.load(Ordering::Relaxed) {
+        0 => None,
+        v => Some(v),
+    }
 }
 
 /// Whether proactive agent push notifications are opted in by settings.

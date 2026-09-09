@@ -858,6 +858,13 @@ impl Tool for ConfigTool {
                 final_value.as_bool().unwrap_or(false),
             );
         }
+        if setting == "taskOutputMaxChars" {
+            // Republish so `TaskOutput`'s cap moves with the setting inside the
+            // running session, exactly as the push flag above does.
+            platform_api::session_flags::set_task_output_max_chars(
+                final_value.as_u64().and_then(|n| u32::try_from(n).ok()),
+            );
+        }
 
         emit_completed(&bus, started, "set", &setting, &file).await;
         Ok(done(json!({

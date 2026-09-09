@@ -3120,6 +3120,82 @@ Running background agents: a1b2c3d4e (survey the crate)"
             assert!(*reg.output_calls.lock().unwrap() >= 3);
         }
 
+        // ── TO-08: where the output cap comes from ───────────────────────────
+
+        /// Serializes on the same lock the env-var tests use, and always clears
+        /// the published setting on the way out so a later test sees the
+        /// oracle's `Ge().taskOutputMaxChars === undefined` branch.
+        fn with_task_output_setting<T>(chars: Option<u32>, f: impl FnOnce() -> T) -> T {
+            let _lock = super::ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            platform_api::session_flags::set_task_output_max_chars(chars);
+            let out = f();
+            platform_api::session_flags::set_task_output_max_chars(None);
+            out
+        }
+
+        /// `see()` pulls an out-of-range setting to the nearest bound instead of
+        /// rejecting it (`Math.min(Math.max(e,4000),128000)`).
+        #[test]
+        fn the_output_cap_setting_is_clamped_not_rejected() {
+            assert_eq!(
+                with_task_output_setting(Some(10), max_task_output_length),
+                4_000
+            );
+            assert_eq!(
+                with_task_output_setting(Some(9_999_999), max_task_output_length),
+                128_000
+            );
+            assert_eq!(
+                with_task_output_setting(Some(50_000), max_task_output_length),
+                50_000
+            );
+        }
+
+        /// `jqo()` returns the SETTING outright when present — the env var is
+        /// only consulted in its `undefined` branch. The port used to read the
+        /// env var alone, so a configured project was silently ignored.
+        #[test]
+        fn the_output_cap_setting_wins_over_the_env_var() {
+            let with_env = |chars: Option<u32>| {
+                with_task_output_setting(chars, || {
+                    std::env::set_var("TASK_MAX_OUTPUT_LENGTH", "70000");
+                    let got = max_task_output_length();
+                    std::env::remove_var("TASK_MAX_OUTPUT_LENGTH");
+                    got
+                })
+            };
+            assert_eq!(with_env(Some(20_000)), 20_000, "the setting wins");
+            assert_eq!(with_env(None), 70_000, "no setting ⇒ the env var applies");
+        }
+
+        /// `get maxResultSizeChars(){return zut()+bWn}` — the SOFT cap (settings
+        /// only, never the env var) plus 18_000. Default 50_000, not the flat
+        /// 100_000 the port used to report.
+        #[test]
+        fn the_result_budget_tracks_the_soft_cap() {
+            let tool = TaskOutputTool::new(bctx(MockRegistry::with_record(None)));
+            assert_eq!(
+                with_task_output_setting(None, || tool.max_result_size_chars()),
+                50_000
+            );
+            assert_eq!(
+                with_task_output_setting(Some(128_000), || tool.max_result_size_chars()),
+                146_000
+            );
+            // The env var moves `max_task_output_length` but NOT this getter.
+            let via_env = with_task_output_setting(None, || {
+                std::env::set_var("TASK_MAX_OUTPUT_LENGTH", "120000");
+                let got = tool.max_result_size_chars();
+                std::env::remove_var("TASK_MAX_OUTPUT_LENGTH");
+                got
+            });
+            assert_eq!(via_env, 50_000, "zut() ignores TASK_MAX_OUTPUT_LENGTH");
+            // `persistenceThresholdCeiling: hge+bWn` is a constant.
+            assert_eq!(tool.persistence_threshold_ceiling(), Some(146_000));
+        }
+
         // ── BASHOUT.1: output truncation (formatTaskOutput) ──────────────────
 
         #[test]

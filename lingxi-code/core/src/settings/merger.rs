@@ -102,6 +102,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         agent_push_notif_enabled: next
             .agent_push_notif_enabled
             .or(prev.agent_push_notif_enabled),
+        task_output_max_chars: next
+            .task_output_max_chars
+            .or(prev.task_output_max_chars),
         workflow_keyword_trigger_enabled: next
             .workflow_keyword_trigger_enabled
             .or(prev.workflow_keyword_trigger_enabled),

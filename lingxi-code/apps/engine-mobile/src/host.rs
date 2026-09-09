@@ -3563,6 +3563,10 @@ async fn build_mobile_inner_with_ask(
     // `agentPushNotifEnabled` scalar override (user → project → local). The
     // feature flag is checked independently by the cron/tool consumers.
     let mut agent_push_notif_enabled = false;
+    // `taskOutputMaxChars` scalar override (user → project → local). Absent
+    // leaves `TASK_MAX_OUTPUT_LENGTH` in charge; `tool_task` applies the
+    // oracle's 4_000..=128_000 clamp when it reads this.
+    let mut task_output_max_chars: Option<u32> = None;
     // `workflowSizeGuideline` scalar override (user → project → local). Absent
     // stays at Claude Code's built-in medium default; an explicit "medium"
     // remains explicit (is_default = false).
@@ -3774,6 +3778,13 @@ async fn build_mobile_inner_with_ask(
                     {
                         agent_push_notif_enabled = b;
                     }
+                    if let Some(chars) = v
+                        .get("taskOutputMaxChars")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|n| u32::try_from(n).ok())
+                    {
+                        task_output_max_chars = Some(chars);
+                    }
                     if let Some(size) = v
                         .get("workflowSizeGuideline")
                         .and_then(serde_json::Value::as_str)
@@ -3801,6 +3812,7 @@ async fn build_mobile_inner_with_ask(
             }
         }
         platform_api::session_flags::set_agent_push_notif_enabled(agent_push_notif_enabled);
+        platform_api::session_flags::set_task_output_max_chars(task_output_max_chars);
         // Filesystem roots so file-path CONTENT rules (`Edit(src/**)`,
         // `Read(./secrets/**)`) match the call's path. `dirs` is not a mobile dep,
         // so HOME comes from the env (absent on a sandboxed device ⇒ `None`).

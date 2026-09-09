@@ -2555,6 +2555,15 @@ const TASK_MAX_OUTPUT_DEFAULT: usize = 32_000;
 /// (`outputFormatting.ts:4` `TASK_MAX_OUTPUT_UPPER_LIMIT = 160_000`).
 const TASK_MAX_OUTPUT_UPPER_LIMIT: usize = 160_000;
 
+/// claude-code `Pir` / `hge` — the bounds `see()` clamps
+/// `settings.taskOutputMaxChars` into (`src_158021603.js`: `Pir=4000,hge=128000`).
+const TASK_OUTPUT_SETTING_MIN: usize = 4_000;
+const TASK_OUTPUT_SETTING_MAX: usize = 128_000;
+
+/// claude-code `bWn = u1 - c5e` = `50_000 - 32_000` — the headroom the
+/// `TaskOutput` tool adds on top of the output cap to get its result budget.
+const TASK_OUTPUT_RESULT_HEADROOM: usize = 18_000;
+
 /// Boolean that also accepts the string literals `"true"`/`"false"` — a port of
 /// the TS `semanticBoolean()` (`utils/semanticBoolean.ts:22-29`) preprocess
 /// step: `"true"`→`true`, `"false"`→`false`; anything else passes through to the
@@ -2618,11 +2627,40 @@ fn parse_int_radix10(s: &str) -> Option<i128> {
     Some(buf.parse::<i128>().unwrap_or(i128::MAX))
 }
 
-/// Port of `getMaxTaskOutputLength()` (`outputFormatting.ts:7-15`) over
-/// `validateBoundedIntEnvVar` (`envValidation.ts:9-38`): `TASK_MAX_OUTPUT_LENGTH`
-/// overrides the 32_000 default; an empty / non-positive / unparseable value
-/// falls back to the default; anything above 160_000 is clamped down to it.
+/// claude-code `see()` — the settings clamp: `Math.min(Math.max(e, 4000), 128000)`
+/// applied to `Ge().taskOutputMaxChars`, or `None` when the setting is absent.
+///
+/// A value outside the range is PULLED to the nearest bound, not rejected;
+/// that is what makes the setting safe to honour ahead of the env var.
+fn settings_task_output_cap() -> Option<usize> {
+    platform_api::session_flags::task_output_max_chars()
+        .map(|v| (v as usize).clamp(TASK_OUTPUT_SETTING_MIN, TASK_OUTPUT_SETTING_MAX))
+}
+
+/// claude-code `zut()` — `see(Ge().taskOutputMaxChars) ?? 32_000`. The SOFT cap
+/// the tool's result budget is derived from; unlike
+/// [`max_task_output_length`] it ignores `TASK_MAX_OUTPUT_LENGTH`.
+fn task_output_soft_cap() -> usize {
+    settings_task_output_cap().unwrap_or(TASK_MAX_OUTPUT_DEFAULT)
+}
+
+/// Port of `getMaxTaskOutputLength()` — 2.1.263 `jqo()`:
+///
+/// ```js
+/// function jqo(){let e=see(Ge().taskOutputMaxChars);if(e!==void 0)return e;
+///   return Hte("TASK_MAX_OUTPUT_LENGTH",process.env.TASK_MAX_OUTPUT_LENGTH,c5e,tgn).effective}
+/// ```
+///
+/// The SETTING wins outright when present (already clamped to 4_000..=128_000);
+/// only when it is absent does `TASK_MAX_OUTPUT_LENGTH` apply over the 32_000
+/// default, with an empty / non-positive / unparseable value falling back to
+/// that default and anything above 160_000 clamped down to it. The port used to
+/// read the env var alone, so a project that had set `taskOutputMaxChars` was
+/// silently ignored.
 fn max_task_output_length() -> usize {
+    if let Some(from_settings) = settings_task_output_cap() {
+        return from_settings;
+    }
     let raw = match std::env::var("TASK_MAX_OUTPUT_LENGTH") {
         Ok(v) if !v.is_empty() => v,
         _ => return TASK_MAX_OUTPUT_DEFAULT,
@@ -2833,9 +2871,22 @@ impl Tool for TaskOutputTool {
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
     }
+    /// claude-code `get maxResultSizeChars(){return zut()+bWn}` — the SOFT
+    /// output cap plus 18_000 of headroom, i.e. 50_000 by default and up to
+    /// 146_000 when `taskOutputMaxChars` is raised. The port's flat 100_000 was
+    /// neither: it over-budgeted a default session and under-budgeted a
+    /// configured one.
     fn max_result_size_chars(&self) -> usize {
-        100_000
+        task_output_soft_cap() + TASK_OUTPUT_RESULT_HEADROOM
     }
+
+    /// claude-code `persistenceThresholdCeiling: hge+bWn` = 146_000 — the cap
+    /// the persistence threshold is measured against, independent of the
+    /// session's own setting.
+    fn persistence_threshold_ceiling(&self) -> Option<usize> {
+        Some(TASK_OUTPUT_SETTING_MAX + TASK_OUTPUT_RESULT_HEADROOM)
+    }
+
     /// `shouldDefer: true` (`TaskOutputTool.tsx:148`).
     fn should_defer(&self) -> bool {
         true

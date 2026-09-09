@@ -394,6 +394,45 @@ user-vs-model split is wrong.
   `schema_shape_matches_latest_shared_contract` read `LINGXI_EXPERIMENTAL_AGENT_TEAMS`
   twice without the lock every mutator in the file already takes.
 
+A second research fan-out — the owner-routing / idle-wake / active-task cluster
+(`AGT-05`, `TN-10`, `TN-03`, `TID-06`, `TID-07`, `AGT-09`) — is banked in
+`subagents/workflows/wf_87b17957-723/journal.jsonl`. All six plans came back
+`sound-with-corrections`; 36 claims were refuted. The load-bearing ones, so a
+future pass does not have to re-derive them:
+
+- **The compiler gives NO pressure on the consumer side of a new
+  `TaskNotification` field.** Every test fixture spreads `..Default::default()`;
+  only the two PRODUCTION emit sites in `tasks/src/registry.rs` are exhaustive.
+  A missed or wrong fill is caught by the step's own assertions or not at all.
+- **There are TWO notification traits, not one.** The orchestrator never sees
+  `TaskRegistryHandle`; it sees `TaskNotificationProvider`
+  (`orchestrator/src/prompt/task_notification.rs`), bridged in
+  `task_notifications_provider.rs`. A signature change hits both plus three
+  mocks.
+- **`TaskRecord::owner_agent_id` is not one axis.** It is the agent's OWN id for
+  `local_agent` and the CREATOR for `local_bash` (`tasks/src/handle.rs`).
+  Routing a `local_agent` completion must read `creator_agent_id`.
+- **Delivering to a running owner via `send_message` cancels its turn.**
+  `resume` lands as `Event::UserMessage` on the runner's event channel, which a
+  `biased` select races against the in-flight API future; the persistent arm
+  drops the stream and re-issues. The oracle's `cYe` folds without cancelling.
+  Either probe that the owner's turn survives, or restrict delivery to a PARKED
+  owner and record the running-owner arm as a divergence.
+- **The port's `cYe` is `msgqueue`'s `take_mid_turn_prompt`**, which runs in
+  production on every host and is hard-wired to `command.is_main_thread()`.
+  `is_task_notification_for` is the unwired other half of THAT function, not of
+  a fold nobody wrote.
+- **TN-10's step 4 is a dependency cycle**: `orchestrator` depends on `agent`,
+  so `TaskNotificationProvider` cannot be threaded onto `SubagentContext`. It
+  needs the registry handle plus the renderer moved into a shared crate.
+- **One correction in that batch is itself wrong.** The verifier reported that
+  claude-code's `JF` "stamps `notified:!0` and never enqueues", making the port's
+  `kill_background_shells_for_agent` doc comment inaccurate. `JF`
+  (`src_160988549.js` @2038729) captures `o = d.notified` BEFORE stamping and
+  DOES enqueue `pi(e,"stopped",…)` when `r && !o`; `nHn`'s second half then
+  dequeues it. The port's comment describes that net effect correctly and was
+  left alone. Read the verdicts, but check them too.
+
 - **MON-01** — an MCP task's answer now reaches the model. The notification was
   falling into the generic arm, so it carried `<task-type>mcp_task</task-type>`,
   an `<output-file>` line, and `Task "…" completed successfully` — with the

@@ -11209,6 +11209,12 @@ pub async fn build(
     // below from `policy.tool_wide_deny_names()`; left empty otherwise ⇒ the
     // subagent tool pool is unfiltered (byte-identical to before).
     let subagent_tool_wide_deny_cell = subagent_spawner_concrete.tool_wide_deny_names_handle();
+    // (2.1.263 `bs(Rn)`) The spawn-time bypass clamps: an agent definition's
+    // `permissionMode: bypassPermissions` must NOT raise a restrictive parent
+    // session. Grabbed before boxing because `bypass_disabled` only exists once
+    // the boot permission tiers load, far below. Filled in BOTH arms of the
+    // enforcement branch so the cell is never left at its no-clamp default.
+    let subagent_bypass_gates_cell = subagent_spawner_concrete.spawn_bypass_gates_handle();
     // Coordinator mode is constructed below because it owns the session
     // lifecycle. Capture the spawner's set-once seam now and fill it once the
     // live mode exists, so each spawn consults `is_enabled()` at spawn time.
@@ -11799,6 +11805,16 @@ pub async fn build(
             cfg.flag_settings.as_ref(),
         )
         .await;
+        // (2.1.263 `bs(Rn)`) All three clamp inputs exist here: `ey()` is this
+        // tier fold's `disableBypassPermissionsMode == "disable"`, `Rn.restricted`
+        // is the `--restricted` bit, and `YYe()` is read ONCE at this edge — never
+        // inside the clamp, because `CLAUDE_CODE_EVAL_CONFINED` is a process global
+        // and an env-reading gate makes a parallel test suite flaky.
+        let _ = subagent_bypass_gates_cell.set(agent::permission_mode::SpawnBypassGates {
+            confined: platform_api::env::is_eval_confined_session(),
+            bypass_disabled,
+            restricted: cfg.restricted,
+        });
         if cfg.restricted {
             additional_working_dirs = permission::working_dirs::AdditionalWorkingDirs::new();
         }
@@ -11970,6 +11986,14 @@ pub async fn build(
         boot_additional_working_dirs = cfg.add_dir.clone();
         perms
     };
+    // Enforcement-off fallback for the clamp inputs: the settings tiers were not
+    // loaded, so `disableBypassPermissionsMode` is unknown (⇒ `false`). A no-op
+    // when the enforcing arm above already filled the cell.
+    let _ = subagent_bypass_gates_cell.set(agent::permission_mode::SpawnBypassGates {
+        confined: platform_api::env::is_eval_confined_session(),
+        bypass_disabled: false,
+        restricted: cfg.restricted,
+    });
     // Capture the enforcing gate for the interactive TUI's Shift+Tab live
     // permission-mode cycling (`set_permission_mode`), before `perms` is moved
     // into the tool context below.

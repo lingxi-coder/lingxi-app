@@ -3616,6 +3616,16 @@ async fn build_mobile_inner_with_ask(
     // value is reused by subagent/workflow composition and the tool context
     // so every surface reports the same effective mode.
     let mut resolved_permission_mode = PermissionMode::Auto;
+    // (2.1.263 `bs(Rn)`) Spawn-time bypass clamps for subagent definitions,
+    // published from the settings fold below like `resolved_permission_mode`.
+    // `restricted` is always false on mobile: there is no `--restricted` flag.
+    // `confined` is read ONCE here rather than inside the clamp — a gate that
+    // reads `CLAUDE_CODE_EVAL_CONFINED` itself makes a parallel suite flaky.
+    let mut subagent_bypass_gates = agent::permission_mode::SpawnBypassGates {
+        confined: platform_api::env::is_eval_confined_session(),
+        bypass_disabled: false,
+        restricted: false,
+    };
     let mut requested_permission_mode = PermissionMode::Auto.wire_str().to_string();
     let workspace_leases = permission::WorkspacePermissionLeaseRegistry::new();
     // ONE derivation of the (host, guest) workspace pairing. `model_cwd` below
@@ -3872,6 +3882,7 @@ async fn build_mobile_inner_with_ask(
             .with_plan_files(plan_files.clone());
         // Audit fix (#1): honor the bypassPermissions killswitch resolved above.
         policy.bypass_killswitch_active = bypass_disabled;
+        subagent_bypass_gates.bypass_disabled = bypass_disabled;
         // Auto-mode killswitch (`Bpa()`): the live `set_permission_mode` gate
         // refuses `auto` when any tier set `disableAutoMode: "disable"`.
         policy.auto_mode_disabled = auto_mode_disabled;
@@ -4317,6 +4328,7 @@ async fn build_mobile_inner_with_ask(
             &orch_cfg.model,
         ))
         .with_permission_mode(resolved_permission_mode)
+        .with_spawn_bypass_gates(subagent_bypass_gates)
         .with_model_setting(orch_cfg.model.clone())
         .with_hook_context(
             subagent_hook_session_id,

@@ -204,6 +204,11 @@ pub enum TaskSpawnInput {
     Monitor {
         /// Shell command to execute.
         command: String,
+        /// The sandbox-wrapped form to actually spawn, when the tool's
+        /// `shouldUseSandbox` decision said to confine it. `None` ⇒ spawn
+        /// `command` unwrapped. `command` stays the raw text so `/tasks` and
+        /// the notifications keep showing what the model asked for.
+        spawn_command: Option<String>,
         /// Optional deadline; `None` is session-persistent.
         timeout: Option<std::time::Duration>,
         /// Working directory inherited from the tool invocation.

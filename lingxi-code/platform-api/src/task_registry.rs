@@ -54,6 +54,17 @@ pub struct MonitorRegistration {
     pub persistent: bool,
     /// Invocation working directory.
     pub cwd: Option<String>,
+    /// The command as it should actually be SPAWNED, when that differs from
+    /// [`Self::command`] — i.e. the sandbox-wrapped form.
+    ///
+    /// claude-code passes `shouldUseSandbox: jS({command})` to the shared shell
+    /// entry point (`src_168769646.js` @9633) and lets it wrap; the port's
+    /// Monitor has its own spawn path, so the decision is made at the tool and
+    /// the wrapped string travels here. [`Self::command`] stays the raw text so
+    /// `/tasks` and the notifications keep showing what the model asked for.
+    /// `None` ⇒ spawn `command` unwrapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_command: Option<String>,
     /// Originating assistant tool-use id, when available.
     pub tool_use_id: Option<String>,
     /// Creator ownership used to defer a resting parent's notification.

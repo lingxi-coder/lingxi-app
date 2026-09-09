@@ -19,6 +19,10 @@ use tokio_util::sync::CancellationToken;
 
 const HANDLER_NAME: &str = "monitor_ws";
 const BYPASS_REASON: &str = "monitor_task";
+/// Audit reason when the command arrived ALREADY wrapped by the tool's
+/// `shouldUseSandbox` decision — the construction is a bypass, the command is
+/// not. Distinguishing the two is what keeps the audit log honest.
+const CONFINED_REASON: &str = "monitor_task_sandbox_wrapped";
 const BATCH_WINDOW: Duration = Duration::from_millis(200);
 const TOKEN_CAPACITY: f64 = 10.0;
 const TOKEN_REFILL_SECS: f64 = 2.0;
@@ -393,6 +397,7 @@ impl Task for MonitorHandler {
     ) -> Result<TaskHandle, TaskError> {
         let TaskSpawnInput::Monitor {
             command,
+            spawn_command,
             timeout,
             cwd,
             tool_use_id: _,
@@ -415,16 +420,27 @@ impl Task for MonitorHandler {
         // applies one of its own, so remember which kind this is before the
         // value is moved into the command.
         let had_deadline = timeout.is_some();
+        // MON-09: the Monitor TOOL made the `shouldUseSandbox` decision and, when
+        // it said confine, handed us the wrapped command. The bypass below is
+        // then only about how the `SandboxedCommand` is CONSTRUCTED — the
+        // confinement already lives in the string, exactly as it does on the
+        // Bash tool's sandboxed path.
+        let confined = spawn_command.is_some();
+        let to_spawn = spawn_command.unwrap_or(command);
         let sandboxed = self.sandbox.bypass_with_audit(
             ProcessCommand {
                 command: "bash".into(),
-                args: vec!["-c".into(), command],
+                args: vec!["-c".into(), to_spawn],
                 cwd,
                 env: HashMap::new(),
                 timeout,
                 stdin: None,
             },
-            BYPASS_REASON,
+            if confined {
+                CONFINED_REASON
+            } else {
+                BYPASS_REASON
+            },
         );
         let cancel = CancellationToken::new();
         let sink = Arc::new(MonitorStreamSink {
@@ -1181,6 +1197,7 @@ mod tests {
     fn monitor_input() -> TaskSpawnInput {
         TaskSpawnInput::Monitor {
             command: "echo hi".into(),
+            spawn_command: None,
             timeout: None,
             cwd: None,
             tool_use_id: None,

@@ -292,6 +292,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
         },
         TaskType::Monitor => TaskSpawnInput::Monitor {
             command: String::new(),
+            spawn_command: None,
             timeout: None,
             cwd: None,
             tool_use_id: None,
@@ -535,6 +536,7 @@ impl TaskRegistryHandle for TaskRegistry {
             TaskType::Monitor,
             TaskSpawnInput::Monitor {
                 command: reg.command,
+                spawn_command: reg.spawn_command,
                 timeout,
                 cwd: reg.cwd.map(PathBuf::from),
                 tool_use_id: reg.tool_use_id,

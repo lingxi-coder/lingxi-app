@@ -421,10 +421,64 @@ impl Tool for MonitorTool {
                 cwd.display()
             )));
         };
+        // MON-09: claude-code runs a monitor through the SAME sandbox decision
+        // as an ordinary shell call — `vV(e, signal, "bash", {…,
+        // shouldUseSandbox: jS({command}), preventCwdChanges: !0, …})`
+        // (`src_168769646.js` @9633). The port's Monitor has its own spawn
+        // path, which bypassed the sandbox entirely with an audited exception,
+        // so a monitor command ran with more reach than the identical command
+        // typed into Bash.
+        //
+        // `dangerouslyDisableSandbox` is `false`: `jS`'s escape hatch reads
+        // that off the CALL, and Monitor's schema has no such input.
+        let sandbox_runtime = self.ctx.effective_sandbox_runtime();
+        let decision = sandbox::decision::should_use_sandbox(
+            &command,
+            self.ctx.sandbox_available,
+            false,
+            sandbox_runtime.are_unsandboxed_commands_allowed(),
+            &sandbox_runtime,
+            // The SESSION workspace, as the Bash tool passes it — the policy is
+            // scoped to the session, not to this monitor's cwd. Re-read rather
+            // than reusing the local above, which the cwd recovery may have
+            // consumed.
+            self.ctx.cwd(),
+        );
+        let spawn_command = match decision {
+            sandbox::decision::SandboxDecision::NoSandbox => None,
+            sandbox::decision::SandboxDecision::Sandbox { .. } => {
+                let shell = tool_shell::bash::resolve_shell_path().to_string();
+                match self
+                    .ctx
+                    .sandbox_runner
+                    .wrap(
+                        &command,
+                        &sandbox_runtime,
+                        self.ctx.platform,
+                        Some(&shell),
+                        Some(cwd.as_path()),
+                    )
+                    .await
+                {
+                    Ok(wrapped) => Some(wrapped),
+                    // A refusal is the same error the Bash tool surfaces; a
+                    // monitor that cannot be confined must not fall back to
+                    // running unconfined.
+                    Err(sandbox::wrap::SandboxWrapError::Unsupported(message)) => {
+                        return Err(ToolError::InvalidInput(message))
+                    }
+                    Err(sandbox::wrap::SandboxWrapError::SbplWrite(message)) => {
+                        return Err(ToolError::Io(message))
+                    }
+                }
+            }
+        };
+
         let timeout_field = if persistent { 0 } else { timeout_ms };
         let task_id = registry
             .spawn_monitor(MonitorRegistration {
                 command,
+                spawn_command,
                 description,
                 timeout_ms: timeout_field,
                 persistent,
@@ -722,6 +776,67 @@ mod tests {
         );
         platform_api::session_flags::set_agent_push_notif_enabled(false);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
+    }
+
+    /// MON-09: a monitor command runs under the SAME sandbox decision as the
+    /// identical command typed into Bash. The port used to bypass the sandbox
+    /// outright, so a monitor had strictly more reach than Bash for the same
+    /// text.
+    #[tokio::test]
+    async fn a_monitor_command_is_wrapped_by_the_shared_sandbox_decision() {
+        let _g = guard();
+        let registry = Arc::new(RecordingRegistry::default());
+        let monitor_cwd = std::env::temp_dir().join(format!(
+            "lingxi-monitor-sbx-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&monitor_cwd).expect("create the monitor cwd");
+
+        let spawn_command_for = |available: bool| {
+            let registry = registry.clone();
+            let monitor_cwd = monitor_cwd.clone();
+            async move {
+                let mut ctx = shell_test_ctx(dummy_out());
+                ctx.task_registry = Some(registry.clone());
+                ctx.sandbox_available = available;
+                ctx.sandbox_runtime.enabled = available;
+                let mut call_ctx = fresh_ctx();
+                call_ctx.cwd = Some(monitor_cwd);
+                MonitorTool::new(ctx)
+                    .call(
+                        json!({ "command": "tail -f app.log", "description": "app log" }),
+                        call_ctx,
+                        fresh_tx(),
+                    )
+                    .await
+                    .expect("monitor should start");
+                let reg = registry
+                    .monitor
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .expect("the registration");
+                (reg.command, reg.spawn_command)
+            }
+        };
+
+        // No sandbox on this host ⇒ `should_use_sandbox` short-circuits and the
+        // raw command is spawned, exactly as Bash would.
+        let (command, unconfined) = spawn_command_for(false).await;
+        assert_eq!(command, "tail -f app.log");
+        assert_eq!(unconfined, None);
+
+        // Sandbox available and enabled ⇒ the SPAWNED form is wrapped, while
+        // the recorded `command` stays the raw text the model wrote (that is
+        // what `/tasks` and the notifications show).
+        let (command, confined) = spawn_command_for(true).await;
+        assert_eq!(command, "tail -f app.log");
+        let confined = confined.expect("an available sandbox must confine the command");
+        assert_ne!(confined, "tail -f app.log", "the command must be wrapped");
+        assert!(
+            confined.contains("tail -f app.log"),
+            "the wrap carries the original command: {confined}"
+        );
     }
 
     #[tokio::test]

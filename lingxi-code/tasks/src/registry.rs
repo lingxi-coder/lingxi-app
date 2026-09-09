@@ -3454,6 +3454,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
         }
         TaskSpawnInput::Monitor {
             command,
+            spawn_command: _,
             timeout: _,
             cwd: _,
             tool_use_id,

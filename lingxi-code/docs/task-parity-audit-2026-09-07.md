@@ -71,7 +71,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | `bg-06` | confirmed **[fixed]** | P2 | medium | Explicit-background spawn runs in the workspace root instead of the persistent shell cwd |
 | `bg-07` | confirmed **[fixed]** | P2 | medium | Result data carries 2.1.191-era `outputTaskId/outputFilePath/outputFileSize`; 2.1.263 has `persistedOutputPath/persistedOutputSize` (+ `backgroundCwdHint`) and rewrites stdout via Vpe |
 | `bg-09` | confirmed | P2 | medium | Stall watchdog (`Her`: 45 s no-growth + interactive-prompt regex → task-notification) and memory-pressure reap (`jer`) are not ported |
-| `bg-08` | confirmed | P3 | medium | Background telemetry events are renamed/missing: port emits `tengu_tool_bash_timeout`; oracle emits explicit/timeout/turn-abort `_backgrounded` events and `was_backgrounded` |
+| `bg-08` | confirmed **[fixed]** | P3 | medium | Background telemetry events are renamed/missing: port emits `tengu_tool_bash_timeout`; oracle emits explicit/timeout/turn-abort `_backgrounded` events and `was_backgrounded` |
 | `bg-10` | keep | P3 | high | Mobile ShellMobileTool has no run_in_background surface (accepted mobile divergence) — keep, but route any future mobile background path through the registry |
 
 ### Client wiring
@@ -122,8 +122,8 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
 | `TID-08` | confirmed **[substantially fixed: tool_use_id, cwd, is_backgrounded and the launching agent now land on the record. The spawn-input variant and the fields for unported features (adopted shells, incremental reads) remain]** | P1 | medium | local_bash record shape: TaskSpawnInput::LocalBash carries no tool_use_id (never stamped) and LocalBashTaskState lacks isBackgrounded/isAdopted/agentId/kind/caller/cwd |
-| `TID-04` | confirmed | P2 | medium | Notified terminal tasks are never evicted from the registry (oracle evicts them on the next attachment pass via Kan/Dlo, and exposes remove/evictTerminal) |
-| `TID-05` | confirmed | P2 | medium | `end_time` is only written on the mcp_task settle path and `total_paused_ms` is never written — every other terminal transition leaves them at None/0 although the oracle stamps `endTime:Date.now()` on each and diffs both in the update patch |
+| `TID-04` | confirmed **[fixed]** | P2 | medium | Notified terminal tasks are never evicted from the registry (oracle evicts them on the next attachment pass via Kan/Dlo, and exposes remove/evictTerminal) |
+| `TID-05` | confirmed **[partially fixed: `end_time` now stamps on every terminal transition; `total_paused_ms` still has no writer — the oracle diffs it in the SDK patch (TID-06) but no site writes it onto a task record]** | P2 | medium | `end_time` is only written on the mcp_task settle path and `total_paused_ms` is never written — every other terminal transition leaves them at None/0 although the oracle stamps `endTime:Date.now()` on each and diffs both in the update patch |
 | `TID-06` | confirmed | P2 | medium | Registry register/update do not emit the SDK `task_started` / `task_updated` system messages (oracle Mlo/Rlo via the same queue `pi` uses for task_notification) |
 | `TID-07` | confirmed | P2 | medium | Active-task predicates MI/n3t (delegated work running) and X_n/r3t (live background shell) and their state inputs (`isIdle` on teammate/agent) do not exist in the port |
 | `TID-02` | confirmed | P3 | medium | Oracle task type `auto_mode_scan` (prefix `e`, label "auto-mode scan") is missing from TaskType, wire strings, validator and /tasks |
@@ -162,7 +162,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | `AGT-07` | confirmed | P3 | medium | No stoppedByUser / userStopCount: a user stop cannot be resumed by the user, and model-initiated resumes are not gated |
 | `AGT-09` | confirmed | P3 | medium | in_process_teammate has no isIdle on its task record, so idle teammates count as active delegated work (MI/n3t) |
 | `AGT-10` | confirmed | P3 | medium | Observer tasks (isObserver / td) absent — note: env-gated experimental in 2.1.263 |
-| `AGT-11` | confirmed | P3 | medium | Terminal local_agent records are never evicted (oracle: 30 s after notification) |
+| `AGT-11` | confirmed **[fixed]** | P3 | medium | Terminal local_agent records are never evicted (oracle: 30 s after notification) |
 | `AGT-12` | keep | P3 | high | LocalFusion task type ('f' prefix, `local_fusion` label) is a LingXi-only extension — keep |
 
 ### Monitor / mcp_task
@@ -327,6 +327,19 @@ And two more:
   block (server / tool / status / status message / elapsed / elicitation)
   instead of its spool, with `omitOutputPath`'s truncation header. Three lines
   whose inputs the port does not model are omitted rather than invented.
+
+Three more, and the registry finally forgets things:
+
+- `5bca0ae94` **bg-08** — the oracle's three `_backgrounded` events and the
+  `was_backgrounded` field. Two fire on their real paths; the turn-abort one has
+  no emitter and says so at the constant, since that trigger is `bg-04`'s
+  unported half. `command_type` is the `Npe` port over `Les`'s 49 names.
+- `1410ca1c5` **TID-04 + AGT-11 + TID-05's `end_time`** — notified terminal rows
+  are swept at the START of the drain, so the candidates are rows an EARLIER
+  pass notified. The four guards keep their oracle order and their two opposite
+  `??` defaults; `!eh(I)` has no substrate here and is documented as a
+  narrowing. `end_time` and `evict_after` now stamp in one helper on every
+  terminal transition.
 
 Guards worth keeping in mind for follow-up work:
 

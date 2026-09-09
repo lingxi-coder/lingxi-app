@@ -3017,18 +3017,42 @@ impl TaskRegistry {
             return None;
         }
         let mut killed_bash_output = None;
+        // claude-code stamps `notified:!0` in EVERY per-type kill handler
+        // (`JF` for local_bash, `THn` for monitors, and the remote-agent /
+        // teammate / dream handlers) with ONE exception: `local_agent`, whose
+        // kill uses `notified: D.notified || Yf(D)` and therefore lets its stop
+        // notification through.
+        //
+        // The stamp is what suppresses the redundant second telling. A model
+        // that called TaskStop already has `Successfully stopped task: X` in
+        // hand; without this it ALSO got a `<task-notification>` saying the
+        // same command "was stopped", because this engine derives notifications
+        // from `terminal && !notified`.
+        //
+        // Scoped per type on purpose. Stamping in the shared `base_mut()` would
+        // also silence `Agent "X" was stopped by Claude`, which is the one stop
+        // the model is NOT otherwise told about.
         match state {
             TaskState::LocalBash(bash) => {
                 bash.base.status = TaskStatus::Killed;
+                bash.base.notified = true;
                 killed_bash_output = Some(bash.base.output_file.clone());
             }
+            // NOT stamped — see above.
             TaskState::LocalAgent(agent) => agent.base.status = TaskStatus::Killed,
-            TaskState::InProcessTeammate(teammate) => teammate.base.status = TaskStatus::Killed,
-            TaskState::Monitor(monitor) => monitor.base.status = TaskStatus::Killed,
+            TaskState::InProcessTeammate(teammate) => {
+                teammate.base.status = TaskStatus::Killed;
+                teammate.base.notified = true;
+            }
+            TaskState::Monitor(monitor) => {
+                monitor.base.status = TaskStatus::Killed;
+                monitor.base.notified = true;
+            }
             // A backgrounded MCP call: mark killed + `mcpStatus:"cancelled"`
             // (the poll loop's `status==="killed"` → `cancelTask` branch).
             TaskState::McpTask(mcp) => {
                 mcp.base.status = TaskStatus::Killed;
+                mcp.base.notified = true;
                 mcp.mcp_status = "cancelled".to_string();
             }
             _ => {}

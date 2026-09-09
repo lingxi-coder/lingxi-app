@@ -4431,6 +4431,60 @@ async fn a_monitors_stdout_byte_count_reaches_the_notification() {
     );
 }
 
+/// claude-code stamps `notified` in every per-type kill handler EXCEPT
+/// `local_agent`. The stamp suppresses a second telling the model does not need
+/// — it already holds `Successfully stopped task: X` — while the agent
+/// exception keeps the one stop it is not otherwise told about.
+#[tokio::test]
+async fn stopping_a_shell_is_silent_but_stopping_an_agent_is_not() {
+    let (_d, registry) = make_registry();
+
+    let (shell, _) = registry.allocate_bash_output().await.unwrap();
+    registry
+        .register_background_bash(
+            shell.clone(),
+            "sleep 60".into(),
+            "long one".into(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    seed_agent(
+        &registry,
+        "a-victim",
+        protocol::AgentId::new(),
+        None,
+        TaskStatus::Running,
+    )
+    .await;
+
+    registry.kill_with_reason(&shell, "parent").await.unwrap();
+    registry
+        .kill_with_reason("a-victim", "parent")
+        .await
+        .unwrap();
+
+    let drained = registry.take_pending_task_notifications().await;
+    let ids: Vec<&str> = drained.iter().map(|n| n.task_id.as_str()).collect();
+    assert!(
+        !ids.contains(&shell.as_str()),
+        "a stopped shell must not narrate itself a second time, got: {ids:?}",
+    );
+    assert!(
+        ids.contains(&"a-victim"),
+        "but a stopped AGENT must still report — this is the exception a blanket \
+         stamp would delete, got: {ids:?}",
+    );
+    // Both really are terminal; the shell's silence is the stamp, not a
+    // half-finished kill.
+    assert_eq!(
+        registry.get(&shell).await.unwrap().base().status,
+        TaskStatus::Killed
+    );
+}
+
 /// claude-code `bjn` + `JFe` — the rosters a "no task found" message names.
 #[tokio::test]
 async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents() {

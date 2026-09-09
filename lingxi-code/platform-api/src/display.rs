@@ -132,9 +132,267 @@ pub fn sanitize_display_to(value: &str, limit: usize) -> String {
     out
 }
 
+/// Unicode binary property `Variation_Selector` (Unicode 15): the Mongolian
+/// free variation selectors, the BMP block, and the supplementary block.
+fn is_variation_selector(c: char) -> bool {
+    matches!(
+        c,
+        '\u{180B}'..='\u{180D}'
+            | '\u{180F}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{E0100}'..='\u{E01EF}'
+    )
+}
+
+/// `\p{Zl}` | `\p{Zp}` — the two separator characters the MCP display
+/// sanitizers name explicitly (they are NOT in `Cc`/`Cf`).
+fn is_line_or_paragraph_separator(c: char) -> bool {
+    matches!(c, '\u{2028}' | '\u{2029}')
+}
+
+/// The classes `Ge` (in `rg`) strips, minus `\p{Cc}`: format characters, the
+/// two separators, and variation selectors. `\p{Cs}` is unreachable — a Rust
+/// `&str` cannot hold a lone surrogate.
+///
+/// Public because the MCP `statusMessage` normalizer (`v`, in the task
+/// notification renderer) strips the SAME set plus `\p{Cc}`, and two
+/// hand-copied tables would be free to drift apart.
+#[must_use]
+pub fn is_mcp_stripped_class(c: char) -> bool {
+    is_format_char(c) || is_line_or_paragraph_separator(c) || is_variation_selector(c)
+}
+
+/// `oe(t, n)` (`src_156484250.js` @954) — a surrogate-safe UTF-16 prefix.
+///
+/// The oracle slices to `n` code units and drops a trailing HIGH surrogate so a
+/// pair is never split. Accumulating `char::len_utf16` reproduces that: a Rust
+/// `char` is whole by construction, so the boundary can never land inside a
+/// pair. No ellipsis is appended — `oe` is a plain cut.
+fn truncate_utf16_units(value: &str, limit: usize) -> String {
+    if limit == 0 {
+        return String::new();
+    }
+    let mut used = 0usize;
+    let mut out = String::new();
+    for c in value.chars() {
+        let width = c.len_utf16();
+        if used + width > limit {
+            break;
+        }
+        used += width;
+        out.push(c);
+    }
+    out
+}
+
+/// `ESn = 128` — the intermediate cap inside `e1e`.
+const MCP_ID_INTERMEDIATE_UNITS: usize = 128;
+
+/// The `rG` cap: an `mcpTaskId` is shown as its first 8 UTF-16 units.
+pub const MCP_TASK_ID_UNITS: usize = 8;
+
+/// `rG(r)` (`src_160977784.js` @883) — the short form of an MCP task id:
+///
+/// ```js
+/// var ESn = 128;
+/// function e1e(r){return oe(r.replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Variation_Selector}]+/gu,""),ESn)}
+/// function rG(r){return oe(e1e(r),8)}
+/// ```
+///
+/// Note what this is NOT: the characters are DELETED, not replaced with a
+/// space (that is [`sanitize_mcp_name`]'s rule), and NO ellipsis is appended —
+/// a long id is simply cut to its first 8 units. `\p{Cs}` is unreachable here
+/// because a Rust `&str` cannot hold a lone surrogate.
+///
+/// The 128-unit intermediate cut is kept even though the 8-unit cut subsumes
+/// it: it is one composed function upstream, and a future change to either
+/// bound should not have to re-derive the other.
+#[must_use]
+pub fn sanitize_mcp_task_id(value: &str) -> String {
+    let stripped: String = value
+        .chars()
+        .filter(|c| {
+            !(c.is_control() || is_mcp_stripped_class(*c))
+        })
+        .collect();
+    let intermediate = truncate_utf16_units(&stripped, MCP_ID_INTERMEDIATE_UNITS);
+    truncate_utf16_units(&intermediate, MCP_TASK_ID_UNITS)
+}
+
+/// `ie = 200` — the display-column cap in `rg`.
+pub const MCP_NAME_WIDTH: usize = 200;
+
+/// `Ye = ie * 4 = 800` — the UTF-16 pre-cut in `rg`, which bounds the work the
+/// width pass has to do.
+pub const MCP_NAME_UNITS: usize = MCP_NAME_WIDTH * 4;
+
+/// `rg(e)` (`src_160860334.js` @31193) — the display sanitizer claude-code runs
+/// over an MCP server or tool name before interpolating it:
+///
+/// ```js
+/// var ie=200, Ye=ie*4, Ge=/[\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Variation_Selector}]+/gu;
+/// function rg(e){let r=e===void 0?"":To(pt(e).replace(Ge," "));
+///   return r===""?void 0:Xe(oe(r,Ye),ie)}
+/// ```
+///
+/// `Ge` REPLACES each run with a single space (unlike
+/// [`sanitize_mcp_task_id`], which deletes), `To` collapses whitespace runs and
+/// trims, an empty result becomes `None`, and `Xe` is a grapheme-segmented
+/// truncation to 200 display COLUMNS with a trailing `…`.
+///
+/// Two deliberate narrowings, both from the port's substrate rather than from
+/// choice:
+///
+/// * `\p{Cc}` is absent from `Ge` upstream too — a control character survives
+///   the replace and is then folded by `To`'s whitespace collapse only if it is
+///   whitespace. Reproduced exactly.
+/// * `pt` is `Bun.stripANSI`, and this port has no ANSI stripper at this layer
+///   (`tui-core`'s is above `platform-api`). The names reaching this function
+///   come from MCP server CONFIGURATION, not from a terminal, so no call site
+///   can carry an escape today. If one ever can, the strip belongs here, before
+///   the `Ge` replace.
+#[must_use]
+pub fn sanitize_mcp_name(value: &str) -> Option<String> {
+    // `.replace(Ge, " ")` — each RUN becomes one space.
+    let mut replaced = String::with_capacity(value.len());
+    let mut in_run = false;
+    for c in value.chars() {
+        if is_mcp_stripped_class(c) {
+            if !in_run {
+                replaced.push(' ');
+                in_run = true;
+            }
+            continue;
+        }
+        in_run = false;
+        replaced.push(c);
+    }
+
+    // `To(t) = t.replace(<ansi>, "").replace(/\s+/g, " ").trim()`.
+    let mut collapsed = String::with_capacity(replaced.len());
+    let mut pending_space = false;
+    for c in replaced.chars() {
+        if is_js_whitespace(c) {
+            pending_space = true;
+            continue;
+        }
+        if pending_space && !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        pending_space = false;
+        collapsed.push(c);
+    }
+
+    if collapsed.is_empty() {
+        return None;
+    }
+    Some(truncate_to_width_ellipsis(
+        &truncate_utf16_units(&collapsed, MCP_NAME_UNITS),
+        MCP_NAME_WIDTH,
+    ))
+}
+
+/// `Xe(t, e)` (`src_157736630.js` @7307) — grapheme-segmented truncation to `e`
+/// display COLUMNS:
+///
+/// ```js
+/// function Xe(t,e){if(te(t)<=e)return t;if(e<=1)return"\u2026";
+///   let n=0,r="";for(let{segment:o}of Xs().segment(t)){let i=te(o);
+///     if(n+i>e-1)break;r+=o,n+=i}return r+"\u2026"}
+/// ```
+///
+/// `te` is `Bun.stringWidth` and `Xs()` an `Intl.Segmenter` over graphemes; the
+/// port spells those as `unicode-width` and `unicode-segmentation`, the same
+/// pairing every other `Xe`-family port in the workspace uses. The budget for
+/// the kept segments is `e - 1`, leaving a column for the ellipsis.
+fn truncate_to_width_ellipsis(value: &str, max_width: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    use unicode_width::UnicodeWidthStr as _;
+
+    if value.width() <= max_width {
+        return value.to_string();
+    }
+    if max_width <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let budget = max_width - 1;
+    let mut used = 0usize;
+    let mut out = String::new();
+    for segment in value.graphemes(true) {
+        let width = segment.width();
+        if used + width > budget {
+            break;
+        }
+        out.push_str(segment);
+        used += width;
+    }
+    out.push('\u{2026}');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `rG` DELETES the stripped classes and appends no ellipsis — the two ways
+    /// it differs from every other sanitizer in this module.
+    #[test]
+    fn an_mcp_task_id_is_cut_to_eight_units_with_no_ellipsis() {
+        assert_eq!(sanitize_mcp_task_id("k1234567890abcdef"), "k1234567");
+        assert_eq!(sanitize_mcp_task_id("short"), "short");
+        // U+200B (Cf) and U+2028 (Zl) are removed, not replaced — the surviving
+        // characters close up, so eight of them still fit.
+        assert_eq!(sanitize_mcp_task_id("a\u{200b}b\u{2028}cdefghij"), "abcdefgh");
+        // A variation selector is removed too.
+        assert_eq!(sanitize_mcp_task_id("a\u{fe0f}bc"), "abc");
+    }
+
+    /// An astral character costs TWO UTF-16 units, so seven of them plus an
+    /// emoji cannot fit: the cut lands before the emoji rather than splitting
+    /// its surrogate pair.
+    #[test]
+    fn an_mcp_task_id_never_splits_a_surrogate_pair() {
+        assert_eq!(sanitize_mcp_task_id("abcdefg\u{1f600}"), "abcdefg");
+        assert_eq!(sanitize_mcp_task_id("abcdef\u{1f600}"), "abcdef\u{1f600}");
+    }
+
+    /// `rg` REPLACES each stripped run with ONE space, then collapses and
+    /// trims — so a name made only of stripped characters becomes `None`, which
+    /// is what makes `Pee` render an empty side.
+    #[test]
+    fn an_mcp_name_replaces_runs_with_one_space_and_empties_to_none() {
+        assert_eq!(sanitize_mcp_name("github"), Some("github".to_string()));
+        assert_eq!(
+            sanitize_mcp_name("git\u{200b}\u{200c}hub"),
+            Some("git hub".to_string()),
+            "a RUN of format chars becomes exactly one space"
+        );
+        assert_eq!(sanitize_mcp_name("  spaced   out  "), Some("spaced out".to_string()));
+        assert_eq!(sanitize_mcp_name(""), None);
+        assert_eq!(sanitize_mcp_name("\u{200b}\u{2028}"), None);
+    }
+
+    /// `Xe`'s budget is `e - 1`, leaving one column for the ellipsis, and it
+    /// measures DISPLAY WIDTH over graphemes — a wide CJK character costs two.
+    #[test]
+    fn an_over_long_mcp_name_is_cut_to_display_columns_with_an_ellipsis() {
+        let long = "a".repeat(250);
+        let out = sanitize_mcp_name(&long).expect("non-empty");
+        assert_eq!(out, format!("{}\u{2026}", "a".repeat(MCP_NAME_WIDTH - 1)));
+
+        // 150 wide characters = 300 columns. The budget is 199 columns, so 99
+        // of them fit (198) and the 100th would overshoot.
+        let wide = "\u{4e2d}".repeat(150);
+        let out = sanitize_mcp_name(&wide).expect("non-empty");
+        assert_eq!(out, format!("{}\u{2026}", "\u{4e2d}".repeat(99)));
+    }
+
+    /// A name exactly at the cap keeps every column and gains no ellipsis.
+    #[test]
+    fn an_mcp_name_at_the_cap_is_untouched() {
+        let exact = "a".repeat(MCP_NAME_WIDTH);
+        assert_eq!(sanitize_mcp_name(&exact), Some(exact));
+    }
 
     #[test]
     fn ordinary_text_is_untouched() {

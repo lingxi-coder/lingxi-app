@@ -477,6 +477,13 @@ pub struct McpTaskState {
     pub mcp_status: String,
     /// Latest human-readable status line (`statusMessage`), if any.
     pub status_message: Option<String>,
+    /// The settled call's result text (`resultText`), kept so the terminal
+    /// notification can inline it in `<result>` the way claude-code's `F` does.
+    /// The spool copy is still written — that is what `TaskOutput` reads — but
+    /// a notification cannot go and read a file, so the text has to be here too.
+    /// `None` until the call settles, and on a call that failed or was
+    /// cancelled (those render from `status_message` instead).
+    pub result_text: Option<String>,
 }
 
 /// State specific to a dream task.

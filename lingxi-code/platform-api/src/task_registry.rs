@@ -523,6 +523,11 @@ pub struct TaskNotification {
     /// push-notification hint. Additive default `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub monitor_housekeeping: bool,
+    /// `mcp_task` only: the fields claude-code's `F` needs on top of the
+    /// registry id. `None` for every other task type, which is what keeps the
+    /// generic arm the fallback. Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpTaskNotificationMeta>,
     /// `local_agent` only: the turn budget the run exhausted (claude-code
     /// `enqueueAgentNotification`'s `maxTurnsReached`). `Some(n)` on a
     /// `completed` task replaces the "finished" verb with
@@ -628,6 +633,28 @@ pub struct TaskOutputChunk {
     /// default `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpTaskOutputMeta>,
+}
+
+/// The `mcp_task` half of [`TaskNotification`] — see its `mcp` field.
+///
+/// Claude-code passes these to `F` (`src_184372091.js` @12876) at the enqueue
+/// site (@16139) alongside the registry id, which is the only thing the other
+/// task types need.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpTaskNotificationMeta {
+    /// `serverName` — the left half of the `(server/tool)` clause.
+    pub server_name: String,
+    /// `toolName` — the right half.
+    pub tool_name: String,
+    /// `mcpStatus`, NOT the registry status. `F` interpolates this into both
+    /// the summary's trailing word and the `<status>` tag, so an `mcp_task` is
+    /// the one notification whose `<status>` is not the registry's own wire
+    /// string: a server-cancelled call is `cancelled` here while the registry
+    /// row says `failed`.
+    pub mcp_status: String,
+    /// `statusMessage` — the detail line a failed or cancelled call carries.
+    /// `None` selects the "cancelled by the server" wording.
+    pub status_message: Option<String>,
 }
 
 /// The `mcp_task` half of [`TaskOutputChunk`] — see its `mcp` field.

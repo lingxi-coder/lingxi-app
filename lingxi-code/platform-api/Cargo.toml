@@ -17,6 +17,10 @@ uuid = { version = "1", features = ["v4"] }
 # leaf crate (no `platform-api` dep) → no cycle.
 jsonrpc = { path = "../jsonrpc" }
 async-trait.workspace = true
+# `rg`'s width-aware truncation (`Xe`) segments by grapheme and measures display
+# columns, exactly like the oracle's `Intl.Segmenter` + `Bun.stringWidth` pair.
+unicode-segmentation = "=1.12.0"
+unicode-width = "=0.1.14"
 futures-core.workspace = true
 futures-util.workspace = true
 indexmap.workspace = true

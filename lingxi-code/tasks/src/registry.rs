@@ -692,6 +692,8 @@ impl TaskRegistry {
             // `NZu` seeds `mcpStatus:"working"`.
             mcp_status: "working".to_string(),
             status_message: None,
+            // A running call has produced nothing yet.
+            result_text: None,
         });
         self.tasks.write().await.insert(id.clone(), state);
         // Cancel-on-kill hook: `kill` runs this cleanup (no handler / no
@@ -1225,8 +1227,10 @@ impl TaskRegistry {
                 None => return Err(TaskError::NotFound(task_id)),
             }
         };
-        // Persist the real result so the notification's `output-file` carries it
-        // (the port surfaces the result via the spool, not an inline value).
+        // Persist the real result so the notification's `output-file` carries
+        // it AND `TaskOutput` can serve it later. The inline `<result>` in the
+        // notification is stamped separately, below, from the state — claude's
+        // `F` is handed `resultText` directly and a renderer cannot read a file.
         let _ = self.output_manager.append(&output_file, result_text).await;
         // The call has settled, so it is no longer cancellable — drop the
         // cancel hook before the atomic terminal transition below (this also
@@ -1266,6 +1270,14 @@ impl TaskRegistry {
                 } else {
                     "completed".to_string()
                 };
+                // Only a COMPLETED call carries a result body upstream
+                // (`F`'s `status==="completed" ? resultText ?? "" : …`); a
+                // failure renders from `statusMessage` instead, so storing the
+                // text here would put it somewhere nothing reads and leave a
+                // failed row looking like it had an answer.
+                if !failed {
+                    m.result_text = Some(result_text.to_string());
+                }
             }
             state.base_mut().status = status;
             state.base().clone()
@@ -2735,11 +2747,31 @@ impl TaskRegistry {
                 max_turns_reached: agent_outcome.max_turns_reached,
                 // Terminal notifications are never monitor events.
                 monitor_housekeeping: false,
+                // `mcp_task` only — what claude-code's `F` needs beyond the
+                // registry id. `mcpStatus` (not the registry status) drives
+                // both the summary's trailing word and the `<status>` tag.
+                mcp: match state {
+                    TaskState::McpTask(m) => {
+                        Some(platform_api::task_registry::McpTaskNotificationMeta {
+                            server_name: m.server_name.clone(),
+                            tool_name: m.tool_name.clone(),
+                            mcp_status: m.mcp_status.clone(),
+                            status_message: m.status_message.clone(),
+                        })
+                    }
+                    _ => None,
+                },
                 result: workflow_outcome
                     .as_ref()
                     .and_then(|outcome| outcome.result.clone())
                     .or(agent_outcome.result)
-                    .or(fusion_final_text),
+                    .or(fusion_final_text)
+                    .or_else(|| match state {
+                        // The settled call's text, stamped by
+                        // `settle_mcp_task`. Only a completed call has one.
+                        TaskState::McpTask(m) => m.result_text.clone(),
+                        _ => None,
+                    }),
                 workflow_failures: workflow_outcome
                     .as_ref()
                     .map(|outcome| outcome.failures.clone())
@@ -2872,6 +2904,8 @@ impl TaskRegistry {
                 },
                 // A rest notification is never a monitor event.
                 monitor_housekeeping: false,
+                // A rest notification only ever fires for a `local_agent`.
+                mcp: None,
                 workflow_failures: Vec::new(),
                 workflow_agent_count: None,
                 workflow_total_tokens: None,
@@ -3680,6 +3714,8 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
                 // `NZu` seeds `mcpStatus:"working"`.
                 mcp_status: "working".to_string(),
                 status_message: None,
+                // A running call has produced nothing yet.
+                result_text: None,
             })
         }
         TaskSpawnInput::Dream { max_iterations, .. } => {

@@ -169,7 +169,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 
 | id | verdict | sev | fix risk | finding |
 |---|---|---|---|---|
-| `MON-01` | confirmed | P2 | medium | mcp_task terminal notification is rendered in the generic <task-type> shape with no inline <result>; oracle uses buildMcpTaskNotification (summary `MCP task k… (server/tool) completed.` + inline <result>) |
+| `MON-01` | confirmed **[fixed: `F` (`src_184372091.js` @12876) ported whole — shape, the `mcpStatus`-not-registry-status `<status>`, the four-way body ladder, and the escaped-length `<result>` budget (`ne`/`H`, `vee()`). `rG`/`rg`/`Pee`/`v` live in `platform_api::display`. Two documented absences: `resultHint` (`savedHint`) has no producer — `settle_mcp_task` is handed text, not a save receipt — and `rg`'s `Bun.stripANSI` step is skipped because `platform-api` sits below the port's ANSI stripper and these names come from MCP config, not a terminal]** | P2 | medium | mcp_task terminal notification is rendered in the generic <task-type> shape with no inline <result>; oracle uses buildMcpTaskNotification (summary `MCP task k1234567 (server/tool) completed.` + inline <result>) |
 | `MON-02` | confirmed | P2 | medium | Monitor `ws` source missing entirely (schema, prompt section, search hint, monitor_ws WebSocket task, its frames and TaskStop special case) |
 | `MON-04` | confirmed **[fixed]** | P2 | medium | Monitor timeout never emits `[Monitor timed out — re-arm if needed.]` before the kill |
 | `MON-05` | confirmed **[fixed]** | P2 | low | Suppression notice is merged AFTER the batch in one event; oracle sends a separate housekeeping notice BEFORE the event, and resets the high-volume window on a different condition |
@@ -393,6 +393,20 @@ user-vs-model split is wrong.
   flake surfaced alongside it and is fixed in the same commit:
   `schema_shape_matches_latest_shared_contract` read `LINGXI_EXPERIMENTAL_AGENT_TEAMS`
   twice without the lock every mutator in the file already takes.
+
+- **MON-01** — an MCP task's answer now reaches the model. The notification was
+  falling into the generic arm, so it carried `<task-type>mcp_task</task-type>`,
+  an `<output-file>` line, and `Task "…" completed successfully` — with the
+  actual result reachable only by opening the spool. `F` is ported whole. Three
+  things it pins that reading the summary alone would not give you: the
+  `<status>` tag is `mcpStatus`, NOT the registry status (a server-cancelled
+  call reads `cancelled` here while its row says `failed` — the only
+  notification where the two differ); `_a` emits a tag only for a field `F`
+  passes, so there is no `<tool-use-id>`, `<task-type>` or `<output-file>`; and
+  the `<result>` budget is measured on the XML-ESCAPED length, so a body of `&`s
+  keeps about a fifth as much raw text. The audit row's `MCP task k…` was
+  shorthand, not bytes: `rG` cuts an id to 8 UTF-16 units and appends NO
+  ellipsis.
 
 - `b759e7564` **TOF-05, write path** — an ENOSPC on a spool used to vanish
   entirely. The retry re-issues the MARKER, not the chunk (`#p()` splices before

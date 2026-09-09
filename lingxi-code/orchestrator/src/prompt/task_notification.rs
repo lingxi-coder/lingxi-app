@@ -346,6 +346,143 @@ fn truncate_task_notification(value: &str) -> String {
 
 /// Render ONE `<task-notification>` block for a drained task, dispatching on its
 /// `task_type` to the byte-faithful per-type format.
+/// `B = 1e4` — the cap `v` applies to an MCP `statusMessage`.
+const MCP_STATUS_MESSAGE_MAX_UTF16: usize = 10_000;
+
+/// `vee() = u() * 4`, where `u()` is the MCP output token cap (default 25 000,
+/// `MAX_MCP_OUTPUT_TOKENS` / a GrowthBook flag override it upstream). The port
+/// has the same default at `tools/mcp`'s `DEFAULT_MAX_MCP_OUTPUT_TOKENS`; the
+/// two override paths are not wired to this renderer, so the constant is the
+/// default alone.
+const MCP_RESULT_BUDGET_UTF16: usize = 25_000 * 4;
+
+/// The exact suffix `H` appends, and the `13` its budget arithmetic subtracts.
+const MCP_RESULT_TRUNCATION_SUFFIX: &str = "\u{2026} [truncated]";
+
+/// `oe(t, n)` (`src_156484250.js` @954) — a surrogate-safe UTF-16 prefix.
+///
+/// Distinct from [`truncate_utf16`], which reproduces a bare JS `slice` and may
+/// leave a lone surrogate: `oe` explicitly drops a trailing HIGH surrogate so a
+/// pair is never split. Accumulating `char::len_utf16` gives that for free.
+fn truncate_utf16_pairs(value: &str, limit: usize) -> String {
+    let mut used = 0usize;
+    let mut out = String::new();
+    for c in value.chars() {
+        let width = c.len_utf16();
+        if used + width > limit {
+            break;
+        }
+        used += width;
+        out.push(c);
+    }
+    out
+}
+
+/// `v(e)` (`src_184372091.js` @12876) — normalize an MCP `statusMessage`:
+///
+/// ```js
+/// var B=1e4, re=/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Variation_Selector}]+/gu;
+/// function v(e){if(e===void 0)return;
+///   let s=e.replace(re," ").replace(/ {2,}/g," ").trim();
+///   if(s==="")return;
+///   return s.length>B?`${oe(s,B)}\u2026 [truncated]`:s}
+/// ```
+///
+/// Note the second replace is ` {2,}` — runs of literal SPACES, not `\s+`. A
+/// tab or newline that was not in the stripped classes survives as itself.
+/// `None` out means "no detail", which is what the caller substitutes.
+fn normalize_mcp_status_message(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    // `.replace(re, " ")` — each RUN of the stripped classes becomes one space.
+    let mut replaced = String::with_capacity(value.len());
+    let mut in_run = false;
+    for c in value.chars() {
+        if c.is_control() || platform_api::display::is_mcp_stripped_class(c) {
+            if !in_run {
+                replaced.push(' ');
+                in_run = true;
+            }
+            continue;
+        }
+        in_run = false;
+        replaced.push(c);
+    }
+    // `.replace(/ {2,}/g, " ")` — SPACES only.
+    let mut collapsed = String::with_capacity(replaced.len());
+    let mut spaces = 0usize;
+    for c in replaced.chars() {
+        if c == ' ' {
+            spaces += 1;
+            continue;
+        }
+        if spaces > 0 {
+            collapsed.push(' ');
+            spaces = 0;
+        }
+        collapsed.push(c);
+    }
+    if spaces > 0 {
+        collapsed.push(' ');
+    }
+    let trimmed = collapsed.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if utf16_len(trimmed) > MCP_STATUS_MESSAGE_MAX_UTF16 {
+        return Some(format!(
+            "{}{MCP_RESULT_TRUNCATION_SUFFIX}",
+            truncate_utf16_pairs(trimmed, MCP_STATUS_MESSAGE_MAX_UTF16)
+        ));
+    }
+    Some(trimmed.to_string())
+}
+
+/// `Pee(t, r)` (`src_184370924.js` @712) —
+/// `` `${rg(t) ?? ""}/${rg(r) ?? ""}` ``. A name that sanitizes to nothing
+/// leaves its side of the slash EMPTY rather than dropping the separator.
+fn mcp_server_tool(server_name: &str, tool_name: &str) -> String {
+    format!(
+        "{}/{}",
+        platform_api::display::sanitize_mcp_name(server_name).unwrap_or_default(),
+        platform_api::display::sanitize_mcp_name(tool_name).unwrap_or_default()
+    )
+}
+
+/// `ne(e, s)` + `H(e, s)` (`src_184372091.js` @13226) — fit `text` into `budget`
+/// UTF-16 units MEASURED AFTER XML ESCAPING:
+///
+/// ```js
+/// function ne(e,s){let i=Nt(e);if(i.length<=s)return i;return Nt(H(e,s))}
+/// function H(e,s){let t=Math.max(0,Math.floor(e.length*(s/Nt(e).length)));
+///   for(;;){let r=oe(e,t);if(Nt(r).length+13<=s||t===0)return r+"\u2026 [truncated]";
+///     t=Math.floor(t*0.9)}}
+/// ```
+///
+/// The budget is on the ESCAPED length, so a body full of `&`/`<`/`>` gets far
+/// less raw text than one without — which is the point: the escaped form is
+/// what reaches the model. The first guess scales the raw length by the escape
+/// ratio and then shrinks by 10% until it fits, leaving room for the 13-unit
+/// suffix. `H` appends the suffix to the RAW slice and `ne` escapes the
+/// result, so the suffix is escaped too (a no-op for its own characters).
+fn fit_escaped_mcp_result(text: &str, budget: usize) -> String {
+    let escaped = escape_xml(text);
+    let escaped_len = utf16_len(&escaped);
+    if escaped_len <= budget {
+        return escaped;
+    }
+    // `Math.floor(e.length * (s / Nt(e).length))` — `escaped_len` is non-zero
+    // here because it is strictly greater than a `usize` budget.
+    let raw_len = utf16_len(text);
+    let mut take = (raw_len as u128 * budget as u128 / escaped_len as u128) as usize;
+    loop {
+        let slice = truncate_utf16_pairs(text, take);
+        if utf16_len(&escape_xml(&slice)) + 13 <= budget || take == 0 {
+            return escape_xml(&format!("{slice}{MCP_RESULT_TRUNCATION_SUFFIX}"));
+        }
+        take = take * 9 / 10;
+    }
+}
+
 fn render_one(n: &TaskNotification) -> String {
     // The `<output-file>` path: the real spool path when known, else the bare
     // `<taskId>.output` filename claude-code's `getTaskOutputPath` would join.
@@ -694,6 +831,57 @@ fn render_one(n: &TaskNotification) -> String {
                 escape_xml(event)
             )
         }
+        // `F(e)` (`src_184372091.js` @12876), enqueued at @16139. The only
+        // notification built by its own function rather than a status verb over
+        // the shared shape, and the only one whose `<status>` is NOT the
+        // registry's wire string: `F` is handed `mcpStatus` and uses it for
+        // both the tag and the summary's trailing word, so a server-cancelled
+        // call reads `cancelled` here while its registry row says `failed`.
+        //
+        // `_a` emits a tag only for a truthy field and `F` passes just
+        // `taskId` / `status` / `summary`, so there is no `<tool-use-id>`, no
+        // `<task-type>` and no `<output-file>` line — the port used to fall
+        // into the generic arm and emit all three plus `Task "…" completed
+        // successfully`, with the result reachable only by opening the spool.
+        //
+        // The guard keeps the arm total: an `mcp_task` row that somehow has no
+        // meta still renders, through the generic arm, rather than inventing
+        // empty names.
+        "mcp_task" if n.mcp.is_some() => {
+            let meta = n.mcp.as_ref().expect("guarded by the match arm");
+            let status = meta.mcp_status.as_str();
+            let summary = format!(
+                "MCP task {} ({}) {status}.",
+                platform_api::display::sanitize_mcp_task_id(&n.task_id),
+                mcp_server_tool(&meta.server_name, &meta.tool_name)
+            );
+            // `t = v(e.statusMessage) ?? "no detail"`.
+            let detail = normalize_mcp_status_message(meta.status_message.as_deref())
+                .unwrap_or_else(|| "no detail".to_string());
+            // The status ladder, in the oracle's order. Note the LAST two arms
+            // are distinguished by whether a `statusMessage` was PRESENT, not
+            // by whether it normalized to something: a message of only
+            // zero-width characters still selects `Task cancelled: no detail`,
+            // never the "by the server" wording.
+            let body = match status {
+                "completed" => n.result.clone().unwrap_or_default(),
+                "failed" => format!("Task failed: {detail}"),
+                _ if meta.status_message.is_some() => format!("Task cancelled: {detail}"),
+                _ => "Task was cancelled by the server.".to_string(),
+            };
+            // `body: `\n<result>\n${ne(r, vee() - p.length)}${p}\n</result>``.
+            // `p` is the `resultHint` clause — claude-code's `savedHint` from
+            // persisting an oversized blob to disk. Nothing in this port
+            // produces one (`settle_mcp_task` is handed text, not a save
+            // receipt), so the clause is empty and the budget is `vee()`
+            // undiminished. When a producer appears, subtract its length here.
+            format!(
+                "<task-notification>\n<task-id>{}</task-id>\n<status>{status}</status>\n<summary>{}</summary>\n<result>\n{}\n</result>\n</task-notification>",
+                n.task_id,
+                escape_xml(&summary),
+                fit_escaped_mcp_result(&body, MCP_RESULT_BUDGET_UTF16)
+            )
+        }
         "monitor_mcp" | "monitor_ws" => {
             // `enqueueShellNotification` (monitor kind) — no `<task-type>`;
             // summary escaped.
@@ -875,6 +1063,151 @@ mod tests {
             workflow_duration_ms: None,
             ..Default::default()
         }
+    }
+
+    fn mcp(status: &str, server: &str, tool: &str, message: Option<&str>) -> TaskNotification {
+        let mut n = base("k1234567z", "mcp_task", "completed", "fetch the issue");
+        n.mcp = Some(platform_api::task_registry::McpTaskNotificationMeta {
+            server_name: server.to_string(),
+            tool_name: tool.to_string(),
+            mcp_status: status.to_string(),
+            status_message: message.map(str::to_string),
+        });
+        n
+    }
+
+    /// `F`'s whole shape, byte for byte. No `<tool-use-id>`, no `<task-type>`,
+    /// no `<output-file>` — `_a` emits a tag only for a field `F` passes, and
+    /// `F` passes three. The result is INLINE, which is the finding: the port
+    /// used to render the generic arm and leave the answer in the spool.
+    #[test]
+    fn an_mcp_task_completion_renders_the_oracle_shape_with_an_inline_result() {
+        let mut n = mcp("completed", "github", "create_issue", None);
+        n.result = Some("Issue #12 created".to_string());
+
+        assert_eq!(
+            render_one(&n),
+            "<task-notification>\n\
+             <task-id>k1234567z</task-id>\n\
+             <status>completed</status>\n\
+             <summary>MCP task k1234567 (github/create_issue) completed.</summary>\n\
+             <result>\nIssue #12 created\n</result>\n\
+             </task-notification>"
+        );
+    }
+
+    /// The `<status>` tag carries `mcpStatus`, not the registry status — the
+    /// one notification where the two can disagree. Upstream the registry row
+    /// for a cancelled call is `failed` (`status: d==="completed"?"completed":"failed"`)
+    /// while `F` is handed `d` itself.
+    #[test]
+    fn the_status_tag_is_the_mcp_status_not_the_registry_status() {
+        let mut n = mcp("cancelled", "github", "create_issue", Some("server said stop"));
+        n.status = "failed".to_string();
+
+        let out = render_one(&n);
+        assert!(out.contains("<status>cancelled</status>"), "got: {out}");
+        assert!(
+            out.contains("(github/create_issue) cancelled."),
+            "the summary's trailing word is the mcp status too: {out}"
+        );
+        assert!(
+            out.contains("<result>\nTask cancelled: server said stop\n</result>"),
+            "got: {out}"
+        );
+    }
+
+    /// The three non-completed bodies, including the distinction the ladder
+    /// turns on: PRESENCE of a `statusMessage`, not whether it normalizes to
+    /// anything. A message of only zero-width characters is still a message.
+    #[test]
+    fn the_non_completed_bodies_follow_the_oracle_ladder() {
+        let failed = render_one(&mcp("failed", "s", "t", Some("boom")));
+        assert!(failed.contains("<result>\nTask failed: boom\n</result>"), "{failed}");
+
+        let failed_bare = render_one(&mcp("failed", "s", "t", None));
+        assert!(
+            failed_bare.contains("<result>\nTask failed: no detail\n</result>"),
+            "{failed_bare}"
+        );
+
+        let cancelled_bare = render_one(&mcp("cancelled", "s", "t", None));
+        assert!(
+            cancelled_bare.contains("<result>\nTask was cancelled by the server.\n</result>"),
+            "{cancelled_bare}"
+        );
+
+        let cancelled_empty = render_one(&mcp("cancelled", "s", "t", Some("\u{200b}\u{200b}")));
+        assert!(
+            cancelled_empty.contains("<result>\nTask cancelled: no detail\n</result>"),
+            "a present-but-empty message still takes the `cancelled:` arm: {cancelled_empty}"
+        );
+    }
+
+    /// A completed call with no text renders an EMPTY `<result>` — `F`'s
+    /// `e.resultText ?? ""`, not an omitted section.
+    #[test]
+    fn a_completed_mcp_task_with_no_text_still_renders_an_empty_result() {
+        let out = render_one(&mcp("completed", "s", "t", None));
+        assert!(out.contains("<result>\n\n</result>"), "got: {out}");
+    }
+
+    /// `Pee` leaves a side of the slash EMPTY when a name sanitizes away,
+    /// rather than dropping the separator.
+    #[test]
+    fn a_name_that_sanitizes_away_leaves_its_side_of_the_slash_empty() {
+        let out = render_one(&mcp("completed", "\u{200b}", "create_issue", None));
+        assert!(out.contains("(/create_issue) completed."), "got: {out}");
+    }
+
+    /// The `<result>` budget is measured on the ESCAPED text, so a body of
+    /// `&`s costs 5 units each and far less raw text survives. Both the marker
+    /// and the escaped length are pinned.
+    #[test]
+    fn an_over_long_mcp_result_is_cut_against_its_escaped_length() {
+        let mut n = mcp("completed", "s", "t", None);
+        n.result = Some("&".repeat(MCP_RESULT_BUDGET_UTF16));
+        let out = render_one(&n);
+
+        assert!(out.contains("\u{2026} [truncated]"), "the marker must be present");
+        let body = out
+            .split_once("<result>\n")
+            .and_then(|(_, rest)| rest.split_once("\n</result>"))
+            .expect("a result section")
+            .0;
+        assert!(
+            utf16_len(body) <= MCP_RESULT_BUDGET_UTF16,
+            "escaped body is {} units, budget {MCP_RESULT_BUDGET_UTF16}",
+            utf16_len(body)
+        );
+        // Every `&` became `&amp;`, so the raw text kept is about a fifth of the
+        // budget — proof the budget is on the escaped form, not the raw one.
+        assert!(
+            body.matches("&amp;").count() < MCP_RESULT_BUDGET_UTF16 / 4,
+            "kept {} escaped ampersands",
+            body.matches("&amp;").count()
+        );
+    }
+
+    /// A body already inside the budget is escaped and passed through with no
+    /// marker — the `ne` early return.
+    #[test]
+    fn an_mcp_result_inside_the_budget_is_only_escaped() {
+        let mut n = mcp("completed", "s", "t", None);
+        n.result = Some("a < b && c > d".to_string());
+        let out = render_one(&n);
+        assert!(out.contains("<result>\na &lt; b &amp;&amp; c &gt; d\n</result>"), "got: {out}");
+        assert!(!out.contains("[truncated]"), "got: {out}");
+    }
+
+    /// The arm is guarded on the meta, so a row without one still renders —
+    /// through the generic arm — rather than inventing empty names.
+    #[test]
+    fn an_mcp_task_without_meta_falls_back_to_the_generic_arm() {
+        let n = base("k1234567z", "mcp_task", "completed", "fetch the issue");
+        let out = render_one(&n);
+        assert!(out.contains("<task-type>mcp_task</task-type>"), "got: {out}");
+        assert!(!out.contains("MCP task"), "got: {out}");
     }
 
     #[test]

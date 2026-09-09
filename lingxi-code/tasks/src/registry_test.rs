@@ -3503,6 +3503,7 @@ fn mcp_state_for_evict(id: &str) -> crate::state::TaskState {
         tool_name: "deploy".into(),
         mcp_status: "completed".into(),
         status_message: None,
+        result_text: None,
     })
 }
 
@@ -5745,6 +5746,19 @@ async fn settle_mcp_task_writes_result_and_drains_notification() {
         "output_path is the spool path: {:?}",
         n.output_path
     );
+    // MON-01: the notification carries the result INLINE and the fields `F`
+    // needs. The spool copy above is for `TaskOutput`; a renderer cannot open a
+    // file, so the text has to ride on the notification too.
+    assert_eq!(
+        n.result.as_deref(),
+        Some("clean working tree"),
+        "the settled text rides on the notification"
+    );
+    let meta = n.mcp.as_ref().expect("an mcp_task notification carries its meta");
+    assert_eq!(meta.server_name, "git");
+    assert_eq!(meta.tool_name, "status");
+    assert_eq!(meta.mcp_status, "completed");
+    assert_eq!(meta.status_message, None);
     // consume-once.
     assert!(
         registry.take_pending_task_notifications().await.is_empty(),
@@ -5764,9 +5778,25 @@ async fn settle_mcp_task_failed_marks_failed() {
     let state = registry.get(&id).await.unwrap();
     assert_eq!(state.base().status, TaskStatus::Failed);
     match &state {
-        TaskState::McpTask(m) => assert_eq!(m.mcp_status, "failed"),
+        TaskState::McpTask(m) => {
+            assert_eq!(m.mcp_status, "failed");
+            // A FAILED call renders from `statusMessage`, not from the text
+            // (`F`'s `status==="completed" ? resultText : …`), so stashing it
+            // would put it where nothing reads it and leave a failed row
+            // looking like it had an answer.
+            assert_eq!(
+                m.result_text, None,
+                "a failed settle must not stash a result body"
+            );
+        }
         other => panic!("expected McpTask, got {other:?}"),
     }
+    let drained = registry.take_pending_task_notifications().await;
+    assert_eq!(drained[0].result, None, "and it must not reach the notification");
+    assert_eq!(
+        drained[0].mcp.as_ref().map(|m| m.mcp_status.as_str()),
+        Some("failed")
+    );
 }
 
 #[tokio::test]

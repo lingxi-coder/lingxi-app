@@ -37,8 +37,16 @@ Derived oracle facts are in `~/.claude/oracle-chunks/notes/agent-audit/`.
 
 ## Result
 
-Ten divergences confirmed. Nine are fixed; the rest are recorded with their
-blockers. Everything else in the agent surface — the LONG/LEAN prompt
+Fourteen divergences confirmed. Ten are fixed; the rest are recorded with their
+blockers.
+
+A correction to an earlier draft of this report: it said source precedence was
+"already aligned", on the strength of the port's tier map matching `Z$`'s
+`[built-in, plugin, userSettings, projectSettings, flagSettings,
+policySettings]`. The tier ORDER is right, but three of the SOURCES that feed
+those tiers are not populated at all (AG-17..AG-19). A literal sweep cannot see
+that, and neither can reading the merge function — only reading the loader
+that produces its input can. Everything else in the agent surface — the LONG/LEAN prompt
 arms, the fork sections, the examples, agent-type normalization and the
 ambiguity/deny/not-found errors, the depth/budget/concurrency caps, required-MCP
 gating, worktree isolation, the `<usage>` trailer, one-shot built-ins, frontmatter
@@ -164,6 +172,43 @@ Fixed: `explore_plan_agents_enabled()` / `safe_mode_enabled()` in
 `agent/src/builtins.rs`, with `builtin_agent_definitions_with_gates` keeping the
 composition testable without touching process-global env.
 
+### AG-17 (P1) — nested project agent directories were never discovered
+
+`wQr` builds the projectSettings tier from `O5(kind, cwd)` (@1338241), which
+walks UP:
+
+```js
+let r=i9e(yQr()).normalize("NFC"),o=kQr(n),d=i9e(n),p=[];
+while(!0){
+  if(Pf(d)===Pf(r))break;            // the home dir is the ceiling, NOT collected
+  p.push(SN(d,".claude",e));
+  if(o&&Pf(d)===Pf(o))break;         // the project root IS collected, then stop
+  let C=_Qr(d); if(C===d)break;      // filesystem root
+  d=C}
+```
+
+Every level from the cwd to the enclosing project root contributes a
+`<dir>/.claude/agents`, and `Z$` then sorts that tier by `ITe` — the separator
+count of `baseDir`, ascending — so under later-wins the DEEPEST directory wins.
+
+The port read exactly one project directory, `<cwd>/<DOT_DIR>/agents`. In a
+monorepo that means an agent defined at `packages/foo/<DOT_DIR>/agents/` was
+invisible whenever the session ran from the repo root, and one defined at the
+repo root was invisible from inside a package. Both are ordinary layouts, and
+neither produced a diagnostic — the agent simply was not in the catalog.
+
+Fixed: `catalog::project_agent_dirs` ports `O5` (pure, given cwd / home /
+project root) and `catalog::agent_dir_precedence` hands the walk to
+`load_agents_from_dirs` reversed — shallowest first — so later-wins reproduces
+`ITe` without a second sort. The composition root passes `$HOME` as the ceiling
+and `permission::set_cwd::project_root_of(cwd)` as the `kQr(cwd)` boundary.
+Existence is not pre-checked: `load_agents_from_dirs` already treats an
+unreadable directory as an empty contribution, which is `O5`'s ENOENT arm.
+
+One behaviour change falls out and is correct: with the cwd AT `$HOME`, the walk
+now collects nothing, so `~/<DOT_DIR>/agents` is loaded once as `userSettings`
+instead of twice (the second time as `projectSettings`, which used to win).
+
 ### AG-07 (P2) — the built-in web-fetch agent auto-backgrounded
 
 2.1.266 moved the async decision into `vBo` and, doing so, factored the
@@ -228,6 +273,44 @@ a kill-switch).
 
 ## Not fixed — recorded with the blocker
 
+### AG-18 (P2) — `--add-dir` agent directories are never loaded
+
+For `kind === "agents"` only, `wQr` adds a second projectSettings source: each
+`Rp()` directory (the `--add-dir` set) contributes `<dir>/.claude/agents`,
+tagged `fromAdditionalDirectory: true`, minus any the upward walk already
+covered. `Z$` ranks those BELOW the ordinary project directories within the same
+tier.
+
+`agent::catalog::load_agents_from_additional_directory` exists and has **zero
+callers** — named, implemented, never wired.
+
+Blocker: `EngineConfig` carries no add-dir list. The port's
+`permissions.additionalDirectories` is resolved elsewhere in boot and is not in
+scope at the point the catalog is built. `agent_dir_precedence` is the seam to
+extend once it is; its rustdoc names this.
+
+### AG-19 (P2) — the managed policy agent directory is never loaded
+
+`wQr`'s LOWEST tier is `SN(Jb(),".claude",e)` — `<managed dir>/.claude/agents`,
+tagged `policySettings`. `AgentSource::PolicySettings` exists in the port and is
+threaded through the MCP / hook-trust paths, but nothing ever produces an agent
+carrying it.
+
+Blocker: the port has no managed-settings DIRECTORY helper (only
+`managed-settings.json` content handling), so there is no path to read.
+
+### AG-20 (P3) — two files in one directory declaring the same name
+
+`load_agents_from_dirs` inserts into a `HashMap` as it walks `read_dir`, so when
+two files in the SAME directory declare the same `name`, the winner is whichever
+the filesystem happened to yield last. The oracle is deterministic (the tier
+lists are ordered before the map insert), de-duplicates by INODE across sources
+(`Skipping duplicate file '<path>' from <source> (same inode already loaded from
+<other>)`), and logs every collision through `Hto`:
+`[agents] Duplicate agent name 'X' (source): loc1, loc2 — active: loc1`.
+
+Neither the inode dedup nor the duplicate log exists in the port.
+
 ### AG-13 (P2) — the 2.1.266 stop-pending spawn guard
 
 New in 2.1.266 (@3578059):
@@ -237,10 +320,14 @@ if(n.agentId!==void 0&&jH(n.agentId))
   throw new pE("This agent has been stopped and its stop is still completing; it cannot launch new agents.")
 ```
 
-Blocker: no substrate. The port has no stop-pending set — `grep` for
-`stop_pending` / `is_stopping` / `stop_in_flight` is zero across the tree. The
-guard needs a registry of agent ids whose stop has been requested but not yet
-settled before the message can be anything but decorative.
+Blocker: no substrate, and the substrate is a whole mechanism rather than a
+flag. In the oracle the set is filled by the KILL-ESCALATION path `Xne` — a
+kill marks every agent id of the task stop-pending, arms a 10s escalation and a
+30s overdue timer, and a settle callback clears them; `N3` clears an id again
+when a run starts. Three sites read it (the `Agent` tool, the `Skill` tool, and
+shell exec, each with its own refusal copy). The port's `kill_with_reason` has
+no such unsettled window and no per-agent-id tracking, so adding only the read
+would be a gate that can never fire.
 
 ### AG-14 (P2) — the harness-note layer around agent results
 
@@ -303,9 +390,12 @@ branding, and the deferred remote/CCR isolation path.
 
 | suite | before | after |
 |---|---|---|
-| `agent --lib` | 405 passed, 8 failed | 415 passed, 2 failed |
+| `agent --lib` | 405 passed, 8 failed | 418 passed, 2 failed |
 | `tool-agent --lib` | 161 passed, 0 failed | 165 passed, 0 failed |
 | `platform-api --lib` | 300 passed, 0 failed | 302 passed, 0 failed |
+
+`cargo check -p engine-desktop` is clean too — the composition root is the only
+caller of the new discovery seam.
 
 `orchestrator`'s **lib test target** could not be built: another session's
 uncommitted `orchestrator/src/prompt/goal_checkin.rs` is missing a field in a
@@ -347,6 +437,11 @@ Tests were added for behaviour that had none:
 * `explore_inherit_cap_kill_switch_restores_plain_inherit` — with a premise
   assertion that the session would otherwise be capped, so a pass cannot come
   from the model being under the cap anyway.
+* `project_agent_dirs_walks_up_to_the_project_root` — all three stop conditions
+  (project root, home ceiling, filesystem root) and the returned order;
+  `agent_dir_precedence_puts_the_deepest_project_dir_last`; and
+  `a_nested_project_agent_overrides_a_shallower_one`, which asserts the OUTCOME
+  through the real loader on a real temp tree rather than the ordering alone.
 
 `completed_no_output_uses_marker` still passes: its fixture is
 `{"reason":"max_turns_exhausted"}` with no `max_turns`, which is not a shape the

@@ -1670,6 +1670,79 @@ pub async fn load_agents_from_dirs(paths: &[(PathBuf, AgentSource)]) -> Vec<Agen
     out
 }
 
+/// claude `O5(kind, cwd)` (src_162329786.js @1338241) — every project-scoped
+/// agent directory between `cwd` and the enclosing project root:
+///
+/// ```js
+/// let r=i9e(yQr()).normalize("NFC"),o=kQr(n),d=i9e(n),p=[];
+/// while(!0){
+///   if(Pf(d)===Pf(r))break;            // the home dir is the ceiling, NOT collected
+///   p.push(SN(d,".claude",e));
+///   if(o&&Pf(d)===Pf(o))break;         // the project root IS collected, then stop
+///   let C=_Qr(d); if(C===d)break;      // filesystem root
+///   d=C}
+/// ```
+///
+/// The port used to read ONE project directory (`<cwd>/<DOT_DIR>/agents`), so
+/// in a monorepo an agent defined at `packages/foo/<DOT_DIR>/agents/` was
+/// invisible whenever the session's cwd was the repo root, and one defined at
+/// the repo root was invisible from inside a package. Both are ordinary
+/// layouts.
+///
+/// Returned DEEPEST first, matching `O5`. `project_root` is `kQr(cwd)` — the
+/// outermost enclosing project; `None` walks to the home ceiling (or the
+/// filesystem root, whichever comes first). Existence is NOT checked here:
+/// [`load_agents_from_dirs`] already treats an unreadable directory as an empty
+/// contribution, which is `O5`'s ENOENT arm.
+#[must_use]
+pub fn project_agent_dirs(cwd: &Path, home: &Path, project_root: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut dir = cwd;
+    loop {
+        if dir == home {
+            break;
+        }
+        out.push(dir.join(branding::DOT_DIR).join("agents"));
+        if project_root.is_some_and(|root| dir == root) {
+            break;
+        }
+        match dir.parent() {
+            Some(parent) if parent != dir => dir = parent,
+            _ => break,
+        }
+    }
+    out
+}
+
+/// The agent directories to hand [`load_agents_from_dirs`], LOWEST priority
+/// FIRST (that function is later-wins).
+///
+/// claude's tier map (`Z$`) is `[built-in, plugin, userSettings,
+/// projectSettings, flagSettings, policySettings]`, and WITHIN the
+/// projectSettings tier it sorts by `ITe` — the separator count of `baseDir`,
+/// ascending — so the DEEPEST project directory wins. Emitting the walk
+/// reversed (shallowest first) gives later-wins the same answer without a
+/// second sort.
+///
+/// ⛔ Two of claude's sources are still missing here, and both need plumbing
+/// this function cannot invent: the `--add-dir` directories
+/// (`Rp()`-derived, `fromAdditionalDirectory`, ranked BELOW the ordinary
+/// project tier — `EngineConfig` carries no add-dir list) and the managed
+/// policy directory (`SN(Jb(),".claude",e)`, the LOWEST tier).
+#[must_use]
+pub fn agent_dir_precedence(
+    user_agents_dir: PathBuf,
+    cwd: &Path,
+    home: &Path,
+    project_root: Option<&Path>,
+) -> Vec<(PathBuf, AgentSource)> {
+    let mut dirs = vec![(user_agents_dir, AgentSource::UserDefined)];
+    let mut project = project_agent_dirs(cwd, home, project_root);
+    project.reverse();
+    dirs.extend(project.into_iter().map(|d| (d, AgentSource::Project)));
+    dirs
+}
+
 /// Load agents from a caller-supplied additional directory.  This preserves
 /// the oracle's distinct `additionalDirectory` provenance instead of
 /// collapsing it into user/project settings.
@@ -2060,6 +2133,115 @@ mod tests {
             def.allowed_tools,
             vec!["Read".to_string(), "Grep".to_string()]
         );
+    }
+
+    /// `O5`'s three stop conditions, and the order it returns.
+    #[test]
+    fn project_agent_dirs_walks_up_to_the_project_root() {
+        let d = |p: &str| PathBuf::from(p);
+        let agents = |p: &str| d(p).join(branding::DOT_DIR).join("agents");
+
+        // cwd inside a package: every level from cwd to the project root,
+        // deepest first, root INCLUDED.
+        assert_eq!(
+            project_agent_dirs(
+                &d("/home/u/repo/packages/foo"),
+                &d("/home/u"),
+                Some(&d("/home/u/repo")),
+            ),
+            vec![
+                agents("/home/u/repo/packages/foo"),
+                agents("/home/u/repo/packages"),
+                agents("/home/u/repo"),
+            ]
+        );
+
+        // At the project root: just the one.
+        assert_eq!(
+            project_agent_dirs(&d("/home/u/repo"), &d("/home/u"), Some(&d("/home/u/repo"))),
+            vec![agents("/home/u/repo")]
+        );
+
+        // No project root: the HOME ceiling stops the walk, and home itself is
+        // never collected — `if(Pf(d)===Pf(r))break` runs before the push.
+        assert_eq!(
+            project_agent_dirs(&d("/home/u/scratch/x"), &d("/home/u"), None),
+            vec![agents("/home/u/scratch/x"), agents("/home/u/scratch")]
+        );
+
+        // cwd IS home: nothing at all.
+        assert!(project_agent_dirs(&d("/home/u"), &d("/home/u"), None).is_empty());
+
+        // Neither home nor root on the path: the filesystem root ends it.
+        assert_eq!(
+            project_agent_dirs(&d("/srv/a"), &d("/home/u"), None),
+            vec![agents("/srv/a"), agents("/srv"), agents("/")]
+        );
+    }
+
+    /// `load_agents_from_dirs` is later-wins, and `ITe` makes the DEEPEST
+    /// project directory win, so the walk must be handed over reversed.
+    #[test]
+    fn agent_dir_precedence_puts_the_deepest_project_dir_last() {
+        let d = |p: &str| PathBuf::from(p);
+        let got = agent_dir_precedence(
+            d("/home/u/.lingxi/agents"),
+            &d("/home/u/repo/packages/foo"),
+            &d("/home/u"),
+            Some(&d("/home/u/repo")),
+        );
+        let names: Vec<String> = got
+            .iter()
+            .map(|(p, _)| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "/home/u/.lingxi/agents".to_string(),
+                format!("/home/u/repo/{}/agents", branding::DOT_DIR),
+                format!("/home/u/repo/packages/{}/agents", branding::DOT_DIR),
+                format!("/home/u/repo/packages/foo/{}/agents", branding::DOT_DIR),
+            ],
+            "user first (lowest), then project shallow -> deep",
+        );
+        assert_eq!(got[0].1, AgentSource::UserDefined);
+        assert!(got[1..].iter().all(|(_, s)| *s == AgentSource::Project));
+    }
+
+    /// The deepest definition of a name must be the one that survives — the
+    /// behaviour `ITe` + later-wins produce together, asserted end to end
+    /// through the real loader rather than on the ordering alone.
+    #[tokio::test]
+    async fn a_nested_project_agent_overrides_a_shallower_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let deep = root.join("packages").join("foo");
+        for (dir, body) in [(&root, "ROOT"), (&deep, "DEEP")] {
+            let agents = dir.join(branding::DOT_DIR).join("agents");
+            tokio::fs::create_dir_all(&agents).await.unwrap();
+            tokio::fs::write(
+                agents.join("reviewer.md"),
+                format!("---\nname: reviewer\ndescription: {body}\n---\nbody\n"),
+            )
+            .await
+            .unwrap();
+        }
+        let dirs = agent_dir_precedence(
+            tmp.path().join("no-such-user-dir"),
+            &deep,
+            tmp.path(),
+            Some(&root),
+        );
+        let loaded = load_agents_from_dirs(&dirs).await;
+        let reviewer = loaded
+            .iter()
+            .find(|a| a.agent_type == "reviewer")
+            .expect("the nested walk must find it at all");
+        assert_eq!(
+            reviewer.when_to_use, "DEEP",
+            "the definition closest to the cwd wins",
+        );
+        assert_eq!(loaded.len(), 1, "one name, one entry: {loaded:?}");
     }
 
     #[tokio::test]

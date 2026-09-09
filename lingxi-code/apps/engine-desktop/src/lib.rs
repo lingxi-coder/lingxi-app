@@ -11400,19 +11400,28 @@ pub async fn build(
     //       list. Nothing between here and the former position reads the
     //       catalog; plugin agents still land later via the plugin bootstrap's
     //       `plugin_agent_catalog` writes.
-    let project_agents_dir = cwd.join(branding::DOT_DIR).join("agents");
     let user_agents_dir = cfg.lingxi_home.join("agents");
+    // claude `O5` walks UP from the cwd collecting `<dir>/<DOT_DIR>/agents` at
+    // every level to the enclosing project root, so a monorepo's per-package
+    // agents and its root agents are both in scope, with the definition closest
+    // to the cwd winning. The port used to read the cwd's directory alone.
+    // `HOME` is the ceiling (never itself collected); `project_root_of` is the
+    // `kQr(cwd)` boundary — its absence just lets the walk run to the ceiling.
+    let agent_dirs = agent::catalog::agent_dir_precedence(
+        user_agents_dir,
+        &cwd,
+        std::env::var_os("HOME")
+            .map_or_else(|| std::path::PathBuf::from("/"), std::path::PathBuf::from)
+            .as_path(),
+        permission::set_cwd::project_root_of(&cwd).as_deref(),
+    );
     // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom agent definitions
     // (`V5d.agents:!0`, `K5d.agents:!1`) — skip the dir scan, empty catalog.
     let mut agents =
         if cfg.customization_gates.disables_custom_agents() || strict_plugin_only_agents {
             Vec::new()
         } else {
-            agent::load_agents_from_dirs(&[
-                (user_agents_dir, agent::definition::AgentSource::UserDefined),
-                (project_agents_dir, agent::definition::AgentSource::Project),
-            ])
-            .await
+            agent::load_agents_from_dirs(&agent_dirs).await
         };
     // (M4 cc2.1.198) `--agents <json>` flag agents — see
     // [`merge_cli_flag_agents`].

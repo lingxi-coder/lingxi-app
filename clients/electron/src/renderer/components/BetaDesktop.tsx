@@ -533,7 +533,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                     style={{
                       width: '100%', minHeight: 37, display: 'flex', alignItems: 'center', gap: 9,
                       padding: '7px 62px 7px 8px', border: 0, borderRadius: 8,
-                      background: active ? t.surfaceActive : 'transparent', color: active ? t.text : t.text2,
+                      background: 'transparent', color: active ? t.text : t.text2,
                       cursor: 'pointer', textAlign: 'left',
                     }}
                   >

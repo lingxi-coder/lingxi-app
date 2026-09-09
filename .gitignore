@@ -81,6 +81,9 @@ __pycache__/
 # stray local build artifact (not part of the project)
 lingxi-code/test_entry
 
+# Local task/tool output artifacts (rebuildable)
+output/
+
 # test-harness conversation capture artifacts (regenerated)
 lingxi-code/test-harness/conversation-*.txt
 

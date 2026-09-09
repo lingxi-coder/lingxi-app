@@ -177,8 +177,8 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | `MON-07` | confirmed **[fixed]** | P2 | medium | Zero-output monitor exit is summarised as `stream ended`; oracle says `Monitor "d" ended without producing output (exit 0)` |
 | `MON-09` | confirmed **[fixed]** | P2 | medium | Monitor command bypasses the sandbox decision that the oracle applies (shouldUseSandbox: jS({command})) |
 | `MON-03` | confirmed | P3 | medium | Command monitor is minted as a separate `monitor_ws`/'s' task type instead of a `local_bash` record with kind:"monitor" ('b' id); id.rs comment cites 2.1.223 to justify it |
-| `MON-08` | confirmed | P3 | medium | MCP auto-background ignores hasPendingElicitation: oracle keeps the call in the foreground while an elicitation dialog is open |
-| `MON-10` | confirmed **[partially fixed: the `Dl()`-gated description split landed; `getMcpAutoBackgroundMs`'s host latch remains]** | P3 | low | Dl()-gated variants missing: Monitor prompt has no 'foreground with Bash' wording when background tasks are disabled, and getMcpAutoBackgroundMs ignores the host-level backgroundTasksDisabled latch |
+| `MON-08` | confirmed **[fixed]** | P3 | medium | MCP auto-background ignores hasPendingElicitation: oracle keeps the call in the foreground while an elicitation dialog is open |
+| `MON-10` | confirmed **[fixed: the description split landed; the `getMcpAutoBackgroundMs` half is RESOLVED not implemented — `Dl()`'s second disjunct is a runtime latch set by the MCP-serve/http entry path, which has no analogue in this port, so nothing could set it. Documented at `platform_api::env::background_tasks_disabled`]** | P3 | low | Dl()-gated variants missing: Monitor prompt has no 'foreground with Bash' wording when background tasks are disabled, and getMcpAutoBackgroundMs ignores the host-level backgroundTasksDisabled latch |
 | `MON-11` | confirmed **[fixed]** | P3 | low | Push-notification splices: ybn leads with two newlines (port one) and the per-event GM hint is omitted even when push is enabled |
 | `MON-12` | confirmed **[fixed]** | P3 | medium | monitor_mcp: dormant on both sides, but the port's handler/doc/hook projection describe a resource-catalog watcher that 2.1.263 does not have (oracle record carries server+tool, no producer, no kill module) |
 | `MON-13` | confirmed **[fixed]** | P3 | low | Monitor pre-spawn failure returns a task id instead of the oracle's `Monitor: pre-spawn error (cwd/argv redacted)` tool error |
@@ -340,6 +340,28 @@ Three more, and the registry finally forgets things:
   `??` defaults; `!eh(I)` has no substrate here and is documented as a
   narrowing. `end_time` and `evict_after` now stamp in one helper on every
   terminal transition.
+
+And one more, from the researched batch:
+
+- `0bce76602` **MON-08 + MON-10's remainder** — the MCP auto-background race is a
+  loop again: while an elicitation is open the call stays in the foreground, and
+  each deferral re-arms a FULL window (a dialog closing at T=121 s backgrounds at
+  T=240 s upstream, so a tighter poll would be a divergence). The predicate is a
+  shared refcount with a decrement-on-drop guard, because `handle` has four exits
+  and a leaked count defers forever. The `ve` disjunct has no host-dialog seam
+  here and is not ported. MON-10's `Dl()` half turned out to be a runtime latch
+  set by an entry path this port does not have — resolved and documented rather
+  than implemented.
+
+The seven-finding research fan-out that produced this batch is banked in
+`subagents/workflows/wf_00ec3161-be5/journal.jsonl`: oracle evidence, port seams
+and adversarial verdicts for TO-04, TO-07, TOF-05, TOF-09, SLT-05, MON-08 and
+AGT-07. Read the VERDICTS before acting on a plan — the pass refuted 34 of 261
+claims, four of them load-bearing: TOF-05's retry re-issues the MARKER, not the
+original body, and sets `lostOutput` on the FIRST failure; TOF-09's `sYt` REPAIRS
+a bad directory mode rather than refusing it, and checks uid/mode at the ROOT
+only, not per segment; AGT-07's `LV` is not user-stop-only, so that plan's
+user-vs-model split is wrong.
 
 Guards worth keeping in mind for follow-up work:
 

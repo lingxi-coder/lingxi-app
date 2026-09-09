@@ -2715,7 +2715,17 @@ impl Tool for BashTool {
                 // after `-c`, matching `bashProvider.ts:201-205` with the
                 // snapshot path deferred.
                 args: vec!["-c".into(), "-l".into(), inner_cmd],
-                cwd: Some(workspace.clone()),
+                // The PERSISTENT shell cwd, same as the foreground arm.
+                // claude-code has ONE spawn for both modes (`vV`);
+                // `run_in_background` only decides what happens AFTER the shell
+                // is already running in the session cwd, so a `cd sub` from an
+                // earlier foreground call must be visible here too. Spawning in
+                // the workspace instead made a backgrounded command silently
+                // run somewhere else than the command before it.
+                cwd: Some(match ctx.cwd.as_ref() {
+                    Some(c) => c.clone(),
+                    None => self.shell_cwd.lock().unwrap().clone(),
+                }),
                 env: HashMap::new(),
                 timeout: Some(Duration::from_millis(timeout_ms)),
                 stdin: None,

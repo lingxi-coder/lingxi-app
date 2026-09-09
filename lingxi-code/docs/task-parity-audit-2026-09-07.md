@@ -109,7 +109,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | `TO-01` | confirmed | P2 | low | TaskOutput tool_result joins XML parts with "\n" — oracle joins with "\n\n" (and a test pins the wrong join) **[fixed]** |
 | `TO-02` | confirmed | P2 | medium | TaskStop on a local_bash task leaves `notified=false`, so the port injects a `<\task-notification>` ("Background command … was stopped") the oracle suppresses; the oracle also appends "\n[killed]\n" to the spool **[deferred: same seam as TN-09; the drain already yields exactly one stopped notification]** |
 | `TO-03` | confirmed **[fixed]** | P2 | medium | Not-found messages lack the oracle's suffixes (". Did you mean: …?", ". Running teammates: …", ". Running named agents: …", ". Running background agents: id (desc)") and teammate/name ambiguity errors |
-| `TO-04` | confirmed | P2 | medium | TaskStop has no ownership / observer checks and no owner notification — `_ctx` (which carries `agent_id`) is ignored |
+| `TO-04` | confirmed **[partially fixed: the ownership guard (`sut`) and its ordering are done — any agent could stop any other agent's background task. The observer branch has no substrate (`isObserver` greps to zero) and the owner notification needs AGT-05/TN-10's per-agent routing; neither is pending work]** | P2 | medium | TaskStop has no ownership / observer checks and no owner notification — `_ctx` (which carries `agent_id`) is ignored |
 | `TO-05` | confirmed **[fixed]** | P2 | medium | Non-bash TaskOutput `<output>` is not passed through the subagent-output sanitiser (`uH`): no `[harness: subagent output matched instruction-shaped pattern(s): …]` marker, no `Human:`/`Assistant:` turn-marker neutralisation |
 | `TO-06` | confirmed **[fixed]** | P2 | medium | TaskOutput for an `mcp_task` returns the spooled result text; the oracle returns a synthetic metadata block (server/tool/status/elapsed…) with `omitOutputPath` and its own truncation header |
 | `TO-07` | confirmed **[partially fixed: `isRawTranscript` and the report extraction are done — `chunk.result` was `None` for every production agent, so `TaskOutput` served the raw transcript; `[The agent produced no report text.]` and `harnessHead` remain, and are gated behind moving the max-turns note builder out of `tools/agent`]** | P2 | medium | local_agent output shaping: no `[The agent produced no report text.]`, no `harnessHead` prefix, no `isRawTranscript` flag on the transcript fallback |
@@ -370,6 +370,13 @@ user-vs-model split is wrong.
   production `local_agent` task and `TaskOutput` served the JSON transcript
   instead of the answer. The bare-array form still works, which is why no test
   caught it — the fixtures all use it.
+
+- `335174e49` **TO-04 piece 1** — `TaskStop` resolved the caller's agent id and
+  then ignored it, so any subagent could stop any other agent's background work.
+  The owner is `task.agentId`, which differs per type (an agent's OWN id; a
+  shell's SPAWNER) and is NOT the oracle's separate `ownerAgentId` — using the
+  creator would have let a parent stop a child and refused the child itself.
+  Ordering is pinned: not-running is reported before ownership.
 
 Guards worth keeping in mind for follow-up work:
 

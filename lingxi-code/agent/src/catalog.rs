@@ -1619,19 +1619,82 @@ fn json_to_yaml(v: &serde_json::Value) -> serde_yaml::Value {
 ///
 /// The returned list is sorted alphabetically by `agent_type` for stable
 /// display order in `/agents`.
+/// claude `wie` — the per-file byte cap `vG` applies before parsing a markdown
+/// definition (1 MiB).
+const MARKDOWN_FILE_MAX_BYTES: u64 = 1_048_576;
+
+/// Every `*.md` file under `root`, RECURSIVELY.
+///
+/// claude's `vG(dir)` scans with
+/// `rg --files --hidden --follow --no-ignore --glob "*.md"`, whose fallback
+/// `TQr` is an explicit recursive walk that follows symlinks and keeps a
+/// `dev:ino` visited set so a symlink loop cannot hang it. The port read the
+/// TOP LEVEL only, so `<DOT_DIR>/agents/reviewers/api.md` — an ordinary way to
+/// group definitions — was invisible.
+///
+/// The visited key here is the canonical path rather than `dev:ino`: `TQr` uses
+/// `dev:ino` when the platform reports it and falls back to `realpath`
+/// otherwise, and the two are interchangeable for loop detection. Following
+/// symlinks is `--follow`, so entries are classified through
+/// `metadata` (which resolves them), not `symlink_metadata`.
+///
+/// Results are sorted. claude leaves this to ripgrep's traversal order; the
+/// port's caller inserts later-wins into a map, so an unsorted walk would make
+/// the winner between two files declaring the same `name` depend on filesystem
+/// order. Sorting pins it without changing WHICH definitions exist.
+async fn collect_markdown_files(root: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        // Canonicalize BEFORE the visited check so two paths reaching the same
+        // directory through different symlinks collapse to one entry.
+        let Ok(key) = tokio::fs::canonicalize(&dir).await else {
+            continue;
+        };
+        if !visited.insert(key) {
+            continue;
+        }
+        // missing dir = empty contribution (`O5`/`vG`'s ENOENT arm)
+        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            // `--follow`: resolve through a symlink before classifying it.
+            let meta = match tokio::fs::metadata(&path).await {
+                Ok(m) => m,
+                Err(e) => {
+                    // `TQr`: `Failed to follow symlink ${C}: ${D}` — a dangling
+                    // link is reported, not fatal.
+                    tracing::warn!(error = %e, path = %path.display(), "failed to follow symlink");
+                    continue;
+                }
+            };
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() && path.extension().and_then(|s| s.to_str()) == Some("md") {
+                if meta.len() > MARKDOWN_FILE_MAX_BYTES {
+                    tracing::warn!(
+                        path = %path.display(),
+                        limit = MARKDOWN_FILE_MAX_BYTES,
+                        "loadMarkdownFilesFromDir: skipping: not a regular file or exceeds the byte limit"
+                    );
+                    continue;
+                }
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 pub async fn load_agents_from_dirs(paths: &[(PathBuf, AgentSource)]) -> Vec<AgentDefinition> {
     use std::collections::HashMap;
     let mut by_name: HashMap<String, AgentDefinition> = HashMap::new();
     for (dir, source) in paths {
-        // missing dir = empty contribution
-        let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
-            continue;
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("md") {
-                continue;
-            }
+        for p in collect_markdown_files(dir).await {
             let raw = match tokio::fs::read_to_string(&p).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -2133,6 +2196,73 @@ mod tests {
             def.allowed_tools,
             vec!["Read".to_string(), "Grep".to_string()]
         );
+    }
+
+    /// `vG` scans with `rg --files --glob "*.md"`, which RECURSES. Grouping
+    /// definitions into subdirectories is ordinary; the port used to read the
+    /// top level only, so those files were invisible with no diagnostic.
+    #[tokio::test]
+    async fn agent_files_are_found_in_subdirectories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents = tmp.path().join("agents");
+        let nested = agents.join("reviewers").join("backend");
+        tokio::fs::create_dir_all(&nested).await.unwrap();
+        tokio::fs::write(
+            agents.join("top.md"),
+            "---\nname: top\ndescription: t\n---\nbody\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            nested.join("api.md"),
+            "---\nname: api\ndescription: a\n---\nbody\n",
+        )
+        .await
+        .unwrap();
+        // A non-markdown neighbour and an oversized definition are both skipped.
+        tokio::fs::write(agents.join("notes.txt"), "not an agent")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            agents.join("huge.md"),
+            format!(
+                "---\nname: huge\ndescription: h\n---\n{}",
+                "x".repeat(MARKDOWN_FILE_MAX_BYTES as usize + 1)
+            ),
+        )
+        .await
+        .unwrap();
+
+        let loaded = load_agents_from_dirs(&[(agents, AgentSource::Project)]).await;
+        let names: Vec<&str> = loaded.iter().map(|a| a.agent_type.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["api", "top"],
+            "the nested definition must load and the over-cap one must not",
+        );
+    }
+
+    /// `TQr` keeps a `dev:ino` visited set precisely so a symlink cycle cannot
+    /// hang the walk. Without one this test does not finish.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_cycle_does_not_hang_the_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents = tmp.path().join("agents");
+        let sub = agents.join("sub");
+        tokio::fs::create_dir_all(&sub).await.unwrap();
+        tokio::fs::write(
+            agents.join("a.md"),
+            "---\nname: a\ndescription: d\n---\nbody\n",
+        )
+        .await
+        .unwrap();
+        // sub/loop -> agents, i.e. agents/sub/loop/sub/loop/...
+        std::os::unix::fs::symlink(&agents, sub.join("loop")).unwrap();
+
+        let loaded = load_agents_from_dirs(&[(agents, AgentSource::Project)]).await;
+        assert_eq!(loaded.len(), 1, "the cycle must not duplicate or hang");
+        assert_eq!(loaded[0].agent_type, "a");
     }
 
     /// `O5`'s three stop conditions, and the order it returns.

@@ -37,7 +37,7 @@ Derived oracle facts are in `~/.claude/oracle-chunks/notes/agent-audit/`.
 
 ## Result
 
-Fourteen divergences confirmed. Ten are fixed; the rest are recorded with their
+Fifteen divergences confirmed. Eleven are fixed; the rest are recorded with their
 blockers.
 
 A correction to an earlier draft of this report: it said source precedence was
@@ -208,6 +208,37 @@ unreadable directory as an empty contribution, which is `O5`'s ENOENT arm.
 One behaviour change falls out and is correct: with the cwd AT `$HOME`, the walk
 now collects nothing, so `~/<DOT_DIR>/agents` is loaded once as `userSettings`
 instead of twice (the second time as `projectSettings`, which used to win).
+
+### AG-21 (P1) — agent directories were scanned only at the top level
+
+`vG(dir)` — the loader behind every agent tier — scans with
+
+```
+rg --files --hidden --follow --no-ignore --glob "*.md"
+```
+
+which RECURSES, and its non-ripgrep fallback `TQr` is an explicit recursive
+walk that follows symlinks and keeps a `dev:ino` visited set so a symlink cycle
+cannot hang it. It also applies a per-file cap (`wie = 1048576`) and logs
+`loadMarkdownFilesFromDir: skipping <path>: not a regular file or exceeds
+<limit> byte limit`.
+
+`load_agents_from_dirs` used a single `read_dir`, so anything below the top
+level — `<DOT_DIR>/agents/reviewers/api.md`, an ordinary way to group
+definitions — was invisible, with no diagnostic, and there was no size cap at
+all.
+
+Fixed: `collect_markdown_files` walks recursively, resolves entries through
+`metadata` (that is `--follow`), keys its visited set on the canonical path
+(`TQr` prefers `dev:ino` and falls back to `realpath`; the two are
+interchangeable for loop detection), and applies the 1 MiB cap. Results are
+sorted, which claude leaves to ripgrep's traversal order: the port's caller
+inserts later-wins into a map, so an unsorted walk would let filesystem order
+decide between two files declaring the same `name`. Sorting pins that without
+changing which definitions exist.
+
+The symlink-cycle test does not merely assert a count — without the visited set
+it does not terminate.
 
 ### AG-07 (P2) — the built-in web-fetch agent auto-backgrounded
 
@@ -390,7 +421,7 @@ branding, and the deferred remote/CCR isolation path.
 
 | suite | before | after |
 |---|---|---|
-| `agent --lib` | 405 passed, 8 failed | 418 passed, 2 failed |
+| `agent --lib` | 405 passed, 8 failed | 420 passed, 2 failed |
 | `tool-agent --lib` | 161 passed, 0 failed | 165 passed, 0 failed |
 | `platform-api --lib` | 300 passed, 0 failed | 302 passed, 0 failed |
 
@@ -437,6 +468,10 @@ Tests were added for behaviour that had none:
 * `explore_inherit_cap_kill_switch_restores_plain_inherit` — with a premise
   assertion that the session would otherwise be capped, so a pass cannot come
   from the model being under the cap anyway.
+* `agent_files_are_found_in_subdirectories` — a nested definition loads, a
+  non-markdown neighbour and an over-cap file do not;
+  `a_symlink_cycle_does_not_hang_the_scan`, which fails by hanging rather than
+  by asserting if the visited set is dropped.
 * `project_agent_dirs_walks_up_to_the_project_root` — all three stop conditions
   (project root, home ceiling, filesystem root) and the returned order;
   `agent_dir_precedence_puts_the_deepest_project_dir_last`; and

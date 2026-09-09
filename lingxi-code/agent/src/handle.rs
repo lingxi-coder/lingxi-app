@@ -2235,6 +2235,10 @@ pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEnt
             tools_description: tools_description(def),
             agent_type: def.agent_type.clone(),
             when_to_use: def.when_to_use.clone(),
+            // `whenToUseLean` rides along unresolved: which of the two texts a
+            // line renders is `U2n`'s decision, taken per RENDER against the
+            // model being rendered for, not per catalog build.
+            when_to_use_lean: crate::builtins::when_to_use_lean(def).map(str::to_string),
         })
         .collect();
     entries.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
@@ -6596,8 +6600,56 @@ mod tests {
         );
         // statusline-setup: Explicit([Read, Edit]).
         assert_eq!(by["statusline-setup"].tools_description, "Read, Edit");
-        // when_to_use carried through verbatim (claude 2.1.193 lean variant N6p).
-        assert!(by["Explore"].when_to_use.contains("broad fan-out searches"));
+        // `Explore` is the only definition carrying both texts: `when_to_use`
+        // is the FULL `vto`, `when_to_use_lean` the `Cto` a lean session
+        // renders. `U2n` picks between them per render, so the entry must
+        // carry both rather than pre-resolving one.
+        assert_eq!(
+            by["Explore"].when_to_use,
+            crate::builtins::EXPLORE_WHEN_TO_USE
+        );
+        assert_eq!(
+            by["Explore"].when_to_use_lean.as_deref(),
+            Some(crate::builtins::EXPLORE_WHEN_TO_USE_LEAN)
+        );
+        assert!(by["Explore"]
+            .when_to_use
+            .starts_with("Fast read-only search agent for locating code."));
+        assert!(by["Explore"]
+            .when_to_use_lean
+            .as_deref()
+            .unwrap()
+            .contains("broad fan-out searches"));
+        // Every other built-in declares no lean variant.
+        for ty in ["general-purpose", "statusline-setup", "Plan"] {
+            assert!(
+                by[ty].when_to_use_lean.is_none(),
+                "{ty} declares no whenToUseLean"
+            );
+        }
+    }
+
+    /// A user/project agent that overrides a built-in by name brings its own
+    /// single `description`; it must render that in BOTH prompt modes rather
+    /// than inheriting the built-in's lean variant.
+    #[test]
+    fn a_catalog_override_of_explore_carries_no_lean_variant() {
+        let mut defs = builtin_agent_definitions();
+        defs.push(AgentDefinition {
+            agent_type: "Explore".to_string(),
+            when_to_use: "CATALOG OVERRIDE".to_string(),
+            source: AgentSource::Project,
+            ..agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()]))
+        });
+        let entries = crate::agent_listing_entries(&defs);
+        let explore = entries.iter().find(|e| e.agent_type == "Explore").unwrap();
+        assert_eq!(explore.when_to_use, "CATALOG OVERRIDE");
+        assert!(explore.when_to_use_lean.is_none());
+        assert_eq!(
+            platform_api::subagent_spawn::format_agent_line(explore, true),
+            "- Explore: CATALOG OVERRIDE (Tools: Read)",
+            "the override's own text must render on the lean arm too",
+        );
     }
 
     #[tokio::test]

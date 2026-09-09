@@ -37,8 +37,8 @@ Derived oracle facts are in `~/.claude/oracle-chunks/notes/agent-audit/`.
 
 ## Result
 
-Ten divergences confirmed. Six are fixed in this change; four are recorded with
-their blockers. Everything else in the agent surface — the LONG/LEAN prompt
+Ten divergences confirmed. Nine are fixed; the rest are recorded with their
+blockers. Everything else in the agent surface — the LONG/LEAN prompt
 arms, the fork sections, the examples, agent-type normalization and the
 ambiguity/deny/not-found errors, the depth/budget/concurrency caps, required-MCP
 gating, worktree isolation, the `<usage>` trailer, one-shot built-ins, frontmatter
@@ -184,11 +184,7 @@ factor in the binary and outside it here.
 Fixed in `AgentTool::call`. (Impact is bounded today: the web-fetch agent is
 behind `LINGXI_WEB_FETCH_AGENT`, off by default.)
 
----
-
-## Not fixed — recorded with the blocker
-
-### AG-08 (P2) — `whenToUseLean`: a non-lean session sees the lean Explore text
+### AG-08 (P2) — a non-lean session saw the lean Explore description
 
 2.1.266's listing formatter takes the lean flag:
 
@@ -197,27 +193,42 @@ function U2n(e,n){let r=H4o(e),o=n&&e.whenToUseLean||e.whenToUse;return `- ${e.a
 ```
 
 and the producer computes it from the main-loop model
-(`D=VU(YK(e.options.mainLoopModel))`, @5174317). `Explore` is the only definition
-in 2.1.266 that declares `whenToUseLean` (`vto` full / `Cto` lean, @1495xxx). The
-port stores only the LEAN text in its single `when_to_use` field, so a NON-lean
-session renders the lean description where the oracle renders the full one.
+(`D=VU(YK(e.options.mainLoopModel))`, @5174317). `Explore` is the only
+definition in 2.1.266 that declares `whenToUseLean` (`vto` full / `Cto` lean,
+@1495xxx). The port stored only the LEAN text in its single `when_to_use` field,
+so a NON-lean session rendered the lean description where the oracle renders the
+full one — and no non-listing surface could reach the full text at all.
 
-This is live on LingXi, not theoretical: `dh_simple_system_prompt` returns
-`false` (⇒ non-lean) for every `PromptProfile::FullHarness` model — i.e. every
-non-Anthropic provider — and for sonnet/haiku/claude-3/opus-4-0..4-7. Those
-sessions are exactly the ones getting the wrong line today.
+Live on LingXi rather than theoretical: `dh_simple_system_prompt` returns `false`
+(⇒ non-lean) for every `PromptProfile::FullHarness` model — i.e. every
+non-Anthropic provider — and for sonnet/haiku/claude-3/opus-4-0..4-7.
 
-Blocker: the lean flag has to reach the formatter. `format_agent_line(entry)`
-and the `SubagentSpawner::agent_listing()` trait method both carry no model, and
-the selection must happen where `AgentDefinition::source` is still visible (a
-user agent named `Explore` overrides the built-in and has no lean variant). The
-clean shape is a `when_to_use_lean: Option<String>` on `SubagentListingEntry`
-plus `format_agent_line(entry, lean)`; that is 32 literal construction sites,
-mostly in tests. Both call sites already know the model
-(`AgentTool::prompt`'s `opts.model`, and the orchestrator's main-loop model), so
-no trait change is needed.
+Fixed: `AgentDefinition` keeps the FULL text; `SubagentListingEntry` gained
+`when_to_use_lean`, populated from `builtins::when_to_use_lean` (BUILT-IN
+definitions only — a catalog agent that overrides `Explore` by name brings one
+`description` and must render it on both arms); and `format_agent_line(entry,
+lean)` picks between them per RENDER, keeping the JS `||` fall-through so an
+empty lean variant does not render a blank description. Both call sites already
+knew their model, so the `SubagentSpawner` trait is unchanged.
 
-### AG-09 (P2) — the 2.1.266 stop-pending spawn guard
+### AG-09 (P3) — the Explore inherit-cap kill-switch
+
+2.1.266's `yX` short-circuits the cap ahead of the tier test:
+
+```js
+if(a.CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP)return"inherit";
+```
+
+`resolve_builtin_explore_model` implemented the cap but not the escape hatch.
+Fixed, reading the env through `is_env_truthy` like every other bare `a.X` gate
+here (it differs only for a value like `"0"`, truthy in JS, which nobody sets on
+a kill-switch).
+
+---
+
+## Not fixed — recorded with the blocker
+
+### AG-13 (P2) — the 2.1.266 stop-pending spawn guard
 
 New in 2.1.266 (@3578059):
 
@@ -231,7 +242,7 @@ Blocker: no substrate. The port has no stop-pending set — `grep` for
 guard needs a registry of agent ids whose stop has been requested but not yet
 settled before the message can be anything but decorative.
 
-### AG-10 (P2) — the harness-note layer around agent results
+### AG-14 (P2) — the harness-note layer around agent results
 
 `bft` returns `{harnessNoteCount, harnessTailCount, harnessSectionHash, content}`
 and `Rae(content, harnessNoteCount, …)` splits notes from body downstream: the
@@ -247,7 +258,7 @@ the turn-limit fact already reaches the model through the notification summary,
 and adding the note to `outcome.result` would put it INSIDE `<result>`, which is
 not where the oracle puts it.
 
-### AG-11 (P3) — the `agent.spawn` plugin hook
+### AG-15 (P3) — the `agent.spawn` plugin hook
 
 New in 2.1.266: `_Bo` (@2955987) runs the spawn through a plugin **function
 hook** that can deny it, rewrite the agent type / model / cwd / background flag,
@@ -258,7 +269,7 @@ Blocker: this is not an agent-subsystem gap. The port has no functionHooks
 runtime at all (`functionHooks` / `hooks-worker`: zero hits), so `agent.spawn`
 lands only after that subsystem exists.
 
-### AG-12 (P3) — smaller residuals
+### AG-16 (P3) — smaller residuals
 
 * `outputSchema` (`V4o`, @3575900): the oracle declares a discriminated union of
   `completed` / `async_launched` / `remote_launched` shapes with per-field
@@ -267,14 +278,15 @@ lands only after that subsystem exists.
 * `cacheTtl`: `sKt(e)` reads `frontmatter.experimental.cacheTtl` (key
   case-normalized to `cachettl`) into the definition. The port's frontmatter
   parser covers every other field but this one.
-* `forceAsync`: `vBo`'s `e.forceAsync` (`L5() && !teammate`) has no term in the
-  port's background formula, so `subagent_type: "fork"` with an explicit
-  `run_in_background: false` runs synchronously where the oracle forces async.
-  Unreachable from the model (the schema omits `run_in_background` whenever the
-  fork feature is on) but reachable programmatically.
-* `CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP`: `yX` short-circuits the Explore
-  inherit cap under this env. `resolve_builtin_explore_model` implements the cap
-  itself but not the escape hatch.
+* `forceAsync`: `vBo`'s `e.forceAsync` (`L5() && !teammate`) is deliberately NOT
+  modeled. The binary backgrounds every spawn once the fork feature is on, but
+  the port's fork path is synchronous end to end — the parent's rendered system
+  prompt and the fork context messages are threaded onto the request the SYNC
+  dispatch builds, and `dispatch_async` has no equivalent; adding the disjunct
+  first sent forks down a route that drops their inherited context (three fork
+  tests went red on exactly that). It only changes the answer for an explicit
+  `run_in_background: false`, which the schema does not advertise while fork is
+  on. The reason is recorded on `should_run_in_background`.
 
 ## Preserved LingXi divergences
 
@@ -285,13 +297,22 @@ branding, and the deferred remote/CCR isolation path.
 
 ## Verification
 
-`cargo check -p agent -p tool-agent --all-targets` → clean (0 errors).
-`cargo test -p agent -p tool-agent --no-fail-fast`:
+`cargo check` clean across `platform-api`, `agent`, `tool-agent`, `tasks`,
+`tool-skill` (`--all-targets`) and the `orchestrator` lib.
+`cargo test -p platform-api -p agent -p tool-agent --no-fail-fast`:
 
 | suite | before | after |
 |---|---|---|
-| `agent --lib` | 405 passed, 8 failed | 413 passed, 2 failed |
-| `tool-agent --lib` | 161 passed, 0 failed | 164 passed, 0 failed |
+| `agent --lib` | 405 passed, 8 failed | 415 passed, 2 failed |
+| `tool-agent --lib` | 161 passed, 0 failed | 165 passed, 0 failed |
+| `platform-api --lib` | 300 passed, 0 failed | 302 passed, 0 failed |
+
+`orchestrator`'s **lib test target** could not be built: another session's
+uncommitted `orchestrator/src/prompt/goal_checkin.rs` is missing a field in a
+`GoalDeferralState` initializer. The lib itself compiles, so the one
+orchestrator change here (the `agent_listing_delta` renderer taking the
+main-loop model's lean flag) is checked; its tests are not, and none of them
+assert on the Explore description.
 
 Six of the eight `agent` failures were the AG-04 fix landing: the listing tests
 took `builtin_agent_definitions().len()` as the expected LISTING length, so they
@@ -308,7 +329,7 @@ this change. `agent/src/permission_mode.rs` is another session's in-flight work
 `cargo test -p agent -- permission_mode` running); the file imports only
 `AgentPermissionMode` and `PermissionMode` and touches nothing in this change.
 
-Three tests were added for behaviour that had none:
+Tests were added for behaviour that had none:
 
 * `turn_limited_agent_reports_the_limit_and_keeps_partial_output` — the note
   fronts the report, the partial text survives, and the no-output marker is gone.
@@ -318,6 +339,14 @@ Three tests were added for behaviour that had none:
   `cre()` gates, including that Explore and Plan move together.
 * `agent_schema_projection_covers_coordinator_and_model_force` and an assertion
   on the `model` description in `agent_schema_requires_description_and_prompt`.
+* `format_agent_line_renders_the_lean_variant_only_on_the_lean_arm` — both arms
+  plus the empty-lean fall-through; `a_catalog_override_of_explore_carries_no_lean_variant`
+  — an override renders its own text on the lean arm too.
+* `background_decision_ports_vbo` — every arm of `vBo`, including that `!Pw(n)`
+  gates only the implicit default.
+* `explore_inherit_cap_kill_switch_restores_plain_inherit` — with a premise
+  assertion that the session would otherwise be capped, so a pass cannot come
+  from the model being under the cap anyway.
 
 `completed_no_output_uses_marker` still passes: its fixture is
 `{"reason":"max_turns_exhausted"}` with no `max_turns`, which is not a shape the

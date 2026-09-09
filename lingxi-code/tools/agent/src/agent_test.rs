@@ -4859,6 +4859,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let entry = |t: &str| platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: t.into(),
             when_to_use: "x".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         };
         assert!(general_purpose_is_available(&[entry("general-purpose")]));
@@ -4883,11 +4884,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "general-purpose".into(),
                 when_to_use: "use for anything".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools".into(),
             },
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "Explore".into(),
                 when_to_use: "search".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools except Edit".into(),
             },
         ]
@@ -5028,6 +5031,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "Explore".into(),
             when_to_use: "search".into(),
+            when_to_use_lean: None,
             tools_description: "All tools except Edit".into(),
         }];
         let short = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, false);
@@ -5072,11 +5076,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "Explore".into(),
                 when_to_use: "search".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools except Edit".into(),
             },
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "Plan".into(),
                 when_to_use: "plan".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools except Edit".into(),
             },
         ]);
@@ -5120,11 +5126,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "general-purpose".into(),
                 when_to_use: "anything".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools".into(),
             },
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "statusline-setup".into(),
                 when_to_use: "status line".into(),
+                when_to_use_lean: None,
                 tools_description: "Read, Edit".into(),
             },
         ]);
@@ -5168,11 +5176,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "general-purpose".into(),
                 when_to_use: "anything".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools".into(),
             },
             platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: "statusline-setup".into(),
                 when_to_use: "status line".into(),
+                when_to_use_lean: None,
                 tools_description: "Read, Edit".into(),
             },
         ]);
@@ -5245,6 +5255,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         let full = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
@@ -5272,6 +5283,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         let prompt = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
@@ -5300,6 +5312,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
@@ -5351,6 +5364,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         platform_api::subscription::set_current_subscription(Some(
@@ -5379,6 +5393,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
 
@@ -5432,6 +5447,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         platform_api::session_flags::set_non_interactive_session(true);
@@ -5462,6 +5478,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         let prior_global = platform_api::session_flags::is_non_interactive_session();
@@ -5499,6 +5516,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         let p = AgentTool::build_prompt(
@@ -5529,6 +5547,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let agents = vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }];
         let p = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
@@ -5957,6 +5976,85 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         // Non-one-shot → trailer still present after the marker.
         assert!(mc.contains("<usage>subagent_tokens: 0"));
+    }
+
+    /// `vBo`'s `shouldRunAsync`, arm by arm. The interesting one is `!Pw(n)`:
+    /// it gates ONLY the implicit default, so the two explicit arms still
+    /// background the built-in web-fetch agent.
+    #[test]
+    fn background_decision_ports_vbo() {
+        let base = || BackgroundDecision {
+            wants_background: None,
+            definition_background: false,
+            is_builtin_web_fetch: false,
+            is_coordinator: false,
+            caller_is_in_process_teammate: false,
+            background_tasks_disabled: false,
+        };
+
+        // Default: background.
+        assert!(should_run_in_background(base()));
+        // Explicit false: foreground.
+        assert!(!should_run_in_background(BackgroundDecision {
+            wants_background: Some(false),
+            ..base()
+        }));
+        // A coordinator backgrounds its workers anyway (`e.isCoordinator&&!o`).
+        assert!(should_run_in_background(BackgroundDecision {
+            wants_background: Some(false),
+            is_coordinator: true,
+            ..base()
+        }));
+        // `n.background===!0` outranks an explicit false.
+        assert!(should_run_in_background(BackgroundDecision {
+            wants_background: Some(false),
+            definition_background: true,
+            ..base()
+        }));
+
+        // `!Pw(n)`: the built-in web-fetch agent does NOT auto-background …
+        assert!(!should_run_in_background(BackgroundDecision {
+            is_builtin_web_fetch: true,
+            ..base()
+        }));
+        // … not even on a coordinator, since the factor wraps the whole `d` …
+        assert!(!should_run_in_background(BackgroundDecision {
+            is_builtin_web_fetch: true,
+            is_coordinator: true,
+            ..base()
+        }));
+        // … but both explicit arms sit outside the factor.
+        assert!(should_run_in_background(BackgroundDecision {
+            is_builtin_web_fetch: true,
+            wants_background: Some(true),
+            ..base()
+        }));
+        assert!(should_run_in_background(BackgroundDecision {
+            is_builtin_web_fetch: true,
+            definition_background: true,
+            ..base()
+        }));
+
+        // The kill-switch and the teammate carve-out defeat every arm.
+        for d in [
+            BackgroundDecision {
+                wants_background: Some(true),
+                background_tasks_disabled: true,
+                ..base()
+            },
+            BackgroundDecision {
+                wants_background: Some(true),
+                caller_is_in_process_teammate: true,
+                ..base()
+            },
+            BackgroundDecision {
+                definition_background: true,
+                caller_is_in_process_teammate: true,
+                ..base()
+            },
+        ] {
+            assert!(!should_run_in_background(d));
+        }
     }
 
     /// `bft`'s max-turns harness NOTE (src_162329786.js @3532630). The runner

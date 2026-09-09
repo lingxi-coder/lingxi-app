@@ -713,16 +713,36 @@ impl std::fmt::Debug for SubagentInheritance {
 pub struct SubagentListingEntry {
     /// Agent type label (TS `agentType`).
     pub agent_type: String,
-    /// "When to use" guidance (TS `whenToUse`).
+    /// "When to use" guidance (TS `whenToUse`) — the FULL text, which is what
+    /// every non-listing surface reads.
     pub when_to_use: String,
+    /// The shorter "when to use" a LEAN session renders instead (TS
+    /// `whenToUseLean`). `None` for every definition that does not declare one,
+    /// which in 2.1.266 is all of them but the built-in `Explore`.
+    #[serde(default)]
+    pub when_to_use_lean: Option<String>,
     /// Pre-rendered tools description (TS `getToolsDescription`): `All tools`,
     /// `All tools except X, Y`, an explicit `A, B, C`, or `None`.
     pub tools_description: String,
 }
 
 /// Format one agent catalog line, the single source of truth for claude-code's
-/// `formatAgentLine` (`AgentTool/prompt.ts:43-46`):
-/// `- {agentType}: {whenToUse} (Tools: {toolsDescription})`.
+/// `formatAgentLine` — 2.1.266 `U2n` (src_162329786.js @3554069):
+///
+/// ```js
+/// function U2n(e,n){let r=H4o(e),o=n&&e.whenToUseLean||e.whenToUse;
+///                   return `- ${e.agentType}: ${o} (Tools: ${r})`}
+/// ```
+///
+/// `n` is the LEAN-prompt flag, computed by the caller from the model it is
+/// rendering for (`VU(YK(mainLoopModel))` in the `agent_listing_delta`
+/// producer, the tool's own `PromptOptions.model` in the inline path). A
+/// non-lean session renders the FULL `whenToUse` even for a definition that
+/// declares a lean variant.
+///
+/// The `||` is JS truthiness, so an EMPTY `whenToUseLean` falls through to
+/// `whenToUse` rather than rendering a blank description; `filter(…is_empty)`
+/// keeps that.
 ///
 /// Lives here (a leaf crate) so BOTH the inline tool-prompt path (`tool-agent`)
 /// and the `agent_listing_delta` attachment path (`agent` crate → orchestrator)
@@ -730,10 +750,19 @@ pub struct SubagentListingEntry {
 /// `agent` engine crate. The `tools_description` is pre-rendered by the
 /// spawner / catalog (TS `getToolsDescription`).
 #[must_use]
-pub fn format_agent_line(entry: &SubagentListingEntry) -> String {
+pub fn format_agent_line(entry: &SubagentListingEntry, lean: bool) -> String {
+    let when_to_use = if lean {
+        entry
+            .when_to_use_lean
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&entry.when_to_use)
+    } else {
+        &entry.when_to_use
+    };
     format!(
         "- {}: {} (Tools: {})",
-        entry.agent_type, entry.when_to_use, entry.tools_description
+        entry.agent_type, when_to_use, entry.tools_description
     )
 }
 
@@ -1080,11 +1109,46 @@ mod tests {
         let entry = SubagentListingEntry {
             agent_type: "Explore".into(),
             when_to_use: "Read-only search agent".into(),
+            when_to_use_lean: None,
             tools_description: "All tools except Edit, Write".into(),
         };
+        // No lean variant declared: both arms render `whenToUse`.
+        for lean in [false, true] {
+            assert_eq!(
+                format_agent_line(&entry, lean),
+                "- Explore: Read-only search agent (Tools: All tools except Edit, Write)"
+            );
+        }
+    }
+
+    /// `U2n`'s `o = n && e.whenToUseLean || e.whenToUse`: the lean text is
+    /// rendered ONLY on the lean arm, and an empty one falls through to
+    /// `whenToUse` the way JS truthiness does.
+    #[test]
+    fn format_agent_line_renders_the_lean_variant_only_on_the_lean_arm() {
+        let entry = SubagentListingEntry {
+            agent_type: "Explore".into(),
+            when_to_use: "the long one".into(),
+            when_to_use_lean: Some("the short one".into()),
+            tools_description: "All tools".into(),
+        };
         assert_eq!(
-            format_agent_line(&entry),
-            "- Explore: Read-only search agent (Tools: All tools except Edit, Write)"
+            format_agent_line(&entry, false),
+            "- Explore: the long one (Tools: All tools)"
+        );
+        assert_eq!(
+            format_agent_line(&entry, true),
+            "- Explore: the short one (Tools: All tools)"
+        );
+
+        let empty = SubagentListingEntry {
+            when_to_use_lean: Some(String::new()),
+            ..entry
+        };
+        assert_eq!(
+            format_agent_line(&empty, true),
+            "- Explore: the long one (Tools: All tools)",
+            "an empty lean variant is falsy in JS and must fall through",
         );
     }
 

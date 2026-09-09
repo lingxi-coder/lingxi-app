@@ -667,6 +667,58 @@ fn extract_content_texts(result: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Inputs to [`should_run_in_background`] — `vBo`'s argument object minus the
+/// isolation fields, which the port resolves separately.
+struct BackgroundDecision {
+    /// `wantsBackground` — the call's `run_in_background`, tri-state.
+    wants_background: Option<bool>,
+    /// `n.background===!0` — the selected definition's frontmatter flag.
+    definition_background: bool,
+    /// `Pw(n)` — the BUILT-IN `web-fetch` agent, which never auto-backgrounds.
+    is_builtin_web_fetch: bool,
+    /// `e.isCoordinator`.
+    is_coordinator: bool,
+    /// `callerIsInProcessTeammate`.
+    caller_is_in_process_teammate: bool,
+    /// `backgroundTasksDisabled` — the only negative gate on the whole group.
+    background_tasks_disabled: bool,
+}
+
+/// `vBo`'s `shouldRunAsync` for a LOCAL spawn (2.1.266 @2957xxx):
+///
+/// ```js
+/// let d=e.isCoordinator&&!o||e.forceAsync||!o&&r!==!1;
+/// let y=r===!0||n.background===!0||!Pw(n)&&d;
+/// return {…, shouldRunAsync: E||y&&!e.backgroundTasksDisabled}
+/// ```
+///
+/// (`E` is the remote-launch arm, which the port does not have.)
+///
+/// The two EXPLICIT arms — an explicit `run_in_background: true` and a
+/// definition's `background: true` — sit outside the `!Pw(n)` factor, so they
+/// still background the built-in web-fetch agent; only the implicit default
+/// does not.
+///
+/// ⛔ `e.forceAsync` (`L5()&&!Le`, the raw fork FEATURE flag) is NOT modeled.
+/// The binary backgrounds every spawn once fork is enabled, but the port's fork
+/// path is synchronous end to end — the parent's rendered system prompt and the
+/// fork context messages are threaded onto the request the SYNC dispatch builds
+/// (`fork_threads_parent_system_prompt_onto_request`,
+/// `fork_gate_on_explicit_fork_takes_fork_path`), and `dispatch_async` has no
+/// equivalent. Adding the disjunct before the async fork path exists would send
+/// forks down a route that drops their inherited context. It only changes the
+/// answer for an explicit `run_in_background: false`, which the schema does not
+/// advertise while fork is on.
+fn should_run_in_background(d: BackgroundDecision) -> bool {
+    let auto_background = !d.caller_is_in_process_teammate
+        && (d.is_coordinator || d.wants_background != Some(false));
+    (d.wants_background == Some(true)
+        || d.definition_background
+        || (!d.is_builtin_web_fetch && auto_background))
+        && !d.background_tasks_disabled
+        && !d.caller_is_in_process_teammate
+}
+
 /// claude `pRe` (src_160528463.js @870) — the prefix of the harness NOTE that
 /// fronts a turn-limited agent's result.
 const MAX_TURNS_NOTE_PREFIX: &str = "NOTE: this agent stopped at its ";
@@ -1432,6 +1484,7 @@ impl AgentTool {
         agents.push(SubagentListingEntry {
             agent_type: FUSION_AGENT_TYPE.to_string(),
             when_to_use: FUSION_WHEN_TO_USE.to_string(),
+            when_to_use_lean: None,
             tools_description: "Fusion deliberation (read-only panel)".to_string(),
         });
     }
@@ -1966,8 +2019,14 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// `agent_listing_delta` attachment path (orchestrator) render identical
     /// lines. The `toolsDescription` is pre-rendered by the spawner (TS
     /// `getToolsDescription`).
-    fn format_agent_line(agent: &platform_api::subagent_spawn::SubagentListingEntry) -> String {
-        platform_api::subagent_spawn::format_agent_line(agent)
+    /// `lean` is `U2n`'s second argument — the LEAN-prompt flag for the model
+    /// this prompt is being rendered for. A definition that declares a
+    /// `whenToUseLean` renders it only on that arm.
+    fn format_agent_line(
+        agent: &platform_api::subagent_spawn::SubagentListingEntry,
+        lean: bool,
+    ) -> String {
+        platform_api::subagent_spawn::format_agent_line(agent, lean)
     }
 
     /// Build the dynamic Agent tool prompt, porting claude-code v2.1.193's
@@ -2065,6 +2124,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         model: Option<&str>,
         general_purpose_available: bool,
     ) -> String {
+        // `re = PC({model, leanPrompt})` — the LEAN-prompt flag, computed ONCE
+        // and used for both the catalog lines (`U2n`'s second argument) and the
+        // SHORT/LONG arm split below, exactly as `H2n` does.
+        let lean = tool_api::dh_simple_system_prompt(model);
         // Catalog placement (binary intro `p`): the 2.1.193 default externalizes
         // the catalog to the orchestrator's `<system-reminder>` attachment, so the
         // description carries only the static pointer line. A LEGACY inline body is
@@ -2108,7 +2171,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             } else {
                 let agent_lines = agents
                     .iter()
-                    .map(Self::format_agent_line)
+                    .map(|agent| Self::format_agent_line(agent, lean))
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!("Available agent types and the tools they have access to:\n{agent_lines}")
@@ -2211,7 +2274,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // render the SHORT arm, so a sonnet / haiku / `claude-3-*` /
         // `opus-4-0..4-7` session never saw `## When not to use`,
         // `## Usage notes`, `## Writing the prompt`, or the `<example>` blocks.
-        if tool_api::dh_simple_system_prompt(model) {
+        if lean {
             // ---- SHORT (lean) arm — binary `if(m){…}` ----
             //
             // `## When to use` + four terse bullets. NO `## When not to use`, NO
@@ -4044,12 +4107,19 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // only an explicit `run_in_background: true`, or `background: true` in a
         // definition, still can. The two explicit arms stay outside the factor,
         // exactly as the binary has them.
-        let is_builtin_web_fetch = selected.is_built_in && effective_type == WEB_FETCH_AGENT_TYPE;
-        let run_in_background = (parsed.run_in_background == Some(true)
-            || selected.background
-            || (!is_builtin_web_fetch && parsed.run_in_background != Some(false)))
-            && !background_tasks_disabled
-            && !caller_is_in_process_teammate;
+        let run_in_background = should_run_in_background(BackgroundDecision {
+            wants_background: parsed.run_in_background,
+            definition_background: selected.background,
+            is_builtin_web_fetch: selected.is_built_in
+                && effective_type == WEB_FETCH_AGENT_TYPE,
+            is_coordinator: self
+                .ctx
+                .coordinator_mode
+                .as_ref()
+                .is_some_and(|m| m.is_enabled()),
+            caller_is_in_process_teammate,
+            background_tasks_disabled,
+        });
         let is_async = run_in_background;
         Self::emit_agent_tool_selected(
             &bus,
@@ -4634,6 +4704,7 @@ mod f_description_l_gate_tests {
         vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
+            when_to_use_lean: None,
             tools_description: "All tools".into(),
         }]
     }
@@ -4784,6 +4855,7 @@ mod f_description_l_gate_tests {
         fixture.push(platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "fusion".into(),
             when_to_use: "Parallel multi-model deliberation for complex code, task, plan, or review work. About 4\u{2013}5\u{d7} the cost of a single agent.".into(),
+            when_to_use_lean: None,
             tools_description: "Fusion deliberation (read-only panel)".into(),
         });
         // `prompt_env` already takes `AGENT_LIST_ENV_LOCK` — do the

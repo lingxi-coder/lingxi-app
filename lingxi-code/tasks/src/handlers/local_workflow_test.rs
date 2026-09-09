@@ -641,6 +641,7 @@ impl SubagentSpawner for BlockingWorkflowObserverSpawner {
         vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: DEFAULT_WORKFLOW_SUBAGENT.to_string(),
             when_to_use: String::new(),
+            when_to_use_lean: None,
             tools_description: String::new(),
         }]
     }
@@ -716,6 +717,7 @@ impl SubagentSpawner for EchoSpawner {
         .map(|t| platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: (*t).to_string(),
             when_to_use: String::new(),
+            when_to_use_lean: None,
             tools_description: String::new(),
         })
         .collect()
@@ -1162,6 +1164,7 @@ impl SubagentSpawner for TranscriptOverrideSpawner {
         vec![platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: DEFAULT_WORKFLOW_SUBAGENT.to_string(),
             when_to_use: String::new(),
+            when_to_use_lean: None,
             tools_description: String::new(),
         }]
     }
@@ -1570,6 +1573,7 @@ impl SubagentSpawner for NamespacedListingSpawner {
             .map(|t| platform_api::subagent_spawn::SubagentListingEntry {
                 agent_type: t.clone(),
                 when_to_use: String::new(),
+                when_to_use_lean: None,
                 tools_description: String::new(),
             })
             .collect()

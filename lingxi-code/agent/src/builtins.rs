@@ -365,6 +365,33 @@ pub const WORKFLOW_SUBAGENT_NON_SCHEMA_ADDENDUM: &str = "\n\n---\n\nNOTE: You ar
 /// `${Lp}` is resolved to `StructuredOutput`.
 pub const WORKFLOW_SUBAGENT_SCHEMA_ADDENDUM: &str = "\n\n---\n\nNOTE: You are running inside a workflow script. You MUST return your final answer by calling the StructuredOutput tool exactly once \u{2014} the tool's input schema defines the required shape. Do your work, then call StructuredOutput; do NOT put your answer in a text response (the script reads ONLY the tool call). If validation fails, read the error and call StructuredOutput again with a corrected shape.";
 
+/// claude `vto` (@1495xxx) — the built-in `Explore` agent's FULL `whenToUse`,
+/// the text a NON-lean session renders and the one every non-listing surface
+/// (the SDK's `bKe`, `claude-code-guide`'s custom-agent block) reads.
+pub const EXPLORE_WHEN_TO_USE: &str = "Fast read-only search agent for locating code. Use it to find files by pattern (eg. \"src/components/**/*.tsx\"), grep for symbols or keywords (eg. \"API endpoints\"), or answer \"where is X defined / which files reference Y.\" Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis — it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: \"quick\" for a single targeted lookup, \"medium\" for moderate exploration, or \"very thorough\" to search across multiple locations and naming conventions.";
+
+/// claude `Cto` (@1495xxx) — the same agent's `whenToUseLean`, rendered in
+/// place of [`EXPLORE_WHEN_TO_USE`] when the session is on the lean prompt.
+/// `Explore` is the ONLY definition in 2.1.266 that declares one.
+pub const EXPLORE_WHEN_TO_USE_LEAN: &str = "Read-only search agent for broad fan-out searches — when answering means sweeping many files, directories, or naming conventions and you only need the conclusion, not the file dumps. It reads excerpts rather than whole files, so it locates code; it doesn't review or audit it. Specify search breadth: \"medium\" for moderate exploration, \"very thorough\" for multiple locations and naming conventions.";
+
+/// The `whenToUseLean` a definition declares, or `None`.
+///
+/// Only BUILT-IN definitions can carry one — a user/project/plugin agent that
+/// overrides a built-in by name brings its own single `description` and must
+/// render that in both prompt modes, so the source check is load-bearing rather
+/// than defensive.
+#[must_use]
+pub fn when_to_use_lean(def: &AgentDefinition) -> Option<&'static str> {
+    if !matches!(def.source, AgentSource::BuiltIn) {
+        return None;
+    }
+    match def.agent_type.as_str() {
+        "Explore" => Some(EXPLORE_WHEN_TO_USE_LEAN),
+        _ => None,
+    }
+}
+
 /// The workflow runtime's private subagent type (oracle `bn.agentType`,
 /// src_173804794.js @34591).
 ///
@@ -681,15 +708,14 @@ pub fn builtin_agent_definitions_with_gates(
     // `if(d8())n.push(b0,$Ee)` — Explore and Plan are registered as a pair.
     if include_explore_plan {
         defs.push(
-        // claude 2.1.193 Explore carries BOTH `whenToUse` (M6p, full) and
-        // `whenToUseLean` (N6p, lean); the model-facing agent listing renders the
-        // LEAN variant, so `when_to_use` (the port's single listing field) holds
-        // N6p verbatim. The full M6p text is used only by non-listing surfaces the
-        // port does not have yet; adding a separate `when_to_use_lean` field is
-        // deferred (it would ripple to 40+ AgentDefinition literals).
+        // `Explore` carries BOTH `whenToUse` (`vto`, full) and `whenToUseLean`
+        // (`Cto`, lean). `when_to_use` holds the FULL text — `U2n` renders the
+        // lean one only when the session is lean, and every non-listing surface
+        // reads the full one. The lean variant is supplied by
+        // [`when_to_use_lean`] and carried on the listing entry.
         def(
             "Explore",
-            "Read-only search agent for broad fan-out searches — when answering means sweeping many files, directories, or naming conventions and you only need the conclusion, not the file dumps. It reads excerpts rather than whole files, so it locates code; it doesn't review or audit it. Specify search breadth: \"medium\" for moderate exploration, \"very thorough\" for multiple locations and naming conventions.",
+            EXPLORE_WHEN_TO_USE,
             AgentToolPolicy::Except(read_only_disallowed()),
             // claude-code 2.1.198 `qme` frontmatter is `model:"inherit"` (was
             // `"haiku"`): the effective model is computed per-session by `GAe`

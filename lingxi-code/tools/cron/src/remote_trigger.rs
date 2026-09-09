@@ -206,11 +206,19 @@ fn json_stringify_body(body: &str) -> String {
 }
 
 fn is_id(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }
 
 /// `w(text, max)` — truncate to `max` chars with an ellipsis.
 fn clip(text: &str, max: usize) -> String {
+    // Byte length >= char count, so a string that fits the cap in BYTES fits it
+    // in chars — the common case, and it skips the full `chars()` walk that a
+    // 200-event run log would otherwise pay per block.
+    if text.len() <= max {
+        return text.to_string();
+    }
     let count = text.chars().count();
     if count <= max {
         return text.to_string();
@@ -243,7 +251,9 @@ fn normalise_event_fields(body: &Value) -> Value {
                 return event.clone();
             };
             let type_ok = data.get("type").is_none_or(|t| t.is_null() || t == "user");
-            let role_ok = message.get("role").is_none_or(|r| r.is_null() || r == "user");
+            let role_ok = message
+                .get("role")
+                .is_none_or(|r| r.is_null() || r == "user");
             let already = data.get("type") == Some(&json!("user"))
                 && message.get("role") == Some(&json!("user"));
             if !type_ok || !message.contains_key("content") || !role_ok || already {
@@ -345,7 +355,9 @@ fn form_encode(value: &str) -> String {
     let mut out = String::new();
     for b in value.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => {
+                out.push(b as char)
+            }
             b' ' => out.push('+'),
             _ => out.push_str(&format!("%{b:02X}")),
         }
@@ -358,8 +370,18 @@ fn encode_uri_component(value: &str) -> String {
     let mut out = String::new();
     for b in value.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*'
-            | b'\'' | b'(' | b')' => out.push(b as char),
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'!'
+            | b'~'
+            | b'*'
+            | b'\''
+            | b'('
+            | b')' => out.push(b as char),
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -368,8 +390,7 @@ fn encode_uri_component(value: &str) -> String {
 
 fn iso_seconds(ms: i64) -> String {
     let secs = ms.div_euclid(1000);
-    cron::schedule::iso_8601_utc(u64::try_from(secs).unwrap_or(0) * 1000)
-        .replace(".000Z", "Z")
+    cron::schedule::iso_8601_utc(u64::try_from(secs).unwrap_or(0) * 1000).replace(".000Z", "Z")
 }
 
 /// `pe(trigger)` — the scheduled-summary lines for create/update.
@@ -395,14 +416,18 @@ fn trigger_summary(data: &Value, now_ms: i64) -> Option<String> {
         if enabled {
             lines.push(format!("→ Scheduled: {what} {rel} ({iso} UTC)"));
             if non_empty("run_once_at").is_some() && at < now_ms {
-                lines.push("⚠ next_run_at is in the past — confirm the date/timezone is intended.".into());
+                lines.push(
+                    "⚠ next_run_at is in the past — confirm the date/timezone is intended.".into(),
+                );
             }
         } else {
             lines.push(format!("→ Disabled (next run would be {rel}, {iso} UTC)"));
         }
     }
     if let Some(id) = data.get("id").and_then(Value::as_str).filter(|s| is_id(s)) {
-        lines.push(format!("→ View/manage: {CLAUDE_AI_ORIGIN}/code/routines/{id}"));
+        lines.push(format!(
+            "→ View/manage: {CLAUDE_AI_ORIGIN}/code/routines/{id}"
+        ));
     }
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
@@ -483,7 +508,10 @@ fn describe_event(payload: &Value) -> Vec<String> {
                     Some("tool_use") => out.push(format!(
                         "tool_use {}: {}",
                         block.get("name").and_then(Value::as_str).unwrap_or("?"),
-                        clip(&block.get("input").cloned().unwrap_or(json!({})).to_string(), 300)
+                        clip(
+                            &block.get("input").cloned().unwrap_or(json!({})).to_string(),
+                            300
+                        )
                     )),
                     Some("tool_result") => {
                         let body = match block.get("content") {
@@ -519,7 +547,8 @@ fn describe_event(payload: &Value) -> Vec<String> {
             Some("permission_denied") => vec![format!(
                 "permission_denied {}{}: {}",
                 s(payload.get("tool_name"), 100).unwrap_or_else(|| "?".into()),
-                s(payload.get("decision_reason_type"), 40).map_or(String::new(), |d| format!(" [{d}]")),
+                s(payload.get("decision_reason_type"), 40)
+                    .map_or(String::new(), |d| format!(" [{d}]")),
                 s(payload.get("decision_reason"), 500)
                     .or_else(|| s(payload.get("message"), 500))
                     .unwrap_or_else(|| "?".into())
@@ -537,10 +566,16 @@ fn describe_event(payload: &Value) -> Vec<String> {
             Some("api_retry") => vec![format!(
                 "api_retry {}/{}: status={} error={} retry_in={}",
                 payload.get("attempt").map_or("?".into(), Value::to_string),
-                payload.get("max_retries").map_or("?".into(), Value::to_string),
-                payload.get("error_status").map_or("none".into(), Value::to_string),
-                s(payload.get("error"), 200)
-                    .unwrap_or_else(|| clip(&payload.get("error").map_or("?".into(), Value::to_string), 200)),
+                payload
+                    .get("max_retries")
+                    .map_or("?".into(), Value::to_string),
+                payload
+                    .get("error_status")
+                    .map_or("none".into(), Value::to_string),
+                s(payload.get("error"), 200).unwrap_or_else(|| clip(
+                    &payload.get("error").map_or("?".into(), Value::to_string),
+                    200
+                )),
                 payload
                     .get("retry_delay_ms")
                     .and_then(Value::as_f64)
@@ -550,7 +585,12 @@ fn describe_event(payload: &Value) -> Vec<String> {
                 .or_else(|| s(payload.get("message"), 300))
                 .or_else(|| s(payload.get("text"), 300))
                 .or_else(|| s(payload.get("reason"), 300))
-                .map(|t| vec![format!("system{}: {t}", subtype.map_or(String::new(), |st| format!("/{st}")))])
+                .map(|t| {
+                    vec![format!(
+                        "system{}: {t}",
+                        subtype.map_or(String::new(), |st| format!("/{st}"))
+                    )]
+                })
                 .unwrap_or_default(),
         },
         "result" => {
@@ -562,18 +602,28 @@ fn describe_event(payload: &Value) -> Vec<String> {
                 .get("permission_denials")
                 .and_then(Value::as_array)
                 .filter(|d| !d.is_empty())
-                .map_or(String::new(), |d| format!(" permission_denials={}", d.len()));
+                .map_or(String::new(), |d| {
+                    format!(" permission_denials={}", d.len())
+                });
             let errors = payload
                 .get("errors")
                 .and_then(Value::as_array)
                 .filter(|e| !e.is_empty())
-                .map_or(String::new(), |e| format!(" errors={}", clip(&Value::Array(e.clone()).to_string(), 1500)));
-            let result = s(payload.get("result"), 1000).map_or(String::new(), |r| format!(" — {r}"));
+                .map_or(String::new(), |e| {
+                    format!(
+                        " errors={}",
+                        clip(&Value::Array(e.clone()).to_string(), 1500)
+                    )
+                });
+            let result =
+                s(payload.get("result"), 1000).map_or(String::new(), |r| format!(" — {r}"));
             vec![format!(
                 "result: {} is_error={} turns={} duration={duration}{denials}{errors}{result}",
                 subtype.unwrap_or("?"),
                 payload.get("is_error").map_or("?".into(), Value::to_string),
-                payload.get("num_turns").map_or("?".into(), Value::to_string),
+                payload
+                    .get("num_turns")
+                    .map_or("?".into(), Value::to_string),
             )]
         }
         "env_manager_log" => {
@@ -594,7 +644,8 @@ fn describe_event(payload: &Value) -> Vec<String> {
                     "permission prompt {}: {}",
                     s(req.and_then(|r| r.get("tool_name")), 100).unwrap_or_else(|| "?".into()),
                     s(req.and_then(|r| r.get("decision_reason")), 300).unwrap_or_else(|| {
-                        req.and_then(|r| r.get("input")).map_or("?".into(), |i| clip(&i.to_string(), 300))
+                        req.and_then(|r| r.get("input"))
+                            .map_or("?".into(), |i| clip(&i.to_string(), 300))
                     })
                 )],
                 Some("request_user_dialog") => vec![format!(
@@ -615,7 +666,8 @@ fn describe_event(payload: &Value) -> Vec<String> {
                 vec![format!(
                     "rate_limit: rejected ({}){}",
                     s(info.and_then(|i| i.get("rateLimitType")), 40).unwrap_or_else(|| "?".into()),
-                    info.and_then(|i| i.get("resetsAt")).map_or(String::new(), |r| format!(" resets_at={r}"))
+                    info.and_then(|i| i.get("resetsAt"))
+                        .map_or(String::new(), |r| format!(" resets_at={r}"))
                 )]
             } else {
                 vec![]
@@ -650,7 +702,10 @@ fn summarise_run_log(page: &Value, session_id: &str, budget: usize) -> (String, 
         let lines = if payload.is_object() {
             let lines = describe_event(&payload);
             if lines.is_empty() {
-                let kind = payload.get("type").and_then(Value::as_str).unwrap_or("untyped");
+                let kind = payload
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("untyped");
                 let key = match payload.get("subtype").and_then(Value::as_str) {
                     Some(st) => format!("{kind}/{st}"),
                     None => kind.to_string(),
@@ -671,14 +726,24 @@ fn summarise_run_log(page: &Value, session_id: &str, budget: usize) -> (String, 
             .and_then(Value::as_str)
             .map_or(String::new(), |t| format!("[{t}] "));
         let block = clip(
-            &lines.iter().map(|l| format!("{stamp}{l}")).collect::<Vec<_>>().join("\n"),
+            &lines
+                .iter()
+                .map(|l| format!("{stamp}{l}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
             RUN_LOG_LINE_CAP,
         );
-        if used + block.len() + 1 > limit {
+        // CHARS, not bytes: `clip` truncates in chars and the ceiling this
+        // budget serves is `max_result_size_chars`. Measuring the gate in bytes
+        // dropped non-ASCII events up to ~3x earlier than intended, while the
+        // final `clip` below overshot the cap by the same factor — the two
+        // errors ran in opposite directions, so neither showed on ASCII.
+        let block_chars = block.chars().count();
+        if used + block_chars + 1 > limit {
             overflow += 1;
             continue;
         }
-        used += block.len() + 1;
+        used += block_chars + 1;
         kept.push(block);
     }
     kept.reverse();
@@ -701,19 +766,30 @@ fn summarise_run_log(page: &Value, session_id: &str, budget: usize) -> (String, 
     let total_skipped: usize = skipped.values().sum();
     if total_skipped > 0 {
         let mut kinds: Vec<_> = skipped.into_iter().collect();
-        kinds.sort_by(|a, b| b.1.cmp(&a.1));
-        let shown: Vec<String> = kinds.iter().take(8).map(|(k, n)| format!("{} ×{n}", clip(k, 40))).collect();
+        kinds.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let shown: Vec<String> = kinds
+            .iter()
+            .take(8)
+            .map(|(k, n)| format!("{} ×{n}", clip(k, 40)))
+            .collect();
         let mut parts = shown;
         if kinds.len() > 8 {
             parts.push(format!("{} other kind(s)", kinds.len() - 8));
         }
-        head.push(format!("({total_skipped} non-transcript event(s) on this page skipped: {})", parts.join(", ")));
+        head.push(format!(
+            "({total_skipped} non-transcript event(s) on this page skipped: {})",
+            parts.join(", ")
+        ));
     }
     if kept.is_empty() && overflow == 0 {
         head.push("(no transcript events on this page)".into());
     }
-    let mut text = head.into_iter().chain(kept.iter().cloned()).collect::<Vec<_>>().join("\n");
-    if text.len() > budget {
+    let mut text = head
+        .into_iter()
+        .chain(kept.iter().cloned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.chars().count() > budget {
         text = format!("{}…[truncated]", clip(&text, budget.saturating_sub(20)));
     }
     (
@@ -946,7 +1022,9 @@ impl Tool for RemoteTriggerTool {
             }
             "create_webhook_trigger" => {
                 let Some(b) = body.clone() else {
-                    return Err(fail("webhook_no_body", "create_webhook_trigger requires body").await);
+                    return Err(
+                        fail("webhook_no_body", "create_webhook_trigger requires body").await,
+                    );
                 };
                 (
                     HttpMethod::Post,
@@ -956,25 +1034,45 @@ impl Tool for RemoteTriggerTool {
             }
             "list_runs" => {
                 let Some(id) = trigger_id.as_deref() else {
-                    return Err(fail("list_runs_no_trigger_id", "list_runs requires trigger_id").await);
+                    return Err(
+                        fail("list_runs_no_trigger_id", "list_runs requires trigger_id").await,
+                    );
                 };
-                let mut pairs = vec![("trigger_id", id.to_string()), ("limit", LIST_RUNS_LIMIT.to_string())];
-                if let Some(c) = &cursor {
-                    pairs.push(("cursor", c.clone()));
-                }
-                (HttpMethod::Get, format!("{base_url}/v1/code/sessions?{}", query(pairs)), None)
-            }
-            "get_run_log" => {
-                let Some(id) = session_id.as_deref() else {
-                    return Err(fail("get_run_log_no_session_id", "get_run_log requires session_id").await);
-                };
-                let mut pairs = vec![("limit", RUN_LOG_LIMIT.to_string()), ("sort_order", "desc".to_string())];
+                let mut pairs = vec![
+                    ("trigger_id", id.to_string()),
+                    ("limit", LIST_RUNS_LIMIT.to_string()),
+                ];
                 if let Some(c) = &cursor {
                     pairs.push(("cursor", c.clone()));
                 }
                 (
                     HttpMethod::Get,
-                    format!("{base_url}/v1/code/sessions/{}/events?{}", encode_uri_component(id), query(pairs)),
+                    format!("{base_url}/v1/code/sessions?{}", query(pairs)),
+                    None,
+                )
+            }
+            "get_run_log" => {
+                let Some(id) = session_id.as_deref() else {
+                    return Err(fail(
+                        "get_run_log_no_session_id",
+                        "get_run_log requires session_id",
+                    )
+                    .await);
+                };
+                let mut pairs = vec![
+                    ("limit", RUN_LOG_LIMIT.to_string()),
+                    ("sort_order", "desc".to_string()),
+                ];
+                if let Some(c) = &cursor {
+                    pairs.push(("cursor", c.clone()));
+                }
+                (
+                    HttpMethod::Get,
+                    format!(
+                        "{base_url}/v1/code/sessions/{}/events?{}",
+                        encode_uri_component(id),
+                        query(pairs)
+                    ),
                     None,
                 )
             }
@@ -983,14 +1081,23 @@ impl Tool for RemoteTriggerTool {
                     return Err(fail("run_no_trigger_id", "run requires trigger_id").await);
                 };
                 // `let {trigger_id, ...rest} = body ?? {}` — the body minus trigger_id.
-                let mut rest = body.clone().and_then(|b| b.as_object().cloned()).unwrap_or_default();
+                let mut rest = body
+                    .clone()
+                    .and_then(|b| b.as_object().cloned())
+                    .unwrap_or_default();
                 rest.remove("trigger_id");
-                (HttpMethod::Post, format!("{base}/{id}/run"), Some(Value::Object(rest)))
+                (
+                    HttpMethod::Post,
+                    format!("{base}/{id}/run"),
+                    Some(Value::Object(rest)),
+                )
             }
             _ => unreachable!("action validated"),
         };
 
-        let request_body = data.as_ref().map(|d| serde_json::to_string(d).unwrap_or_else(|_| "{}".into()));
+        let request_body = data
+            .as_ref()
+            .map(|d| serde_json::to_string(d).unwrap_or_else(|_| "{}".into()));
 
         let req = HttpRequest {
             method,
@@ -1030,27 +1137,45 @@ impl Tool for RemoteTriggerTool {
         if success {
             if let Some(page) = &parsed {
                 if action == "list_runs" {
-                    let (j, s) = summarise_runs(page, trigger_id.as_deref().unwrap_or(""), cursor.is_some());
+                    let (j, s) =
+                        summarise_runs(page, trigger_id.as_deref().unwrap_or(""), cursor.is_some());
                     json = j;
                     summary = s;
                 } else if action == "get_run_log" {
                     // `n = maxResultSizeChars - ye - session_id.length`.
-                    let budget = self
-                        .max_result_size_chars()
-                        .saturating_sub(RUN_LOG_RESERVE + session_id.as_deref().unwrap_or("").len());
-                    let (j, s) = summarise_run_log(page, session_id.as_deref().unwrap_or(""), budget);
+                    let budget = self.max_result_size_chars().saturating_sub(
+                        RUN_LOG_RESERVE + session_id.as_deref().unwrap_or("").len(),
+                    );
+                    let (j, s) =
+                        summarise_run_log(page, session_id.as_deref().unwrap_or(""), budget);
                     json = j;
                     summary = s;
                 }
             }
         }
-        if matches!(action.as_str(), "create" | "update" | "run" | "create_webhook_trigger") {
+        if matches!(
+            action.as_str(),
+            "create" | "update" | "run" | "create_webhook_trigger"
+        ) {
             let created_id = match action.as_str() {
-                "create" => parsed.as_ref().and_then(|p| p.get("id")).and_then(Value::as_str).map(str::to_string),
-                "create_webhook_trigger" => body.as_ref().and_then(|b| b.get("routine_trigger_id")).and_then(Value::as_str).map(str::to_string),
+                "create" => parsed
+                    .as_ref()
+                    .and_then(|p| p.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                "create_webhook_trigger" => body
+                    .as_ref()
+                    .and_then(|b| b.get("routine_trigger_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 _ => trigger_id.clone(),
             };
-            let has = |k: &str| body.as_ref().and_then(|b| b.get(k)).and_then(Value::as_str).is_some_and(|s| !s.is_empty());
+            let has = |k: &str| {
+                body.as_ref()
+                    .and_then(|b| b.get(k))
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+            };
             tracing::info!(
                 event = "tengu_remote_trigger",
                 action = %action,
@@ -1111,6 +1236,45 @@ mod tests {
     use platform_api::process::ProcessOutput;
     use std::sync::Mutex;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+
+    /// The run-log size budget must be counted in the SAME unit `clip`
+    /// truncates in, and the unit `max_result_size_chars` names: chars.
+    ///
+    /// Every other test here is ASCII, where bytes and chars coincide, so none
+    /// of them can tell the two accountings apart. This fixture is CJK (3 bytes
+    /// per char) and is SIZED to straddle the gate: 4 blocks of ~63 chars are
+    /// ~252 chars (well inside the budget) but ~572 bytes (well outside it), so
+    /// a byte-counted gate drops events a char-counted one keeps. Verified to
+    /// fail against the byte accounting before being committed.
+    #[test]
+    fn the_run_log_budget_counts_chars_not_bytes() {
+        let event = |text: &str| {
+            json!({
+                "created_at": "2026-09-08T00:00:00Z",
+                "payload": {"type": "user", "message": {"role": "user", "content": text}},
+            })
+        };
+        // 37 CJK chars = 111 bytes.
+        let wide = "计划任务的转录事件文本内容用于验证预算单位是否正确计算字符数而不是字节数目";
+        assert_eq!(wide.chars().count(), 37, "fixture width is load-bearing");
+        let page = json!({"data": [event(wide), event(wide), event(wide), event(wide)]});
+
+        let budget = 500;
+        let (data, summary) = summarise_run_log(&page, "s1", budget);
+        let shown = serde_json::from_str::<Value>(&data).expect("json")["events_shown"]
+            .as_u64()
+            .expect("events_shown");
+        assert_eq!(
+            shown, 4,
+            "all four fit in chars; a byte-counted gate drops the tail",
+        );
+        let summary = summary.expect("a summary");
+        assert!(
+            summary.chars().count() <= budget,
+            "the summary must respect the budget in chars ({} > {budget})",
+            summary.chars().count(),
+        );
+    }
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {

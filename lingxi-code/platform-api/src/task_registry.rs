@@ -200,6 +200,11 @@ pub struct TaskRecord {
     /// `MonitorMcpTaskState` carries no per-tool name (it watches resources, not
     /// a single tool), so this stays `None` for `monitor_mcp`; the `mcp_task`
     /// type (`McpTaskState`) DOES carry a single `tool_name` and populates it.
+    ///
+    /// The oracle's `monitor_mcp` record DOES carry one — its projection is
+    /// `o.server=r.server, o.tool=r.tool`, the same pair as `mcp_task`. Nothing
+    /// creates such a record in 2.1.263 either, so neither side has a value to
+    /// disagree about; a future producer here would have to fill both.
     /// Additive default `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,

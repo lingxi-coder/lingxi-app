@@ -11435,6 +11435,21 @@ pub async fn build(
             cfg.customization_gates.safe_mode,
         );
     }
+    // `Z$`'s TOP tier: `[built-in, plugin, userSettings, projectSettings,
+    // flagSettings, policySettings]` applied later-wins, so an org-provisioned
+    // agent outranks every other source — `--agents` included. Hence AFTER the
+    // flag merge. `wQr` gives this tier no `Fr(...)` / `ku("agents")` gate of
+    // its own (unlike user and project), because org policy is not user
+    // customization; the safe-mode / `--bare` arm above still suppresses the
+    // whole disk catalog before this runs.
+    if !cfg.customization_gates.disables_custom_agents() {
+        let policy_agents = agent::load_agents_from_dirs(&[(
+            agent::catalog::policy_agent_dir(&crate::settings_watch::managed_settings_dir()),
+            agent::definition::AgentSource::PolicySettings,
+        )])
+        .await;
+        agent::catalog::merge_agents_later_wins(&mut agents, policy_agents);
+    }
 
     // (P2-02 cc2.1.207 / M7 cc2.1.220) The agent to apply to the MAIN loop: an
     // EXPLICIT `--agent` (fresh boot or re-passed on `--resume`) wins;

@@ -37,7 +37,7 @@ Derived oracle facts are in `~/.claude/oracle-chunks/notes/agent-audit/`.
 
 ## Result
 
-Fifteen divergences confirmed. Twelve are fixed; the rest are recorded with their
+Fifteen divergences confirmed. Fourteen are fixed; the rest are recorded with their
 blockers.
 
 A correction to an earlier draft of this report: it said source precedence was
@@ -300,10 +300,6 @@ Fixed, reading the env through `is_env_truthy` like every other bare `a.X` gate
 here (it differs only for a value like `"0"`, truthy in JS, which nobody sets on
 a kill-switch).
 
----
-
-## Not fixed — recorded with the blocker
-
 ### AG-18 (P2) — `--add-dir` agent directories were never loaded
 
 For `kind === "agents"` only, `wQr` adds a second projectSettings source: each
@@ -330,27 +326,60 @@ under two spellings, and then the port merely reads it twice — the ordinary
 project entry still comes later and still wins, which is the answer claude
 reaches by dropping the duplicate.
 
-### AG-19 (P2) — the managed policy agent directory is never loaded
+### AG-19 (P2) — the managed policy agent directory was never loaded
 
-`wQr`'s LOWEST tier is `SN(Jb(),".claude",e)` — `<managed dir>/.claude/agents`,
-tagged `policySettings`. `AgentSource::PolicySettings` exists in the port and is
-threaded through the MCP / hook-trust paths, but nothing ever produces an agent
-carrying it.
+`wQr`'s TOP tier is `SN(Jb(),".claude",e)` — `<managed dir>/.claude/agents`,
+tagged `policySettings`. `AgentSource::PolicySettings` existed in the port and
+was threaded through the MCP and hook-trust paths, but nothing ever produced an
+agent carrying it, so an org-provisioned definition simply did not exist.
 
-Blocker: the port has no managed-settings DIRECTORY helper (only
-`managed-settings.json` content handling), so there is no path to read.
+Precedence matters here and is easy to get backwards: `Z$` applies
+`[built-in, plugin, userSettings, projectSettings, flagSettings, policySettings]`
+later-wins, so policy outranks EVERYTHING, `--agents` included. It is therefore
+merged AFTER `merge_cli_flag_agents`, not alongside the directory tiers.
 
-### AG-20 (P3) — two files in one directory declaring the same name
+`wQr` gives this tier no `Fr(...)` / `ku("agents")` gate of its own — unlike the
+user and project tiers — because org policy is not user customization. Only the
+safe-mode / `--bare` arm suppresses it, and that already drops the whole disk
+catalog upstream.
 
-`load_agents_from_dirs` inserts into a `HashMap` as it walks `read_dir`, so when
-two files in the SAME directory declare the same `name`, the winner is whichever
-the filesystem happened to yield last. The oracle is deterministic (the tier
-lists are ordered before the map insert), de-duplicates by INODE across sources
-(`Skipping duplicate file '<path>' from <source> (same inode already loaded from
-<other>)`), and logs every collision through `Hto`:
-`[agents] Duplicate agent name 'X' (source): loc1, loc2 — active: loc1`.
+Fixed: `catalog::policy_agent_dir` + `catalog::merge_agents_later_wins`, wired
+from the composition root through the existing
+`settings_watch::managed_settings_dir()`.
 
-Neither the inode dedup nor the duplicate log exists in the port.
+(Another blocker of my own that did not survive contact: I had recorded this as
+needing a managed-settings DIRECTORY helper the port lacked. It has had one all
+along.)
+
+### AG-20 (P3) — one file reachable from two directories loaded twice
+
+`wQr` de-duplicates every loaded markdown file by INODE across all tiers at
+once, keeping the first occurrence:
+
+```js
+let ve=await Promise.all(Se.map((De)=>SQr(De.filePath))), xe=new Map, Ie=[];
+… if(je!==void 0){t(`Skipping duplicate file '${Le.filePath}' from ${Le.source} (same inode already loaded from ${je})`);continue}
+let Oe=Se.length-Ie.length;
+if(Oe>0)t(`Deduplicated ${Oe} files in ${e} (same inode via symlinks or hard links)`);
+```
+
+Without it, one definition symlinked or hard-linked into two of the directories
+was parsed twice and landed under two different `source` labels, with only
+map-insertion order deciding which the rest of the session saw.
+
+Fixed: `load_agents_from_dirs` keys a cross-root set on `dev:ino` (the path off
+Unix, the same substitution `TQr` makes for its directory visited set) and skips
+repeats, logging each one. The messages go through `tracing`, so they carry the
+port's wording rather than claude's — these are diagnostics, not model-facing
+bytes.
+
+The within-directory half of this finding was already closed by AG-21's sort:
+two DISTINCT files declaring one name are not inode duplicates, so both load and
+ordinary later-wins decides, deterministically.
+
+---
+
+## Not fixed — recorded with the blocker
 
 ### AG-13 (P2) — the 2.1.266 stop-pending spawn guard
 
@@ -431,7 +460,7 @@ branding, and the deferred remote/CCR isolation path.
 
 | suite | before | after |
 |---|---|---|
-| `agent --lib` | 405 passed, 8 failed | 421 passed, 2 failed |
+| `agent --lib` | 405 passed, 8 failed | 425 passed, 2 failed |
 | `tool-agent --lib` | 161 passed, 0 failed | 165 passed, 0 failed |
 | `platform-api --lib` | 300 passed, 0 failed | 302 passed, 0 failed |
 
@@ -484,6 +513,9 @@ Tests were added for behaviour that had none:
   by asserting if the visited set is dropped.
 * `agent_dir_precedence_places_add_dirs_below_the_project_tier` — the tier
   position and the dedup against the walk.
+* `one_file_reachable_from_two_dirs_is_loaded_once` and its negative half
+  `two_distinct_files_with_one_name_still_resolve_by_precedence`;
+  `merge_agents_later_wins_replaces_in_place` and `policy_agent_dir_sits_under_the_managed_root`.
 * `project_agent_dirs_walks_up_to_the_project_root` — all three stop conditions
   (project root, home ceiling, filesystem root) and the returned order;
   `agent_dir_precedence_puts_the_deepest_project_dir_last`; and

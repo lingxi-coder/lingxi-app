@@ -1610,6 +1610,40 @@ fn json_to_yaml(v: &serde_json::Value) -> serde_yaml::Value {
     serde_yaml::to_value(v).unwrap_or(serde_yaml::Value::Null)
 }
 
+/// claude `SN(Jb(),".claude",e)` — the managed policy agent directory under the
+/// OS policy root (`getManagedFilePath`).
+///
+/// This is `Z$`'s TOP tier: `C=[built-in, plugin, userSettings, projectSettings,
+/// flagSettings, policySettings]` is applied later-wins, so an org-provisioned
+/// definition outranks every other source, `--agents` included. It is therefore
+/// merged AFTER the flag agents, not alongside the dir tiers.
+///
+/// `wQr` loads it with no `Fr(...)` / `ku("agents")` gate of its own — unlike
+/// the user and project tiers — because org policy is not user customization.
+/// The safe-mode / `--bare` arm still applies: `jto` returns built-ins only
+/// before any of this runs.
+#[must_use]
+pub fn policy_agent_dir(managed_dir: &Path) -> PathBuf {
+    managed_dir.join(branding::DOT_DIR).join("agents")
+}
+
+/// Fold `incoming` over `agents` with claude's later-wins tier semantics: a
+/// same-named definition REPLACES the one already there, a new name appends.
+///
+/// The in-place replace matters — appending instead would leave two entries for
+/// one `agent_type`, and every consumer downstream (`agent_listing_entries`,
+/// `lookup_definition`, `/agents`) picks by name, so which one they saw would
+/// depend on iteration order.
+pub fn merge_agents_later_wins(agents: &mut Vec<AgentDefinition>, incoming: Vec<AgentDefinition>) {
+    for def in incoming {
+        if let Some(slot) = agents.iter_mut().find(|e| e.agent_type == def.agent_type) {
+            *slot = def;
+        } else {
+            agents.push(def);
+        }
+    }
+}
+
 /// Load every `*.md` agent file under each path in `paths`, in order.
 ///
 /// Files with no frontmatter or invalid YAML are logged at `warn!` and
@@ -1642,8 +1676,8 @@ const MARKDOWN_FILE_MAX_BYTES: u64 = 1_048_576;
 /// port's caller inserts later-wins into a map, so an unsorted walk would make
 /// the winner between two files declaring the same `name` depend on filesystem
 /// order. Sorting pins it without changing WHICH definitions exist.
-async fn collect_markdown_files(root: &Path) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
+async fn collect_markdown_files(root: &Path) -> Vec<(PathBuf, String)> {
+    let mut out: Vec<(PathBuf, String)> = Vec::new();
     let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -1682,7 +1716,8 @@ async fn collect_markdown_files(root: &Path) -> Vec<PathBuf> {
                     );
                     continue;
                 }
-                out.push(path);
+                let identity = file_identity(&meta, &path);
+                out.push((path, identity));
             }
         }
     }
@@ -1690,11 +1725,45 @@ async fn collect_markdown_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// claude `SQr(filePath)` — the identity `wQr` de-duplicates markdown files on,
+/// so one file reachable through a symlink or a hard link from two of the
+/// directories is loaded once.
+///
+/// `dev:ino` where the platform reports it, the path otherwise. `TQr` makes the
+/// same substitution for its directory visited set.
+#[cfg(unix)]
+fn file_identity(meta: &std::fs::Metadata, path: &Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let _ = path;
+    format!("{}:{}", meta.dev(), meta.ino())
+}
+
+#[cfg(not(unix))]
+fn file_identity(_meta: &std::fs::Metadata, path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 pub async fn load_agents_from_dirs(paths: &[(PathBuf, AgentSource)]) -> Vec<AgentDefinition> {
     use std::collections::HashMap;
     let mut by_name: HashMap<String, AgentDefinition> = HashMap::new();
+    // `wQr` de-duplicates by inode across ALL tiers at once, keeping the FIRST
+    // occurrence and logging each skip. Same inode means the same bytes, so the
+    // choice only decides which `source`/`baseDir` gets recorded.
+    let mut by_identity: HashMap<String, AgentSource> = HashMap::new();
+    let mut deduplicated = 0usize;
     for (dir, source) in paths {
-        for p in collect_markdown_files(dir).await {
+        for (p, identity) in collect_markdown_files(dir).await {
+            if let Some(already) = by_identity.get(&identity) {
+                tracing::debug!(
+                    path = %p.display(),
+                    source = ?source,
+                    already_loaded_from = ?already,
+                    "Skipping duplicate file (same inode already loaded)"
+                );
+                deduplicated += 1;
+                continue;
+            }
+            by_identity.insert(identity, *source);
             let raw = match tokio::fs::read_to_string(&p).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -1727,6 +1796,12 @@ pub async fn load_agents_from_dirs(paths: &[(PathBuf, AgentSource)]) -> Vec<Agen
                 }
             }
         }
+    }
+    if deduplicated > 0 {
+        tracing::debug!(
+            count = deduplicated,
+            "Deduplicated agent files (same inode via symlinks or hard links)"
+        );
     }
     let mut out: Vec<AgentDefinition> = by_name.into_values().collect();
     out.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
@@ -2285,6 +2360,110 @@ mod tests {
         let loaded = load_agents_from_dirs(&[(agents, AgentSource::Project)]).await;
         assert_eq!(loaded.len(), 1, "the cycle must not duplicate or hang");
         assert_eq!(loaded[0].agent_type, "a");
+    }
+
+    /// `wQr` de-duplicates by inode across tiers, so one definition reachable
+    /// from two directories through a symlink is loaded once — not twice under
+    /// two different `source` labels.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn one_file_reachable_from_two_dirs_is_loaded_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user = tmp.path().join("user");
+        let project = tmp.path().join("project");
+        tokio::fs::create_dir_all(&user).await.unwrap();
+        tokio::fs::create_dir_all(&project).await.unwrap();
+        let real = user.join("shared.md");
+        tokio::fs::write(&real, "---\nname: shared\ndescription: d\n---\nbody\n")
+            .await
+            .unwrap();
+        // The project dir reaches the SAME inode through a symlink.
+        std::os::unix::fs::symlink(&real, project.join("shared.md")).unwrap();
+
+        let loaded = load_agents_from_dirs(&[
+            (user, AgentSource::UserDefined),
+            (project, AgentSource::Project),
+        ])
+        .await;
+        assert_eq!(loaded.len(), 1, "one inode, one definition: {loaded:?}");
+        assert_eq!(
+            loaded[0].source,
+            AgentSource::UserDefined,
+            "the FIRST occurrence is kept, matching `wQr`'s scan order",
+        );
+    }
+
+    /// The negative half: two SEPARATE files declaring the same name are not
+    /// inode duplicates, so both load and ordinary later-wins decides.
+    #[tokio::test]
+    async fn two_distinct_files_with_one_name_still_resolve_by_precedence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user = tmp.path().join("user");
+        let project = tmp.path().join("project");
+        tokio::fs::create_dir_all(&user).await.unwrap();
+        tokio::fs::create_dir_all(&project).await.unwrap();
+        tokio::fs::write(
+            user.join("a.md"),
+            "---\nname: dup\ndescription: USER\n---\nbody\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            project.join("b.md"),
+            "---\nname: dup\ndescription: PROJECT\n---\nbody\n",
+        )
+        .await
+        .unwrap();
+
+        let loaded = load_agents_from_dirs(&[
+            (user, AgentSource::UserDefined),
+            (project, AgentSource::Project),
+        ])
+        .await;
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].when_to_use, "PROJECT", "later tier wins");
+    }
+
+    /// `policy_agent_dir` is `Z$`'s TOP tier, so it must beat a `--agents`
+    /// definition of the same name — which is why the composition root merges
+    /// it AFTER the flag agents.
+    #[test]
+    fn merge_agents_later_wins_replaces_in_place() {
+        let named = |ty: &str, desc: &str, source: AgentSource| {
+            parse_agent_markdown(
+                &format!("---\nname: {ty}\ndescription: {desc}\n---\nbody\n"),
+                source,
+                PathBuf::from("/base"),
+                Path::new("x.md"),
+            )
+            .expect("fixture parses")
+        };
+        let mut agents = vec![
+            named("keeper", "FLAG", AgentSource::Flag),
+            named("other", "PROJECT", AgentSource::Project),
+        ];
+        merge_agents_later_wins(
+            &mut agents,
+            vec![
+                named("keeper", "POLICY", AgentSource::PolicySettings),
+                named("fresh", "POLICY", AgentSource::PolicySettings),
+            ],
+        );
+        assert_eq!(agents.len(), 3, "replace in place, then append: {agents:?}");
+        let keeper = agents.iter().find(|a| a.agent_type == "keeper").unwrap();
+        assert_eq!(keeper.when_to_use, "POLICY");
+        assert_eq!(keeper.source, AgentSource::PolicySettings);
+        assert_eq!(agents[1].agent_type, "other", "untouched entries keep order");
+    }
+
+    #[test]
+    fn policy_agent_dir_sits_under_the_managed_root() {
+        assert_eq!(
+            policy_agent_dir(Path::new("/Library/Application Support/LingXi")),
+            PathBuf::from("/Library/Application Support/LingXi")
+                .join(branding::DOT_DIR)
+                .join("agents")
+        );
     }
 
     /// `O5`'s three stop conditions, and the order it returns.

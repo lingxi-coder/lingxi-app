@@ -27,6 +27,46 @@ fn utf16_units(content: &str) -> u64 {
 /// (claude-code `MAX_TASK_OUTPUT_BYTES_DISPLAY = '5GB'`, `diskOutput.ts:31`).
 pub const MAX_TASK_OUTPUT_BYTES_DISPLAY: &str = "5GB";
 
+/// claude-code `Bt = 8388608` — `getTaskOutput` never returns more than the
+/// LAST 8 MiB of a spool, however large the file is
+/// (`Rbt(t, e = Bt)` → `k_(handle, e)`).
+///
+/// Distinct from [`MAX_TASK_OUTPUT_BYTES`], which is the 5GB WRITE cap: that
+/// one stops the spool growing, this one stops a full read from materialising
+/// gigabytes into memory on the way to a caller that will truncate it to tens
+/// of thousands of characters anyway.
+pub const MAX_TASK_OUTPUT_READ_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Keep at most the last [`MAX_TASK_OUTPUT_READ_BYTES`] and announce what was
+/// dropped, claude-code `Rbt`:
+///
+/// ```js
+/// let{content:r,bytesTotal:s,bytesRead:c}=o;
+/// if(s>c)return`[${Math.round((s-c)/1024)}KB of earlier output omitted]\n${r}`;
+/// return r
+/// ```
+///
+/// The oracle seeks, so its `bytesRead` is exact; this trims an
+/// already-materialised string, so the cut is snapped FORWARD to a UTF-8
+/// boundary and the omitted count is recomputed from what actually survived —
+/// the header must describe the real cut, not the requested one.
+fn apply_read_tail_cap(content: String) -> String {
+    let total = content.len() as u64;
+    if total <= MAX_TASK_OUTPUT_READ_BYTES {
+        return content;
+    }
+    let mut cut = (total - MAX_TASK_OUTPUT_READ_BYTES) as usize;
+    while cut < content.len() && !content.is_char_boundary(cut) {
+        cut += 1;
+    }
+    let omitted = cut as f64 / 1024.0;
+    format!(
+        "[{}KB of earlier output omitted]\n{}",
+        omitted.round() as u64,
+        &content[cut..]
+    )
+}
+
 /// Owner of the task-output sandbox directory.
 pub struct TaskOutputManager {
     output_dir: PathBuf,
@@ -521,7 +561,7 @@ impl TaskOutputManager {
             let fc =
                 platform_api::apply_line_window(terminal_override.content, opts.offset, opts.limit);
             return Ok(TaskOutput {
-                content: fc.content,
+                content: cap_full_read(fc.content, &opts),
                 total_lines: fc.total_lines,
                 truncated: fc.truncated,
                 physical_spool_authoritative,
@@ -540,12 +580,25 @@ impl TaskOutputManager {
             .await
             .map_err(|e| OutputError::Io(e.to_string()))?;
         Ok(TaskOutput {
-            content: fc.content,
+            content: cap_full_read(fc.content, &opts),
             total_lines: fc.total_lines,
             truncated: fc.truncated,
             physical_spool_authoritative: true,
         })
     }
+}
+
+/// Apply [`apply_read_tail_cap`] only to a FULL read.
+///
+/// A windowed read is the caller asking for a specific slice; the oracle's
+/// byte cap belongs to `getTaskOutput`, which takes no window. `total_lines`
+/// deliberately still counts the whole file — the header says what was dropped,
+/// and the line total is what the caller pages against.
+fn cap_full_read(content: String, opts: &OutputOptions) -> String {
+    if opts.offset.is_some() || opts.limit.is_some() {
+        return content;
+    }
+    apply_read_tail_cap(content)
 }
 
 #[cfg(test)]
@@ -813,6 +866,75 @@ mod tests {
                 .unwrap()
                 .content,
             "independent-right\n"
+        );
+    }
+
+    /// TOF-04: a full read never returns more than the last 8 MiB, and says how
+    /// much it dropped. Without this a 5GB spool (which the WRITE cap happily
+    /// allows) was materialised whole on its way to a caller that truncates to
+    /// tens of thousands of characters.
+    #[tokio::test]
+    async fn a_full_read_keeps_the_last_8mb_and_announces_the_rest() {
+        let (_fs, mgr) = manager();
+        let path = mgr.allocate("btail0001").await.unwrap();
+        // 8 MiB + 2 KiB, with a marker at each end.
+        let over = 2 * 1024;
+        let filler = "A".repeat(MAX_TASK_OUTPUT_READ_BYTES as usize + over - "HEAD".len() - "TAIL".len());
+        mgr.append(&path, &format!("HEAD{filler}TAIL")).await.unwrap();
+
+        let read = mgr.read(&path, OutputOptions::default()).await.unwrap();
+        assert!(
+            read.content.starts_with("[2KB of earlier output omitted]\n"),
+            "got: {:?}",
+            &read.content[..60.min(read.content.len())]
+        );
+        assert!(!read.content.contains("HEAD"), "the head must be dropped");
+        assert!(read.content.ends_with("TAIL"), "the tail must survive");
+        assert_eq!(
+            read.content.len(),
+            "[2KB of earlier output omitted]\n".len() + MAX_TASK_OUTPUT_READ_BYTES as usize,
+            "exactly the cap survives, plus the header"
+        );
+    }
+
+    /// Under the cap the content is returned verbatim — no header.
+    #[tokio::test]
+    async fn a_full_read_under_the_cap_is_verbatim() {
+        let (_fs, mgr) = manager();
+        let path = mgr.allocate("btail0002").await.unwrap();
+        mgr.append(&path, "small output\n").await.unwrap();
+        let read = mgr.read(&path, OutputOptions::default()).await.unwrap();
+        assert_eq!(read.content, "small output\n");
+    }
+
+    /// A WINDOWED read is the caller asking for a slice; the oracle's byte cap
+    /// belongs to `getTaskOutput`, which takes no window, so the header must not
+    /// appear there.
+    #[tokio::test]
+    async fn a_windowed_read_is_not_tail_capped() {
+        let (_fs, mgr) = manager();
+        let path = mgr.allocate("btail0003").await.unwrap();
+        let line = "B".repeat(1024);
+        let body: String = std::iter::repeat(line.as_str())
+            .take((MAX_TASK_OUTPUT_READ_BYTES as usize / 1025) + 64)
+            .collect::<Vec<_>>()
+            .join("\n");
+        mgr.append(&path, &body).await.unwrap();
+
+        let read = mgr
+            .read(
+                &path,
+                OutputOptions {
+                    offset: Some(0),
+                    limit: Some(2),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !read.content.contains("of earlier output omitted"),
+            "got: {:?}",
+            &read.content[..60.min(read.content.len())]
         );
     }
 

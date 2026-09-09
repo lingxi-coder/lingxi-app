@@ -32,7 +32,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use telemetry::tengu::tool::{BASH_COMPLETED, BASH_FAILED, BASH_STARTED, BASH_TIMEOUT};
+use telemetry::tengu::tool::{
+    BASH_COMPLETED, BASH_EXPLICITLY_BACKGROUNDED, BASH_FAILED, BASH_STARTED, BASH_TIMEOUT,
+    BASH_TIMEOUT_BACKGROUNDED,
+};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -897,6 +900,38 @@ fn background_ends_with_final_response(ctx: &ToolUseContext) -> bool {
 /// `<error>Command was aborted before completion</error>` marker appended to
 /// stderr (`BashTool.tsx:602-604`). `is_error` follows `interrupted` (TS
 /// `is_error: interrupted`) and is therefore `true`.
+/// claude-code `yWt` + `"wget"` (= `Les`) — the command names the backgrounding
+/// telemetry reports as a `command_type`, in the oracle's order.
+const TELEMETRY_COMMAND_TYPES: &[&str] = &[
+    "npm", "yarn", "pnpm", "node", "python", "python3", "go", "cargo", "make", "docker",
+    "terraform", "webpack", "vite", "jest", "pytest", "curl", "git", "gh", "dotnet", "msbuild",
+    "nuget", "bun", "bunx", "npx", "deno", "pwsh", "pip", "uv", "poetry", "gradle", "mvn", "nx",
+    "turbo", "tsc", "eslint", "prettier", "build", "test", "serve", "watch", "dev", "xcodebuild",
+    "swift", "bazel", "nix", "nix-shell", "nix-build", "nix-env", "wget",
+];
+
+/// claude-code `Npe(command)` — the `command_type` field on the backgrounding
+/// events:
+///
+/// ```js
+/// function Npe(e){let t=Lm(e);if(t.length===0)return S("other");
+///   for(let r of t){let o=ft(r," ");let d=Les.find((p)=>p===o);if(d)return u(d)}
+///   return S("other")}
+/// ```
+///
+/// Split the command line, take each sub-command's FIRST token, and report the
+/// first one that is a known name — else `"other"`. The first MATCH wins, not
+/// the first sub-command: `cd foo && cargo build` reports `cargo`.
+fn telemetry_command_type(command: &str) -> &'static str {
+    for part in permission::shell_command::split_command(command) {
+        let head = part.trim().split(' ').next().unwrap_or_default();
+        if let Some(known) = TELEMETRY_COMMAND_TYPES.iter().find(|c| **c == head) {
+            return known;
+        }
+    }
+    "other"
+}
+
 /// Human-readable duration — claude-code's `qs()` in its default (no-options)
 /// form: a sub-minute value is `"<floor(seconds)>s"`; otherwise the largest
 /// units down, `"Xd Yh Zm"` / `"Yh Zm Ws"` / `"Zm Ws"` / `"Ws"`, with the
@@ -2766,6 +2801,20 @@ impl Tool for BashTool {
         // `pwd -P` readback entirely — but they START in it, same as the
         // foreground arm (see the shared `cwd` derivation above).
         if run_bg {
+            // bg-08: the oracle emits this the moment an explicit background
+            // launch is taken (`i("tengu_bash_command_explicitly_backgrounded",
+            // {command_type:Npe(ve)})`, `src_160988549.js` @4343453).
+            {
+                let mut meta: LogEventMetadata = HashMap::new();
+                meta.insert(
+                    "command_type".into(),
+                    AnalyticsValue::String(telemetry_command_type(&cmd_str).into()),
+                );
+                self.ctx
+                    .bus
+                    .log_event(BASH_EXPLICITLY_BACKGROUNDED, meta)
+                    .await;
+            }
             let pcmd = SbxCommand {
                 command: shell,
                 // BASH.4: login-shell init (see the foreground site) — `-l`
@@ -3025,7 +3074,21 @@ impl Tool for BashTool {
                     AnalyticsValue::String(request_id.clone()),
                 );
                 meta.insert("timeout_ms".into(), AnalyticsValue::Int(timeout_ms as i64));
-                self.ctx.bus.log_event(BASH_TIMEOUT, meta).await;
+                self.ctx.bus.log_event(BASH_TIMEOUT, meta.clone()).await;
+                // bg-08: the oracle's OWN event for this path
+                // (`wn("tengu_bash_command_timeout_backgrounded",hn)`). It is
+                // additional to the LingXi `tengu_tool_bash_timeout` above,
+                // which has no upstream twin and other tooling reads.
+                let mut bg_meta: LogEventMetadata = HashMap::new();
+                bg_meta.insert(
+                    "command_type".into(),
+                    AnalyticsValue::String(telemetry_command_type(&cmd_str).into()),
+                );
+                bg_meta.insert("timeout_ms".into(), AnalyticsValue::Int(timeout_ms as i64));
+                self.ctx
+                    .bus
+                    .log_event(BASH_TIMEOUT_BACKGROUNDED, bg_meta)
+                    .await;
                 // The command is now a background task: give the identity we
                 // minted up front an actual record, so its id resolves in
                 // TaskOutput / TaskStop / TaskList and its completion produces a
@@ -3298,6 +3361,13 @@ impl Tool for BashTool {
                             AnalyticsValue::Int((ansi_dropped_out + ansi_dropped_err) as i64),
                         );
                         meta.insert("truncated".into(), AnalyticsValue::Bool(false));
+                        // bg-08: `was_backgrounded: Boolean(Se.backgroundTaskId)`
+                        // (`src_160988549.js` @4338725). This arm is the
+                        // FOREGROUND completion, so the command was never
+                        // backgrounded — the field is emitted as `false` rather
+                        // than omitted, because "absent" and "ran in the
+                        // foreground" are different answers to the query.
+                        meta.insert("was_backgrounded".into(), AnalyticsValue::Bool(false));
                         self.ctx.bus.log_event(BASH_COMPLETED, meta).await;
 
                         let interp = crate::command_semantics::interpret_command_result(
@@ -3375,6 +3445,9 @@ impl Tool for BashTool {
                     AnalyticsValue::Int((ansi_dropped_out + ansi_dropped_err) as i64),
                 );
                 meta.insert("truncated".into(), AnalyticsValue::Bool(truncated_out));
+                // bg-08: see the image arm above — this is the foreground
+                // completion, so `was_backgrounded` is `false`, not absent.
+                meta.insert("was_backgrounded".into(), AnalyticsValue::Bool(false));
                 self.ctx.bus.log_event(BASH_COMPLETED, meta).await;
                 // `staleReadFileStateHint` — computed BEFORE the read-state
                 // refresh (oracle order: `te = …OcT(…)` then `await Zmm(…)`),
@@ -3525,6 +3598,24 @@ mod tests {
             h.join().expect("thread");
         }
         assert_eq!(seen.lock().unwrap().len(), 16_000);
+    }
+
+    /// bg-08: `Npe` reports the FIRST KNOWN command name across the whole
+    /// command line, not the first sub-command's name — `cd foo && cargo build`
+    /// is a `cargo` invocation as far as the backgrounding telemetry is
+    /// concerned.
+    #[test]
+    fn telemetry_command_type_reports_the_first_known_name() {
+        assert_eq!(telemetry_command_type("cargo build --release"), "cargo");
+        assert_eq!(telemetry_command_type("cd foo && cargo build"), "cargo");
+        assert_eq!(telemetry_command_type("ls -la"), "other");
+        assert_eq!(telemetry_command_type(""), "other");
+        // The match is on the whole first token, not a prefix: `nix-build` and
+        // `nix` are separate entries and `cargofmt` is neither.
+        assert_eq!(telemetry_command_type("nix-build ."), "nix-build");
+        assert_eq!(telemetry_command_type("cargofmt"), "other");
+        // `wget` is `Les`'s one addition on top of `yWt`.
+        assert_eq!(telemetry_command_type("wget https://x"), "wget");
     }
 
     #[test]
@@ -5350,6 +5441,45 @@ mod tests {
         fn is_available(&self) -> bool {
             true
         }
+    }
+
+    /// bg-08 wiring: the oracle's own backgrounding event has to actually FIRE
+    /// on the explicit-background path, carrying the `command_type`. Pinning the
+    /// classifier alone would leave the emitter free to not exist.
+    #[tokio::test]
+    async fn an_explicit_background_launch_emits_the_oracle_event() {
+        let mut ctx = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        ctx.process = Arc::new(BgStub);
+        let sink = Arc::new(telemetry::InMemorySink::default());
+        ctx.bus.attach_sink(sink.clone()).await;
+        BashTool::new(ctx)
+            .call(
+                json!({"command": "cd repo && cargo build", "run_in_background": true}),
+                use_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+
+        let events = sink.events().await;
+        let hit = events
+            .iter()
+            .find(|e| e.name == "tengu_bash_command_explicitly_backgrounded")
+            .expect("the explicit-background event must fire");
+        let Some(telemetry::AnalyticsValue::String(command_type)) =
+            hit.metadata.get("command_type")
+        else {
+            panic!("the event must carry a string `command_type`: {:?}", hit.metadata);
+        };
+        assert_eq!(
+            command_type, "cargo",
+            "the first KNOWN command name across the line, not `cd`"
+        );
     }
 
     #[tokio::test]

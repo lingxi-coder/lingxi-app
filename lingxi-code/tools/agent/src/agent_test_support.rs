@@ -378,16 +378,19 @@ impl SubagentSpawner for MockSubagentSpawner {
             SubagentListingEntry {
                 agent_type: "general-purpose".into(),
                 when_to_use: "use for anything".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools".into(),
             },
             SubagentListingEntry {
                 agent_type: "Explore".into(),
                 when_to_use: "search".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools except Edit".into(),
             },
             SubagentListingEntry {
                 agent_type: "Plan".into(),
                 when_to_use: "plan a task".into(),
+                when_to_use_lean: None,
                 tools_description: "All tools except Edit".into(),
             },
         ]

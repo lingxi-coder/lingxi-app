@@ -39,7 +39,33 @@ pub const BASH_COMPLETED: &str = "tengu_tool_bash_completed";
 /// `tengu_tool_bash_failed` — bash invocation errored before producing an exit code.
 pub const BASH_FAILED: &str = "tengu_tool_bash_failed";
 /// `tengu_tool_bash_timeout` — bash invocation hit the timeout watchdog.
+///
+/// This `tengu_tool_bash_*` family is a LingXi naming scheme, not a rename of
+/// anything upstream: a grep of the 2.1.263 sources for `tengu_tool_bash`
+/// returns zero (while other `tengu_*` needles from the same file match), so
+/// there is no oracle event these drifted from. The three constants BELOW are
+/// the oracle's own backgrounding events, which the port was missing entirely.
 pub const BASH_TIMEOUT: &str = "tengu_tool_bash_timeout";
+
+/// `tengu_bash_command_explicitly_backgrounded` — the model asked for
+/// `run_in_background: true` and the command was handed off
+/// (claude-code `src_160988549.js` @4343453,
+/// `i("tengu_bash_command_explicitly_backgrounded",{command_type:Npe(ve)})`).
+pub const BASH_EXPLICITLY_BACKGROUNDED: &str = "tengu_bash_command_explicitly_backgrounded";
+
+/// `tengu_bash_command_timeout_backgrounded` — the command outlived its timeout
+/// and was moved to the background instead of killed
+/// (`wn("tengu_bash_command_timeout_backgrounded",hn)`, @4343287).
+pub const BASH_TIMEOUT_BACKGROUNDED: &str = "tengu_bash_command_timeout_backgrounded";
+
+/// `tengu_bash_command_turn_abort_backgrounded` — a turn abort moved a running
+/// command to the background rather than killing it
+/// (`wn("tengu_bash_command_turn_abort_backgrounded")`, @4344733).
+///
+/// NO EMITTER YET: turn-abort backgrounding is the unported half of `bg-04`.
+/// The constant is here so the event name is settled in one place when that
+/// trigger lands, not because anything fires it today.
+pub const BASH_TURN_ABORT_BACKGROUNDED: &str = "tengu_bash_command_turn_abort_backgrounded";
 /// `tengu_tool_edit_started` — Edit tool began applying a replacement.
 pub const EDIT_STARTED: &str = "tengu_tool_edit_started";
 /// `tengu_tool_edit_completed` — Edit tool wrote the modified file.

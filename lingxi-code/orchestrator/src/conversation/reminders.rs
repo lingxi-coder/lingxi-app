@@ -1013,9 +1013,14 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             } else {
                 "New agent types are now available for the Agent tool:"
             };
+            // `U2n(N, D)` where `D = VU(YK(e.options.mainLoopModel))` (producer
+            // @5174317): the catalog lines are rendered for the MAIN-LOOP model,
+            // so a non-lean session gets a definition's full `whenToUse` even
+            // when it declares a lean variant.
+            let lean = tool_api::dh_simple_system_prompt(self.tools.main_loop_model().as_deref());
             let lines = new_entries
                 .iter()
-                .map(agent::format_agent_line)
+                .map(|entry| agent::format_agent_line(entry, lean))
                 .collect::<Vec<_>>()
                 .join("\n");
             sections.push(format!("{header}\n{lines}"));

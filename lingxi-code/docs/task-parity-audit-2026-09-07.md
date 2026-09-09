@@ -112,7 +112,7 @@ Fixed in this pass: the P0 root cause, plus `TO-01`, `tools-02`, `TOF-06`, `TOF-
 | `TO-04` | confirmed | P2 | medium | TaskStop has no ownership / observer checks and no owner notification — `_ctx` (which carries `agent_id`) is ignored |
 | `TO-05` | confirmed **[fixed]** | P2 | medium | Non-bash TaskOutput `<output>` is not passed through the subagent-output sanitiser (`uH`): no `[harness: subagent output matched instruction-shaped pattern(s): …]` marker, no `Human:`/`Assistant:` turn-marker neutralisation |
 | `TO-06` | confirmed **[fixed]** | P2 | medium | TaskOutput for an `mcp_task` returns the spooled result text; the oracle returns a synthetic metadata block (server/tool/status/elapsed…) with `omitOutputPath` and its own truncation header |
-| `TO-07` | confirmed | P2 | medium | local_agent output shaping: no `[The agent produced no report text.]`, no `harnessHead` prefix, no `isRawTranscript` flag on the transcript fallback |
+| `TO-07` | confirmed **[partially fixed: `isRawTranscript` and the report extraction are done — `chunk.result` was `None` for every production agent, so `TaskOutput` served the raw transcript; `[The agent produced no report text.]` and `harnessHead` remain, and are gated behind moving the max-turns note builder out of `tools/agent`]** | P2 | medium | local_agent output shaping: no `[The agent produced no report text.]`, no `harnessHead` prefix, no `isRawTranscript` flag on the transcript fallback |
 | `TO-08` | confirmed **[fixed]** | P3 | medium | Output-cap sources differ: oracle honours settings `taskOutputMaxChars` (clamped 4000..128000) before the env var; `maxResultSizeChars` is a getter `zut()+18000` (50000 default) and `persistenceThresholdCeiling` 146000 — port is env-only, 100_000, no ceiling |
 | `TO-09` | confirmed | P3 | low | Blocking-wait edges and UI hints: task evicted mid-wait should yield `{retrieval_status:"timeout",task:null}`, abort should raise (not return timeout), `waiting_for_task` progress event and `non-blocking` tool-use render are absent |
 | `TO-10` | confirmed **[partially fixed: the `Unsupported task type` branch landed; the keepalive exceptions and the re-signalled note remain]** | P3 | medium | TaskStop remaining branches: `Unsupported task type: X` text, keepalive/loop-still-live exceptions to "not running", and the `had already ended … re-signalled it` note path |
@@ -362,6 +362,14 @@ original body, and sets `lostOutput` on the FIRST failure; TOF-09's `sYt` REPAIR
 a bad directory mode rather than refusing it, and checks uid/mode at the ROOT
 only, not per segment; AGT-07's `LV` is not user-stop-only, so that plan's
 user-vs-model split is wrong.
+
+- `22abe3c61` **TO-07 step 0** — a latent bug the audit never named, found while
+  researching it: `extract_text_content` wanted a bare block array, the runner's
+  completion payload is an OBJECT, and `agent_content_from_spool` faithfully
+  hands it that object. So `TaskOutputChunk.result` was `None` for every
+  production `local_agent` task and `TaskOutput` served the JSON transcript
+  instead of the answer. The bare-array form still works, which is why no test
+  caught it — the fixtures all use it.
 
 Guards worth keeping in mind for follow-up work:
 

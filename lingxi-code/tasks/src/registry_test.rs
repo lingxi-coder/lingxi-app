@@ -585,6 +585,7 @@ async fn an_agents_background_shell_defers_that_agents_rest_notification() {
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from("/tmp/tasks/a-owner-rest.output"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -1211,6 +1212,7 @@ async fn budget_stop_matches_claude_background_agent_filter() {
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: PathBuf::from("/tmp/tasks/aforegrnd.output"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -2722,6 +2724,7 @@ fn local_fusion_state_for_test(id: &str, output_dir: &std::path::Path) -> TaskSt
             end_time: None,
             total_paused_ms: 0,
             output_file: output_dir.join(format!("{id}.output")),
+            evict_after: None,
             output_offset: 0,
             notified: false,
             creator_teammate_name: None,
@@ -2952,6 +2955,7 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
         end_time: None,
         total_paused_ms: 0,
         output_file: std::path::PathBuf::from("/tmp/tasks/abg01.output"),
+        evict_after: None,
         output_offset: 0,
         notified: false,
         creator_teammate_name: None,
@@ -2991,6 +2995,7 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
         end_time: None,
         total_paused_ms: 0,
         output_file: std::path::PathBuf::from("/tmp/tasks/abg02.output"),
+        evict_after: None,
         output_offset: 0,
         notified: false,
         creator_teammate_name: None,
@@ -3029,6 +3034,7 @@ fn state_for_spawn_stamps_local_workflow_tool_use_id() {
         end_time: None,
         total_paused_ms: 0,
         output_file: std::path::PathBuf::from("/tmp/tasks/wspawn001.output"),
+        evict_after: None,
         output_offset: 0,
         notified: false,
         creator_teammate_name: None,
@@ -3087,6 +3093,7 @@ async fn take_pending_carries_workflow_resume_and_terminal_metadata() {
                 end_time: Some(SystemTime::now()),
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from("/tmp/tasks/wmeta0001.output"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -3161,6 +3168,7 @@ async fn workflow_notification_omits_default_progress_counts() {
                 end_time: Some(SystemTime::now()),
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from("/tmp/tasks/wmeta0002.output"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -3218,6 +3226,7 @@ async fn take_pending_carries_agent_error() {
         end_time: None,
         total_paused_ms: 0,
         output_file: std::path::PathBuf::from("/tmp/tasks/afailed01.output"),
+        evict_after: None,
         output_offset: 0,
         notified: false,
         creator_teammate_name: None,
@@ -3263,6 +3272,7 @@ fn agent_state(id: &str, status: TaskStatus) -> crate::state::TaskState {
             end_time: None,
             total_paused_ms: 0,
             output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+            evict_after: None,
             output_offset: 0,
             notified: false,
             creator_teammate_name: None,
@@ -3327,6 +3337,173 @@ async fn take_pending_carries_agent_result_usage_and_worktree() {
     );
     assert_eq!(n.worktree_branch.as_deref(), Some("worktree-agent-1"));
     assert!(n.killed_by.is_none(), "a completion has no stop initiator");
+}
+
+// ---- TID-04 / TID-05 / AGT-11: the terminal clocks and the eviction sweep ----
+
+/// TID-05: `end_time` was declared and never written outside the `mcp_task`
+/// settle, so every other terminal row reported a `None` that could only be read
+/// as "still running" — and the 30 s `mcp_task` eviction guard had nothing to
+/// measure from.
+#[tokio::test]
+async fn a_terminal_transition_stamps_the_end_time() {
+    let (_d, registry) = make_registry();
+    registry
+        .insert_state_for_test(agent_state("aclock001", TaskStatus::Running))
+        .await;
+    assert!(registry.get("aclock001").await.unwrap().base().end_time.is_none());
+
+    registry
+        .set_status("aclock001", TaskStatus::Completed)
+        .await
+        .unwrap();
+    let base = registry.get("aclock001").await.unwrap();
+    assert!(base.base().end_time.is_some(), "the terminal transition stamps it");
+    // AGT-11: and the 30 s eviction deadline alongside it.
+    assert!(base.base().evict_after.is_some(), "and the eviction deadline");
+}
+
+/// AGT-11: a resting agent that still owns live background children gets NO
+/// deadline — the oracle's `if(t.park&&keepaliveReasons.size>0)return`. Without
+/// this the parent is evicted out from under children that still report to it.
+#[tokio::test]
+async fn an_agent_holding_live_children_gets_no_eviction_deadline() {
+    let (_d, registry) = make_registry();
+    let parent = protocol::AgentId::new();
+    let mut parent_state = agent_state("aheld0001", TaskStatus::Running);
+    if let crate::state::TaskState::LocalAgent(agent) = &mut parent_state {
+        agent.agent_id = parent;
+    }
+    registry.insert_state_for_test(parent_state).await;
+    // A live child that names the parent as its creator.
+    let mut child = agent_state("achild001", TaskStatus::Running);
+    child.base_mut().creator_agent_id = Some(parent);
+    registry.insert_state_for_test(child).await;
+
+    registry
+        .set_status("aheld0001", TaskStatus::Completed)
+        .await
+        .unwrap();
+    let held = registry.get("aheld0001").await.unwrap();
+    assert!(held.base().end_time.is_some(), "the clock still stamps");
+    assert!(
+        held.base().evict_after.is_none(),
+        "but no deadline while children are live"
+    );
+}
+
+/// TID-04's subtlest rule: the two `?? ` defaults point in OPPOSITE directions.
+/// An agent with no deadline is kept forever (`evictAfter ?? 1/0`), a workflow
+/// with no deadline is evicted at once (`evictAfter ?? 0`). Collapsing them to
+/// one default silently changes which rows survive.
+#[tokio::test]
+async fn the_missing_deadline_defaults_point_opposite_ways() {
+    let (_d, registry) = make_registry();
+    // Both terminal + notified, neither carrying a deadline.
+    let mut agent = agent_state("akeep0001", TaskStatus::Completed);
+    agent.base_mut().notified = true;
+    registry.insert_state_for_test(agent).await;
+    let mut workflow = workflow_state_for_evict("wgone0001");
+    workflow.base_mut().notified = true;
+    registry.insert_state_for_test(workflow).await;
+
+    let _ = registry.take_pending_task_notifications().await;
+
+    assert!(
+        registry.get("akeep0001").await.is_some(),
+        "a deadline-less agent is KEPT (`?? 1/0`)"
+    );
+    assert!(
+        registry.get("wgone0001").await.is_none(),
+        "a deadline-less workflow is EVICTED (`?? 0`)"
+    );
+}
+
+/// An `mcp_task` is the one type measured from `end_time`, not `evict_after`,
+/// and it is held for the full 30 s.
+#[tokio::test]
+async fn an_mcp_task_is_held_for_thirty_seconds_after_it_ends() {
+    let (_d, registry) = make_registry();
+    let mut fresh = mcp_state_for_evict("kfresh001");
+    fresh.base_mut().notified = true;
+    fresh.base_mut().end_time = Some(SystemTime::now());
+    registry.insert_state_for_test(fresh).await;
+    let mut stale = mcp_state_for_evict("kstale001");
+    stale.base_mut().notified = true;
+    stale.base_mut().end_time = Some(SystemTime::now() - std::time::Duration::from_secs(31));
+    registry.insert_state_for_test(stale).await;
+
+    let _ = registry.take_pending_task_notifications().await;
+
+    assert!(
+        registry.get("kfresh001").await.is_some(),
+        "still inside the 30 s window"
+    );
+    assert!(
+        registry.get("kstale001").await.is_none(),
+        "past it, so evicted"
+    );
+}
+
+fn workflow_state_for_evict(id: &str) -> crate::state::TaskState {
+    use crate::state::{LocalWorkflowTaskState, TaskState, TaskStateBase};
+    TaskState::LocalWorkflow(LocalWorkflowTaskState {
+        base: TaskStateBase {
+            id: id.into(),
+            task_type: TaskType::LocalWorkflow,
+            status: TaskStatus::Completed,
+            description: "wf".into(),
+            tool_use_id: None,
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+            evict_after: None,
+            output_offset: 0,
+            notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
+        },
+        session_uuid: None,
+        workflow_id: "evict".into(),
+        script: String::new(),
+        resume_from_run_id: None,
+        args: None,
+        run_id: None,
+        script_path: None,
+        transcript_dir: None,
+        current_step: 0,
+        outcome: platform_api::task_registry::WorkflowTerminalOutcome::default(),
+        scope: None,
+    })
+}
+
+fn mcp_state_for_evict(id: &str) -> crate::state::TaskState {
+    use crate::state::{McpTaskState, TaskState, TaskStateBase};
+    TaskState::McpTask(McpTaskState {
+        base: TaskStateBase {
+            id: id.into(),
+            task_type: TaskType::McpTask,
+            status: TaskStatus::Completed,
+            description: "mcp".into(),
+            tool_use_id: None,
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+            evict_after: None,
+            output_offset: 0,
+            notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
+        },
+        server_name: "acme".into(),
+        tool_name: "deploy".into(),
+        mcp_status: "completed".into(),
+        status_message: None,
+    })
 }
 
 /// AGT-08 / TN-06 middle link: `max_turns_reached` has to SURVIVE the drain.
@@ -3494,6 +3671,7 @@ async fn find_running_workflow_by_run_id_matches_only_running_same_id() {
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -3567,6 +3745,7 @@ async fn find_nonterminal_local_app_workflows_matches_only_the_requested_app() {
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -3632,6 +3811,7 @@ async fn find_nonterminal_local_app_workflows_ignores_workflow_id() {
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -3729,6 +3909,7 @@ async fn a_custom_workflow_with_the_same_name_gets_no_lease_and_does_not_block_d
             end_time: None,
             total_paused_ms: 0,
             output_file: std::path::PathBuf::from("/tmp/tasks/wforged01.output"),
+            evict_after: None,
             output_offset: 0,
             notified: false,
             creator_teammate_name: None,
@@ -3811,6 +3992,7 @@ async fn assert_scope_blocks_delete_at_the_guard(
             end_time: None,
             total_paused_ms: 0,
             output_file: std::path::PathBuf::from(format!("/tmp/tasks/{task_id}.output")),
+            evict_after: None,
             output_offset: 0,
             notified: false,
             creator_teammate_name: None,
@@ -4022,6 +4204,7 @@ async fn register_adopted_workflow_does_not_replace_existing_live_task_with_same
             end_time: None,
             total_paused_ms: 0,
             output_file: std::path::PathBuf::from("/tmp/wabc12345.output"),
+            evict_after: None,
             output_offset: 0,
             notified: false,
             creator_teammate_name: None,
@@ -4086,6 +4269,7 @@ async fn workflow_run_id_reservation_and_paused_cleanup_respect_liveness_and_ses
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -4178,6 +4362,7 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
         end_time: None,
         total_paused_ms: 0,
         output_file: std::path::PathBuf::from("/tmp/tasks/a-rest-1.output"),
+        evict_after: None,
         output_offset: 0,
         notified: false,
         creator_teammate_name: None,
@@ -4282,6 +4467,7 @@ async fn unnamed_rested_agent_waits_for_live_non_agent_children_before_notifying
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from("/tmp/tasks/a-rest-parent.output"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -4311,6 +4497,7 @@ async fn unnamed_rested_agent_waits_for_live_non_agent_children_before_notifying
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from("/tmp/tasks/w-child-live.output"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -4405,6 +4592,7 @@ async fn seed_agent_described(
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -4443,6 +4631,7 @@ async fn a_monitors_stdout_byte_count_reaches_the_notification() {
             end_time: None,
             total_paused_ms: 0,
             output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+            evict_after: None,
             output_offset: 0,
             notified: false,
             creator_teammate_name: None,
@@ -4523,6 +4712,15 @@ async fn stopping_a_shell_is_silent_but_stopping_an_agent_is_not() {
         .await
         .unwrap();
 
+    // Both really are terminal; the shell's silence is the stamp, not a
+    // half-finished kill. Checked BEFORE the drain: the kill stamped the shell
+    // `notified`, so the drain's TID-04 sweep now evicts that row and there
+    // would be nothing left to read afterwards.
+    assert_eq!(
+        registry.get(&shell).await.unwrap().base().status,
+        TaskStatus::Killed
+    );
+
     let drained = registry.take_pending_task_notifications().await;
     let ids: Vec<&str> = drained.iter().map(|n| n.task_id.as_str()).collect();
     assert!(
@@ -4534,11 +4732,16 @@ async fn stopping_a_shell_is_silent_but_stopping_an_agent_is_not() {
         "but a stopped AGENT must still report — this is the exception a blanket \
          stamp would delete, got: {ids:?}",
     );
-    // Both really are terminal; the shell's silence is the stamp, not a
-    // half-finished kill.
-    assert_eq!(
-        registry.get(&shell).await.unwrap().base().status,
-        TaskStatus::Killed
+    // ...and having been stamped `notified` by the kill, the shell row is gone
+    // after the sweep, while the agent — notified only by THIS drain — stays for
+    // one more pass.
+    assert!(
+        registry.get(&shell).await.is_none(),
+        "a kill-stamped shell is evicted by the next sweep"
+    );
+    assert!(
+        registry.get("a-victim").await.is_some(),
+        "the agent this drain just notified survives the same pass"
     );
 }
 
@@ -4639,6 +4842,7 @@ async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents(
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from("/tmp/tasks/t-buddy.output"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -4845,6 +5049,7 @@ async fn named_rested_agent_waits_for_live_background_children_before_notifying(
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from("/tmp/tasks/a-rest-parent.output"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -4874,6 +5079,7 @@ async fn named_rested_agent_waits_for_live_background_children_before_notifying(
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from("/tmp/tasks/b-child-live.output"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: Some("reviewer".into()),
@@ -4945,6 +5151,7 @@ async fn deferred_rest_requeue_preserves_newer_payload() {
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from("/tmp/tasks/a-rest-parent.output"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -4974,6 +5181,7 @@ async fn deferred_rest_requeue_preserves_newer_payload() {
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from("/tmp/tasks/b-child-live.output"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: Some("reviewer".into()),
@@ -5060,6 +5268,7 @@ async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from("/tmp/tasks/a-rest-a.output"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -5089,6 +5298,7 @@ async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from("/tmp/tasks/a-rest-b.output"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,
@@ -5118,6 +5328,7 @@ async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: std::path::PathBuf::from("/tmp/tasks/b-child-live.output"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: Some("reviewer".into()),
@@ -5195,6 +5406,7 @@ async fn take_pending_skips_already_notified_and_non_terminal() {
             end_time: None,
             total_paused_ms: 0,
             output_file: std::path::PathBuf::from("/tmp/tasks/bnotified.output"),
+            evict_after: None,
             output_offset: 0,
             notified: true, // already surfaced (e.g. via TaskOutput)
             creator_teammate_name: None,
@@ -5236,12 +5448,23 @@ async fn take_pending_skips_already_notified_and_non_terminal() {
     );
     assert_eq!(drained[0].task_id, fresh);
 
-    // The already-notified task and the pending task both survive untouched.
+    // TID-04: the already-notified terminal row is EVICTED by the sweep this
+    // drain runs first — it was notified by an earlier pass, which is exactly
+    // the oracle's `Kan`/`Dlo` candidate. It used to survive forever, which is
+    // what made the registry grow for the life of the session.
     assert!(
-        registry.get("bnotified").await.is_some(),
-        "already-notified survives"
+        registry.get("bnotified").await.is_none(),
+        "an already-notified terminal row is evicted, not kept forever"
     );
+    // The pending row is untouched: the sweep only ever considers terminal rows.
     assert!(registry.get(&pending).await.is_some(), "pending survives");
+    // And the row this drain just notified survives THIS pass — eviction is
+    // one-pass-delayed, so the model is never told about a task in the same
+    // breath as the registry forgets it.
+    assert!(
+        registry.get(&fresh).await.is_some(),
+        "a row notified by THIS drain is not evicted by THIS drain"
+    );
 }
 
 // ---- M8 cc2.1.198: "Task panels: no stuck Running after finish" -----------

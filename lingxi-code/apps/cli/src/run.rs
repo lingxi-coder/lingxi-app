@@ -7069,6 +7069,7 @@ mod tests {
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: PathBuf::from("/tmp/ftest0001"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,

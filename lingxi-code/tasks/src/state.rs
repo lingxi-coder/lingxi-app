@@ -52,6 +52,17 @@ pub struct TaskStateBase {
     pub total_paused_ms: u64,
     /// Path to the spool file accumulating stdout/stderr.
     pub output_file: PathBuf,
+    /// Wall-clock deadline after which a NOTIFIED terminal row may be evicted
+    /// from the registry — claude-code `evictAfter`, stamped as
+    /// `Date.now() + 30_000` on the terminal transition
+    /// (`ret`, `src_160988549.js` @2041938).
+    ///
+    /// `None` on a live row, and also on a resting `local_agent` that still owns
+    /// live background children: the oracle declines to set a deadline there
+    /// (`if(t.park&&keepaliveReasons.size>0)return`) so the parent outlives the
+    /// children that still report to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evict_after: Option<SystemTime>,
     /// Last byte offset surfaced to the caller (for incremental reads).
     pub output_offset: u64,
     /// Whether the user has been notified of completion.
@@ -668,6 +679,7 @@ mod taskstate_scope_readback_tripwire {
                 end_time: None,
                 total_paused_ms: 0,
                 output_file: PathBuf::from("/dev/null"),
+                evict_after: None,
                 output_offset: 0,
                 notified: false,
                 creator_teammate_name: None,

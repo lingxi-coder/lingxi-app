@@ -21,7 +21,7 @@ use platform_api::{
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
 
 /// Tracks running tasks and dispatches lifecycle operations to handlers.
@@ -511,6 +511,7 @@ impl TaskRegistry {
             end_time: None,
             total_paused_ms: 0,
             output_file: path,
+            evict_after: None,
             output_offset: 0,
             notified: false,
             creator_teammate_name: None,
@@ -677,6 +678,7 @@ impl TaskRegistry {
             end_time: None,
             total_paused_ms: 0,
             output_file: path,
+            evict_after: None,
             output_offset: 0,
             notified: false,
             creator_teammate_name,
@@ -814,6 +816,7 @@ impl TaskRegistry {
             end_time: None,
             total_paused_ms: 0,
             output_file: path.clone(),
+            evict_after: None,
             output_offset: 0,
             notified: false,
             creator_teammate_name: None,
@@ -1366,6 +1369,7 @@ impl TaskRegistry {
             end_time: None,
             total_paused_ms: 0,
             output_file: path,
+            evict_after: None,
             output_offset: 0,
             notified: false,
             creator_teammate_name: None,
@@ -1748,6 +1752,7 @@ impl TaskRegistry {
                 end_time: None,
                 total_paused_ms: 0,
                 output_file,
+                evict_after: None,
                 output_offset: 0,
                 notified: true,
                 creator_teammate_name: None,
@@ -1996,6 +2001,21 @@ impl TaskRegistry {
         let task_id = self.canonical_or_raw(task_id).await;
         let updated = {
             let mut map = self.tasks.write().await;
+            // Answered BEFORE the mutable borrow below: the keepalive question
+            // is about the WHOLE map (does any live row name this agent as its
+            // creator?), which cannot be asked while one entry is borrowed
+            // mutably.
+            let holds_children = match (status.is_terminal(), map.get(&task_id)) {
+                (true, Some(TaskState::LocalAgent(agent))) => {
+                    Self::has_live_background_children_locked(
+                        &map,
+                        Some(agent.agent_id),
+                        None,
+                        None,
+                    )
+                }
+                _ => false,
+            };
             let entry = map
                 .get_mut(&task_id)
                 .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
@@ -2022,6 +2042,9 @@ impl TaskRegistry {
                 TaskState::McpTask(m) => m.base.status = status,
                 TaskState::Dream(d) => d.base.status = status,
                 TaskState::LocalFusion(f) => f.base.status = status,
+            }
+            if status.is_terminal() {
+                stamp_terminal_clock(entry, holds_children);
             }
             entry.clone()
             // `map` write-guard drops here — the best-effort hook fire below
@@ -2600,6 +2623,16 @@ impl TaskRegistry {
         use crate::handle::{status_to_wire, task_type_to_wire};
         let mut out: Vec<_> = self.pending_monitor_events.lock().await.drain(..).collect();
         let mut map = self.tasks.write().await;
+        // TID-04: evict the rows a PREVIOUS pass already notified, BEFORE this
+        // one marks any new ones.
+        //
+        // Order is the whole point. claude-code runs the sweep (`Kan`/`Dlo`) on
+        // the attachment pass, where every candidate was notified by an earlier
+        // pass; evicting after the drain below would delete a row in the same
+        // breath as telling the model about it, and `/tasks` would never show a
+        // finished task at all. Running it first reproduces the oracle's
+        // one-pass grace without needing a timestamp to express it.
+        Self::evict_notified_terminal_rows(&mut map);
         // Collect ids first (terminal + not-notified) so the per-id remove below
         // doesn't fight the iteration borrow.
         let drain_ids: Vec<String> = map
@@ -3124,6 +3157,117 @@ impl TaskRegistry {
 fn stamp_kill_notified(state: &mut TaskState) {
     if !matches!(state, TaskState::LocalAgent(_)) {
         state.base_mut().notified = true;
+    }
+}
+
+impl TaskRegistry {
+    /// claude-code `Dlo`'s eviction half (`src_160988549.js` @2029385) — drop
+    /// the terminal rows the model has already been told about.
+    ///
+    /// Without this the registry grows for the life of the session: every
+    /// finished shell, agent and monitor stays in the map forever, so `/tasks`
+    /// accumulates and every drain re-scans them.
+    ///
+    /// A candidate must be terminal AND notified. Four guards then hold a row
+    /// back, transcribed from the oracle in its own order:
+    ///
+    /// ```js
+    /// if("retain"in D&&(D.evictAfter??1/0)>Date.now())continue;
+    /// if("retain"in D&&(D.keepaliveReasons?.size??0)>0)continue;
+    /// if(D.type==="local_workflow"&&((D.evictAfter??0)>Date.now()||!eh(I)))continue;
+    /// if(D.type==="mcp_task"&&(D.endTime??0)+fT>Date.now())continue;
+    /// ```
+    ///
+    /// `"retain" in D` is a `local_agent` type test — `retain` is a field only
+    /// that variant carries — so the first two guards are the agent's 30 s
+    /// deadline and its live-children hold. Note the two default directions are
+    /// OPPOSITE and both are load-bearing: an agent with no deadline (`?? 1/0`)
+    /// is kept forever, a workflow with no deadline (`?? 0`) is evicted at once.
+    ///
+    /// ONE guard has no substrate here: `!eh(I)` keeps a `local_workflow` while
+    /// a live `/loop` is keyed on its task id (`eh(e)=!Gb().loopsByTaskId.has(e)`).
+    /// This port has no task-id-keyed loop registry — loops are cron-driven —
+    /// so there is nothing to consult, and the workflow's own deadline is the
+    /// only thing holding it. That is a KNOWN narrowing, not an oversight.
+    fn evict_notified_terminal_rows(map: &mut HashMap<String, TaskState>) {
+        let now = SystemTime::now();
+        // `?? 1/0` — an agent with no deadline never expires.
+        let agent_deadline_passed = |at: Option<SystemTime>| at.is_some_and(|at| at <= now);
+        // `?? 0` — a workflow with no deadline is already expired.
+        let workflow_deadline_passed = |at: Option<SystemTime>| at.is_none_or(|at| at <= now);
+        let snapshot = &*map;
+        let doomed: Vec<String> = snapshot
+            .iter()
+            .filter(|(_, state)| {
+                let base = state.base();
+                if !base.status.is_terminal() || !base.notified {
+                    return false;
+                }
+                match state {
+                    TaskState::LocalAgent(agent) => {
+                        agent_deadline_passed(base.evict_after)
+                            && !Self::has_live_background_children_locked(
+                                snapshot,
+                                Some(agent.agent_id),
+                                None,
+                                None,
+                            )
+                    }
+                    TaskState::LocalWorkflow(_) => workflow_deadline_passed(base.evict_after),
+                    // The `mcp_task` guard is the only one keyed on `endTime`
+                    // rather than `evictAfter`; same 30 s, different clock.
+                    TaskState::McpTask(_) => base
+                        .end_time
+                        .is_none_or(|end| end + EVICT_AFTER <= now),
+                    _ => true,
+                }
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in doomed {
+            map.remove(&id);
+        }
+    }
+}
+
+/// claude-code `fT = 30000` — how long a terminal row lingers before the
+/// attachment pass may evict it (`src_160988549.js` @2024365).
+const EVICT_AFTER: Duration = Duration::from_secs(30);
+
+/// The two clocks claude-code stamps on EVERY terminal transition, in one place
+/// so no variant can be added without them.
+///
+/// * `endTime: Date.now()` — the oracle writes it on the killed
+///   (@2047553), completed (@2050039) and failed (@2050942) transitions alike.
+///   The port declared `end_time` and never wrote it outside the `mcp_task`
+///   settle, so `elapsed` on an `mcp_task` and the 30 s `mcp_task` eviction
+///   guard both read a `None` that could only mean "still running".
+/// * `evictAfter` — claude-code `ret(e,t)`:
+///
+///   ```js
+///   function ret(e,t){if(e.retain)return;
+///     if(t.park&&(e.keepaliveReasons?.size??0)>0)return;
+///     return Date.now()+fT}
+///   ```
+///
+///   `retain` is a `local_agent` field, so the guard only ever applies to that
+///   type; the park-with-keepalive arm is the resting agent that still owns live
+///   children, which must not be evicted out from under them. The port has no
+///   `retain` (nothing sets it) and spells "has keepalive reasons" as
+///   [`TaskRegistry::has_live_background_children_locked`], which the caller
+///   evaluates — so this function takes the answer rather than computing it.
+fn stamp_terminal_clock(state: &mut TaskState, holds_live_children: bool) {
+    let now = SystemTime::now();
+    let base = state.base_mut();
+    if base.end_time.is_none() {
+        base.end_time = Some(now);
+    }
+    // Only a `local_agent` carries the oracle's `retain`/`keepaliveReasons`
+    // pair; every other type is evicted on the pass after it is notified, with
+    // no per-row deadline at all.
+    let deferred = matches!(state, TaskState::LocalAgent(_)) && holds_live_children;
+    if !deferred && state.base().evict_after.is_none() {
+        state.base_mut().evict_after = Some(now + EVICT_AFTER);
     }
 }
 

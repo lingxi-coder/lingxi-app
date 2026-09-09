@@ -16,6 +16,13 @@ use tokio::sync::Mutex;
 /// single truncation marker, matching `DiskTaskOutput.append`.
 pub const MAX_TASK_OUTPUT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
+/// The cap's unit: JS `String.length`, i.e. UTF-16 code units. A CJK character
+/// is 3 UTF-8 bytes but 1 unit, and an emoji is 4 bytes but 2 — counting bytes
+/// tripped the cap early for any non-ASCII spool.
+fn utf16_units(content: &str) -> u64 {
+    content.chars().map(|c| c.len_utf16() as u64).sum()
+}
+
 /// Display string for [`MAX_TASK_OUTPUT_BYTES`] used in the truncation marker
 /// (claude-code `MAX_TASK_OUTPUT_BYTES_DISPLAY = '5GB'`, `diskOutput.ts:31`).
 pub const MAX_TASK_OUTPUT_BYTES_DISPLAY: &str = "5GB";
@@ -61,6 +68,9 @@ struct TerminalOverride {
 /// + `#capped`).
 #[derive(Debug, Default, Clone, Copy)]
 struct CapState {
+    /// Running size in UTF-16 CODE UNITS — the unit claude-code's
+    /// `DiskTaskOutput.append` accumulates (`this.#f += t.length` over JS
+    /// strings), not bytes on disk.
     bytes_written: u64,
     capped: bool,
 }
@@ -273,9 +283,12 @@ impl TaskOutputManager {
     /// Append a chunk to a task's spool, enforcing the per-file 5GB disk cap
     /// ([`MAX_TASK_OUTPUT_BYTES`]) on the WRITE side.
     ///
-    /// Byte-aligned with claude-code's `DiskTaskOutput.append`
-    /// (`diskOutput.ts:110-131`): the running byte count uses the chunk's UTF-8
-    /// byte length, and once it would cross the cap the spool is marked capped —
+    /// Aligned with claude-code's `DiskTaskOutput.append`: the running count is
+    /// `this.#f += t.length` where `t` is a JS STRING, so the unit is UTF-16
+    /// CODE UNITS, not bytes — upstream re-measures real bytes only when it
+    /// builds the Buffer to write. Counting UTF-8 bytes here tripped the cap
+    /// early for any non-ASCII spool (a CJK character is 3 bytes but 1 unit).
+    /// Once the count would cross the cap the spool is marked capped —
     /// a single truncation marker
     /// `\n[output truncated: exceeded 5GB disk cap]\n` is written and all
     /// subsequent appends are dropped. The write itself uses
@@ -298,7 +311,10 @@ impl TaskOutputManager {
                 // Already capped — drop further output (claude `if (capped) return`).
                 None
             } else {
-                state.bytes_written = state.bytes_written.saturating_add(content.len() as u64);
+                // `this.#f += t.length` — UTF-16 code units, matching JS
+                // `String.length`.
+                state.bytes_written =
+                    state.bytes_written.saturating_add(utf16_units(content));
                 if state.bytes_written > MAX_TASK_OUTPUT_BYTES {
                     state.capped = true;
                     Some(format!(
@@ -366,7 +382,8 @@ impl TaskOutputManager {
         caps.insert(
             output_file.to_path_buf(),
             CapState {
-                bytes_written: content.len() as u64,
+                // Same unit as `append`: UTF-16 code units.
+                bytes_written: utf16_units(content),
                 capped: false,
             },
         );
@@ -423,7 +440,8 @@ impl TaskOutputManager {
         caps.insert(
             output_file.to_path_buf(),
             CapState {
-                bytes_written: content.len() as u64,
+                // Same unit as `append`: UTF-16 code units.
+                bytes_written: utf16_units(content),
                 capped: false,
             },
         );
@@ -796,6 +814,44 @@ mod tests {
                 .content,
             "independent-right\n"
         );
+    }
+
+    /// The cap counts UTF-16 code units (JS `String.length`), not UTF-8 bytes.
+    /// A CJK character is 3 bytes but 1 unit, so a byte-counting port trips the
+    /// 5GB cap almost three times early on a non-ASCII spool.
+    #[tokio::test]
+    async fn the_cap_counts_utf16_code_units_not_bytes() {
+        let (_fs, mgr) = manager();
+        let path = mgr.allocate("bu16000001").await.unwrap();
+        // Two units short of the cap.
+        mgr.seed_bytes_for_test(&path, MAX_TASK_OUTPUT_BYTES - 2)
+            .await;
+
+        // Two CJK characters = 6 UTF-8 bytes but only 2 units, so this lands
+        // exactly ON the cap and is written verbatim.
+        mgr.append(&path, "\u{4f60}\u{597d}").await.unwrap();
+        let body = mgr
+            .read(&path, OutputOptions::default())
+            .await
+            .unwrap()
+            .content;
+        assert!(
+            body.contains('\u{4f60}'),
+            "at the cap the chunk is written, got: {body:?}"
+        );
+        assert!(
+            !body.contains("output truncated"),
+            "a byte count would have capped here, got: {body:?}"
+        );
+
+        // One more unit crosses it.
+        mgr.append(&path, "x").await.unwrap();
+        let body = mgr
+            .read(&path, OutputOptions::default())
+            .await
+            .unwrap()
+            .content;
+        assert!(body.contains("output truncated"), "got: {body:?}");
     }
 
     #[tokio::test]
